@@ -212,6 +212,7 @@ export async function submitGeneration(
 }
 
 export async function planH3Windows(params: {
+  retry_plan?: H3WindowPlan
   prompt: string
   model_type: string
   resolution: string
@@ -220,6 +221,7 @@ export async function planH3Windows(params: {
   overlap_frames: number
   discard_frames: number
   sliding_window_memory_override?: boolean
+  minimax_h3_extended_duration?: boolean
   has_start_image?: boolean
   has_end_image?: boolean
   image_paths?: string[]
@@ -304,6 +306,7 @@ export async function updateStudioPreferences(
 }
 
 export async function planH3Sequence(params: {
+  retry_plan?: H3WindowPlan
   prompt: string
   model_type: string
   resolution: string
@@ -311,6 +314,7 @@ export async function planH3Sequence(params: {
   references: MiniMaxH3Reference[]
   sequence_clip_frames?: number
   sequence_memory_override?: boolean
+  minimax_h3_extended_duration?: boolean
   overlap_frames?: number
   sequence_continuity?: boolean
   camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
@@ -2916,5 +2920,5 @@ export async function retryEnhancedJob(jobId: string, action: 'retry' | 'refresh
     const error = await response.json().catch(() => ({}))
     throw new Error(error.detail || 'Could not retry this job.')
   }
-  return response.json() as Promise<{job_id: string; status: string}>
+  return response.json() as Promise<{job_id: string; status: import('../types').GenerationJob['status']}>
 }

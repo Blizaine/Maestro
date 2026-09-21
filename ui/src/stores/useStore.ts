@@ -8,6 +8,8 @@ import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 import {
   effectiveH3OmniSequenceFrames,
+  h3MaximumFrames,
+  supportsH3ExtendedDuration,
   h3WindowOverrideKey,
   h3OmniSequenceWindowCount,
   h3SlidingWindowCount,
@@ -910,6 +912,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
   // base RAW/Turbo generation and their identity-preserving Edit variants.
   // Other image models remain opt-in through Model Visibility.
   'flux2_klein_9b',
+  'qwen_image_21_7B',
   'krea2_raw',
   'krea2_turbo',
   'krea2_raw_edit',
@@ -970,7 +973,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 15
+const DEFAULTS_VERSION = 16
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -996,6 +999,7 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   13: ['viggle_animate'],
   14: ['yue2'],
   15: ['yue2'], // v2.2 music default; enable once, then preserve user changes.
+  16: ['qwen_image_21_7B'],
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 
@@ -1673,6 +1677,7 @@ interface AppState {
   setSlidingWindowOverlap: (frames: number) => void
   slidingWindowLocked: boolean
   setSlidingWindowLocked: (locked: boolean) => void
+  setH3ExtendedDuration: (enabled: boolean) => void
   /** Durable H3 pass lengths keyed by exact model type and resolution. */
   h3WindowOverrides: Record<string, number>
   saveH3WindowOverride: (modelType: string, resolution: string, frames: number) => void
@@ -1819,7 +1824,7 @@ interface AppState {
   stopGeneration: (jobId?: string) => void
   dismissJob: (jobId: string) => void
   clearCompletedJobs: () => Promise<void>
-  reconnectJobs: () => Promise<void>
+  reconnectJobs: (confirmedJob?: GenerationJob) => Promise<void>
 
   // LoRA state
   availableLoras: string[]
@@ -1959,7 +1964,7 @@ interface AppState {
   enhanceOnGenerationRevision: number
   setEnhanceOnGeneration: (enabled: boolean) => void
   setEnhanceOnGenerationDefault: (enabled: boolean) => void
-  enhancePrompt: (ttsMode?: string, planningStyle?: 'faithful' | 'creative' | 'adaptive') => Promise<void>
+  enhancePrompt: (ttsMode?: string, planningStyle?: 'faithful' | 'creative' | 'adaptive', retryFlaggedWindows?: boolean) => Promise<void>
   h3WindowPlan: H3WindowPlan | null
   updateH3WindowPrompt: (index: number, prompt: string) => void
   clearH3WindowPlan: () => void
@@ -3640,7 +3645,13 @@ export const useStore = create<AppState>((set, get) => ({
   musicDescription: '',
   setMusicDescription: (s) => set({ musicDescription: s }),
   musicInstrumental: false,
-  setMusicInstrumental: (b) => set({ musicInstrumental: b }),
+  setMusicInstrumental: (b) => set(s => {
+    const custom = s.params.custom_settings
+    const artists = Array.isArray(custom?.artist_loras) ? custom.artist_loras.length > 0 : !!custom?.artist_id
+    const resumeArtists = !b && artists && (s.params.model_type === 'yue2' || s.modelOptions?.yue2_composition)
+    return {musicInstrumental: b, ...(resumeArtists ? {params: {...s.params, model_mode: 2,
+      custom_settings: {...custom, instrumental: false, abc: ''}, audio_prompt_type: '', audio_guide: undefined}} : {})}
+  }),
   audioSubMode: 'speech' as import('../types').AudioSubMode,
   selectedModelPerAudioSubMode: {} as Partial<Record<import('../types').AudioSubMode, string>>,
   inferenceStepsPerModel: {},
@@ -3870,6 +3881,7 @@ export const useStore = create<AppState>((set, get) => ({
       'minimax_h3_sequence_continuity',
       'minimax_h3_sequence_clip_frames',
       'minimax_h3_sequence_memory_override',
+      'minimax_h3_extended_duration',
     ].includes(String(key))
     set(s => {
       const nextParams = { ...s.params, [key]: value }
@@ -5411,7 +5423,7 @@ export const useStore = create<AppState>((set, get) => ({
     const isLtx = options?.multi_window_sequence_controls === true
     const sw = options?.sliding_window_defaults
     const minimumFrames = options?.frames_minimum || fps
-    const maximumFrames = options?.frames_maximum || Math.round(3600 * fps)
+    const maximumFrames = h3MaximumFrames(options, state.params.minimax_h3_extended_duration) || Math.round(3600 * fps)
     const step = Math.max(1, options?.frames_steps || 1)
     const context = state.studioVideoWorkflow === 'extend' && options?.sliding_window
       ? Math.max(0, state.slidingWindowOverlap - 1) : 0
@@ -5429,11 +5441,12 @@ export const useStore = create<AppState>((set, get) => ({
           state.systemStats?.gpu.vram_total_gb ?? 0, minimumFrames, maximumFrames, step)
       : recommendedH3PassProfile(policy, state.params.resolution, state.systemStats?.gpu.vram_total_gb ?? 0)
     const windowMin = sw?.window_min ?? minimumFrames
-    const windowMax = sw?.window_max ?? maximumFrames
+    const windowMax = state.params.minimax_h3_extended_duration && supportsH3ExtendedDuration(options)
+      ? maximumFrames : sw?.window_max ?? maximumFrames
     const capFrames = Math.max(windowMin, Math.min(windowMax,
       state.slidingWindowLocked ? Math.round(state.slidingWindowSeconds * fps)
         : recommendation?.frames ?? (recommendation?.supported === false ? windowMin : windowMax)))
-    if (isH3 && frames + context <= capFrames) {
+    if (isH3 && frames + context <= capFrames + 1) {
       frames = Math.max(Math.round(minimum * fps), normalizeH3NativeFrames(
         frames + context, minimumFrames, maximumFrames, step) - context)
       seconds = frames / fps
@@ -5481,7 +5494,7 @@ export const useStore = create<AppState>((set, get) => ({
       frames = normalizeH3NativeFrames(
         frames,
         options?.frames_minimum ?? 124,
-        options?.frames_maximum ?? 345,
+        h3MaximumFrames(options, get().params.minimax_h3_extended_duration) ?? 345,
         options?.frames_steps ?? 17,
       )
     } else if (swDefaults) {
@@ -5534,6 +5547,28 @@ export const useStore = create<AppState>((set, get) => ({
     })
   },
   slidingWindowLocked: false,
+  setH3ExtendedDuration: (enabled) => {
+    const state = get()
+    if (!supportsH3ExtendedDuration(state.modelOptions)) return
+    const fps = state.modelOptions?.fps ?? 24
+    const frames = h3MaximumFrames(state.modelOptions, enabled) ?? 345
+    set({
+      slidingWindowLocked: enabled,
+      slidingWindowSeconds: frames / fps,
+      h3WindowPlan: null,
+      promptEnhanceError: null,
+      params: { ...state.params,
+        minimax_h3_extended_duration: enabled,
+        sliding_window_memory_override: enabled,
+        minimax_h3_sequence_memory_override: enabled,
+        sliding_window_size: frames,
+        minimax_h3_sequence_clip_frames: frames,
+        // Enabling the experiment is an explicit manual duration choice.
+        ...(enabled ? { _duration_planning_mode: 'duration' as const } : {}),
+      },
+    })
+    get().setDurationSeconds(state.durationSeconds)
+  },
   setSlidingWindowLocked: (locked) => set(state => {
     const isH3 = String(state.modelOptions?.architecture || '').startsWith('minimax_h3')
     return {
@@ -6940,7 +6975,7 @@ export const useStore = create<AppState>((set, get) => ({
       const fps = state.modelOptions?.fps ?? 16
       const supportsSlidingWindows = state.modelOptions?.sliding_window === true
       const minimumFrames = state.modelOptions?.frames_minimum ?? 1
-      const maximumFrames = state.modelOptions?.frames_maximum ?? null
+      const maximumFrames = h3MaximumFrames(state.modelOptions, params.minimax_h3_extended_duration)
       const h3ReferenceSequenceRequested = (
         isOmniReference
         && params.minimax_h3_reference_sequence === true
@@ -7064,7 +7099,8 @@ export const useStore = create<AppState>((set, get) => ({
           : Math.round(state.slidingWindowSeconds * fps)
         if (swDefaults) {
           const windowMinimum = swDefaults.window_min ?? 1
-          const windowMaximum = swDefaults.window_max ?? windowFrames
+          const windowMaximum = params.minimax_h3_extended_duration && supportsH3ExtendedDuration(state.modelOptions)
+            ? maximumFrames ?? windowFrames : swDefaults.window_max ?? windowFrames
           const windowStep = Math.max(1, swDefaults.window_step ?? 1)
           windowFrames = windowMinimum
             + Math.round((windowFrames - windowMinimum) / windowStep) * windowStep
@@ -7478,6 +7514,16 @@ export const useStore = create<AppState>((set, get) => ({
       if (state.audioSubMode === 'music') {
         params._music_description = state.musicDescription || ''
         params._music_instrumental = !!state.musicInstrumental
+        if (params.model_type === 'yue2' || state.modelOptions?.yue2_composition) {
+          const musicSettings = {...(params.custom_settings as Record<string, unknown> | undefined), instrumental: !!state.musicInstrumental}
+          params.custom_settings = musicSettings
+          if (state.musicInstrumental) {
+            params.model_mode = 0
+            params.custom_settings = {...musicSettings, abc: ''}
+            params.audio_prompt_type = ''
+            delete params.audio_guide
+          }
+        }
       }
       if (state.audioSubMode === 'sfx') {
         // SFX mode: use MMAudio to generate sound effects
@@ -8219,16 +8265,20 @@ export const useStore = create<AppState>((set, get) => ({
     if (failed) throw new Error(`Could not clear ${failed} completed ${failed === 1 ? 'entry' : 'entries'}. Please try again.`)
   },
 
-  reconnectJobs: async () => {
-    // On page load, check backend for any active jobs and restore them
+  reconnectJobs: async (confirmedJob) => {
+    // Restore active work and saved enhancement history without replaying
+    // notifications for jobs that already ended before this browser connected.
     try {
-      const data = await api.fetchActiveJobs()
-      if (data.jobs.length > 0) {
+      // A retry response is already authoritative. Do not delay its visible
+      // acceptance or polling behind another request for queue history.
+      const data = confirmedJob ? {jobs: []} : await api.fetchActiveJobs()
+      if (data.jobs.length > 0 || confirmedJob) {
         const existingIds = new Set(get().jobs.map(j => j.id))
         const newJobs: GenerationJob[] = data.jobs
           .filter(j => !existingIds.has(j.job_id))
           .map(j => ({
             id: j.job_id,
+            restoredFromHistory: true,
             showInGallery: j.show_in_gallery === true,
             kind: j.kind || 'generation',
             status: j.status as GenerationJob['status'],
@@ -8244,6 +8294,11 @@ export const useStore = create<AppState>((set, get) => ({
             enhancement: j.enhancement,
             ..._adaptiveEtaJobFields(j),
           }))
+        // A successful retry is already accepted even if the history refresh
+        // fails or is briefly stale. Publish and poll that confirmed job too.
+        if (confirmedJob && !existingIds.has(confirmedJob.id) && !newJobs.some(job => job.id === confirmedJob.id)) {
+          newJobs.push(confirmedJob)
+        }
         if (newJobs.length > 0) {
           set(s => ({
             jobs: [...s.jobs, ...newJobs],
@@ -8251,8 +8306,11 @@ export const useStore = create<AppState>((set, get) => ({
               j => j.status === 'queued' || j.status === 'running',
             ),
           }))
-          // Start polling for each reconnected job
-          newJobs.forEach(job => {
+          // Saved terminal entries remain available for review, but only
+          // unfinished work needs polling (and future terminal notifications).
+          const activeJobs = newJobs.filter(job =>
+            job.status === 'held' || job.status === 'queued' || job.status === 'running')
+          activeJobs.forEach(job => {
             const pollInterval = setInterval(async () => {
               try {
                 const status = await api.fetchJobStatus(job.id)
@@ -8303,7 +8361,7 @@ export const useStore = create<AppState>((set, get) => ({
               }
             }, 2000)
           })
-          console.log(`[Queue] Reconnected to ${newJobs.length} active job(s)`)
+          console.log(`[Queue] Restored ${newJobs.length} job(s), ${activeJobs.length} active`)
         }
       }
     } catch {
@@ -8741,8 +8799,11 @@ export const useStore = create<AppState>((set, get) => ({
       const overlapDefault = swDefaults?.overlap_default ?? 5
       const discardDefault = swDefaults?.discard_last_frames ?? 0
       const minimumDuration = Math.max(1, (options.frames_minimum || fps) / fps)
-      const nativeMaximumDuration = options.frames_maximum
-        ? options.frames_maximum / fps
+      const extendedDuration = activeState.params.minimax_h3_extended_duration === true
+        && supportsH3ExtendedDuration(options)
+      const effectiveMaximumFrames = h3MaximumFrames(options, extendedDuration)
+      const nativeMaximumDuration = effectiveMaximumFrames
+        ? effectiveMaximumFrames / fps
         : null
       const h3ReferenceSequence = (
         options.omni_reference === true
@@ -8856,18 +8917,19 @@ export const useStore = create<AppState>((set, get) => ({
               selectedResolution,
               activeState.systemStats?.gpu.vram_total_gb ?? 0,
             )
-        const selectedFrames = savedOverride ?? recommendation?.frames
+        const selectedFrames = extendedDuration
+          ? Math.round(slidingWindowSeconds * fps) : savedOverride ?? recommendation?.frames
         if (selectedFrames != null) {
           nextWindowFrames = normalizeH3NativeFrames(
             selectedFrames,
             options.frames_minimum ?? 124,
-            options.frames_maximum ?? 345,
+            effectiveMaximumFrames ?? 345,
             options.frames_steps ?? 17,
           )
           nextWindowSeconds = nextWindowFrames / fps
           paramUpdates.sliding_window_size = nextWindowFrames
         }
-        nextWindowLocked = savedOverride != null
+        nextWindowLocked = extendedDuration || savedOverride != null
         paramUpdates.sliding_window_memory_override = nextWindowLocked
         if (options.omni_reference === true) {
           paramUpdates.minimax_h3_sequence_memory_override = nextWindowLocked
@@ -9192,13 +9254,17 @@ export const useStore = create<AppState>((set, get) => ({
     return {
       h3WindowPlan: {
         ...s.h3WindowPlan,
+        // Manual edits may change the entry/exit state used by neighbouring
+        // windows. Keep the edited prompts, but don't repair from an old clock.
+        camera_checkpoint: null,
+        retryable_windows: [],
         windows,
         window_prompts: windows.map(window => window.prompt),
       },
     }
   }),
   clearH3WindowPlan: () => set({ h3WindowPlan: null }),
-  enhancePrompt: async (ttsMode?: string, requestedStyle: 'faithful' | 'creative' | 'adaptive' = 'adaptive') => {
+  enhancePrompt: async (ttsMode?: string, requestedStyle: 'faithful' | 'creative' | 'adaptive' = 'adaptive', retryFlaggedWindows = false) => {
     let state = get()
     const primaryStudioCreate = (
       state.generationMode === 'video'
@@ -9244,6 +9310,11 @@ export const useStore = create<AppState>((set, get) => ({
     }
     const { generationMode, startImage, endImage, imageRefs } = state
     const isH3Writer = String(state.modelOptions?.architecture || selectedModelDefinition?.architecture || '').startsWith('minimax_h3')
+    const retryContext = state.h3WindowPlan?.camera_checkpoint?.context as {image_paths?: string[]} | undefined
+    if (retryFlaggedWindows && !state.h3WindowPlan?.retryable_windows?.length) {
+      set({promptEnhanceError: 'This draft has no saved windows to repair. Create a new draft instead.'})
+      return
+    }
     const planningStyle = requestedStyle === 'adaptive' && !isH3Writer ? 'faithful' : requestedStyle
     const clearCapturedEnhancement = () => set(s => s.enhanceOnGenerationRevision === state.enhanceOnGenerationRevision
       ? {enhanceOnGeneration: null, enhanceOnGenerationRevision: s.enhanceOnGenerationRevision + 1} : {})
@@ -9335,7 +9406,7 @@ export const useStore = create<AppState>((set, get) => ({
         // the runtime's Qwen conditioner will number them.
         let h3HasStartAttachment = false
         let h3HasEndAttachment = false
-        if (useStudioFrameInputs && startImage) {
+        if (useStudioFrameInputs && startImage && !retryFlaggedWindows) {
           try {
             const uploaded = await api.uploadImage(startImage)
             imagePaths.push(uploaded.path)
@@ -9346,7 +9417,7 @@ export const useStore = create<AppState>((set, get) => ({
           h3HasStartAttachment = true
         }
         if (isH3FirstLast) {
-          if (useStudioFrameInputs && endImage) {
+          if (useStudioFrameInputs && endImage && !retryFlaggedWindows) {
             try {
               const uploaded = await api.uploadImage(endImage)
               imagePaths.push(uploaded.path)
@@ -9415,7 +9486,7 @@ export const useStore = create<AppState>((set, get) => ({
         ? plannedDuration.windowCount
         : 1
       const totalFrames = Math.max(1, Math.round(state.durationSeconds * fps))
-      const h3NativeMaximumFrames = state.modelOptions?.frames_maximum ?? null
+      const h3NativeMaximumFrames = h3MaximumFrames(state.modelOptions, params.minimax_h3_extended_duration)
       const h3SequenceBudget = (
         isOmniReference
         && params.minimax_h3_reference_sequence === true
@@ -9447,6 +9518,7 @@ export const useStore = create<AppState>((set, get) => ({
 
       if (shouldPlanH3Sequence) {
         const plan = await api.planH3Sequence({
+          ...(retryFlaggedWindows && state.h3WindowPlan ? { retry_plan: state.h3WindowPlan } : {}),
           prompt: h3PlanningSource,
           model_type: params.model_type,
           resolution: params.resolution,
@@ -9454,6 +9526,7 @@ export const useStore = create<AppState>((set, get) => ({
           references: params.minimax_h3_references ?? [],
           sequence_clip_frames: h3SequenceClipFrames,
           sequence_memory_override: state.slidingWindowLocked,
+          minimax_h3_extended_duration: params.minimax_h3_extended_duration,
           overlap_frames: state.slidingWindowOverlap,
           sequence_continuity: params.minimax_h3_sequence_continuity !== false,
           camera_coverage: params.minimax_h3_camera_coverage || 'auto',
@@ -9492,6 +9565,7 @@ export const useStore = create<AppState>((set, get) => ({
         // contain only their own local actions. Endpoint and injected images
         // were collected above in the runtime's stable presentation order.
         const plan = await api.planH3Windows({
+          ...(retryFlaggedWindows && state.h3WindowPlan ? { retry_plan: state.h3WindowPlan } : {}),
           prompt: h3PlanningSource,
           model_type: params.model_type,
           resolution: params.resolution,
@@ -9500,9 +9574,10 @@ export const useStore = create<AppState>((set, get) => ({
           overlap_frames: state.slidingWindowOverlap,
           discard_frames: discardFrames,
           sliding_window_memory_override: state.slidingWindowLocked,
+          minimax_h3_extended_duration: params.minimax_h3_extended_duration,
           has_start_image: !!(startImage || params.image_start),
           has_end_image: !!(endImage || params.image_end),
-          image_paths: imagePaths.length > 0 ? imagePaths : undefined,
+          image_paths: retryFlaggedWindows ? retryContext?.image_paths : imagePaths.length > 0 ? imagePaths : undefined,
           injected_keyframes: injectedKeyframes.length > 0 ? injectedKeyframes : undefined,
           camera_coverage: params.minimax_h3_camera_coverage || 'auto',
           planning_style: planningStyle,
@@ -9531,6 +9606,9 @@ export const useStore = create<AppState>((set, get) => ({
         return
       }
 
+      if (retryFlaggedWindows) {
+        throw new Error('The window settings changed. Create a new draft for these settings.')
+      }
       // TTS dialogue needs more tokens for longer conversations
       const maxTokens = (generationMode === 'audio' && ttsMode) ? 2048 : undefined
       const ltxEnhanceSource = (
@@ -11638,6 +11716,7 @@ export const useStore = create<AppState>((set, get) => ({
           ...(subMode === 'music' ? {
             musicDescription: (p._music_description as string) || '',
             musicInstrumental: !!p._music_instrumental
+              || (p.custom_settings as Record<string, unknown> | undefined)?.instrumental === true
               || restoredLyrics.trim().toLowerCase() === '[instrumental]',
           } : {}),
         }))
@@ -11810,6 +11889,7 @@ export const useStore = create<AppState>((set, get) => ({
       p.sliding_window_discard_last_frames as number
     ) ?? undefined
     newParams.sliding_window_memory_override = p.sliding_window_memory_override === true
+    newParams.minimax_h3_extended_duration = p.minimax_h3_extended_duration === true
     newParams.guidance_phases = (p.guidance_phases as number) ?? undefined
     newParams.video_prompt_type = (p.video_prompt_type as string) || ''
     newParams.audio_prompt_type = (p.audio_prompt_type as string) || ''
@@ -12019,6 +12099,15 @@ export const useStore = create<AppState>((set, get) => ({
     newParams.custom_settings = Object.keys(
       restoredH3LongSequenceSettings,
     ).length > 0 ? restoredH3LongSequenceSettings : undefined
+    if (modelType === 'yue2') {
+      // Keep the complete music selection when loading or rerolling a song.
+      // Runtime-only LoRA fields are not part of the generic custom-setting UI.
+      newParams.custom_settings = Object.fromEntries(
+        ['abc', 'artist_id', 'artist_strength', 'artist_loras', 'instrumental']
+          .filter(key => restoredCustomSettings[key] !== undefined)
+          .map(key => [key, restoredCustomSettings[key]]),
+      )
+    }
     newParams.minimax_h3_window_storyboard = (p.minimax_h3_window_storyboard as boolean) ?? undefined
     newParams.minimax_h3_multi_window = (p.minimax_h3_multi_window as boolean) ?? undefined
     const legacyLtxLongForm = (

@@ -533,7 +533,8 @@ export function GlobalQueuePopover({
           </div>
         </div>
       )}
-      {reviewJob && <EnhancedJobReview job={jobs.find(job => job.id === reviewJob.id) || reviewJob} onClose={() => setReviewJob(null)}/>}
+      {reviewJob && <EnhancedJobReview job={jobs.find(job => job.id === reviewJob.id) || reviewJob}
+        onClose={() => setReviewJob(null)} onSubmitted={() => setOpen(true)}/>}
     </div>
   )
 }

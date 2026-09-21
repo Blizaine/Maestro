@@ -211,6 +211,58 @@ class EnhancedJobWiringTests(unittest.TestCase):
         self.assertEqual(record['prepared']['params']['minimax_h3_sequence_prompt_mode'], 'manual')
         self.writer.assert_not_awaited()
 
+    def test_queued_review_retry_retains_checkpoint_and_prepares_full_job(self):
+        retry = load('retry_enhanced_job', self.ns)
+        self.job['status'] = 'failed'
+        self.job['enhancement']['original_params'].update(
+            video_length=1962, minimax_h3_multi_window=True)
+        saved_plan = {'camera_checkpoint': {'version': 1},
+            'windows': [{'prompt': f'Saved window {i}'} for i in range(1, 7)],
+            'planning_warnings': ["Window 4's camera plan needs review."]}
+        self.job['enhancement'].update(state='review', prepared={'params': self.params,
+            'h3_window_plan': deepcopy(saved_plan)}, warnings=saved_plan['planning_warnings'])
+        async def repair(body, prepare_only):
+            self.assertEqual(body['_h3_retry_plan'], saved_plan)
+            prompts = [w['prompt'] for w in saved_plan['windows']]
+            prompts[3] = 'Repaired window 4'
+            return {'params': {**body, 'h3_window_prompts': prompts},
+                    'h3_window_plan': {'window_prompts': prompts, 'planned_by': 'llm', 'planning_warnings': []}}
+        self.prepare.side_effect = repair
+        with patch.object(threading, 'Thread'):
+            result = asyncio.run(retry('testjob', Request({'action': 'retry'})))
+        accepted = self.jobs[result['job_id']]
+        self.assertTrue(try_start(accepted))
+        self.run_enhancement(accepted)
+        self.assertEqual(accepted['enhancement']['state'], 'complete')
+        self.assertEqual(len(accepted['params']['h3_window_prompts']), 6)
+        self.assertEqual(accepted['params']['h3_window_prompts'][3], 'Repaired window 4')
+        self.assertEqual(self.job['enhancement']['prepared']['h3_window_plan'], saved_plan)
+        self.writer.assert_not_awaited()
+
+    def test_accept_reviewed_multiwindow_draft_reaches_worker_without_enhancing_again(self):
+        retry = load('retry_enhanced_job', self.ns)
+        prepared_params = {**self.params, 'prompt': 'Reviewed native script',
+            'h3_window_prompts': ['Exact first window', 'Exact second window'],
+            'h3_window_plan_signature': 'saved-signature'}
+        self.job.update(status='failed')
+        self.job['enhancement'].update(state='review', prepared={
+            'params': prepared_params, 'enhancement_review_required': True,
+            'h3_window_plan': {'planning_warnings': ['Review the camera fallback.']}},
+            warnings=['Review the camera fallback.'])
+        self.archive.save(self.job)
+        with patch.object(threading, 'Thread') as thread:
+            response = asyncio.run(retry('testjob', Request({'action': 'accept_draft'})))
+        accepted = self.jobs[response['job_id']]
+        self.assertEqual(response['status'], 'queued')
+        self.assertEqual(accepted['enhancement']['state'], 'complete')
+        thread.return_value.start.assert_called_once()
+        self.assertTrue(try_start(accepted))
+        self.run_enhancement(accepted)
+        self.assertEqual({key: accepted['params'][key] for key in prepared_params}, prepared_params)
+        self.assertEqual(accepted['enhancement']['state'], 'complete')
+        self.writer.assert_not_awaited()
+        self.prepare.assert_not_awaited()
+
     def test_dismissed_cancelled_job_cannot_be_resurrected_by_worker_teardown(self):
         self.job.update(status='cancelled', dismissed=True)
         self.archive.save(self.job)

@@ -150,6 +150,34 @@ class TraceTests(unittest.TestCase):
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_cached_projector_alias_matches_production_loader(self):
+        for legacy, current, expected in (
+            (b"legacy", None, "legacy.gguf"),
+            (b"legacy", b"current", "legacy.gguf"),
+            (b"", b"current", "current.gguf"),
+            (b"", None, None),
+        ):
+            with self.subTest(legacy=legacy, current=current), tempfile.TemporaryDirectory() as folder:
+                directory = Path(folder) / "writer"
+                directory.mkdir()
+                (directory / "model.gguf").write_bytes(b"model")
+                (directory / "legacy.gguf").write_bytes(legacy)
+                if current is not None:
+                    (directory / "current.gguf").write_bytes(current)
+                llm = types.SimpleNamespace(
+                    MODEL_REGISTRY={"local/writer-GGUF": {
+                        "gguf_file": "model.gguf", "mmproj_file": "current.gguf",
+                        "mmproj_cache_aliases": ["legacy.gguf"],
+                    }},
+                    get_model_dir=lambda: folder,
+                )
+                if expected is None:
+                    with self.assertRaisesRegex(ValueError, "Writer asset is not installed"):
+                        installed_writer(llm, "local/writer-GGUF")
+                else:
+                    writer = installed_writer(llm, "local/writer-GGUF")
+                    self.assertEqual(Path(writer["assets"][1]["path"]).name, expected)
+
     def test_legacy_wrapper_does_not_double_count_inference(self):
         wrapper = {"index": 1, "function": "generate", "output": "draft", "status": "complete"}
         dispatched = {"index": 2, "function": "generate_streaming", "output": "draft", "status": "complete",

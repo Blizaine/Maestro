@@ -55,8 +55,11 @@ def dialogue_forbidden(prompt: str) -> bool:
         r"(?:no[ -]?one|nobody)\s+(?:ever\s+)?(?:speaks?|talks?|"
         r"mouths?\s+(?:any\s+)?words?)|"
         r"(?:silent|nonverbal)\s+"
-        r"(?:(?:live[- ]action|animated|cinematic|dramatic|short|feature|"
-        r"martial[- ]arts)\s+){0,4}(?:scene|film|movie|video|sequence)|"
+        r"(?:(?:\d+(?:\.\d+)?(?:[- ](?:second|minute)s?|s)|\d+:\d+|"
+        r"live[- ]action|animated|cinematic|dramatic|short|feature|"
+        r"martial[- ]arts|vertical|horizontal|portrait|landscape|"
+        r"photorealistic|studio|product|commercial)\s+){0,10}"
+        r"(?:scene|film|movie|video|sequence)|"
         r"(?:entire|whole)\s+(?:scene|clip|film|movie|video|sequence)\s+(?:is\s+|stays\s+|remains\s+)?silent|"
         r"(?:music|instrumental)[ -]only)\b",
         source, re.IGNORECASE,
@@ -97,12 +100,12 @@ def dialogue_forbidden(prompt: str) -> bool:
             continue
         after = source[match.end():]
         suffix_is_temporal = re.match(
-            r"\s+(?:until|before|after|between|outside|during|from|"
+            r"\s+(?:plays?\s+)?(?:until|before|after|between|outside|during|from|"
             r"(?:in|for)\s+(?:the\s+)?(?:first|last|opening|final|initial|next|\d))\b",
             after, re.IGNORECASE,
         )
         suffix_is_global = re.match(
-            r"\s+(?:during|for|in|throughout)\s+(?:the\s+)?"
+            r"\s+(?:plays?\s+)?(?:during|for|in|throughout)\s+(?:the\s+)?"
             r"(?:entire|whole|full)\s+(?:scene|clip|film|movie|video|sequence)\b",
             after, re.IGNORECASE,
         )

@@ -1548,6 +1548,7 @@ class MiniMaxH3Model:
         _audio_segment=False,
         _audio_speaker=None,
         _face_refinement=None,
+        minimax_h3_extended_duration=False,
         **_kwargs,
     ):
         if not _audio_segment:
@@ -1599,9 +1600,15 @@ class MiniMaxH3Model:
                 "cover up to 10.13s; Maestro will continue, but quality "
                 "beyond that demonstrated envelope is experimental."
             )
-        if _face_refinement is None and not self.audio_only and not MINIMAX_H3_MIN_DURATION <= duration <= MINIMAX_H3_MAX_DURATION:
+        from .duration import H3_EXPERIMENTAL_MAX_SECONDS
+        maximum_duration = (
+            H3_EXPERIMENTAL_MAX_SECONDS
+            if minimax_h3_extended_duration is True and not self.viggle
+            else MINIMAX_H3_MAX_DURATION
+        )
+        if _face_refinement is None and not self.audio_only and not MINIMAX_H3_MIN_DURATION <= duration <= maximum_duration:
             raise ValueError(
-                f"MiniMax H3 supports {MINIMAX_H3_MIN_DURATION:g}-{MINIMAX_H3_MAX_DURATION:g}s at 24 fps; "
+                f"MiniMax H3's selected duration limit is {MINIMAX_H3_MIN_DURATION:g}-{maximum_duration:g}s at 24 fps; "
                 f"the aligned request is {frame_num} frames ({duration:.3f}s)."
             )
         if int(sampling_steps) < 2:

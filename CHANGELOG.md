@@ -3,9 +3,162 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## [2.2.1] - 2026-09-16
+## [2.3.0] - 2026-09-20
 
-Includes the full v2.2.0 feature release plus this enhancement hotfix:
+Qwen Image 2.1, a complete My Music training workflow, and more control over
+music LoRAs. Includes all updates since v2.2.4.
+
+- **Hotfix:** Fix Qwen Image 2.1's first-use download failing with a 404 for
+  `Qwen3-VL-8B-Instruct/added_tokens.json` after an upstream asset move. Pin
+  the complete processor export compatible with Maestro's Transformers
+  version, also avoiding a tokenizer configuration error in the relocated
+  files. Existing downloaded models are reused.
+- Add **Qwen Image 2.1 7B** for image generation, editing with up to ten
+  references, and transparent RGBA PNGs. Includes BF16/INT8 ConvRot downloads,
+  model-specific enhancement guides, separate LoRA storage, MMGP offloading
+  and tiled VAE execution. Enabled once in Model Visibility without changing
+  the selected model. Qwen Research License restrictions are shown with it.
+- YuE2 Instrumental now automatically uses Mothersuperior's instrumental AR
+  LoRA at strength 1 with Melody and chords planning and an instrumental
+  section prompt. Downloads the verified adapter on first use, pauses artist
+  LoRAs for that job, and records the recipe in song metadata. Studio, queued
+  jobs and Director music generation use the same instrumental path.
+- Music LoRAs now use the familiar searchable checkbox list and selected-weight
+  controls in Advanced. My Music's saved library has a persistent **Show in LoRA
+  selector** toggle, so only shortlisted LoRAs appear there; listing a LoRA does
+  not activate it. YuE2 supports experimental multi-LoRA mixes with independent
+  strengths and triggers, weighted sound companions, queued settings and saved
+  song metadata. Known v4/v9 tokenizer mixes are rejected; voice switching by
+  song section is not guaranteed. Loading song settings restores music LoRAs.
+- YuE2 songwriting and Music Style enhancement now emphasize the requested
+  lead vocal and delivery, retaining explicit performer names and supplied
+  training triggers instead of replacing them with generic timbre or album
+  references. Distinguish the song's subject and production influences from
+  its requested singer.
+- Add opt-in **Auto** music training: prepare songs and suggested main-voice
+  excerpts, train voice/sound then song style, and save the matched LoRA in one
+  queued run. Set targets up front (100/200 by default), stop/resume saved work,
+  and open either training stage afterward for further training or comparisons.
+  The backend advances stages even with the browser closed; automatic excerpts
+  remain marked unreviewed and check-only songs stay out of training.
+- Simplify My Music training into a guided recordings → voice/sound → song
+  style → test-song workflow. Carry the learned voice into the next stage,
+  reopen existing style projects, and keep technical controls, alternate methods
+  and older checkpoints in Expert settings. Clarify that lyrics are already
+  included; optional word timing is a separate experiment. Preserve existing
+  ranks, objectives and unfinished step targets when resuming.
+- Move YuE2 music LoRA selection and strength into Advanced → LoRAs & presets,
+  with an active badge and the automatically applied training trigger shown.
+  Add searchable saved LoRAs and reversible Remove / Restore library controls;
+  preserve trained weights, queued jobs, training projects and generated songs.
+- My Music: separate author voice/sound adaptation from AR song-style training.
+  Train a matched real-audio tokenizer and decoder with waveform supervision,
+  compare original/before/after sound, then train AR with freshly prepared tokens.
+  Save/resume paired checkpoints without changing previous styles. Clarify
+  check-only recordings and add language-controlled song rescanning that keeps
+  reviewed/manual clips; long-song transcription no longer inherits one opening
+  language guess for the full track. Voice resemblance remains experimental.
+- My Music: prepare full songs without supplying lyrics first. Separate vocals,
+  transcribe timed words, preview detected voices, and suggest phrase-based
+  excerpts. Review voice choices, lyrics, descriptions, vocal delivery and clip
+  boundaries before creating an immutable training dataset. Whole-song held-out
+  splits, cached stages and queue-aware cancellation preserve original audio and
+  existing projects. New projects recommend v9; legacy projects keep their pair.
+- My Music: import combined AI-Toolkit YuE2 adapters, with both musical and
+  acoustic branches preserved. Fix music-style ZIP imports on Python 3.10.
+- Add experimental joint music/audio training with matched checkpoints,
+  resumable optimizer state, and fixed checkpoint auditions. Support matched v9
+  tokenizer/decoder projects; existing v4 projects keep their original assets.
+  Joint training can also refine a saved style, preserving its existing decoder
+  and saving a baseline before training; original saved styles remain intact.
+- Stop replaying old completion and failure notifications when opening Maestro
+  or reconnecting to saved Studio/Director history. Active jobs still notify
+  when they finish, and completed history no longer starts status polling.
+- Add an opt-in **Allow 30s clips · Experimental** switch to Studio's H3
+  Duration settings. Frames and References can use a single 719-frame pass
+  (29.96 seconds at 24 fps), including queued enhancement and restored jobs.
+  Auto keeps its existing GPU recommendations. Longer passes require more
+  memory and time and may lose consistency; Animate retains its fixed window.
+
+## [2.2.4] - 2026-09-18
+
+Includes the full v2.2.0 feature release and v2.2.1–v2.2.3 fixes below, plus:
+
+- Retry only flagged H3 window prompts while retaining the saved story schedule,
+  dialogue, continuity boundaries, and all accepted window prompts. Supports
+  Frames and Reference sequences, interactive Enhance and queued enhancement.
+- Clarify prompt-review actions: generate the complete job with the saved draft,
+  retry flagged windows then generate, or edit without starting generation.
+  Full rewrites and generation from the original prompt live under Other options.
+- Preserve retry progress across restarts and repeated review attempts. Reject
+  stale repair requests when the source, references or timing have changed;
+  older drafts need a fresh enhancement to enable targeted window repair.
+- Fix the remaining silent-product prompt case from #115: logotype timelines
+  stay visual directions, and silent-video instructions with duration/aspect
+  qualifiers are recognized without discarding explicitly supplied dialogue.
+
+## [2.2.3] - 2026-09-17
+
+Includes the full v2.2.0 feature release and v2.2.1/v2.2.2 fixes below, plus:
+
+- Fix H3 reference enhancement for scripted conversations: preserve named
+  references in queued Enhance, retain dialogue introduced by a character's
+  reaction, and correct invented voice-reference clauses from the actual uploads.
+- Explain insufficient duration for exact dialogue before loading the writer.
+  Avoid repeated attempts to shorten words that must remain unchanged.
+- Allocate complete supplied conversations across windows before camera writing.
+  Keep scene-wide directions out of the event clock, and let brief facial
+  reactions share remaining time without squeezing speech or shortening physical
+  actions and explicitly timed pauses. See [validation](docs/VALIDATION_H3_REFERENCE_DIALOGUE.md).
+- Keep reported arrivals inside dialogue out of scene staging, and preserve
+  visual prop movement and nonverbal sounds during speech cleanup.
+- Fix false H3 camera-plan review warnings for imported colon-timed storyboards
+  such as `0-3s: [ARRIVAL]`. Keep authored scenes together, distinguish revision
+  comparisons from action-order requirements, and keep vehicle/prop notes and
+  written logos out of the cast and dialogue maps.
+- Preserve authored nonverbal sound cues in their own scene's audio instructions.
+  Avoid rejecting otherwise valid camera plans because sounds such as a fizz or
+  metallic clang, including continuing or fading cues, were not repeated in the
+  visual action description; physical actions and chronology still require their
+  own evidence.
+- Check meaning before rejecting camera plans for low word overlap. A bounded,
+  event-local review must quote the actual visual action before accepting a
+  faithful paraphrase; real omissions still receive focused repair. Clean plans
+  do not require an extra call. Keep `Only then` together when parsing actions.
+- Improve imported-script continuation: carry the achieved scene state into the
+  next window instead of replaying the preceding action. Keep explicitly separate
+  still-image restrictions scoped to the starting frame, and distinguish a filmed
+  subject's prop-holding hands from the camera operator's foreground hands.
+- Reduce avoidable H3 enhancement calls: stop retrying solely for preferred
+  dialogue density, copyedit overlong AI speech before requesting a full rewrite,
+  and batch remaining per-turn shortening into one retry. Keep exact quotations,
+  required topics, speaker ownership, and hard timing checks.
+- Bound H3 RMSNorm temporary allocations for large reference sequences, addressing
+  the first-step allocation failure in [#139](https://github.com/Blizaine/Maestro/issues/139).
+  Preserve normalization precision, reference detail, and the existing VRAM budget.
+  See [validation and limitations](docs/VALIDATION_H3_MEMORY_AND_LATENCY.md).
+
+## [2.2.2] - 2026-09-16
+
+Includes the full v2.2.0 feature release and v2.2.1 hotfix, plus:
+
+- Reduce false H3 fidelity failures by separating writing instructions, speech
+  topics and descriptive role phrases from required physical action. Preserve
+  straight/curly quoted speech and its intended speaker, including unnamed roles.
+- Keep useful shorter AI conversations after bounded repair instead of failing
+  preferred minimum-word targets. Reallocate speaking time and copyedit only
+  AI-written lines when needed; exact user quotes remain intact.
+- Preserve conversational turn order and complete source-event schedules across
+  windows, including continuing conversations and corrected window labels.
+- Show accepted reviewed-draft retries in the queue immediately. Keep submission
+  errors visible and leave mobile controls open when generation was not accepted.
+- Carry Director vocal-activity evidence through planning and H3 compilation.
+  Remove conflicting singing/open-mouth cues during instrumental passages and
+  musician cutaways while respecting explicit performance requests.
+- Recognize cached vision-projector aliases in the developer prompt bench,
+  matching the normal loader after model-file renames.
+
+Previously included in v2.2.1:
 
 - Fixed false H3 enhancement review warnings for imported numbered shot lists.
   Preserve shot clocks, source order and camera settings; accept faithful

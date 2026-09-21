@@ -52,9 +52,18 @@ def adaptive_dialogue_expansion_requested(prompt: str) -> bool:
     for line in reversed(locked):
         source = source[:line['source_offset']] + marker + source[line['source_end']:]
     # Never infer a writing request from the words spoken by a character.
-    if conversation_brief(source):
-        return True
     for clause in re.split(r"(?<=[.!?;])\s+|[\r\n]+", source):
+        # Performance restrictions do not request additional words. In an
+        # already scripted conversation, "No overlapping speech" controls
+        # turn-taking rather than imposing a fresh dialogue-writing quota.
+        if re.fullmatch(
+            r"\s*(?:no|without|avoid)\s+(?:overlapping|simultaneous)\s+"
+            r"(?:speech|dialogue|talking)(?:\s+or\s+narration)?[.!?;]?\s*",
+            clause, flags=re.I,
+        ):
+            continue
+        if marker not in clause and conversation_brief(clause):
+            return True
         cues = list(_PLANNER_SPEECH_VERB.finditer(clause))
         for index, cue in enumerate(cues):
             end = cues[index + 1].start() if index + 1 < len(cues) else len(clause)
@@ -86,6 +95,11 @@ def is_writing_instruction(text: str) -> bool:
         r"(?:the\s+|a\s+|this\s+)?(?:shot[ -]for[ -]shot|prompt|choreography|"
         r"screenplay|script|scene description)\b", str(text or "").strip(), re.I,
     )
+    spoken_direction = re.match(
+        r"^(?:please\s+)?(?:write|create|develop|include)\s+"
+        r"(?:[\w-]+\s+){0,5}(?:dialogue|conversation|spoken exchange)\b",
+        str(text or "").strip(), re.I,
+    )
     # A list of production restrictions is shared guidance, not an action
     # to schedule as its own beat. Do not match physical events like "No one
     # catches the falling glass" or a character who refuses an action.
@@ -93,7 +107,7 @@ def is_writing_instruction(text: str) -> bool:
     separator = r'(?:\s*[,;]\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+)'
     restriction = re.fullmatch(rf'(?:no|without)\s+{term}(?:{separator}{term})*',
                               str(text or '').strip(' .!?;\t\r\n'), re.I)
-    return bool(instruction or restriction)
+    return bool(instruction or spoken_direction or restriction)
 
 
 def draft_spoken_exchange(prompt: str, duration_seconds: float | None, generator,

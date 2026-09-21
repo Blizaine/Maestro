@@ -2,6 +2,7 @@
 import math
 
 from .music_styles import load_style, validate_strength
+from .music_contracts import adapter_contract
 
 
 def reconstruction_options(raw, project):
@@ -22,10 +23,15 @@ def reconstruction_options(raw, project):
             or len(set(tracks)) != len(tracks)):
         raise ValueError("Choose 1–4 different recordings from this project")
     options = {"style_id": style_id, "track_ids": list(tracks)}
-    comparison = raw.get('comparison', 'audio' if training.get('audio_checkpoint') else 'ar')
-    if not isinstance(comparison, str) or comparison not in {'ar', 'audio'}:
-        raise ValueError('Choose an AR or audio adaptation comparison')
+    joint = adapter_contract(style) == 'joint'
+    comparison = raw.get('comparison', 'joint' if joint else 'audio' if training.get('audio_checkpoint') else 'ar')
+    if not isinstance(comparison, str) or comparison not in {'ar', 'audio', 'joint'}:
+        raise ValueError('Choose an AR, audio adaptation or joint comparison')
+    if joint != (comparison == 'joint'):
+        raise ValueError('Joint checkpoints compare both adapters together; separate checkpoints use AR or audio comparisons')
     options['comparison'] = comparison
+    if comparison == 'audio' and style.get('adapted_pair'):
+        raise ValueError('Use the sound-pair comparison in Voice & sound; generic audio adapters do not match the adapted tokenizer')
     for key, default, low, high in (("seconds", 60, 10, 60), ("seed", 22005, 0, 2**32 - 1),
                                    ("steps", 32, 1, 64)):
         value = raw.get(key, default)

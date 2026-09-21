@@ -5,6 +5,8 @@ import { useStore } from '../../stores/useStore'
 import { PostProcessing } from './PostProcessing'
 import { ControlVideoSection } from './ControlVideoSection'
 import { LoraSelector } from '../SettingsDrawer/LoraSelector'
+import { Yue2LoraSelector } from './Yue2LoraSelector'
+import { selectedMusicStyles } from '../../lib/musicStyles'
 import { WindowSettings } from './DurationSlider'
 import { DirectorH3Optimizations } from './DirectorH3Optimizations'
 import { H3MediaControls } from './H3MediaControls'
@@ -243,6 +245,7 @@ function LtxFramesExperimentalControls() {
 /** One source for section badges, the total count and their help text. */
 function useAdvancedActiveSections(): Record<AdvancedSectionKey, string[]> {
   const params = useStore(s => s.params)
+  const instrumental = useStore(s => s.musicInstrumental)
   const modelOptions = useStore(s => s.modelOptions)
   const sidebarMode = useStore(s => s.sidebarMode)
   const directorVideoModel = useStore(s => s.selectedModelPerMode.video || '')
@@ -340,7 +343,9 @@ function useAdvancedActiveSections(): Record<AdvancedSectionKey, string[]> {
     && !modelOptions?.no_negative_prompt
     && (!isScailEdit || isScailHq)
   ) items.generation.push('Negative prompt')
-  if (!modelOptions?.loras_disabled && !(generationMode === 'avatar' && editSubMode === 'outpaint')) {
+  if (params.model_type === 'yue2') items.loras.push(...(instrumental
+    ? ['YuE2 instrumental LoRA'] : selectedMusicStyles(params.custom_settings).map(() => 'YuE2 music LoRA')))
+  if (params.model_type !== 'yue2' && !modelOptions?.loras_disabled && !(generationMode === 'avatar' && editSubMode === 'outpaint')) {
     for (const l of params.activated_loras) items.loras.push(`LoRA: ${l.replace(/\.(safetensors|sft)$/i, '')}`)
   }
   if (!isScailEdit && generationMode !== 'audio' && spatialUpsampling) items.finishing.push(`Upscaling (${spatialUpsampling})`)
@@ -477,7 +482,8 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
   const hasPerformance = showH3Optimizations || showReferenceDetail || showCacheTuning
     || !!modelOptions?.minimax_h3_text_encoder_choices?.length || !!modelOptions?.ltx25_video_vae_choices?.length
   const hasFinishing = !isAudio && (!isScailEdit || (isH3 && !modelOptions?.audio_only))
-  const canUseLoras = !isOutpaint && !modelOptions?.loras_disabled
+  const isYue2 = params.model_type === 'yue2'
+  const canUseLoras = !isYue2 && !isOutpaint && !modelOptions?.loras_disabled
   const showH3LongSequenceExperiments = (
     H3_LONG_SEQUENCE_TESTS_VISIBLE
     && isVideo
@@ -587,13 +593,14 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
 
               {/* Presets belong with the creative adapter controls so users can
                   save or restore a setup before adjusting its LoRAs. */}
-              <AdvancedSection section="loras" title={canUseLoras ? 'LoRAs & presets' : 'Presets'} activeItems={activeSections.loras} open={sections.loras} onToggle={expanded => toggleSection('loras', expanded)}>
+              <AdvancedSection section="loras" title={canUseLoras || isYue2 ? 'LoRAs & presets' : 'Presets'} activeItems={activeSections.loras} open={sections.loras} onToggle={expanded => toggleSection('loras', expanded)}>
               <PresetManager />
 
               {/* Keep creative adapters near the top so users can choose them
                   before working through the lower-level tuning controls.
                   Official Outpaint owns its stage-one-only IC-LoRA schedule. */}
               {canUseLoras && <LoraSelector />}
+              {isYue2 && <Yue2LoraSelector />}
               {canUseLoras && modelOptions?.minimax_h3_fused_turbo && (
                 <p className="rounded-lg border border-amber-500/25 bg-amber-500/8 px-3 py-2 text-[9px] leading-relaxed text-text-muted">
                   H3 LoRAs are experimental with Fused 4-Step. Start with one adapter at low strength and compare a short clip using the same seed. Extra acceleration adapters are excluded; Mystic remains baked in at 0.7.

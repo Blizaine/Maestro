@@ -9,7 +9,7 @@ from unittest.mock import Mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 from services.dialogue_writing import dialogue_topic_covered, requested_dialogue_topics
-from services.h3_dialogue_writing import complete_creative_dialogue, creative_dialogue_windows
+from services.h3_dialogue_writing import _shorten_generated_dialogue, complete_creative_dialogue, creative_dialogue_windows
 from services.h3_story_ledger import (
     _canonicalize_story_ledger, _deterministic_ledger, _merge_h3_cast_names,
     canonicalize_h3_reference_names, extract_h3_source_intent,
@@ -108,20 +108,57 @@ class H3CreativeRegressionTests(unittest.TestCase):
         generator = Mock(side_effect=["{}", "{}", json.dumps({"generated_dialogue": [speech(LINE_B, 2, "Leo")]})])
         result, warnings = complete_creative_dialogue(BRIEF, ledger, canonical_ledger=canonical, locked_dialogue=[], durations=[10.1, 10.1], generate=generator, system_prompt="Focused guide")
         self.assertEqual([item["text"] for item in result["generated_dialogue"]], ["Ready?", LINE_B])
-        self.assertEqual(len(warnings), 1)
-        self.assertIn("window 1", warnings[0])
+        self.assertEqual(warnings, [])  # A short valid line is not a timing failure.
         self.assertEqual(ledger, original)
         self.assertEqual(generator.call_count, 3)
 
-    def test_feedback_retry_succeeds_without_rewriting_other_windows(self):
+    def test_density_development_is_one_pass_and_keeps_a_valid_shorter_exchange(self):
         canonical, ledger = fixture(lines=[speech("Ready?", 1), speech(LINE_B, 2, "Leo")])
         generator = Mock(side_effect=[json.dumps({"generated_dialogue": [speech("That sounds good!", 1)]}), json.dumps({"generated_dialogue": [speech(LINE_A, 1)]})])
         result, warnings = complete_creative_dialogue(BRIEF, ledger, canonical_ledger=canonical, locked_dialogue=[], durations=[10.1, 10.1], generate=generator, system_prompt="Focused guide")
         self.assertEqual(warnings, [])
-        self.assertEqual([item["text"] for item in result["generated_dialogue"]], [LINE_A, LINE_B])
-        self.assertIn("Validation feedback: 3 spoken words", generator.call_args_list[1].kwargs["prompt"])
-        self.assertIn("at least 19 MORE spoken words; aim to add 21", generator.call_args_list[1].kwargs["prompt"])
+        self.assertEqual([item["text"] for item in result["generated_dialogue"]], ["That sounds good!", LINE_B])
+        self.assertEqual(generator.call_count, 1)
         self.assertEqual(generator.call_args.kwargs["json_schema"]["properties"]["generated_dialogue"]["items"]["properties"]["speaker"]["enum"], ["Maya", "Leo"])
+
+    def test_overlong_exchange_is_copyedited_before_another_full_rewrite(self):
+        canonical, ledger = fixture(durations=[5.0], lines=[speech(LINE_A, 1)])
+        writer = Mock(return_value=json.dumps({"L1": "Let's label our clips by scene."}))
+        result, warnings = complete_creative_dialogue(BRIEF, ledger, canonical_ledger=canonical,
+                    locked_dialogue=[], durations=[5.0], generate=writer, system_prompt="Focused guide")
+        self.assertEqual(warnings, [])
+        writer.assert_called_once()
+        self.assertIn('SHORTEN AI-WRITTEN LINES', writer.call_args.kwargs['prompt'])
+        self.assertEqual(result['generated_dialogue'][0]['text'], "Let's label our clips by scene.")
+
+    def test_failed_copyedit_still_gets_one_structured_repair(self):
+        canonical, ledger = fixture(durations=[5.0], lines=[speech(LINE_A, 1)])
+        writer = Mock(side_effect=['{}', json.dumps({'generated_dialogue': [speech("Label the clips by scene.", 1)]})])
+        result, warnings = complete_creative_dialogue(BRIEF, ledger, canonical_ledger=canonical,
+                    locked_dialogue=[], durations=[5.0], generate=writer, system_prompt="Focused guide")
+        self.assertEqual(warnings, [])
+        self.assertEqual(writer.call_count, 2)
+        self.assertEqual(result['generated_dialogue'][0]['text'], "Label the clips by scene.")
+
+    def test_copyedit_batches_overlong_turns_and_retains_fitting_turn(self):
+        lines = [speech('Please organize the clips by scene first.', 1),
+                 speech('We can save a recipe for tomorrow.', 1, 'Leo'),
+                 speech('Thanks!', 1)]
+        original = deepcopy(lines)
+        writer = Mock(side_effect=[
+            json.dumps({'L1': 'Please label every clip by scene.', 'L2': 'Save a recipe for tomorrow.', 'L3': 'Thanks!'}),
+            json.dumps({'L1': 'Label each scene.', 'L2': 'Save the recipe.'}),
+        ])
+        edited = _shorten_generated_dialogue(BRIEF, lines, target_words=9, per_line_targets=[4, 4, 1],
+                    generate=writer, system_prompt='Copyediting guide')
+        self.assertEqual(writer.call_count, 2)
+        retry = writer.call_args.kwargs['prompt']
+        self.assertIn('"L1"', retry)
+        self.assertIn('"L2"', retry)
+        self.assertNotIn('"L3"', retry)
+        self.assertEqual([line['text'] for line in edited], ['Label each scene.', 'Save the recipe.', 'Thanks!'])
+        self.assertEqual([line['speaker'] for line in edited], [line['speaker'] for line in original])
+        self.assertEqual(lines, original)
 
     def test_missing_topic_triggers_repair_even_with_enough_words(self):
         prompt = BRIEF + "\nFeatures include:\n• Save & share characters w/ RefMod support"
@@ -143,19 +180,19 @@ class H3CreativeRegressionTests(unittest.TestCase):
             {"start_seconds": 0, "end_seconds": 6.4, "dialogue": []},
             {"start_seconds": 6.4, "end_seconds": 14.4, "dialogue": [{"dialogue_id": "D1"}]},
         ]}]
-        self.assertTrue(creative_dialogue_windows(BRIEF, ledger, [], [14.4])[0]["problems"])
+        self.assertTrue(creative_dialogue_windows(BRIEF, ledger, [], [14.4])[0]["writing_notes"])
         final = creative_dialogue_windows(BRIEF, ledger, [], [14.4], camera_segments=camera)[0]
         self.assertEqual(final["problems"], [])
         self.assertEqual(final["spoken_words"], 22)
         self.assertEqual(ledger, original)
 
-        # A sparse reply does not become a developed conversation when there
-        # is ample speaking time, and a silent plan cannot satisfy it either.
+        # Preferred density remains useful writing feedback, not a blocker.
         _, sparse = fixture(BRIEF, [14.4], [speech("Ready?", 1)])
         for shots in ([{"start_seconds": 0, "end_seconds": 14.4, "dialogue": [{"dialogue_id": "D1"}]}], []):
             with self.subTest(shots=shots):
                 audited = creative_dialogue_windows(BRIEF, sparse, [], [14.4], camera_segments=[{"shots": shots}])
-                self.assertTrue(audited[0]["problems"])
+                self.assertTrue(audited[0]["writing_notes"])
+                self.assertEqual(audited[0]["problems"], [])
 
     def test_camera_time_does_not_waive_missing_spoken_topics(self):
         prompt = BRIEF + "\nFeatures include:\n• Save & share characters w/ RefMod support"

@@ -1017,9 +1017,16 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
               <dt className="text-text-muted">Audio</dt>
               <dd className="text-text-secondary">{meta.model_details.sample_rate / 1000} kHz · {meta.model_details.channels === 2 ? 'stereo' : `${meta.model_details.channels} channel`}</dd>
             </>}
-            {meta?.model_details?.artist && <>
-              <dt className="text-text-muted">Music style</dt>
-              <dd className="break-words text-text-secondary">{meta.model_details.artist.name} · strength {meta.model_details.artist.strength}</dd>
+            {(meta?.model_details?.artists?.length || meta?.model_details?.artist) && <>
+              <dt className="text-text-muted">Music LoRAs</dt>
+              <dd className="break-words text-text-secondary">
+                {(meta.model_details.artists?.length ? meta.model_details.artists : [meta.model_details.artist!]).map(artist =>
+                  <div key={artist.id}>{artist.name} · strength {artist.strength}</div>)}
+              </dd>
+            </>}
+            {meta?.model_details?.instrumental && <>
+              <dt className="text-text-muted">Instrumental</dt>
+              <dd className="text-text-secondary">Instrumental LoRA · strength {meta.model_details.instrumental.strength} · Melody and chords</dd>
             </>}
             {meta?.model_details?.plan?.abc && <>
               <dt className="text-text-muted">Composition</dt>

@@ -1447,7 +1447,11 @@ class H3StoryLedgerTests(unittest.TestCase):
         )
 
         self.assertEqual(result["planned_by"], "llm")
-        self.assertEqual(result["planning_warnings"], [])
+        # This legacy response assigns 41 words plus an entrance to 14.375s.
+        # The new final timing audit must expose that squeeze without claiming
+        # its valid story/dialogue IDs failed fidelity or dropping exact words.
+        self.assertTrue(result["planning_warnings"])
+        self.assertTrue(all("more speaking time" in item for item in result["planning_warnings"]))
         self.assertEqual(result["planning_diagnostics"], [])
         self.assertIsInstance(calls[0]["json_schema"], dict)
         self.assertIn("character_appearance", calls[0]["json_schema"]["properties"])

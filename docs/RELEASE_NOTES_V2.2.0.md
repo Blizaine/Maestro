@@ -1,13 +1,120 @@
-# Maestro v2.2.1
+# Maestro v2.2.4
 
-Released 16 September 2026.
+Released 18 September 2026. Includes the v2.2.0 feature release from 16 September.
 
 This release brings one adaptive Enhance workflow, enhancement inside the
 generation queue, YuE2 music and experimental personal music styles, a searchable
 gallery across folders, and stronger control over Director music videos.
 
-The complete v2.2.0 feature release remains below, with the following v2.2.1
-enhancement fix included.
+The complete v2.2.0 feature release remains below, together with the v2.2.1–v2.2.3
+fixes and these v2.2.4 prompt-review improvements.
+
+## v2.2.4 targeted retries and clearer prompt review
+
+- **Retry only flagged windows:** when a camera or dialogue check flags part of
+  an H3 sequence, retry those windows while preserving the accepted prompts
+  exactly. The shared story, dialogue schedule and continuity boundaries stay
+  in place. Supports Frames and References, Enhance now and queued enhancement.
+- **Keep repair progress:** saved drafts retain the information needed for
+  targeted retries after restarting Maestro. A second unsuccessful attempt stays
+  focused on the flagged windows. If the prompt, references or timing change,
+  create a fresh draft so the repair uses the correct inputs.
+- **Make the scope of each action clear:** **Generate all N windows with this
+  draft** uses the full saved draft, including flagged windows, without running
+  enhancement again. **Retry window N & generate** repairs flagged prompts and
+  generates the full job only when checks pass. **Edit prompts in Studio** opens
+  the draft without starting generation. **Other options** contains full rewrites
+  and generation from the original source.
+- **Enhance-now retries remain a review step:** the prompt field's retry action
+  repairs flagged windows without submitting a generation job.
+- **Silent product timelines remain visual:** fixes the exact product-brief
+  parsing case from #115, where `Logotype timeline:` became a speaker and its
+  visual directions consumed dialogue capacity. Silent-video instructions can
+  include duration, aspect and product-style qualifiers; explicitly written
+  dialogue still remains intact.
+
+Use Pinokio's **Update**, restart Maestro and refresh the browser. Drafts created
+before this update need a fresh enhancement to enable targeted repair. Manual
+prompt edits invalidate the saved repair checkpoint; the edited prompts remain
+available for generation. Shared story-level issues can still require a full
+rewrite. No new dependencies or model downloads are required for this update.
+
+See [Studio controls](Studio-controls.md), the [enhancement API](Studio-enhancement-api.md),
+and the [validation record](VALIDATION_V2.2.0.md).
+
+## v2.2.3 H3 enhancement and memory fixes
+
+- **Fewer false camera-fidelity warnings:** imported `0-3s: [TITLE]` storyboards
+  keep their authored scenes. Revision wording, production headings, written
+  logos and sound cues are no longer mistaken for extra actors, speech or missing
+  physical actions. A bounded meaning check can accept a faithful camera
+  paraphrase using evidence from that event; actual omissions still need repair.
+- **Complete conversations fit more reliably:** retain dialogue introduced by a
+  named reaction, distribute whole turns across windows, and preserve every exact
+  line in order. Scene-wide directions no longer consume their own action slots;
+  brief facial reactions share spare time while physical actions retain theirs.
+- **Correct reference and voice ownership:** queued enhancement recognizes the
+  supplied names, upload ordering and reference roles. Character subjects remain
+  separate from vocal-event IDs; invented voice-reference clauses are corrected
+  using the actual uploads. Markdown wrappers are removed from native prompts.
+- **Clear duration feedback:** if exact supplied dialogue cannot fit the chosen
+  duration, explain the word/time conflict before loading the LLM. Keep the source
+  unchanged and suggest more time or another window.
+- **Less unnecessary rewriting:** stop repeated calls made solely to meet a
+  preferred dialogue density. Copyedit overlong AI-written speech first and batch
+  remaining shortening requests. Exact user lines, topic ownership and hard
+  timing checks remain protected; this is not a promised fixed speedup.
+- **Better continuation and prompt cleanup:** the next window inherits what the
+  preceding scene accomplished. Still-image-only constraints stay scoped to the
+  start image; prop-holding hands keep their owner. Spoken reports of arrivals
+  do not become on-screen entrances, and nonverbal prop motion/sounds survive.
+- **Lower H3 normalization memory peaks:** process large hidden sequences in
+  bounded slices while retaining native RMSNorm precision and inference hooks.
+  Addresses the allocation hotspot in [#139](https://github.com/Blizaine/Maestro/issues/139)
+  without reducing reference detail or changing VRAM budgets. The isolated
+  operation is validated; a full A100 reproduction remains unverified.
+
+After updating and restarting Maestro, refresh the browser and enhance again
+from the original source to use the corrected planner. Saved drafts remain
+available; they are not silently rewritten. No additional dependencies or model
+downloads are required for these fixes.
+
+See the validation records for [reference dialogue](VALIDATION_H3_REFERENCE_DIALOGUE.md),
+[imported timelines](VALIDATION_H3_IMPORTED_TIMELINES.md), and
+[memory and retry behavior](VALIDATION_H3_MEMORY_AND_LATENCY.md). Warning-free
+enhancement does not guarantee perfect generated staging or lip sync.
+
+## v2.2.2 enhancement and Director fixes
+
+- **Fewer false review failures:** distinguish writing instructions, conversation
+  topics, character descriptions and background context from actions that must
+  appear on camera. Straight, curly and mixed quotation marks retain complete
+  user-written lines; descriptive speakers such as "the older man" keep ownership.
+- **More practical dialogue timing:** keep useful shorter exchanges after bounded
+  repair instead of rejecting them for missing a preferred minimum word count.
+  Preserve conversation order, allocate speaking time and rewrite crowded AI-only
+  lines when necessary. User-written quotes are never shortened automatically;
+  genuinely overfull or incomplete drafts can still require review.
+- **More reliable multi-window planning:** allow the required source events and
+  supporting beats to fit the story schema, preserve ongoing conversation turns,
+  and repair misplaced window labels when source events remain intact and ordered.
+- **Working review continuation:** immediately show and poll accepted draft retries
+  without waiting for queue-history refresh. Submission errors remain visible,
+  including on mobile where controls stay open until a job is accepted.
+- **Director vocal ownership:** retain analyzed vocal activity through planning,
+  start images, ending poses and final H3 prompt compilation. During instrumental
+  passages, the singer listens or moves with closed lips; instrumentalists do not
+  acquire invented singing, bellows or vocal breaths. User-requested expressions
+  and wind-instrument playing remain supported. Replan existing Director projects
+  to apply the updated guidance and vocal evidence.
+- **Developer tooling:** the prompt bench recognizes cached vision-projector
+  aliases, including existing Qwen3.8 installations, just as normal loading does.
+
+These changes improve reliability; LLM writing and generated staging still need
+human judgment. The validation record separates warning-free enhancement from
+creative quality and rendered results.
+
+## v2.2.1 numbered-shot fix
 
 **AI enhancement hotfix:** imported numbered shot headings such as
 `SHOT 1 — 0:00–0:02` now retain their authored structure, including Markdown
@@ -178,6 +285,15 @@ See [local LLM runtime](LLM-runtime.md). Native Linux CUDA build/generation stil
 requires reporter validation; mocked build tests are not a substitute for it.
 
 ## GitHub issues
+
+v2.2.4 fixes the remaining silent-product dialogue classification reproduced from
+**#115** and adds targeted window retries for drafts needing local camera repair.
+The reported prompt is covered by parser and three-window scheduler regressions.
+The broader product-mode and entity-handling request in **#138** remains open.
+
+v2.2.3 addresses the large-sequence RMSNorm allocation reported in **#139**.
+The bounded operation and numerical equivalence are tested; complete generation
+on the reporter's A100 remains for validation, so this is not a blanket OOM fix.
 
 Fixes and requested controls in this release address **#4, #121, #123, #124,
 #125, #126, #127, #129 and #132**. Release comments describe the implemented

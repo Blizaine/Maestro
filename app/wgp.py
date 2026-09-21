@@ -298,13 +298,13 @@ def compute_sliding_window_no(current_video_length, sliding_window_size, discard
     return max(1, 1 + math.ceil(left_after_first_window / (sliding_window_size - discard_last_frames - reuse_frames)))
 
 
-def clean_image_list(gradio_list):
+def clean_image_list(gradio_list, preserve_alpha=False):
     if not isinstance(gradio_list, list): gradio_list = [gradio_list]
     gradio_list = [ tup[0] if isinstance(tup, tuple) else tup for tup in gradio_list ]        
 
     if any( not isinstance(image, (Image.Image, str))  for image in gradio_list): return None
     if any( isinstance(image, str) and not has_image_file_extension(image) for image in gradio_list): return None
-    gradio_list = [ convert_image( Image.open(img) if isinstance(img, str) else img  ) for img in gradio_list  ]        
+    gradio_list = [convert_image(img, preserve_alpha=preserve_alpha) for img in gradio_list]
     return gradio_list
 
 _generate_video_param_names = None
@@ -798,6 +798,8 @@ def validate_settings(state, model_type, single_prompt, inputs):
         return None, None, None, None
 
     model_def = get_model_def(model_type)
+    from models.minimax_h3.duration import apply_h3_duration_override
+    model_def = apply_h3_duration_override(inputs, model_def)
     model_handler = get_model_handler(model_type)
     image_outputs = inputs["image_mode"] > 0
     any_steps_skipping = (
@@ -1164,7 +1166,7 @@ def validate_settings(state, model_type, single_prompt, inputs):
         if image_refs == None or len(image_refs) == 0:
             gr.Info("You must provide at least one Reference Image")
             return ret()
-        image_refs = clean_image_list(image_refs)
+        image_refs = clean_image_list(image_refs, preserve_alpha=model_def.get("preserve_image_ref_alpha", False))
         if image_refs == None :
             gr.Info("A Reference Image should be an Image") 
             return ret()
@@ -2156,7 +2158,7 @@ def update_generation_status(html_content):
     if(html_content):
         return gr.update(value=html_content)
 
-family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx25.ltx25_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.minimax_h3.minimax_h3_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.qwen.qwen_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.yue2.yue2_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.minimax_music3_handler", "models.TTS.index_tts2_handler"]
+family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx25.ltx25_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.minimax_h3.minimax_h3_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.qwen.qwen_handler", "models.qwen21.qwen21_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.yue2.yue2_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.minimax_music3_handler", "models.TTS.index_tts2_handler"]
 DEFAULT_LORA_ROOT = "loras"
 
 def register_family_lora_args(parser, lora_root):
@@ -5560,13 +5562,14 @@ def select_video(state, current_gallery_tab, input_file_list, file_selected, aud
     visible= len(files) > 0 
     return choice if source=="video" else gr.update(), html_content, gr.update(visible=visible and is_video) , gr.update(visible=visible and is_image), gr.update(visible=visible and is_audio), gr.update(visible=visible and is_deleted and source=="video"), gr.update(visible=visible and is_deleted and source=="audio"), gr.update(visible=visible and is_video) , gr.update(visible=visible and is_video) 
 
-def convert_image(image):
+def convert_image(image, preserve_alpha=False):
 
     from PIL import ImageOps
     from typing import cast
     if isinstance(image, str):
         image = Image.open(image)
-    image = image.convert('RGB')
+    has_alpha = "A" in image.getbands() or "transparency" in image.info
+    image = image.convert('RGBA' if preserve_alpha and has_alpha else 'RGB')
     return cast(Image, ImageOps.exif_transpose(image))
 
 def get_resampled_video(video_in, start_frame, max_frames, target_fps, bridge='torch'):
@@ -7582,6 +7585,7 @@ def generate_video(
     minimax_h3_sequence_continuity=True,
     minimax_h3_sequence_clip_frames=None,
     minimax_h3_sequence_memory_override=False,
+    minimax_h3_extended_duration=False,
     minimax_h3_text_encoder="nvfp4_awq",
     # LTX-2.5 defaults to the conventional fast ConvVAE. The optional NAD
     # diffusion decoder is model state and therefore triggers a model reload
@@ -7643,7 +7647,11 @@ def generate_video(
         audio_file_settings_list = gen["audio_file_settings_list"]
 
 
-    model_def = get_model_def(model_type) 
+    model_def = get_model_def(model_type)
+    from models.minimax_h3.duration import h3_duration_model_def
+    model_def = h3_duration_model_def(model_def, {
+        "minimax_h3_extended_duration": minimax_h3_extended_duration,
+    })
     is_image = image_mode > 0
     audio_only = model_def.get("audio_only", False)
     duration_def = model_def.get("duration_slider", None)
@@ -8294,6 +8302,10 @@ def generate_video(
         current_video_length += sliding_window_overlap - 1
     original_image_refs = image_refs
     image_refs = None if image_refs is None else ([] + image_refs) # work on a copy as it is going to be modified
+    if image_refs is not None and model_def.get("preserve_image_ref_alpha", False):
+        # Shared resize/background/mask preparation is RGB-only. Keep native
+        # alpha in original_image_refs for RGBA-aware runtimes such as Qwen 2.1.
+        image_refs = [convert_image(image) for image in image_refs]
     # image_refs = None
     # nb_frames_positions= 0
     # Output Video Ratio Priorities:
@@ -9469,6 +9481,8 @@ def generate_video(
                     outpaint_mask_preserve=outpaint_mask_preserve,
                     face_arc_embeds = face_arc_embeds,
                     custom_settings=custom_settings_for_model,
+                    **({"minimax_h3_extended_duration": minimax_h3_extended_duration}
+                       if str(model_def.get("architecture") or "").startswith("minimax_h3") else {}),
                     save_masks=args.save_masks,
                     temperature=temperature,
                     window_start_frame_no = window_start_frame,

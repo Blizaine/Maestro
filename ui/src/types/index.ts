@@ -97,6 +97,7 @@ export interface GenerateParams {
   sliding_window_discard_last_frames?: number
   /** Explicitly honor a manually locked window above the model's VRAM-aware recommendation. */
   sliding_window_memory_override?: boolean
+  minimax_h3_extended_duration?: boolean
   /** Optional model-specific transformer step cache. */
   skip_steps_cache_type?: '' | 'first_block'
   /** First Block Cache residual-change threshold. */
@@ -429,6 +430,10 @@ export interface H3WindowPlan {
   planning_warnings?: string[]
   planning_diagnostics?: string[]
   planning_notes?: string[]
+  retryable_windows?: number[]
+  retried_windows?: number[]
+  retry_fingerprint?: string
+  camera_checkpoint?: Record<string, unknown> | null
   planning_style?: WindowPlanningStyle
   plan_kind?: 'sliding_window' | 'reference_sequence'
   camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
@@ -479,6 +484,8 @@ export interface PromptEnhancementRecord {
 export interface GenerationJob {
   enhancement?: PromptEnhancementRecord | null
   id: string
+  /** First observation is a saved queue snapshot, not a new terminal event. */
+  restoredFromHistory?: boolean
   /** Direct submissions stay visible while the backend is queued/planning. */
   showInGallery?: boolean
   kind?: 'generation' | 'editor_export' | string
@@ -1115,6 +1122,9 @@ export interface OutputMetadata {
     plan?: { abc?: string; request?: Record<string, unknown> }
     truncated?: Record<string, boolean>
     artist?: { id: string; name: string; strength: number; tokenizer_revision: string }
+    artists?: Array<{ id: string; name: string; strength: number; tokenizer_revision: string | null }>
+    artist_mix?: string
+    instrumental?: { repo_id: string; revision: string; file: string; sha256: string; strength: number; cot: string; decoder: string }
   }
   source: 'sidecar' | 'embedded' | 'none'
   params: Record<string, unknown> | null

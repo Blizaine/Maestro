@@ -8092,7 +8092,7 @@ async def llm_write_song(request: Request):
     from services.guide_loader import load_guide
     if selected_architecture == "yue2":
         from models.TTS.yue2.prompting import writer_duration_instruction
-        system_prompt = load_guide("music", "song_writer_yue2")
+        system_prompt = load_guide("music", "song_writer_yue2_instrumental" if instrumental else "song_writer_yue2")
         system_prompt += "\n\n" + writer_duration_instruction(body.get("duration_seconds"))
     elif is_minimax_music3 and instrumental:
         system_prompt = (
@@ -8216,7 +8216,7 @@ async def director_generate_music(request: Request):
         _ensure_llm_loaded()
         if selected_architecture == "yue2":
             from models.TTS.yue2.prompting import writer_duration_instruction
-            system_prompt = load_guide("music", "song_writer_yue2")
+            system_prompt = load_guide("music", "song_writer_yue2_instrumental" if instrumental else "song_writer_yue2")
             system_prompt += "\n\n" + writer_duration_instruction(duration_seconds)
         elif is_minimax_music3 and instrumental:
             system_prompt = (
@@ -8264,6 +8264,9 @@ async def director_generate_music(request: Request):
         raise HTTPException(status_code=400, detail="Provide a description, or style + lyrics")
 
     gen_params = _build_music_gen_params(model_type, lyrics, style, duration_seconds, seed)
+    if selected_architecture == "yue2" and instrumental:
+        gen_params.update(model_mode=0, _music_instrumental=True,
+                          custom_settings={**(gen_params.get('custom_settings') or {}), 'instrumental': True, 'abc': ''})
 
     out_dir = _workspace_dir(workspace)
     os.makedirs(out_dir, exist_ok=True)
@@ -8344,12 +8347,16 @@ def _interactive_enhancement_slot(function):
 async def llm_plan_h3_windows(request: Request):
     """Expand one H3 First/Last concept into exact per-window prompts."""
 
+    from services.h3_plan_retry import H3PlanRetryError
+
     body = await request.json()
     prompt = str(body.get("prompt") or "").strip()
     model_type = str(body.get("model_type") or "")
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
     model_def = wgp.get_model_def(model_type) or {}
+    from models.minimax_h3.duration import apply_h3_duration_override
+    model_def = apply_h3_duration_override(body, model_def)
     if not str(model_def.get("architecture") or "").startswith("minimax_h3"):
         raise HTTPException(status_code=400, detail="H3 window planning requires a MiniMax H3 model.")
     if model_def.get("omni_reference"):
@@ -8363,6 +8370,7 @@ async def llm_plan_h3_windows(request: Request):
 
     sliding_defaults = model_def.get("sliding_window_defaults") or {}
     planning_inputs = {
+        "minimax_h3_extended_duration": body.get("minimax_h3_extended_duration") is True,
         "model_type": model_type,
         "resolution": body.get("resolution") or "864x480",
         "video_length": body.get("total_frames") or body.get("video_length") or 124,
@@ -8438,9 +8446,12 @@ async def llm_plan_h3_windows(request: Request):
             nsfw=bool(nsfw),
             camera_coverage=str(body.get("camera_coverage") or "auto"),
             planning_style=str(body.get("planning_style") or "faithful"),
+            retry_plan=body.get("retry_plan"),
         )
         result["effective_window_frames"] = window_frames
         return result
+    except H3PlanRetryError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except Exception as error:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(error)) from error
@@ -8451,12 +8462,16 @@ async def llm_plan_h3_windows(request: Request):
 async def llm_plan_h3_sequence(request: Request):
     """Expand one H3 Omni concept into reference-driven windows."""
 
+    from services.h3_plan_retry import H3PlanRetryError
+
     body = await request.json()
     prompt = str(body.get("prompt") or "").strip()
     model_type = str(body.get("model_type") or "")
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
     model_def = wgp.get_model_def(model_type) or {}
+    from models.minimax_h3.duration import apply_h3_duration_override
+    model_def = apply_h3_duration_override(body, model_def)
     if not (
         str(model_def.get("architecture") or "").startswith("minimax_h3")
         and model_def.get("omni_reference")
@@ -8483,6 +8498,7 @@ async def llm_plan_h3_sequence(request: Request):
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     sequence_inputs = {
+        "minimax_h3_extended_duration": body.get("minimax_h3_extended_duration") is True,
         "resolution": body.get("resolution") or "864x480",
         "video_length": body.get("total_frames") or 124,
         "minimax_h3_sequence_clip_frames": body.get(
@@ -8561,11 +8577,14 @@ async def llm_plan_h3_sequence(request: Request):
             overlap_frames=overlap_frames,
             native_continuation=native_continuation,
             planning_style=str(body.get("planning_style") or "faithful"),
+            retry_plan=body.get("retry_plan"),
         )
         result["effective_window_frames"] = effective_clip_frames
         if sequence_adjustment:
             result["sequence_memory"] = sequence_adjustment
         return result
+    except H3PlanRetryError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except Exception as error:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(error)) from error
@@ -8631,6 +8650,14 @@ async def _llm_enhance_prompt_payload(body: dict):
     # Use our local LLM service
     from services import llm_service
     from services.h3_prompt_budget import H3PromptBudgetError
+
+    if needs_h3_context_ir:
+        try:
+            llm_service.validate_h3_source_dialogue_duration(prompt, body.get("duration_seconds"))
+        except H3PromptBudgetError as error:
+            # An immutable script cannot be shortened by retrying the writer.
+            # Explain the selected-duration conflict before loading any LLM.
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     services = enhancement_settings(wgp.server_config.get("services", {}))
     provider = services.get("llm_provider", "local")
@@ -10449,6 +10476,7 @@ async def _prepare_generation_submission(
     """Normalize/plan a request, then submit it or return prepared params."""
 
     body = dict(body)
+    h3_retry_plan = body.pop("_h3_retry_plan", None)
     _stamp_live_generation_settings_version(body)
     if (
         body.get("generation_mode") == "image"
@@ -10508,6 +10536,8 @@ async def _prepare_generation_submission(
     except Exception:
         _base_model_type = body.get("model_type")
     _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
+    from models.minimax_h3.duration import apply_h3_duration_override
+    _generation_model_def = apply_h3_duration_override(body, _generation_model_def)
     if (
         _generation_model_def.get("infer_audio_prompt_from_guide", False)
         and body.get("audio_guide")
@@ -11066,6 +11096,7 @@ async def _prepare_generation_submission(
                     overlap_frames=h3_sequence_overlap,
                     native_continuation=h3_native_sequence,
                     planning_style=h3_sequence_planning_style,
+                    retry_plan=h3_retry_plan,
                 )
                 cached_prompts = h3_window_plan_response["window_prompts"]
                 if not llm_was_loaded and llm_service.is_loaded():
@@ -11401,6 +11432,7 @@ async def _prepare_generation_submission(
                         body.get("minimax_h3_camera_coverage") or "auto"
                     ),
                     planning_style=h3_first_last_planning_style,
+                    retry_plan=h3_retry_plan,
                 )
                 cached_prompts = h3_window_plan_response["window_prompts"]
                 # A planner loaded only for this request should not compete
@@ -24694,7 +24726,14 @@ def _prepare_job_enhancement(job: dict) -> None:
                    ltx_window_plan=record["prepared"].get("ltx_window_plan"),
                    phase="", message="Preparing saved enhanced draft…")
         return
-    update_job(job, phase="Enhancing", message="Enhancing prompt and planning windows…")
+    from services.h3_plan_retry import retryable_windows
+    targets = retryable_windows((record.get("prepared") or {}).get("h3_window_plan"))
+    message = (
+        "Repairing window" + ("s " if len(targets) > 1 else " ")
+        + ", ".join(map(str, targets)) + "; keeping the other prompts…"
+        if targets else "Enhancing prompt and planning windows…"
+    )
+    update_job(job, phase="Enhancing", message=message)
     record.update(state="enhancing", error=None)
     _studio_job_archive.save(job)
     try:
@@ -24705,7 +24744,8 @@ def _prepare_job_enhancement(job: dict) -> None:
         with enhancement_context(record["settings"], lambda: is_cancel_requested(job)):
             prepared = asyncio.run(prepare_enhanced_job(
                 record["original_params"], wgp.get_model_def(job["params"]["model_type"]) or {},
-                _llm_enhance_prompt_payload, _prepare_generation_submission))
+                _llm_enhance_prompt_payload, _prepare_generation_submission,
+                previous_prepared=record.get("prepared")))
         if is_cancel_requested(job):
             raise InterruptedError("Prompt enhancement cancelled.")
         plan = prepared.get("h3_window_plan") or prepared.get("ltx_window_plan")
@@ -25297,6 +25337,8 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     _mc_min_f, _mc_fs, _mc_latent = 17, 8, 8
                 try:
                     _mc_model_def = wgp.get_model_def(_mc_model_type) or {}
+                    from models.minimax_h3.duration import h3_duration_model_def
+                    _mc_model_def = h3_duration_model_def(_mc_model_def, raw_params)
                 except Exception:
                     _mc_model_def = {}
                 _mc_is_h3 = str(
@@ -28167,7 +28209,7 @@ async def retry_enhanced_job(job_id: str, request: Request):
                 raise HTTPException(400, "No draft is available to review")
             record.update(state="complete", error=None)
         elif action == "refresh":
-            record.update(state="pending", prepared=None, error=None, enhanced_prompt=None)
+            record.update(state="pending", prepared=None, error=None, enhanced_prompt=None, warnings=[])
         elif action == "as_written":
             # Explicit opt-out: normal validation still applies to manual
             # multi-window prompts; no hidden AI pass or silent fallback.

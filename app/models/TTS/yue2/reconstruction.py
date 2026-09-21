@@ -15,13 +15,14 @@ import numpy as np
 
 from services.music_styles import file_digest, load_style
 from services.music_training import project_directory
-from .music_assets import MERT_REVISION, TOKENIZER_REVISION
+from .music_assets import MERT_REVISION
+from services.music_contracts import tokenizer_pair
 from .protocol import CODEC_OFFSET, CODEC_SIZE, SongRequest, token_prefixes
 
 
 def prepared_tracks(project, options):
     expected = {"dataset_digest": project["dataset_digest"], "mert_revision": MERT_REVISION,
-                "tokenizer_revision": TOKENIZER_REVISION, "feature_layer": 20, "frame_rate": 25}
+                "tokenizer_revision": tokenizer_pair(project)['revision'], "feature_layer": 20, "frame_rate": 25}
     if project.get("prepared") != expected:
         raise ValueError("Prepare this project again with the current music tokenizer")
     directory = project_directory(project["id"]) / "prepared"
@@ -58,6 +59,8 @@ def reconstruct_project(project, options, output_dir, job_id, *, report, cancell
     check_cancel()
     tracks = prepared_tracks(project, options)
     style = load_style(options["style_id"], verify=True)
+    if style.get('tokenizer_revision') != tokenizer_pair(project)['revision']:
+        raise ValueError('Choose a style trained with this project\'s tokenizer pair for reconstruction')
     compare_audio = options.get('comparison') == 'audio'
     if any(style[branch]["sha256"] != options[f"{branch}_sha256"] for branch in ("ar", "nar")):
         raise ValueError("The selected checkpoint changed while this diagnostic was queued")
@@ -69,11 +72,13 @@ def reconstruct_project(project, options, output_dir, job_id, *, report, cancell
     manifest = {"version": 1, "project_id": project["id"], "job_id": job_id,
                 "source_dataset_digest": project["dataset_digest"], "options": options,
                 "checkpoint": style.get("training", {}).get("checkpoint"),
-                "tokenizer_revision": TOKENIZER_REVISION, "records": [], "status": "running",
+                "tokenizer_revision": tokenizer_pair(project)['revision'], "records": [], "status": "running",
                 "comparison": "Fixed source tokens; AR adapter off/on; matching NAR adapter enabled in both"}
     if compare_audio:
-        manifest['comparison'] = 'Fixed source tokens and AR conditioning; paired v4 audio adapter versus personal audio adapter'
+        manifest['comparison'] = 'Fixed source tokens and AR conditioning; matched audio adapter versus personal audio adapter'
         manifest['audio_checkpoint'] = style.get('training', {}).get('audio_checkpoint')
+    elif options.get('comparison') == 'joint':
+        manifest['comparison'] = 'Fixed source tokens; joint AR and NAR adapters off/on, without a generic decoder adapter'
 
     def record(path, details):
         manifest["records"].append({"file": path.name, **details})
@@ -145,9 +150,11 @@ def reconstruct_project(project, options, output_dir, job_id, *, report, cancell
                 pipeline.last_latents = None
                 from .music_assets import ASSETS
                 record(path, {**common, "variant": variant, "artist_strength": strength,
+                              "adapter_mode": style.get('adapter_mode', 'separate'),
+                              "nar_strength": strength if options.get('comparison') == 'joint' else 1.0,
                               "style_id": options["style_id"], "seed": options["seed"],
                               "steps": options["steps"], "ar_sha256": options["ar_sha256"],
-                              "nar_sha256": ASSETS['nar']['sha256'] if compare_audio and variant_index == 0 else options["nar_sha256"],
+                              "nar_sha256": ASSETS[tokenizer_pair(project)['nar']]['sha256'] if compare_audio and variant_index == 0 else options["nar_sha256"],
                               "checkpoint": manifest["checkpoint"], "audio_checkpoint": manifest.get('audio_checkpoint')})
         # Confirm the inputs also remained unchanged through the GPU work.
         for track, _, _ in tracks:

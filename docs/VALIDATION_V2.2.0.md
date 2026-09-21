@@ -1,8 +1,101 @@
-# v2.2.1 validation record
+# v2.2.4 validation record
 
-Prepared 16 September 2026. This distinguishes automated regression coverage
+Updated 18 September 2026. This distinguishes automated regression coverage
 from rendered workflows exercised during development and tests still needed on
 other hardware.
+
+## v2.2.4 targeted retry and prompt-review update
+
+- Final release CPU discovery passed **2,150 tests**, with six CUDA-dependent
+  skips, in 114.808 seconds. Python syntax and undefined-name checks, five
+  standalone JSON grammar checks, UI lint and the TypeScript/Vite production
+  build passed. Existing mixed-import and bundle-size warnings remain.
+- The release inventory contains 28 application/test/documentation files and
+  no private media, models, settings or experiment artifacts. All 88 local
+  documentation links resolve. The offline browser review test passed, and its
+  mobile screenshot was visually inspected for readable actions and layout.
+- The exact silent water-purifier prompt from #115 initially reproduced a false
+  39-word speech line owned by `Logotype timeline`. It now extracts zero spoken
+  lines and retains the visual timeline through the three-window scheduler.
+  Related tests preserve explicit dialogue and distinguish local silence from
+  a whole-video instruction. The writer is mocked unavailable for this scheduler
+  regression; it is not a new live-model fidelity test.
+- Planner regressions exercise six-window sequences with a failed fourth window,
+  repeated failures, multiple flagged windows, saved checkpoint round-trips,
+  stale inputs, cancellation and full refresh. Accepted compiled prompts remain
+  unchanged and only flagged windows call the camera writer. Both Frames and
+  References are covered.
+- Queue tests verify that a saved review checkpoint reaches the repair planner
+  and that the resulting job retains the complete set of window prompts.
+- Mocked browser tests exercise the actual review component and store: accept
+  the full draft, retry flagged windows, rewrite all, use the original prompt,
+  edit without enqueueing, rejected retries, queue visibility and mobile layout.
+  Interactive Enhance retries send the saved plan; full refresh omits it.
+- These checks use controlled writer/API responses. They verify retry scope and
+  UI behavior, not the artistic quality of new LLM or video output. Release
+  preparation does not interrupt the maintainer's generation or submit GPU jobs.
+
+## v2.2.3 H3 reliability and memory update
+
+- Release CPU discovery passed **2,135 tests**, with six CUDA-dependent skips,
+  in 127.182 seconds. Python syntax, undefined-name checks, five standalone JSON
+  grammar tests, UI lint and TypeScript/Vite production build passed. Existing
+  bundle-size and mixed-import warnings remain informational.
+- The clean-repository guard passed for 2,424 tracked files. All 27 release paths
+  exclude local media, models, settings and private experiment artifacts;
+  84 local documentation links and the staged whitespace check passed.
+- Development's final combined regression run passed 448 tests covering reference
+  binding, dialogue ownership/order/timing, imported scripts, camera fidelity,
+  source sounds and continuation.
+- Bounded live Qwen3.8 27B and Gemma 4 E4B enhancement checks and complete saved
+  trace replays retained exact dialogue and correct reference owners without
+  warnings on the final compiler. All failed development attempts remain recorded;
+  these are development cases, not unseen holdouts or render-quality guarantees.
+- The reported single-window conversation is rejected before loading the writer
+  with a specific duration explanation. The corresponding two-window case retains
+  all six lines. See [reference-dialogue evidence](VALIDATION_H3_REFERENCE_DIALOGUE.md).
+- Imported timeline verification retains ordered source scenes, local sound cues
+  and completed-state handoffs. Detailed [timeline evidence](VALIDATION_H3_IMPORTED_TIMELINES.md)
+  also records remaining camera/prop wording weaknesses despite operational passes.
+- A CUDA operation check of the reported large RMSNorm shape reduced peak allocated
+  memory from 18.554 to 5.793 GiB with sampled bit-identical results. This was one
+  isolated operation on an RTX 4090, not a complete A100 generation or a throughput
+  promise. See [memory and retry evidence](VALIDATION_H3_MEMORY_AND_LATENCY.md).
+- The maintainer reported the latest tests working before authorizing publication.
+  Release preparation does not submit new LLM or video jobs or restart the app.
+
+## v2.2.2 reliability update
+
+- Release CPU discovery passed **2,069 tests**, with six CUDA-dependent skips,
+  in 126.589 seconds. Syntax, undefined-name checks, five standalone JSON grammar
+  checks, UI lint and production build also passed. The normal Vite bundle-size
+  and mixed-import warnings remain informational. No LLM retests were run during
+  release preparation.
+- 869 focused Python regression tests passed during development, covering H3
+  parsing, exact dialogue, timing and camera plans; Director; Studio enhancement
+  and queue retries; adaptive enhancement; and the prompt bench.
+- Six final live regression requests completed without review warnings or
+  automated check failures: three prompts, once each with Gemma E4B and Qwen3.6
+  27B. The three-window reported brief retained its exact line with the older man.
+  These were enhancement-only, text-only Frames equivalents because the reporter's
+  reference image was unavailable. Qwen3.8 was installed but omitted by an overly
+  strict benchmark filename check; that detection is now corrected, with no new
+  Qwen3.8 generation or enhancement run claimed.
+- All 50 development/evaluation attempts were retained privately, including
+  failures and rejected approaches. Two earlier evaluations exposed more parsing
+  defects and became regression fixtures; the final six are not unseen holdouts.
+- Text review found remaining limitations despite operational passes: one Gemma
+  draft described boarding/sitting only in its closing state and paired a spoken
+  turn with the other character's acting cue. Some simple scenes were stretched
+  too slowly across three windows. Warning-free output does not certify fidelity.
+  Final requests took 24.5-289 seconds, with up to eleven writer calls.
+- Production UI build and mocked browser checks passed for reviewed-draft
+  acceptance, rejected retries, immediate queue visibility without a history
+  request, and mobile validation remaining visible. No test video jobs were sent.
+- Director regressions cover silent/unknown vocal intervals, singers and
+  instrumentalists, contradictory mouth cues, explicit expressions, wind
+  instruments and persistence through final compilation. A newly rendered music
+  video was not required or claimed for this release.
 
 ## v2.2.1 enhancement hotfix
 

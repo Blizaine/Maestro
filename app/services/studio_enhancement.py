@@ -208,7 +208,7 @@ def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
     return payload, sequence
 
 
-async def prepare_enhanced_job(params: dict, model: dict, enhance, prepare) -> dict:
+async def prepare_enhanced_job(params: dict, model: dict, enhance, prepare, *, previous_prepared: dict | None = None) -> dict:
     """Prepare on a copy; callers checkpoint the result only after full success."""
     body = deepcopy(params)
     if model.get("omni_reference"):
@@ -226,6 +226,10 @@ async def prepare_enhanced_job(params: dict, model: dict, enhance, prepare) -> d
         body["minimax_h3_sequence_prompt_mode"] = "adaptive"
         body["minimax_h3_window_storyboard"] = True
         body["ltx_window_prompt_mode"] = "auto"
+        from services.h3_plan_retry import retryable_windows
+        previous_plan = (previous_prepared or {}).get("h3_window_plan")
+        if retryable_windows(previous_plan):
+            body["_h3_retry_plan"] = deepcopy(previous_plan)
     else:
         result = await enhance(payload)
         check_cancelled()

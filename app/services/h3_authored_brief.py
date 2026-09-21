@@ -44,7 +44,11 @@ _LINE_HEADING = re.compile(
 _LINE_TIMED_HEADING = re.compile(
     rf"(?m)^[ \t]*(?:[-*][ \t]+|\d+[.)][ \t]+)?"
     rf"(?P<start>{_CLOCK})\s*(?:s|sec(?:onds?)?)?\s*[-–—]\s*"
-    rf"(?P<end>{_CLOCK})\s*(?:s|sec(?:onds?)?)[ \t]+(?:[-–—|:][ \t]+)?",
+    rf"(?P<end>{_CLOCK})\s*(?:s|sec(?:onds?)?)"
+    # Accept "0-3s: [ARRIVAL]" without a space before the colon. The title
+    # labels the block; it must not become an action or a character name.
+    r"(?:[ \t]*[:：|｜–—-][ \t]*|[ \t]+|(?=\r?$))"
+    r"(?:[\[【](?P<title>[^\]】\r\n]{1,200})[\]】][ \t]*)?",
     re.IGNORECASE,
 )
 _NUMBERED_SHOT_HEADING = re.compile(
@@ -339,8 +343,76 @@ def authored_optical_settings(source: str) -> list[str]:
     return result
 
 
+_SOUND_CUE = re.compile(
+    r"(?:(?:sfx|sound(?:\s+effects?)?|audio)\s*:\s*)?"
+    r"(?:(?:a|an|the)\s+)?"
+    r"(?:(?:hard|soft|loud|quiet|faint|distant|close|nearby|sharp|deep|low|high|"
+    r"heavy|light|short|brief|long|sudden|steady|sustained|rising|fading|gentle|"
+    r"metallic|mechanical|electronic|rhythmic|muffled|echoing|rapid|continuous)\s+)*"
+    r"(?:fizz(?:ing)?|hiss(?:ing)?|buzz(?:ing)?|hum(?:ming)?|roar(?:ing)?|rumble|rumbling|thunder|"
+    r"clang|clank|clatter|rattle|thud|thump|click|crackle|whoosh|whistle|beep|"
+    r"ringing|chime|ticking|rustle|footsteps)(?:s|es)?(?:\s+sounds?)?"
+    r"(?:\s+(?:(?:is\s+)?(?:still\s+)?(?:going|continuing|fading(?:\s+(?:out|away))?)|"
+    r"(?:still\s+)?(?:continues?|persists?|lingers?|fades?(?:\s+(?:out|away))?)|"
+    r"keeps?\s+(?:going|ringing|echoing)))?",
+    re.IGNORECASE,
+)
+
+
+def is_standalone_sound_cue(value: str) -> bool:
+    return bool(_SOUND_CUE.fullmatch(str(value or "").strip(" \t.!?")))
+
+
+def authored_sound_cues(source: str) -> list[str]:
+    """Copy standalone nonverbal sound cues, never physical action or speech.
+
+    A brief may write "Hard fizz, then a foam column erupts." The sound belongs
+    in the event's audio field, not in its visible-action checklist. A whole
+    clause match excludes "the courier clicks a latch" and "glass shatters";
+    those still need visible staging and must not be satisfied by an SFX label.
+    Explicit before/after dependencies are not split or moved by this helper.
+    """
+    text = re.sub(r'<d>.*?</d>|"[^"\r\n]*"|“[^”\r\n]*”|'
+                  r"(?<!\w)['‘][^'’\r\n]*['’](?!\w)", " ", str(source or ""), flags=re.S)
+    clauses = re.split(r"(?<=[.!?])\s+|[,;\r\n]+", text)
+    result = []
+    seen = set()
+    for clause in clauses:
+        cue = re.sub(r"^then\s+", "", clause.strip(" \t.!?"), flags=re.I)
+        if is_standalone_sound_cue(cue) and cue.casefold() not in seen:
+            seen.add(cue.casefold())
+            result.append(cue)
+    return result
+
+
+def video_direction_source(source: str) -> str:
+    """Scope an explicitly separate still-image brief to the starting frame.
+
+    Keep the complete source for vision and event extraction. Only persistent
+    video directions use this slice: a closed door in the requested still is
+    not a command to keep that door closed throughout the subsequent video.
+    Require both an image-generation request and an explicit prompt boundary;
+    an ordinary first-frame instruction must never discard global constraints.
+    """
+    boundary = re.search(
+        r"(?:^|\n)[ \t]*(?:#{1,6}[ \t]*)?(?:"
+        r"(?:video|animation)\s+prompt\s*:|"
+        r"(?:once|when)\s+[^\n]{0,60}?ready\s*,\s*use\s+it\s+as\s+"
+        r"(?:a\s+)?reference[^\n]{0,120}?(?:this|following)\s+(?:video\s+)?prompt\s*:)",
+        source, re.I,
+    )
+    if boundary and re.search(
+        r"\b(?:produce|create|generate|draw)\s+(?:(?:one|a|an|the|single)\s+)?"
+        r"(?:still|image|picture)\b|(?:^|\n)\s*(?:image|still)\s+prompt\s*:",
+        source[:boundary.start()], re.I,
+    ):
+        return source[boundary.end():]
+    return source
+
+
 def explicit_negative_constraints(source: str) -> str:
     """Keep authored prohibition clauses as global directions, never as events."""
+    source = video_direction_source(source)
     # Only sentence-start prohibitions or a clear Throughout clause qualify;
     # incidental narration such as "he finds no key" is not a global rule.
     # A flattened paste can put a notes heading directly after a prohibition.

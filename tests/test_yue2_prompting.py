@@ -3,11 +3,13 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import sys
 from types import SimpleNamespace
 import unittest
 
 
 PATH = Path(__file__).resolve().parents[1] / "app/models/TTS/yue2/prompting.py"
+sys.path.insert(0, str(PATH.parents[3]))
 spec = importlib.util.spec_from_file_location("yue2_prompting", PATH)
 prompting = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(prompting)

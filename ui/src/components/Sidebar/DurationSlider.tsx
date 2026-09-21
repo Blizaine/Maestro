@@ -9,6 +9,8 @@ import {
 } from '../../lib/durationPlanning'
 import {
   effectiveH3OmniSequenceFrames,
+  h3MaximumFrames,
+  supportsH3ExtendedDuration,
   h3OmniSequenceWindowCount,
   h3TimelineFrames,
   h3WindowOverrideKey,
@@ -37,6 +39,8 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
   const locked = useStore(s => s.slidingWindowLocked)
   const setLocked = useStore(s => s.setSlidingWindowLocked)
   const modelOptions = useStore(s => s.modelOptions)
+  const extendedDuration = useStore(s => s.params.minimax_h3_extended_duration === true)
+  const setExtendedDuration = useStore(s => s.setH3ExtendedDuration)
   const omniReferenceSequence = useStore(s => (
     s.modelOptions?.omni_reference === true
     && s.params.minimax_h3_reference_sequence === true
@@ -67,7 +71,7 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
   const swDefaults = (modelOptions as Record<string, unknown> | null)?.sliding_window_defaults as Record<string, number> | undefined
   const supportsSlidingWindows = modelOptions?.sliding_window === true
   const minimumFrames = modelOptions?.frames_minimum ?? Math.round(fps)
-  const maximumFrames = modelOptions?.frames_maximum ?? Math.round(300 * fps)
+  const maximumFrames = h3MaximumFrames(modelOptions, extendedDuration) ?? Math.round(300 * fps)
   const frameStep = modelOptions?.frames_steps ?? Math.round(fps)
   const isOmniReference = modelOptions?.omni_reference === true
   const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
@@ -104,24 +108,26 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
         resolution,
         totalVramGb,
         minimumFrames,
-        maximumFrames,
+        modelOptions?.frames_maximum ?? maximumFrames,
         frameStep,
       )
     : recommendedWindowProfile(memoryPolicy, resolution, totalVramGb)
   const safeWindowFrames = windowRecommendation?.frames ?? null
   const automaticCapFrames = Math.max(minimumFrames, Math.min(
-    swDefaults?.window_max ?? maximumFrames,
+    extendedDuration && supportsH3ExtendedDuration(modelOptions) ? maximumFrames : swDefaults?.window_max ?? maximumFrames,
     locked ? Math.round(windowSize * fps)
       : safeWindowFrames ?? (windowRecommendation?.supported === false
         ? minimumFrames : swDefaults?.window_max ?? maximumFrames),
   ))
-  const planningWindowSeconds = automaticCapFrames / fps
+  const planningWindowSeconds = (extendedDuration
+    ? safeWindowFrames ?? modelOptions?.frames_maximum ?? automaticCapFrames
+    : automaticCapFrames) / fps
   const unsupportedAutoResolution = windowRecommendation?.supported === false
   const nativeMinSeconds = modelOptions?.frames_minimum
     ? modelOptions.frames_minimum / fps
     : 1
-  const nativeMaxSeconds = modelOptions?.frames_maximum
-    ? modelOptions.frames_maximum / fps
+  const nativeMaxSeconds = h3MaximumFrames(modelOptions, extendedDuration)
+    ? maximumFrames / fps
     : null
   const isVideoExtend = studioVideoWorkflow === 'extend' && supportsSlidingWindows
   const minDuration = modelType === 'viggle_animate' ? 1 / fps : Math.max(
@@ -164,7 +170,7 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
   const totalFrames = h3TimelineFrames(
     duration,
     fps,
-    modelOptions?.frames_maximum,
+    maximumFrames,
   )
   const omniSequenceClipCount = omniReferenceSequence
     ? h3OmniSequenceWindowCount({
@@ -182,14 +188,14 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
   useEffect(() => {
     if (previousSelection.current !== overrideKey) {
       previousSelection.current = overrideKey
-      setLocked(savedOverrideFrames != null)
-      if (savedOverrideFrames != null) setWindowSize(savedOverrideFrames / fps)
+      setLocked(extendedDuration || savedOverrideFrames != null)
+      if (!extendedDuration && savedOverrideFrames != null) setWindowSize(savedOverrideFrames / fps)
     }
     // A child Auto effect may already have changed the timeline this commit.
     // Reconcile that current value instead of restoring this render's stale one.
     setDuration(useStore.getState().durationSeconds)
   }, [duration, durationPlanningMode, windowSize, resolution, modelType, totalVramGb, savedOverrideFrames, locked, overlap,
-    modelOptions, setDuration, overrideKey, setLocked, setWindowSize, fps])
+    modelOptions, setDuration, overrideKey, setLocked, setWindowSize, fps, extendedDuration])
 
   const imageMode = useStore(s => s.params.image_mode)
   const isMultiClip = imageMode === 2
@@ -224,7 +230,10 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
         showSingleWindow={isH3 || isLtx || supportsSlidingWindows}
         enablePlanningModes={isH3 || isLtx || supportsSlidingWindows}
         planningMode={durationPlanningMode}
-        onPlanningModeChange={mode => setParam('_duration_planning_mode', mode)}
+        onPlanningModeChange={mode => {
+          if (mode === 'auto' && extendedDuration) setExtendedDuration(false)
+          setParam('_duration_planning_mode', mode)
+        }}
         autoPrompt={durationPlanningPrompt}
         autoSourceSeconds={autoSourceSeconds == null ? null : Math.round(autoSourceSeconds * fps) / fps}
         autoSourceLabel={autoSourceLabel}
@@ -298,6 +307,8 @@ export function WindowSettings() {
   const saveH3WindowOverride = useStore(s => s.saveH3WindowOverride)
   const clearH3WindowOverride = useStore(s => s.clearH3WindowOverride)
   const modelOptions = useStore(s => s.modelOptions)
+  const extendedDuration = useStore(s => s.params.minimax_h3_extended_duration === true)
+  const setExtendedDuration = useStore(s => s.setH3ExtendedDuration)
   const omniReferenceSequence = useStore(s => (
     s.modelOptions?.omni_reference === true
     && s.params.minimax_h3_reference_sequence === true
@@ -336,7 +347,7 @@ export function WindowSettings() {
     ? (modelOptions?.frames_minimum ?? Math.round(3 * fps))
     : (swDefaults?.window_min ?? Math.round(3 * fps))
   const maximumFrames = isH3
-    ? (modelOptions?.frames_maximum ?? 345)
+    ? (h3MaximumFrames(modelOptions, extendedDuration) ?? 345)
     : omniReferenceSequence
     ? (modelOptions?.frames_maximum ?? Math.round(15 * fps))
     : (swDefaults?.window_max ?? Math.round(40 * fps))
@@ -362,7 +373,7 @@ export function WindowSettings() {
         totalFrames: h3TimelineFrames(
           duration,
           fps,
-          modelOptions?.frames_maximum,
+          maximumFrames,
         ),
         windowFrames: Math.max(1, Math.round(windowSize * fps)),
         overlapFrames: overlap,
@@ -381,7 +392,7 @@ export function WindowSettings() {
         resolution,
         totalVramGb,
         minimumFrames,
-        maximumFrames,
+        modelOptions?.frames_maximum ?? maximumFrames,
         frameStep,
       )
     : recommendedWindowProfile(memoryPolicy, resolution, totalVramGb)
@@ -411,6 +422,20 @@ export function WindowSettings() {
 
   return (
     <div className="space-y-3">
+      {generationMode === 'video' && supportsH3ExtendedDuration(modelOptions) && (
+        <label className="flex items-start gap-2 rounded-lg border border-border p-2.5 text-xs">
+          <input type="checkbox" className="mt-0.5 accent-accent-blue"
+            checked={extendedDuration}
+            onChange={event => setExtendedDuration(event.target.checked)} />
+          <span>
+            <span className="text-text-primary">Allow 30s clips <span className="text-amber-400">· Experimental</span></span>
+            <span className="block mt-1 text-[10px] text-text-muted">
+              Raises Window Length to 30s so one clip can run without continuation windows.
+              Uses more VRAM and takes longer; quality may drift. Auto restores the recommended limit.
+            </span>
+          </span>
+        </label>
+      )}
       <div>
         <div className="flex items-center justify-between mb-1.5">
           <div className="flex items-center gap-1.5">
@@ -420,6 +445,7 @@ export function WindowSettings() {
             <button
               onClick={() => {
                 if (locked) {
+                  if (extendedDuration) setExtendedDuration(false)
                   if (savedOverrideFrames != null) {
                     clearH3WindowOverride(modelType, resolution)
                   }
@@ -439,7 +465,7 @@ export function WindowSettings() {
             >
               {locked ? <Lock size={10} /> : <Unlock size={10} />}
             </button>
-            {isH3 && (
+            {isH3 && !extendedDuration && (
               <button
                 onClick={() => {
                   saveH3WindowOverride(modelType, resolution, currentWindowFrames)

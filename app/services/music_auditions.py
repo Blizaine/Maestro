@@ -56,8 +56,8 @@ def render_checkpoint(project, branch, checkpoint, settings, *, report, cancelle
     settings = audition_options(settings)
     if not settings['enabled']:
         raise ValueError('Set up a fixed audition request first')
-    field = 'audio_checkpoints' if branch == 'audio' else 'checkpoints'
-    if branch not in {'style', 'audio'}:
+    field = {'audio': 'audio_checkpoints', 'joint': 'joint_checkpoints'}.get(branch, 'checkpoints')
+    if branch not in {'style', 'audio', 'joint'}:
         raise ValueError('Choose a style or audio checkpoint')
     row = next((item for item in project.get(field, []) if item['file'] == checkpoint), None)
     if row is None:
@@ -67,6 +67,10 @@ def render_checkpoint(project, branch, checkpoint, settings, *, report, cancelle
     if path.parent != directory / field:
         raise ValueError('Invalid checkpoint path')
     digest = file_digest(path)
+    if branch == 'joint':
+        from models.TTS.yue2.training_audition import checkpoint_sources
+        sources = checkpoint_sources(project, branch, row, report=report, cancelled=cancelled)
+        digest = hashlib.sha256((digest + file_digest(sources['nar'])).encode()).hexdigest()
     fingerprint = request_fingerprint(project, settings)
     identity = f'{branch}-{row["step"]}-{fingerprint}-{digest[:12]}'
     record = {'id': identity, 'branch': branch, 'step': row['step'], 'checkpoint': checkpoint,
@@ -79,7 +83,10 @@ def render_checkpoint(project, branch, checkpoint, settings, *, report, cancelle
         result = render_audition(project, branch, row, settings, identity, report=report, cancelled=cancelled)
         if cancelled():
             raise InterruptedError('Checkpoint audition cancelled; training checkpoint is saved')
-        if file_digest(path) != digest:
+        actual = file_digest(path)
+        if branch == 'joint':
+            actual = hashlib.sha256((actual + file_digest(sources['nar'])).encode()).hexdigest()
+        if actual != digest:
             raise ValueError('The checkpoint changed while its audition was rendering')
         record.update(result, status='completed')
         return record
@@ -95,8 +102,8 @@ def train_with_auditions(project_id, options, trainer, branch, *, report, cancel
     if not settings['enabled']:
         trainer(projects.get_project(project_id), options, report=report, cancelled=cancelled)
         return 0
-    field = 'audio_completed_steps' if branch == 'audio' else 'completed_steps'
-    history_field = 'audio_checkpoints' if branch == 'audio' else 'checkpoints'
+    field = {'audio': 'audio_completed_steps', 'joint': 'joint_completed_steps'}.get(branch, 'completed_steps')
+    history_field = {'audio': 'audio_checkpoints', 'joint': 'joint_checkpoints'}.get(branch, 'checkpoints')
     resume, failures = options['resume'], 0
     while True:
         project = projects.get_project(project_id)

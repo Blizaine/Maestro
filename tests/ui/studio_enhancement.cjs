@@ -113,6 +113,14 @@ async function assertExplicitEnhancement(page, sidebar, requests, llmRequests) {
     assert.equal(requests.length, submitted, 'A brief without window prompts is not silently planned');
     assert.equal(llmRequests.length, before);
     assert.match(await page.evaluate(() => window.store.getState().promptEnhanceError), /press Enhance/);
+    await page.setViewportSize({width: 390, height: 720});
+    await page.evaluate(() => window.store.getState().setSidebarOpen(true));
+    await sidebar.getByRole('button', {name: 'Generate', exact: true}).click();
+    assert.equal(await page.evaluate(() => window.store.getState().sidebarOpen), true,
+      'An unsubmitted draft keeps mobile controls and its validation message visible');
+    assert.equal(requests.length, submitted);
+    await sidebar.getByText(/This .* sequence needs .* press Enhance/).waitFor();
+    await page.setViewportSize({width: 1360, height: 900});
     await enhance();
     assert.ok(llmRequests.at(-1).endpoint.endsWith(endpoint));
     await sidebar.getByRole('button', {name: /Exact H3 prompts/}).click();
@@ -306,24 +314,47 @@ async function assertExplicitEnhancement(page, sidebar, requests, llmRequests) {
     enhancement: {version: 1, state: 'review', warnings: ['Review the fallback draft.'], error: 'The writer needs a review before generation.'}};
   const savedData = {enhancement: {...saved.enhancement, original_prompt: 'Original scene', enhanced_prompt: 'Saved enhanced scene'},
     original_params: saved.params, prepared: {params: {...saved.params, prompt: 'Saved enhanced scene'}}};
-  let retryAction;
+  let retryAction, rejectRetry = true;
   await page.route('**/api/v1/jobs/enhanced-test/enhancement', route => route.fulfill({json: savedData}));
   await page.route('**/api/v1/jobs/enhanced-test/retry', route => {
     retryAction = route.request().postDataJSON().action;
+    if (rejectRetry) return route.fulfill({status: 503, json: {detail: 'Submission unavailable; retry.'}});
     return route.fulfill({json: {job_id: 'retry-test', status: 'queued'}});
   });
   await page.evaluate(job => window.store.setState({jobs: [job], isGenerating: false}), saved);
   await page.getByRole('button', {name: /^Generation queue,/}).first().click();
   await page.getByRole('button', {name: 'Needs attention — review prompts'}).click();
-  const jobReview = page.getByRole('dialog', {name: 'Job prompts'});
+  const jobReview = page.getByRole('dialog', {name: 'Review enhanced prompts'});
   await jobReview.getByText('The writer needs a review before generation.', {exact: true}).waitFor();
   await jobReview.getByText('Saved enhanced scene', {exact: true}).waitFor();
   await page.setViewportSize({width: 390, height: 720});
   const reviewBounds = await jobReview.boundingBox();
   assert.ok(reviewBounds && reviewBounds.x >= 0 && reviewBounds.x + reviewBounds.width <= 390, 'Saved draft fits mobile');
   await page.screenshot({path: screenshotPath('mobile-enhanced-job-review.png')});
-  await jobReview.getByRole('button', {name: 'Generate reviewed draft'}).click();
+  await jobReview.getByRole('button', {name: 'Generate full job with this draft'}).click();
+  await jobReview.getByText('Submission unavailable; retry.', {exact: true}).waitFor();
+  assert.equal(await jobReview.isVisible(), true, 'Rejected submission leaves an actionable error in the review');
+  assert.equal(await page.evaluate(() => window.store.getState().jobs.some(j => j.id === 'retry-test')), false);
+  rejectRetry = false;
+  let historyRequested = false;
+  await page.route('**/api/v1/jobs', route => {
+    historyRequested = true;
+    return route.fulfill({status: 503, json: {detail: 'History refresh failed'}});
+  });
+  await page.route('**/api/v1/status/retry-test', route => route.fulfill({json: {
+    job_id: 'retry-test', status: 'queued', progress: 0, step: 0, total_steps: 0, phase: '',
+    message: 'Waiting for GPU', output_files: [], enhancement: {...saved.enhancement, state: 'complete'},
+  }}));
+  await jobReview.getByRole('button', {name: 'Generate full job with this draft'}).click();
   assert.equal(retryAction, 'accept_draft', 'A fallback runs only after explicit review');
+  await jobReview.waitFor({state: 'hidden'});
+  await page.waitForFunction(() => window.store.getState().jobs.some(j => j.id === 'retry-test' && j.status === 'queued'));
+  assert.equal(await page.evaluate(() => window.store.getState().isGenerating), true);
+  await page.getByText('Queued for generation', {exact: true}).waitFor();
+  await page.waitForFunction(() => window.store.getState().jobs.find(j => j.id === 'retry-test')?.message === 'Waiting for GPU');
+  assert.equal(historyRequested, false, 'An accepted job does not depend on a second queue history request');
+  await page.unroute('**/api/v1/jobs');
+  await page.unroute('**/api/v1/status/retry-test');
   await page.setViewportSize({width: 1360, height: 900});
   await page.evaluate(job => {
     window.store.setState({jobs: [{...job, status: 'running', phase: 'Enhancing'}], isGenerating: true});

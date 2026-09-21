@@ -7,6 +7,7 @@ const path = require('node:path');
 const {assertPromptStability} = require('./prompt_stability.cjs');
 const {assertExplicitEnhancement} = require('./studio_enhancement.cjs');
 const {assertQueueHistory} = require('./queue_history.cjs');
+const {assertEnhancementReview} = require('./enhancement_review.cjs');
 const {assertGalleryLibrary} = require('./gallery_library.cjs');
 const {assertDurationPopup} = require('./duration_popup.cjs');
 const {assertAnimateKeyboard} = require('./animate_keyboard.cjs');
@@ -43,6 +44,7 @@ const read = async endpoint => {
     "window.store = useStore; window.shouldEnhanceOnGeneration = shouldEnhanceOnGeneration; window.themes = {applyThemePrefs, FAMILIES}; window.baseParams = {...useStore.getState().params};",
     "window.mount = () => {window.reactRoot = createRoot(document.getElementById('root')); window.reactRoot.render(<React.StrictMode><Sidebar/></React.StrictMode>);};",
     "window.mountQueue = () => {const node = document.createElement('div'); node.style.cssText = 'position:fixed;top:10px;right:10px;z-index:60'; document.body.append(node); window.queueNode = node; window.queueRoot = createRoot(node); window.queueRoot.render(<GlobalQueuePopover/>);};",
+    "import {EnhancedJobReview} from './src/components/EnhancedJobReview'; window.mountReview = job => {window.reviewRoot?.unmount(); const node = document.createElement('div'); document.body.append(node); window.reviewNode = node; window.reviewRoot = createRoot(node); window.reviewRoot.render(<EnhancedJobReview job={job} onClose={() => {window.reviewRoot.unmount(); node.remove();}}/>);};",
     "window.mountDashboard = () => {if (window.dashboardRoot) return; const node = document.createElement('div'); document.body.append(node); window.dashboardRoot = createRoot(node); window.dashboardRoot.render(<DirectorDashboard/>);};",
   ].join('\n'), resolveDir: path.join(root, 'ui'), loader: 'tsx'}, bundle: true, write: false,
     jsx: 'automatic', define: {'process.env.NODE_ENV': '"development"'}, logLevel: 'silent'});
@@ -165,6 +167,11 @@ const read = async endpoint => {
     }
     if (process.env.MAESTRO_UI_QUEUE_ONLY) {
       await assertQueueHistory(page, output);
+      assert.deepEqual(errors, []);
+      return;
+    }
+    if (process.env.MAESTRO_UI_REVIEW_ONLY) {
+      await assertEnhancementReview(page, output, llmRequests);
       assert.deepEqual(errors, []);
       return;
     }

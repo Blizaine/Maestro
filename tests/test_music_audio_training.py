@@ -26,7 +26,7 @@ class AudioTrainingTests(unittest.TestCase):
             path = self.root / f'{i}.wav'; path.write_bytes(bytes([i]) * 200)
             tracks.append({'audio_path': str(path), 'lyrics': '[Verse]\nHello hello, café!\n[Chorus]\nDon’t wait.',
                            'style': 'Acoustic', 'holdout': bool(i)})
-        self.project = music_training.create_project('Source', 'My sound', tracks)
+        self.project = music_training.create_project('Source', 'My sound', tracks, pair='v4')
 
     def test_new_experiment_preserves_checkpoint_and_resume(self):
         project = self.project
@@ -48,6 +48,47 @@ class AudioTrainingTests(unittest.TestCase):
         for raw in ({'steps': 2000}, {'steps': True}, {'learning_rate': float('nan')}, {'conditioning_checkpoint': '../x'}):
             with self.assertRaises(ValueError):
                 music_training.audio_training_options(raw)
+
+    def test_v9_fork_requires_fresh_tokens_and_keeps_original_untouched(self):
+        directory = music_training.project_directory(self.project['id'])
+        (directory / 'prepared').mkdir()
+        (directory / 'prepared' / 'marker').write_bytes(b'v4')
+        music_training.update_project(self.project['id'], prepared={'tokenizer_revision': 'v4'},
+                                     resume_available=True, completed_steps=800)
+        before = (directory / 'project.json').read_bytes()
+        forked = music_training.fork_project(self.project['id'], pair='v9')
+        self.assertEqual(forked['tokenizer_pair'], 'v9')
+        self.assertFalse(forked.get('prepared'))
+        self.assertFalse(forked.get('resume_available'))
+        self.assertFalse((music_training.project_directory(forked['id']) / 'prepared').exists())
+        self.assertEqual((directory / 'project.json').read_bytes(), before)
+        with self.assertRaises(ValueError):
+            music_training.fork_project(self.project['id'], pair='unknown')
+
+    def test_joint_options_keep_separate_training_unchanged(self):
+        joint = music_training.joint_training_options({})
+        self.assertEqual(joint['window_frames'], 1500)
+        self.assertEqual(joint['rank'], 32)
+        self.assertEqual(joint['accumulation_steps'], 1)
+        self.assertEqual(music_training.training_options({})['accumulation_steps'], 2)
+        self.assertEqual(joint['initial_style_id'], '')
+        continued = music_training.joint_training_options({'initial_style_id': 'saved-style'})
+        self.assertEqual(continued['learning_rate'], 2e-5)
+        self.assertEqual(music_training.joint_training_options({'initial_style_id': 'saved-style', 'learning_rate': 3e-5})['learning_rate'], 3e-5)
+        for raw in (None, [], {'window_frames': True}, {'window_frames': 2000}, {'lyric_alignment': True}):
+            with self.assertRaises(ValueError):
+                music_training.joint_training_options(raw)
+        for identity in (None, [], True, '../outside', 'bad/name'):
+            with self.assertRaises(ValueError):
+                music_training.joint_training_options({'initial_style_id': identity})
+
+    def test_pair_selection_rejects_invalid_types_without_changing_a_project(self):
+        from services.music_contracts import tokenizer_pair, adapter_contract
+        for value in (None, [], {}, 9, True, 'unknown'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                tokenizer_pair({'tokenizer_pair': value})
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                adapter_contract({'adapter_mode': value})
 
     def test_words_keep_original_unicode_offsets_and_skip_tags(self):
         lyrics = self.project['tracks'][0]['lyrics']

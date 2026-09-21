@@ -52,7 +52,11 @@ curl -X POST "http://127.0.0.1:PORT/api/v1/generate" -H "Content-Type: applicati
 | `POST /api/v1/jobs/{job_id}/retry` | Retry a terminal enhanced job; JSON body has `action` below. |
 | `DELETE /api/v1/jobs/{job_id}` | Dismiss a terminal job's saved queue history. Generated media is retained. |
 
-Retry actions are `retry` (reuse completed enhancement or retry an unfinished writer), `refresh` (write a new draft from the original), `as_written` (explicitly skip enhancement), and `accept_draft` (generate a reviewed fallback). Normal input and window validation still applies to `as_written`. Retries create a new job; an active retry is returned instead of being submitted twice.
+Retry actions are `retry` (reuse completed enhancement or repair flagged H3 windows when a resumable draft exists), `refresh` (rewrite every prompt from the original), `as_written` (generate the whole job from the original prompt with enhancement off), and `accept_draft` (generate the whole job using the saved draft, including flagged windows). Normal input and window validation still applies to `as_written`. Retries create a new job; an active retry is returned instead of being submitted twice. A successful writing retry continues to full-job generation; unresolved review warnings pause it again.
+
+H3 plans expose `retryable_windows` as one-based window numbers and retain a `camera_checkpoint`. Keep that checkpoint with the plan. A targeted retry retains the shared schedule, exact dialogue and neighbouring entry/exit states; passed window prompts are copied unchanged. `refresh` explicitly discards this checkpoint. Older drafts without one and failures in shared story planning require full re-enhancement.
+
+For interactive planning, send the saved plan as `retry_plan` alongside the same inputs to `POST /api/v1/llm/plan-h3-windows` or `POST /api/v1/llm/plan-h3-sequence`. This updates the draft only. A changed prompt, model, references, timing or relevant settings invalidates targeted repair; the server returns an error rather than silently rewriting all windows. Manual prompt edits disable the old repair checkpoint because they may change continuity boundaries.
 
 Enhancement states are `pending`, `enhancing`, `complete`, `review`, or `failed`. A cancelled job is identified by its job status. The server checkpoints the completed enhancement before generation. A writer failure or fallback requiring review does not silently proceed into generation. Other eligible jobs can continue.
 

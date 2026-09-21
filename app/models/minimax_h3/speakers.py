@@ -42,20 +42,21 @@ _PRODUCTION_LABELS = {
     "negative prompt", "notes", "overall soundscape", "pacing", "pov",
     "instead", "prohibited", "forbidden", "disallowed",
     "instruction", "instructions", "prompt", "reference", "resolution", "retention analysis", "role",
+    "prop", "props", "hero object", "hero prop", "set", "vehicle", "vehicles",
     "scene", "setting", "sfx", "shot", "sound", "sound design",
     "sound effects", "soundscape", "soundtrack", "style", "subject",
-    "subject definitions", "summary", "template", "templates", "time", "title", "tone", "transition",
+    "subject definitions", "summary", "template", "templates", "time", "timeline", "title", "tone", "transition",
     "vfx", "visual", "visual direction", "visual style", "visuals", "voice",
 }
 _PRODUCTION_LABEL_WORDS = {
     word for label in _PRODUCTION_LABELS for word in label.split()
 } | {
-    "and", "animation", "appearance", "background", "behavior", "blood", "body",
+    "and", "animation", "appearance", "background", "behavior", "blood", "body", "boosters",
     "characterization", "choreography", "cinematic", "closing", "clothing",
     "colorless", "colour", "core", "delivery", "density", "design", "directions", "environment",
     "facial", "film", "final", "foreground", "global", "guidance", "identity", "image",
-    "initial", "injuries", "instructions", "lock", "main", "motion", "movement",
-    "opening", "outfit", "performance", "physical", "plan", "production",
+    "initial", "injuries", "instructions", "lock", "locked", "logo", "logotype", "main", "motion", "movement",
+    "opening", "outfit", "performance", "physical", "plan", "product", "production",
     "quality", "reference", "references", "requirements", "rules", "settings", "setup",
     "state", "structure", "system", "technique", "texture", "timing", "treatment",
     "wardrobe",
@@ -81,6 +82,35 @@ def is_h3_production_label(value: Any) -> bool:
 
 class H3SpeakerBindingError(ValueError):
     """A real dialogue line lacks an unambiguous referenced speaker."""
+
+
+def h3_action_beat_speaker(source: str, dialogue_start: int) -> str:
+    """Recognize prose dialogue attributed by an adjacent named reaction.
+
+    ``Alex stares at Sam. "Keep it."`` belongs to Alex, not the last name
+    mentioned or the preceding turn. Stay within the same paragraph and one
+    complete reaction sentence; headings, thoughts, and plural actors do not
+    establish a speaker.
+    """
+    before = source[max(0, dialogue_start - 420):dialogue_start]
+    before = re.split(r'["“”]|</d>|\n\s*\n', before, flags=re.I)[-1]
+    reaction = re.search(
+        r"(?:^|[.!?]\s+)([A-Z][A-Za-z0-9_'’-]*(?:\s+[A-Z][A-Za-z0-9_'’-]*){0,3})"
+        r"\s+(?:(?:then|[\w-]+ly)\s+)?"
+        r"(?i:stares?|looks?|glances?|glares?|nods?|shrugs?|smiles?|grins?|"
+        r"frowns?|blinks?|sighs?|pauses?|hesitates?|turns?|leans?|squints?|"
+        r"shakes?\s+(?:his|her|their)\s+head)\b"
+        r"[^.!?;\r\n\"“”]{0,180}[.!?][ \t\r\n]*$", before,
+    )
+    if not reaction:
+        return ""
+    name = _clean_ref2va_dialogue_owner_name(reaction.group(1))
+    if not name or is_h3_production_label(name):
+        return ""
+    # A second independent actor makes a reaction-only attribution ambiguous.
+    if re.search(r"\b(?:and|while|but|as)\s+[A-Z][\w'’-]*\b", reaction.group(0)):
+        return ""
+    return name
 
 
 def is_h3_spoken_quote(source: str, match: re.Match, *, allow_screenplay_label: bool = True) -> bool:
@@ -162,6 +192,8 @@ def is_h3_spoken_quote(source: str, match: re.Match, *, allow_screenplay_label: 
                      attribution[:post_verb.start()])
         or re.match(r"\s+(?:[A-Z][\w'’-]*|he|she|they)\b", attribution[post_verb.end():])
     ):
+        return True
+    if allow_screenplay_label and h3_action_beat_speaker(source, start):
         return True
     return not (source[:start] + source[end:]).strip(" \t\r\n.,;:!?-")
 
@@ -325,7 +357,7 @@ def _resolve_ref2va_dialogue_owner_name(
     ))
     if marked:
         return _clean_ref2va_dialogue_owner_name(marked[-1].group(1))
-    return ""
+    return h3_action_beat_speaker(source, dialogue_start)
 
 
 def _resolve_ref2va_dialogue_speaker(

@@ -158,6 +158,10 @@ export function NotificationCoordinator() {
         if (!TERMINAL_STATUSES.has(job.status)) continue
         const before = previousJobs.get(job.id)
         if (before?.status === job.status) continue
+        // History can arrive on first load or a later reconnect, including
+        // while unrelated work is running. Only its future changes are live
+        // events; locally submitted failures still alert immediately.
+        if (!before && job.restoredFromHistory) continue
         const status = job.status as TerminalStatus
         publishTerminal(
           `studio:${job.id || 'pending'}`,
@@ -181,9 +185,14 @@ export function NotificationCoordinator() {
       const previousPipelineStatus = previous.pipelineStatus?.status
       if (
         state.pipelineId
+        && state.pipelineId === previous.pipelineId
         && pipelineStatus
         && TERMINAL_STATUSES.has(pipelineStatus)
         && pipelineStatus !== previousPipelineStatus
+        && (
+          (previousPipelineStatus && ACTIVE_PIPELINE_STATUSES.has(previousPipelineStatus))
+          || (!previousPipelineStatus && previous.pipelinePolling)
+        )
       ) {
         const status = pipelineStatus as TerminalStatus
         publishTerminal(
@@ -212,7 +221,7 @@ export function NotificationCoordinator() {
         for (const entry of state.directorQueue.entries) {
           if (!TERMINAL_STATUSES.has(entry.status)) continue
           const before = previousEntries.get(entry.id)
-          if (before?.status === entry.status) continue
+          if (!before || !ACTIVE_JOB_STATUSES.has(before.status)) continue
           const status = entry.status as TerminalStatus
           const identity = entry.pipeline_id
             ? `director:${entry.pipeline_id}`

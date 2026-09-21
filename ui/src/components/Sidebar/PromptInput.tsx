@@ -3,6 +3,7 @@ import { Sparkles, Loader2, ChevronDown, ChevronUp, Brain, PenLine, RefreshCw, C
 import { canEnhanceOnGeneration, shouldEnhanceOnGeneration, useStore } from '../../stores/useStore'
 import {
   effectiveH3OmniSequenceFrames,
+  h3MaximumFrames,
   h3OmniSequenceWindowCount,
   h3TimelineFrames,
 } from '../../lib/h3Memory'
@@ -240,7 +241,8 @@ export function PromptInput() {
     usesWindows
     && modelOptions?.sliding_window_auto_prompt_pacing === true
   )
-  const nativeMaximumFrames = modelOptions?.frames_maximum ?? null
+  const extendedDuration = useStore(s => s.params.minimax_h3_extended_duration === true)
+  const nativeMaximumFrames = h3MaximumFrames(modelOptions, extendedDuration)
   const sequenceClipFrames = nativeMaximumFrames != null
     ? effectiveH3OmniSequenceFrames({
         policy: modelOptions?.omni_sequence_memory_policy,
@@ -262,7 +264,7 @@ export function PromptInput() {
   const h3SequenceTotalFrames = h3TimelineFrames(
     durationSeconds,
     fps,
-    modelOptions?.frames_maximum,
+    nativeMaximumFrames,
   )
   const h3SequenceNeedsMultiplePasses = (
     h3SequenceEnabled
@@ -420,7 +422,7 @@ export function PromptInput() {
               type="button"
               onClick={() => enhancePrompt(undefined, h3WindowPlan.planning_style || 'adaptive')}
               disabled={isEnhancing}
-              title={`Rebuild the H3 ${usesH3SequencePlanner ? 'reference sequence' : 'window plan'} from the current idea and timing.`}
+              title="Create a new draft for all windows. This replaces the current prompts."
               className="p-1 text-text-muted hover:text-accent-blue disabled:opacity-50"
             >
               <RefreshCw size={11} className={isEnhancing ? 'animate-spin' : ''} />
@@ -448,8 +450,16 @@ export function PromptInput() {
                 </details>
               )}
               <div className="mt-1 text-text-muted">
-                Open the exact window prompts to review or edit the script, or refresh to enhance again.
+                Generate uses all {h3WindowPlan.window_count} {usesH3SequencePlanner && !h3NativeSequence ? 'clips' : 'windows'} shown below, including flagged drafts. You can edit them before generating.
               </div>
+              {!!h3WindowPlan.retryable_windows?.length && !h3PlanIsStale && <div className="mt-2">
+                <button type="button" disabled={isEnhancing}
+                  onClick={() => void enhancePrompt(undefined, h3WindowPlan.planning_style || 'adaptive', true)}
+                  className="rounded-md border border-border px-2 py-1.5 text-text-primary hover:bg-bg-hover disabled:opacity-50">
+                  Retry {h3WindowPlan.retryable_windows.length === 1 ? `window ${h3WindowPlan.retryable_windows[0]}` : 'flagged windows'}
+                </button>
+                <p className="mt-1 text-text-muted">Keeps the other prompts and story schedule. Updates this draft without starting generation.</p>
+              </div>}
             </div>
           )}
           {!compact && !!h3WindowPlan.planning_notes?.length && (

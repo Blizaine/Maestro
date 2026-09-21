@@ -1521,7 +1521,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("Window Length", duration)
         self.assertIn("Recommended", duration)
         self.assertIn("saveH3WindowOverride", duration)
-        self.assertIn("modelOptions?.frames_maximum ?? 345", duration)
+        self.assertIn("h3MaximumFrames(modelOptions, extendedDuration) ?? 345", duration)
         self.assertIn("h3WindowOverrideKey", store)
         self.assertIn("api.fetchH3WindowOverrides()", store)
         self.assertIn('@api.get("/api/v1/h3-window-overrides")', launch)

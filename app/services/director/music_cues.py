@@ -88,8 +88,9 @@ def format_music_cues(clip):
                      'If the referenced band includes a drummer, favor revealing that same drummer '
                      'and their first visible strike at this entrance, following the supplied audio.')
     if status == 'quiet':
-        parts.append('No sustained percussion was detected here. Favor the vocalist, ensemble, or '
-                     'environment; avoid an invented drum solo or drummer entrance.')
+        parts.append('No sustained percussion was detected here. Favor the ensemble, listening '
+                     'reactions, or environment; avoid an invented drum solo or drummer entrance. '
+                     'This percussion cue is not evidence of singing.')
     elif status == 'active' and not cues:
         parts.append('Percussion is already active; a drummer insert may follow the audible rhythm, '
                      'but do not describe this as a new drum entrance.')

@@ -13,7 +13,9 @@ const models = [music, other, speech].map(model_type => ({model_type, name:model
     import React from 'react'; import {createRoot} from 'react-dom/client';
     import {useStore} from './src/stores/useStore';
     import {MusicControls} from './src/components/Sidebar/MusicControls';
+    import * as musicStyles from './src/lib/musicStyles';
     window.store = useStore;
+    window.musicStyles = musicStyles;
     createRoot(document.getElementById('root')).render(<MusicControls/>);
     window.boot = useStore.getState().loadModels();`, resolveDir:path.join(root,'ui'), loader:'tsx'},
     bundle:true, write:false, jsx:'automatic', logLevel:'silent', define:{'process.env.NODE_ENV':'"development"'}});
@@ -86,7 +88,7 @@ const models = [music, other, speech].map(model_type => ({model_type, name:model
       assert.ok(visibility.enabled_models.includes(music));
       assert.equal(prefs.music_defaults_version, 1);
       assert.equal(prefs.director_music_model, music);
-      await page.getByLabel('Saved music style').waitFor();
+      await page.getByLabel('Composition planning', {exact:true}).waitFor();
       const composition = page.getByLabel('Composition planning', {exact:true});
       assert.equal(await composition.inputValue(), '2', 'Direct generation is the initial selection');
       // Exercise the actual queue payload, not just the visible select value.
@@ -97,6 +99,60 @@ const models = [music, other, speech].map(model_type => ({model_type, name:model
         assert.equal(submissions.at(-1)?.model_mode, mode, 'The submitted composition mode matches the visible choice');
       }
       await composition.selectOption('2');
+      await page.evaluate(() => {
+        window.musicStyles.toggleMusicStyle({id:'rapper',name:'Rapper',trigger:'Rap voice'},true);
+        window.musicStyles.toggleMusicStyle({id:'singer',name:'Singer',trigger:'Pop voice'},true);
+        window.musicStyles.setMusicStyleStrength('rapper',0.75);
+        window.musicStyles.setMusicStyleStrength('singer',1.25);
+      });
+      assert.equal(await composition.isDisabled(),true);
+      await page.evaluate(() => window.store.getState().startGeneration('queue'));
+      const selections = [{id:'rapper',strength:0.75},{id:'singer',strength:1.25}];
+      assert.deepEqual(submissions.at(-1).custom_settings.artist_loras,selections,'Both selections reach the actual queued request');
+      const saved = JSON.parse(JSON.stringify(submissions.at(-1)));
+      await page.evaluate(async params => {
+        window.musicStyles.selectMusicStyle();
+        window.store.setState({selectedOutputMeta:{source:'sidecar',params},selectedOutput:-1});
+        await window.store.getState().loadSettingsFromOutput();
+      }, saved);
+      await settle(page);
+      assert.deepEqual(await page.evaluate(() => window.store.getState().params.custom_settings.artist_loras),selections,
+        'Loading a saved song restores every LoRA and its exact strength');
+      await page.evaluate(() => window.store.getState().startGeneration('queue'));
+      assert.deepEqual(submissions.at(-1).custom_settings.artist_loras,selections,'Restored settings survive resubmission');
+      await page.evaluate(async params => {
+        window.store.setState({selectedOutputMeta:{source:'sidecar',params:{...params,custom_settings:{artist_id:'legacy',artist_strength:0.6}}}});
+        await window.store.getState().loadSettingsFromOutput();
+      }, saved);
+      await settle(page);
+      assert.deepEqual(await page.evaluate(() => window.musicStyles.selectedMusicStyles(window.store.getState().params.custom_settings)),
+        [{id:'legacy',strength:0.6}],'Old single-LoRA outputs still restore correctly');
+      await page.getByRole('checkbox', {name:'Instrumental', exact:true}).check();
+      assert.equal(await composition.inputValue(),'0','Instrumental visibly uses full score planning');
+      assert.equal(await composition.isDisabled(),true);
+      await page.evaluate(() => window.store.getState().startGeneration('queue'));
+      const instrumental = JSON.parse(JSON.stringify(submissions.at(-1)));
+      assert.equal(instrumental.model_mode,0);
+      assert.equal(instrumental.custom_settings.instrumental,true);
+      assert.equal(instrumental.custom_settings.artist_id,'legacy','Artist choices remain saved while paused');
+      assert.equal(instrumental.custom_settings.abc,'');
+      assert.equal(instrumental.audio_prompt_type,'');
+      await page.getByRole('checkbox', {name:'Instrumental', exact:true}).uncheck();
+      assert.equal(await composition.inputValue(),'2','Turning Instrumental off restores the vocal planning selection');
+      await page.evaluate(async params => {
+        window.store.setState({selectedOutputMeta:{source:'sidecar',params:{...params,_music_instrumental:undefined,prompt:'[intro]\n[outro]'}}});
+        await window.store.getState().loadSettingsFromOutput();
+      },instrumental);
+      await settle(page);
+      assert.equal(await page.getByRole('checkbox', {name:'Instrumental',exact:true}).isChecked(),true,
+        'An instrumental with a section plan restores from its runtime flag');
+      await page.getByRole('checkbox', {name:'Instrumental',exact:true}).uncheck();
+      assert.equal(await composition.inputValue(),'2','Restored artist LoRAs resume in their required direct mode');
+      await page.getByRole('checkbox', {name:'Instrumental',exact:true}).check();
+      await page.evaluate(() => window.musicStyles.selectMusicStyle({id:'solo',name:'Solo',trigger:'Solo'}));
+      assert.equal(await page.getByRole('checkbox', {name:'Instrumental',exact:true}).isChecked(),false,
+        'Choosing a training audition switches back to vocal generation');
+      await page.evaluate(() => window.musicStyles.selectMusicStyle());
       await page.getByRole('button',{name:'My music',exact:true}).click();
       await page.getByRole('dialog',{name:'My music',exact:true}).waitFor();
       await page.evaluate(id => {
@@ -104,7 +160,7 @@ const models = [music, other, speech].map(model_type => ({model_type, name:model
         window.store.getState().setDirectorMusicModel(id);
       }, other);
       await settle(page);
-      assert.equal(await page.getByLabel('Saved music style').count(), 0);
+      assert.equal(await page.getByLabel('Composition planning', {exact:true}).count(), 0);
       assert.equal(prefs.selected_model_per_audio_sub_mode.music, other);
       await page.evaluate(id => window.store.getState().toggleModelEnabled(id), music);
       await settle(page);
@@ -126,19 +182,19 @@ const models = [music, other, speech].map(model_type => ({model_type, name:model
 
       holdOptions = true;
       ({page, context} = await open());
-      await page.getByLabel('Saved music style').waitFor();
+      await page.getByLabel('Composition planning', {exact:true}).waitFor();
       assert.equal(await page.getByLabel('Composition planning', {exact:true}).inputValue(), '2',
         'Default composition does not wait for the model-options response');
       assert.equal(await page.getByRole('button',{name:'My music',exact:true}).count(), 1, 'Controls show while capabilities are still loading');
       failOptions = true; holdOptions = false; releaseOptions();
       await settle(page);
-      assert.equal(await page.getByLabel('Saved music style').count(), 1, 'A failed options request cannot hide YuE2 controls');
+      assert.equal(await page.getByLabel('Composition planning', {exact:true}).count(), 1, 'A failed options request cannot hide YuE2 controls');
       assert.equal(await page.evaluate(() => window.store.getState().modelOptions), null);
       // Stale capabilities from YuE2 must not keep its controls on another model.
       await page.evaluate(({music,other}) => window.store.setState(s => ({
         params:{...s.params,model_type:other}, modelOptions:{model_type:music,yue2_composition:true},
       })), {music,other});
-      assert.equal(await page.getByLabel('Saved music style').count(), 0);
+      assert.equal(await page.getByLabel('Composition planning', {exact:true}).count(), 0);
       await context.close();
       assert.deepEqual(errors, []);
     }
