@@ -2317,6 +2317,10 @@ class family_handler:
             normalize_audio_settings(ui_defaults, validate_prompt=False)
             return
 
+        from models.minimax_h3.duration import apply_h3_duration_override
+        model_def = apply_h3_duration_override(ui_defaults, model_def or {})
+        maximum_frames = int(model_def.get("frames_maximum") or _H3_MAX_FRAMES)
+
         try:
             requested_frames = int(ui_defaults.get("video_length", 124))
         except (TypeError, ValueError):
@@ -2333,13 +2337,13 @@ class family_handler:
         outpaint_text = str(ui_defaults.get("video_guide_outpainting") or "").strip()
         outpainting = bool(outpaint_text) and not outpaint_text.startswith("#")
         exact_outpaint_timeline = outpainting and ui_defaults.get("minimax_h3_multi_window") is True
-        if requested_frames <= _H3_MAX_FRAMES + 1 and not exact_outpaint_timeline:
+        if requested_frames <= maximum_frames + 1 and not exact_outpaint_timeline:
             ui_defaults["video_length"] = min(
-                _H3_MAX_FRAMES,
+                maximum_frames,
                 max(_H3_MIN_FRAMES, aligned_frames),
             )
         elif omni_reference and not omni_sequence:
-            ui_defaults["video_length"] = _H3_MAX_FRAMES
+            ui_defaults["video_length"] = maximum_frames
         else:
             # A long First/Last or enabled Omni Reference Sequence setting is
             # the joined output duration, not one H3 pass.
@@ -2350,13 +2354,13 @@ class family_handler:
 
         try:
             requested_window = int(
-                ui_defaults.get("sliding_window_size", _H3_MAX_FRAMES)
+                ui_defaults.get("sliding_window_size", maximum_frames)
             )
         except (TypeError, ValueError):
-            requested_window = _H3_MAX_FRAMES
+            requested_window = maximum_frames
         aligned_window = align_num_frames(max(1, requested_window))
         ui_defaults["sliding_window_size"] = min(
-            _H3_MAX_FRAMES,
+            maximum_frames,
             max(_H3_MIN_FRAMES, aligned_window),
         )
         if (
@@ -2485,6 +2489,9 @@ class family_handler:
             except (ValueError, TypeError) as error:
                 return str(error)
             return None
+        from models.minimax_h3.duration import apply_h3_duration_override
+        model_def = apply_h3_duration_override(inputs, model_def or {})
+        maximum_frames = int(model_def.get("frames_maximum") or _H3_MAX_FRAMES)
         custom = inputs.get("custom_settings") or {}
         if custom.get("audio_refinement") == "enabled":
             if (model_def or {}).get("lock_inference_steps") or (model_def or {}).get("minimax_h3_fused_turbo"):
@@ -2652,7 +2659,7 @@ class family_handler:
         )
         if omni_reference and not omni_sequence:
             inputs["video_length"] = min(
-                _H3_MAX_FRAMES,
+                maximum_frames,
                 max(_H3_MIN_FRAMES, align_h3_num_frames(max(1, requested_frames))),
             )
             inputs["sliding_window_size"] = inputs["video_length"]
@@ -2662,9 +2669,9 @@ class family_handler:
                 and bool(str(inputs.get("video_guide_outpainting") or "").strip())
                 and not str(inputs.get("video_guide_outpainting") or "").strip().startswith("#")
             )
-            if requested_frames <= _H3_MAX_FRAMES + 1 and not exact_outpaint_timeline:
+            if requested_frames <= maximum_frames + 1 and not exact_outpaint_timeline:
                 requested_frames = min(
-                    _H3_MAX_FRAMES,
+                    maximum_frames,
                     max(
                         _H3_MIN_FRAMES,
                         align_h3_num_frames(max(1, requested_frames)),
@@ -2676,12 +2683,12 @@ class family_handler:
 
             try:
                 requested_window = int(
-                    inputs.get("sliding_window_size", _H3_MAX_FRAMES)
+                    inputs.get("sliding_window_size", maximum_frames)
                 )
             except (TypeError, ValueError):
-                requested_window = _H3_MAX_FRAMES
+                requested_window = maximum_frames
             inputs["sliding_window_size"] = min(
-                _H3_MAX_FRAMES,
+                maximum_frames,
                 max(
                     _H3_MIN_FRAMES,
                     align_h3_num_frames(max(1, requested_window)),

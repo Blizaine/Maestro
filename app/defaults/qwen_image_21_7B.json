@@ -1,0 +1,19 @@
+{
+    "model": {
+        "name": "Qwen Image 2.1 7B",
+        "architecture": "qwen_image_21_7B",
+        "description": "Unified image generation and editing with up to 10 reference images, improved text rendering and native transparent RGBA output. Start with 40 steps, CFG 1 and 1024px; 2K is available with more memory. Qwen Research License: non-commercial research/evaluation only; commercial use requires a separate license from Qwen. Only Qwen Image 2.1 7B LoRAs are compatible.",
+        "URLs": [
+            "https://huggingface.co/DeepBeepMeep/Qwen_image_2/resolve/main/qwen_image_21_7B_bf16.safetensors",
+            "https://huggingface.co/DeepBeepMeep/Qwen_image_2/resolve/main/qwen_image_21_7B_int8_convrot.safetensors"
+        ],
+        "image_outputs": true
+    },
+    "prompt": "",
+    "resolution": "1024x1024",
+    "num_inference_steps": 40,
+    "guidance_scale": 1.0,
+    "batch_size": 1,
+    "image_mode": 1,
+    "video_prompt_type": "I"
+}

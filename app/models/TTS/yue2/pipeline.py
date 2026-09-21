@@ -102,15 +102,37 @@ class YuE2Pipeline:
 
     @torch.inference_mode()
     def generate(self, *args, **kwargs):
-        from .artist_adapter import active_artist
-        with active_artist(self, kwargs.get("custom_settings")) as artist:
-            if artist and artist["trigger"]:
-                style = str(kwargs.get("alt_prompt") or "")
-                if artist["trigger"].casefold() not in style.casefold():
-                    kwargs["alt_prompt"] = f"{artist['trigger']}, {style}".rstrip(", ")
+        from .artist_adapter import active_artists, artist_style_prompt
+        from .instrumental import is_instrumental, section_plan, instrumental_settings, active_instrumental
+        prompt = args[0] if args else kwargs.get('input_prompt')
+        if is_instrumental(kwargs, prompt):
+            self._interrupt = self._early_stop = False
+            plan = section_plan(prompt)
+            if args:
+                args = (plan, *args[1:])
+            else:
+                kwargs['input_prompt'] = plan
+            kwargs.update(model_mode=0, audio_prompt_type='', audio_guide=None,
+                          custom_settings=instrumental_settings(kwargs.get('custom_settings')))
+            with active_instrumental(self) as instrumental:
+                result = self._generate(*args, **kwargs)
+                if isinstance(result, dict):
+                    result.setdefault('artifact_metadata', {})['instrumental'] = instrumental
+                    result.setdefault('overridden_inputs', {}).update(
+                        prompt=plan, model_mode=0, audio_prompt_type='', audio_guide=None,
+                        custom_settings=kwargs['custom_settings'], _music_instrumental=True)
+                return result
+        with active_artists(self, kwargs.get("custom_settings")) as artists:
+            if artists:
+                kwargs['alt_prompt'] = artist_style_prompt(kwargs.get('alt_prompt'), artists)
             result = self._generate(*args, **kwargs)
-            if artist and isinstance(result, dict):
-                result.setdefault("artifact_metadata", {})["artist"] = artist
+            if artists and isinstance(result, dict):
+                metadata = result.setdefault('artifact_metadata', {})
+                metadata['artists'] = artists
+                if len(artists) == 1:
+                    metadata['artist'] = artists[0]  # Existing single-song readers.
+                else:
+                    metadata['artist_mix'] = 'additive-ar-joint-nar-weighted-companions-v1'
             return result
 
     @torch.inference_mode()

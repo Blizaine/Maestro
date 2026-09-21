@@ -5,11 +5,13 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import threading
 import time
 import uuid
 
 from .music_styles import style_directory, file_digest
+from .music_contracts import tokenizer_pair
 
 PROJECT_ROOT = Path("settings/music_training")
 _lock = threading.RLock()
@@ -79,12 +81,13 @@ def review_track(project_id, track_id, reviewed):
         return update_project(project_id, reviews=reviews)
 
 
-def create_project(name, trigger, tracks, *, root=None):
+def create_project(name, trigger, tracks, *, root=None, pair="v9"):
+    tokenizer_pair({'tokenizer_pair': pair})
     name, trigger = str(name or "").strip(), str(trigger or "").strip()
     if not name or len(name) > 100 or not trigger or len(trigger) > 200:
         raise ValueError("Enter a name and a short, distinctive style trigger")
-    if not isinstance(tracks, list) or not 2 <= len(tracks) <= 50:
-        raise ValueError("Choose 2–50 songs, including at least one held-out song")
+    if not isinstance(tracks, list) or not 2 <= len(tracks) <= 500:
+        raise ValueError("Choose 2–500 recordings from up to 50 songs, including a held-out song")
     normalized, seen, song_splits, reviews = [], set(), {}, {}
     for track in tracks:
         if not isinstance(track, dict):
@@ -102,7 +105,7 @@ def create_project(name, trigger, tracks, *, root=None):
             raise ValueError("Use different recordings for training and held-out evaluation")
         seen.add(digest)
         normalized.append({"id": digest[:16], "audio_path": str(audio), "audio_sha256": digest,
-                           "name": audio.stem, "lyrics": lyrics, "style": style,
+                           "name": str(track.get('name') or audio.stem)[:200], "lyrics": lyrics, "style": style,
                            "holdout": track.get("holdout") is True})
         song = str(track.get('source_song') or '').strip()[:200]
         if song:
@@ -115,7 +118,10 @@ def create_project(name, trigger, tracks, *, root=None):
             reviews[digest[:16]] = review_fingerprint(normalized[-1])
     if not any(track["holdout"] for track in normalized) or all(track["holdout"] for track in normalized):
         raise ValueError("Keep at least one training song and one separate held-out song")
+    if len({track.get('source_song', track['audio_sha256']).casefold() for track in normalized}) > 50:
+        raise ValueError('Use at most 50 original songs per dataset')
     project = {"version": 1, "id": uuid.uuid4().hex[:16], "name": name, "trigger": trigger,
+               "tokenizer_pair": pair,
                "tracks": normalized, "created_at": time.time(), "status": "draft", "progress": 0,
                "dataset_digest": hashlib.sha256(json.dumps(normalized, sort_keys=True).encode()).hexdigest(),
                "checkpoints": [], "reviews": reviews, "message": "Ready to prepare audio tokens"}
@@ -164,16 +170,46 @@ def audio_training_options(raw):
         'conditioning_checkpoint': conditioning}
 
 
-def fork_project(project_id):
+def joint_training_options(raw):
+    """A bounded comparison recipe; keep legacy training settings unchanged."""
+    if not isinstance(raw, dict):
+        raise ValueError('Joint training settings must be an object')
+    initial_style = raw.get('initial_style_id', '')
+    if not isinstance(initial_style, str) or initial_style and not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', initial_style):
+        raise ValueError('Choose a saved music style to continue from')
+    base = training_options({'rank': 32, 'steps': 200,
+                             'learning_rate': 2e-5 if initial_style else 1e-4, **raw})
+    if base['lyric_alignment']:
+        raise ValueError('Joint training currently uses token and audio losses without the lyric timing head')
+    window = raw.get('window_frames', 1500)
+    if isinstance(window, bool) or not isinstance(window, int) or not 128 <= window <= 1500:
+        raise ValueError('Joint audio windows must be 128–1500 frames')
+    return {**base, 'initial_style_id': initial_style, 'window_frames': window, 'checkpoint_every': min(100, base['steps']),
+            'artist_fraction': .75, 'accumulation_steps': 1}
+
+
+def fork_project(project_id, *, pair=None):
     """New experiment with immutable source metadata; copy only verified preparation."""
     import shutil
     source = get_project(project_id)
-    created = create_project(source['name'][:80] + ' · experiment', source['trigger'], source['tracks'])
+    pair = pair or source.get('tokenizer_pair', 'v4')
+    same_pair = pair == source.get('tokenizer_pair', 'v4')
+    created = create_project(source['name'][:75] + f' · {pair} experiment', source['trigger'], source['tracks'], pair=pair)
     if created['dataset_digest'] != source['dataset_digest']:
         raise ValueError('Source recordings changed; prepare a new dataset')
     original, destination = project_directory(project_id), project_directory(created['id'])
     changes = {'reviews': source.get('reviews', {}), 'sequence_coverage': source.get('sequence_coverage', [])}
-    for folder, field in (('prepared', 'prepared'), ('audio_targets', 'audio_prepared'), ('alignment', 'alignment')):
+    if same_pair and source.get('adapted_pair'):
+        from .music_contracts import pair_asset
+        (destination / 'adapted_pair').mkdir()
+        for branch in ('head', 'nar'):
+            shutil.copyfile(pair_asset(source, branch), destination / 'adapted_pair' / (branch + '.safetensors'))
+        changes['adapted_pair'] = dict(source['adapted_pair'])
+    for folder, field in (('prepared', 'prepared'), ('audio_targets', 'audio_prepared'), ('alignment', 'alignment'),
+                          ('pair_features', 'pair_prepared')):
+        if not same_pair:
+            # Tokens and all dependent caches must be rebuilt for a new pair.
+            continue
         if source.get(field) and (original / folder).is_dir():
             shutil.copytree(original / folder, destination / folder)
             changes[field] = source[field]

@@ -1,4 +1,17 @@
-import type { SlidingWindowMemoryPolicy } from '../types'
+import type { ModelOptions, SlidingWindowMemoryPolicy } from '../types'
+
+// 17*n+5 frames at 24fps: 29.958s, outside H3's published 15s envelope.
+export const H3_EXPERIMENTAL_MAX_FRAMES = 719
+
+export function supportsH3ExtendedDuration(options?: ModelOptions | null): boolean {
+  return !!options && !options.audio_only && options.model_type !== 'viggle_animate'
+    && String(options.architecture || '').startsWith('minimax_h3')
+}
+
+export function h3MaximumFrames(options?: ModelOptions | null, extended?: unknown): number | null {
+  return extended === true && supportsH3ExtendedDuration(options)
+    ? H3_EXPERIMENTAL_MAX_FRAMES : options?.frames_maximum ?? null
+}
 
 export type H3MemoryRecommendation = {
   supported: boolean

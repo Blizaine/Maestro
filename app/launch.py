@@ -8092,7 +8092,7 @@ async def llm_write_song(request: Request):
     from services.guide_loader import load_guide
     if selected_architecture == "yue2":
         from models.TTS.yue2.prompting import writer_duration_instruction
-        system_prompt = load_guide("music", "song_writer_yue2")
+        system_prompt = load_guide("music", "song_writer_yue2_instrumental" if instrumental else "song_writer_yue2")
         system_prompt += "\n\n" + writer_duration_instruction(body.get("duration_seconds"))
     elif is_minimax_music3 and instrumental:
         system_prompt = (
@@ -8216,7 +8216,7 @@ async def director_generate_music(request: Request):
         _ensure_llm_loaded()
         if selected_architecture == "yue2":
             from models.TTS.yue2.prompting import writer_duration_instruction
-            system_prompt = load_guide("music", "song_writer_yue2")
+            system_prompt = load_guide("music", "song_writer_yue2_instrumental" if instrumental else "song_writer_yue2")
             system_prompt += "\n\n" + writer_duration_instruction(duration_seconds)
         elif is_minimax_music3 and instrumental:
             system_prompt = (
@@ -8264,6 +8264,9 @@ async def director_generate_music(request: Request):
         raise HTTPException(status_code=400, detail="Provide a description, or style + lyrics")
 
     gen_params = _build_music_gen_params(model_type, lyrics, style, duration_seconds, seed)
+    if selected_architecture == "yue2" and instrumental:
+        gen_params.update(model_mode=0, _music_instrumental=True,
+                          custom_settings={**(gen_params.get('custom_settings') or {}), 'instrumental': True, 'abc': ''})
 
     out_dir = _workspace_dir(workspace)
     os.makedirs(out_dir, exist_ok=True)
@@ -8352,6 +8355,8 @@ async def llm_plan_h3_windows(request: Request):
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
     model_def = wgp.get_model_def(model_type) or {}
+    from models.minimax_h3.duration import apply_h3_duration_override
+    model_def = apply_h3_duration_override(body, model_def)
     if not str(model_def.get("architecture") or "").startswith("minimax_h3"):
         raise HTTPException(status_code=400, detail="H3 window planning requires a MiniMax H3 model.")
     if model_def.get("omni_reference"):
@@ -8365,6 +8370,7 @@ async def llm_plan_h3_windows(request: Request):
 
     sliding_defaults = model_def.get("sliding_window_defaults") or {}
     planning_inputs = {
+        "minimax_h3_extended_duration": body.get("minimax_h3_extended_duration") is True,
         "model_type": model_type,
         "resolution": body.get("resolution") or "864x480",
         "video_length": body.get("total_frames") or body.get("video_length") or 124,
@@ -8464,6 +8470,8 @@ async def llm_plan_h3_sequence(request: Request):
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
     model_def = wgp.get_model_def(model_type) or {}
+    from models.minimax_h3.duration import apply_h3_duration_override
+    model_def = apply_h3_duration_override(body, model_def)
     if not (
         str(model_def.get("architecture") or "").startswith("minimax_h3")
         and model_def.get("omni_reference")
@@ -8490,6 +8498,7 @@ async def llm_plan_h3_sequence(request: Request):
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     sequence_inputs = {
+        "minimax_h3_extended_duration": body.get("minimax_h3_extended_duration") is True,
         "resolution": body.get("resolution") or "864x480",
         "video_length": body.get("total_frames") or 124,
         "minimax_h3_sequence_clip_frames": body.get(
@@ -10527,6 +10536,8 @@ async def _prepare_generation_submission(
     except Exception:
         _base_model_type = body.get("model_type")
     _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
+    from models.minimax_h3.duration import apply_h3_duration_override
+    _generation_model_def = apply_h3_duration_override(body, _generation_model_def)
     if (
         _generation_model_def.get("infer_audio_prompt_from_guide", False)
         and body.get("audio_guide")
@@ -25326,6 +25337,8 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     _mc_min_f, _mc_fs, _mc_latent = 17, 8, 8
                 try:
                     _mc_model_def = wgp.get_model_def(_mc_model_type) or {}
+                    from models.minimax_h3.duration import h3_duration_model_def
+                    _mc_model_def = h3_duration_model_def(_mc_model_def, raw_params)
                 except Exception:
                     _mc_model_def = {}
                 _mc_is_h3 = str(

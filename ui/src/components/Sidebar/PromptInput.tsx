@@ -3,6 +3,7 @@ import { Sparkles, Loader2, ChevronDown, ChevronUp, Brain, PenLine, RefreshCw, C
 import { canEnhanceOnGeneration, shouldEnhanceOnGeneration, useStore } from '../../stores/useStore'
 import {
   effectiveH3OmniSequenceFrames,
+  h3MaximumFrames,
   h3OmniSequenceWindowCount,
   h3TimelineFrames,
 } from '../../lib/h3Memory'
@@ -240,7 +241,8 @@ export function PromptInput() {
     usesWindows
     && modelOptions?.sliding_window_auto_prompt_pacing === true
   )
-  const nativeMaximumFrames = modelOptions?.frames_maximum ?? null
+  const extendedDuration = useStore(s => s.params.minimax_h3_extended_duration === true)
+  const nativeMaximumFrames = h3MaximumFrames(modelOptions, extendedDuration)
   const sequenceClipFrames = nativeMaximumFrames != null
     ? effectiveH3OmniSequenceFrames({
         policy: modelOptions?.omni_sequence_memory_policy,
@@ -262,7 +264,7 @@ export function PromptInput() {
   const h3SequenceTotalFrames = h3TimelineFrames(
     durationSeconds,
     fps,
-    modelOptions?.frames_maximum,
+    nativeMaximumFrames,
   )
   const h3SequenceNeedsMultiplePasses = (
     h3SequenceEnabled

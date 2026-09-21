@@ -15,7 +15,8 @@ export function MusicTrackFields({track, onChange}: {track: MusicTrack; onChange
     <p className="text-[11px] text-text-muted">{captionHint}</p>
     <label className="block text-xs">Full lyrics and sections<textarea aria-label="Full lyrics and sections" rows={5} className={`${field} mt-1`} value={track.lyrics} maxLength={40000} onChange={event => edit({lyrics: event.target.value})} placeholder="[Verse]… [Chorus]… or [Instrumental]"/></label>
     <p className="text-[11px] text-text-muted">Match this recording or excerpt: include repetitions, spoken intros and omitted verses correctly. Do not paste the full song's lyrics for a short excerpt.</p>
-    <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={track.holdout} onChange={event => edit({holdout: event.target.checked})}/>Held-out evaluation song</label>
+    <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={track.holdout} onChange={event => edit({holdout: event.target.checked})}/>Check only — do not train on this song (held out)</label>
+    <p className="text-[11px] text-text-muted">Use a different song for this check. It measures whether training helps on unseen audio; it does not teach the voice or supply a reference for generation.</p>
     <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={!!track.reviewed} disabled={!track.style.trim() || !track.lyrics.trim()} onChange={event => onChange({reviewed: event.target.checked})}/>I listened and checked this caption and these lyrics</label>
   </>
 }

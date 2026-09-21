@@ -436,6 +436,8 @@ def get_diarizer_pipeline(profile: str = "speech"):
         return None
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    from shared.torchaudio_compat import ensure_pyannote_audio_compat
+    ensure_pyannote_audio_compat()
     _base = os.path.dirname(os.path.abspath(__file__))
     _project_root = os.path.normpath(os.path.join(_base, "..", ".."))
     _app_root = os.path.normpath(os.path.join(_base, ".."))

@@ -21,7 +21,8 @@ from transformers import Qwen3Config
 from .artist_adapter import read_upstream_adapter, target_shapes
 from .artist_training import TrainableAdapter
 from .audio_training_data import target_identity
-from .music_assets import ensure_asset, TOKENIZER_REVISION, VAE_REVISION
+from .music_assets import ensure_asset, VAE_REVISION
+from services.music_contracts import tokenizer_pair, pair_asset
 from .modules import YuE2Config
 from .protocol import CODEC_OFFSET, CODEC_SIZE, MUSIC_END, SongRequest, token_prefixes
 from .tokenization_yue2 import YuE2TextTokenizer
@@ -34,6 +35,8 @@ from services.music_styles import file_digest
 def load_data(project, tokenizer, *, report, cancelled):
     from .music_assets import ROOT
     directory = project_directory(project['id'])
+    if project.get('prepared', {}).get('tokenizer_revision') != tokenizer_pair(project)['revision']:
+        raise ValueError('Prepare this project with its selected tokenizer pair before training')
     groups = {'artist': [], 'heldout': [], 'minted': [], 'minted_val': []}
     def item(codes_path, latent_path, request):
         codes = np.load(codes_path, mmap_mode='r', allow_pickle=False)
@@ -85,8 +88,10 @@ def train_audio(project, options, *, report, cancelled, pause_at_checkpoint=Fals
         raise ValueError('Resume this audio experiment or create a new experiment')
     if options['resume'] and not latest.exists():
         raise ValueError('No saved audio training state is available to resume')
+    pair = tokenizer_pair(project)
     paths = {key: ensure_asset(key, report=report, cancelled=cancelled) for key in
-             ('ar_training', 'nar_training', 'nar', 'text_tokenizer')}
+             ('ar_training', 'nar_training', 'text_tokenizer')}
+    paths['nar'] = pair_asset(project, 'nar', cancelled=cancelled, report=report)
     groups, regularizer_digest = load_data(project, YuE2TextTokenizer(str(paths['text_tokenizer'])), report=report, cancelled=cancelled)
     condition = options['conditioning_checkpoint']
     condition_path = directory / 'checkpoints' / condition if condition else None
@@ -94,7 +99,7 @@ def train_audio(project, options, *, report, cancelled, pause_at_checkpoint=Fals
         raise ValueError('Choose a saved music checkpoint for audio conditioning')
     contract = {key: options[key] for key in ('rank', 'seed', 'learning_rate', 'io_learning_rate', 'window_frames', 'conditioning_checkpoint')}
     contract.update(objective='fixed-tokenizer-flow-v1', dataset_digest=project['dataset_digest'],
-                    tokenizer_revision=TOKENIZER_REVISION, vae_revision=VAE_REVISION,
+                    tokenizer_revision=pair['revision'], vae_revision=VAE_REVISION,
                     regularizer_digest=regularizer_digest, conditioning_sha256=file_digest(condition_path) if condition else 'base-ar')
     saved = torch.load(latest, map_location='cpu', weights_only=True) if options['resume'] else None
     if saved and saved['contract'] != contract:

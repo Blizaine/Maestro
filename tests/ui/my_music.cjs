@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(__dirname, '../..');
 const esbuild = require(path.join(root, 'ui/node_modules/esbuild'));
-const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'C:/Users/bliza/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
 
 // A real PCM recording lets the browser reject bad URLs or non-audio responses.
 const recording = Buffer.alloc(44 + 16000);
@@ -40,8 +40,8 @@ async function verifyPlayback(player) {
     for (const width of [1100, 390]) {
       const page = await browser.newPage({viewport: {width, height: 820}});
       const errors = []; page.on('pageerror', error => errors.push(error.message));
-      let project, upload = 0, submitted, audioSubmitted, cancelled = false, rendered;
-      const style = {id: 'style-one', name: 'Original acoustic', trigger: 'My acoustic songs', license: 'CC BY-NC 4.0'};
+      let project, upload = 0, submitted, audioSubmitted, jointSubmitted, cancelled = false, rendered;
+      const style = {id: 'style-one', name: 'Original acoustic', trigger: 'My acoustic songs', license: 'CC BY-NC 4.0', tokenizer_pair: 'v9', tokenizer_revision: 'v9'};
       await page.route('**/*', async route => {
         const url = new URL(route.request().url()), body = route.request().postDataJSON;
         let result = {};
@@ -57,6 +57,9 @@ async function verifyPlayback(player) {
             body: recording.subarray(start, end + 1)});
         }
         if (url.pathname === '/api/v1/music-styles') result = {styles: [style]};
+        else if (url.pathname === '/api/v1/music-styles/style-one' && route.request().method() === 'PATCH') {
+          Object.assign(style, body.call(route.request())); result = style;
+        }
         else if (url.pathname === '/api/v1/upload-audio') result = {path: `uploads/audio/song-${++upload}.wav`, filename: `song-${upload}.wav`, url: `/api/v1/uploads/audio/song-${upload}.wav`};
         else if (url.pathname === '/api/v1/music-training/projects') {
           if (route.request().method() === 'POST') {
@@ -74,6 +77,9 @@ async function verifyPlayback(player) {
         } else if (url.pathname.endsWith('/adapt-audio')) {
           audioSubmitted = body.call(route.request());
           project = {...project, status: 'queued', job_id: 'training-job', message: 'Adapting source sound queued'};
+        } else if (url.pathname.endsWith('/train-joint')) {
+          jointSubmitted = body.call(route.request());
+          project = {...project, status: 'queued', job_id: 'training-job', message: 'Joint training queued'};
         } else if (url.pathname.endsWith('/render-audition')) {
           rendered = body.call(route.request());
         } else if (url.pathname.endsWith('/review-data')) {
@@ -89,6 +95,9 @@ async function verifyPlayback(player) {
       const bounds = await dialog.boundingBox();
       assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width, 'Music dialog stays within viewport');
       await page.getByRole('button', {name: 'Train a style', exact: true}).click();
+      await page.getByText('Expert setup', {exact: true}).click();
+      await page.getByRole('checkbox', {name: /Prepare full songs automatically/}).uncheck();
+      await page.getByLabel('Audio tokenizer and decoder', {exact: true}).selectOption('v9');
       await page.getByLabel('Project name', {exact: true}).fill('My original songs');
       await page.getByLabel('Style trigger', {exact: true}).fill('My acoustic songs');
       await page.getByLabel('Recordings', {exact: true}).setInputFiles([
@@ -102,23 +111,33 @@ async function verifyPlayback(player) {
         await page.getByLabel('Style caption', {exact: true}).nth(index).fill('Acoustic pop');
         await page.getByLabel('Full lyrics and sections', {exact: true}).nth(index).fill('[Verse]\nOriginal song');
       }
-      assert.equal(await page.getByLabel('Held-out evaluation song').nth(1).isChecked(), true);
+      assert.equal(await page.getByLabel('Check only — do not train on this song (held out)').nth(1).isChecked(), true);
       await page.getByLabel('I listened and checked this caption and these lyrics', {exact: true}).first().check();
       await page.getByLabel('Style caption', {exact: true}).first().fill('Gentle acoustic pop');
       assert.equal(await page.getByLabel('I listened and checked this caption and these lyrics', {exact: true}).first().isChecked(), false, 'Editing a caption invalidates its review');
       await page.getByRole('button', {name: 'Create project', exact: true}).click();
-      await page.getByRole('button', {name: 'Prepare audio tokens'}).click();
+      await page.getByRole('button', {name: 'Prepare voice training', exact: true}).waitFor();
+      assert.equal(await page.getByLabel('Training method', {exact: true}).isVisible(), false);
+      await page.getByText('Expert settings', {exact: true}).click();
+      assert.equal(await page.getByLabel('Training method', {exact: true}).inputValue(), 'author');
+      await page.getByLabel('Training method', {exact: true}).selectOption('style');
+      await page.getByRole('button', {name: 'Prepare song-style training'}).click();
       await page.getByText('Waiting to prepare music', {exact: true}).waitFor();
       assert.equal(submitted.tracks.length, 2); assert.equal(submitted.tracks[1].holdout, true);
+      assert.equal(submitted.tokenizer_pair, 'v9');
       await page.getByRole('button', {name: 'Stop after current step'}).click();
       await page.getByText('Cancelled before starting', {exact: true}).waitFor();
       assert.ok(cancelled);
-      assert.equal(await page.getByLabel('Use lyric timing when training').isEnabled(), false);
+      await page.getByText('Expert settings', {exact: true}).click();
+      await page.getByText('Extra word-timing guidance · experimental', {exact: true}).click();
+      assert.equal(await page.getByLabel('Add extra word-timing guidance').isEnabled(), false);
       await page.getByRole('button', {name: 'Align lyrics', exact: true}).click();
-      await page.getByLabel('Use lyric timing when training').check();
-      await page.getByText('Adapt source sound · experimental', {exact: true}).click();
+      await page.getByLabel('Add extra word-timing guidance').check();
+      await page.getByLabel('Training method', {exact: true}).selectOption('advanced');
+      await page.getByText('Adapt source sound · decoder-only experiment', {exact: true}).click();
       await page.getByRole('button', {name: 'Prepare source sound', exact: true}).click();
       await page.getByLabel('Total audio training steps').fill('100');
+      await page.getByText('Test songs & comparisons', {exact: true}).click();
       await page.getByLabel('Automatically audition checkpoints', {exact: true}).check();
       await page.getByLabel('Audition style caption', {exact: true}).fill('Solo voice and piano');
       await page.getByLabel('Audition lyrics', {exact: true}).fill('[Verse]\nNew test words for comparison');
@@ -149,6 +168,21 @@ async function verifyPlayback(player) {
       await page.getByLabel('Render saved checkpoint').selectOption('0');
       assert.equal(rendered.checkpoint, 'step-200.safetensors');
       assert.equal(rendered.audition.seed, 777);
+      await page.getByLabel('Training method', {exact: true}).selectOption('advanced');
+      await page.getByText('Train music and sound together · experimental', {exact: true}).click();
+      await page.getByLabel('Total joint training steps', {exact: true}).fill('200');
+      const starting = page.getByLabel('Joint training starting point', {exact: true});
+      assert.equal(await starting.inputValue(), '');
+      await starting.selectOption('style-one');
+      await page.getByRole('button', {name: 'Start joint training', exact: true}).click();
+      await page.getByText('Joint training queued', {exact: true}).waitFor();
+      assert.equal(jointSubmitted.rank, 32);
+      assert.equal(jointSubmitted.window_frames, 1500);
+      assert.equal(jointSubmitted.audition.seed, 777);
+      assert.equal(jointSubmitted.initial_style_id, 'style-one');
+      assert.equal(jointSubmitted.learning_rate, .00002);
+      await page.getByRole('button', {name: 'Stop after current step'}).click();
+      await page.getByText('Cancelled before starting', {exact: true}).waitFor();
       await page.getByText('Recordings, captions & lyrics · 0/2 reviewed', {exact: true}).click();
       await verifyPlayback(page.getByLabel('Recording one.wav', {exact: true}));
       await verifyPlayback(page.getByLabel('Recording two.wav', {exact: true}));
@@ -163,12 +197,15 @@ async function verifyPlayback(player) {
       await page.getByRole('button', {name: 'Edit captions and lyrics in a new project', exact: true}).click();
       assert.equal(await page.getByLabel('Project name', {exact: true}).inputValue(), 'My original songs · reviewed');
       await verifyPlayback(page.getByLabel('Recording one.wav', {exact: true}));
-      assert.equal(await page.getByLabel('Held-out evaluation song').nth(1).isChecked(), true);
+      assert.equal(await page.getByLabel('Check only — do not train on this song (held out)').nth(1).isChecked(), true);
       await page.getByLabel('Full lyrics and sections', {exact: true}).nth(0).fill('[Verse]\nCorrected words');
       assert.equal(project.tracks[0].lyrics, '[Verse]\nOriginal song', 'Editing a draft preserves the original project');
-      await page.getByRole('button', {name: 'Saved styles', exact: true}).click();
-      await page.getByRole('button', {name: 'Use style', exact: true}).click();
-      assert.equal(await page.evaluate(() => window.selected.id), style.id);
+      await page.getByRole('button', {name: 'Saved LoRAs', exact: true}).click();
+      await page.getByRole('switch', {name: `Show ${style.name} in LoRA selector`, exact: true}).click();
+      await page.waitForFunction(() => document.querySelector('[role="switch"]')?.checked);
+      assert.equal(style.in_selector, true);
+      assert.equal(await page.evaluate(() => window.selected), undefined, 'Listing a style does not select it for generation');
+      await page.getByRole('button', {name: 'Close My music', exact: true}).click();
       await page.evaluate(() => window.mount());
       await dialog.waitFor();
       const output = path.join(root, '.codex-tmp/sidebar-validation'); fs.mkdirSync(output, {recursive: true});
@@ -178,6 +215,6 @@ async function verifyPlayback(player) {
       assert.deepEqual(errors, []);
       await page.close();
     }
-    console.log('PASS My music: desktop/mobile fit, draft/saved/copied recording playback, dataset upload, held-out labels, alignment review/copy, source-sound controls, shared-queue cancellation and style selection');
+    console.log('PASS My music: desktop/mobile fit, draft/saved/copied recording playback, dataset upload, held-out labels, alignment review/copy, source-sound controls, shared-queue cancellation and independent style shortlisting');
   } finally {await browser.close();}
 })().catch(error => {console.error(error); process.exitCode = 1;});

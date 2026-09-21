@@ -16,7 +16,8 @@ from scipy.signal import resample_poly
 import soundfile as sf
 
 from .vae import ResidualUnit, WNConv1d, get_activation
-from .music_assets import ensure_asset, VAE_REVISION, TOKENIZER_REVISION
+from .music_assets import ensure_asset, VAE_REVISION
+from services.music_contracts import tokenizer_pair
 from services.music_styles import file_digest
 from services.music_training import project_directory, update_project
 
@@ -96,7 +97,7 @@ def read_stereo(path, sample_rate=48000):
 
 def target_identity(project, track):
     return {'version': 1, 'source_sha256': track['audio_sha256'], 'dataset_digest': project['dataset_digest'],
-            'vae_revision': VAE_REVISION, 'tokenizer_revision': TOKENIZER_REVISION,
+            'vae_revision': VAE_REVISION, 'tokenizer_revision': tokenizer_pair(project)['revision'],
             'sample_rate': 48000, 'channels': 2, 'frame_rate': 25, 'posterior': 'mean', 'halo': 32, 'precision': 'fp32-no-tf32'}
 
 

@@ -221,6 +221,7 @@ export async function planH3Windows(params: {
   overlap_frames: number
   discard_frames: number
   sliding_window_memory_override?: boolean
+  minimax_h3_extended_duration?: boolean
   has_start_image?: boolean
   has_end_image?: boolean
   image_paths?: string[]
@@ -313,6 +314,7 @@ export async function planH3Sequence(params: {
   references: MiniMaxH3Reference[]
   sequence_clip_frames?: number
   sequence_memory_override?: boolean
+  minimax_h3_extended_duration?: boolean
   overlap_frames?: number
   sequence_continuity?: boolean
   camera_coverage?: 'auto' | 'continuous' | 'multi_shot'

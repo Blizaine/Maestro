@@ -21,7 +21,17 @@ def writer_duration_instruction(duration_seconds) -> str:
 
 
 def validate_song_inputs(inputs, lyrics):
-    if not str(lyrics or "").strip() or not str(inputs.get("alt_prompt") or "").strip():
+    from models.TTS.yue2.instrumental import is_instrumental, instrumental_settings
+    custom = inputs.get("custom_settings") or {}
+    if not isinstance(custom, dict):
+        return "YuE2 score settings must be an object."
+    if 'instrumental' in custom and not isinstance(custom['instrumental'], bool):
+        return "YuE2 instrumental mode must be on or off."
+    instrumental = is_instrumental(inputs, lyrics)
+    if instrumental:
+        inputs.update(model_mode=0, audio_prompt_type='', audio_guide=None,
+                      custom_settings=instrumental_settings(custom))
+    if (not instrumental and not str(lyrics or "").strip()) or not str(inputs.get("alt_prompt") or "").strip():
         return "YuE2 requires lyrics and a music style."
     mode = inputs.get("model_mode")
     if mode is None:
@@ -47,15 +57,14 @@ def validate_song_inputs(inputs, lyrics):
     custom = inputs.get("custom_settings") or {}
     if not isinstance(custom, dict):
         return "YuE2 score settings must be an object."
-    if custom.get("artist_id"):
+    from services.music_styles import generation_styles
+    try:
+        artists = [] if instrumental else generation_styles(custom)
+    except ValueError as error:
+        return str(error)
+    if artists:
         if mode != 2:
-            return "This music style uses Direct generation. Clear the style to use score planning."
-        from services.music_styles import load_style, validate_strength
-        try:
-            load_style(custom["artist_id"])
-            validate_strength(custom.get("artist_strength", 1.0))
-        except ValueError as error:
-            return str(error)
+            return "Music LoRAs use Direct generation. Clear the LoRAs to use score planning."
     if not scoring and "abc" in custom:
         if not isinstance(custom["abc"], str):
             return "ABC score must be text."

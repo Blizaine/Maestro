@@ -1,11 +1,12 @@
 // Real React + Zustand regression checks in an isolated browser (no app writes).
 // Run: node tests/ui/studio_duration.cjs
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(__dirname, '../..');
 const esbuild = require(path.join(root, 'ui/node_modules/esbuild'));
 const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
-  'C:/Users/bliza/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+  'playwright');
 
 (async () => {
   const bundle = await esbuild.build({
@@ -15,9 +16,9 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
       import { useStore } from './src/stores/useStore';
       import { DurationSlider, WindowSettings } from './src/components/Sidebar/DurationSlider';
       window.store = useStore;
-      window.mount = () => {
+      window.mount = (compact = false) => {
         window.root = createRoot(document.getElementById('root'));
-        window.root.render(<><DurationSlider/><WindowSettings/></>);
+        window.root.render(compact ? <DurationSlider includeWindowSettings/> : <><DurationSlider/><WindowSettings/></>);
       };
     `, resolveDir: path.join(root, 'ui'), loader: 'tsx' },
     bundle: true, write: false, jsx: 'automatic', define: { 'process.env.NODE_ENV': '"development"' },
@@ -116,6 +117,75 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
     assert.equal(await page.evaluate(() => window.updates), beforeNoop, 'Repeated canonical writes do not notify React');
     assert.deepEqual(errors, []);
     console.log('Time slider: native steps, GPU cap, manual 14.4s cap, 60m preset, Window mode and idempotence passed');
+    // The opt-in must survive real UI reconciliation and the generation request.
+    let extendedSubmission;
+    await page.route('**/api/v1/generate', route => {
+      extendedSubmission = route.request().postDataJSON();
+      return route.fulfill({status:400, json:{detail:'Captured experimental request'}});
+    });
+    for (const omni of [true, false]) {
+      extendedSubmission = undefined;
+      await page.evaluate(omni => {
+        const s = window.store.getState();
+        const model = omni ? 'minimax_h3_ref2va' : 'minimax_h3';
+        window.store.setState({studioVideoWorkflow:omni ? 'references' : 'frames',
+          studioVideoEffectiveCreateRoute:omni ? 'omni' : 'generate',
+          models:[{...s.modelOptions, model_type:model, architecture:model, omni_reference:omni}],
+          modelOptions:{...s.modelOptions, model_type:model, architecture:model, omni_reference:omni},
+          startImage:null, endImage:null, imageRefs:[], isGenerating:false, promptEnhanceError:null,
+          params:{...s.params, model_type:model, image_mode:0, prompt:'A quiet garden at sunrise.',
+            _duration_planning_mode:'duration', minimax_h3_extended_duration:false,
+            minimax_h3_reference_sequence:false, minimax_h3_multi_window:false,
+            minimax_h3_references:omni ? [{type:'image',path:'/ref.png',role:'Garden'}] : [],
+            image_start:undefined, image_end:undefined}});
+      }, omni);
+      await page.getByRole('checkbox', {name:/Allow 30s clips/}).check();
+      assert.equal(await page.getByRole('slider', {name:'Window length', exact:true}).getAttribute('max'), '719');
+      await page.evaluate(() => window.store.getState().setDurationSeconds(30));
+      await page.waitForTimeout(80);
+      const selected = await page.evaluate(() => {
+        const s = window.store.getState();
+        return {frames:s.params.video_length, window:s.params.sliding_window_size,
+          sequence:!!(s.params.minimax_h3_multi_window || s.params.minimax_h3_reference_sequence)};
+      });
+      assert.deepEqual(selected, {frames:719, window:719, sequence:false}, '30s rounds to one native pass');
+      await page.evaluate(() => window.store.getState().startGeneration());
+      assert.ok(extendedSubmission, `Experimental request reaches the API: ${await page.evaluate(() => window.store.getState().promptEnhanceError)}`);
+      assert.equal(extendedSubmission.minimax_h3_extended_duration, true);
+      assert.equal(extendedSubmission.video_length, 719);
+      assert.equal(extendedSubmission.sliding_window_size, 719);
+      assert.equal(extendedSubmission.sliding_window_memory_override, true);
+      const modelOptions = await page.evaluate(() => window.store.getState().modelOptions);
+      await page.route('**/api/v1/model-options/*', route => route.fulfill({json:modelOptions}));
+      await page.evaluate(() => window.store.getState().loadModelOptions(window.store.getState().params.model_type));
+      assert.equal(await page.evaluate(() => window.store.getState().params.sliding_window_size), 719,
+        'Refreshing native model options must retain an experimental job limit');
+      await page.getByRole('checkbox', {name:/Allow 30s clips/}).uncheck();
+      assert.equal(await page.getByRole('slider', {name:'Window length', exact:true}).getAttribute('max'), '345');
+    }
+    await page.getByRole('checkbox', {name:/Allow 30s clips/}).check();
+    await page.getByRole('button', {name:/^Auto/}).click();
+    assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_extended_duration), false,
+      'Auto explicitly exits the experiment');
+    // Exercise the compact popup controls used by the real Studio sidecar.
+    await page.evaluate(() => {window.root.unmount(); window.mount(true);});
+    await page.getByRole('checkbox', {name:/Allow 30s clips/}).check();
+    await page.getByRole('button', {name:'Window', exact:true}).click();
+    await page.getByRole('button', {name:'1', exact:true}).click();
+    assert.equal(await page.evaluate(() => window.store.getState().params.video_length), 719);
+    const assets = path.join(root, 'ui/dist/assets');
+    await page.addStyleTag({content:fs.readFileSync(path.join(assets, fs.readdirSync(assets).find(f => f.endsWith('.css'))), 'utf8')});
+    await page.setViewportSize({width:390, height:800});
+    await page.evaluate(() => {document.body.style.padding='12px'; document.getElementById('root').style.width='100%';});
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= 390), 'Extended controls fit mobile width');
+    const output = path.join(root, '.codex-tmp/sidebar-validation');
+    fs.mkdirSync(output, {recursive:true});
+    await page.screenshot({path:path.join(output, 'h3-extended-30s.png')});
+    await page.getByRole('switch', {name:'Automatic duration'}).click();
+    assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_extended_duration), false);
+    await page.evaluate(() => {window.root.unmount(); window.mount();});
+    assert.deepEqual(errors, []);
+    console.log('Experimental H3: both modes submit 719-frame single passes, toggle off and Auto restore native limits');
     await page.evaluate(() => {
       const s = window.store.getState();
       window.store.setState({studioVideoWorkflow: 'animate',

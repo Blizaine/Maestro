@@ -3,6 +3,78 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [2.3.0] - 2026-09-20
+
+Qwen Image 2.1, a complete My Music training workflow, and more control over
+music LoRAs. Includes all updates since v2.2.4.
+
+- Add **Qwen Image 2.1 7B** for image generation, editing with up to ten
+  references, and transparent RGBA PNGs. Includes BF16/INT8 ConvRot downloads,
+  model-specific enhancement guides, separate LoRA storage, MMGP offloading
+  and tiled VAE execution. Enabled once in Model Visibility without changing
+  the selected model. Qwen Research License restrictions are shown with it.
+- YuE2 Instrumental now automatically uses Mothersuperior's instrumental AR
+  LoRA at strength 1 with Melody and chords planning and an instrumental
+  section prompt. Downloads the verified adapter on first use, pauses artist
+  LoRAs for that job, and records the recipe in song metadata. Studio, queued
+  jobs and Director music generation use the same instrumental path.
+- Music LoRAs now use the familiar searchable checkbox list and selected-weight
+  controls in Advanced. My Music's saved library has a persistent **Show in LoRA
+  selector** toggle, so only shortlisted LoRAs appear there; listing a LoRA does
+  not activate it. YuE2 supports experimental multi-LoRA mixes with independent
+  strengths and triggers, weighted sound companions, queued settings and saved
+  song metadata. Known v4/v9 tokenizer mixes are rejected; voice switching by
+  song section is not guaranteed. Loading song settings restores music LoRAs.
+- YuE2 songwriting and Music Style enhancement now emphasize the requested
+  lead vocal and delivery, retaining explicit performer names and supplied
+  training triggers instead of replacing them with generic timbre or album
+  references. Distinguish the song's subject and production influences from
+  its requested singer.
+- Add opt-in **Auto** music training: prepare songs and suggested main-voice
+  excerpts, train voice/sound then song style, and save the matched LoRA in one
+  queued run. Set targets up front (100/200 by default), stop/resume saved work,
+  and open either training stage afterward for further training or comparisons.
+  The backend advances stages even with the browser closed; automatic excerpts
+  remain marked unreviewed and check-only songs stay out of training.
+- Simplify My Music training into a guided recordings → voice/sound → song
+  style → test-song workflow. Carry the learned voice into the next stage,
+  reopen existing style projects, and keep technical controls, alternate methods
+  and older checkpoints in Expert settings. Clarify that lyrics are already
+  included; optional word timing is a separate experiment. Preserve existing
+  ranks, objectives and unfinished step targets when resuming.
+- Move YuE2 music LoRA selection and strength into Advanced → LoRAs & presets,
+  with an active badge and the automatically applied training trigger shown.
+  Add searchable saved LoRAs and reversible Remove / Restore library controls;
+  preserve trained weights, queued jobs, training projects and generated songs.
+- My Music: separate author voice/sound adaptation from AR song-style training.
+  Train a matched real-audio tokenizer and decoder with waveform supervision,
+  compare original/before/after sound, then train AR with freshly prepared tokens.
+  Save/resume paired checkpoints without changing previous styles. Clarify
+  check-only recordings and add language-controlled song rescanning that keeps
+  reviewed/manual clips; long-song transcription no longer inherits one opening
+  language guess for the full track. Voice resemblance remains experimental.
+- My Music: prepare full songs without supplying lyrics first. Separate vocals,
+  transcribe timed words, preview detected voices, and suggest phrase-based
+  excerpts. Review voice choices, lyrics, descriptions, vocal delivery and clip
+  boundaries before creating an immutable training dataset. Whole-song held-out
+  splits, cached stages and queue-aware cancellation preserve original audio and
+  existing projects. New projects recommend v9; legacy projects keep their pair.
+- My Music: import combined AI-Toolkit YuE2 adapters, with both musical and
+  acoustic branches preserved. Fix music-style ZIP imports on Python 3.10.
+- Add experimental joint music/audio training with matched checkpoints,
+  resumable optimizer state, and fixed checkpoint auditions. Support matched v9
+  tokenizer/decoder projects; existing v4 projects keep their original assets.
+  Joint training can also refine a saved style, preserving its existing decoder
+  and saving a baseline before training; original saved styles remain intact.
+- Stop replaying old completion and failure notifications when opening Maestro
+  or reconnecting to saved Studio/Director history. Active jobs still notify
+  when they finish, and completed history no longer starts status polling.
+- Add an opt-in **Allow 30s clips · Experimental** switch to Studio's H3
+  Duration settings. Frames and References can use a single 719-frame pass
+  (29.96 seconds at 24 fps), including queued enhancement and restored jobs.
+  Auto keeps its existing GPU recommendations. Longer passes require more
+  memory and time and may lose consistency; Animate retains its fixed window.
+
 ## [2.2.4] - 2026-09-18
 
 Includes the full v2.2.0 feature release and v2.2.1–v2.2.3 fixes below, plus:

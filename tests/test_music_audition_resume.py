@@ -36,7 +36,7 @@ class TrainingResumeTests(unittest.TestCase):
             for i in range(2):
                 audio = root / f'song-{i}.wav'; audio.write_bytes(bytes([i]))
                 tracks.append({'audio_path': str(audio), 'style': 'Pop', 'lyrics': 'New words', 'holdout': bool(i)})
-            originals = [projects.create_project(name, 'Sample', tracks) for name in ('continuous', 'previewed')]
+            originals = [projects.create_project(name, 'Sample', tracks, pair='v4') for name in ('continuous', 'previewed')]
             for project in originals:
                 projects.update_project(project['id'], prepared={'tokenizer_revision': trainer.TOKENIZER_REVISION})
             groups = {group: [{'prefix': [1, 2, 3, 4], 'codec': [1, 2, 3, 4, 5]}] for group in ('artist', 'heldout', 'minted', 'minted_val')}

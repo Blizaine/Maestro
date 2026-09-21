@@ -17,7 +17,8 @@ import torch.nn.functional as F
 from safetensors.torch import load_file
 from accelerate import init_empty_weights
 
-from .music_assets import ensure_asset, MERT_REVISION, TOKENIZER_REVISION
+from .music_assets import ensure_asset, MERT_REVISION
+from services.music_contracts import tokenizer_pair, pair_asset
 from .sheetsage2.configuration_mert2 import MERT2Config
 from .sheetsage2.modeling_mert2 import MERT2Model
 from services.music_training import project_directory, update_project
@@ -80,12 +81,14 @@ def _waveform(path):
 
 
 def prepare_project(project, *, report, cancelled):
+    pair = tokenizer_pair(project)
     paths = {name: ensure_asset(name, cancelled=cancelled, report=report)
-             for name in ("mert", "mert_config", "mert_processor", "tokenizer")}
+             for name in ("mert", "mert_config", "mert_processor")}
+    paths['tokenizer'] = pair_asset(project, 'head', report=report, cancelled=cancelled)
     directory = project_directory(project["id"]) / "prepared"
     directory.mkdir(parents=True, exist_ok=True)
     cache_identity = {"dataset_digest": project["dataset_digest"], "mert_revision": MERT_REVISION,
-                      "tokenizer_revision": TOKENIZER_REVISION, "feature_layer": 20, "frame_rate": 25}
+                      "tokenizer_revision": pair['revision'], "feature_layer": 20, "frame_rate": 25}
     processor = json.loads(paths["mert_processor"].read_text())
     if processor.get("do_normalize") is not False or processor.get("sampling_rate") != 24000:
         raise ValueError("The MERT processor does not match the real-audio tokenizer")
@@ -98,7 +101,10 @@ def prepare_project(project, *, report, cancelled):
         model.load_state_dict(load_file(str(paths["mert"])), strict=True, assign=True)
         model = model.to(device="cuda", dtype=torch.bfloat16).eval().requires_grad_(False)
         head = RealAudioHead()
-        head.load_state_dict(torch.load(paths["tokenizer"], map_location="cpu", weights_only=True)["model"], strict=True)
+        weights = (load_file(str(paths['tokenizer'])) if paths['tokenizer'].suffix == '.safetensors'
+                   else torch.load(paths['tokenizer'], map_location='cpu', weights_only=True)['model'])
+        head.load_state_dict(weights, strict=True)
+        del weights
         head = head.to("cuda").eval().requires_grad_(False)
         tracks = project["tracks"]
         for index, track in enumerate(tracks):

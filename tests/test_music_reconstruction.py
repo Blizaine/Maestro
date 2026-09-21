@@ -45,7 +45,7 @@ class ReconstructionTests(unittest.TestCase):
             path.write_bytes(bytes([number]) * 200)
             tracks.append({"audio_path": str(path), "lyrics": "[Verse]\nMorning light",
                            "style": "Acoustic folk", "holdout": number == 1})
-        self.project = music_training.create_project("Original songs", "My acoustic sound", tracks)
+        self.project = music_training.create_project("Original songs", "My acoustic sound", tracks, pair='v4')
         self.cache = {"dataset_digest": self.project["dataset_digest"], "mert_revision": MERT_REVISION,
                       "tokenizer_revision": TOKENIZER_REVISION, "feature_layer": 20, "frame_rate": 25}
         self.project = music_training.update_project(self.project["id"], prepared=self.cache,
@@ -87,6 +87,16 @@ class ReconstructionTests(unittest.TestCase):
         self.assertEqual(options["artist_strength"], 0.5)
         self.assertEqual(options["ar_sha256"], music_styles.file_digest(
             music_styles.style_directory("checkpoint") / "ar.safetensors"))
+
+    def test_joint_reconstruction_compares_both_adapters(self):
+        path = music_styles.style_directory('checkpoint') / 'style.json'
+        manifest = json.loads(path.read_text())
+        manifest.update(version=2, adapter_mode='joint')
+        path.write_text(json.dumps(manifest))
+        self.assertEqual(reconstruction_options(self.request, self.project)['comparison'], 'joint')
+        for comparison in ('ar', 'audio'):
+            with self.assertRaisesRegex(ValueError, 'both adapters'):
+                reconstruction_options({**self.request, 'comparison': comparison}, self.project)
 
     def test_fixed_tokens_keep_order_offset_duration_and_holdout(self):
         options = reconstruction_options(self.request, self.project)

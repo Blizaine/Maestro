@@ -6,14 +6,28 @@ import json
 
 from services.music_styles import file_digest
 from services.music_training import project_directory
+from services.music_contracts import tokenizer_pair, pair_asset
+
+
+def checkpoint_adapter_mode(branch, row):
+    mode = row.get('adapter_mode', 'joint') if branch == 'joint' else 'separate'
+    if mode not in {'separate', 'joint'}:
+        raise ValueError('Unsupported checkpoint adapter mode')
+    return mode
 
 
 def checkpoint_sources(project, branch, row, *, cancelled, report):
     from .music_assets import ensure_asset
     directory = project_directory(project['id'])
+    if branch == 'joint':
+        sources = {key: directory / 'joint_checkpoints' / row['file' if key == 'ar' else 'nar_file'] for key in ('ar', 'nar')}
+        for key, path in sources.items():
+            if path.resolve().parent != directory / 'joint_checkpoints' or file_digest(path) != row[key + '_sha256']:
+                raise ValueError('The joint checkpoint pair changed; cannot audition mismatched adapters')
+        return sources
     if branch == 'style':
         return {'ar': directory / 'checkpoints' / row['file'],
-                'nar': ensure_asset('nar', cancelled=cancelled, report=report)}
+                'nar': pair_asset(project, 'nar', cancelled=cancelled, report=report)}
     sources = {'nar': directory / 'audio_checkpoints' / row['file']}
     conditioning = row.get('conditioning_checkpoint', '')
     if conditioning:
@@ -60,7 +74,7 @@ def render_audition(project, branch, row, settings, identity, *, report, cancell
         style = settings['style']
         if project['trigger'].casefold() not in style.casefold():
             style = f"{project['trigger']}, {style}"
-        with active_adapters(pipeline, sources, settings['strength']):
+        with active_adapters(pipeline, sources, settings['strength'], mode=checkpoint_adapter_mode(branch, row)):
             result = pipeline.generate(input_prompt=settings['lyrics'], alt_prompt=style,
                 seed=settings['seed'], duration_seconds=settings['seconds'],
                 sampling_steps=settings['sampling_steps'], guide_scale=settings['guide_scale'],

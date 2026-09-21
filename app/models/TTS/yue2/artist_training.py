@@ -27,6 +27,7 @@ from .protocol import CODEC_OFFSET, CODEC_SIZE, MUSIC_END, SongRequest, token_pr
 from .tokenization_yue2 import YuE2TextTokenizer
 from .transformer import YuE2AR
 from services.music_training import project_directory, update_project
+from services.music_contracts import tokenizer_pair
 
 
 class TrainableAdapter(nn.Module):
@@ -69,7 +70,7 @@ def _aligned_layer(layer, values):
     return ar_layer(layer, values)[0]
 
 
-def sequence_loss(model, item, maximum, *, gradients, cursor_head=None, metrics=None):
+def sequence_loss(model, item, maximum, *, gradients, cursor_head=None, metrics=None, production_norm=False):
     prefix = item["prefix"]
     if len(prefix) >= maximum - 1:
         raise ValueError("Song lyrics leave no room for training audio tokens; shorten the lyrics")
@@ -80,10 +81,10 @@ def sequence_loss(model, item, maximum, *, gradients, cursor_head=None, metrics=
         body.append(MUSIC_END)
     ids = torch.tensor(prefix + body, device="cuda", dtype=torch.long)
     values = model.model.embed_tokens(ids)
-    layer_fn = _aligned_layer if cursor_head is not None else _layer
+    layer_fn = _aligned_layer if cursor_head is not None or production_norm else _layer
     for layer in model.model.layers:
         values = checkpoint(layer_fn, layer, values, use_reentrant=False) if gradients else layer_fn(layer, values)
-    if cursor_head is not None:
+    if cursor_head is not None or production_norm:
         from .training_math import ar_norm
         normalized = ar_norm(values, model.model.norm)
         hidden = normalized[len(prefix) - 1:-1]
@@ -159,7 +160,8 @@ def train_project(project, options, *, report, cancelled, pause_at_checkpoint=Fa
     directory = project_directory(project["id"])
     checkpoints = directory / "checkpoints"
     checkpoints.mkdir(exist_ok=True)
-    if not project.get("prepared") or project["prepared"].get("tokenizer_revision") != TOKENIZER_REVISION:
+    pair = tokenizer_pair(project)
+    if not project.get("prepared") or project["prepared"].get("tokenizer_revision") != pair['revision']:
         raise ValueError("Prepare this dataset with the current music tokenizer before training")
     if torch.cuda.get_device_properties(0).total_memory < 20 * 1024**3:
         raise ValueError("YuE2 style training currently requires a GPU with at least 20 GB VRAM")
@@ -179,6 +181,9 @@ def train_project(project, options, *, report, cancelled, pause_at_checkpoint=Fa
     latest = checkpoints / "resume.pt"
     contract = {key: options[key] for key in ("rank", "seed", "learning_rate", "artist_fraction", "max_tokens", "accumulation_steps")}
     contract["dataset_digest"] = project["dataset_digest"]
+    # Preserve resume compatibility for the original v4 projects.
+    if pair['revision'] != TOKENIZER_REVISION:
+        contract['tokenizer_revision'] = pair['revision']
     if aligned:
         from .lyric_alignment import ALIGNMENT_VERSION
         from services.music_styles import file_digest

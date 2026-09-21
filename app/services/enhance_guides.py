@@ -38,6 +38,7 @@ _ARCHITECTURE_MAP = {
     "flf2v": "wan_video.md",
 
     # Qwen image models — edit guide when reference image exists, gen guide otherwise
+    "qwen_image_21": ("qwen_image_21_edit.md", "qwen_image_21_gen.md"),
     "qwen_image_edit": ("qwen_image_edit.md", "qwen_image_gen.md"),
     "qwen_image_layered": ("qwen_image_edit.md", "qwen_image_gen.md"),
     "qwen_image": "qwen_image_gen.md",

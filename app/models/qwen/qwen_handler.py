@@ -126,6 +126,10 @@ class family_handler():
             default=None,
             help=f"Path to a directory that contains qwen images Loras (default: {os.path.join(lora_root, 'qwen')})"
         )
+        # CLI options are registered once per UI family. The new 7B model
+        # shares the Qwen group but its adapters are not 20B-compatible.
+        parser.add_argument("--lora-dir-qwen21", default=None,
+                            help="Directory for Qwen Image 2.1 7B LoRAs")
 
     @staticmethod
     def get_lora_dir(base_model_type, args, lora_root):
