@@ -63,16 +63,39 @@ def get_live_stats() -> dict:
     # ---- GPU (NVIDIA / NVML) -----------------------------------------
     gpu_available = False
     gpu_percent = vram_used_gb = vram_total_gb = vram_percent = 0.0
+    gpu_memory_source = "unavailable"
     if _nvml_ok and pynvml is not None:
         try:
             handle = pynvml.nvmlDeviceGetHandleByIndex(0)  # GPU 0
-            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            gpu_percent = float(util.gpu)
-            vram_used_gb = mem.used / (1024 ** 3)
-            vram_total_gb = mem.total / (1024 ** 3)
-            vram_percent = (mem.used / mem.total) * 100.0 if mem.total else 0.0
             gpu_available = True
+            try:
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                gpu_percent = float(util.gpu)
+            except Exception:
+                # A device handle is enough to prove that the GPU exists even
+                # when a particular utilization counter is unavailable.
+                gpu_percent = 0.0
+
+            try:
+                mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                vram_used_gb = mem.used / (1024 ** 3)
+                vram_total_gb = mem.total / (1024 ** 3)
+                vram_percent = (
+                    (mem.used / mem.total) * 100.0 if mem.total else 0.0
+                )
+                gpu_memory_source = "nvml"
+            except Exception:
+                # Grace Blackwell systems such as GB10 expose GPU utilization
+                # through NVML but return NotSupported for discrete-VRAM
+                # accounting because CPU and GPU share one memory pool. Use
+                # the system-memory pool as an explicitly labelled fallback;
+                # callers that need benchmark-grade attribution should still
+                # use process/cgroup counters.
+                vm = psutil.virtual_memory()
+                vram_used_gb = vm.used / (1024 ** 3)
+                vram_total_gb = vm.total / (1024 ** 3)
+                vram_percent = float(vm.percent)
+                gpu_memory_source = "unified_system"
         except Exception:
             # GPU asleep / driver transient — report unavailable this tick.
             gpu_available = False
@@ -107,5 +130,6 @@ def get_live_stats() -> dict:
             "vram_used_gb": round(vram_used_gb, 2),
             "vram_total_gb": round(vram_total_gb, 2),
             "vram_percent": round(vram_percent, 1),
+            "memory_source": gpu_memory_source,
         },
     }
