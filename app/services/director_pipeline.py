@@ -34,7 +34,6 @@ from services.director_model_compat import (
     DIRECTOR_PIPELINE_TYPES,
     assess_director_model,
 )
-from services.director.music_performance import music_performance_direction
 from services.director_video_strategy import (
     BOUNDED_START_END,
     OMNI_REFERENCE,
@@ -94,11 +93,12 @@ _DIRECTOR_QUEUE_FILENAME = "_director_queue.json"
 _DIRECTOR_QUEUE_VERSION = 1
 _DIRECTOR_QUEUE_TERMINAL = {"completed", "failed", "cancelled"}
 _LTX25_MUSIC_VIDEO_SYNC_CONTRACT = (
-    "SOURCE-AUDIO LIP SYNC: Any person visibly singing or rapping "
-    "lip-syncs every vocal syllable to the supplied source soundtrack with "
-    "exact timing, natural mouth shapes, and matching breaths. People who "
-    "are not performing vocals keep their mouths closed. "
-    + music_performance_direction()
+    "SOURCE-AUDIO LIP SYNC: Keep the supplied track as the source of sound. "
+    "Synchronize lip movement only for a person this shot explicitly assigns "
+    "to an audible vocal part, and only while that part is present; keep their "
+    "lips relaxed and closed through instrumental gaps. Preserve every other "
+    "subject's assigned action. The soundtrack alone does not require anyone "
+    "to appear on screen."
 )
 _DIRECTOR_VOCAL_PERFORMANCE_RE = re.compile(
     r"\b(?:lip[-\s]?sync(?:s|ing|ed)?|sing(?:s|ing|er|ers)?|"
@@ -366,6 +366,14 @@ def _create_director_video_execution_profile(
     _normalize_director_media_strengths(params, model_def=model_def)
     video_params = dict(params.get("video_params") or {})
     video_loras = dict(params.get("video_loras") or {})
+    default_turbo = model_def.get("minimax_h3_default_turbo_preset")
+    if default_turbo:
+        # A community checkpoint may recommend its own accelerator. Preserve
+        # an explicit opt-out and persist the recipe in the project so child
+        # jobs and regeneration use the same settings.
+        video_params.setdefault("minimax_h3_turbo_mode", True)
+        if not video_params.get("minimax_h3_turbo_preset"):
+            video_params["minimax_h3_turbo_preset"] = default_turbo
     profile_inputs = {
         **video_params,
         "activated_loras": video_loras.get("activated_loras", []) or [],
@@ -662,6 +670,7 @@ def _prepare_director_generation_params(params: dict) -> None:
         model_def = getter(model_type) if callable(getter) else {}
         normalize_minimax_h3_turbo_request(
             params,
+            model_def=model_def,
             full_checkpoint=bool(
                 (model_def or {}).get("minimax_h3_full_checkpoint", False)
             ),
@@ -922,6 +931,15 @@ def _director_params_from_saved_state(state: dict) -> dict:
     if isinstance(profile, dict):
         params["_director_video_execution_profile"] = profile
     return params
+
+
+def _director_image_prompt_type(model_type: str, refs: list[str]) -> str:
+    """Use the selected editor's reference format; anchors use plain T2I."""
+    if not refs:
+        return ""
+    resolved = _director_model_assessment(model_type)
+    # Model-free callers historically use the main-image editor contract.
+    return resolved[1]["image_reference_mode"] if resolved is not None else "KI"
 
 
 def _limit_director_image_refs(
@@ -2309,7 +2327,7 @@ def _rerun_clip_image_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         # A legacy no-reference pipeline must bootstrap with plain T2I.  Once
         # this image is saved below it becomes the durable anchor for every
         # later clip rerun.
-        "video_prompt_type": "KI" if all_refs else "",
+        "video_prompt_type": _director_image_prompt_type(image_model, all_refs),
         "resolution": image_params.get("resolution", "1280x720"),
         "seed": -1,
         "settings_version": 2.52,
@@ -6791,8 +6809,7 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
             "image_prompt_type": "",
             "num_inference_steps": steps,
             "guidance_scale": guidance,
-            # 'I' carries an image reference; a ref-less anchor is plain T2I.
-            "video_prompt_type": "KI" if all_refs else "",
+            "video_prompt_type": _director_image_prompt_type(image_model, all_refs),
             "resolution": resolution,
             "seed": -1,
             "settings_version": 2.52,
@@ -7015,8 +7032,9 @@ def _apply_h3_music_audio_contract(video_model: str, clip_plans: list[dict], par
     """The uploaded song supplies H3 music-video vocals, including on reruns.
 
     Planner-authored transcript tags cannot request a second generated voice.
-    Keep explicitly user-scripted speech; otherwise the compiler removes the
-    invented vocal tags once the source-audio plan is restored.
+    Keep explicitly user-scripted lines as transcript/timing metadata. The
+    compiler removes generated-vocal tags because the exact source track
+    supplies the sound; it does not synthesize extra speech over that track.
     """
     if (
         not str(video_model or "").lower().startswith("minimax_h3")
@@ -7027,7 +7045,7 @@ def _apply_h3_music_audio_contract(video_model: str, clip_plans: list[dict], par
     from services.h3_story_ledger import extract_locked_dialogue
 
     # Only the user's scene brief (or explicit rerun edit), never an AI shot
-    # draft, can opt into scripted speech alongside the music workflow.
+    # draft, supplies authored transcript metadata alongside the source track.
     scene_script = extract_locked_dialogue(str(params.get("scene_description") or ""))
     for plan in clip_plans:
         user_edited = bool(plan.get("_director_prompt_user_edited"))

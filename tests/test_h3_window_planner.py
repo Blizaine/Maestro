@@ -267,7 +267,7 @@ class H3WindowPlannerTests(unittest.TestCase):
         self.assertIn("between canyon walls", second)
         self.assertIn("through waterfalls", second)
         self.assertIn("through caves", second)
-        self.assertIn("hands and held object remain visible", second)
+        self.assertIn("hands and held object visible naturally in the foreground", second)
         self.assertIn("extremely fast real-time movement", second)
         self.assertNotIn("<d>[English]", second)
         self.assertIn(

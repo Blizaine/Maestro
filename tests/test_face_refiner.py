@@ -17,6 +17,96 @@ from postprocessing.h3_face_refiner import runtime, face
 
 
 class FaceRefinerContracts(unittest.TestCase):
+    @staticmethod
+    def _winerror_145():
+        error = OSError(145, "The directory is not empty")
+        error.winerror = 145
+        return error
+
+    def test_temp_cleanup_retries_windows_directory_not_empty(self):
+        class LockedTemporaryDirectory:
+            def __init__(self, path):
+                self.name = str(path)
+
+            def cleanup(self):
+                raise FaceRefinerContracts._winerror_145()
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "frames"
+            path.mkdir()
+            temporary = LockedTemporaryDirectory(path)
+            remove = service._remove_temporary_tree
+            attempts = []
+
+            def locked_once(candidate):
+                attempts.append(candidate)
+                if len(attempts) == 1:
+                    raise FaceRefinerContracts._winerror_145()
+                remove(candidate)
+
+            with patch.object(service, "_remove_temporary_tree", side_effect=locked_once), \
+                 patch.object(service.time, "sleep"), \
+                 patch.object(service, "_schedule_deferred_temporary_cleanup") as defer:
+                service._cleanup_temporary_directory(temporary)
+
+            self.assertFalse(path.exists())
+            self.assertEqual(len(attempts), 2)
+            defer.assert_not_called()
+
+    def test_cleanup_lock_does_not_replace_processing_exception(self):
+        class LockedTemporaryDirectory:
+            def __init__(self, path):
+                self.name = str(path)
+
+            def cleanup(self):
+                raise FaceRefinerContracts._winerror_145()
+
+        cleanup = tempfile.TemporaryDirectory()
+        try:
+            root = Path(cleanup.name)
+            path = root / "frames"
+            path.mkdir()
+            temporary = LockedTemporaryDirectory(path)
+            with patch.object(service, "_root", return_value=root), \
+                 patch.object(service.tempfile, "TemporaryDirectory", return_value=temporary), \
+                 patch.object(service, "_remove_temporary_tree", side_effect=self._winerror_145()), \
+                 patch.object(service, "_schedule_deferred_temporary_cleanup",
+                              side_effect=RuntimeError("cleanup worker unavailable")) as defer, \
+                 patch.object(service.time, "sleep"):
+                with self.assertLogs(service.__name__, level="WARNING") as logs:
+                    with self.assertRaisesRegex(RuntimeError, "tracking failed"):
+                        with service._temporary_directory("frames-"):
+                            raise RuntimeError("tracking failed")
+
+            self.assertTrue(any("cleanup is deferred" in record for record in logs.output))
+            self.assertTrue(any("could not schedule deferred cleanup" in record for record in logs.output))
+            defer.assert_called_once_with(path)
+        finally:
+            cleanup.cleanup()
+
+    def test_completed_output_survives_persistent_temporary_lock(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            locked_path = root / "frames"
+            locked_path.mkdir()
+            def fail_cleanup():
+                raise self._winerror_145()
+            temporary = SimpleNamespace(
+                name=str(locked_path),
+                cleanup=fail_cleanup,
+            )
+            output = root / "completed.mp4"
+            with patch.object(service, "_root", return_value=root), \
+                 patch.object(service.tempfile, "TemporaryDirectory", return_value=temporary), \
+                 patch.object(service, "_remove_temporary_tree", side_effect=self._winerror_145()), \
+                 patch.object(service, "_schedule_deferred_temporary_cleanup") as defer, \
+                 patch.object(service.time, "sleep"), \
+                 self.assertLogs(service.__name__, level="WARNING"):
+                with service._temporary_directory("frames-"):
+                    output.write_bytes(b"finished video")
+            self.assertEqual(output.read_bytes(), b"finished video")
+            defer.assert_called_once_with(locked_path)
+
     def test_refinement_adapter_retains_huggingface_source_subfolder(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -27,6 +27,12 @@ const cases = [
   ['https://huggingface.co/creator/Wan2.1-I2V-Film', 'wan_i2v'],
   ['https://huggingface.co/creator/Wan2.2-I2V-Film', 'wan'],
   ['https://huggingface.co/creator/Minimax-Music-3', 'minimax_music3_music'],
+  ['https://huggingface.co/creator/Qwen-Image-2.1-Film', 'qwen21'],
+  ['https://huggingface.co/creator/Qwen2.1-Image-Film', 'qwen21'],
+  ['https://civitai.com/models/123/qwen-2.1-film', 'qwen21'],
+  ['https://huggingface.co/creator/Qwen-Image-Edit-2511-Film', 'qwen'],
+  ['https://huggingface.co/creator/Qwen-Image-v2.1', 'qwen'],
+  ['https://huggingface.co/creator/Qwen-Image-2.10', 'qwen'],
   ['https://huggingface.co/creator/Film-LoRA?token=minimax', ''],
   ['https://huggingface.co/creator/Film-H3', ''],
   ['https://huggingface.co/MiniMaxCreator/LTX-2.3-Film', 'ltx2'],
@@ -54,5 +60,11 @@ for (const [url, expected] of cases) assert.equal(suggest(url), expected, url);
   const unknown = 'https://civitai.com/models/123';
   await client.importHuggingFaceLora(unknown, resolve(unknown, ''));
   assert.equal(requests.at(-1).body.target_dir, ''); // Preserve backend metadata detection.
-  console.log(`${cases.length} URL suggestions and 4 import destination requests passed`);
+  const olderVersion = 'https://civitai.com/models/123/qwen-2.1-film?modelVersionId=20';
+  await client.importHuggingFaceLora(olderVersion, resolve(olderVersion, ''));
+  assert.equal(requests.at(-1).body.target_dir, '', 'Version metadata beats the shared CivitAI slug');
+  const qwen21 = 'https://huggingface.co/creator/Qwen-Image-2.1-Film';
+  await client.importHuggingFaceLora(qwen21, resolve(qwen21, ''));
+  assert.equal(requests.at(-1).body.target_dir, 'qwen21');
+  console.log(`${cases.length} URL suggestions and ${requests.length} import destination requests passed`);
 })().catch(error => { console.error(error); process.exitCode = 1; });

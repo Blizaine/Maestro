@@ -5,6 +5,7 @@ import * as api from '../../api/client'
 import { CharacterImagePickerButton } from '../Characters/CharacterImagePicker'
 import { CharacterToolbarItem } from './SidebarPanels'
 import { MediaAddTile } from './MediaInputCard'
+import { GalleryInput } from '../shared/GalleryInput'
 
 export function ImageRefSection() {
   const modelOptions = useStore(s => s.modelOptions)
@@ -85,6 +86,9 @@ export function ImageRefSection() {
 
   return (
     <div className="space-y-2">
+      <GalleryInput kind="image" label="reference image" onFile={file => addFiles([file])}
+        getImages={() => imageRefs}
+        disabledReason={!canAddMore ? 'Reference image limit reached.' : undefined} />
       <label className="text-[11px] text-text-muted uppercase tracking-wider block">
         {isAdaptiveImageGenerate ? 'Source / Reference Images (Optional)' : 'Reference Images'}
       </label>

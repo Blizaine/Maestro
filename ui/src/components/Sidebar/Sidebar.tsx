@@ -2,7 +2,7 @@ import { Settings, X } from 'lucide-react'
 import { useEffect, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
 import { useStore } from '../../stores/useStore'
 import { ViggleControls } from './ViggleControls'
-import { useIsMobile } from '../../lib/useIsMobile'
+import { useIsMobileSidecar } from '../../lib/useIsMobile'
 import { GenerationModeSelector } from './GenerationModeSelector'
 import { InputsPanel } from './InputsPanel'
 import { OmniReferenceSection } from './OmniReferenceSection'
@@ -30,6 +30,7 @@ import { HardwareStatusBar } from './HardwareStatusBar'
 import { VideoWorkflowSelector } from './VideoWorkflowSelector'
 import { ImageWorkflowSelector } from './ImageWorkflowSelector'
 import { ImageWorkflowControls } from './ImageWorkflowControls'
+import { ControlVideoSection } from './ControlVideoSection'
 import { AppModeToggle, MaestroBrand } from '../AppModeNavigation'
 import { CharacterToolbarContext, PromptDock, SidebarLayoutContext } from './SidebarPanels'
 
@@ -59,7 +60,7 @@ export function Sidebar() {
   const sidebarMode = useStore(s => s.sidebarMode)
   const editSubMode = useStore(s => s.editSubMode)
   const selectedModel = useStore(s => s.models.find(model => model.model_type === s.params.model_type))
-  const isMobile = useIsMobile()
+  const isMobile = useIsMobileSidecar()
   const [characterSlot, setCharacterSlot] = useState<HTMLDivElement | null>(null)
   const [sidebarElement, setSidebarElement] = useState<HTMLElement | null>(null)
   const [settingsElement, setSettingsElement] = useState<HTMLDivElement | null>(null)
@@ -241,6 +242,9 @@ export function Sidebar() {
           <ToolsPanel forcedTool="revoice" embedded />
         ) : (
         <>
+        {(isImage || isVideo) && !isAnimate && !isOmniReference && !modelOptions?.minimax_h3_media_sources && (
+          <ControlVideoSection galleryOnly />
+        )}
         {/* Video Transform workflows use the established Edit engines. */}
         {isEdit && editControls}
 
@@ -321,6 +325,7 @@ export function Sidebar() {
               <AppModeToggle size="sm" />
               <button
                 onClick={() => setSidebarOpen(false)}
+                aria-label="Close sidecar"
                 className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
               >
                 <X size={16} />

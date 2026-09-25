@@ -325,7 +325,8 @@ async function assertExplicitEnhancement(page, sidebar, requests, llmRequests) {
   await page.getByRole('button', {name: /^Generation queue,/}).first().click();
   await page.getByRole('button', {name: 'Needs attention — review prompts'}).click();
   const jobReview = page.getByRole('dialog', {name: 'Review enhanced prompts'});
-  await jobReview.getByText('The writer needs a review before generation.', {exact: true}).waitFor();
+  await jobReview.getByRole('status').getByText('Generation is paused for review. Your draft is saved.', {exact: true}).waitFor();
+  await jobReview.getByText('Review the fallback draft.', {exact: true}).waitFor();
   await jobReview.getByText('Saved enhanced scene', {exact: true}).waitFor();
   await page.setViewportSize({width: 390, height: 720});
   const reviewBounds = await jobReview.boundingBox();

@@ -194,6 +194,22 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("promptbench/rubric.md", hashes)
         self.assertIn("promptbench/operator/SKILL.md", hashes)
 
+    def test_director_and_prompt_enhancer_guide_edits_invalidate_snapshot(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for category in ("enhance", "director", "prompt_enhancer"):
+                guide = root / "services" / "llm_guides" / category / "instructions.md"
+                guide.parent.mkdir(parents=True, exist_ok=True)
+                guide.write_text("Preserve the source scene.", encoding="utf-8")
+            before = source_fingerprint(root)
+            for category in ("director", "prompt_enhancer"):
+                guide = root / "services" / "llm_guides" / category / "instructions.md"
+                guide.write_text("Keep vocal ownership with the assigned visible performer.", encoding="utf-8")
+                after = source_fingerprint(root)
+                self.assertNotEqual(digest(before), digest(after), category)
+                self.assertEqual(len(after), 3)
+                before = after
+
     def test_public_reference_templates_require_private_media(self):
         path = Path(__file__).resolve().parents[1] / "app/promptbench/cases.json"
         with self.assertRaisesRegex(ValueError, "at least one image or video"):

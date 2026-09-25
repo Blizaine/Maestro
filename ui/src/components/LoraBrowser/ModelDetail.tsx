@@ -52,7 +52,10 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
   // Load available LoRA directories for target selection
   const browserDefaultDir = useStore(s => s.loraBrowserDefaultDir)
   const [loraDirs, setLoraDirs] = useState<string[]>([])
-  const [targetDirOverride, setTargetDirOverride] = useState(browserDefaultDir || '')
+  const [targetDirOverride, setTargetDirOverride] = useState('')
+  // The selected version's architecture takes priority over the search filter.
+  // Only an explicit folder selection should override known model metadata.
+  const autoTargetDir = localArch ? '' : browserDefaultDir || ''
   useEffect(() => {
     fetchLoraDirectories().then(r => setLoraDirs(r.directories)).catch(() => {})
   }, [])
@@ -165,7 +168,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
     if (isCheckpoint) {
       startDownload({ ...common, target_arch: '', kind: 'checkpoint', target_architecture: targetArchitecture, auto_quantize: autoQuantize })
     } else {
-      startDownload({ ...common, target_arch: localArch || '', target_dir_name: targetDirOverride || undefined })
+      startDownload({ ...common, target_arch: localArch || '', target_dir_name: targetDirOverride || autoTargetDir || undefined })
     }
   }
 
@@ -349,7 +352,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                   onChange={e => setTargetDirOverride(e.target.value)}
                   className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
                 >
-                  <option value="">Auto ({localArch || 'loras'})</option>
+                  <option value="">Auto ({localArch || autoTargetDir || 'loras'})</option>
                   {loraDirs.map(d => (
                     <option key={d} value={d}>{d}</option>
                   ))}

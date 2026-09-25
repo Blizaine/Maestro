@@ -1,6 +1,6 @@
 import { outputIdentity } from '../../lib/galleryIdentity'
 import { useState, useRef, useEffect, useCallback, type CSSProperties } from 'react'
-import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked, Info, ChevronDown, ChevronUp, MoreHorizontal, ScanFace } from 'lucide-react'
+import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked, Info, ChevronDown, ChevronUp, MoreHorizontal, ScanFace, Maximize2, Columns2 } from 'lucide-react'
 import { SaveRecipeDialog } from '../Recipes/SaveRecipeDialog'
 import { FaceRefinerDialog } from '../Characters/FaceRefiner'
 import { useStore } from '../../stores/useStore'
@@ -9,6 +9,8 @@ import type { OutputFile, OutputMetadata } from '../../types'
 import { formatGenerationDuration } from '../../lib/format'
 import { formatDuration } from '../../lib/durationPlanning'
 import { modelDisplayName } from '../../lib/modelDisplay'
+import { sendToGalleryInput, useGalleryInputs, type GalleryInputTarget } from '../../lib/galleryInputs'
+import { getVideoPosterUrl } from '../../lib/thumbnailCache'
 
 interface Props {
   file: OutputFile
@@ -17,6 +19,7 @@ interface Props {
   onActivate: (index: number) => void
   onPlaybackStart: (index: number, media: HTMLMediaElement) => void
   onMeasured: (index: number, height: number) => void
+  onOpenViewer?: (file: OutputFile, options?: { compare?: boolean; currentTime?: number }) => void
   style?: CSSProperties
 }
 
@@ -72,7 +75,7 @@ function RetryImage({ url, alt }: { url: string; alt: string }) {
   )
 }
 
-export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackStart, onMeasured, style }: Props) {
+export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackStart, onMeasured, onOpenViewer, style }: Props) {
   const browsingAllFolders = useStore(s => s.browsingAllFolders)
   const switchWorkspace = useStore(s => s.switchWorkspace)
   const setSelectedOutput = useStore(s => s.setSelectedOutput)
@@ -81,14 +84,13 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const deleteOutput = useStore(s => s.deleteSelectedOutput)
   const rejoinClipGroup = useStore(s => s.rejoinClipGroup)
   const toggleFavorite = useStore(s => s.toggleFavorite)
-  const setStartImage = useStore(s => s.setStartImage)
-  const addImageRef = useStore(s => s.addImageRef)
   const setContinueVideo = useStore(s => s.setContinueVideo)
   const setStudioVideoWorkflow = useStore(s => s.setStudioVideoWorkflow)
   const setSidebarMode = useStore(s => s.setSidebarMode)
   const setSidebarOpen = useStore(s => s.setSidebarOpen)
   const openRetakeDialog = useStore(s => s.openRetakeDialog)
-  const generationMode = useStore(s => s.generationMode)
+  const inputTargets = useGalleryInputs(s => s.targets)
+  const receivingGalleryInput = useGalleryInputs(s => s.receiving)
   const workspaces = useStore(s => s.workspaces)
   const activeWorkspace = useStore(s => s.activeWorkspace)
   // Virtual Uploads view: browse-only. Move/favorite/delete resolve
@@ -115,7 +117,10 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const [copied, setCopied] = useState(false)
   const [copiedOriginalPrompt, setCopiedOriginalPrompt] = useState(false)
   const [rejoining, setRejoining] = useState(false)
-  const [sentToInput, setSentToInput] = useState(false)
+  const [sentToInput, setSentToInput] = useState('')
+  const sentToInputTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const [sendingToInput, setSendingToInput] = useState('')
+  const [inputError, setInputError] = useState('')
   const [showActionMenu, setShowActionMenu] = useState(false)
   const [actionMenuOpensDown, setActionMenuOpensDown] = useState(false)
   const [showMoveMenu, setShowMoveMenu] = useState(false)
@@ -124,6 +129,8 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const actionMenuRef = useRef<HTMLDivElement>(null)
   const itemRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
+
+  useEffect(() => () => clearTimeout(sentToInputTimer.current), [])
 
   // Measure actual height and report to parent
   useEffect(() => {
@@ -457,8 +464,15 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
         setShowMoveMenu(false)
       }
     }
+    const escape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { setShowActionMenu(false); setShowMoveMenu(false) }
+    }
     document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
+    document.addEventListener('keydown', escape)
+    return () => {
+      document.removeEventListener('mousedown', handler)
+      document.removeEventListener('keydown', escape)
+    }
   }, [showActionMenu])
 
   const handleMove = async (targetWs: string) => {
@@ -478,42 +492,61 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     }
   }
 
-  const handleSendToInput = async () => {
-    if (file.type !== 'image') return
+  const handleSendToInput = async (target: GalleryInputTarget, captureFrame = false) => {
+    if (sendingToInput) return
+    setSendingToInput(target.id)
+    setInputError('')
     try {
-      const res = await fetch(getFileUrl(file.name, file.workspace))
-      const blob = await res.blob()
-      const imageFile = new File([blob], file.name, { type: blob.type || 'image/png' })
-      if (generationMode === 'image') {
-        addImageRef(imageFile)
+      let media: File
+      if (captureFrame) {
+        media = await captureCurrentFrame()
       } else {
-        setStartImage(imageFile)
+        const res = await fetch(getFileUrl(file.name, file.workspace))
+        if (!res.ok) throw new Error(`Could not read gallery media (${res.status}).`)
+        const blob = await res.blob()
+        media = new File([blob], file.name, {
+          type: blob.type.startsWith(`${file.type}/`) ? blob.type : file.type === 'video' ? 'video/mp4' : 'image/png',
+        })
       }
-      setSentToInput(true)
-      setTimeout(() => setSentToInput(false), 2000)
+      await sendToGalleryInput(target.id, media)
+      clearTimeout(sentToInputTimer.current)
+      setSentToInput(target.id)
+      sentToInputTimer.current = setTimeout(() => setSentToInput(''), 2000)
+      setSidebarOpen(true)
     } catch (e) {
-      console.error('Failed to send image to input:', e)
+      setInputError(e instanceof Error ? e.message : 'Could not send media to this input.')
+    } finally {
+      setSendingToInput('')
     }
   }
 
-  // Capture the frame the video preview is currently SHOWING (canvas grab
-  // of the <video> element at its currentTime — same-origin, so no taint)
-  // and append it to the Reference tiles. Pairs with SCAIL-2: scrub to the
-  // pose you want, one click, it's your character reference.
-  const handleSendFrameToRefs = async () => {
-    if (file.type !== 'video') return
+  // Send the displayed frame through the same image input as a gallery still.
+  const captureCurrentFrame = async (): Promise<File> => {
+    let temporaryVideo: HTMLVideoElement | null = null
     try {
       let video = videoRef.current
-      if (!video || video.videoWidth === 0) {
-        // Preview not loaded (never hovered) — decode frame 0 offscreen.
+      if (!video || video.readyState < 2 || video.videoWidth === 0 || video.seeking) {
+        // Load offscreen without disturbing playback. Preserve a pending seek
+        // instead of silently substituting frame zero for the selected frame.
+        const requestedTime = video?.currentTime || 0
         video = document.createElement('video')
-        video.src = getFileUrl(file.name, file.workspace)
+        temporaryVideo = video
         video.muted = true
+        video.playsInline = true
         await new Promise<void>((resolve, reject) => {
-          video!.onloadeddata = () => resolve()
-          video!.onerror = () => reject(new Error('video load failed'))
+          const timer = setTimeout(() => reject(new Error('Video frame loading timed out.')), 15000)
+          video!.onloadeddata = () => { clearTimeout(timer); resolve() }
+          video!.onerror = () => { clearTimeout(timer); reject(new Error('Could not load the video frame.')) }
+          video!.src = getFileUrl(file.name, file.workspace)
+        })
+        if (requestedTime > 0) await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('Video frame seeking timed out.')), 15000)
+          video!.onseeked = () => { clearTimeout(timer); resolve() }
+          video!.onerror = () => { clearTimeout(timer); reject(new Error('Could not seek to the selected frame.')) }
+          video!.currentTime = requestedTime
         })
       }
+      const frameTime = video.currentTime
       const canvas = document.createElement('canvas')
       canvas.width = video.videoWidth
       canvas.height = video.videoHeight
@@ -524,12 +557,15 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
         canvas.toBlob(b => (b ? resolve(b) : reject(new Error('frame capture failed'))), 'image/png')
       )
       const stem = file.name.replace(/\.[^.]+$/, '')
-      const frameFile = new File([blob], `${stem}_t${video.currentTime.toFixed(2)}s.png`, { type: 'image/png' })
-      addImageRef(frameFile)
-      setSentToInput(true)
-      setTimeout(() => setSentToInput(false), 2000)
-    } catch (e) {
-      console.error('Failed to capture video frame:', e)
+      return new File([blob], `${stem}_t${frameTime.toFixed(2)}s.png`, { type: 'image/png' })
+    } finally {
+      if (temporaryVideo) {
+        temporaryVideo.onloadeddata = null
+        temporaryVideo.onseeked = null
+        temporaryVideo.onerror = null
+        temporaryVideo.removeAttribute('src')
+        temporaryVideo.load()
+      }
     }
   }
 
@@ -615,6 +651,8 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
             ref={videoRef}
             key={file.url}
             src={file.url}
+            poster={getVideoPosterUrl(file.url) ?? undefined}
+            preload="none"
             controls
             loop
             playsInline
@@ -638,8 +676,21 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
               onPlay={handlePlaybackStart}
             />
           </div>
+        ) : onOpenViewer ? (
+          <button type="button" className="h-full w-full cursor-zoom-in focus-visible:outline-2 focus-visible:outline-accent-blue"
+            aria-label={`Enlarge ${file.name}`} title="Click to enlarge"
+            onClick={event => { event.stopPropagation(); handleSelect(); onOpenViewer(file) }}>
+            <RetryImage key={file.url} url={file.url} alt={file.name} />
+          </button>
         ) : (
           <RetryImage key={file.url} url={file.url} alt={file.name} />
+        )}
+        {file.type === 'video' && onOpenViewer && (
+          <button type="button" className="absolute top-2 right-2 rounded-lg bg-black/65 p-2 text-white hover:bg-black/85"
+            aria-label="Open full-screen gallery" title="Open full-screen gallery"
+            onClick={event => { event.stopPropagation(); handleSelect(); onOpenViewer(file, {currentTime: videoRef.current?.currentTime}) }}>
+            <Maximize2 size={17} />
+          </button>
         )}
       </div>
 
@@ -798,6 +849,20 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
               <div className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
                 Clip actions
               </div>
+              {file.type !== 'audio' && onOpenViewer && (
+                <button type="button" role="menuitem"
+                  onClick={() => { setShowActionMenu(false); onOpenViewer(file, {currentTime: videoRef.current?.currentTime}) }}
+                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary hover:bg-bg-hover hover:text-text-primary">
+                  <Maximize2 size={14} className="text-accent-blue" /><span>Open full-screen gallery</span>
+                </button>
+              )}
+              {file.type === 'image' && onOpenViewer && (
+                <button type="button" role="menuitem"
+                  onClick={() => { setShowActionMenu(false); onOpenViewer(file, {compare: true}) }}
+                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary hover:bg-bg-hover hover:text-text-primary">
+                  <Columns2 size={14} className="text-accent-blue" /><span>Compare images</span>
+                </button>
+              )}
               {file.type === 'video' && (
                 <button
                   role="menuitem"
@@ -884,26 +949,26 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                   <span>{copied ? 'Prompt copied' : 'Copy prompt'}</span>
                 </button>
               )}
-              {file.type === 'image' && (
+              {(file.type === 'image' || file.type === 'video') && inputTargets
+                .filter(target => target.kind === 'image' || file.type === 'video')
+                .map(target => (
                 <button
+                  key={target.id}
                   role="menuitem"
-                  onClick={handleSendToInput}
-                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-accent-blue"
+                  onClick={() => void handleSendToInput(target, file.type === 'video' && target.kind === 'image')}
+                  disabled={!!sendingToInput || receivingGalleryInput || !!target.disabledReason}
+                  title={target.disabledReason}
+                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-accent-blue disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {sentToInput ? <Check size={14} className="text-accent-green" /> : <ArrowLeftToLine size={14} />}
-                  <span>{generationMode === 'image' ? 'Use as input image' : 'Use as start frame'}</span>
+                  {sendingToInput === target.id ? <Loader2 size={14} className="animate-spin shrink-0" />
+                    : sentToInput === target.id ? <Check size={14} className="text-accent-green shrink-0" />
+                      : <ArrowLeftToLine size={14} className="shrink-0" />}
+                  <span>{file.type === 'video'
+                    ? `Use ${target.kind === 'image' ? 'current frame' : 'video'} as ${target.label}`
+                    : `Use as ${target.label}`}</span>
                 </button>
-              )}
-              {file.type === 'video' && (
-                <button
-                  role="menuitem"
-                  onClick={handleSendFrameToRefs}
-                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-accent-blue"
-                >
-                  {sentToInput ? <Check size={14} className="text-accent-green" /> : <ArrowLeftToLine size={14} />}
-                  <span>Use current frame as reference</span>
-                </button>
-              )}
+              ))}
+              {inputError && <p role="alert" className="px-2.5 py-2 text-xs text-red-400">{inputError}</p>}
               <button
                 role="menuitem"
                 onClick={() => {

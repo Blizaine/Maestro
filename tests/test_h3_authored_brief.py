@@ -70,12 +70,12 @@ class AuthoredBriefTests(unittest.TestCase):
         calls = []
         actions = [
             "Character A parries, winds up his fist, and punches Character B hundreds of meters into the cliff.",
-            "Character B smashes the mountain face, pauses in the rubble, then stomps and launches back toward A.",
+            "Character B hurtles through the stone railing in a spray of debris and embeds in the cratering mountain wall; after a brief rubble pause, he stomps the debris pit and launches back toward A.",
             "Character B's spinning whip kick blasts Character A across the platform and embeds him in the opposite cliff.",
-            "Character A tears free, runs along the cliff, and dives fist-first toward B, who charges an upward kick.",
+            "Character A tears free from the cliff wall, stomps off the rock to launch along the cliff, then dives fist-first toward B as B charges an upward kick.",
             "A's downward fist meets B's aerial kick; the platform cracks and both spin back into combat stances.",
             "B skims into a sweep; A vaults and elbows; B counters with a roundhouse; A fires two cannon punches.",
-            "They separate to opposite ends; A charges compressed fist rings while B draws rubble into rotating leg winds.",
+            "The two briefly separate, taking positions at opposite ends; Character A sinks low and draws his fists back while Character B steps back, lowers his stance, and lifts one leg as rubble orbits its charged wind.",
             "A's ultimate fist and B's storm whip kick collide; the platform collapses and they remain frozen in clash pose.",
         ]
         # Deliberately put a meaningful consequence beyond the former 330-char
@@ -141,11 +141,21 @@ class AuthoredBriefTests(unittest.TestCase):
             self.assertIn("Character B: An adult Asian male grandmaster in earth-yellow monk robes.", prompt)
             self.assertNotIn("Lens,", prompt)
             self.assertNotIn("<d>", prompt)
-        # The application-owned source ending outranks a shorter model-authored
-        # paraphrase and must remain complete in the final state.
-        final_source_event = extract_source_events(source)[-1]["text"]
-        self.assertIn(final_source_event, result["windows"][-1]["closing_state"])
-        self.assertIn("frozen in clash pose", result["windows"][-1]["closing_state"])
+        # Only the accepted final camera action is carried forward as completed
+        # context. The model-authored closing prose is not accepted as a state
+        # fact when no source-grounded handoff supports it.
+        final_state = result["windows"][-1]["closing_state"]
+        self.assertTrue(final_state.startswith("Continue from the visible result of:"))
+        self.assertIn(
+            "A's ultimate fist and B's storm whip kick collide; the platform collapses "
+            "and they remain frozen in clash pose.",
+            final_state,
+        )
+        self.assertNotIn(
+            "Both fighters remain frozen in clash pose amid the ruined platform.",
+            final_state,
+        )
+        self.assertIn("Do not repeat it.", final_state)
 
         # A provider can ignore the requested schema and return only its
         # first phase. Keep that draft for one focused repair, not a silent

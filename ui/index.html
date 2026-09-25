@@ -6,7 +6,9 @@
     <link rel="apple-touch-icon" sizes="1254x1254" href="/maestro-home-icon-orange.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!-- Keep the Home Screen header below an opaque status bar rather than
+         under iOS's translucent shading. -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
     <meta name="apple-mobile-web-app-title" content="Maestro" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <!-- Hint the UA before CSS loads so native controls don't flash the

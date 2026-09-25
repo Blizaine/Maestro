@@ -50,6 +50,10 @@ from services.director.planners.short_film import (  # noqa: E402
     _restore_h3_dialogue_after_pacing_repair,
     _story_continuity_blueprint_schema,
 )
+from services.director.schema import DialogueBeat  # noqa: E402
+from services.director.long_form_story import (  # noqa: E402
+    compact_long_form_h3_prompt,
+)
 
 
 class TestH3DirectorDialogueCompiler(unittest.TestCase):
@@ -3620,6 +3624,204 @@ Ross turns toward Joey.
         self.assertNotIn("different-ending", plan.shots[0].video_prompt)
         self.assertNotIn("<d><d>", plan.shots[0].video_prompt)
         self.assertGreater(plan.shots[0].duration_sec, 12)
+
+
+class TestH3Issue148Regressions(unittest.TestCase):
+    def test_balanced_nested_duplicate_uses_exact_beats_and_keeps_surrounding_action(self):
+        spoken = "It was like, a crime scene. Just brown mush everywhere."
+        spoken_reply = "No, estaba delicioso."
+        prompt = (
+            "Joey sets down his cup. Joey speaks: "
+            "<d><d>[English] It was like, a crime scene. Just brown mush "
+            "everywhere.</d> It was like...</d> Monica watches him closely. "
+            "Monica takes a bite. <d><d>[Spanish] No, estaba delicioso.</d> "
+            "It was perfectly fine.</d> Monica smiles. "
+            "overall_soundscape: Quiet cafe room tone. "
+            "non_diegetic_music: N/A."
+        )
+        subjects = [
+            {"character_id": "joey", "speaker_name": "Joey"},
+            {"character_id": "monica", "speaker_name": "Monica"},
+        ]
+
+        compiled, _ = compile_h3_official_prompt(
+            prompt,
+            subjects,
+            [
+                {"speaker_id": "joey", "spoken_text": spoken, "language": "English"},
+                {"speaker_id": "monica", "spoken_text": spoken_reply, "language": "Spanish"},
+            ],
+            duration_seconds=6,
+        )
+
+        self.assertIn("Joey sets down his cup", compiled)
+        self.assertIn("Monica watches him closely", compiled)
+        self.assertIn("Monica takes a bite", compiled)
+        self.assertIn("Monica smiles", compiled)
+        self.assertEqual(compiled.count(f"<d>[English] {spoken}</d>"), 1)
+        self.assertEqual(compiled.count(f"<d>[Spanish] {spoken_reply}</d>"), 1)
+        self.assertEqual(compiled.count("It was like"), 1)
+        self.assertNotIn("<d><d>", compiled)
+        joey_line = compiled.index("Joey (S1) speaks")
+        monica_line = compiled.index("Monica (S2) speaks")
+        self.assertLess(joey_line, monica_line)
+        self.assertEqual(
+            validate_h3_prompt_contract(
+                compiled,
+                [
+                    {"speaker_id": "joey", "spoken_text": spoken, "language": "English"},
+                    {"speaker_id": "monica", "spoken_text": spoken_reply, "language": "Spanish"},
+                ],
+            ),
+            [],
+        )
+
+    def test_unclosed_duplicate_discards_inner_speech_and_keeps_visual_action(self):
+        spoken = "I brought the notes for our meeting."
+        prompt = (
+            "Mara opens the folder. Mara speaks: "
+            "<d><d>[English] I brought the notes for our meeting.</d> "
+            "Mara reaches for the pen."
+        )
+        subjects = [{"character_id": "mara", "speaker_name": "Mara"}]
+
+        compiled, _ = compile_h3_official_prompt(
+            prompt,
+            subjects,
+            [{"speaker_id": "mara", "spoken_text": spoken}],
+            duration_seconds=5,
+        )
+
+        self.assertIn("Mara opens the folder", compiled)
+        self.assertIn("Mara reaches for the pen", compiled)
+        self.assertEqual(compiled.count(f"<d>[English] {spoken}</d>"), 1)
+        self.assertEqual(compiled.count("I brought the notes"), 1)
+        self.assertNotIn("<d><d>", compiled)
+
+    def test_unclosed_duplicate_without_structured_authority_still_fails(self):
+        with self.assertRaises(H3DialogueContractError):
+            compile_h3_official_prompt(
+                "A person starts to speak: <d><d>[Spanish] Hola",
+                [],
+                [],
+                duration_seconds=4,
+            )
+
+    def test_saved_language_roundtrip_and_legacy_positional_order(self):
+        legacy = DialogueBeat(
+            "Hello there.", "mara", "quietly", "leans closer", "high",
+        )
+        self.assertEqual(legacy.priority, "high")
+        self.assertIsNone(legacy.language)
+
+        beat = DialogueBeat.from_dict({
+            "spoken_text": "Buenos días.",
+            "speaker_id": "mara",
+            "language": "Spanish",
+            "priority": "high",
+        })
+        restored = DialogueBeat.from_dict(beat.to_dict())
+        self.assertEqual(restored.language, "Spanish")
+        self.assertEqual(restored.to_dict()["language"], "Spanish")
+
+        prompt, _ = compile_h3_official_prompt(
+            "Mara smiles and greets her friend. "
+            "overall_soundscape: Soft room tone. non_diegetic_music: N/A.",
+            [{"character_id": "mara", "speaker_name": "Mara"}],
+            [restored],
+            duration_seconds=4,
+        )
+        self.assertIn("<d>[Spanish] Buenos días.</d>", prompt)
+
+    def test_long_form_compaction_keeps_saved_dialogue_language(self):
+        filler = " ".join(["repeated continuity prose"] * 230)
+        prompt, compacted = compact_long_form_h3_prompt({
+            "subjects_on_screen": [{
+                "character_id": "mara",
+                "speaker_name": "Mara",
+                "visual_description": "Mara in a green coat",
+            }],
+            "dialogue_beats": [{
+                "speaker_id": "mara",
+                "spoken_text": "¿Trajiste los documentos?",
+                "language": "Spanish",
+            }],
+            "video_prompt": (
+                "subject_definitions: Mara is an office manager.\n\n"
+                "summary: Mara asks a colleague a question.\n\n"
+                "retention_analysis: Preserve Mara's identity.\n\n"
+                "integrated_multimodal_description: " + filler + "\n\n"
+                "overall_soundscape: Quiet office.\n\n"
+                "non_diegetic_music: N/A"
+            ),
+        })
+
+        self.assertTrue(compacted)
+        self.assertIn("<d>[Spanish] ¿Trajiste los documentos?</d>", prompt)
+        self.assertNotIn("<d>[English]", prompt)
+
+    def test_audio_driven_reference_compiles_transcript_metadata_without_new_speech(self):
+        transcript = {
+            "speaker_id": "mara",
+            "spoken_text": "Hola, ¿cómo estás?",
+            "language": "Spanish",
+            "delivery": "warmly",
+            "physical_cue": "she waves once",
+        }
+        plan = {
+            "video_prompt": (
+                "Mara lifts her hand in greeting, then smiles. "
+                "<d>[Spanish] Hola, ¿cómo estás?</d> "
+                "overall_soundscape: Light wind. non_diegetic_music: N/A."
+            ),
+            "_director_h3_model_family": "ref2va",
+            "_director_subjects_on_screen": [{
+                "character_id": "mara",
+                "speaker_name": "Mara",
+                "visual_description": "Mara wearing a green coat",
+                "wardrobe": "green coat",
+                "position_or_relation": "screen-left",
+            }],
+            "_director_dialogue_beats": [transcript],
+            "_director_audio_plan": {"mode": "audio_driven", "ambience": "Light wind"},
+        }
+        references = [{
+            "type": "audio",
+            "role": "the supplied dialogue performance",
+            "audio_intent": "drive",
+        }]
+
+        compile_h3_clip_plans(
+            [plan],
+            prompt_modes=["ref2va"],
+            durations=[6],
+            reference_manifests=[references],
+        )
+
+        self.assertIn("lifts her hand in greeting", plan["video_prompt"])
+        self.assertIn("mapped driving audio", plan["video_prompt"])
+        self.assertNotIn("Hola", plan["video_prompt"])
+        self.assertNotIn("<d>", plan["video_prompt"])
+        self.assertEqual(plan["_director_dialogue_beats"][0]["language"], "Spanish")
+
+    def test_audio_shot_conversion_forces_source_audio_mode_and_keeps_language(self):
+        planner = ShortFilmPlanner()
+        converted = planner._convert_audio_shots(
+            [{
+                "audio_plan": {"mode": "dialogue_driven", "lip_sync_critical": True},
+                "dialogue_beats": [{
+                    "speaker_id": "mara",
+                    "spoken_text": "Hola.",
+                    "language": "Spanish",
+                }],
+            }],
+            [{"start": 0, "end": 4}],
+            [],
+            False,
+        )
+
+        self.assertEqual(converted[0].audio_plan.mode, "audio_driven")
+        self.assertEqual(converted[0].dialogue_beats[0].language, "Spanish")
 
 
 if __name__ == "__main__":

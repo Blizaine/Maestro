@@ -2,6 +2,8 @@ import { useRef, useCallback, useEffect, useState } from 'react'
 import { Upload, X, Sparkles } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { VideoTimelineSelector } from '../shared/VideoTimelineSelector'
+import { GalleryInput } from '../shared/GalleryInput'
+import { loadMediaInput } from '../../lib/mediaInput'
 import * as api from '../../api/client'
 
 /**
@@ -32,16 +34,11 @@ export function EditAnythingControls() {
   const handleUpload = useCallback(async (file: File) => {
     try {
       const result = await api.uploadImage(file)
-      const url = URL.createObjectURL(file)
-      const video = document.createElement('video')
-      video.src = url
-      video.onloadedmetadata = () => {
-        const duration = video.duration && isFinite(video.duration) ? video.duration : 0
-        const resolution = `${video.videoWidth}x${video.videoHeight}`
-        setEditVideo(file, result.path, url, duration, resolution)
-      }
+      const { url, duration, resolution } = await loadMediaInput(file)
+      setEditVideo(file, result.path, url, duration, resolution)
     } catch {
       console.error('Failed to upload video')
+      return false
     }
   }, [setEditVideo])
 
@@ -53,6 +50,7 @@ export function EditAnythingControls() {
 
   return (
     <div className="space-y-3">
+      <GalleryInput kind="video" label="Prompt Edit source" onFile={handleUpload} />
       {/* Header hint */}
       <div className="flex items-start gap-2 bg-accent-blue/10 border border-accent-blue/20 rounded-lg px-2.5 py-2">
         <Sparkles size={12} className="text-accent-blue mt-0.5 shrink-0" />

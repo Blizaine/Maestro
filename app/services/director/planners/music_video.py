@@ -630,32 +630,27 @@ class MusicVideoPlanner(BasePlanner):
                 )
                 if activity == "active":
                     vocal_info = (
-                        "mapped source audio drives this interval; vocal "
-                        "activity is present; "
-                        "synchronize visible performance and movement to that "
-                        "exact audio; any visible vocalist explicitly lip-syncs "
-                        "every syllable to it without quoting, transcribing, "
-                        "or inventing words; an instrumentalist cutaway keeps "
-                        "the established singer off screen and the visible "
-                        "musician's mouth closed"
+                        "mapped source audio drives this interval and vocal "
+                        "activity is present; synchronize the shot's existing "
+                        "subjects and actions to that audio; only a person "
+                        "explicitly assigned as a visible vocalist lip-syncs, "
+                        "and only to their own audible part; do not add a person "
+                        "or transcribe lyrics for the soundtrack"
                     )
                 elif activity == "silent":
                     vocal_info = (
-                        "the separated vocal stem is silent in this interval; "
-                        "do not depict singing, lip-sync, or an open-mouth "
-                        "vocal performance; keep visible mouths closed except "
-                        "for clearly non-vocal expression; synchronize motion "
-                        "to the supplied soundtrack"
+                        "mapped source audio drives this interval with no "
+                        "detected vocal activity; do not depict singing or "
+                        "lip-sync; preserve the shot's assigned actions and "
+                        "explicit non-song expressions"
                     )
                 else:
                     vocal_info = (
                         "mapped source audio drives this interval, but vocal "
-                        "activity is unknown; do not invent lyrics or assert "
-                        "visible singing. Stage the lead singer listening or moving "
-                        "with relaxed closed lips by default; any lip movement must "
-                        "follow an actual audible voice in the supplied audio, never "
-                        "a guitar riff. Do not invent a bellow, shout, vocal breath "
-                        "or open-mouth exertion to convey musical energy"
+                        "activity is unknown; do not invent lyrics or visible "
+                        "singing, and do not add anyone to represent the "
+                        "soundtrack; lip movement follows an actually audible "
+                        "voice, not musical rhythm"
                     )
             else:
                 vocal_info = (
@@ -817,10 +812,10 @@ class MusicVideoPlanner(BasePlanner):
             "visible traits, wardrobe, performance, camera, lighting, ambience, "
             "effects, and music.\n"
             "- The per-shot source-audio slice is mapped as driving audio. "
-            "Synchronize instrument playing, dance, action and camera to it. "
-            "Only assigned visible vocalists sing or lip-sync; on instrument "
-            "cutaways the singer remains off screen and the musician's mouth "
-            "stays closed. Do not invent or transcribe lyrics.\n"
+            "Synchronize this shot's assigned actions to it. Only a person "
+            "explicitly assigned as a visible vocalist lip-syncs to their own "
+            "audible part. Keep the source soundtrack as the audio source; do "
+            "not add a person to represent it or transcribe lyrics.\n"
             "- Character/location references are soft guidance, not fixed first "
             "frames. Describe the finished target shot.\n"
             "- Do not create image_prompt, image_source, visual_changes, or "
@@ -862,7 +857,7 @@ The user's main reference is visual ground truth. Every image_prompt and video_p
 Character references define identity and location references define the setting. Follow their labels and the Scene Concept in every self-contained video prompt; do not invent conflicting identities or settings."""
         else:
             scene_anchoring_rules = """SCENE-ANCHORING (avoid off-topic content):
-No visual reference was provided. Invent consistent performers and a setting that fit the Scene Concept, then reuse the same artists, roles and world across every clip. Show the assigned singer delivering vocals in singer-focused shots; instrument cutaways keep that voice off screen."""
+No visual reference was provided. Follow the Scene Concept, which may be narrative, dance, environment, or performance-focused. Do not add people or objects solely because the soundtrack contains vocals. Keep the identity and role of any requested or explicitly assigned person consistent across clips."""
 
         system_prompt = f"""You are a music video director. Plan each clip AND write its prompts. Output ONLY the JSON array.
 
@@ -893,7 +888,7 @@ OUTPUT — respond with ONLY a JSON array:
   {{
     "scene_goal": "What this clip achieves",
     "scene_type": "performance|narrative|atmospheric",
-    "subjects_on_screen": [{{"visual_description": "the woman in red", "position_or_relation": "center frame", "performance_role": "vocalist"}}],
+    "subjects_on_screen": [{{"visual_description": "a visible person", "position_or_relation": "center frame", "performance_role": "non_vocal"}}],
     "environment": "Setting details",
     "visual_style": "Style",
     "lighting": "Lighting",
@@ -1034,9 +1029,8 @@ Write {len(clips)} structured shot plans. Go:"""
                 ),
             )
 
-            # Keep all generated views of a performance consistent, including
-            # its start image and ending pose. The final H3 compiler repeats
-            # this after any later polish, using the persisted audio evidence.
+            # Keep role-specific mouth cues consistent across generated views
+            # of the shot. The final H3 compiler repeats this after later polish.
             from ..music_performance import constrain_music_performance, music_performance_direction
             for key in ("video_prompt", "image_prompt", "spatial_setup", "ending_beat"):
                 if isinstance(raw.get(key), str):
@@ -1049,12 +1043,17 @@ Write {len(clips)} structured shot plans. Go:"""
                         constrain_music_performance(value, subjects, audio.vocal_activity, project_context=project_context)
                         if isinstance(value, str) else value for value in raw[key]
                     ]
-            if audio.vocal_activity is not None:
+            if audio.mode == "music_driven":
                 direction = music_performance_direction(subjects, audio.vocal_activity, project_context=project_context)
-                if raw.get("video_prompt"):
+                if direction and raw.get("video_prompt") and direction not in raw["video_prompt"]:
                     raw["video_prompt"] = f"{raw['video_prompt']} {direction}"
-                if raw.get("window_prompts"):
-                    raw["window_prompts"] = [f"{value} {direction}" if isinstance(value, str) else value for value in raw["window_prompts"]]
+                if direction and raw.get("window_prompts"):
+                    raw["window_prompts"] = [
+                        f"{value} {direction}"
+                        if isinstance(value, str) and direction not in value
+                        else value
+                        for value in raw["window_prompts"]
+                    ]
 
             # Parse dialogue beats if present
             dialogue_beats = None

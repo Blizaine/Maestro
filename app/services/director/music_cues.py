@@ -85,15 +85,19 @@ def format_music_cues(clip):
         song_time = float(cue['time'])
         local_time = max(0, song_time - float(clip.get('start', 0)))
         parts.append(f'Likely percussion entrance at song {song_time:.2f}s, shot +{local_time:.2f}s. '
-                     'If the referenced band includes a drummer, favor revealing that same drummer '
-                     'and their first visible strike at this entrance, following the supplied audio.')
+                     'If this shot already assigns a visible drummer, a brief insert may show that '
+                     'same person and their first visible strike here. Otherwise, let the audible '
+                     'rhythm pace the shot’s existing actions or camera; do not add a drummer or '
+                     'instrument shot.')
     if status == 'quiet':
-        parts.append('No sustained percussion was detected here. Favor the ensemble, listening '
-                     'reactions, or environment; avoid an invented drum solo or drummer entrance. '
-                     'This percussion cue is not evidence of singing.')
+        parts.append('No sustained percussion was detected here. Favor the current scene’s '
+                     'existing actions, camera, or environment; do not invent a drum solo, drummer '
+                     'entrance, or ensemble shot. This percussion cue is not evidence of singing.')
     elif status == 'active' and not cues:
-        parts.append('Percussion is already active; a drummer insert may follow the audible rhythm, '
-                     'but do not describe this as a new drum entrance.')
+        parts.append('Percussion is already active; if this shot already assigns a visible drummer, '
+                     'their existing action may follow the audible rhythm. Otherwise, let the rhythm '
+                     'pace the current scene’s actions or camera without adding an instrument insert; '
+                     'do not describe this as a new drum entrance.')
     elif status == 'unknown':
         parts.append('Instrument timing is unknown; do not invent an instrument entrance from the beat grid.')
     parts.append('Percussion timing is an audio estimate, not a verified instrument identity. '

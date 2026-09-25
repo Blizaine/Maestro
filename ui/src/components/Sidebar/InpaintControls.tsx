@@ -2,6 +2,8 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { Upload, X, Eye, AlertTriangle, Download } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { VideoTimelineSelector } from '../shared/VideoTimelineSelector'
+import { GalleryInput } from '../shared/GalleryInput'
+import { loadMediaInput } from '../../lib/mediaInput'
 import * as api from '../../api/client'
 
 export function InpaintControls() {
@@ -69,19 +71,14 @@ export function InpaintControls() {
     setError(null)
     try {
       const result = await api.uploadImage(file)
-      const url = URL.createObjectURL(file)
-      const video = document.createElement('video')
-      video.src = url
-      video.onloadedmetadata = () => {
-        const duration = video.duration && isFinite(video.duration) ? video.duration : 0
-        const resolution = `${video.videoWidth}x${video.videoHeight}`
-        setEditVideo(file, result.path, url, duration, resolution)
-      }
+      const { url, duration, resolution } = await loadMediaInput(file)
+      setEditVideo(file, result.path, url, duration, resolution)
       // Re-check after upload in case the user just installed SAM in
       // another tab while this Inpaint session was open.
       refreshSamStatus()
     } catch {
       setError('Failed to upload video')
+      return false
     }
   }, [setEditVideo, refreshSamStatus])
 
@@ -123,6 +120,7 @@ export function InpaintControls() {
 
   return (
     <div className="space-y-3">
+      <GalleryInput kind="video" label="Inpaint source" onFile={handleUpload} />
       {/* SAM not installed — prominent banner shown the moment the user
           enters Inpaint mode (not gated on upload). Tells them exactly
           which Pinokio menu item to click. Inpaint won't work at all

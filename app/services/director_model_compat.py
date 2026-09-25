@@ -55,6 +55,21 @@ def _reference_modes(model_def: Mapping[str, Any]) -> set[str]:
     return modes
 
 
+def director_image_reference_mode(model_def: Mapping[str, Any]) -> str:
+    """Choose the image-reference format Director can submit for this model.
+
+    Prefer the legacy main-image-plus-references contract when supported.
+    Models such as Qwen Image 2.1 expose references using the I mode and can
+    submit that format directly.
+    """
+    modes = _reference_modes(model_def)
+    if "KI" in modes:
+        return "KI"
+    if "I" in modes:
+        return "I"
+    return ""
+
+
 def _choice_values(config: Any, key: str) -> set[str]:
     if not isinstance(config, Mapping):
         return set()
@@ -93,12 +108,12 @@ def _image_capability(model_def: Mapping[str, Any]) -> dict[str, Any]:
             "Director must be able to create an establishing image without a reference.",
         )
 
-    modes = _reference_modes(model_def)
-    if "KI" not in modes:
+    if not director_image_reference_mode(model_def):
         return _result(
             False,
-            "Director needs main-image plus reference editing for consistent start frames.",
+            "Director needs reference-image editing for consistent start frames.",
         )
+    modes = _reference_modes(model_def)
     if "" not in modes:
         return _result(
             False,
@@ -252,6 +267,7 @@ def assess_director_model(
             "video_strategy": ROLLING_WINDOW,
             "audio_input_mode": "none",
             "reference_mode": "none",
+            "image_reference_mode": "",
             "shot_image_support": SHOT_IMAGES_REQUIRED,
             "supports_endpoint_continuity": False,
             "clip_min_frames": None,
@@ -308,6 +324,7 @@ def assess_director_model(
         "video_strategy": strategy,
         "audio_input_mode": audio_input_mode,
         "reference_mode": str(model_def.get("director_reference_mode") or "start_frame"),
+        "image_reference_mode": director_image_reference_mode(model_def),
         "shot_image_support": shot_image_support(model_def),
         "supports_endpoint_continuity": bool(
             model_def.get("director_endpoint_continuity")

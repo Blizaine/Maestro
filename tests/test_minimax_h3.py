@@ -224,6 +224,7 @@ def _load_turbo_helpers():
 
 def _load_llm_enhance_helpers():
     from services.h3_story_ledger import normalize_h3_dialogue_tags
+    from services.h3_performance_audio import has_h3_performance_audio
 
     tree = ast.parse(_read(_LLM_SERVICE_PATH), filename=str(_LLM_SERVICE_PATH))
     helper_names = {
@@ -279,6 +280,7 @@ def _load_llm_enhance_helpers():
         "Optional": typing.Optional,
         "repair_text": lambda value: str(value or ""),
         "normalize_h3_dialogue_tags": normalize_h3_dialogue_tags,
+        "has_h3_performance_audio": has_h3_performance_audio,
     }
     module = ast.Module(body=selected, type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), str(_LLM_SERVICE_PATH), "exec"), namespace)
@@ -1664,6 +1666,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         updates = []
 
         async def fake_prepare(body, *, prepare_only=False):
+            from services.studio_enhancement import fidelity_retry_limit
+            self.assertEqual(fidelity_retry_limit(), 3)
             captured.update(body)
             captured["prepare_only"] = prepare_only
             return {
@@ -1690,10 +1694,14 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         )
         services_module = types.ModuleType("services")
         services_module.llm_service = fake_llm
+        from services import studio_enhancement
         apply_deferred.__globals__.update({
             "asyncio": asyncio,
             "_prepare_generation_submission": fake_prepare,
             "update_job": fake_update,
+            "enhancement_context": studio_enhancement.enhancement_context,
+            "_enhancement_settings_snapshot": lambda: {"enhance_fidelity_retries": 3},
+            "is_cancel_requested": lambda job: False,
         })
         job = {
             "id": "planned-1",
@@ -1708,7 +1716,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             },
         }
 
-        with mock.patch.dict(sys.modules, {"services": services_module}):
+        with mock.patch.dict(sys.modules, {"services": services_module,
+                                          "services.studio_enhancement": studio_enhancement}):
             apply_deferred(job)
 
         self.assertTrue(captured["prepare_only"])

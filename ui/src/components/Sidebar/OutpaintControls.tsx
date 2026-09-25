@@ -2,6 +2,8 @@ import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { Upload, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { VideoTimelineSelector } from '../shared/VideoTimelineSelector'
+import { GalleryInput } from '../shared/GalleryInput'
+import { loadMediaInput } from '../../lib/mediaInput'
 import { OutpaintCanvas } from './OutpaintCanvas'
 import * as api from '../../api/client'
 import { OutpaintBatchPanel } from './OutpaintBatchPanel'
@@ -88,30 +90,14 @@ export function OutpaintControls() {
     setError(null)
     try {
       const result = await api.uploadImage(file)
-      const url = URL.createObjectURL(file)
-      const isVideo = file.type.startsWith('video/')
-      if (isVideo) {
-        const video = document.createElement('video')
-        video.src = url
-        video.onloadedmetadata = () => {
-          const duration = video.duration && isFinite(video.duration) ? video.duration : 0
-          const resolution = `${video.videoWidth}x${video.videoHeight}`
-          setEditVideo(file, result.path, url, duration, resolution)
-          // Reset trim window to the full clip so the timeline starts
-          // wide-open. User can narrow with the markers if they want a
-          // partial-window outpaint.
-          setTrimStart(0)
-          setTrimEnd(duration)
-        }
-      } else {
-        const img = new window.Image()
-        img.src = url
-        img.onload = () => {
-          setEditVideo(file, result.path, url, 0, `${img.naturalWidth}x${img.naturalHeight}`)
-        }
-      }
+      const { url, duration, resolution } = await loadMediaInput(file)
+      setEditVideo(file, result.path, url, duration, resolution)
+      // A new source starts with the full clip selected.
+      setTrimStart(0)
+      setTrimEnd(duration)
     } catch {
       setError('Failed to upload')
+      return false
     }
   }, [setEditVideo, setTrimStart, setTrimEnd])
 
@@ -142,6 +128,9 @@ export function OutpaintControls() {
 
   return (
     <div className="space-y-3">
+      <GalleryInput kind="video" label="Outpaint source" onFile={handleUpload} />
+      <GalleryInput kind="image" label="Outpaint source image" onFile={handleUpload}
+        getImages={() => editVideoFile?.type.startsWith('image/') ? [editVideoFile] : []} />
       {/* Upload zone — shown only when no clip loaded. Same dashed-border
           + drop-target treatment as the other Edit-mode flows. */}
       {!editVideoFile ? (

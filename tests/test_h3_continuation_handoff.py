@@ -34,6 +34,7 @@ class ContinuationHandoffTests(unittest.TestCase):
         self.assertIn('No cuts', explicit_negative_constraints(source))
         intent = extract_h3_source_intent(source)
         self.assertNotIn('No candy spilling', intent['global_instructions'])
+        self.assertNotIn('No candy spilling', intent['negative_constraints'])
         self.assertEqual(len(extract_source_events(source)), 2)
         self.assertIn(OPEN, extract_source_events(source)[0]['text'])
 
@@ -91,7 +92,7 @@ class ContinuationHandoffTests(unittest.TestCase):
 
     def test_missing_handoff_keeps_source_fallback(self):
         _, beats, segment = self.canonical(closing='')
-        self.assertEqual(segment['closing_state'], beats[-1]['state_after'])
+        self.assertIn(OPEN, segment['closing_state'])
 
     def test_handoff_does_not_substitute_for_missing_action(self):
         _, beats, segment = self.canonical()
@@ -113,8 +114,10 @@ class ContinuationHandoffTests(unittest.TestCase):
                     'editing_style': 'Continuous take', 'ambient_audio': 'Wind'})
             number = props['segment']['minimum']
             if number == 2:
-                self.assertIn('Required opening state: ' + HANDOFF, kwargs['prompt'])
-                self.assertNotIn('result of this event: ' + OPEN, kwargs['prompt'])
+                self.assertIn('Required opening state: Continue from the visible result of:', kwargs['prompt'])
+                self.assertIn(OPEN, kwargs['prompt'])
+                self.assertIn('Do not repeat it.', kwargs['prompt'])
+                self.assertNotIn('holding the jug', kwargs['prompt'])
                 self.assertNotIn('No candy spilling', kwargs['prompt'])
             return json.dumps({'segment': number, 'coverage': 'Continuous car POV',
                 'event_cards': {'event_1': {'phases': [card(OPEN if number == 1 else LAUNCH)]}},
@@ -125,7 +128,8 @@ class ContinuationHandoffTests(unittest.TestCase):
             planning_style='adaptive', llm_generate=generate)
         self.assertEqual(len(calls), 3)
         self.assertEqual(result['planning_warnings'], [])
-        self.assertEqual(result['segments'][1]['opening_state'], HANDOFF)
+        self.assertIn(OPEN, result['segments'][1]['opening_state'])
+        self.assertNotIn('holding the jug', result['segments'][1]['opening_state'])
         self.assertIn('jug falls', result['segments'][1]['closing_state'])
         self.assertNotIn('magically', result['segments'][1]['closing_state'])
 

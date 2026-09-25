@@ -554,14 +554,24 @@ class AdaptiveWritingTests(unittest.TestCase):
         legacy = _canonicalize_story_ledger(CONCEPT, canonical, candidate, locked_dialogue=[], segment_count=2)
         self.assertEqual(legacy['beats'][0]['description'], CONCEPT)
 
-    def test_camera_handoff_does_not_restore_source_over_adapted_aftermath(self):
+    def test_camera_handoff_keeps_adapted_aftermath_as_context_and_grounded_actions(self):
         from services.h3_story_ledger import _camera_phase_beats
         beat = {'beat_id': 'B2', 'description': 'The agile fighter completes his evasive step as both circle the damaged pillar.',
                 'state_after': 'Both circle beside the fracture.', 'source_event_ids': ['E2', 'E3'], 'dialogue_ids': []}
         events = [{'event_id': 'E2', 'text': 'A punch misses and cracks the pillar.'},
                   {'event_id': 'E3', 'text': 'Both circle beside it.'}]
         adaptive = _camera_phase_beats([beat], source_events=events, expected_dialogue_events={}, preserve_adaptation=True)
-        self.assertEqual(adaptive, [beat])
+        self.assertEqual(len(adaptive), 1)
+        grouped = adaptive[0]
+        self.assertEqual(grouped['_grouped_source_event_ids'], ['E2', 'E3'])
+        self.assertEqual(grouped['source_event_ids'], ['E2', 'E3'])
+        self.assertEqual(grouped['state_after'], beat['state_after'])
+        self.assertIn('evasive step', grouped['_staging_context'])
+        self.assertNotIn('evasive step', grouped['_canonical_action'])
+        self.assertLess(
+            grouped['_canonical_action'].index('punch misses'),
+            grouped['_canonical_action'].index('Both circle'),
+        )
         legacy = _camera_phase_beats([beat], source_events=events, expected_dialogue_events={})
         self.assertEqual(len(legacy), 2)
 

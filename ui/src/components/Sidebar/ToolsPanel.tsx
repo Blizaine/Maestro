@@ -6,6 +6,7 @@ import { MediaFlowPanel } from './MediaFlowPanel'
 import { MediaFinishingControls } from './MediaFinishingControls'
 import { dlssSpatialOptions } from '../../lib/mediaFlow'
 import { FaceRefinerButton } from '../Characters/FaceRefiner'
+import { GalleryInput } from '../shared/GalleryInput'
 
 // Upscale methods — same set as Post Processing's Spatial Upsampling, minus the
 // VAE options (those are tied to the generation pipeline, not a standalone clip).
@@ -103,6 +104,7 @@ export function ToolsPanel({
       setSource({ path: r.path, name: file.name, url: r.url })
     } catch (e) {
       console.error('Source upload failed:', e)
+      return false
     } finally {
       setUploading(false)
     }
@@ -141,6 +143,9 @@ export function ToolsPanel({
 
   return (
     <div className="flex flex-col gap-4">
+      <GalleryInput kind={mediaKind} label={`${tool === 'upscale' ? 'Upscale' : tool === 'film_grain' ? 'Film Grain' : 'Revoice'} source`}
+        getImages={() => mediaKind === 'image' && sourceUrl ? [{url: sourceUrl, name: sourceName || 'Source image'}] : []}
+        onFile={handleSourceUpload} disabledReason={uploading ? 'Uploading source media…' : undefined} />
       {mediaKind === 'video' && <FaceRefinerButton source={sourcePath ? { path: sourcePath, name: sourceName || 'Video', url: sourceUrl } : undefined} />}
       {!embedded && (
       <div>

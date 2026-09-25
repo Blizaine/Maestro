@@ -3,6 +3,8 @@ import { Upload, X, UserRoundPen, Loader2, Eye, Plus } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import type { RecastCharacterMapping } from '../../types'
 import { VideoTimelineSelector } from '../shared/VideoTimelineSelector'
+import { GalleryInput } from '../shared/GalleryInput'
+import { loadMediaInput } from '../../lib/mediaInput'
 import { InfoTooltip } from './InfoTooltip'
 import { ScailResolutionSelector } from './ScailResolutionSelector'
 import * as api from '../../api/client'
@@ -83,17 +85,12 @@ export function RecastControls() {
   const handleVideoUpload = useCallback(async (file: File) => {
     try {
       const result = await api.uploadImage(file)
-      const url = URL.createObjectURL(file)
-      const video = document.createElement('video')
-      video.src = url
-      video.onloadedmetadata = () => {
-        const duration = video.duration && isFinite(video.duration) ? video.duration : 0
-        const resolution = `${video.videoWidth}x${video.videoHeight}`
-        setEditVideo(file, result.path, url, duration, resolution)
-      }
+      const { url, duration, resolution } = await loadMediaInput(file)
+      setEditVideo(file, result.path, url, duration, resolution)
       resetPreview()
     } catch {
       console.error('Failed to upload video')
+      return false
     }
   }, [resetPreview, setEditVideo])
 
@@ -108,6 +105,7 @@ export function RecastControls() {
       })
     } catch {
       console.error('Failed to upload reference image')
+      return false
     }
   }, [updateMapping])
 
@@ -181,6 +179,7 @@ export function RecastControls() {
 
   return (
     <div className="space-y-3">
+      <GalleryInput kind="video" label="Recast source" onFile={handleVideoUpload} />
       <div className="flex items-center gap-1.5">
         <UserRoundPen size={13} className="shrink-0 text-accent-blue" />
         <span className="text-[10px] font-medium text-text-primary">
@@ -283,6 +282,10 @@ export function RecastControls() {
           const previews = referencePreviews.filter(preview => preview.mapping_index === mappingIndex)
           return (
             <div key={mapping.id} className="rounded-lg border border-border bg-bg-secondary/40 p-2 space-y-2">
+              <GalleryInput kind="image" label={`Character ${MAPPING_LABELS[mappingIndex]} reference`}
+                getImages={() => mapping.refUrl ? [{url: mapping.refUrl, name: mapping.target || `Character ${MAPPING_LABELS[mappingIndex]}`}]
+                  : mapping.refFile ? [mapping.refFile] : []}
+                onFile={file => handlePrimaryUpload(mappingIndex, file)} />
               <div className="flex items-center gap-1.5">
                 <span
                   className="w-3 h-3 rounded-full border border-white/30 shrink-0"

@@ -42,6 +42,7 @@ export function DirectorH3Optimizations() {
       .then(options => {
         if (cancelled) return
         setLoadedOptions({ model: videoModel, options })
+        useStore.getState().initializeDirectorH3Turbo(videoModel, options)
         const defaultSteps = options.default_num_inference_steps
         if (defaultSteps != null && Number.isFinite(defaultSteps)) {
           const current = useStore.getState().directorVideoInferenceStepsByModel[videoModel]
@@ -128,7 +129,8 @@ export function DirectorH3Optimizations() {
   )
   const fusedTurbo = modelOptions?.minimax_h3_fused_turbo === true
   const activeCount = [turboSelected, solSelected, slaSelected, cacheSelected].filter(Boolean).length
-  const defaultSteps = modelOptions?.default_num_inference_steps
+  const defaultSteps = modelOptions?.minimax_h3_turbo?.unaccelerated_steps
+    ?? modelOptions?.default_num_inference_steps
   const currentSteps = videoStepsByModel[videoModel] ?? defaultSteps
 
   const setDirectorTurbo = (checked: boolean) => {

@@ -70,6 +70,39 @@
       "description": "Maestro's previous standard-LoRA default and the upstream-recommended EMA checkpoint. It remains available for comparisons and targets stronger faces, fingers, fine texture, and static or small-motion detail using six evaluations at strength 1.0."
     },
     {
+      "id": "lightx2v-ref2va-turbo4-v0.1-comfy-bf16",
+      "label": "LightX2V Ref2VA Turbo4 v0.1 — Singularity",
+      "status": "experimental",
+      "filename": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "remote_path": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "repo_id": "lightx2v/Minimax-h3-Turbo",
+      "model_card_url": "https://github.com/ModelTC/Minimax-H3-Turbo",
+      "revision": "3ec17a324ced54151364f24f8b5fb6bf7e26414f",
+      "sha256": "5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c",
+      "size": 1956193000,
+      "steps": 4,
+      "minimum_steps": 4,
+      "weight": 1.0,
+      "weight_min": 0.0,
+      "weight_max": 2.0,
+      "workflow": "ref2va",
+      "runtime": "standard_lora",
+      "generation_settings": {
+        "guidance_scale": 1.0,
+        "audio_guidance_scale": 1.0,
+        "flow_shift": 12.0,
+        "audio_flow_shift": 3.0,
+        "sample_solver": "euler"
+      },
+      "reference_detail": "match",
+      "lora_contract": {
+        "format": "comfy",
+        "ordinary": {"rank": 128, "alpha": 8, "intrinsic_scale": 0.0625},
+        "fused_qkv": {"rank": 384, "alpha": 24, "intrinsic_scale": 0.0625}
+      },
+      "description": "Pinned Comfy BF16 Ref2VA Turbo4 adapter for experimental Singularity v1.3. Uses four Euler steps, CFG disabled, and Match reference sizing."
+    },
+    {
       "id": "alibaba-pai-fl2va-pdd-8step",
       "label": "Alibaba PAI FL2VA Acc — 8-step PDD",
       "status": "official",

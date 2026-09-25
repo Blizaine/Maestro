@@ -7,78 +7,122 @@ import re
 PERFORMANCE_ROLES = ("vocalist", "instrumentalist", "non_vocal", "non_performer")
 
 MUSIC_PERFORMANCE_RULES = """MUSIC PERFORMANCE ROLES:
-- Establish each person's role from the user's concept, performer mappings and references,
-  then keep that role across cuts. Camera focus never turns an instrumentalist into a singer.
-- For each subjects_on_screen entry, set performance_role: vocalist (assigned lead/backing
-  vocals in this shot), instrumentalist (plays without singing), non_vocal (dancer, listener,
-  or other person not singing), or non_performer (instrument, scenery, object).
-- Vocals in the soundtrack do NOT require the vocalist to be on screen. A guitar/drum
-  cutaway can happen during a vocal phrase: the established singer continues OFF SCREEN.
-  State that explicitly in video_prompt and every window_prompt. Do not insert the singer
-  into that cutaway or transfer their voice/lip movements to the musician being shown.
-- For non-singing guitarists, bassists, drummers and listeners, explicitly describe relaxed,
-  CLOSED lips, with no singing, mouthing lyrics, or lip-sync. Keep hands, body, expression
-  and instrument playing lively; closing the mouth must not freeze their performance.
-- In a wide band shot, only the assigned visible vocalist mouths the audible vocal;
-  the other musicians keep their mouths closed. Backing vocals, duets and a guitarist
-  who also sings are allowed when the user assigns them. Do not invent backing singers.
-- A wind/brass player's mouth may form the required embouchure; that is instrument
-  playing, not lyric-shaped mouth movement. Match first-frame mouth poses to these roles.
-- Preserve explicitly requested cheers, shouts or other non-singing expressions;
-  those do not turn an audience member into the source track's vocalist.
-- Keep one role per person consistent throughout a shot. A camera cut changes framing,
-  not vocal ownership. Preserve the correct performer for each voice in a duet.
-- The person's vocalist ROLE is not evidence that vocals occur in this INTERVAL.
-  During instrumental intros, breaks and pauses, even the lead singer keeps relaxed
-  closed lips while listening, moving or interacting with the band. Never animate
-  guitar riffs as syllables. When vocal evidence is unknown, use this listening pose
-  by default and allow mouth movement only with an actual voice in the source audio.
-- Describe intensity with eyes, posture, hands and instrument playing, not invented
-  bellows, open-mouth shouts, panting or vocal breaths. A drummer does not shout just
-  because a chorus is energetic. A cheer explicitly requested for the audience does
-  not authorize a musician to shout. Remove conflicting mouth actions from action_beats,
-  ending_beat, image_prompt, video_prompt and window_prompts before returning the plan.
+- Describe only people and objects assigned to the current shot. A soundtrack does not
+  require a singer, band member, instrument, or any other person to appear on screen.
+- Give each visible person a role based on the user's concept, explicit performer mapping,
+  or reference: vocalist (sings in this shot), instrumentalist (plays without singing),
+  non_vocal (dancer, listener, or other non-singing person), or non_performer.
+  Do not infer a role from camera focus, musical energy, or an unknown voice.
+- A visible assigned vocalist lip-syncs only their own audible part. Keep their lips relaxed
+  and closed during instrumental intros, gaps, and pauses; detected vocals do not require
+  that vocalist to be visible.
+- A visible assigned instrumentalist plays with relaxed closed lips and active hands/body,
+  without singing or mouthing lyrics. Wind and brass players use their natural embouchure.
+- In a group shot, only explicitly assigned vocalists sing. Backing vocals, duets, and a
+  singing instrumentalist are valid when assigned; do not invent extra singers.
+- Preserve explicitly requested cheers, shouts, and other non-song expressions without
+  transferring the soundtrack's vocals to that person. Preserve dance and other actions.
+- Keep each visible person's role consistent across cuts. Match a singer's visible mouth
+  movement only to that person's own audible part; leave the supplied soundtrack unchanged.
+- Remove conflicting mouth actions from action_beats, ending_beat, image_prompt,
+  video_prompt, and window_prompts while preserving the rest of the requested performance.
 """
 
 
-_VOCAL_OWNERSHIP = (
+_LEGACY_GLOBAL_DIRECTION = (
     "Vocal ownership stays with the assigned singer across camera cuts. "
     "Only an explicitly assigned vocalist lip-syncs, and only to their own "
     "audible vocal part. Non-singing guitarists, bassists and drummers keep "
     "their lips closed without mouthing lyrics, except for a non-singing "
     "expression explicitly requested by the user; their hands and bodies "
     "continue the instrumental performance. During an instrument-only "
-    "cutaway with audible vocals, the singer continues off screen; do not transfer the vocal "
-    "to the person in view or insert a singer into the shot."
+    "cutaway with audible vocals, the singer continues off screen; do not transfer "
+    "the vocal to the person in view or insert a singer into the shot."
+)
+_LEGACY_ACTIVITY_DIRECTIONS = (
+    "This interval has no detected vocals: even the lead singer keeps relaxed "
+    "closed lips throughout, moving or listening to the instrumental music. "
+    "No singing, lip-sync, bellowing or invented vocal breath.",
+    "Vocal activity in this interval is unconfirmed. Default to relaxed closed "
+    "lips, including the lead singer; allow lyric-shaped mouth movement only "
+    "when a voice is actually audible in the supplied audio. Guitar riffs and "
+    "drum hits never drive the mouth. Do not invent shouts or vocal breaths.",
+    "Vocals occur within this interval, not necessarily throughout it. The "
+    "assigned singer closes their lips during instrumental gaps and starts "
+    "lip-sync only when their actual vocal part enters.",
 )
 
 
-def music_performance_direction(subjects=(), vocal_activity=None, *, project_context=""):
-    """Compile assigned roles, without guessing vocalists from camera focus.
+def strip_legacy_music_performance_direction(
+    prompt,
+    subjects=(),
+    vocal_activity=None,
+    *,
+    project_context="",
+):
+    """Remove exact old role boilerplate while preserving surrounding prose."""
+    text = str(prompt or "")
+    for emitted in (_LEGACY_GLOBAL_DIRECTION, *_LEGACY_ACTIVITY_DIRECTIONS):
+        text = text.replace(emitted, "")
 
-    Older plans have no role metadata and receive the conditional direction.
-    Missing roles never imply that an unidentified person must remain silent.
-    """
-    parts = [_VOCAL_OWNERSHIP]
-    if vocal_activity == "silent":
-        parts.append(
-            "This interval has no detected vocals: even the lead singer keeps relaxed "
-            "closed lips throughout, moving or listening to the instrumental music. "
-            "No singing, lip-sync, bellowing or invented vocal breath."
-        )
-    elif vocal_activity == "unknown":
-        parts.append(
-            "Vocal activity in this interval is unconfirmed. Default to relaxed closed "
-            "lips, including the lead singer; allow lyric-shaped mouth movement only "
-            "when a voice is actually audible in the supplied audio. Guitar riffs and "
-            "drum hits never drive the mouth. Do not invent shouts or vocal breaths."
-        )
-    elif vocal_activity == "active":
-        parts.append(
-            "Vocals occur within this interval, not necessarily throughout it. "
-            "The assigned singer closes their lips during instrumental gaps and "
-            "starts lip-sync only when their actual vocal part enters."
-        )
+    # Older compilation appended one canonical line for each role. Remove it
+    # only when the current subject metadata lets us reconstruct that exact
+    # emitted line; never consume an arbitrary sentence or its camera/action
+    # prefix while trying to recognize saved boilerplate.
+    for subject in subjects or ():
+        role = _field(subject, "performance_role")
+        description = re.sub(
+            r"\s+", " ", str(_field(subject, "visual_description") or "")
+        ).strip(" .")
+        if not description:
+            continue
+        emitted = None
+        if role == "vocalist":
+            if _requested_expression(subject, project_context):
+                emitted = (
+                    f"{description} may perform the user's explicitly requested "
+                    "expression; this never transfers the song's vocal to them."
+                )
+            else:
+                emitted = (
+                    f"Assigned visible vocalist: {description}; mouth movement "
+                    "follows only their vocal part when audible."
+                )
+        elif role == "instrumentalist":
+            if _requested_expression(subject, project_context):
+                emitted = (
+                    f"{description} may perform the user's explicitly requested "
+                    "expression; this never transfers the song's vocal to them."
+                )
+            elif _WIND_PLAYER.search(description):
+                emitted = (
+                    f"{description} uses the instrument's embouchure without "
+                    "singing or mouthing lyrics."
+                )
+            else:
+                emitted = (
+                    f"{description} keeps their mouth closed and does not sing, "
+                    "mouth lyrics, or lip-sync; natural body movement continues."
+                )
+        elif role == "non_vocal":
+            emitted = (
+                f"{description} does not sing or mouth the lyrics; preserve any "
+                "explicitly described non-singing expression or cheering."
+            )
+        if emitted:
+            text = text.replace(emitted, "")
+
+    # Collapse only horizontal whitespace created by removal. Preserve blank
+    # lines that separate H3 prompt fields and references.
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    return text.strip()
+
+
+def music_performance_direction(subjects=(), vocal_activity=None, *, project_context=""):
+    """Compile concise directions only for people explicitly visible in this shot."""
+    parts = []
     for subject in subjects or ():
         def field(key):
             return subject.get(key) if isinstance(subject, Mapping) else getattr(subject, key, None)
@@ -87,20 +131,57 @@ def music_performance_direction(subjects=(), vocal_activity=None, *, project_con
         description = re.sub(r"\s+", " ", str(field("visual_description") or "")).strip(" .")
         if not description or role not in PERFORMANCE_ROLES or role == "non_performer":
             continue
-        if role in {"vocalist", "instrumentalist"} and _requested_expression(subject, project_context):
-            parts.append(f"{description} may perform the user's explicitly requested expression; this never transfers the song's vocal to them.")
-            continue
+        requested_expression = _requested_expression(subject, project_context)
         if role == "vocalist":
-            parts.append(f"Assigned visible vocalist: {description}; mouth movement follows only their vocal part when audible.")
-        elif role == "instrumentalist" and re.search(
-            r"\b(?:flute|flutist|flautist|saxophone|saxophonist|trumpet|trombone|clarinet|oboe|bassoon|tuba|harmonica|bagpipe|brass|wind instrument)\w*\b",
-            description, re.IGNORECASE,
-        ):
-            parts.append(f"{description} uses the instrument's embouchure without singing or mouthing lyrics.")
+            if vocal_activity in {"silent", "unknown"}:
+                if requested_expression:
+                    direction = (
+                        f"{description} keeps relaxed closed lips except during the "
+                        "explicitly requested non-song expression; do not lip-sync "
+                        "unless their own vocal part is audible."
+                    )
+                else:
+                    direction = (
+                        f"{description} keeps relaxed closed lips through this interval; "
+                        "no singing or lyric mouthing."
+                    )
+            else:
+                direction = (
+                    f"{description} lip-syncs only their own audible vocal part, "
+                    "with relaxed closed lips during instrumental gaps."
+                )
+            if requested_expression:
+                direction += " Keep that expression separate from their assigned song vocal."
+            parts.append(direction)
+        elif role == "instrumentalist" and _WIND_PLAYER.search(description):
+            direction = (
+                f"{description} uses the instrument's natural embouchure without "
+                "singing or mouthing lyrics."
+            )
+            if requested_expression:
+                direction += " Preserve the explicitly requested non-song expression separately from playing."
+            parts.append(direction)
         elif role == "instrumentalist":
-            parts.append(f"{description} keeps their mouth closed and does not sing, mouth lyrics, or lip-sync; natural body movement continues.")
+            if requested_expression:
+                direction = (
+                    f"{description} keeps relaxed closed lips except during the "
+                    "explicitly requested non-song expression; never lip-sync to "
+                    "source vocals, and keep hands and body active."
+                )
+            else:
+                direction = (
+                    f"{description} plays with relaxed closed lips, without singing or "
+                    "mouthing lyrics; keep hands and body active."
+                )
+            parts.append(direction)
         else:
-            parts.append(f"{description} does not sing or mouth the lyrics; preserve any explicitly described non-singing expression or cheering.")
+            direction = (
+                f"{description} remains a non-singing presence; preserve their "
+                "described action without lip-syncing to the soundtrack."
+            )
+            if requested_expression:
+                direction += " Preserve the explicitly requested non-song expression."
+            parts.append(direction)
     return " ".join(parts)
 
 
@@ -159,16 +240,15 @@ def constrain_music_performance(prompt, subjects=(), vocal_activity=None, *, pro
     quoted text and user-requested expressions are left intact. This is scoped
     to source-song planning; narrative dialogue never passes through it.
     """
+    text = strip_legacy_music_performance_direction(
+        prompt,
+        subjects,
+        vocal_activity,
+        project_context=project_context,
+    )
     people = [s for s in subjects or () if _field(s, "performance_role") in {"vocalist", "instrumentalist"}]
     if not people:
-        return str(prompt or "")
-    text = str(prompt or "")
-    direction = music_performance_direction(subjects, vocal_activity, project_context=project_context)
-    if direction in text:
-        return direction.join(
-            constrain_music_performance(part, subjects, vocal_activity, project_context=project_context)
-            for part in text.split(direction)
-        )
+        return text
     aliases = [_aliases(s) for s in people]
     blocked = []
     for person in people:
@@ -181,7 +261,7 @@ def constrain_music_performance(prompt, subjects=(), vocal_activity=None, *, pro
     # Resolve simple sentence-local subjects, then their following pronouns.
     # Never transfer a drummer's restriction to a singer in a mixed shot.
     current = 0 if len(people) == 1 else None
-    pieces = re.split(r"(?<=[.!?;])(?=\s)|(?=\[Shot\s+\d+\])", str(prompt or ""))
+    pieces = re.split(r"(?<=[.!?;])(?=\s)|(?=\[Shot\s+\d+\])", text)
     for index, sentence in enumerate(pieces):
         matches = [i for i, names in enumerate(aliases) if any(name.search(sentence) for name in names)]
         if len(matches) == 1:

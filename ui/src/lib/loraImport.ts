@@ -27,6 +27,7 @@ export function suggestLoraImportDirectory(url: string): string {
   if (compact.includes('kontext')) return 'flux_dev_kontext'
   if (/\bflux(?:[\s._-]*1)?\b/.test(identity)) return 'flux'
   if (compact.includes('krea2')) return 'krea2'
+  if (/(?<![a-z0-9])qwen[\s._-]*(?:image[\s._-]*)?2[._-]1(?![a-z0-9])/.test(identity)) return 'qwen21'
   if (/\bqwen(?:[\s._-]*image)?\b/.test(identity)) return 'qwen'
   if (compact.includes('zimage')) return 'z_image'
   if (/\bwan[\s._-]*2/.test(identity)) {
@@ -40,5 +41,12 @@ export function suggestLoraImportDirectory(url: string): string {
 }
 
 export function resolveLoraImportDirectory(url: string, manualDirectory: string): string {
-  return manualDirectory || suggestLoraImportDirectory(url)
+  if (manualDirectory) return manualDirectory
+  try {
+    // A CivitAI model can contain versions for different architectures. Its
+    // title/slug is shared; let the backend resolve the chosen version's base.
+    const host = new URL(url.trim()).hostname.toLowerCase().replace(/^www\./, '')
+    if (host === 'civitai.com') return ''
+  } catch { /* Leave invalid URLs to the import endpoint's validation. */ }
+  return suggestLoraImportDirectory(url)
 }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import sys
 import unittest
 
@@ -15,6 +16,8 @@ if str(APP) not in sys.path:
 
 from services.h3_story_ledger import (  # noqa: E402
     _canonicalize_segment_contract,
+    _camera_repair_feedback,
+    _camera_event_card_schema,
     _camera_phase_beats,
     _canonicalize_story_ledger,
     _coalesce_camera_phases,
@@ -23,7 +26,10 @@ from services.h3_story_ledger import (  # noqa: E402
     _dialogue_catalog,
     _dialogue_word_count,
     _expected_dialogue_events,
+    _expand_camera_event_cards,
     _fallback_segment,
+    _h3_contract_clauses,
+    _h3_preview_action_frames,
     _ledger_schema,
     _materialize_segment,
     _materialized_segment_violations,
@@ -40,6 +46,7 @@ from services.h3_story_ledger import (  # noqa: E402
     plan_h3_story_segments,
     sanitize_h3_nonverbal_audio,
     sanitize_h3_prompt_text,
+    _spectacle_violations,
     segment_violations,
 )
 from services.h3_window_planner import (  # noqa: E402
@@ -197,6 +204,210 @@ class H3StoryLedgerTests(unittest.TestCase):
         self.assertIn("exactly one identity instance", intent["cast_cardinality_contract"])
         self.assertIn("Ross - Blaine - Rachel", intent["blocking_contract"])
 
+    def test_media_setup_and_opening_frame_stay_context_while_actions_remain_ordered(self):
+        prompt = (
+            "Make a quiet narrative music video in the warm hall and audience layout shown in <Picture 1>; "
+            "use <Audio 1> as the exact performance-driving soundtrack. "
+            "Use the supplied opening frame as the exact first composition and as the appearance reference. "
+            "Use the supplied image as the exact first frame: preserve the seated audience. "
+            "Keep the same person, clothing, pose progression, hall, and visible audience. "
+            "Play the supplied 37.327-second track once without looping, stretching, replacing, or supplementing it. "
+            "Do not loop, stretch, replace, or supplement the supplied audio; add no dialogue, replacement music, "
+            "new vocals, lyrics, humming, voiceover, captions, sound effects, or extra soundtrack. "
+            "Nora raises the lantern. Nora plays piano while walking toward the stage. "
+            "After the supplied track ends, Nora holds the lantern in silence for four seconds."
+        )
+
+        events = extract_source_events(prompt)
+        intent = extract_h3_source_intent(prompt)
+        event_text = " ".join(item["text"] for item in events).casefold()
+        for context in (
+            "make a quiet narrative music video", "use <audio 1>",
+            "supplied opening frame", "preserve the seated audience",
+            "do not loop", "add no dialogue", "extra soundtrack",
+            "play the supplied 37.327-second track",
+        ):
+            self.assertNotIn(context, event_text)
+        for action in (
+            "Nora raises the lantern", "Nora plays piano", "walking toward the stage",
+            "holds the lantern in silence",
+        ):
+            self.assertIn(action.casefold(), event_text)
+        self.assertIn("play the supplied 37.327-second track", intent["global_instructions"].casefold())
+        self.assertIn("Keep the same person, clothing, pose progression, hall, and visible audience",
+                      intent["global_instructions"])
+        self.assertNotIn("Keep the same person, clothing, pose progression, hall, and visible audience",
+                         intent["opening_only_instructions"])
+        self.assertIn("preserve the seated audience", intent["opening_only_instructions"].casefold())
+
+        action_after_frame = extract_source_events(
+            "Use the supplied image as the exact first frame: Nora lowers the lantern."
+        )
+        self.assertIn("Nora lowers the lantern", " ".join(item["text"] for item in action_after_frame))
+
+    def test_full_fight_opening_pose_is_context_but_later_choreography_stays_timed(self):
+        source = (
+            "Use the supplied opening frame as the exact first composition and as the appearance reference for "
+            "the adult fighter in the cream training robe; begin with the controlled high kick already visible. "
+            "At the exact first frame, the second adult fighter is just outside the frame at right; reveal them "
+            "only as the same uninterrupted tracking move widens or pans right. They wear a plain charcoal "
+            "training jacket and face the cream-robed fighter across the same covered stone courtyard. "
+            "Continue from the opening pose: the cream-robed fighter completes the kick, lands, and steps back; "
+            "the charcoal-jacketed partner checks the movement with a forearm guard and releases; both regain "
+            "balanced footing. The charcoal-jacketed fighter then makes one low sweep, the cream-robed fighter "
+            "steps over it, lands, and stops an open palm a safe distance from the partner's chest. "
+            "The partner lowers both hands to signal the practice bout is over. Keep the action in this order "
+            "and both fighters in the same courtyard. One uninterrupted real-time tracking shot, no cuts, no "
+            "weapons, no injury, no magic, no slow motion, and no dialogue or speech-like mouth movement."
+        )
+        events = extract_source_events(source)
+        event_text = " ".join(item["text"] for item in events).casefold()
+        intent = extract_h3_source_intent(source)
+
+        self.assertNotIn("use the supplied opening frame", event_text)
+        self.assertNotIn("begin with the controlled high kick already visible", event_text)
+        for action in (
+            "reveal them only",
+            "completes the kick",
+            "lands",
+            "steps back",
+            "checks the movement with a forearm guard",
+            "regain balanced footing",
+            "makes one low sweep",
+            "stops an open palm",
+            "lowers both hands",
+        ):
+            self.assertIn(action, event_text)
+        self.assertIn("exact first composition", intent["opening_only_instructions"].casefold())
+        self.assertIn("kick already visible", intent["opening_only_instructions"].casefold())
+        self.assertNotIn("Continue", intent["proper_names"])
+
+        action_tail = (
+            "Begin with Ada opening the box while the brass key is already visible. "
+            "Use the supplied opening frame as the appearance reference for Nora opening a blue door."
+        )
+        tail_text = " ".join(item["text"] for item in extract_source_events(action_tail)).casefold()
+        self.assertIn("ada opening the box", tail_text)
+        self.assertIn("nora opening a blue door", tail_text)
+
+    def test_only_after_is_not_a_cast_name_but_a_person_named_only_is(self):
+        temporal = extract_h3_source_intent(
+            "Noor waits by the door. Only after the bell rings, Malik opens it."
+        )
+        self.assertNotIn("Only", temporal["proper_names"])
+        self.assertIn("Noor", temporal["proper_names"])
+        self.assertIn("Malik", temporal["proper_names"])
+
+        named = extract_h3_source_intent("Only (the courier) enters the archive.")
+        self.assertIn("Only", named["proper_names"])
+
+    def test_inline_scene_profiles_and_prohibitions_stay_out_of_timed_events(self):
+        prompt = (
+            "Scene: The silent story follows an adult archivist through a rainy night. "
+            "Character notes: Ada is an adult archivist in a gray coat. "
+            "Constraints: Do not preview the binder handoff before Ada enters the archive. "
+            "Actions: Ada unlocks the oak door. Ada enters the archive and retrieves a blue binder. "
+            "Ada returns to the doorway and closes the door."
+        )
+
+        events = extract_source_events(prompt)
+        intent = extract_h3_source_intent(prompt)
+        event_text = " ".join(item["text"] for item in events)
+
+        self.assertIn("Ada unlocks the oak door", event_text)
+        self.assertIn("Ada enters the archive", event_text)
+        self.assertIn("retrieves a blue binder", event_text)
+        self.assertIn("returns to the doorway", event_text)
+        self.assertIn("closes the door", event_text)
+        for context in ("Scene:", "Character notes:", "Constraints:", "Do not preview"):
+            self.assertNotIn(context.casefold(), event_text.casefold())
+        self.assertEqual(intent["cast_names"], ["Ada"])
+        self.assertIn("gray coat", intent["global_instructions"])
+        self.assertIn("Do not preview the binder handoff before Ada enters the archive", intent["global_instructions"])
+        self.assertIn("Do not preview the binder handoff before Ada enters the archive", intent["negative_constraints"])
+
+    def test_scene_heading_keeps_unrecognized_authored_actions(self):
+        events = extract_source_events("Scene: Ada finds the lamp. She repairs it.")
+        event_text = " ".join(item["text"] for item in events)
+        self.assertIn("Ada finds the lamp", event_text)
+        self.assertIn("She repairs it", event_text)
+
+    def test_inline_character_notes_stop_before_later_actions(self):
+        for heading in ("Character notes", "Role notes", "Cast notes"):
+            prompt = (
+                f"{heading}: Mara wears a green coat. "
+                "Mara unlocks the safe. Mara retrieves the map."
+            )
+            with self.subTest(heading=heading):
+                event_text = " ".join(item["text"] for item in extract_source_events(prompt))
+                intent = extract_h3_source_intent(prompt)
+                self.assertNotIn("wears a green coat", event_text)
+                self.assertIn("Mara unlocks the safe", event_text)
+                self.assertIn("Mara retrieves the map", event_text)
+                self.assertIn("green coat", intent["global_instructions"])
+
+    def test_inline_role_label_keeps_an_unfamiliar_finite_action(self):
+        action = (
+            "Character notes: Nora: adult gardener transplants the basil "
+            "into a larger pot."
+        )
+        relative_profile = (
+            "Character notes: Nora: adult gardener who alone owns the can."
+        )
+
+        action_text = " ".join(event["text"] for event in extract_source_events(action))
+        profile_text = " ".join(
+            event["text"] for event in extract_source_events(relative_profile)
+        )
+        self.assertIn("transplants the basil", action_text)
+        self.assertNotIn("who alone owns the can", profile_text)
+
+    def test_lowercase_apposition_keeps_its_action_subject(self):
+        for source in (
+            "The pilots, tired and exhausted, retreat to the hangar",
+            "The pilot, bleeding, retreats toward the hangar",
+            "The courier, running, drops the parcel",
+        ):
+            with self.subTest(source=source):
+                clauses = _h3_contract_clauses(source)
+                self.assertEqual(len(clauses), 1, clauses)
+                normalize = lambda text: " ".join(
+                    text.replace(",", "").replace("(", "").replace(")", "").split()
+                )
+                self.assertEqual(normalize(clauses[0]), normalize(source))
+
+    def test_natural_lightning_exception_does_not_cover_a_later_actor_bolt(self):
+        source = "A stormy sky hangs over the ridge. Ivo carries a plain wooden staff."
+        draft = {
+            "action": (
+                "A lightning bolt flashes across the storm clouds. "
+                "A second lightning bolt flashes from Ivo's staff."
+            )
+        }
+        violations = _spectacle_violations(source, draft)
+        self.assertTrue(any("lightning bolt" in item for item in violations), violations)
+
+    def test_generic_character_action_rows_are_not_locked_as_dialogue(self):
+        source = (
+            "Character A: walks to the door.\n"
+            "Character B: catches the falling vase."
+        )
+        self.assertEqual(extract_locked_dialogue(source), [])
+        events = extract_source_events(source)
+        event_text = " ".join(item["text"] for item in events)
+        self.assertIn("walks to the door", event_text)
+        self.assertIn("catches the falling vase", event_text)
+
+    def test_generic_character_questions_and_first_person_speech_stay_dialogue(self):
+        source = (
+            "Character A: I think he opens the door at noon.\n"
+            "Character B: Who opens the door?"
+        )
+        self.assertEqual(
+            [item["text"] for item in extract_locked_dialogue(source)],
+            ["I think he opens the door at noon.", "Who opens the door?"],
+        )
+
     def test_reference_and_prompt_native_cast_are_kept_in_one_exact_contract(self):
         prompt = (
             "Blaine walks into the coffee shop and sits on the couch between "
@@ -320,6 +531,29 @@ class H3StoryLedgerTests(unittest.TestCase):
             canonical_first["end_seconds"] - canonical_first["start_seconds"],
             4.5,
         )
+
+    def test_fallback_keeps_last_source_result_and_continuous_camera_boundary(self):
+        beats = [
+            {
+                "beat_id": "B1", "source_event_ids": ["E1"], "dialogue_ids": [],
+                "description": "Nora lowers the frame toward the worktable",
+                "state_after": "The immediate visible state follows this event: Show new physical progression toward the table",
+            },
+            {
+                "beat_id": "B2", "source_event_ids": ["E2"], "dialogue_ids": [],
+                "description": "Nora sets the frame flat on the worktable",
+                "state_after": "The immediate visible state is the result of this event: Show new physical progression from the lowering toward the later inspection",
+            },
+        ]
+        segment = _fallback_segment(
+            2, duration=8.0, beats=beats,
+            opening_state="Nora holds the frame above the empty worktable",
+            camera_coverage="continuous", dialogue_catalog=[], source_intent={},
+        )
+        self.assertIn("sets the frame flat on the worktable", segment["closing_state"])
+        self.assertNotIn("holds the frame above", segment["closing_state"])
+        self.assertEqual(segment["coverage"], "single continuous shot")
+        self.assertEqual(segment["shots"][1]["transition"], "continuous reframe without a cut")
 
     def test_long_exact_turn_is_fragmented_across_adjacent_windows(self):
         prompt = (
@@ -1000,6 +1234,183 @@ class H3StoryLedgerTests(unittest.TestCase):
         self.assertNotIn("Sniderverse style", rendered)
         self.assertNotIn("rated-r", rendered)
 
+    def test_dialogue_instruction_colon_preserves_all_named_line_anchors(self):
+        prompt = (
+            "Two adult exhibit volunteers wait outside the archive. "
+            "Ada sets the brass key on the table. Len unrolls the paper plan. "
+            "The archive door remains locked. "
+            "Preserve these four lines exactly, in this order, with the named speakers, "
+            "and add no other spoken words: "
+            'Len says, "The north door is still locked." '
+            'Ada replies, "I have the only brass key." '
+            'Len says, "I\'ll stay here with the plan." '
+            'Ada says, "Wait here while I fetch the binder." '
+            "Ada retrieves the blue binder. Ada returns to the same corridor."
+        )
+        locked = extract_locked_dialogue(prompt)
+        events = extract_source_events(prompt)
+        expected = _expected_dialogue_events(prompt, locked)
+        global_instructions = extract_h3_source_intent(prompt)["global_instructions"]
+
+        self.assertEqual(
+            [(item["speaker"], item["text"]) for item in locked],
+            [
+                ("Len", "The north door is still locked."),
+                ("Ada", "I have the only brass key."),
+                ("Len", "I'll stay here with the plan."),
+                ("Ada", "Wait here while I fetch the binder."),
+            ],
+        )
+        speech_events = [
+            (item["event_id"], item["text"])
+            for item in events
+            if re.search(r"\b(?:says?|replies?)\b", item["text"], re.IGNORECASE)
+        ]
+        self.assertEqual(
+            speech_events,
+            [
+                ("E5", "Len says"),
+                ("E6", "Ada replies"),
+                ("E7", "Len says"),
+                ("E8", "Ada says"),
+            ],
+        )
+        self.assertEqual(
+            expected,
+            {"D1": "E5", "D2": "E6", "D3": "E7", "D4": "E8"},
+        )
+        self.assertIn("Preserve these four lines exactly", global_instructions)
+        self.assertNotIn("Len says", global_instructions)
+
+        ledger = _deterministic_ledger(
+            prompt,
+            segment_count=1,
+            locked_dialogue=locked,
+            camera_coverage="multi_shot",
+            reference_context="",
+        )
+        phases = _camera_phase_beats(
+            ledger["beats"],
+            source_events=events,
+            expected_dialogue_events=expected,
+            preserve_adaptation=True,
+        )
+        phase_by_dialogue = {
+            dialogue_id: phase
+            for phase in phases
+            for dialogue_id in phase.get("dialogue_ids") or []
+        }
+        for dialogue_id, event_id in expected.items():
+            self.assertEqual(
+                phase_by_dialogue[dialogue_id]["source_event_ids"],
+                [event_id],
+            )
+        self.assertEqual(
+            [phase_by_dialogue[f"D{index}"]["description"] for index in range(1, 5)],
+            ["Len visibly delivers the assigned dialogue line",
+             "Ada visibly delivers the assigned dialogue line",
+             "Len visibly delivers the assigned dialogue line",
+             "Ada visibly delivers the assigned dialogue line"],
+        )
+
+        phases = _coalesce_camera_phases(phases, target_count=4)
+        fallback = _fallback_segment(
+            1,
+            duration=24.0,
+            beats=phases,
+            opening_state=ledger["initial_state"],
+            camera_coverage="multi_shot",
+            dialogue_catalog=locked,
+            source_intent=ledger["source_intent"],
+        )
+        rendered = _materialize_segment(
+            fallback,
+            beats=phases,
+            dialogue_catalog=locked,
+            source_events=events,
+        )
+        rendered_lines = [
+            (line["speaker"], line["text"])
+            for shot in rendered["shots"]
+            for line in shot["dialogue"]
+        ]
+        self.assertEqual(
+            rendered_lines,
+            [(item["speaker"], item["text"]) for item in locked],
+        )
+        rendered_actions = " ".join(shot["action"] for shot in rendered["shots"])
+        for setup in (
+            "two adult exhibit volunteers wait",
+            "sets the brass key",
+            "unrolls the paper plan",
+            "archive door remains locked",
+        ):
+            self.assertIn(setup, rendered_actions.casefold())
+        for shot in rendered["shots"]:
+            if not shot["dialogue"]:
+                self.assertNotIn(
+                    "visibly delivers the assigned dialogue line",
+                    shot["action"].casefold(),
+                )
+
+    def test_materialization_suppresses_only_pure_unassigned_speech_cues(self):
+        def materialize(source_action: str, proposed_action: str) -> str:
+            segment = {
+                "segment": 1,
+                "title": "Silent setup",
+                "opening_state": "Ada stands by the archive door",
+                "coverage": "multi_shot",
+                "pacing": "natural real-time pacing",
+                "shots": [{
+                    "shot": 1,
+                    "start_seconds": 0.0,
+                    "end_seconds": 6.0,
+                    "transition": "opening composition",
+                    "framing": "medium scene composition",
+                    "camera": "a motivated camera follows the action",
+                    "action": proposed_action,
+                    "dialogue": [],
+                    "beat_ids": ["B1"],
+                }],
+                "closing_state": "Ada remains by the archive door",
+            }
+            beats = [{
+                "beat_id": "B1",
+                "description": proposed_action,
+                "source_event_ids": ["E1"],
+                "dialogue_ids": [],
+                "state_after": "Ada remains by the archive door",
+            }]
+            return _materialize_segment(
+                segment,
+                beats=beats,
+                dialogue_catalog=[{
+                    "dialogue_id": "D1",
+                    "speaker": "Ada",
+                    "text": "I have the key.",
+                }],
+                source_events=[{"event_id": "E1", "text": source_action}],
+            )["shots"][0]["action"]
+
+        silent_action = materialize(
+            "Ada replies",
+            "Ada visibly delivers the assigned dialogue line",
+        )
+        self.assertNotIn("visibly delivers the assigned dialogue line", silent_action)
+        self.assertIn("No words are spoken or mouthed", silent_action)
+
+        mixed_action = materialize(
+            "Ada approaches the doorway and replies",
+            "Ada approaches the doorway while visibly delivering the assigned dialogue line",
+        )
+        self.assertIn("approaches the doorway", mixed_action)
+        self.assertNotIn("visibly delivers the assigned dialogue line", mixed_action)
+
+        for vocalization in ("Ada laughs", "Ada gasps"):
+            with self.subTest(vocalization=vocalization):
+                nonverbal_action = materialize(vocalization, vocalization)
+                self.assertIn(vocalization, nonverbal_action)
+
     def test_source_events_drop_orphaned_character_name_from_compound_action(self):
         prompt = (
             "Blaine waves. Thanos, while standing in the swamp near Yoda, "
@@ -1457,7 +1868,31 @@ class H3StoryLedgerTests(unittest.TestCase):
         self.assertIn("character_appearance", calls[0]["json_schema"]["properties"])
         self.assertNotIn("beats", calls[0]["json_schema"]["properties"])
         self.assertNotIn("MANDATORY OUTPUT CHECKSUM", calls[0]["prompt"])
-        self.assertLessEqual(len(result["segments"][0]["shots"]), 4)
+        first_segment_shots = result["segments"][0]["shots"]
+        first_segment_beats = [
+            beat for beat in result["camera_checkpoint"]["context"]["render_beats"]
+            if int(beat.get("segment") or 0) == 1
+        ]
+        first_event_ids = list(dict.fromkeys(
+            str(event_id or "").upper()
+            for beat in first_segment_beats
+            for event_id in (beat.get("source_event_ids") or [])
+        ))
+        source_event_text = {
+            str(event.get("event_id") or "").upper(): str(event.get("text") or "").casefold()
+            for event in result["camera_checkpoint"]["context"]["source_events"]
+        }
+        timed_source = " ".join(
+            str(shot.get("_timing_source_action") or "").casefold()
+            for shot in first_segment_shots
+        )
+        source_offsets = []
+        for event_id in first_event_ids:
+            source_text = source_event_text[event_id]
+            offset = timed_source.find(source_text)
+            self.assertGreaterEqual(offset, 0, f"camera phases omitted immutable source event {event_id}")
+            source_offsets.append(offset)
+        self.assertEqual(source_offsets, sorted(source_offsets))
         rendered_dialogue = [
             (line["dialogue_id"], line["speaker"])
             for segment in result["segments"]
@@ -1583,7 +2018,8 @@ class H3StoryLedgerTests(unittest.TestCase):
             for event_id in beat["source_event_ids"]
         ]
         self.assertEqual(referenced, [item["event_id"] for item in extract_source_events(self.prompt)])
-        self.assertIn("Do not return a story schedule, IDs, beats", calls[0]["prompt"])
+        self.assertIn("Do not return a story schedule", calls[0]["prompt"])
+        self.assertNotIn("beats", calls[0]["json_schema"]["properties"])
 
     def test_canonicalizer_anchors_immediate_first_line_without_llm_repair(self):
         prompt = (
@@ -2520,6 +2956,362 @@ class H3StoryLedgerTests(unittest.TestCase):
             self.assertEqual(prompt.count("integrated_multimodal_description:"), 1)
             self.assertEqual(prompt.count("overall_soundscape:"), 1)
             self.assertEqual(prompt.count("non_diegetic_music:"), 1)
+
+    def test_creation_preface_keeps_action_bearing_tail_and_performance_motion(self):
+        for source, expected in (
+            (
+                "Create a short video of Nora unlocking the case and handing Lee the map.",
+                ("unlocking the case", "handing Lee the map"),
+            ),
+            (
+                "Keep playing the piano while walking across the room.",
+                ("playing the piano", "walking across the room"),
+            ),
+        ):
+            with self.subTest(source=source):
+                events = extract_source_events(source)
+                text = " ".join(item["text"] for item in events).casefold()
+                for action in expected:
+                    self.assertIn(action.casefold(), text)
+
+    def test_empty_window_anchors_cross_the_full_story_and_run_without_event_ids(self):
+        source = (
+            "[0s-4s] Nora opens the blue workshop door. "
+            "[4s-8s] Nora carries the map through the doorway."
+        )
+        events = extract_source_events(source)
+        schedule = [
+            {"beat_id": "B1", "segment": 1, "source_event_ids": ["E1"],
+             "dialogue_ids": [], "description": events[0]["text"], "state_after": "The door is open."},
+            {"beat_id": "B2", "segment": 2, "source_event_ids": [],
+             "dialogue_ids": [], "description": "Nora checks the map beside the threshold.",
+             "state_after": "Nora remains beside the threshold."},
+            {"beat_id": "B3", "segment": 3, "source_event_ids": ["E2"],
+             "dialogue_ids": [], "description": events[1]["text"], "state_after": "The map is inside."},
+        ]
+        connective = _camera_phase_beats(
+            [schedule[1]], source_events=events, expected_dialogue_events={},
+            full_schedule_beats=schedule,
+        )[0]
+        self.assertEqual(connective["_transition_after_source_event_ids"], ["E1"])
+        self.assertEqual(connective["_transition_before_source_event_ids"], ["E2"])
+
+        def violations(action: str) -> list[str]:
+            segment = {
+                "segment": 2,
+                "semantic_actions": True,
+                "opening_state": "The door is open.",
+                "closing_state": "Nora remains beside the threshold.",
+                "shots": [{
+                    "shot": 1, "beat_ids": ["B2"], "dialogue": [],
+                    "start_seconds": 0.0, "end_seconds": 4.0,
+                    "transition": "continuous reframe", "framing": "wide view",
+                    "camera": "continuous camera movement", "action": action,
+                    "sound_effects": "",
+                }],
+            }
+            return segment_violations(
+                source, segment, segment_number=2, duration=4.0,
+                assigned_beats=[connective], dialogue_catalog=[],
+            )
+
+        replay_and_preview = violations(
+            "Nora opens the blue workshop door and carries the map through the doorway."
+        )
+        self.assertTrue(any("replays completed source event E1" in item for item in replay_and_preview))
+        self.assertTrue(any("previews later source event E2" in item for item in replay_and_preview))
+        self.assertEqual(
+            violations("Nora adjusts a loose corner of the map beside the doorway."),
+            [],
+        )
+
+    def test_bound_audio_drive_allows_recurrent_performance_in_connective_phase(self):
+        source = (
+            "[0s-4s] Nora plays the piano. "
+            "[4s-8s] Lee sets the score on the chair."
+        )
+        events = extract_source_events(source)
+        schedule = [
+            {"beat_id": "B1", "segment": 1, "source_event_ids": ["E1"],
+             "dialogue_ids": [], "description": events[0]["text"], "state_after": "Nora continues."},
+            {"beat_id": "B2", "segment": 2, "source_event_ids": [],
+             "dialogue_ids": [], "description": "A connective visual beat.",
+             "state_after": "The music remains in progress."},
+            {"beat_id": "B3", "segment": 3, "source_event_ids": ["E2"],
+             "dialogue_ids": [], "description": events[1]["text"], "state_after": "The score rests on the chair."},
+        ]
+        connective = _camera_phase_beats(
+            [schedule[1]], source_events=events, expected_dialogue_events={},
+            full_schedule_beats=schedule, audio_driven=True,
+        )[0]
+        segment = {
+            "segment": 2, "semantic_actions": True,
+            "opening_state": "Nora remains at the piano.",
+            "closing_state": "The music remains in progress.",
+            "shots": [{
+                "shot": 1, "beat_ids": ["B2"], "dialogue": [],
+                "start_seconds": 0.0, "end_seconds": 4.0,
+                "transition": "continuous reframe", "framing": "wide view",
+                "camera": "continuous camera movement",
+                "action": "Nora plays the piano softly while the room settles.",
+                "sound_effects": "",
+            }],
+        }
+        errors = segment_violations(
+            source, segment, segment_number=2, duration=4.0,
+            assigned_beats=[connective], dialogue_catalog=[],
+        )
+        self.assertFalse(any("replays completed source event E1" in item for item in errors), errors)
+
+    def test_explicit_spaced_recurrence_allows_a_later_occurrence_only(self):
+        source = (
+            "[0s-4s] Nora closes the workshop door every evening. "
+            "[4s-8s] Nora hands Lee the key."
+        )
+        events = extract_source_events(source)
+        schedule = [
+            {"beat_id": "B1", "segment": 1, "source_event_ids": ["E1"],
+             "dialogue_ids": [], "description": events[0]["text"],
+             "state_after": "The workshop door is shut."},
+            {"beat_id": "B2", "segment": 2, "source_event_ids": [],
+             "dialogue_ids": [], "description": "A later evening at the workshop.",
+             "state_after": "The door remains shut."},
+            {"beat_id": "B3", "segment": 3, "source_event_ids": ["E2"],
+             "dialogue_ids": [], "description": events[1]["text"],
+             "state_after": "Lee has the key."},
+        ]
+        connective = _camera_phase_beats(
+            [schedule[1]], source_events=events, expected_dialogue_events={},
+            full_schedule_beats=schedule,
+        )[0]
+        segment = {
+            "segment": 2, "semantic_actions": True,
+            "opening_state": "The workshop door is shut.",
+            "closing_state": "The workshop door remains shut after the later visit.",
+            "shots": [{
+                "shot": 1, "beat_ids": ["B2"], "dialogue": [],
+                "start_seconds": 0.0, "end_seconds": 4.0,
+                "transition": "continuous reframe", "framing": "medium view",
+                "camera": "continuous camera movement",
+                "action": "The following evening. Nora closes the workshop door.",
+                "sound_effects": "",
+            }],
+        }
+        errors = segment_violations(
+            source, segment, segment_number=2, duration=4.0,
+            assigned_beats=[connective], dialogue_catalog=[],
+        )
+        self.assertFalse(any("replays completed source event E1" in item for item in errors), errors)
+
+        one_off = "[0s-4s] Nora closes the workshop door. [4s-8s] Nora hands Lee the key."
+        one_off_events = extract_source_events(one_off)
+        one_off_schedule = [
+            {**schedule[0], "description": one_off_events[0]["text"]},
+            schedule[1],
+            {**schedule[2], "description": one_off_events[1]["text"]},
+        ]
+        one_off_connective = _camera_phase_beats(
+            [one_off_schedule[1]], source_events=one_off_events,
+            expected_dialogue_events={}, full_schedule_beats=one_off_schedule,
+        )[0]
+        one_off_errors = segment_violations(
+            one_off, segment, segment_number=2, duration=4.0,
+            assigned_beats=[one_off_connective], dialogue_catalog=[],
+        )
+        self.assertTrue(
+            any("replays completed source event E1" in item for item in one_off_errors),
+            one_off_errors,
+        )
+
+    def test_camera_prompt_marks_only_assigned_explicit_recurrence(self):
+        prompt = (
+            "Every evening Nora waters the station planter. "
+            "Lee changes the score on the bench."
+        )
+        events = extract_source_events(prompt)
+        self.assertEqual(len(events), 2)
+        ledger = _deterministic_ledger(
+            prompt, segment_count=1, segment_durations=[10.0],
+            locked_dialogue=[], camera_coverage="multi_shot", reference_context="",
+        )
+        calls = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            if kwargs["json_schema"] is None:
+                return json.dumps({
+                    "character_appearance": {"Nora": "As supplied.", "Lee": "As supplied."},
+                    "setting_continuity": "A station planter and bench.",
+                    "motion_mechanics": "Natural physical movement.",
+                    "visual_continuity": "Naturalistic live action.",
+                    "editing_style": "Readable camera coverage.",
+                    "ambient_audio": "Quiet station ambience.",
+                })
+            properties = kwargs["json_schema"].get("properties", {})
+            if "event_cards" in properties:
+                raise RuntimeError("capture camera prompt only")
+            return json.dumps(ledger)
+
+        plan_h3_story_segments(
+            prompt, segment_durations=[10.0], mode="reference_sequence",
+            camera_coverage="multi_shot", expect_dialogue=False,
+            planning_style="faithful", llm_generate=generate,
+        )
+        camera_call = next(call for call in calls if "event_cards" in call["json_schema"]["properties"])
+        card_text = camera_call["prompt"].split(
+            "Immutable chronological events (depict each once, in order):\n", 1,
+        )[1].split("\n\nImmutable dialogue performances", 1)[0]
+        cards = json.loads(card_text)
+        self.assertEqual(len(cards), 3)
+        self.assertEqual(cards[0]["assigned_occurrence"]["source_event_id"], "E1")
+        self.assertEqual(cards[0]["assigned_occurrence"]["occurrence"], 1)
+        self.assertEqual(cards[1]["assigned_occurrence"]["occurrence"], 2)
+        self.assertNotIn("assigned_occurrence", cards[2])
+
+    def test_first_frame_opening_is_first_advancing_phase_not_summary(self):
+        beat = {
+            "beat_id": "B1", "source_event_ids": ["E1"],
+            "dialogue_ids": [], "_start_frame_continuation": True,
+        }
+        event = _camera_event_card_schema(1, [beat])["properties"]["event_cards"]["properties"]["event_1"]
+        self.assertEqual(event["properties"]["phases"]["minItems"], 0)
+        self.assertIn("first advancing phase", event["properties"]["opening"]["properties"]["action"]["description"])
+        recovery_description = event["properties"]["opening"]["properties"]["recovery"]["description"]
+        self.assertIn("leave it empty when no separate transition is needed", recovery_description)
+        self.assertIn("starting from the state achieved by opening.action", event["properties"]["phases"]["items"]["properties"]["action"]["description"])
+        self.assertIn("Begin from the state reached by recovery", event["properties"]["opening"]["properties"]["action"]["description"])
+
+    def test_body_part_hand_nouns_do_not_hide_later_transfer_predicates(self):
+        cast = re.compile(r"\b(?:Mara|Sam|Priya|Ada|Len)\b", re.I)
+        cases = (
+            ("Priya holds her right hand steady at her side.", False),
+            ("Mara's left hand relaxed beside the spool.", False),
+            ("Mara's hands shaking above the spool.", False),
+            ("Mara's hand off the key remains still.", False),
+            ("Mara rests her hand on the table and hands Sam the spool.", True),
+            ("Let her hand Sam the key.", True),
+            ("Let her hand off the key to Sam.", True),
+            ("Watch her hand it over.", True),
+        )
+        for text, expect_transfer in cases:
+            with self.subTest(text=text):
+                frames = _h3_preview_action_frames(text, cast)
+                self.assertEqual(any(frame[0] == "hand" for frame in frames), expect_transfer, frames)
+        self.assertTrue(any(
+            frame[0] == "hand"
+            for frame in _h3_preview_action_frames("Let her hand Sam the key.", None)
+        ))
+        self.assertTrue(any(
+            frame[0] == "hand"
+            for frame in _h3_preview_action_frames("Let her hand off the key to Sam.", None)
+        ))
+
+    def test_chronology_repair_feedback_keeps_exact_source_anchor(self):
+        source = "Only after the final line, Ada and Len lower the completed frame."
+        feedback = _camera_repair_feedback(
+            ["B1 shot action drops the explicit 'only after' chronology relation"],
+            [{"beat_id": "B1", "description": source}],
+        )
+        self.assertEqual(len(feedback), 1)
+        self.assertIn("retain the source's exact temporal anchor wording and order", feedback[0])
+        self.assertIn(source, feedback[0])
+
+    def test_prior_camera_context_is_limited_to_static_geometry(self):
+        from services.h3_story_ledger import _h3_stable_camera_context
+        events = extract_source_events("Priya opens the workshop door.")
+        context = _h3_stable_camera_context(
+            "The stone wall is west of the workshop. Priya opens the workshop door. "
+            "The door opens inward.", events,
+        )
+        self.assertIn("stone wall is west of the workshop", context)
+        self.assertIn("door opens inward", context)
+        self.assertNotIn("Priya opens", context)
+
+    def test_generated_connective_state_does_not_replace_camera_authored_ending(self):
+        prompt = "[0s-4s] Nora opens the blue case."
+        event = extract_source_events(prompt)[0]
+        beat = {
+            "beat_id": "B1", "source_event_ids": [event["event_id"]],
+            "dialogue_ids": [], "description": event["text"],
+            "state_after": "The immediate visible state follows this event: Show progression.",
+        }
+        segment = {
+            "segment": 1, "title": "Case", "opening_state": "Nora faces the case.",
+            "coverage": "continuous", "pacing": "real time",
+            "shots": [{
+                "shot": 1, "event_indices": [1], "dialogue_ids": [],
+                "start_seconds": 0.0, "end_seconds": 4.0,
+                "transition": "continuous reframe", "framing": "medium view",
+                "camera": "track Nora", "action": "Nora opens the blue case.",
+                "sound_effects": "",
+            }],
+            "closing_state": "The blue case is open on the table.",
+        }
+        normalized = _canonicalize_segment_contract(
+            segment, segment_number=1, duration=4.0, assigned_beats=[beat],
+            dialogue_catalog=[], opening_state="Nora faces the case.",
+            source_intent={}, source_events=[event],
+        )
+        self.assertEqual(normalized["closing_state"], "The blue case is open on the table.")
+
+    def test_one_camera_card_per_silent_source_event_can_stay_in_one_take(self):
+        source = " ".join([
+            "[0s-2s] Nora opens the case.",
+            "[2s-4s] Nora removes the map.",
+            "[4s-6s] Nora folds the map.",
+            "[6s-8s] Nora sets the map on the table.",
+            "[8s-10s] Nora closes the case.",
+            "[10s-12s] Nora walks to the window.",
+        ])
+        events = extract_source_events(source)
+        grouped = {
+            "beat_id": "B1", "segment": 1,
+            "source_event_ids": [item["event_id"] for item in events],
+            "dialogue_ids": [],
+            "description": "A continuous sequence of all six actions.",
+            "state_after": "Nora stands beside the window with the map on the table.",
+        }
+        phases = _camera_phase_beats(
+            [grouped], source_events=events, expected_dialogue_events={},
+            preserve_adaptation=True,
+        )
+        self.assertEqual([beat["source_event_ids"] for beat in phases], [[f"E{i}"] for i in range(1, 7)])
+        self.assertTrue(all("_staging_context" not in beat for beat in phases))
+        self.assertTrue(all("_staging_context" not in beat for beat in phases[1:]))
+        schema = _camera_event_card_schema(1, phases)
+        cards = schema["properties"]["event_cards"]["properties"]
+        self.assertEqual(list(cards), [f"event_{i}" for i in range(1, 7)])
+        camera_plan = {
+            "segment": 1, "title": "A continuous take", "coverage": "single continuous take",
+            "pacing": "real time", "closing_state": grouped["state_after"],
+            "event_cards": {
+                f"event_{i}": {"phases": [{
+                    "action": events[i - 1]["text"],
+                    "framing": "continuous wide-to-medium composition",
+                    "camera": "reframe without a cut",
+                    "transition": "continue the same take without cutting",
+                    "sound_effects": "natural synchronized effects",
+                }]}
+                for i in range(1, 7)
+            },
+        }
+        expanded = _expand_camera_event_cards(
+            camera_plan, assigned_beats=phases, segment_number=1, duration=12.0,
+        )
+        normalized = _canonicalize_segment_contract(
+            expanded, segment_number=1, duration=12.0, assigned_beats=phases,
+            dialogue_catalog=[], opening_state="Nora stands beside the closed case.",
+            source_intent={}, source_events=events,
+        )
+        self.assertEqual(len(normalized["shots"]), 6)
+        self.assertTrue(all("without cutting" in shot["transition"] for shot in normalized["shots"]))
+        self.assertEqual(
+            segment_violations(
+                source, normalized, segment_number=1, duration=12.0,
+                assigned_beats=phases, dialogue_catalog=[],
+            ),
+            [],
+        )
 
     def test_sanitizer_neutralizes_template_and_context_ir_syntax(self):
         value = sanitize_h3_prompt_text('{"S1": "Neo"} detailed_description: action')

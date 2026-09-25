@@ -5,13 +5,58 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'app'))
 from services.studio_enhancement import (
     StudioJobArchive, captured_settings, current_settings, enhancement_context,
-    enhancement_request, new_enhancement, prepare_enhanced_job, public_enhancement,
+    enhancement_request, new_enhancement, prepare_enhanced_job, public_enhancement, fidelity_retry_limit,
+    enhancement_warnings,
 )
+
+
+class SingleWindowFidelityTests(unittest.TestCase):
+    valid = ('integrated_multimodal_description: [Shot 1] An adult gardener lifts one red pot. '
+             'The camera follows the pot upward. No dialogue.\n'
+             'overall_soundscape: Quiet garden ambience.\nnon_diegetic_music: N/A')
+
+    def test_retry_limit_and_early_success_for_single_h3_prompt(self):
+        from services import llm_service
+        for limit, replies, count, warns in (
+            (0, ['Bad draft'], 1, True),
+            (1, ['Bad draft', 'Still bad'], 2, True),
+            (3, ['Bad draft', 'Still bad', self.valid], 3, False),
+            (3, [self.valid], 1, False),
+            (3, ['Bad draft'] * 4, 4, True),
+        ):
+            with self.subTest(limit=limit, replies=len(replies)), \
+                    enhancement_context({'enhance_fidelity_retries': limit}, lambda: False), \
+                    patch.object(llm_service, 'generate', side_effect=replies) as writer, \
+                    patch('services.enhance_guides.get_enhance_guide', return_value='H3 guide'):
+                result = llm_service.enhance_prompt(
+                    'An adult gardener lifts one red pot. No dialogue.', mode='video',
+                    model_type='minimax_h3_fused_turbo', duration_seconds=8,
+                    planning_style='faithful', max_new_tokens=1024)
+                self.assertEqual(writer.call_count, count)
+                self.assertEqual(bool(enhancement_warnings()), warns)
+                self.assertIn('integrated_multimodal_description:', result)
+                if len(replies) == 3:
+                    self.assertIn('Still bad', writer.call_args.kwargs['prompt'])
+
+    def test_cancel_before_fidelity_repair_does_not_retry(self):
+        from services import llm_service
+        cancelled = False
+        def draft(**kwargs):
+            nonlocal cancelled
+            cancelled = True
+            return 'Bad draft'
+        with self.assertRaises(InterruptedError), \
+                enhancement_context({'enhance_fidelity_retries': 5}, lambda: cancelled), \
+                patch.object(llm_service, 'generate', side_effect=draft) as writer, \
+                patch('services.enhance_guides.get_enhance_guide', return_value='H3 guide'):
+            llm_service.enhance_prompt('A gardener lifts one pot. No dialogue.', mode='video',
+                model_type='minimax_h3_fused_turbo', duration_seconds=8)
+        self.assertEqual(writer.call_count, 1)
 
 
 class QueuedEnhancementTests(unittest.TestCase):
@@ -118,6 +163,43 @@ class QueuedEnhancementTests(unittest.TestCase):
             self.assertEqual(settings['openai_api_key'], 'current')
         self.assertNotIn('settings', public_enhancement(record))
         self.assertFalse(captured_settings({})['nsfw_mode'])
+
+    def test_fidelity_preferences_default_and_are_frozen_for_queued_jobs(self):
+        defaults = captured_settings({})
+        self.assertEqual(defaults['enhance_fidelity_retries'], 1)
+        self.assertFalse(defaults['enhance_fidelity_auto_continue'])
+        settings = {'enhance_fidelity_retries': 3, 'enhance_fidelity_auto_continue': True}
+        record = new_enhancement(self.params, settings)
+        settings.update(enhance_fidelity_retries=0, enhance_fidelity_auto_continue=False)
+        with enhancement_context(record['settings'], lambda: False):
+            self.assertEqual(fidelity_retry_limit(), 3)
+            self.assertTrue(current_settings(settings)['enhance_fidelity_auto_continue'])
+        self.assertEqual(fidelity_retry_limit(), 1)
+        self.assertEqual(fidelity_retry_limit({'enhance_fidelity_retries': 0}), 0)
+        self.assertEqual(fidelity_retry_limit({'enhance_fidelity_retries': 100}), 5)
+        self.assertEqual(fidelity_retry_limit({'enhance_fidelity_retries': 'bad'}), 1)
+
+    def test_auto_continue_keeps_warnings_and_fallback_without_review_pause(self):
+        self.prepare.side_effect = None
+        self.prepare.return_value = {'params': self.params, 'h3_window_plan': {
+            'planned_by': 'deterministic_fallback', 'planning_warnings': ['Window 2 needs review.']}}
+        with enhancement_context({'enhance_fidelity_auto_continue': True}, lambda: False):
+            result = self.run_prepare()
+        self.assertFalse(result['enhancement_review_required'])
+        self.assertTrue(result['enhancement_review_bypassed'])
+        self.assertEqual(result['enhancement_warnings'], ['Window 2 needs review.'])
+        self.assertEqual(result['h3_window_plan']['planned_by'], 'deterministic_fallback')
+
+    def test_auto_continue_does_not_hide_writer_errors_or_empty_drafts(self):
+        with enhancement_context({'enhance_fidelity_auto_continue': True}, lambda: False):
+            self.enhance.side_effect = RuntimeError('writer offline')
+            with self.assertRaisesRegex(RuntimeError, 'writer offline'):
+                self.run_prepare()
+            self.enhance.side_effect = None
+            self.enhance.return_value = {'enhanced': ''}
+            with self.assertRaisesRegex(ValueError, 'empty prompt'):
+                self.run_prepare()
+        self.prepare.assert_not_called()
 
     def test_reference_roles_remain_distinct_from_exact_first_frame(self):
         self.model.update(architecture='minimax_h3_ref2va', omni_reference=True)

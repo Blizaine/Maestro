@@ -13,6 +13,8 @@ import {
 import { useStore } from '../../stores/useStore'
 import type { RepaintRegionMapping } from '../../types'
 import { VideoTimelineSelector } from '../shared/VideoTimelineSelector'
+import { GalleryInput } from '../shared/GalleryInput'
+import { loadMediaInput } from '../../lib/mediaInput'
 import { InfoTooltip } from './InfoTooltip'
 import { ScailResolutionSelector } from './ScailResolutionSelector'
 import * as api from '../../api/client'
@@ -72,20 +74,15 @@ export function RestyleControls() {
   const handleVideoUpload = useCallback(async (file: File) => {
     try {
       const result = await api.uploadImage(file)
-      const url = URL.createObjectURL(file)
-      const video = document.createElement('video')
-      video.src = url
-      video.onloadedmetadata = () => {
-        const duration = video.duration && isFinite(video.duration) ? video.duration : 0
-        const resolution = `${video.videoWidth}x${video.videoHeight}`
-        setEditVideo(file, result.path, url, duration, resolution)
-        // An edited frame is composition-specific. A new source must not
-        // silently reuse a target made for the previous video.
-        setTargetFrame(null, '', '')
-      }
+      const { url, duration, resolution } = await loadMediaInput(file)
+      setEditVideo(file, result.path, url, duration, resolution)
+      // An edited frame is composition-specific. A new source must not
+      // silently reuse a target made for the previous video.
+      setTargetFrame(null, '', '')
       resetPreview()
     } catch (error) {
       console.error('Repaint source upload failed:', error)
+      return false
     }
   }, [resetPreview, setEditVideo, setTargetFrame])
 
@@ -96,6 +93,7 @@ export function RestyleControls() {
       resetPreview()
     } catch (error) {
       console.error('Repaint target-frame upload failed:', error)
+      return false
     }
   }, [resetPreview, setTargetFrame])
 
@@ -151,6 +149,9 @@ export function RestyleControls() {
 
   return (
     <div className="space-y-3">
+      <GalleryInput kind="video" label="Repaint source" onFile={handleVideoUpload} />
+      <GalleryInput kind="image" label="Repaint edited frame" onFile={handleTargetUpload}
+        getImages={() => targetFrameUrl ? [{url: targetFrameUrl, name: 'Repaint edited frame'}] : []} />
       <div className="flex items-center gap-1.5">
         <Paintbrush size={13} className="shrink-0 text-accent-blue" />
         <span className="text-[10px] font-medium text-text-primary">

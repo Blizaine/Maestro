@@ -814,6 +814,13 @@ function _applyModelDefaults(
           overrides.num_inference_steps = remembered
           continue
         }
+        const turbo = state.modelOptions?.model_type === modelType
+          ? state.modelOptions.minimax_h3_turbo : null
+        if (state.params.minimax_h3_turbo_mode === false && turbo?.default_enabled
+          && turbo.unaccelerated_steps != null) {
+          overrides.num_inference_steps = turbo.unaccelerated_steps
+          continue
+        }
       }
       if ((d as Record<string, unknown>)[field] !== undefined) {
         overrides[field] = (d as Record<string, unknown>)[field]
@@ -947,6 +954,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
   'minimax_h3_ref2va',
   'minimax_h3_ref2va_full',
   'minimax_h3_ref2va_fused_turbo',
+  'minimax_h3_ref2va_singularity',
   // Audio — Speech
   'kugelaudio_0_open',
   'qwen3_tts_base',
@@ -973,7 +981,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 16
+const DEFAULTS_VERSION = 17
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -1000,6 +1008,7 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   14: ['yue2'],
   15: ['yue2'], // v2.2 music default; enable once, then preserve user changes.
   16: ['qwen_image_21_7B'],
+  17: ['minimax_h3_ref2va_singularity'],
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 
@@ -1944,7 +1953,7 @@ interface AppState {
   servicesConfig: ServicesConfig | null
   servicesConfigLoading: boolean
   loadServicesConfig: () => Promise<void>
-  updateServicesConfig: (partial: Partial<ServicesConfig>) => Promise<void>
+  updateServicesConfig: (partial: Partial<ServicesConfig>, options?: { throwOnError?: boolean }) => Promise<void>
 
   // LLM state
   llmStatus: LlmStatus | null
@@ -2060,6 +2069,7 @@ interface AppState {
   setDirectorVideoMaxShotFrames: (modelType: string, frames: number | null) => void
   setDirectorH3TurboMode: (modelType: string, enabled: boolean) => void
   setDirectorH3TurboPreset: (modelType: string, presetId: string) => void
+  initializeDirectorH3Turbo: (modelType: string, options: ModelOptions) => void
   setDirectorH3SolMode: (modelType: string, enabled: boolean) => void
   setDirectorH3FirstBlockCache: (modelType: string, enabled: boolean) => void
   setDirectorH3FirstBlockCacheMultiplier: (modelType: string, value: number) => void
@@ -8947,7 +8957,10 @@ export const useStore = create<AppState>((set, get) => ({
       }
       // Apply model defaults for inference steps and guidance scale
       if (options.default_num_inference_steps != null) {
-        paramUpdates.num_inference_steps = options.default_num_inference_steps
+        paramUpdates.num_inference_steps = activeState.params.minimax_h3_turbo_mode === false
+          && options.minimax_h3_turbo?.default_enabled
+          ? options.minimax_h3_turbo.unaccelerated_steps ?? options.default_num_inference_steps
+          : options.default_num_inference_steps
       }
       const rememberedSteps = _rememberedModelSteps(activeState, modelType, options)
       if (rememberedSteps != null) paramUpdates.num_inference_steps = rememberedSteps
@@ -8994,6 +9007,12 @@ export const useStore = create<AppState>((set, get) => ({
         paramUpdates.override_attention = ''
       }
       if (options.minimax_h3_turbo) {
+        // Undefined means a fresh model selection; an explicit false is a
+        // user opt-out (including restored settings) and must remain off.
+        const turboEnabled = get().params.minimax_h3_turbo_mode
+          ?? (activeState.params.model_type === modelType
+            && options.minimax_h3_turbo.default_enabled === true)
+        paramUpdates.minimax_h3_turbo_mode = turboEnabled
         const turboPresets = options.minimax_h3_turbo.presets?.length
           ? options.minimax_h3_turbo.presets
           : [{
@@ -9011,7 +9030,7 @@ export const useStore = create<AppState>((set, get) => ({
         // A restored Turbo preset always displays the same step count the
         // backend will enforce. This also closes a race where model defaults
         // (20 steps) arrive after the user checks Turbo (currently 8-step PDD).
-        if (get().params.minimax_h3_turbo_mode === true) {
+        if (turboEnabled) {
           paramUpdates.num_inference_steps = selectedPreset.steps
           const selectedRecipe = options.minimax_h3_turbo.presets?.find(preset => preset.id === selectedPreset.id)
           if (selectedRecipe?.generation_settings?.guidance_scale != null) {
@@ -9076,6 +9095,24 @@ export const useStore = create<AppState>((set, get) => ({
           ...paramUpdates,
         },
       }))
+      if (
+        options.minimax_h3_turbo?.default_enabled
+        && activeState.params.model_type === modelType
+        && activeState.params.minimax_h3_turbo_mode == null
+      ) {
+        const preset = options.minimax_h3_turbo.presets.find(
+          item => item.id === paramUpdates.minimax_h3_turbo_preset,
+        )
+        if (preset) {
+          // Use the same visible LoRA/weight state as the Turbo checkbox.
+          if (!get().params.activated_loras.includes(preset.filename)) {
+            get().toggleLora(preset.filename)
+          }
+          get().setLoraWeight(preset.filename, 0, preset.weight)
+          get().setParam('minimax_h3_turbo_preset', preset.id)
+          get().setParam('minimax_h3_turbo_mode', true)
+        }
+      }
     } catch {
       // Same staleness rule as the success path — a superseded request's
       // failure must not null out the newer request's options.
@@ -9168,10 +9205,12 @@ export const useStore = create<AppState>((set, get) => ({
       set({ servicesConfigLoading: false })
     }
   },
-  updateServicesConfig: async (partial) => {
+  updateServicesConfig: async (partial, options) => {
     try {
       await api.updateServicesConfig(partial)
-      get().loadServicesConfig()
+      // A field awaiting save must see the new masked value before closing.
+      const config = await api.fetchServicesConfig()
+      set({ servicesConfig: config })
       // Newly-discovered Mature models appear once when Mature Mode is
       // enabled. Previously initialized models retain the user's whitelist.
       if (partial.nsfw_mode === true && _modelVisibilityHydrated) {
@@ -9186,6 +9225,7 @@ export const useStore = create<AppState>((set, get) => ({
         })
       }
     } catch (e) {
+      if (options?.throwOnError) throw e
       console.error('Failed to update services config:', e)
       get().loadServicesConfig()
     }
@@ -9907,6 +9947,27 @@ export const useStore = create<AppState>((set, get) => ({
       [modelType]: presetId,
     },
   })),
+  initializeDirectorH3Turbo: (modelType, options) => {
+    const state = get()
+    const option = options.minimax_h3_turbo
+    if (!option?.default_enabled || state.directorH3TurboModeByModel[modelType] != null) return
+    const preset = option.presets.find(item => item.id === option.preset_id)
+    if (!preset) return
+    const current = state.savedLoraPerMode.video
+    const managedFiles = new Set(option.presets.map(item => item.filename))
+    const loras = (current?.activated_loras || []).filter(name => !managedFiles.has(name))
+    const weights = { ...current?.loraWeights }
+    for (const name of managedFiles) delete weights[name]
+    loras.push(preset.filename)
+    weights[preset.filename] = [preset.weight]
+    const available = [...new Set([...(current?.availableLoras || []), preset.filename])]
+    state.directorSetLora('video', loras, loras.map(name => (
+      (weights[name] || [1]).map(value => value.toFixed(2)).join(';')
+    )).join(' '), weights, available)
+    state.setDirectorH3TurboPreset(modelType, preset.id)
+    state.setDirectorH3TurboMode(modelType, true)
+    state.setDirectorVideoInferenceSteps(modelType, preset.steps)
+  },
   setDirectorH3SolMode: (modelType, enabled) => set(s => ({
     directorH3SolModeByModel: {
       ...s.directorH3SolModeByModel,
@@ -10601,18 +10662,24 @@ export const useStore = create<AppState>((set, get) => ({
     const { directorClipPlans, directorPlannedClips, params, selectedModelPerMode, savedParamsPerMode, savedLoraPerMode, directorResolution, directorAspectRatio, directorSceneDescription } = get()
     if (!directorClipPlans.length) return
 
-    // Use saved image-mode settings if available, otherwise fall back to defaults
+    // Use this model's defaults and only its own saved image-mode overrides.
     const imageModel = selectedModelPerMode.image || 'flux2_klein_9b'
-    const imageOptions = await api.fetchModelOptions(imageModel).catch(() => null)
+    const [imageOptions, imageDefaults] = await Promise.all([
+      api.fetchModelOptions(imageModel).catch(() => null),
+      api.fetchDefaults(imageModel).catch((): Record<string, unknown> => ({})),
+    ])
+    const imageCapability = get().models.find(model => model.model_type === imageModel)?.director
     const directorRes = resolveResolution(
       imageOptions,
       directorResolution,
       directorAspectRatio,
     )
-    // Director's hardcoded image_model fallback is flux2_klein_9b, which is
-    // step-distilled to 4 inference steps (per app/defaults/flux2_klein_9b.json).
+    const matchingImageParams = savedParamsPerMode.image?.model_type === imageModel
+      ? savedParamsPerMode.image : {}
     const imageParams = {
-      ...(savedParamsPerMode.image || { num_inference_steps: 4, guidance_scale: 1 }),
+      num_inference_steps: Number(matchingImageParams.num_inference_steps
+        ?? imageDefaults.num_inference_steps ?? imageOptions?.default_num_inference_steps ?? 4),
+      guidance_scale: Number(matchingImageParams.guidance_scale ?? imageDefaults.guidance_scale ?? 1),
       resolution: directorRes,
     }
     const imageLora = savedLoraPerMode.image
@@ -10631,15 +10698,17 @@ export const useStore = create<AppState>((set, get) => ({
 
     // Submit one image generation, poll to completion, download the result as a File.
     const genImage = async (prompt: string, refs: string[], label: string): Promise<{ file: File; filename: string }> => {
+      const maxRefs = imageCapability?.max_image_refs
+      const imageRefs = maxRefs && maxRefs > 0 ? refs.slice(0, maxRefs) : refs
       const genParams = {
         model_type: imageModel,
         prompt,
-        image_refs: refs,
+        image_refs: imageRefs,
         image_mode: 1,
         num_inference_steps: imageParams.num_inference_steps,
         guidance_scale: imageParams.guidance_scale,
-        // 'KI' carries an image reference; plain T2I (the anchor) needs no ref flag.
-        video_prompt_type: refs.length ? 'KI' : '',
+        // Unified editors such as Qwen 2.1 use I; older main-image editors use KI.
+        video_prompt_type: imageRefs.length ? (imageCapability?.image_reference_mode ?? 'KI') : '',
         resolution: imageParams.resolution,
         seed: -1,
         settings_version: 2.52,
@@ -11264,7 +11333,7 @@ export const useStore = create<AppState>((set, get) => ({
         model_type: modelType,
         activated_loras: [],
         loras_multipliers: '',
-        minimax_h3_turbo_mode: false,
+        minimax_h3_turbo_mode: undefined,
         minimax_h3_turbo_preset: undefined,
       },
       selectedModelPerMode: { ...s.selectedModelPerMode, [currentMode]: modelType },
@@ -13238,10 +13307,14 @@ export const useStore = create<AppState>((set, get) => ({
       || directorTurboPresets[0]
     )
     const savedDirectorVideoLoras = savedLoraPerMode.video
+    const directorTurboDefault = directorH3TurboModeByModel[selectedVideoModel] == null
+      && directorTurboOption?.default_enabled === true
     const directorTurboEnabled = Boolean(
       directorTurboOption && directorTurboPreset
-      && directorH3TurboModeByModel[selectedVideoModel] === true
-      && savedDirectorVideoLoras?.activated_loras?.includes(directorTurboPreset.filename)
+      && (directorTurboDefault || (
+        directorH3TurboModeByModel[selectedVideoModel] === true
+        && savedDirectorVideoLoras?.activated_loras?.includes(directorTurboPreset.filename)
+      ))
     )
     if (directorTurboEnabled) directorVideoSteps = directorTurboPreset!.steps
     const directorSolEnabled = Boolean(

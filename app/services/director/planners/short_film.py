@@ -102,6 +102,7 @@ _DIALOGUE_BEAT_SCHEMA = {
     "properties": {
         "speaker_id": {"type": "string"},
         "spoken_text": {"type": "string"},
+        "language": {"type": "string"},
         "delivery": {"type": "string"},
         "physical_cue": {"type": "string"},
         "priority": {"type": "string"},
@@ -7024,8 +7025,10 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
 {visual_strategy_rules}
 
 You are planning visuals for a scene where the AUDIO ALREADY EXISTS. The dialogue is pre-recorded.
-Your job is to create compelling VISUALS that match the dialogue — environments, staging, camera work,
-character actions, and facial expressions that bring the audio to life.
+The supplied audio owns every audible voice. dialogue_beats may repeat transcript lines for timing,
+speaker assignment, and acting reference only. Never quote, tag, or request those words as new speech
+in video_prompt; keep the visible performance, actions, camera work, and continuity synchronized to
+the supplied track without replacing or duplicating it.
 
 FULL DIALOGUE TRANSCRIPT:
 {full_transcript if full_transcript else "(no transcript available)"}
@@ -7033,7 +7036,7 @@ FULL DIALOGUE TRANSCRIPT:
 STORY CONCEPT: {story_description}
 
 Plan each shot as a structured scene — deciding visuals, camera, action, mood,
-and how dialogue is staged. Write a DETAILED {"video_prompt and image_prompt" if uses_generated_images else "video_prompt"} for each shot.
+and how performers visibly react in time with the existing audio. Write a DETAILED {"video_prompt and image_prompt" if uses_generated_images else "video_prompt"} for each shot.
 
 {char_rules}
 
@@ -7042,7 +7045,8 @@ and how dialogue is staged. Write a DETAILED {"video_prompt and image_prompt" if
 SHORT FILM PLANNING RULES:
 - The audio is PRE-RECORDED — you are planning VISUALS to match existing dialogue.
 - Focus on acting, body language, and emotional expression that matches what's being said.
-- Stage dialogue naturally — characters should have physical business while speaking.
+- Treat dialogue_beats as a transcript for timing, speaker assignment, and acting only. Do not copy, quote, or tag its words in video_prompt; the supplied track already contains them.
+- Stage visible reactions and physical business in sync with the supplied speech, keeping the established action and continuity.
 - Match camera complexity to emotional tone: steady for intimate, dynamic for action.
 - Each shot should advance the story or reveal character.
 - Describe the ENVIRONMENT in detail for each shot (room, furniture, lighting, time of day).
@@ -7057,7 +7061,7 @@ VIDEO PROMPT (video_prompt) — follow the LTX-2 style guide below closely:
 - Action: chronological order — setup, movement, reaction, final beat.
 - Camera: explicit movement tied to the subject (slow dolly in, tracking left, orbit around, handheld follow) — never vague ("digital drift", "cinematic camera").
 - Audio: include ambient sound when relevant, and any other sounds or sound effects that are relevant to the scene.
-- Dialogue: in quotes with delivery cue if present.
+- Dialogue: describe the visible delivery and lip movement without writing dialogue text; supplied audio already contains every spoken line.
 - NEVER say montage, quick cuts, cut to.
 {video_name_rules}
 
@@ -7081,7 +7085,7 @@ OUTPUT FORMAT — respond with ONLY a JSON array:
     "mood": "Emotional tone",
     "action_beats": ["Physical actions in chronological order"],
     "dialogue_beats": [
-      {{"speaker_id": "char_0", "spoken_text": "Actual dialogue", "delivery": "softly", "physical_cue": "leans forward"}}
+      {{"speaker_id": "char_0", "spoken_text": "Actual dialogue", "language": "the line's actual spoken language", "delivery": "softly", "physical_cue": "leans forward"}}
     ],
     "camera_plan": {{
       "framing": "medium shot",
@@ -7089,7 +7093,7 @@ OUTPUT FORMAT — respond with ONLY a JSON array:
       "movement_intensity": "subtle"
     }},
     "audio_plan": {{
-      "mode": "dialogue_driven",
+      "mode": "audio_driven",
       "lip_sync_critical": true
     }},
     "ending_beat": "Final visual moment",
@@ -7218,7 +7222,7 @@ Shots to plan:
 
             audio_raw = raw.get("audio_plan", {})
             audio = AudioPlan(
-                mode=audio_raw.get("mode", "dialogue_driven"),
+                mode="audio_driven",
                 ambience=audio_raw.get("ambience"),
                 timing_anchor="audio",
                 lip_sync_critical=audio_raw.get("lip_sync_critical", True),
@@ -7226,7 +7230,10 @@ Shots to plan:
 
             dialogue_beats = None
             if raw.get("dialogue_beats"):
-                dialogue_beats = [DialogueBeat.from_dict(db) for db in raw["dialogue_beats"]]
+                dialogue_beats = [
+                    DialogueBeat.from_dict(db)
+                    for db in raw["dialogue_beats"]
+                ]
 
             shot = ShotPlan(
                 shot_id=self._make_shot_id(i, "sf"),
@@ -9949,7 +9956,8 @@ H3 NATIVE SHOT CONTRACT — NON-NEGOTIABLE:
 - CONVERSATION PACKING IS REQUIRED: a change of speaker is not by itself a reason to start another array item. Within the same uninterrupted location and story beat, prefer one native clip ({preferred_duration_text}) containing 2-4 alternating dialogue turns when their combined total is no more than {maximum_dialogue_words} words. Keep a brief reaction such as "What?", a gasp, or a one-line reply in the surrounding exchange instead of wasting a separate minimum-length clip.
 - INTERNAL CAMERA EDITING IS SUPPORTED: inside one bounded H3 clip, the camera may begin on an ensemble frame, cut or reframe to each current speaker before their tagged line, hold their unobstructed face and mouth through the complete line, capture reactions, and finish on a new composition. Describe that chronological coverage in camera_plan and action_beats. Prefer the lower end of the requested shot-count range for a continuous dialogue scene.
 - DIALOGUE CAMERA COVERAGE IS REQUIRED: do not leave a dialogue scene entirely in a wide master. Use a wide or two-shot only to establish geography or cover large action, then cut or reframe to motivated medium close-ups or over-the-shoulder angles for each line and listener reactions. Vary shot size by dramatic purpose across adjacent clips; do not default every clip to the same wide framing.
-- DIALOGUE MUST NOT LIVE ONLY IN dialogue_beats. Every dialogue_beats[].spoken_text must also appear exactly once in the same shot's video_prompt as <d>[English] Exact words</d>, with the speaker ID/name, delivery, and physical cue outside the tag. If dialogue_beats is empty, explicitly state that no one speaks, mouths remain closed, and no muttering, gibberish, or speech-like vocalization occurs.
+- DIALOGUE LANGUAGE IS PER LINE: set dialogue_beats[].language to the actual spoken language of that exact line, following the binding screenplay. Preserve the screenplay's words and language; do not translate dialogue into English. Mixed-language screenplays may use a different language on each beat.
+- DIALOGUE MUST NOT LIVE ONLY IN dialogue_beats. Every dialogue_beats[].spoken_text must also appear exactly once in the same shot's video_prompt as <d>[the beat's language] Exact words</d>, with the speaker ID/name, delivery, and physical cue outside the tag. If dialogue_beats is empty, explicitly state that no one speaks, mouths remain closed, and no muttering, gibberish, or speech-like vocalization occurs.
 - SPEAKER VISIBILITY IS REQUIRED: every person who delivers a line must have a complete subjects_on_screen entry and remain visibly framed with an unobstructed face and mouth for the full line. Reframe to the current speaker before speech; reaction framing may follow only after the spoken line is complete.
 - CAST LIST CONSISTENCY IS REQUIRED: every person mentioned in spatial_setup, action_beats, dialogue_beats, ending_beat, closing_blocking, or video_prompt must appear in subjects_on_screen. Do not mention a bystander in blocking while omitting that person from the visible cast.
 - NAMED CAST IS CLOSED: subjects_on_screen may contain only named people present in the user concept, supplied character references, binding voice bible, or locked screenplay dialogue. Setting-appropriate silent extras may appear only as generic roles such as "barista" or "background patron". Never add a named cameo or another familiar character from the franchise.
@@ -9989,7 +9997,7 @@ OUTPUT — one closed object per native shot:
     "lighting": "Shot lighting",
     "mood": "Tone",
     "action_beats": ["Chronological visible actions"],
-    "dialogue_beats": [{{"speaker_id": "char_0", "spoken_text": "Exact words", "delivery": "Delivery", "physical_cue": "Visible cue", "priority": "high"}}],
+    "dialogue_beats": [{{"speaker_id": "char_0", "spoken_text": "Exact words", "language": "actual spoken language", "delivery": "Delivery", "physical_cue": "Visible cue", "priority": "high"}}],
     "camera_plan": {{"framing": "medium shot", "movement": "slow push in", "movement_intensity": "subtle"}},
     "audio_plan": {{"mode": "dialogue_driven", "ambience": "Location ambience", "effects": ["Synchronized practical effects"], "vocal_style": "Natural voices", "timing_anchor": "audio", "lip_sync_critical": true}},
     "ending_beat": "Visible end state",
@@ -10040,7 +10048,7 @@ Continuity audit before responding:
 2. Compare every shot's closing_blocking with the next shot's spatial_setup.
 3. If the same-scene positions differ, put the required movement in the earlier shot's action_beats and video_prompt so the next opening is earned on screen.
 4. Use extend_previous only for a literal seamless continuation with unchanged camera composition. Use continuous for ordinary same-scene cuts.
-5. Cross-check every dialogue_beats entry against video_prompt. Copy each spoken_text verbatim into one <d>[English] ...</d> tag. For a silent shot, forbid invented speech and gibberish explicitly.
+5. Cross-check every dialogue_beats entry against video_prompt. Copy each spoken_text verbatim into one <d>[language] ...</d> tag using that beat's actual spoken language. Never translate a line. For a silent shot, forbid invented speech and gibberish explicitly.
 6. At every continuity_group change, verify that the prior ending visibly motivates the new location/time and that the new opening shows the resulting arrival or consequence. "Independent" is a render boundary, not a story reset.
 7. Compare persistent state across that boundary: objective, knowledge, relationship, injuries, wardrobe damage, and important props must carry forward unless the screenplay visibly changes them.
 8. Remove any unrelated incident, antagonist, or location that is not supported by the screenplay and story blueprint.
@@ -10091,7 +10099,7 @@ SCREENPLAY:
             }
             dialogue_schema = dict(_DIALOGUE_BEAT_SCHEMA)
             dialogue_schema["required"] = [
-                "speaker_id", "spoken_text", "delivery", "physical_cue",
+                "speaker_id", "spoken_text", "language", "delivery", "physical_cue",
                 "priority",
             ]
             configured["items"]["properties"]["dialogue_beats"] = {
@@ -10830,7 +10838,10 @@ repeating that prose across every metadata field."""
             )
             dialogue_beats = None
             if raw.get("dialogue_beats"):
-                dialogue_beats = [DialogueBeat.from_dict(db) for db in raw["dialogue_beats"]]
+                dialogue_beats = [
+                    DialogueBeat.from_dict(db)
+                    for db in raw["dialogue_beats"]
+                ]
                 # Never truncate structured dialogue here. video_prompt was
                 # already written from the same exact lines, so changing only
                 # DialogueBeat.spoken_text creates split/nested <d> blocks and

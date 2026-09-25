@@ -3,6 +3,7 @@ import { Plus, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { ChoiceControl } from '../shared/ChoiceControl'
 import { FileUploadZone } from '../shared/FileUploadZone'
+import { GalleryInput } from '../shared/GalleryInput'
 import * as api from '../../api/client'
 import type { SavedOmniCharacter } from '../../types'
 import { ttsVoiceLimit } from '../../lib/ttsVoices'
@@ -136,6 +137,7 @@ export function AudioModeSection() {
       }
     } catch (e) {
       console.error('Upload failed:', e)
+      return false
     } finally {
       setUploading(false)
     }
@@ -360,6 +362,9 @@ export function AudioModeSection() {
       {/* Non-TTS: Video guide upload (control video for soundtrack) */}
       {!isAudioOnly && needsVideoGuideUpload && (
         <div>
+          <GalleryInput kind="video" label="control video"
+            onFile={file => handleLegacyUpload(file, 'video_guide', setVideoGuideFilename)}
+            disabledReason={uploading ? 'Uploading control media…' : undefined} />
           <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
             Control Video
           </label>

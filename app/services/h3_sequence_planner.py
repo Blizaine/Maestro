@@ -11,8 +11,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 from typing import Any
+from services.h3_performance_audio import (
+    PERFORMANCE_AUDIO_DIRECTION,
+    has_h3_performance_audio,
+    performance_audio_item_duration_seconds,
+)
 
 from services.h3_story_ledger import (
     H3DialogueTimingError,
@@ -441,7 +447,9 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
     pending_voice: list[tuple[int, dict, str]] = []
     for item in items:
         kind = item["type"]
-        role = item.get("role") or f"the supplied {kind} reference"
+        # Roles are prose within one reference row, not additional metadata
+        # lines (including the machine-generated soundtrack clock).
+        role = " ".join(str(item.get("role") or f"the supplied {kind} reference").split())
         if kind == "image":
             picture += 1
             intent = item.get("image_intent", "identity")
@@ -530,6 +538,15 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                     f"The exact target soundtrack supplies the performance and timing for {role}; "
                     "preserve its waveform and audible timeline exactly and synchronize visible action to it."
                 )
+                duration_seconds = performance_audio_item_duration_seconds(item)
+                if duration_seconds is not None:
+                    # This explicit machine line is the only duration source
+                    # consumed by local-window clock guidance. Keep role prose
+                    # and guessed/natural-language lengths out of the parser.
+                    relationships.append(
+                        "H3_PERFORMANCE_AUDIO_CLOCK "
+                        f"duration_seconds={repr(duration_seconds)}"
+                    )
                 # This is Maestro's target conditioning track, not an Omni
                 # reference tensor, so it intentionally has no <Audio N>
                 # label in the full-reference media manifest.
@@ -580,6 +597,65 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
         if "audio reference" not in task_types:
             task_types.append("audio reference")
     return "\n".join(relationships), "\n".join(retention), " + ".join(task_types)
+
+
+def _image_reference_roles(
+    references: list[dict[str, Any]],
+    image_paths: list[str] | None,
+) -> list[dict[str, Any]] | None:
+    """Bind attached story-planning images to normalized manifest roles.
+
+    The attached image list follows the manifest's image order. Keep the
+    canonical ``<Picture N>`` index so a downstream scoped summary cannot
+    relabel or swap image roles. ``None`` means a path could not be matched to
+    a validated manifest entry.
+    """
+
+    attached = [str(path).strip() for path in (image_paths or []) if str(path).strip()]
+    if not attached:
+        return []
+
+    from models.minimax_h3.ref2va import canonicalize_ref2va_reference_order
+    from models.minimax_h3.reference_manifest import validate_reference_manifest
+
+    items = validate_reference_manifest(
+        references,
+        require_files=False,
+        require_visual=False,
+        allow_empty=True,
+    )
+    _prompt, items, _order_remap = canonicalize_ref2va_reference_order("", items)
+    images: list[dict[str, Any]] = []
+    image_index = 0
+    for item in items:
+        if item.get("type") != "image":
+            continue
+        image_index += 1
+        images.append({
+            "path": str(item.get("path") or ""),
+            "image_index": image_index,
+            "image_intent": str(item.get("image_intent") or "identity").strip().lower(),
+            "role": " ".join(str(item.get("role") or "").split())[:500],
+        })
+
+    def path_key(value: str) -> str:
+        return os.path.normcase(os.path.normpath(os.path.abspath(value)))
+
+    by_path: dict[str, list[dict[str, Any]]] = {}
+    for item in images:
+        key = path_key(item["path"])
+        if not key:
+            return None
+        by_path.setdefault(key, []).append(item)
+
+    aligned: list[dict[str, Any]] = []
+    for path in attached:
+        candidates = by_path.get(path_key(path)) or []
+        if not candidates:
+            return None
+        item = candidates.pop(0)
+        aligned.append({**item, "path": path})
+    return aligned
 
 
 def _ref2va_style_opening(style: str) -> str:
@@ -701,9 +777,10 @@ def _ref2va_prompt_bindings(
     ):
         subject = int(match.group(1))
         name = re.sub(r"\s+", " ", match.group(2)).strip(" ,;:.-")
-        if name and name.casefold() not in {
+        if name and not name.casefold().startswith((
+            "the environment", "the location", "the visual style", "the visual treatment",
             "the supplied image reference", "the supplied video reference",
-        }:
+        )):
             aliases[name.casefold()] = subject
 
     audio_by_subject: dict[int, int] = {}
@@ -1261,6 +1338,7 @@ def compile_h3_reference_sequence_prompts(
     # itself; visual prose belongs in the chronological shot description.
     raw_subjects = str(plan.get("subject_definitions") or "").strip()
     canonical_subjects = str(reference_relationships or "").strip()
+    audio_driven = has_h3_performance_audio(canonical_subjects)
     canonical_subjects = canonicalize_h3_reference_names(
         canonical_subjects,
         _merge_h3_cast_names(
@@ -1332,6 +1410,10 @@ def compile_h3_reference_sequence_prompts(
         shots = _normalized_window_shots(item, duration)
         if not shots:
             raise ValueError(f"H3 Omni sequence clip {geometry['index']} has no shots.")
+        if audio_driven:
+            for shot in shots:
+                shot["dialogue"] = []
+                shot["sound_effects"] = "N/A"
         _stabilize_ref2va_hold_shots(shots)
         # MiniMax speaker IDs are scoped to one generated clip/window and are
         # assigned by first vocal-event order. Subject IDs remain stable across
@@ -1447,8 +1529,10 @@ def compile_h3_reference_sequence_prompts(
             if any(term in clip_performance for term in nonverbal_terms)
             else ""
         )
-        nonverbal_clause = f" {local_nonverbal}." if local_nonverbal else ""
-        if has_dialogue:
+        nonverbal_clause = f" {local_nonverbal}." if local_nonverbal and not audio_driven else ""
+        if audio_driven:
+            detailed += " " + PERFORMANCE_AUDIO_DIRECTION
+        elif has_dialogue:
             detailed += " The tagged dialogue is performed once in the listed order."
         elif not local_nonverbal:
             detailed += " The characters remain silent during this clip."
@@ -1474,6 +1558,9 @@ def compile_h3_reference_sequence_prompts(
             ]
         effects = "; ".join(unique_effects)
         soundscape = ambient + (f". Synchronized effects: {effects}" if effects else "")
+        if audio_driven:
+            soundscape = "The supplied target soundtrack, preserved exactly with its original vocals, music and timing"
+            music = "N/A — music is already in the supplied target soundtrack"
         summary = _clean_ref2va_action(
             item.get("summary") or item.get("title") or "The requested story advances",
             setting=setting,
@@ -1653,6 +1740,7 @@ def plan_h3_reference_sequence(
     planning_diagnostics: list[str] = []
     planning_notes: list[str] = []
     dialogue_fragments: list[dict[str, Any]] = []
+    image_reference_roles = _image_reference_roles(references, image_paths)
     try:
         staged = plan_h3_story_segments(
             prompt,
@@ -1670,6 +1758,7 @@ def plan_h3_reference_sequence(
             expect_dialogue=expect_dialogue,
             planning_style=planning_style,
             image_paths=image_paths,
+            image_reference_roles=image_reference_roles,
             nsfw=nsfw,
             resume=resume,
         )
@@ -1681,6 +1770,9 @@ def plan_h3_reference_sequence(
         dialogue_fragments = list(staged.get("dialogue_fragments") or [])
         source_intent = staged.get("source_intent") or source_intent
         story_ledger = staged["ledger"]
+        stable_camera_context = story_ledger.get("stable_camera_context")
+        if not isinstance(stable_camera_context, dict):
+            stable_camera_context = story_ledger
         planned_clips = []
         for index, segment in enumerate(staged["segments"]):
             planned_clips.append({
@@ -1689,10 +1781,10 @@ def plan_h3_reference_sequence(
             })
         plan = {
             "source_prompt": prompt,
-            "subject_definitions": story_ledger.get("subject_continuity", ""),
+            "subject_definitions": stable_camera_context.get("subject_continuity", ""),
             "retention_analysis": default_retention,
-            "setting_continuity": story_ledger.get("setting_continuity", ""),
-            "visual_style": story_ledger.get("visual_continuity", ""),
+            "setting_continuity": stable_camera_context.get("setting_continuity", ""),
+            "visual_style": stable_camera_context.get("visual_continuity", ""),
             "ambient_audio": story_ledger.get("ambient_audio", ""),
             "music": story_ledger.get("music", "N/A"),
             "source_intent": source_intent,

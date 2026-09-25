@@ -19,15 +19,19 @@ _disk_lock = threading.RLock()
 SETTING_KEYS = (
     "llm_provider", "llm_model_id", "llm_device", "llm_remote_url",
     "enhance_llm_model_id", "enhance_llm_device", "nsfw_mode",
+    "enhance_fidelity_retries", "enhance_fidelity_auto_continue",
 )
 
 
 def captured_settings(services: dict) -> dict:
     # Credentials are resolved at execution, never copied into jobs/sidecars.
     defaults = {"llm_provider": "local", "llm_remote_url": "", "llm_device": "cuda",
-                "enhance_llm_model_id": "", "enhance_llm_device": "cuda", "nsfw_mode": False}
+                "enhance_llm_model_id": "", "enhance_llm_device": "cuda", "nsfw_mode": False,
+                "enhance_fidelity_retries": 1, "enhance_fidelity_auto_continue": False}
     result = {key: deepcopy(services.get(key, defaults.get(key))) for key in SETTING_KEYS}
     result["nsfw_mode"] = bool(result["nsfw_mode"])
+    result["enhance_fidelity_retries"] = fidelity_retry_limit(result)
+    result["enhance_fidelity_auto_continue"] = result["enhance_fidelity_auto_continue"] is True
     if result["enhance_llm_model_id"]:
         result.update(llm_model_id=result["enhance_llm_model_id"],
                       llm_device=result["enhance_llm_device"], llm_provider="local", llm_remote_url="")
@@ -37,6 +41,13 @@ def captured_settings(services: dict) -> dict:
 def current_settings(services: dict) -> dict:
     context = _request_context.get()
     return {**services, **{key: value for key, value in context["settings"].items() if value is not None}} if context else services
+
+
+def fidelity_retry_limit(settings: dict | None = None) -> int:
+    """Repairs after the initial draft; legacy jobs retain the one-repair default."""
+    settings = current_settings({}) if settings is None else settings
+    value = settings.get("enhance_fidelity_retries", 1)
+    return min(5, max(0, value)) if type(value) is int else 1
 
 
 def check_cancelled() -> None:
@@ -247,10 +258,14 @@ async def prepare_enhanced_job(params: dict, model: dict, enhance, prepare, *, p
         raise ValueError("Enhancement did not produce valid generation settings.")
     plan = prepared.get("h3_window_plan") or {}
     warnings = list(dict.fromkeys([*(plan.get("planning_warnings") or []), *result_warnings, *enhancement_warnings()]))
-    # A fallback draft remains reviewable, but unattended generation must never
-    # pass it off as a successful AI enhancement. Timing notes alone are fine.
+    # Keep warnings/provenance even when the user elects to generate a usable
+    # draft without pausing. Exceptions, empty prompts and invalid settings
+    # above still fail normally; this option only changes the review gate.
     if "fallback" in str(plan.get("planned_by") or "") or warnings:
-        prepared["enhancement_review_required"] = True
+        auto_continue = current_settings({}).get("enhance_fidelity_auto_continue") is True
+        prepared["enhancement_review_required"] = not auto_continue
+        if auto_continue:
+            prepared["enhancement_review_bypassed"] = True
     prepared["enhancement_warnings"] = warnings
     return prepared
 

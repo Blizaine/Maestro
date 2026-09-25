@@ -2,6 +2,7 @@ import { useRef, useState, type RefObject } from 'react'
 import { Image as ImageIcon, Upload, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
+import { GalleryInput } from '../shared/GalleryInput'
 
 type SourceKind = 'source' | 'mask'
 
@@ -44,6 +45,7 @@ export function ImageWorkflowControls() {
     } catch (uploadError) {
       console.error('Image workflow upload failed:', uploadError)
       setError(`Could not upload the ${kind} image.`)
+      return false
     } finally {
       setUploading(null)
     }
@@ -144,6 +146,9 @@ export function ImageWorkflowControls() {
 
   return (
     <div className="space-y-3">
+      <GalleryInput kind="image" label="source image" onFile={file => upload('source', file)}
+        getImages={() => sourceUrl ? [{url: sourceUrl, name: 'Source image'}] : []}
+        disabledReason={uploading ? 'Uploading an image…' : undefined} />
       {renderInput('source', sourcePath, sourceUrl, sourceInput)}
 
       {workflow === 'inpaint' ? (

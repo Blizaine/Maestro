@@ -137,6 +137,25 @@ class EnhancedJobWiringTests(unittest.TestCase):
         self.assertEqual(self.archive.recover()['testjob']['enhancement']['state'], 'failed')
         llm_service.unload_model.assert_called_once()
 
+    def test_auto_continue_checkpoints_full_flagged_job_without_review_pause(self):
+        self.assertTrue(try_start(self.job))
+        self.job['enhancement']['settings']['enhance_fidelity_auto_continue'] = True
+        self.job['enhancement']['original_params'].update(
+            video_length=672, minimax_h3_multi_window=True)
+        prompts = ['Valid first window', 'Source-based second window']
+        warning = "Window 2's camera plan did not satisfy fidelity checks."
+        async def prepare(params, prepare_only):
+            return {'params': {**params, 'h3_window_prompts': prompts},
+                    'h3_window_plan': {'window_prompts': prompts,
+                        'planned_by': 'deterministic_fallback', 'planning_warnings': [warning]}}
+        self.prepare.side_effect = prepare
+        self.run_enhancement(self.job)
+        self.assertEqual(self.job['enhancement']['state'], 'complete')
+        self.assertEqual(self.job['params']['h3_window_prompts'], prompts)
+        self.assertEqual(self.job['params']['_prompt_enhancement']['warnings'], [warning])
+        self.assertEqual(self.archive.recover()['testjob']['enhancement']['state'], 'complete')
+        self.writer.assert_not_awaited()
+
     def test_cancelled_writer_does_not_start_diffusion_or_release_slot_early(self):
         entered, release = threading.Event(), threading.Event()
         async def writer(payload):
@@ -200,6 +219,28 @@ class EnhancedJobWiringTests(unittest.TestCase):
                 self.assertEqual(record['state'], expected)
                 self.assertEqual(record['original_prompt'], 'A mountain duel.')
                 self.writer.assert_not_awaited()
+
+    def test_explicit_retry_uses_current_fidelity_preferences_but_keeps_original_writer(self):
+        self.ns['_enhancement_settings_snapshot'] = lambda: {
+            'llm_model_id': 'writer-b', 'enhance_fidelity_retries': 3,
+            'enhance_fidelity_auto_continue': True,
+        }
+        retry = load('retry_enhanced_job', self.ns)
+        original_settings = deepcopy(self.job['enhancement']['settings'])
+        for action, state, expected_retries in [
+                ('retry', 'review', 3), ('refresh', 'complete', 3),
+                ('retry', 'complete', 1), ('accept_draft', 'review', 1)]:
+            with self.subTest(action=action, state=state):
+                self.job.update(status='failed', retry_job_id=None)
+                self.job['enhancement'].update(state=state, prepared={'params': self.params})
+                with patch.object(threading, 'Thread'):
+                    result = asyncio.run(retry('testjob', Request({'action': action})))
+                settings = self.jobs[result['job_id']]['enhancement']['settings']
+                self.assertEqual(settings['llm_model_id'], 'writer-a')
+                self.assertEqual(settings['enhance_fidelity_retries'], expected_retries)
+                self.assertEqual(settings['enhance_fidelity_auto_continue'], expected_retries == 3)
+                self.assertEqual(self.job['enhancement']['settings'], original_settings)
+        self.writer.assert_not_awaited()
 
     def test_generate_as_written_uses_manual_validation_without_enhancement(self):
         retry = load('retry_enhanced_job', self.ns)

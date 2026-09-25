@@ -22,6 +22,11 @@ from services.dialogue_timing import (
     DIALOGUE_MAX_WORDS_PER_SECOND,
 )
 from services.h3_story_ledger import normalize_h3_dialogue_tags
+from services.h3_performance_audio import (
+    PERFORMANCE_AUDIO_GUIDANCE,
+    enforce_h3_performance_audio,
+    has_h3_performance_audio,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1778,7 +1783,10 @@ def load_model(
             _api_key = api_key
             _model_id = model_id
             _device = provider
-            _vision_available = False
+            # Remote capability is not discoverable from the provider-neutral
+            # model ID. Send image inputs and let the provider report when a
+            # selected model does not accept them.
+            _vision_available = True
             print(f"[LLM] Connected to {provider} provider: model={model_id}, url={remote_url or 'API'}")
             _reset_idle_timer()
         return
@@ -2153,6 +2161,36 @@ def _diagnose_llm_request_failure(exc: Exception) -> "RuntimeError":
     return RuntimeError(f"LLM request failed: {exc}{detail}")
 
 
+def _diagnose_llm_image_request_failure(
+    exc: Exception,
+    *,
+    images_attached: bool,
+) -> "RuntimeError":
+    """Keep provider errors visible and explain likely text-only model failures."""
+
+    error = _diagnose_llm_request_failure(exc)
+    if not images_attached:
+        return error
+
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    try:
+        body = (response.text or "").lower() if response is not None else ""
+    except Exception:
+        body = ""
+    image_error = any(
+        marker in body
+        for marker in ("image", "vision", "multimodal", "image_url", "media_type")
+    )
+    if status not in (400, 415, 422) and not image_error:
+        return error
+    return RuntimeError(
+        f"{error}\nThis request included image attachments. If the selected "
+        "model is text-only or does not accept image inputs, choose a "
+        "vision-capable model or retry without images."
+    )
+
+
 def _unload_inner():
     global _process, _model_id, _device, _server_port, _vision_available
     _cancel_idle_timer()
@@ -2214,6 +2252,120 @@ def _image_to_data_url(image_path: str, max_size: int = 768) -> Optional[str]:
         with open(image_path, "rb") as f:
             data = base64.b64encode(f.read()).decode("ascii")
         return f"data:{mime};base64,{data}"
+
+
+def _user_message(prompt: str, image_paths: Optional[list]) -> dict:
+    """Build a user message, failing visibly if a remote image cannot be read."""
+
+    if not image_paths or not _vision_available:
+        return {"role": "user", "content": prompt}
+
+    content_parts = []
+    for image_path in image_paths:
+        try:
+            data_url = _image_to_data_url(image_path)
+        except Exception as exc:
+            if _provider in ("remote", "openai", "anthropic"):
+                raise RuntimeError(
+                    "Could not attach an image to the remote LLM request. "
+                    "Check that each selected image is valid and can be read."
+                ) from exc
+            raise
+        if not data_url:
+            if _provider in ("remote", "openai", "anthropic"):
+                raise RuntimeError(
+                    "Could not attach an image to the remote LLM request. "
+                    "Check that each selected image exists and can be read."
+                )
+            continue
+        content_parts.append({
+            "type": "image_url",
+            "image_url": {"url": data_url},
+        })
+    content_parts.append({"type": "text", "text": prompt})
+    return {"role": "user", "content": content_parts}
+
+
+def _anthropic_messages(messages: list) -> tuple[str, list]:
+    """Convert Maestro's OpenAI-style image blocks to Anthropic Messages blocks."""
+
+    system_text = []
+    api_messages = []
+    for message in messages:
+        role = message.get("role", "user")
+        content = message.get("content", "")
+        if role == "system":
+            if isinstance(content, str):
+                system_text.append(content)
+            else:
+                converted = _anthropic_content(content)
+                if any(block.get("type") != "text" for block in converted):
+                    raise ValueError("Anthropic system prompts may contain text only.")
+                text = "".join(
+                    block.get("text", "")
+                    for block in converted
+                    if block.get("type") == "text"
+                )
+                system_text.append(text)
+            continue
+        api_messages.append({
+            "role": role,
+            "content": _anthropic_content(content),
+        })
+    return "\n\n".join(part for part in system_text if part), api_messages
+
+
+def _anthropic_content(content):
+    """Translate content parts; Maestro's images arrive as data URLs."""
+
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        raise ValueError("Anthropic message content must be text or a list of content blocks.")
+
+    converted = []
+    for part in content:
+        if not isinstance(part, dict):
+            raise ValueError("Unsupported content block in Anthropic message.")
+        kind = part.get("type")
+        if kind == "text":
+            converted.append({"type": "text", "text": part.get("text", "")})
+            continue
+        if kind != "image_url":
+            raise ValueError(f"Anthropic does not support Maestro content block type {kind!r}.")
+
+        image_url = part.get("image_url")
+        url = image_url.get("url") if isinstance(image_url, dict) else None
+        match = _re.fullmatch(
+            r"data:(image/[A-Za-z0-9.+-]+);base64,(.+)",
+            str(url or ""),
+            flags=_re.DOTALL,
+        )
+        if match is None:
+            raise ValueError(
+                "Anthropic image inputs must use a base64 data URL generated from a local image."
+            )
+        media_type, data = match.groups()
+        media_type = media_type.lower()
+        if media_type not in {"image/jpeg", "image/png", "image/gif", "image/webp"}:
+            raise ValueError(f"Anthropic does not support image media type {media_type!r}.")
+        converted.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            },
+        })
+    return converted
+
+
+def _messages_have_images(messages: list) -> bool:
+    return any(
+        isinstance(part, dict) and part.get("type") in {"image_url", "image"}
+        for message in messages
+        for part in (message.get("content") if isinstance(message.get("content"), list) else [])
+    )
 
 
 @keep_loaded()
@@ -2299,20 +2451,9 @@ def generate(
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
 
-    # Build user message — multimodal if images provided and vision is available
-    if image_paths and _vision_available:
-        content_parts = []
-        for img_path in image_paths:
-            data_url = _image_to_data_url(img_path)
-            if data_url:
-                content_parts.append({
-                    "type": "image_url",
-                    "image_url": {"url": data_url},
-                })
-        content_parts.append({"type": "text", "text": prompt})
-        messages.append({"role": "user", "content": content_parts})
-    else:
-        messages.append({"role": "user", "content": prompt})
+    # Remote provider support is unknown until a request is made; remote
+    # load_model() enables this path so image inputs are never discarded.
+    messages.append(_user_message(prompt, image_paths))
 
     payload = {
         "messages": messages,
@@ -2390,7 +2531,10 @@ def generate(
     except requests.exceptions.RequestException as e:
         # A dead subprocess surfaces here as a ConnectionError; translate it
         # into an actionable error naming the real cause (see the helper).
-        raise _diagnose_llm_request_failure(e) from e
+        raise _diagnose_llm_image_request_failure(
+            e,
+            images_attached=_messages_have_images(messages),
+        ) from e
     resp.encoding = "utf-8"
     data = resp.json()
 
@@ -2522,20 +2666,14 @@ def generate_streaming(
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
 
-    # Build user message — multimodal if images provided and vision is available
-    if image_paths and _vision_available:
-        content_parts = []
-        for img_path in image_paths:
-            data_url = _image_to_data_url(img_path)
-            if data_url:
-                content_parts.append({
-                    "type": "image_url",
-                    "image_url": {"url": data_url},
-                })
-        content_parts.append({"type": "text", "text": prompt})
-        messages.append({"role": "user", "content": content_parts})
-    else:
-        messages.append({"role": "user", "content": prompt})
+    # Match generate() so remote image paths reach both request modes.
+    try:
+        messages.append(_user_message(prompt, image_paths))
+    except Exception as exc:
+        with _stream_lock:
+            _stream_buffer = f"Error: {exc}"
+            _stream_done = True
+        raise
 
     payload = {
         "messages": messages,
@@ -2704,7 +2842,10 @@ def generate_streaming(
         # the real cause so the Director run reports it instead of hanging.
         with _stream_lock:
             _stream_done = True
-        raise _diagnose_llm_request_failure(e) from e
+        raise _diagnose_llm_image_request_failure(
+            e,
+            images_attached=_messages_have_images(messages),
+        ) from e
     except Exception:
         with _stream_lock:
             _stream_done = True
@@ -2768,15 +2909,8 @@ def generate_streaming(
 
 def _generate_anthropic(messages: list, max_tokens: int, temperature: float, top_p: float) -> str:
     """Non-streaming generation via Anthropic Messages API."""
-    import re as _re
     # Anthropic uses system as a top-level param, not in messages
-    system_text = ""
-    api_messages = []
-    for m in messages:
-        if m["role"] == "system":
-            system_text = m["content"]
-        else:
-            api_messages.append(m)
+    system_text, api_messages = _anthropic_messages(messages)
 
     payload = {
         "model": _model_id,
@@ -2788,13 +2922,19 @@ def _generate_anthropic(messages: list, max_tokens: int, temperature: float, top
     if system_text:
         payload["system"] = system_text
 
-    resp = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        json=payload,
-        headers=_api_headers(),
-        timeout=600,
-    )
-    resp.raise_for_status()
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            json=payload,
+            headers=_api_headers(),
+            timeout=600,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        raise _diagnose_llm_image_request_failure(
+            e,
+            images_attached=_messages_have_images(messages),
+        ) from e
     resp.encoding = "utf-8"
     data = resp.json()
 
@@ -2815,15 +2955,14 @@ def _generate_anthropic(messages: list, max_tokens: int, temperature: float, top
 def _generate_streaming_anthropic(messages: list, max_tokens: int, temperature: float, top_p: float) -> str:
     """Streaming generation via Anthropic Messages API with SSE."""
     global _stream_buffer, _stream_done
-    import re as _re
 
-    system_text = ""
-    api_messages = []
-    for m in messages:
-        if m["role"] == "system":
-            system_text = m["content"]
-        else:
-            api_messages.append(m)
+    try:
+        system_text, api_messages = _anthropic_messages(messages)
+    except Exception as exc:
+        with _stream_lock:
+            _stream_buffer = f"Error: {exc}"
+            _stream_done = True
+        raise
 
     payload = {
         "model": _model_id,
@@ -2872,6 +3011,15 @@ def _generate_streaming_anthropic(messages: list, max_tokens: int, temperature: 
                     with _stream_lock:
                         _stream_buffer = raw_content
 
+    except requests.exceptions.RequestException as e:
+        error = _diagnose_llm_image_request_failure(
+            e,
+            images_attached=_messages_have_images(messages),
+        )
+        with _stream_lock:
+            _stream_buffer = raw_content or f"Error: {error}"
+            _stream_done = True
+        raise error from e
     except InterruptedError:
         with _stream_lock:
             _stream_done = True
@@ -3082,7 +3230,9 @@ def enhance_prompt(
         and not is_h3_ref2va
     )
     is_h3_structured = is_h3_context_ir or is_h3_ref2va
-    if is_h3_structured and not system_override:
+    audio_driven = is_h3_ref2va and has_h3_performance_audio(reference_context)
+    needs_h3_dialogue = is_h3_structured and not audio_driven
+    if needs_h3_dialogue and not system_override:
         validate_h3_source_dialogue_duration(prompt, duration_seconds)
     if planning_style == "adaptive" and is_h3_ref2va and not reference_context and not image_paths:
         reference_context = (
@@ -3192,7 +3342,7 @@ def enhance_prompt(
         result = generate(prompt=raw_prompt, image_paths=image_paths, **gen_kw)
         return repair_text(_clean_enhancer_output(result) or prompt)
 
-    if planning_style == "adaptive" and is_h3_structured:
+    if planning_style == "adaptive" and needs_h3_dialogue:
         from services.adaptive_enhancement import draft_spoken_exchange
         prompt = draft_spoken_exchange(
             prompt, duration_seconds, generate, language=_detect_h3_dialogue_language(prompt),
@@ -3346,6 +3496,12 @@ def enhance_prompt(
         model_type,
         planning_style,
     )
+    if audio_driven:
+        user_prompt = (
+            f"Duration: {duration_seconds or 'the supplied audio duration'} seconds. "
+            f"Write visual performance and camera direction for this brief:\n{prompt}\n\n"
+            + PERFORMANCE_AUDIO_GUIDANCE
+        )
 
     # Add image context
     if image_paths:
@@ -3379,7 +3535,7 @@ def enhance_prompt(
     if lora_system_hint:
         system += f"\n\n{lora_system_hint}"
 
-    if mode in ("video", "avatar") and planning_style == "creative":
+    if mode in ("video", "avatar") and planning_style == "creative" and not audio_driven:
         from services.dialogue_writing import creative_dialogue_budget
 
         system += (
@@ -3398,7 +3554,7 @@ def enhance_prompt(
     if planning_style == "adaptive":
         from services.adaptive_enhancement import adaptive_dialogue_expected, adaptive_writing_guide
         system += "\n\n" + adaptive_writing_guide(prompt)
-        if not adaptive_dialogue_expected(prompt):
+        if not audio_driven and not adaptive_dialogue_expected(prompt):
             system += "\nNo speech was requested: do not add spoken lines or <d> tags. Keep nonverbal effort sounds and synchronized practical effects."
 
     # Preserve structural elements in image prompts
@@ -3450,12 +3606,14 @@ def enhance_prompt(
     else:
         system += "\n\nCRITICAL: Output ONLY the enhanced prompt text. No headers, no labels, no markdown, no explanation, no \"Enhancement Logic\", no \"Edit Prompt:\". No LoRA filenames (.safetensors). Just the raw prompt text."
 
-    if is_h3_structured:
+    if needs_h3_dialogue:
         dialogue_requirement = _build_h3_dialogue_requirement(prompt, duration_seconds, planning_style)
         if dialogue_requirement:
             # Keep this adjacent to the output contract so a long vision guide
             # cannot demote literal dialogue into a vague "speaks" action.
             system += f"\n\n{dialogue_requirement}"
+    if audio_driven:
+        system += "\n\n" + PERFORMANCE_AUDIO_GUIDANCE
 
     # Scale max tokens for multi-window video prompts
     effective_max_tokens = max_new_tokens
@@ -3539,7 +3697,7 @@ def enhance_prompt(
             result, prompt, reference_context
         )
 
-    if mode in ("video", "avatar") and planning_style in {"creative", "adaptive"} and result:
+    if mode in ("video", "avatar") and planning_style in {"creative", "adaptive"} and result and not audio_driven:
         if planning_style == "adaptive" and is_h3_structured:
             result = _fit_adaptive_dialogue(prompt, result, duration_seconds, generate)
         else:
@@ -3561,10 +3719,10 @@ def enhance_prompt(
         if is_h3_ref2va
         else _has_complete_h3_context_structure(result)
     ) if is_h3_structured else True
-    dialogue_is_valid = _h3_dialogue_contract_satisfied(prompt, result) if is_h3_structured else True
+    dialogue_is_valid = _h3_dialogue_contract_satisfied(prompt, result) if needs_h3_dialogue else True
     timed_silence_is_valid = (
         _h3_speech_timing_satisfied(prompt, result, duration_seconds, planning_style)
-        if is_h3_structured
+        if needs_h3_dialogue
         else True
     )
     voice_binding_is_valid = (
@@ -3572,7 +3730,7 @@ def enhance_prompt(
         if is_h3_ref2va
         else True
     )
-    dialogue_binding_is_valid = (
+    dialogue_binding_is_valid = True if audio_driven else (
         _h3_ref2va_dialogue_binding_contract_satisfied(
             prompt, result, reference_context
         )
@@ -3583,7 +3741,7 @@ def enhance_prompt(
     )
 
     # Small local LLMs can either repeat the first Ref2VA mapping or summarize
-    # quoted dialogue as the word "speaks". Retry malformed H3 output once with
+    # quoted dialogue as the word "speaks". Repair malformed H3 output with
     # the immutable dialogue contract adjacent to the shape constraint.
     if is_h3_structured and not (
         structure_is_valid
@@ -3592,91 +3750,102 @@ def enhance_prompt(
         and voice_binding_is_valid
         and dialogue_binding_is_valid
     ):
-        failures = []
-        if not structure_is_valid:
-            failures.append("structure")
-        if not dialogue_is_valid:
-            failures.append("dialogue")
-        if not timed_silence_is_valid:
-            failures.append("timed silence")
-        if not voice_binding_is_valid:
-            failures.append("voice binding")
-        if not dialogue_binding_is_valid:
-            failures.append("dialogue speaker binding")
-        print(f"[Enhance] Invalid MiniMax H3 {'/'.join(failures)}; retrying once.")
-        field_requirement = (
-            "Emit each of the six required field labels exactly once, in order."
-            if is_h3_ref2va
-            else "Emit each of the three required field labels exactly once, in order."
-        )
-        retry = generate(
-            prompt=user_prompt,
-            system_prompt=(
-                system
-                + f"\n\nRETRY REQUIREMENT: Be concise. {field_requirement} "
-                "Do not repeat a subject definition or reference mapping. Never replace a requested "
-                "spoken line with the words 'speaks', 'talks', or 'dialogue'; write the actual <d> block. "
-                "The numbered Saved character Subject map in the request is immutable: never renumber it, "
-                "never emit <Subject N>, and never add another Subject for a repeated label. Speaker IDs "
-                "remain independent and follow first actual vocal-event order."
-            ),
-            max_new_tokens=effective_max_tokens,
-            temperature=min(float(temperature), 0.35),
-            image_paths=image_paths,
-            enable_thinking=False,
-            thinking_budget=4096,
-            frequency_penalty=0.6,
-            presence_penalty=0.15,
-        )
-        retry = repair_text(retry)
-        retry = _clean_enhance_output(retry, preserve_structure=True) if retry else ""
-        if planning_style == "adaptive" and retry:
-            retry = _fit_adaptive_dialogue(prompt, retry, duration_seconds, generate)
-        if is_h3_context_ir and retry:
-            retry = _repair_unambiguous_h3_context_speaker_ids(prompt, retry)
-        if is_h3_ref2va and retry:
-            retry = _canonicalize_h3_ref2va_reference_fields(
-                retry, reference_context, prompt
+        from services.studio_enhancement import check_cancelled, fidelity_retry_limit
+        repair_limit = fidelity_retry_limit()
+        for repair_attempt in range(repair_limit):
+            check_cancelled()
+            failures = []
+            if not structure_is_valid:
+                failures.append("structure")
+            if not dialogue_is_valid:
+                failures.append("dialogue")
+            if not timed_silence_is_valid:
+                failures.append("timed silence")
+            if not voice_binding_is_valid:
+                failures.append("voice binding")
+            if not dialogue_binding_is_valid:
+                failures.append("dialogue speaker binding")
+            print(f"[Enhance] Invalid MiniMax H3 {'/'.join(failures)}; repair {repair_attempt + 1}/{repair_limit}.")
+            field_requirement = (
+                "Emit each of the six required field labels exactly once, in order."
+                if is_h3_ref2va
+                else "Emit each of the three required field labels exactly once, in order."
             )
-            retry = _canonicalize_h3_ref2va_dialogue_speakers(
-                retry, prompt, reference_context
+            retry = generate(
+                prompt=user_prompt + "\n\nPREVIOUS DRAFT TO REPAIR:\n" + result,
+                system_prompt=(
+                    system
+                    + f"\n\nRETRY REQUIREMENT: Be concise. {field_requirement} "
+                    "Do not repeat a subject definition or reference mapping. Never replace a requested "
+                    "spoken line with the words 'speaks', 'talks', or 'dialogue'; write the actual <d> block. "
+                    "The numbered Saved character Subject map in the request is immutable: never renumber it, "
+                    "never emit <Subject N>, and never add another Subject for a repeated label. Speaker IDs "
+                    "remain independent and follow first actual vocal-event order."
+                ),
+                max_new_tokens=effective_max_tokens,
+                temperature=min(float(temperature), 0.35),
+                image_paths=image_paths,
+                enable_thinking=False,
+                thinking_budget=4096,
+                frequency_penalty=0.6,
+                presence_penalty=0.15,
             )
-        retry_structure_is_valid = (
-            _has_complete_h3_ref2va_structure(retry)
-            if is_h3_ref2va
-            else _has_complete_h3_context_structure(retry)
-        )
-        retry_dialogue_is_valid = _h3_dialogue_contract_satisfied(prompt, retry)
-        retry_timed_silence_is_valid = _h3_speech_timing_satisfied(
-            prompt,
-            retry,
-            duration_seconds,
-            planning_style,
-        )
-        retry_voice_binding_is_valid = (
-            _h3_voice_binding_contract_satisfied(retry, reference_context)
-            if is_h3_ref2va
-            else True
-        )
-        retry_dialogue_binding_is_valid = (
-            _h3_ref2va_dialogue_binding_contract_satisfied(
-                prompt, retry, reference_context
+            retry = repair_text(retry)
+            retry = _clean_enhance_output(retry, preserve_structure=True) if retry else ""
+            if planning_style == "adaptive" and retry and not audio_driven:
+                retry = _fit_adaptive_dialogue(prompt, retry, duration_seconds, generate)
+            if is_h3_context_ir and retry:
+                retry = _repair_unambiguous_h3_context_speaker_ids(prompt, retry)
+            if is_h3_ref2va and retry:
+                retry = _canonicalize_h3_ref2va_reference_fields(
+                    retry, reference_context, prompt
+                )
+                retry = _canonicalize_h3_ref2va_dialogue_speakers(
+                    retry, prompt, reference_context
+                )
+            retry_structure_is_valid = (
+                _has_complete_h3_ref2va_structure(retry)
+                if is_h3_ref2va
+                else _has_complete_h3_context_structure(retry)
             )
-            if is_h3_ref2va
-            else _h3_context_dialogue_binding_contract_satisfied(prompt, retry)
-            if is_h3_context_ir
-            else True
-        )
-        if (
-            retry_structure_is_valid
-            and retry_dialogue_is_valid
-            and retry_timed_silence_is_valid
-            and retry_voice_binding_is_valid
-            and retry_dialogue_binding_is_valid
-        ):
+            retry_dialogue_is_valid = not needs_h3_dialogue or _h3_dialogue_contract_satisfied(prompt, retry)
+            retry_timed_silence_is_valid = not needs_h3_dialogue or _h3_speech_timing_satisfied(
+                prompt,
+                retry,
+                duration_seconds,
+                planning_style,
+            )
+            retry_voice_binding_is_valid = (
+                _h3_voice_binding_contract_satisfied(retry, reference_context)
+                if is_h3_ref2va
+                else True
+            )
+            retry_dialogue_binding_is_valid = True if audio_driven else (
+                _h3_ref2va_dialogue_binding_contract_satisfied(
+                    prompt, retry, reference_context
+                )
+                if is_h3_ref2va
+                else _h3_context_dialogue_binding_contract_satisfied(prompt, retry)
+                if is_h3_context_ir
+                else True
+            )
+            if (
+                retry_structure_is_valid
+                and retry_dialogue_is_valid
+                and retry_timed_silence_is_valid
+                and retry_voice_binding_is_valid
+                and retry_dialogue_binding_is_valid
+            ):
+                result = retry
+                break
             result = retry
+            structure_is_valid = retry_structure_is_valid
+            dialogue_is_valid = retry_dialogue_is_valid
+            timed_silence_is_valid = retry_timed_silence_is_valid
+            voice_binding_is_valid = retry_voice_binding_is_valid
+            dialogue_binding_is_valid = retry_dialogue_binding_is_valid
         else:
-            print("[Enhance] H3 retry was incomplete; using deterministic structured fallback.")
+            print("[Enhance] H3 fidelity repairs exhausted; using deterministic structured fallback.")
             result = (
                 _build_h3_ref2va_tagged_fallback(
                     prompt,
@@ -3697,11 +3866,11 @@ def enhance_prompt(
                 )
             )
 
-    # If two full rewrites still summarize a vague request as "they discuss",
+    # If the draft still summarizes a vague request as "they discuss",
     # ask the local LLM for only the missing exchange. This rare focused pass is
     # cheaper and more reliable than accepting a prompt that makes H3 improvise.
     if (
-        is_h3_structured
+        needs_h3_dialogue
         and _h3_requests_speech(prompt)
         and not _extract_h3_quoted_dialogue(prompt)
         and not _h3_dialogue_contract_satisfied(prompt, result)
@@ -3747,14 +3916,14 @@ def enhance_prompt(
 
     # Explicit user dialogue is immutable. Even if both LLM attempts omit it,
     # compile every quoted line into H3 syntax before returning the prompt.
-    if is_h3_structured and not _h3_dialogue_contract_satisfied(prompt, result):
+    if needs_h3_dialogue and not _h3_dialogue_contract_satisfied(prompt, result):
         result = _inject_missing_h3_dialogue(
             result,
             prompt,
             ref2va=is_h3_ref2va,
             reference_context=reference_context,
         )
-    if is_h3_structured:
+    if needs_h3_dialogue:
         result = _strip_h3_untagged_dialogue_duplicates(result, prompt)
         result = _enforce_h3_soundscape_silence(result, prompt)
         result = _enforce_h3_music_request(result, prompt, reference_context)
@@ -3767,11 +3936,11 @@ def enhance_prompt(
         )
         if not (
             _has_complete_h3_ref2va_structure(result)
-            and _h3_dialogue_contract_satisfied(prompt, result)
+            and (audio_driven or _h3_dialogue_contract_satisfied(prompt, result))
             and _h3_voice_binding_contract_satisfied(result, reference_context)
-            and _h3_ref2va_dialogue_binding_contract_satisfied(
+            and (audio_driven or _h3_ref2va_dialogue_binding_contract_satisfied(
                 prompt, result, reference_context
-            )
+            ))
         ):
             print("[Enhance] Enforcing deterministic Omni character/dialogue contract.")
             result = _build_h3_ref2va_tagged_fallback(
@@ -3827,6 +3996,8 @@ def enhance_prompt(
             )
     if planning_style == "adaptive" and is_h3_structured:
         result = _preserve_adaptive_h3_literals(prompt, result)
+    if audio_driven:
+        result = enforce_h3_performance_audio(result)
     return repair_text(result)
 
 
@@ -5132,7 +5303,8 @@ def _canonicalize_h3_ref2va_reference_fields(
         )
         dialogue_source = detail_match.group(1) if detail_match else str(result or "")
     try:
-        speaker_map = _h3_ref2va_subject_speaker_map(dialogue_source, reference_context)
+        speaker_map = ({} if has_h3_performance_audio(reference_context) else
+                       _h3_ref2va_subject_speaker_map(dialogue_source, reference_context))
     except H3SpeakerBindingError:
         if source_has_dialogue:
             raise
@@ -5158,6 +5330,8 @@ def _canonicalize_h3_ref2va_dialogue_speakers(
     reference_context: Optional[str],
 ) -> str:
     """Repair exact user dialogue to the speaker bound by the reference map."""
+    if has_h3_performance_audio(reference_context):
+        return result
     import re
     text = str(result or "")
     cursor = 0
@@ -5604,6 +5778,17 @@ def _build_h3_ref2va_tagged_fallback(
     """Create a deterministic six-field fallback when the local LLM loops."""
     from services.studio_enhancement import record_review_warning
     record_review_warning("The AI draft did not produce a valid H3 reference prompt. Review the source-based draft before generating.")
+    if has_h3_performance_audio(reference_context):
+        definitions, retention = _canonical_h3_ref2va_subject_fields(reference_context, {})
+        return enforce_h3_performance_audio(
+            f"subject_definitions: {definitions}\n"
+            "summary: [reference generation + audio reuse] The requested visual performance.\n"
+            f"retention_analysis: {retention}\n"
+            "detailed_description: The target video maintains the requested visual style. "
+            f"[Shot 1] {prompt}\n"
+            "overall_soundscape: The supplied target soundtrack.\n"
+            "non_diegetic_music: N/A"
+        )
     manifest = _parse_h3_ref2va_subject_manifest(reference_context)
     speaker_map = _h3_ref2va_subject_speaker_map(prompt, reference_context)
     subject_mapping, retention_mapping = _canonical_h3_ref2va_subject_fields(

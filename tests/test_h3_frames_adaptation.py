@@ -17,18 +17,25 @@ from services.h3_window_planner import plan_h3_sliding_windows
 
 
 class FramesAdaptationTests(unittest.TestCase):
-    def test_faithful_treatment_schema_returns_required_options(self):
+    def test_faithful_treatment_schema_keeps_source_relationships_optional(self):
         plain = _faithful_treatment_schema(["Mara"])
         self.assertIsInstance(plain, dict)
         self.assertEqual(plain["properties"]["character_appearance"]["required"], ["Mara"])
         self.assertNotIn("source_adaptation", plain["properties"])
         self.assertNotIn("initial_state", plain["properties"])
+        self.assertIn("source_relationships", plain["properties"])
+        self.assertNotIn("source_relationships", plain["required"])
 
         adapted = _faithful_treatment_schema(
             ["Mara"], resolve_adaptation=True, start_frame=True)
         self.assertEqual(next(iter(adapted["properties"])), "initial_state")
         self.assertIn("source_adaptation", adapted["properties"])
-        self.assertEqual(adapted["required"], list(adapted["properties"]))
+        self.assertIn("source_relationships", adapted["properties"])
+        self.assertNotIn("source_relationships", adapted["required"])
+        self.assertEqual(
+            set(adapted["required"]),
+            set(adapted["properties"]) - {"source_relationships"},
+        )
 
     def test_rejected_adapted_style_cannot_restore_superseded_source_descriptions(self):
         canonical = {"visual_continuity": "Lock two adult men for 30 seconds."}
@@ -112,15 +119,24 @@ class FramesAdaptationTests(unittest.TestCase):
                     "initial_state": initial, "source_adaptation": adaptation,
                 })
             number = props["segment"]["minimum"]
-            self.assertIn(adaptation, kwargs["prompt"])
+            # The adaptation remains in source provenance but should not be
+            # repeated as global prose in every native camera prompt; its
+            # assigned actions and the locked opening are already represented
+            # by the immutable local source requirements below.
+            self.assertNotIn(adaptation, kwargs["prompt"])
             self.assertIn(mechanics, kwargs["prompt"])
-            shared = kwargs["prompt"].split("Shared subjects:")[1].split("Active principal")[0]
+            shared = kwargs["prompt"].split(
+                "Stable subjects and positive appearance facts:"
+            )[1].split("Active principal")[0]
             self.assertIn("ivory robes", shared)
             self.assertNotIn("earth-yellow", shared)
-            self.assertIn("Exact frame continuity", kwargs["prompt"])
             if number == 1:
                 self.assertIn("Required opening state: " + initial, kwargs["prompt"])
-                self.assertIn("FIRST-FRAME ACTION", kwargs["prompt"])
+                self.assertIn("Exact frame continuity:", kwargs["prompt"])
+                self.assertIn(
+                    "Begin from that state and show the necessary transition before the next assigned action",
+                    kwargs["prompt"],
+                )
                 self.assertIn("arm-locked", kwargs["prompt"])  # Original first event remains available.
                 self.assertEqual(kwargs["image_paths"], ["start-frame.png"])
                 event_schema = props["event_cards"]["properties"]["event_1"]["properties"]
@@ -130,8 +146,10 @@ class FramesAdaptationTests(unittest.TestCase):
                                  "continue supplied frame")
             else:
                 self.assertIsNone(kwargs["image_paths"])  # Later windows use the advancing state.
-                self.assertIn("Previous camera geography (carry its landmarks and axis forward): " + coverage,
-                              kwargs["prompt"])
+                self.assertIn(
+                    "Previous camera landmarks and screen axis only:",
+                    kwargs["prompt"],
+                )
             self.assertNotIn("Produce a full 30-second", kwargs["prompt"])
             result = {
                 "segment": number, "title": "Duel", "coverage": coverage,

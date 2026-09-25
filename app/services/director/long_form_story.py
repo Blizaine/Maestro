@@ -13,6 +13,8 @@ import difflib
 import re
 from typing import Any, Iterable, Optional, Sequence
 
+from .h3_dialogue import h3_dialogue_tag
+
 
 LONG_FORM_STORY_BIBLE_REVISION = 2
 
@@ -1244,10 +1246,14 @@ def compact_long_form_h3_prompt(shot: dict[str, Any]) -> tuple[str, bool]:
         speaker = subject_name_by_id.get(_key(speaker_id), speaker_id or "Speaker")
         delivery = _words(beat.get("delivery"), 24) or "speaks naturally"
         cue = _words(beat.get("physical_cue"), 28)
+        dialogue_tag = h3_dialogue_tag({
+            "spoken_text": spoken,
+            "language": beat.get("language"),
+        })
         clause = f"{speaker} {delivery}"
         if cue:
             clause += f" while {cue}"
-        clause += f": <d>[English] {spoken}</d>. Immediately afterward, {speaker} closes their mouth."
+        clause += f": {dialogue_tag}. Immediately afterward, {speaker} closes their mouth."
         dialogue_parts.append(clause)
 
     audio = shot.get("audio_plan") or {}

@@ -42,11 +42,13 @@ CONTEXT-IR FORMAT:
 - Give each speaking person a stable ID such as (S1) or (S2).
 - When already numbered people speak or sing together, use a compound ID such
   as (S1,S2). Characters who never vocalize receive no speaker ID.
-- Literal speech uses <d>[English] Exact words.</d> (change the language tag
-  when requested). Speaker identity, action, delivery, and voice are outside
-  the dialogue tag. Preserve scripted dialogue verbatim.
-- Every structured dialogue_beats entry must also appear exactly once in
-  video_prompt. Never leave the actual spoken words only in the JSON field.
+- For speech generated from the prompt, use <d>[Language] Exact words</d>,
+  where Language is the actual language of that line. Speaker identity,
+  action, delivery, and voice are outside the dialogue tag. Preserve scripted
+  dialogue verbatim and never translate it.
+- When no supplied driving audio owns the voices, every structured
+  dialogue_beats entry must appear exactly once in video_prompt. Never leave
+  actual generated spoken words only in the JSON field.
 - For voiceover, use the exact phrase "says in an off-screen voiceover" and
   immediately state that the corresponding on-screen character's lips remain
   completely closed.
@@ -55,20 +57,29 @@ CONTEXT-IR FORMAT:
   the video ending.
 - Preserve visible signs, labels, banners, subtitles, and other on-screen text
   verbatim in English double quotation marks; never translate it.
-- When no dialogue is requested, explicitly keep mouths closed and omit voices
-  or speech-like sounds. Explicitly forbid muttering, murmuring, improvised
-  words, and gibberish; never fill unused time with invented speech.
-- After the last spoken line, use visible reactions or motion for remaining
-  time and state that characters remain silent with mouths closed.
+- When supplied driving audio owns the voices, transcript beats are timing and
+  acting metadata only: do not copy, quote, tag, or request their words in
+  video_prompt. Keep actions, speaker framing, lip movement, and reactions
+  synchronized to the supplied audio without duplicating or replacing it.
+- When neither dialogue nor supplied vocals are requested, explicitly keep
+  mouths closed and omit voices or speech-like sounds. Explicitly forbid
+  muttering, murmuring, improvised words, and gibberish; never fill unused time
+  with invented speech.
+- After the last prompt-generated spoken line, use visible reactions or motion
+  for remaining time and state that characters remain silent with mouths
+  closed. For supplied driving audio, keep any ongoing vocal performance
+  synchronized to that audio.
 - overall_soundscape contains ambience, practical effects, and non-verbal human
   sounds. Do not repeat dialogue there.
 - non_diegetic_music is audience-only music. Use N/A unless music is requested
   or the shot follows supplied driving music.
 
 TIMING:
-- Keep actions and dialogue realistic for the requested duration. Spoken text
-  should target 2.8 words per second during speech and never exceed 3 words per
-  second across all speakers. Leave time for requested action and pauses.
+- Keep actions and prompt-generated dialogue realistic for the requested
+  duration. Generated spoken text should target 2.8 words per second during
+  speech and never exceed 3 words per second across all speakers. With
+  supplied driving audio, follow its timing instead. Leave time for requested
+  action and pauses.
 - H3 renders bounded native shots. Do not put LTX sliding-window commands,
   references to a previous shot, or IC-LoRA ``Shot N (Camera, Xs)`` trigger
   syntax inside video_prompt. Use the required structured continuity fields

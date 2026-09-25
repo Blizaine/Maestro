@@ -1,6 +1,8 @@
 import { useState, useMemo, useEffect } from 'react'
 import { X, Upload, Plus, Music, Film, Mic } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
+import { GalleryInput } from '../shared/GalleryInput'
+import { loadMediaInput } from '../../lib/mediaInput'
 import * as api from '../../api/client'
 import {
   continuationFirstWindowFrames,
@@ -249,17 +251,14 @@ export function InputsPanel() {
 
   // Extend mode: the source video to continue from.
   const handleAddExtendSource = async (file: File) => {
-    if (!file.type.startsWith('video/')) return
+    if (!file.type.startsWith('video/')) return false
     try {
       const result = await api.uploadImage(file)
-      const url = URL.createObjectURL(file)
-      const video = document.createElement('video')
-      video.src = url
-      video.onloadedmetadata = () => {
-        setContinueVideo(file, result.path, url, (video.duration && isFinite(video.duration)) ? video.duration : 0)
-      }
+      const { url, duration } = await loadMediaInput(file)
+      setContinueVideo(file, result.path, url, duration)
     } catch (e) {
       console.error('Extend source upload failed:', e)
+      return false
     }
   }
 
@@ -333,6 +332,7 @@ export function InputsPanel() {
       syncFrameParams(updated)
     } catch (e) {
       console.error('Frame upload failed:', e)
+      return false
     } finally {
       setFrameUploading(false)
     }
@@ -408,7 +408,7 @@ export function InputsPanel() {
         : Math.min(injectedFrames.length + 1, lastWindow)
       off = 'end'
     }
-    await addInjectFrame(file, null, URL.createObjectURL(file), off, w)
+    return addInjectFrame(file, null, URL.createObjectURL(file), off, w)
   }
 
   // Set a frame's (window, offset), re-routing it across pipelines as needed.
@@ -541,6 +541,7 @@ export function InputsPanel() {
       if (dur && dur > 0) setDurationSeconds(Math.round(dur * 10) / 10)
     } catch (e) {
       console.error('Control video upload failed:', e)
+      return false
     }
   }
   const removeControlVid = () => {
@@ -605,6 +606,7 @@ export function InputsPanel() {
       if (dur && dur > 0) setDurationSeconds(Math.round(dur * 10) / 10)
     } catch (e) {
       console.error('Guide video upload failed:', e)
+      return false
     }
   }
   const removeGuideVid = () => {
@@ -622,6 +624,19 @@ export function InputsPanel() {
 
   return (
     <div>
+      {!isExtend && <GalleryInput kind="image" label="start frame" onFile={setStartImage}
+        getImages={() => startImage ? [startImage] : frameTiles.filter(tile => tile.kind === 'start').map(tile => ({url: tile.preview, name: 'Start frame'}))} />}
+      {!isExtend && supportsEndFrame && <GalleryInput kind="image" label="end frame" onFile={setEndImage}
+        getImages={() => endImage ? [endImage] : frameTiles.filter(tile => tile.kind === 'end').map(tile => ({url: tile.preview, name: 'End frame'}))} />}
+      {isExtend && supportsInject && <GalleryInput kind="image" label="keyframe" onFile={handleAddFrameSmart}
+        getImages={() => injectedFrames.map(frame => frame.file || {url: frame.previewUrl, name: frame.filename})}
+        disabledReason={frameUploading ? 'Uploading a frame…' : undefined} />}
+      {supportsRefs && <GalleryInput kind="image" label="reference image" onFile={addImageRef}
+        getImages={() => imageRefs}
+        disabledReason={!canAddRef ? 'Reference image limit reached.' : undefined} />}
+      {isExtend && <GalleryInput kind="video" label="Extend source" onFile={handleAddExtendSource} />}
+      {supportsControlVid && <GalleryInput kind="video" label="control video" onFile={handleAddControlVid} />}
+      {supportsGuideVid && <GalleryInput kind="video" label="control video" onFile={handleAddGuideVid} />}
       <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Inputs</label>
       <div className="studio-media-grid grid grid-cols-3 gap-2 pb-1">
         {/* Extend-from source video (Extend mode only) — the timeline anchor. */}

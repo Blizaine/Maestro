@@ -33,7 +33,11 @@ from .checkpoint import (
     preprocess_native_video_vae_state_dict,
 )
 from .conditioner import MiniMaxH3Conditioner, MiniMaxH3Qwen3VL, build_h3_processor, load_h3_qwen_config
-from .convrot_layout import has_convrot_layout, restore_interleaved_h3_qkv
+from .convrot_layout import (
+    convrot_quantization_info_from_file,
+    has_convrot_layout,
+    restore_interleaved_h3_qkv,
+)
 from .packing import (
     MINIMAX_H3_AUDIO_CHANNELS,
     MINIMAX_H3_FPS,
@@ -70,6 +74,7 @@ from .scheduler import (
     MiniMaxH3Scheduler,
     res_multistep_update,
 )
+from .singularity import validate_minimax_h3_singularity_checkpoint
 from .first_block_cache import MiniMaxH3FirstBlockCache
 from .fused_turbo import (
     FUSED_H3_MAX_EVALUATIONS,
@@ -83,6 +88,7 @@ from .transformer import (
 )
 from .turbo import (
     MINIMAX_H3_TURBO_MIN_STEPS,
+    find_minimax_h3_accelerators,
     find_minimax_h3_pdd_loras,
     find_minimax_h3_turbo_loras,
     h3_scheduler_grid_points,
@@ -714,14 +720,17 @@ def _normalize_conditioner_checkpoint_namespaces(
     )
 
 
-def probe_h3_checkpoint(filename: str) -> dict[str, int | bool | None]:
+def probe_h3_checkpoint(filename: str) -> dict[str, int | bool | str | tuple | None]:
     """Inspect H3 tensor headers before allocating its 20B/33B network."""
 
     state_dict, metadata = quant_router.load_metadata_state_dict(filename)
-    quantization_format = str(
+    metadata_quantization_format = str(
         (metadata or {}).get("quantization_format", "")
     ).lower()
-    convrot = "convrot" in quantization_format or has_convrot_layout(state_dict)
+    convrot = (
+        "convrot" in metadata_quantization_format
+        or has_convrot_layout(state_dict)
+    )
     table = None
     for key, tensor in state_dict.items():
         for prefix in ("model.diffusion_model.", "diffusion_model."):
@@ -737,6 +746,8 @@ def probe_h3_checkpoint(filename: str) -> dict[str, int | bool | None]:
             "adaln_curve_grid": None,
             "time_embed_dim": 2688,
             "convrot": convrot,
+            "quantization_format": metadata_quantization_format,
+            "convrot_group_size": None,
         }
     if len(table.shape) != 2 or int(table.shape[0]) < 2:
         raise ValueError(f"Invalid H3 AdaLN curve table shape: {tuple(table.shape)}")
@@ -745,6 +756,8 @@ def probe_h3_checkpoint(filename: str) -> dict[str, int | bool | None]:
         "adaln_curve_grid": int(table.shape[0]),
         "time_embed_dim": int(table.shape[1]),
         "convrot": convrot,
+        "quantization_format": metadata_quantization_format,
+        "convrot_group_size": None,
     }
 
 
@@ -755,11 +768,20 @@ def _load_transformer(
     qkv_layout: str = "contiguous",
     sla_config=None,
     vdn: bool = False,
+    singularity: bool = False,
 ) -> MiniMaxH3Transformer:
     checkpoint = probe_h3_checkpoint(_first_path(filename))
     qkv_layout = str(qkv_layout or "contiguous").strip().lower()
     if qkv_layout not in {"contiguous", "grouped", "interleaved"}:
         raise ValueError(f"Unsupported MiniMax H3 QKV layout {qkv_layout!r}")
+    if singularity:
+        # MMGP's metadata-only loader returns descriptor tensor stubs. Read
+        # just the tiny Comfy quantization marker tensors from this pinned
+        # checkpoint; never materialize the model weights during the probe.
+        checkpoint.update(
+            convrot_quantization_info_from_file(_first_path(filename))
+        )
+        validate_minimax_h3_singularity_checkpoint(checkpoint, qkv_layout)
     with init_empty_weights(include_buffers=True):
         transformer = MiniMaxH3Transformer(
             curve_grid=checkpoint["adaln_curve_grid"],
@@ -973,6 +995,11 @@ class MiniMaxH3Model:
         self._fused_turbo = bool(
             model_def.get("minimax_h3_fused_turbo", False)
         )
+        self.singularity = bool(model_def.get("minimax_h3_singularity", False))
+        if self.singularity and self._fused_turbo:
+            raise ValueError(
+                "MiniMax H3 Singularity uses a separate checkpoint and cannot be marked as fused Turbo."
+            )
         self.sample_solver = str(
             model_def.get("minimax_h3_sampler") or "euler"
         ).strip().lower()
@@ -1017,6 +1044,7 @@ class MiniMaxH3Model:
             qkv_layout=qkv_layout,
             sla_config=model_def.get("sla_attention_config"),
             vdn=self.vdn,
+            singularity=self.singularity,
         )
         from .viggle import load_conditioner
         self.conditioner = load_conditioner() if self.viggle else _load_conditioner(
@@ -1048,18 +1076,16 @@ class MiniMaxH3Model:
         self.release_special_loras()
         if getattr(self, "_fused_turbo", False):
             validate_fused_h3_loras(loras_selected)
+        accelerator_paths = tuple(
+            find_minimax_h3_accelerators(loras_selected)
+        )
+        if len(accelerator_paths) > 1:
+            raise ValueError(
+                "MiniMax H3 supports one accelerator at a time; select only "
+                "one Turbo or PDD adapter."
+            )
         turbo_paths = tuple(find_minimax_h3_turbo_loras(loras_selected))
-        if len(turbo_paths) > 1:
-            raise ValueError(
-                "MiniMax H3 supports one Turbo accelerator at a time; "
-                "select one preset in H3 Optimizations."
-            )
         pdd_paths = tuple(find_minimax_h3_pdd_loras(loras_selected))
-        if len(pdd_paths) > 1:
-            raise ValueError(
-                "MiniMax H3 supports one Parallel Decoding Distillation "
-                "adapter at a time."
-            )
         for path in turbo_paths:
             preset = minimax_h3_turbo_preset_for_path(path)
             if preset is None:

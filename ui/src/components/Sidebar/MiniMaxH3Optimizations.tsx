@@ -17,7 +17,8 @@ export function MiniMaxH3Optimizations() {
   const advisory = useStore(s => s.modelOptions?.minimax_h3_runtime_advisory)
   const params = useStore(s => s.params)
   const currentSteps = useStore(s => s.params.num_inference_steps)
-  const defaultSteps = useStore(s => s.modelOptions?.default_num_inference_steps)
+  const defaultSteps = useStore(s => s.modelOptions?.minimax_h3_turbo?.unaccelerated_steps
+    ?? s.modelOptions?.default_num_inference_steps)
   const activatedLoras = useStore(s => s.params.activated_loras)
   const setParam = useStore(s => s.setParam)
   const toggleLora = useStore(s => s.toggleLora)

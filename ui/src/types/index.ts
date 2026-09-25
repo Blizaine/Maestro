@@ -15,6 +15,7 @@ export interface DirectorCapabilityResult {
 
 export interface DirectorModelCompatibility {
   image: DirectorCapabilityResult
+  image_reference_mode?: '' | 'I' | 'KI'
   video: Record<DirectorPipelineType | 'seamless', DirectorCapabilityResult>
   supports_audio_input: boolean
   generates_audio: boolean
@@ -964,6 +965,9 @@ export interface ModelOptions {
     label: string
     experimental: boolean
     preset_id: string
+    /** Selected model recommends this recipe on first selection. */
+    default_enabled?: boolean
+    unaccelerated_steps?: number | null
     version_label: string
     steps: number
     weight: number
@@ -1197,6 +1201,8 @@ export interface ServicesConfig {
   llm_remote_api_key_set: boolean
   enhance_llm_model_id: string
   enhance_llm_device: string
+  enhance_fidelity_retries?: number
+  enhance_fidelity_auto_continue?: boolean
   google_api_key: string
   google_api_key_set: boolean
   openai_api_key: string
@@ -1618,6 +1624,7 @@ export interface DialogueBeat {
   delivery?: string
   physical_cue?: string
   priority?: 'low' | 'medium' | 'high'
+  language?: string
 }
 
 export interface CameraPlan {

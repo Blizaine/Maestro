@@ -1045,9 +1045,11 @@ class TestDirectorCancellation(unittest.TestCase):
 
         self.assertIn("SOURCE-AUDIO LIP SYNC", submitted[0]["prompt"])
         self.assertIn(
-            "lip-syncs every vocal syllable",
+            "only for a person this shot explicitly assigns",
             submitted[0]["prompt"],
         )
+        self.assertIn("only while that part is present", submitted[0]["prompt"])
+        self.assertIn("lips relaxed and closed through instrumental gaps", submitted[0]["prompt"])
         self.assertEqual(submitted[0]["audio_prompt_type"], "A")
         self.assertIn("audio_conditioning_guide", submitted[0])
 
@@ -1224,7 +1226,12 @@ class TestDirectorCancellation(unittest.TestCase):
         self.assertEqual(len(prompts), 2)
         for prompt in prompts:
             self.assertIn("SOURCE-AUDIO LIP SYNC", prompt)
-            self.assertIn("lip-syncs every vocal syllable", prompt)
+            self.assertIn(
+                "only for a person this shot explicitly assigns",
+                prompt,
+            )
+            self.assertIn("only while that part is present", prompt)
+            self.assertIn("lips relaxed and closed through instrumental gaps", prompt)
             self.assertNotIn("\n", prompt)
         self.assertEqual(submitted[0]["audio_prompt_type"], "A")
         self.assertEqual(

@@ -1,21 +1,29 @@
 """Queued face refinement for new generations and existing Maestro videos."""
 from __future__ import annotations
 
+import atexit
 import contextlib
+import errno
 import json
+import logging
 import math
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 
 from .media_flow import _check_abort, _encoding_options
 
 DEFAULTS = {"enabled": False, "face_count": 0, "strength": 0.75,
             "steps": 4, "window_frames": 243, "model": "auto", "character_ids": []}
+_TEMP_CLEANUP_RETRY_DELAYS = (0.05, 0.1, 0.2)
+_DEFERRED_CLEANUP_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0)
+_logger = logging.getLogger(__name__)
 
 
 def normalize_options(value=None):
@@ -70,6 +78,89 @@ def _root():
     path = Path("uploads/face_refiner").resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _is_transient_cleanup_error(error):
+    """Return whether a failed remove may succeed after a short delay."""
+    return (getattr(error, "winerror", None) in {5, 32, 145}
+            or getattr(error, "errno", None) in {
+                errno.EACCES, errno.EBUSY, errno.EPERM, errno.ENOTEMPTY,
+            })
+
+
+def _remove_temporary_tree(path):
+    shutil.rmtree(path)
+
+
+def _retry_temporary_cleanup(path, delays):
+    last_error = None
+    for delay in delays:
+        if delay:
+            time.sleep(delay)
+        try:
+            _remove_temporary_tree(path)
+            return None
+        except Exception as error:
+            last_error = error
+            if not isinstance(error, OSError) or not _is_transient_cleanup_error(error):
+                break
+    return last_error
+
+
+def _cleanup_temporary_directory_at_exit(path):
+    if not Path(path).exists():
+        return
+    try:
+        _remove_temporary_tree(path)
+    except OSError as error:
+        _logger.warning("Face Refiner temporary directory remains after shutdown: %s (%s)", path, error)
+
+
+def _deferred_temporary_cleanup(path):
+    error = _retry_temporary_cleanup(path, _DEFERRED_CLEANUP_RETRY_DELAYS)
+    if error is not None and Path(path).exists():
+        _logger.warning("Face Refiner could not remove deferred temporary directory %s (%s)", path, error)
+
+
+def _schedule_deferred_temporary_cleanup(path):
+    path = os.fspath(path)
+    atexit.register(_cleanup_temporary_directory_at_exit, path)
+    worker = threading.Thread(target=_deferred_temporary_cleanup, args=(path,),
+                              name="face-refiner-temp-cleanup", daemon=True)
+    worker.start()
+
+
+def _cleanup_temporary_directory(temporary):
+    """Retry transient Windows file locks without failing completed work."""
+    path = Path(temporary.name)
+    try:
+        temporary.cleanup()
+        return
+    except Exception as error:
+        cleanup_error = error
+
+    if not path.exists():
+        return
+    if _is_transient_cleanup_error(cleanup_error):
+        cleanup_error = _retry_temporary_cleanup(path, _TEMP_CLEANUP_RETRY_DELAYS)
+        if cleanup_error is None or not path.exists():
+            return
+
+    _logger.warning("Face Refiner temporary directory cleanup is deferred for %s (%s)",
+                    path, cleanup_error)
+    try:
+        _schedule_deferred_temporary_cleanup(path)
+    except Exception as error:
+        _logger.warning("Face Refiner could not schedule deferred cleanup for %s (%s)", path, error)
+
+
+@contextlib.contextmanager
+def _temporary_directory(prefix):
+    temporary = tempfile.TemporaryDirectory(prefix=prefix, dir=_root())
+    try:
+        yield Path(temporary.name)
+    finally:
+        _cleanup_temporary_directory(temporary)
 
 
 def analysis_directory(analysis_id):
@@ -139,8 +230,8 @@ def decoded_video(source, abort=None, progress=None):
     import cv2
     import numpy as np
     import torch
-    with tempfile.TemporaryDirectory(prefix="frames-", dir=_root()) as temporary:
-        path = Path(temporary) / "source.rgb"
+    with _temporary_directory(prefix="frames-") as temporary:
+        path = temporary / "source.rgb"
         capture = cv2.VideoCapture(str(source))
         array = tensor = None
         try:
@@ -167,12 +258,14 @@ def decoded_video(source, abort=None, progress=None):
                 raise ValueError("The source video contains no readable frames")
             array = np.memmap(path, dtype=np.uint8, mode="r+", shape=(count, height, width, 3))
             tensor = torch.from_numpy(array)
-            yield tensor, {"fps": fps, "frames": count, "width": width, "height": height}, Path(temporary)
+            yield tensor, {"fps": fps, "frames": count, "width": width, "height": height}, temporary
         finally:
             capture.release()
+            # Callers release their tensor before this context exits. Let the
+            # memmap close through normal reference counting instead of
+            # invalidating storage that a caller may still hold.
             tensor = None
-            if array is not None:
-                array._mmap.close()
+            array = None
 
 
 def analyze(source, options=None, *, analysis_id=None, abort=None, progress=None):
@@ -188,43 +281,46 @@ def analyze(source, options=None, *, analysis_id=None, abort=None, progress=None
     ref_ids = {id(image): cid for image, cid in zip(references, options["character_ids"])}
     original_fingerprint = fingerprint(source)
     with decoded_video(source, abort, progress) as (frames, geometry, _):
-        detections = _detect(frames, detector, 0.25, abort, progress)
-        _check_abort(abort)
-        if detections is None:
-            raise RuntimeError("Face detection did not complete")
-        tracks = _select_tracks(frames, detections, face_count=options["face_count"],
-            reference_images=references, identity_threshold=0.28, auto_min_face_height=32,
-            reference_threshold=0.5, reference_margin=0.08,
-            auto_min_presence=0.2, insightface_model_dir=identity_dir,
-            abort_callback=abort, progress_callback=progress)
-        _check_abort(abort)
-        if tracks is None:
-            raise RuntimeError("Face tracking did not complete")
-        faces, transforms, warnings = [], [], []
-        for index, track in enumerate(tracks, 1):
+        try:
+            detections = _detect(frames, detector, 0.25, abort, progress)
             _check_abort(abort)
-            prepared = _crop_track(frames, track["boxes"], crop_factor=1.6,
-                canvas_width=512, canvas_height=512, canvas_mode="auto_capped_768",
-                strength_small_face=options["strength"], strength_large_face=options["strength"],
-                abort_callback=abort, progress_callback=progress,
-                track_label=f"Face {index}", include_crops=False)
+            if detections is None:
+                raise RuntimeError("Face detection did not complete")
+            tracks = _select_tracks(frames, detections, face_count=options["face_count"],
+                reference_images=references, identity_threshold=0.28, auto_min_face_height=32,
+                reference_threshold=0.5, reference_margin=0.08,
+                auto_min_presence=0.2, insightface_model_dir=identity_dir,
+                abort_callback=abort, progress_callback=progress)
             _check_abort(abort)
-            if prepared is None:
-                raise RuntimeError("Face crop preparation did not complete")
-            transform, _strengths = prepared
-            reference_frame = select_reference_frame(frames, transform["raw_face_boxes"],
-                max_candidates=24, insightface_model_dir=identity_dir)
-            crop = crop_face_track(frames, transform, reference_frame, reference_frame + 1, uint8_storage=True)
-            image = Image.fromarray(crop[:, 0].permute(1, 2, 0).numpy())
-            image.save(directory / f"face-{index}.png")
-            matched = ref_ids.get(id(track.get("reference_image")))
-            faces.append({"track_id": index, "thumbnail_url": f"/api/v1/face-refiner/analyses/{analysis_id}/faces/{index}",
-                "character_id": matched, "similarity": round(float(track.get("reference_similarity", 0)), 3) if matched else None,
-                "first_seen_seconds": round(next(i for i, box in enumerate(track["boxes"]) if box is not None) / geometry["fps"], 2),
-                "presence": round(float(track["presence"]), 3)})
-            transforms.append(transform)
-            if track.get("anchor") is None:
-                warnings.append(f"Face {index} was tracked by position; a reliable identity embedding was unavailable.")
+            if tracks is None:
+                raise RuntimeError("Face tracking did not complete")
+            faces, transforms, warnings = [], [], []
+            for index, track in enumerate(tracks, 1):
+                _check_abort(abort)
+                prepared = _crop_track(frames, track["boxes"], crop_factor=1.6,
+                    canvas_width=512, canvas_height=512, canvas_mode="auto_capped_768",
+                    strength_small_face=options["strength"], strength_large_face=options["strength"],
+                    abort_callback=abort, progress_callback=progress,
+                    track_label=f"Face {index}", include_crops=False)
+                _check_abort(abort)
+                if prepared is None:
+                    raise RuntimeError("Face crop preparation did not complete")
+                transform, _strengths = prepared
+                reference_frame = select_reference_frame(frames, transform["raw_face_boxes"],
+                    max_candidates=24, insightface_model_dir=identity_dir)
+                crop = crop_face_track(frames, transform, reference_frame, reference_frame + 1, uint8_storage=True)
+                image = Image.fromarray(crop[:, 0].permute(1, 2, 0).numpy())
+                image.save(directory / f"face-{index}.png")
+                matched = ref_ids.get(id(track.get("reference_image")))
+                faces.append({"track_id": index, "thumbnail_url": f"/api/v1/face-refiner/analyses/{analysis_id}/faces/{index}",
+                    "character_id": matched, "similarity": round(float(track.get("reference_similarity", 0)), 3) if matched else None,
+                    "first_seen_seconds": round(next(i for i, box in enumerate(track["boxes"]) if box is not None) / geometry["fps"], 2),
+                    "presence": round(float(track["presence"]), 3)})
+                transforms.append(transform)
+                if track.get("anchor") is None:
+                    warnings.append(f"Face {index} was tracked by position; a reliable identity embedding was unavailable.")
+        finally:
+            frames = None
     _check_abort(abort)
     if fingerprint(source) != original_fingerprint:
         raise ValueError("The source changed while detecting faces. Try again.")
@@ -365,7 +461,10 @@ def process_video(source, destination, *, options=None, analysis_id=None, assign
                 # A WebM/MKV upload must not be copied into a misleading
                 # .mp4 filename. Preserve its frames and audio in MP4.
                 with decoded_video(source, abort, progress) as (frames, geometry, _):
-                    _encode(source, destination, frames, geometry["fps"], abort, progress)
+                    try:
+                        _encode(source, destination, frames, geometry["fps"], abort, progress)
+                    finally:
+                        frames = None
         except BaseException:
             with contextlib.suppress(OSError):
                 Path(destination).unlink()
@@ -375,16 +474,17 @@ def process_video(source, destination, *, options=None, analysis_id=None, assign
     directory = analysis_directory(data["id"])
     try:
         with decoded_video(source, abort, progress) as (frames, geometry, temporary):
-            if any(geometry[key] != data[key] for key in ("frames", "width", "height", "fps")):
-                raise ValueError("Source geometry changed after detection. Detect faces again.")
-            output_array = np.memmap(temporary / "output.rgb", mode="w+", dtype=np.uint8, shape=tuple(frames.shape))
-            output = torch.from_numpy(output_array)
-            base_array = np.memmap(temporary / "base.rgb", mode="w+", dtype=np.uint8, shape=tuple(frames.shape))
-            base_frames = torch.from_numpy(base_array)
-            for start in range(0, geometry["frames"], 24):
-                _check_abort(abort)
-                output[start:start + 24].copy_(frames[start:start + 24])
+            output_array = base_array = output = base_frames = None
             try:
+                if any(geometry[key] != data[key] for key in ("frames", "width", "height", "fps")):
+                    raise ValueError("Source geometry changed after detection. Detect faces again.")
+                output_array = np.memmap(temporary / "output.rgb", mode="w+", dtype=np.uint8, shape=tuple(frames.shape))
+                output = torch.from_numpy(output_array)
+                base_array = np.memmap(temporary / "base.rgb", mode="w+", dtype=np.uint8, shape=tuple(frames.shape))
+                base_frames = torch.from_numpy(base_array)
+                for start in range(0, geometry["frames"], 24):
+                    _check_abort(abort)
+                    output[start:start + 24].copy_(frames[start:start + 24])
                 for mapping in selected:
                     track = mapping["track_id"]
                     if mapping["character_id"]:
@@ -440,9 +540,12 @@ def process_video(source, destination, *, options=None, analysis_id=None, assign
                                     raise RuntimeError("Face compositing did not complete")
                 _encode(source, destination, output_array, geometry["fps"], abort, progress)
             finally:
-                output = base_frames = None
-                output_array._mmap.close()
-                base_array._mmap.close()
+                # Drop every tensor backed by these mappings before the
+                # temporary directory is cleaned up. Closing a memmap while a
+                # tensor still owns its storage can leave a dangling tensor.
+                output = base_frames = frames = None
+                output_array = base_array = None
+                refined = previous_tail = stitched = crop = None
         return report
     except BaseException:
         with contextlib.suppress(OSError):

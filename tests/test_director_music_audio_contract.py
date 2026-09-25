@@ -81,7 +81,7 @@ class TestMusicAudioContract(unittest.TestCase):
             self.apply(model, [plan], params)
             self.assertEqual(plan, original)
 
-    def test_explicit_user_speech_in_music_brief_is_not_discarded(self):
+    def test_explicit_music_brief_lines_remain_metadata_for_exact_source_audio(self):
         plan = self.plan()
         self.apply('minimax_h3_ref2va', [plan], {
             'pipeline_type': 'music_video', 'audio_path': 'song.wav',
@@ -90,7 +90,10 @@ class TestMusicAudioContract(unittest.TestCase):
         self.assertEqual(plan['_director_audio_plan']['mode'], 'audio_driven')
         self.assertEqual(len(plan['_director_dialogue_beats']), 1)
         self.dialogue.compile_h3_clip_plans([plan])
-        self.assertIn('<d>[English] running free</d>', plan['video_prompt'])
+        self.assertEqual(plan['_director_dialogue_beats'][0]['spoken_text'], 'running free')
+        self.assertIn('running free', plan['_director_h3_source_prompt'])
+        self.assertNotIn('<d>', plan['video_prompt'])
+        self.assertIn('mapped driving audio', plan['video_prompt'])
 
     def test_quoted_visual_description_does_not_become_a_speech_exception(self):
         plan = self.plan()
@@ -101,7 +104,7 @@ class TestMusicAudioContract(unittest.TestCase):
         self.assertEqual(plan['_director_audio_plan']['mode'], 'music_driven')
         self.assertEqual(plan['_director_dialogue_beats'], [])
 
-    def test_saved_reviewed_music_speech_survives_cleared_ai_cache(self):
+    def test_reviewed_music_lines_survive_cleared_cache_as_source_audio_metadata(self):
         plan = self.plan()
         plan.update({
             '_director_prompt_user_edited': True,
@@ -114,7 +117,10 @@ class TestMusicAudioContract(unittest.TestCase):
             'scene_description': 'A band performs on stage.',
         })
         self.dialogue.compile_h3_clip_plans([plan])
-        self.assertIn('<d>[English] Welcome to the show.</d>', plan['video_prompt'])
+        self.assertEqual(plan['_director_dialogue_beats'][0]['spoken_text'], 'Welcome to the show.')
+        self.assertIn('Mat says, "Welcome to the show."', plan['_director_h3_source_prompt'])
+        self.assertNotIn('<d>', plan['video_prompt'])
+        self.assertIn('mapped driving audio', plan['video_prompt'])
         self.assertNotIn('running free', plan['video_prompt'])
 
     def test_direct_compiler_uses_music_audio_even_if_writer_supplies_beats(self):

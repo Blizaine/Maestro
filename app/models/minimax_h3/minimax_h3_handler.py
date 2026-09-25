@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 
-
 _MODEL_TYPE = "minimax_h3"
 _REF2VA_MODEL_TYPE = "minimax_h3_ref2va"
 _FULL_MODEL_TYPE = "minimax_h3_full"
@@ -20,6 +19,17 @@ _EXPERIMENTAL_VAE_REPO = "Kijai/MiniMax-H3-experimental"
 _EXPERIMENTAL_VAE_REVISION = "a3e7d8da4ae7ba8df0779094cf5ab9d6ee855fe4"
 _FUSED_MODEL_REPO = "MATLOWAI/minimax-h3-fused-turbo-int8-convrot"
 _FUSED_MODEL_REVISION = "3b51096a1bf67608d98131116558202208fcf195"
+_SINGULARITY_MODEL_ID = "minimax_h3_ref2va_singularity"
+_SINGULARITY_DEFAULT_TURBO_PRESET = "lightx2v-ref2va-turbo4-v0.1-comfy-bf16"
+_SINGULARITY_CHECKPOINT_REQUIREMENTS = {
+    "compressed_modulation": True,
+    "adaln_curve_grid": 1025,
+    "time_embed_dim": 8,
+    "quantization_format": "int8_tensorwise",
+    "convrot": True,
+    "convrot_group_size": 256,
+    "qkv_layout": "grouped",
+}
 _ASSETS_ROOT = "minimax_h3"
 
 _TRANSFORMER = "minimax_h3_fl2va_pruned_fp8_scaled.safetensors"
@@ -1693,6 +1703,21 @@ class family_handler:
         fused_turbo = bool(
             (model_def or {}).get("minimax_h3_fused_turbo", False)
         )
+        singularity = bool(
+            (model_def or {}).get("minimax_h3_singularity", False)
+        )
+        if singularity and fused_turbo:
+            raise ValueError(
+                "MiniMax H3 Singularity is a separate checkpoint, not the fused Turbo model."
+            )
+        if singularity and (
+            base_model_type != _REF2VA_MODEL_TYPE
+            or audio_only
+            or full_checkpoint
+        ):
+            raise ValueError(
+                "MiniMax H3 Singularity v1.3 is only supported as a Ref2VA References model."
+            )
         window_memory_policy = (
             (
                 _H3_FUSED_REFERENCE_WINDOW_MEMORY_POLICY
@@ -1735,6 +1760,13 @@ class family_handler:
             "the next window."
         )
         checkpoint_help = (
+            "SINGULARITY V1.3 — REFERENCES (EXPERIMENTAL)\n"
+            "Reference-focused experimental model with a pinned 21 GB pruned "
+            "INT8 ConvRot checkpoint. The recommended LightX2V Ref2VA Turbo4 "
+            "adapter is 1.96 GB and defaults to four Euler steps. Turbo off "
+            "uses the ordinary 20-step H3 recipe."
+            if singularity
+            else
             "FUSED TURBO PREVIEW\n"
             "This community checkpoint already contains the Ref2VA delta, "
             "LightX2V Turbo, Mystic, and INT8 ConvRot conversion. Maestro "
@@ -1869,7 +1901,7 @@ class family_handler:
             # to INT8 does not download a second ~20B transformer.
             "compatible_model_paths": (
                 {}
-                if full_checkpoint or fused_turbo
+                if full_checkpoint or fused_turbo or singularity
                 else {
                     (
                         _REF2VA_TRANSFORMER
@@ -1897,7 +1929,7 @@ class family_handler:
             ),
             "compatible_model_qkv_layouts": (
                 {}
-                if full_checkpoint or fused_turbo
+                if full_checkpoint or fused_turbo or singularity
                 else {
                     (
                         _WANGP_REF2VA_PRUNED_TRANSFORMER
@@ -1927,6 +1959,48 @@ class family_handler:
             },
             "minimax_h3_full_checkpoint": full_checkpoint,
             "minimax_h3_fused_turbo": fused_turbo,
+            "minimax_h3_singularity": singularity,
+            "minimax_h3_model_id": (
+                _SINGULARITY_MODEL_ID if singularity else ""
+            ),
+            "minimax_h3_default_turbo_preset": (
+                str(
+                    (model_def or {}).get(
+                        "minimax_h3_default_turbo_preset"
+                    )
+                    or _SINGULARITY_DEFAULT_TURBO_PRESET
+                )
+                if singularity
+                else str(
+                    (model_def or {}).get(
+                        "minimax_h3_default_turbo_preset"
+                    )
+                    or ""
+                )
+            ),
+            "minimax_h3_turbo_mode_default": singularity,
+            "minimax_h3_unaccelerated_default_steps": int(
+                (model_def or {}).get(
+                    "minimax_h3_unaccelerated_default_steps", 20
+                )
+            ),
+            "minimax_h3_checkpoint_requirements": dict(
+                (model_def or {}).get(
+                    "minimax_h3_checkpoint_requirements", {}
+                )
+                or (
+                    _SINGULARITY_CHECKPOINT_REQUIREMENTS
+                    if singularity
+                    else {}
+                )
+            ),
+            "source_repo": str((model_def or {}).get("source_repo") or ""),
+            "source_revision": str(
+                (model_def or {}).get("source_revision") or ""
+            ),
+            "source_sha256": str((model_def or {}).get("source_sha256") or ""),
+            "source_size_bytes": (model_def or {}).get("source_size_bytes"),
+            "model_size_gb": (model_def or {}).get("model_size_gb"),
             "lock_inference_steps": False if fused_turbo else bool(
                 (model_def or {}).get("lock_inference_steps", False)
             ),
@@ -1946,7 +2020,7 @@ class family_handler:
             ),
             "minimax_h3_qkv_layout": (
                 "grouped"
-                if fused_turbo
+                if fused_turbo or singularity
                 else ("interleaved" if full_checkpoint else "contiguous")
             ),
             "minimax_h3_sampler": (
@@ -1967,6 +2041,11 @@ class family_handler:
             ),
             "selector_help": f"{workflow_help}\n\n{checkpoint_help}",
             "lora_compatibility_note": (
+                "The LightX2V Ref2VA Turbo4 adapter is the default "
+                "four-step accelerator at strength 1. Select only one H3 Turbo "
+                "or PDD adapter; other H3 LoRAs remain experimental."
+                if singularity
+                else
                 "Experimental H3 LoRA support. Start with one adapter at low strength; "
                 "Turbo/PDD, VDN and DoRA adapters are excluded. Mystic remains baked in at 0.7."
                 if fused_turbo

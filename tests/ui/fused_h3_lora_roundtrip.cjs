@@ -7,6 +7,7 @@ const ts = require(path.join(root, 'ui/node_modules/typescript'));
 const modules = new Map();
 let submitted;
 const api = new Proxy({
+  updateStudioPreferences: async () => ({}),
   submitGeneration: async params => {
     submitted = JSON.parse(JSON.stringify(params));
     return { job_id: 'fused-lora-roundtrip', status: 'held' };
@@ -31,7 +32,7 @@ function load(file) {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
   } }).outputText;
   vm.runInNewContext(code, {
-    module, exports: module.exports, console, URL, AbortController,
+    module, exports: module.exports, console, URL, AbortController, structuredClone,
     localStorage: { getItem: () => null, setItem: () => {} },
     setTimeout: () => 1, clearTimeout: () => {}, setInterval: () => 1, clearInterval: () => {},
     window: { setTimeout: () => 1, clearTimeout: () => {} },

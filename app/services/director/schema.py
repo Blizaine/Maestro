@@ -170,6 +170,7 @@ class DialogueBeat:
     delivery: Optional[str] = None
     physical_cue: Optional[str] = None
     priority: str = "medium"  # "low" | "medium" | "high"
+    language: Optional[str] = None
 
     def to_dict(self) -> dict:
         d = {"spoken_text": self.spoken_text, "priority": self.priority}
@@ -179,6 +180,8 @@ class DialogueBeat:
             d["delivery"] = self.delivery
         if self.physical_cue:
             d["physical_cue"] = self.physical_cue
+        if self.language:
+            d["language"] = self.language
         return d
 
     @staticmethod
@@ -195,6 +198,7 @@ class DialogueBeat:
             delivery=d.get("delivery"),
             physical_cue=d.get("physical_cue"),
             priority=d.get("priority", "medium"),
+            language=(str(d.get("language") or "").strip() or None),
         )
 
 

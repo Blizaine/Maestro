@@ -1,5 +1,6 @@
 """Qwen Image 2.1 adapter for Maestro's MMGP generation lifecycle."""
 
+import itertools
 import json
 import math
 from pathlib import Path
@@ -15,6 +16,7 @@ from mmgp import offload
 from shared.utils import files_locator as fl
 
 from .autoencoder_kl_qwenimage21 import AutoencoderKLQwenImage21
+from .memory import configure_encoder_attention
 from .pipeline_qwenimage21 import QwenImage21Pipeline
 from .transformer_qwenimage21 import QwenImage21Transformer2DModel
 
@@ -61,6 +63,7 @@ class model_factory:
             self.transformer = QwenImage21Transformer2DModel.from_config(_config("transformer_config.json"))
             self.text_encoder = Qwen3VLModel(Qwen3VLConfig.from_dict(_config("text_encoder_config.json")))
             self.vae = AutoencoderKLQwenImage21.from_config(_config("vae_config.json"))
+        configure_encoder_attention(self.text_encoder)
         offload.load_model_data(self.transformer, filename, writable_tensors=False, default_dtype=torch.bfloat16)
         offload.load_model_data(self.text_encoder, text_encoder_filename, writable_tensors=False,
                                default_dtype=torch.bfloat16)
@@ -154,6 +157,10 @@ class model_factory:
 
         handles = [self.transformer.register_forward_pre_hook(check_cancel),
                    self.vae.decoder.register_forward_pre_hook(decoding)]
+        # MMGP can spend a long time in the encoder before the first denoising
+        # callback. Let cancellation take effect at each vision/text block.
+        for block in itertools.chain(self.text_encoder.visual.blocks, self.text_encoder.language_model.layers):
+            handles.append(block.register_forward_pre_hook(check_cancel))
         try:
             check_cancel()
             if callable(set_progress_status):

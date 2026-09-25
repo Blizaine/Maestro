@@ -3,6 +3,109 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [2.4.0] - 2026-09-24
+
+Immersive gallery viewing, Qwen Image 2.1 LoRA and memory improvements,
+experimental H3 Singularity, and more control over prompt enhancement.
+
+- Add **Settings → Integrations → Prompt Enhancement** controls for zero to
+  five fidelity repair attempts, with one still the default. An optional
+  **Generate even if fidelity checks fail** setting lets Enhance on generation
+  use the saved draft after its repair attempts. Review warnings stay available;
+  actual loading, cancellation, empty-draft, and generation failures are not
+  bypassed. Automatic continuation is off by default.
+- Include enabled, compatible Qwen image models, including **Qwen Image 2.1**,
+  in Director's image selector. Honor each model's reference format, reference
+  limit, and generation defaults when creating or rerunning start images.
+
+- Reduce false camera-fidelity warnings during multi-window H3 enhancement
+  by distinguishing a recurring person or prop from a later action actually
+  happening early. Keep premature-action checks and direct repairs to the
+  affected event card without rewriting valid neighboring windows.
+  Preserve inline character notes and restrictions as context, and check
+  individual source actions even when the AI writes a long staging description.
+  Review paraphrases against exact, current visual evidence; retain genuine
+  missing-action and ordering checks. Keep first-frame instructions at the
+  opening, preserve continuous-shot coverage in fallback prompts, and carry
+  the final action's resulting state into the next window.
+  Recognize body-part descriptions and leading before/after clauses without
+  losing checks on real handoffs or reversed action order. Clarify that opening
+  and subsequent camera phases advance the action, and give explicitly recurring
+  events context for showing distinct occasions.
+  Let neighboring camera phases complete one source action while keeping other
+  events and separate recurring occasions independent. Carry accepted visible
+  action into the next window instead of treating an AI closing-state claim as
+  proof that a pending action happened. Preserve explicit opening poses and keep
+  instructions for a starting still out of later video action. Retain every
+  assigned action when fallback shots group recurring and ordinary events.
+- Scope Director music-performance instructions to the people actually shown
+  in each shot. Narrative, dance, and scenery shots no longer inherit a list
+  of singers and instrumentalists; visible performers retain their assigned
+  vocal roles, instrumental gaps, and explicitly requested expressions.
+  Remove the old injected boilerplate when recompiling saved music prompts.
+- Add experimental H3 Singularity v1.3 References with its recommended
+  LightX2V four-step Turbo LoRA, automatic downloads, and Studio/Director
+  settings. The separate INT8 checkpoint preserves existing model choices.
+  See [local testing instructions](docs/H3-Singularity.md).
+- Fix Windows Face Refiner cleanup errors discarding completed work. Release
+  mapped frame storage before cleanup and retry transient file locks without
+  replacing the original processing error (#146).
+- Fix API-key saving: retain real keys containing ellipses, recognize saved
+  masked placeholders, wait for persistence, and keep the editor open with an
+  error on failure. Save settings atomically and preserve the previous settings
+  if saving fails (#143).
+- Reduce Recast mask-composition memory use by processing one frame at a time,
+  avoiding large whole-video temporary index arrays while preserving character
+  colors, mapping priority, and overlap checks (#145).
+- Repair malformed duplicate H3 dialogue markup in Director when structured
+  dialogue supplies the exact lines and speakers, retaining the surrounding
+  visual action. Preserve per-line dialogue language through planning and saved
+  projects. When supplied audio drives a clip, keep its transcript as timing
+  metadata without generating duplicate speech (#148).
+- Send reference images to remote LLMs in streaming and non-streaming requests,
+  with native Anthropic image formatting and clearer unsupported-image errors.
+  Enhancement model overrides retain the selected provider and credentials
+  (PR #136).
+- Package the DramaBox speech and dialogue guides to remove missing-guide
+  startup warnings while preserving their existing instructions (#140).
+- Click gallery images to enlarge them, or browse images and videos in a
+  viewer that enters native fullscreen where supported. Vertical swipes move
+  the media with your finger and slide into the next item, with keyboard
+  navigation and favorites. Heart and close controls float over the media;
+  a single tap pauses or resumes video, revealing controls that fade during playback.
+  Video and controls fit the visible screen as mobile browser toolbars change size.
+  Keep the viewer's sound choice across clips without asking to unmute after each swipe.
+  Prepare the next video during the swipe animation and retain the preview until
+  its first frame is ready, avoiding a blank flash or second load at the handoff.
+  Pinch to zoom fullscreen images, then drag to inspect details and reset to resume swiping.
+  iPhone users can open Maestro from the Home Screen to browse without Safari's toolbar.
+  Dismissing the Home Screen tip is remembered for later visits.
+  Show cached first-frame video posters in the gallery and swipe previews,
+  without requiring phones to decode videos before playback. Use an opaque
+  iOS Home Screen status bar to keep its shading off the app header.
+  Compare images with a before/after divider, using the active sidecar source
+  by default or choosing other gallery and local images. Keep the sidecar
+  collapsible on touch devices in landscape as well as portrait.
+- H3 prompt enhancement treats a Music / performance timeline as the source
+  of vocals and timing, skipping dialogue writing and word-count gates while
+  retaining visual checks. Keep sustained performances across windows without
+  contradictory silence instructions, camera-style notes becoming story events,
+  or scene references being counted as characters.
+- Gallery images, captured video frames, and full videos can now be sent to
+  the active Studio or Director input, including references, Animate, video
+  editing, and upscaling. The media menu names each available destination.
+- Add a Qwen Image 2.1 filter to the CivitAI LoRA Browser and route CivitAI
+  downloads and Hugging Face imports to its separate LoRA library. Selecting
+  another model version uses that version's architecture for automatic placement.
+- Support Qwen Image 2.1 LoRAs exported with fused feed-forward layers by
+  AI Toolkit / ComfyUI, preserving their trained weights and strength instead
+  of rejecting valid adapters as belonging to a different model.
+- Qwen Image 2.1: prevent the encoder's grouped-query attention from forcing
+  large FP32 attention allocations on Windows builds without native Flash
+  Attention. Size the optional reference cache against available VRAM and
+  recompute when needed, preserving all references and output dimensions.
+  Release the cache before VAE decoding and allow cancellation between encoder layers.
+
 ## [2.3.0] - 2026-09-20
 
 Qwen Image 2.1, a complete My Music training workflow, and more control over

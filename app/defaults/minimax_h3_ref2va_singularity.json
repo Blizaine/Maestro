@@ -1,0 +1,46 @@
+{
+  "model": {
+    "name": "H3 Singularity — References (Experimental)",
+    "architecture": "minimax_h3_ref2va",
+    "minimax_h3_model_id": "minimax_h3_ref2va_singularity",
+    "minimax_h3_singularity": true,
+    "minimax_h3_qkv_layout": "grouped",
+    "minimax_h3_default_turbo_preset": "lightx2v-ref2va-turbo4-v0.1-comfy-bf16",
+    "minimax_h3_turbo_mode_default": true,
+    "minimax_h3_unaccelerated_default_steps": 20,
+    "description": "Experimental reference-focused MiniMax H3 Singularity v1.3 using its pinned 21 GB pruned INT8 ConvRot checkpoint.",
+    "selector_help": "SINGULARITY V1.3 — REFERENCES (EXPERIMENTAL)\nReference-focused model with a pinned 21 GB pruned INT8 ConvRot checkpoint. The recommended LightX2V Ref2VA Turbo4 adapter is 1.96 GB and defaults to four Euler steps. Turbo off uses the ordinary 20-step H3 recipe.",
+    "URLs": [
+      "https://huggingface.co/WarmBloodAban/Minimax-h3_Singularity/resolve/af671d9214a6e41ab8c2f43e9f871ea56246115f/Minimax-h3_Singularity_ref2va_Pruned_v1.3_int8.safetensors"
+    ],
+    "source_repo": "https://huggingface.co/WarmBloodAban/Minimax-h3_Singularity",
+    "source_revision": "af671d9214a6e41ab8c2f43e9f871ea56246115f",
+    "source_sha256": "412a7b126595a958964193f3b42513d7cf2df4196ef04223a0f05e3622949cce",
+    "source_size_bytes": 20967647456,
+    "model_size_gb": 21,
+    "minimax_h3_checkpoint_requirements": {
+      "compressed_modulation": true,
+      "adaln_curve_grid": 1025,
+      "time_embed_dim": 8,
+      "quantization_format": "int8_tensorwise",
+      "convrot": true,
+      "convrot_group_size": 256,
+      "qkv_layout": "grouped"
+    },
+    "license_name": "Community derivative; review the derivative and MiniMax base-model terms",
+    "license_url": "https://huggingface.co/WarmBloodAban/Minimax-h3_Singularity"
+  },
+  "prompt": "Use the ordered references to create a coherent cinematic scene with faithful identities, appearance, motion, and sound.",
+  "num_inference_steps": 4,
+  "minimax_h3_turbo_mode": true,
+  "minimax_h3_turbo_preset": "lightx2v-ref2va-turbo4-v0.1-comfy-bf16",
+  "video_length": 124,
+  "sliding_window_size": 345,
+  "sliding_window_overlap": 18,
+  "sliding_window_discard_last_frames": 0,
+  "resolution": "864x480",
+  "guidance_scale": 1.0,
+  "image_prompt_type": "",
+  "minimax_h3_references": [],
+  "minimax_h3_reference_detail": "match"
+}

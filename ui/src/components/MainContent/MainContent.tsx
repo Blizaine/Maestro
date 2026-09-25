@@ -1,15 +1,31 @@
 import { outputIdentity } from '../../lib/galleryIdentity'
 import { useRef, useCallback, useState, useEffect, useMemo, type JSX } from 'react'
-import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Upload, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
+import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Upload, Trash2, ChevronDown, ChevronUp, Maximize2 } from 'lucide-react'
 import { TabFilter } from './TabFilter'
 import { ThumbnailGallery } from './ThumbnailGallery'
 import { MediaFeedItem } from './MediaFeedItem'
+import { GalleryViewer, type GalleryImageChoice } from './GalleryViewer'
 import { GlobalQueuePopover } from '../GlobalQueuePopover'
 import { useStore } from '../../stores/useStore'
-import { useIsMobile } from '../../lib/useIsMobile'
+import { useIsMobileSidecar } from '../../lib/useIsMobile'
+import { captureGallerySourceImages } from '../../lib/galleryInputs'
+import { createGalleryViewerSurface } from '../../lib/galleryFullscreen'
+import { toggleFavorite as saveFavorite } from '../../api/client'
 import { formatEstimatedClock, formatEtaDuration } from '../../lib/format'
 import { PROMPT_ENHANCEMENT_ACTIVITY } from '../../lib/promptEnhancementActivity'
-import type { GenerationJob } from '../../types'
+import type { GenerationJob, OutputFile } from '../../types'
+
+type ViewerSession = {
+  id: string
+  items: OutputFile[]
+  initialId: string
+  initialCompare?: boolean
+  initialTime?: number
+  sourceImages: GalleryImageChoice[]
+  workspace: string
+  allowFavorite: boolean
+  surface: ReturnType<typeof createGalleryViewerSurface>
+}
 
 function WorkspaceSelector() {
   const workspaces = useStore(s => s.workspaces)
@@ -536,9 +552,10 @@ function PipelinePlaceholder() {
 }
 
 export function MainContent() {
-  const isMobile = useIsMobile()
+  const isMobile = useIsMobileSidecar()
   const outputs = useStore(s => s.filteredOutputs())
   const outputsTotal = useStore(s => s.outputsTotal)
+  const hasMoreOutputs = useStore(s => s.outputs.length < s.outputsTotal)
   const outputsLoading = useStore(s => s.outputsLoading)
   const jobs = useStore(s => s.jobs)
   const isEnhancing = useStore(s => s.isEnhancing)
@@ -547,6 +564,50 @@ export function MainContent() {
   const dismissJob = useStore(s => s.dismissJob)
   const activeIndex = useStore(s => s.selectedOutput)
   const setSelectedOutput = useStore(s => s.setSelectedOutput)
+  const [viewerSession, setViewerSession] = useState<ViewerSession | null>(null)
+  const releaseViewerImages = useRef<(() => void) | null>(null)
+  useEffect(() => () => { releaseViewerImages.current?.() }, [])
+
+  const openViewer = useCallback((file: OutputFile, options?: {compare?: boolean; currentTime?: number}) => {
+    if (file.type === 'audio') return
+    const state = useStore.getState()
+    releaseViewerImages.current?.()
+    const sources = captureGallerySourceImages()
+    const surface = createGalleryViewerSurface(!options?.compare)
+    releaseViewerImages.current = () => { sources.release(); surface.release() }
+    setViewerSession({
+      id: `${Date.now()}:${outputIdentity(file)}`,
+      items: state.filteredOutputs().filter(item => item.type !== 'audio'),
+      initialId: outputIdentity(file), initialCompare: options?.compare, initialTime: options?.currentTime,
+      sourceImages: sources.images, workspace: state.activeWorkspace, allowFavorite: !state.browsingUploads, surface,
+    })
+  }, [])
+
+  const favoriteInViewer = useCallback(async (file: OutputFile) => {
+    if (!viewerSession?.allowFavorite) return
+    const origin = file.workspace || viewerSession.workspace
+    const result = await saveFavorite(file.name, origin)
+    useStore.setState(state => ({outputs: state.outputs.map(item => (
+      item.name === file.name && (item.workspace || state.activeWorkspace) === origin
+        ? {...item, favorite: result.favorite} : item
+    ))}))
+    // Keep this viewing session stable even when removing an item from Favorites.
+    setViewerSession(current => current && current.id === viewerSession.id ? {...current,
+      items: current.items.map(item => outputIdentity(item) === outputIdentity(file)
+        ? {...item, favorite: result.favorite} : item),
+    } : current)
+  }, [viewerSession])
+
+  const loadMoreForViewer = useCallback(async () => {
+    if (!viewerSession) return
+    await useStore.getState().loadMoreOutputs()
+    const next = useStore.getState().filteredOutputs().filter(item => item.type !== 'audio')
+    setViewerSession(current => {
+      if (!current || current.id !== viewerSession.id) return current
+      const known = new Set(current.items.map(outputIdentity))
+      return {...current, items: [...current.items, ...next.filter(item => !known.has(outputIdentity(item)))]}
+    })
+  }, [viewerSession])
   // Waiting work now lives in the universal top-bar queue. Keep the gallery
   // focused on media plus useful live/error cards instead of large blank
   // placeholders for every job that has not started yet.
@@ -847,6 +908,14 @@ export function MainContent() {
     requestAnimationFrame(align)
   }, [setSelectedOutput, getItemHeight, placeholderTotalHeight, scheduleCenteredSelection])
 
+  const closeViewer = useCallback((id: string) => {
+    setViewerSession(null)
+    releaseViewerImages.current?.()
+    releaseViewerImages.current = null
+    const index = useStore.getState().filteredOutputs().findIndex(file => outputIdentity(file) === id)
+    if (index >= 0) handleThumbnailClick(index)
+  }, [handleThumbnailClick])
+
   // Infinite scroll: load more when near the bottom
   const loadingMore = useRef(false)
   const handleFeedScroll = useCallback(() => {
@@ -884,6 +953,7 @@ export function MainContent() {
           onActivate={activateIndex}
           onPlaybackStart={handlePlaybackStart}
           onMeasured={handleItemMeasured}
+          onOpenViewer={openViewer}
           style={{
             position: 'absolute',
             top: itemOffsets[i],
@@ -894,10 +964,10 @@ export function MainContent() {
       )
     }
     return items
-  }, [startIndex, endIndex, outputs, activeIndex, activateIndex, handlePlaybackStart, handleItemMeasured, itemOffsets])
+  }, [startIndex, endIndex, outputs, activeIndex, activateIndex, handlePlaybackStart, handleItemMeasured, itemOffsets, openViewer])
 
   return (
-    <main className="flex-1 flex flex-col h-full overflow-hidden">
+    <main className="flex-1 flex flex-col min-h-0 min-w-0 h-full overflow-hidden">
       {/* Top bar */}
       <div className="px-2 md:px-6 py-2 md:py-3 border-b border-border flex items-center justify-between gap-2">
         <TabFilter />
@@ -907,6 +977,16 @@ export function MainContent() {
               ? `${outputs.length} / ${outputsTotal} items`
               : `${outputs.length} ${outputs.length === 1 ? 'item' : 'items'}`}
           </div>
+          <button type="button" aria-label="Open full-screen gallery" title="Open full-screen gallery"
+            disabled={!outputs.some(file => file.type !== 'audio')}
+            onClick={() => {
+              const selected = outputs[activeIndex]
+              const file = selected && selected.type !== 'audio' ? selected : outputs.find(item => item.type !== 'audio')
+              if (file) openViewer(file)
+            }}
+            className="rounded-lg p-1.5 text-text-secondary hover:bg-bg-hover hover:text-text-primary disabled:opacity-35">
+            <Maximize2 size={16} />
+          </button>
           <WorkspaceSelector />
           {!isMobile && <GlobalQueuePopover />}
         </div>
@@ -1002,6 +1082,18 @@ export function MainContent() {
           onThumbnailClick={handleThumbnailClick}
         />
       </div>
+      {viewerSession && (
+        <GalleryViewer key={viewerSession.id}
+          surface={viewerSession.surface}
+          items={viewerSession.items} initialId={viewerSession.initialId}
+          initialCompare={viewerSession.initialCompare} initialTime={viewerSession.initialTime}
+          sourceImages={viewerSession.sourceImages}
+          comparisonImages={viewerSession.items.filter(file => file.type === 'image').map(file => ({
+            id: outputIdentity(file), url: file.url, name: file.workspace ? `${file.workspace} / ${file.name}` : file.name,
+          }))}
+          allowFavorite={viewerSession.allowFavorite} onFavorite={favoriteInViewer} onClose={closeViewer}
+          hasMore={hasMoreOutputs} onLoadMore={loadMoreForViewer} />
+      )}
     </main>
   )
 }

@@ -3,6 +3,7 @@
 from copy import deepcopy
 import json
 from pathlib import Path
+import re
 import sys
 import unittest
 from unittest.mock import Mock
@@ -12,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 from services.h3_story_ledger import (
     _canonicalize_segment_contract,
     _deterministic_ledger,
+    _h3_abstract_combat_step_covered,
+    _h3_preview_action_frames,
     _materialize_segment,
     _enforce_materialized_vocal_staging,
     _reference_h3_cast_names,
@@ -65,6 +68,629 @@ def _card(action, speaker="Nora"):
 
 
 class H3CameraCoverageTests(unittest.TestCase):
+    def _preview_violations(self, source, visible_action):
+        events = extract_source_events(source)
+        self.assertGreaterEqual(len(events), 2, events)
+        beat = _beat(
+            1,
+            events[0]["text"],
+            source_event_ids=[events[0]["event_id"]],
+            state_after=events[0]["text"],
+        )
+        canonical = self.canonical(
+            _camera([[1]], actions=[visible_action]),
+            [beat],
+            source_events=events,
+        )
+        return segment_violations(
+            source, canonical, segment_number=1, duration=12,
+            assigned_beats=[beat], dialogue_catalog=[],
+        )
+
+    def _single_event_coverage_violations(
+        self, source, event_index, visible_action, *, camera="", framing="", closing_state="",
+    ):
+        events = extract_source_events(source)
+        event = events[event_index - 1]
+        beat = {
+            "beat_id": "B1", "segment": 1, "description": event["text"],
+            "source_event_ids": [event["event_id"]], "dialogue_ids": [],
+            "state_after": closing_state or "The visible action is complete",
+        }
+        segment = {
+            "segment": 1, "semantic_actions": True,
+            "shots": [{
+                "shot": 1, "beat_ids": ["B1"], "start_seconds": 0, "end_seconds": 12,
+                "transition": "opening composition", "action": visible_action,
+                "camera": camera, "framing": framing, "sound_effects": "",
+            }],
+            "closing_state": closing_state or "The visible action is complete",
+        }
+        return segment_violations(
+            source, segment, segment_number=1, duration=12,
+            assigned_beats=[beat], dialogue_catalog=[],
+        )
+
+    def test_preview_check_requires_the_future_physical_action_on_the_same_prop(self):
+        cases = (
+            (
+                "[0s-4s] Nora opens the oak door and steps inside. "
+                "[4s-8s] Nora closes and locks the same oak door with the brass key.",
+                "Nora opens the oak door, examines the brass key, and turns toward the window.",
+            ),
+            (
+                "[0s-4s] Mara opens the red drawer. "
+                "[4s-8s] Mara opens the red envelope.",
+                "Mara opens the red drawer and checks its paper lining.",
+            ),
+            (
+                "[0s-4s] Mara holds a sealed envelope. "
+                "[4s-8s] Mara tears the envelope and reads the letter inside.",
+                "Mara holds the sealed envelope and studies the desk lamp.",
+            ),
+            (
+                "[0s-4s] Mara draws her bow. "
+                "[4s-8s] Mara fires an arrow toward the target.",
+                "Mara draws her bow and checks the target downrange.",
+            ),
+        )
+        for source, visible_action in cases:
+            with self.subTest(source=source):
+                errors = self._preview_violations(source, visible_action)
+                self.assertFalse(any("previews later" in item for item in errors), errors)
+
+    def test_preview_check_keeps_positive_controls_for_same_future_action(self):
+        cases = (
+            (
+                "[0s-4s] Nora opens the oak door. "
+                "[4s-8s] Nora closes and locks the oak door.",
+                "Nora locks the oak door with the key.",
+            ),
+            (
+                "[0s-4s] Mara holds a sealed envelope. "
+                "[4s-8s] Mara tears the envelope and reads the letter inside.",
+                "Mara tears open the envelope and reads the letter.",
+            ),
+            (
+                "[0s-4s] Mara draws her bow. "
+                "[4s-8s] Mara fires an arrow toward the target.",
+                "Mara fires the arrow toward the target.",
+            ),
+        )
+        for source, visible_action in cases:
+            with self.subTest(source=source):
+                errors = self._preview_violations(source, visible_action)
+                self.assertTrue(any("previews later" in item for item in errors), errors)
+
+    def test_preview_close_owner_is_scoped_before_a_companion_clause(self):
+        source = (
+            "[0s-4s] Sam waits beside the blue door. "
+            "[4s-8s] Nora closes the same blue door while Sam waits beside Priya."
+        )
+        other_owner = self._preview_violations(source, "Sam closes the blue door.")
+        # The owner differs, but the same reserved door-close result is still
+        # performed early. A different owner cannot legitimize that preview.
+        self.assertTrue(any("previews later" in item for item in other_owner), other_owner)
+        unrelated = self._preview_violations(source, "Sam closes a cupboard.")
+        self.assertFalse(any("previews later" in item for item in unrelated), unrelated)
+
+        same_owner = self._preview_violations(source, "Nora closes the blue door.")
+        self.assertTrue(any("previews later" in item for item in same_owner), same_owner)
+
+    def test_hand_position_and_transfer_can_share_one_clause(self):
+        source = (
+            "[0s-4s] Nora waits beside the spool. "
+            "[4s-8s] Nora rests her left hand on the table and hands Sam the spool."
+        )
+        visible_action = "Nora rests her left hand on the table and hands Sam the spool."
+        frames = _h3_preview_action_frames(visible_action, None)
+        self.assertTrue(any(frame[0] == "hand" for frame in frames), frames)
+
+        errors = self._preview_violations(source, visible_action)
+        self.assertTrue(any("previews later" in item for item in errors), errors)
+
+    def test_preview_check_covers_common_unusual_physical_predicates(self):
+        cases = (
+            (
+                "[0s-4s] Mara holds the ribbon. "
+                "[4s-8s] Mara threads the ribbon through the grommets.",
+                "Mara threads the ribbon through the grommets.",
+            ),
+            (
+                "[0s-4s] Mara holds the banner. "
+                "[4s-8s] Mara ties the banner to the rail.",
+                "Mara ties the banner to the rail.",
+            ),
+            (
+                "[0s-4s] Mara holds the banner. "
+                "[4s-8s] Mara hangs the banner from the rail.",
+                "Mara hangs the banner from the rail.",
+            ),
+        )
+        for source, visible_action in cases:
+            with self.subTest(source=source):
+                errors = self._preview_violations(source, visible_action)
+                self.assertTrue(any("previews later" in item for item in errors), errors)
+
+    def test_preview_check_does_not_read_hand_nouns_or_close_up_as_actions(self):
+        cases = (
+            (
+                "[0s-4s] The courier holds a spool in her right hand. "
+                "[4s-8s] The courier hands the spool to Mara.",
+                "The courier holds the spool in her right hand.",
+            ),
+            (
+                "[0s-4s] The courier waits beside the oak door. "
+                "[4s-8s] The courier closes the oak door.",
+                "Close-up on the oak door as the courier waits beside it.",
+            ),
+            (
+                "[0s-4s] The charcoal-jacketed fighter watches a floor marker. "
+                "[4s-8s] The cream-robed fighter steps over it.",
+                "The charcoal-jacketed fighter steps forward.",
+            ),
+        )
+        for source, visible_action in cases:
+            with self.subTest(source=source):
+                errors = self._preview_violations(source, visible_action)
+                self.assertFalse(any("previews later" in item for item in errors), errors)
+
+    def test_lens_only_sentence_is_not_a_physical_source_event(self):
+        frames = _h3_preview_action_frames(
+            "Lens first glides past the fist, then quick-cuts to the leg, "
+            "finally pulling wide to show a collision course.",
+            re.compile(r"\bCharacter [AB]\b", re.IGNORECASE),
+        )
+        self.assertEqual(frames, [])
+
+    def test_real_handoff_and_close_actions_remain_preview_evidence(self):
+        cases = (
+            (
+                "[0s-4s] The courier waits beside a spool. "
+                "[4s-8s] The courier hands the spool to Mara.",
+                "The courier hands the spool to Mara.",
+            ),
+            (
+                "[0s-4s] The courier waits beside the oak door. "
+                "[4s-8s] The courier closes the oak door.",
+                "The courier closes the oak door.",
+            ),
+            (
+                "[0s-4s] The cream-robed fighter watches a floor marker. "
+                "[4s-8s] The cream-robed fighter steps over it.",
+                "The cream-robed fighter steps over the floor marker.",
+            ),
+        )
+        for source, visible_action in cases:
+            with self.subTest(source=source):
+                errors = self._preview_violations(source, visible_action)
+                self.assertTrue(any("previews later" in item for item in errors), errors)
+
+    def test_source_step_coverage_splits_short_source_under_long_writer_prose(self):
+        chain = (
+            "[0s-2s] Ada waits beside the archive door. "
+            "[2s-22s] Ada unlocks the archive door, opens it, enters the archive, "
+            "retrieves a blue binder, returns to the doorway, then closes and locks the archive door."
+        )
+        events = extract_source_events(chain)
+        self.assertEqual(len(events), 2, events)
+        second = events[1]
+        expanded_writer_description = (
+            second["text"]
+            + " Ada pauses in the doorway while the camera studies the archive's "
+            + "quiet geometry and the cool reflections across the polished floor. " * 12
+        )
+        self.assertGreater(len(expanded_writer_description), 500)
+        beat = {
+            "beat_id": "B1", "segment": 1, "description": expanded_writer_description,
+            "source_event_ids": [second["event_id"]], "dialogue_ids": [],
+            "state_after": "Ada holds the binder beside the locked archive door",
+        }
+        segment = {
+            "segment": 1, "semantic_actions": True,
+            "shots": [{
+                "shot": 1, "beat_ids": ["B1"], "start_seconds": 0, "end_seconds": 12,
+                "transition": "opening composition",
+                "action": "Ada inserts the brass key into the archive door.",
+                "camera": "Close-up on the archive door and lock",
+                "framing": "Tight view of the door",
+                "sound_effects": "",
+            }],
+            "closing_state": "Ada holds the binder beside the locked archive door",
+        }
+        errors = segment_violations(
+            chain, segment, segment_number=1, duration=12,
+            assigned_beats=[beat], dialogue_catalog=[],
+        )
+        self.assertTrue(any("shot action omits required source step" in item for item in errors), errors)
+        self.assertTrue(any("retrieves a blue binder" in item for item in errors), errors)
+        self.assertTrue(any("returns to the doorway" in item for item in errors), errors)
+
+        segment["shots"][0]["action"] = second["text"]
+        errors = segment_violations(
+            chain, segment, segment_number=1, duration=12,
+            assigned_beats=[beat], dialogue_catalog=[],
+        )
+        self.assertFalse(any("shot action omits required source step" in item for item in errors), errors)
+
+    def test_required_action_coverage_accepts_common_physical_paraphrases(self):
+        cases = (
+            ("Mara retrieves the brass key from the drawer.",
+             "Mara takes the brass key out of the drawer."),
+            ("Mara hands the spool to Eli.", "Mara passes the spool to Eli."),
+            ("Ada unlocks the door with the key.",
+             "Ada turns the key until the bolt slides free."),
+            ("Nora carries the package to the cart.",
+             "Nora brings the package to the cart."),
+        )
+        for source, visible_action in cases:
+            with self.subTest(source=source):
+                errors = self._single_event_coverage_violations(
+                    source, 1, visible_action,
+                )
+                self.assertFalse(
+                    any("omits required source step" in item for item in errors),
+                    errors,
+                )
+
+    def test_right_hand_and_close_up_do_not_satisfy_handoff_or_door_close(self):
+        handoff = (
+            "[0s-4s] The courier holds the spool at the workbench. "
+            "[4s-8s] The courier hands the spool to Mara."
+        )
+        handoff_errors = self._single_event_coverage_violations(
+            handoff, 2, "The courier holds the spool in her right hand.",
+            camera="Close-up on the spool", closing_state="Mara has the spool",
+        )
+        self.assertTrue(any("shot action omits required source step" in item for item in handoff_errors), handoff_errors)
+
+        door = (
+            "[0s-4s] Ada waits beside the oak door. "
+            "[4s-8s] Ada closes the oak door."
+        )
+        close_errors = self._single_event_coverage_violations(
+            door, 2, "The oak door remains closed.",
+            camera="Close-up on the oak door", framing="Tight close-up of the door",
+            closing_state="The oak door is closed",
+        )
+        self.assertTrue(any("shot action omits required source step" in item for item in close_errors), close_errors)
+
+        handoff_action = self._single_event_coverage_violations(
+            handoff, 2, "The courier passes the spool from her right hand to Mara.",
+        )
+        self.assertFalse(
+            any("shot action omits required source step" in item for item in handoff_action),
+            handoff_action,
+        )
+
+        door_action = self._single_event_coverage_violations(
+            door, 2, "Ada swings the oak door inward until it is shut.",
+            closing_state="The oak door is shut",
+        )
+        self.assertFalse(
+            any("shot action omits required source step" in item for item in door_action),
+            door_action,
+        )
+
+    def test_plural_hand_positions_are_not_handoff_previews(self):
+        source = (
+            "[0s-4s] Mara waits beside the red spool. "
+            "[4s-8s] Mara hands the red spool to Eli."
+        )
+        for visible_action in (
+            "Mara keeps both hands near the red spool.",
+            "Mara holds the red spool with both hands.",
+            "Mara's hands stay still beside the spool.",
+        ):
+            with self.subTest(visible_action=visible_action):
+                errors = self._preview_violations(source, visible_action)
+                self.assertFalse(any("previews later" in item for item in errors), errors)
+
+        errors = self._preview_violations(source, "Mara hands the red spool to Eli.")
+        self.assertTrue(any("previews later" in item for item in errors), errors)
+
+    def test_hold_target_stops_at_a_comma_before_a_new_clause(self):
+        source = (
+            "[0s-4s] Sam threads the spool through the loom. "
+            "[4s-8s] Sam holds the banner taut."
+        )
+        visual = "Sam holds the spool's loose end, the banner hanging securely."
+        errors = self._preview_violations(source, visual)
+        self.assertFalse(any("previews later" in item for item in errors), errors)
+
+        true_preview = self._preview_violations(source, "Sam holds the banner taut.")
+        self.assertTrue(any("previews later" in item for item in true_preview), true_preview)
+
+    def test_unparsed_predicate_is_still_checked_inside_a_mixed_future_event(self):
+        source = (
+            "[0s-4s] Mara holds the rail. "
+            "[4s-8s] Mara holds the rail, then unravels the rope."
+        )
+        safe_errors = self._preview_violations(
+            source, "Mara holds the rail and looks toward the window."
+        )
+        self.assertFalse(any("previews later" in item for item in safe_errors), safe_errors)
+        preview_errors = self._preview_violations(
+            source, "Mara holds the rail, then unravels the rope."
+        )
+        self.assertTrue(any("previews later" in item for item in preview_errors), preview_errors)
+
+    def test_unparsed_predicate_fallback_accepts_an_ordinary_role_subject(self):
+        source = (
+            "[0s-4s] The potter holds a plain bowl. "
+            "[4s-8s] The potter glazes the bowl with amber varnish."
+        )
+        errors = self._preview_violations(
+            source, "The potter glazes the bowl with amber varnish."
+        )
+        self.assertTrue(any("previews later" in item for item in errors), errors)
+
+    def test_preview_check_ignores_negation_and_quoted_future_actions(self):
+        source = (
+            "[0s-4s] Mara holds a sealed envelope. "
+            "[4s-8s] Mara tears the envelope and reads the letter inside."
+        )
+        for visible_action in (
+            "Mara does not tear or read the sealed envelope yet; she keeps it in her hands.",
+            'Mara says, "Do not tear or read the sealed envelope yet." She holds it.',
+            'Mara says, "I will tear and read it later." She holds it.',
+        ):
+            with self.subTest(visible_action=visible_action):
+                errors = self._preview_violations(source, visible_action)
+                self.assertFalse(any("previews later" in item for item in errors), errors)
+
+    def test_preview_error_repairs_only_its_camera_card_in_the_owning_window(self):
+        actions = [
+            "Nora opens the oak door and steps inside.",
+            "Nora crosses the room holding the brass key.",
+            "Nora closes and locks the oak door with the brass key.",
+            "Nora sits beside the window.",
+        ]
+        source = " ".join(
+            f"[{index * 3}s-{(index + 1) * 3}s] {action}"
+            for index, action in enumerate(actions)
+        )
+        calls = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            properties = (kwargs.get("json_schema") or {}).get("properties", {})
+            if "check_1" in properties:
+                checks = json.loads(kwargs["prompt"])
+                self.assertIn("Nora opens the oak door", checks["check_1"]["source_requirement"])
+                return json.dumps({
+                    key: {"verdict": "missing", "evidence_span_ids": []}
+                    for key in checks
+                })
+            if "event_cards" not in properties:
+                return json.dumps({
+                    "character_appearance": {"Nora": "A courier in a gray coat."},
+                    "setting_continuity": "The door opens into a quiet office with a window.",
+                    "visual_continuity": "Soft daylight.",
+                    "editing_style": "Motivated coverage.",
+                    "ambient_audio": "Quiet room tone.",
+                })
+
+            number = properties["segment"]["minimum"]
+            if number == 1:
+                if "REPAIR ONLY THIS SEGMENT" in kwargs["prompt"]:
+                    self.assertEqual(properties["event_cards"]["required"], ["event_1"])
+                    self.assertIn("event_cards.event_1", kwargs["prompt"])
+                    self.assertNotIn("event_cards.event_2", kwargs["prompt"])
+                    cards = {
+                        "event_1": {"phases": [_card(actions[0])]},
+                        # Providers may ignore a restricted patch schema; this
+                        # unrequested card must never replace the good draft.
+                        "event_2": {"phases": [_card("Nora throws the key through the window.")]},
+                    }
+                else:
+                    cards = {
+                        "event_1": {"phases": [_card(
+                            "Nora closes and locks the oak door with the brass key."
+                        )]},
+                        "event_2": {"phases": [_card(actions[1])]},
+                    }
+            else:
+                cards = {
+                    "event_1": {"phases": [_card(actions[2])]},
+                    "event_2": {"phases": [_card(actions[3])]},
+                }
+            return json.dumps({
+                "segment": number,
+                "title": "The courier's office route",
+                "coverage": "Follow Nora through the office.",
+                "pacing": "Real time.",
+                "event_cards": cards,
+                "closing_state": actions[1] if number == 1 else actions[3],
+            })
+
+        result = plan_h3_story_segments(
+            source,
+            segment_durations=[6, 6],
+            mode="sliding_window",
+            camera_coverage="multi_shot",
+            planning_style="faithful",
+            llm_generate=generate,
+        )
+        self.assertEqual(result["planning_warnings"], [])
+        self.assertEqual(len(result["segments"]), 2)
+        self.assertIn(actions[0], result["segments"][0]["shots"][0]["action"])
+        self.assertIn(actions[1], result["segments"][0]["shots"][1]["action"])
+        self.assertNotIn("throws the key", result["segments"][0]["shots"][1]["action"])
+        self.assertIn(actions[2], result["segments"][1]["shots"][0]["action"])
+        self.assertIn(actions[3], result["segments"][1]["shots"][1]["action"])
+        repair_calls = [
+            call for call in calls if "REPAIR ONLY THIS SEGMENT" in call["prompt"]
+        ]
+        self.assertEqual(len(repair_calls), 1)
+        self.assertEqual(repair_calls[0]["json_schema"]["properties"]["event_cards"]["required"], ["event_1"])
+
+    def test_repaired_paraphrase_gets_one_fresh_same_card_omission_review(self):
+        # Use a real paraphrase outside the small deterministic predicate vocabulary.
+        # Explicit swings/door/shut wording no longer needs a second LLM review.
+        source = "[0s-8s] Ada closes and locks the archive door."
+        calls = []
+        review_count = 0
+
+        def generate(**kwargs):
+            nonlocal review_count
+            calls.append(kwargs)
+            properties = (kwargs.get("json_schema") or {}).get("properties", {})
+            if "check_1" in properties:
+                review_count += 1
+                checks = json.loads(kwargs["prompt"])
+                check = checks["check_1"]
+                self.assertIn("closes and locks", check["source_requirement"])
+                if review_count == 1:
+                    return json.dumps({
+                        "check_1": {
+                            "action_decisions": {
+                                item["action_id"]: {
+                                    "verdict": "missing", "evidence_span_ids": [],
+                                }
+                                for item in check["action_obligations"]
+                            },
+                        },
+                    })
+                self.assertIn("eases the hinged panel flush", json.dumps(check["visual_spans"]))
+                span = next(
+                    item for item in check["visual_spans"]
+                    if "eases the hinged panel flush" in item["text"]
+                )
+                return json.dumps({
+                    "check_1": {
+                        "action_decisions": {
+                            item["action_id"]: {
+                                "verdict": "preserved",
+                                "evidence_span_ids": [span["span_id"]],
+                            }
+                            for item in check["action_obligations"]
+                        },
+                    },
+                })
+            if "event_cards" not in properties:
+                return json.dumps({
+                    "subject_continuity": "Ada remains the same courier in a gray coat.",
+                    "setting_continuity": "The archive door opens into a quiet corridor.",
+                    "motion_mechanics": "The archive door swings on its hinges.",
+                    "visual_continuity": "Soft corridor lighting.",
+                    "editing_style": "Motivated camera coverage.",
+                    "initial_state": "Ada stands beside the open archive door.",
+                    "ambient_audio": "Quiet room tone.",
+                    "music": "N/A",
+                    "required_final_outcome": "The archive door is shut and locked.",
+                    "beats": [{
+                        "beat_id": "B1", "segment": 1,
+                        "description": "Ada closes and locks the archive door.",
+                        "source_event_ids": ["E1"], "dialogue_ids": [],
+                        "state_after": "The archive door is shut and locked.",
+                        "sound_effects": "The latch clicks.",
+                    }],
+                    "generated_dialogue": [],
+                })
+
+            action = (
+                "Ada eases the hinged panel flush into its jamb, then engages its deadbolt."
+                if "REPAIR ONLY THIS SEGMENT" in kwargs["prompt"]
+                else "Ada waits beneath the corridor clock."
+            )
+            return json.dumps({
+                "segment": 1,
+                "title": "Archive exit",
+                "coverage": "A medium view follows Ada at the archive door.",
+                "pacing": "Real time.",
+                "closing_state": "The archive door is shut and locked.",
+                "event_cards": {"event_1": {"phases": [_card(action, speaker="Ada")]}},
+            })
+
+        result = plan_h3_story_segments(
+            source, segment_durations=[8], mode="sliding_window",
+            camera_coverage="multi_shot", planning_style="faithful",
+            llm_generate=generate,
+        )
+        self.assertEqual(review_count, 2, [
+            {"schema_keys": list((call.get("json_schema") or {}).get("properties", {})),
+             "prompt_prefix": call.get("prompt", "")[:100]}
+            for call in calls
+        ] + [{"result": result}])
+        self.assertEqual(sum("REPAIR ONLY THIS SEGMENT" in call["prompt"] for call in calls), 1)
+        self.assertEqual(result["planning_warnings"], [])
+        self.assertIn("eases the hinged panel flush", result["segments"][0]["shots"][0]["action"])
+
+    def test_postrepair_review_skips_omission_when_a_hard_preview_error_remains(self):
+        actions = [
+            "Ada lifts a red folder from the desk.",
+            "Ada carries the folder to the archive doorway.",
+            "Ada closes the archive door behind her.",
+            "Ada waits beside the corridor window.",
+        ]
+        source = " ".join(
+            f"[{index * 3}s-{(index + 1) * 3}s] {action}"
+            for index, action in enumerate(actions)
+        )
+        calls = []
+        review_count = 0
+
+        def generate(**kwargs):
+            nonlocal review_count
+            calls.append(kwargs)
+            properties = (kwargs.get("json_schema") or {}).get("properties", {})
+            if "check_1" in properties:
+                review_count += 1
+                return json.dumps({
+                    "check_1": {"verdict": "missing", "evidence_span_ids": []},
+                })
+            if "event_cards" not in properties:
+                return json.dumps({
+                    "subject_continuity": "Ada remains the same archivist in a blue coat.",
+                    "setting_continuity": "A quiet archive has a corridor window.",
+                    "motion_mechanics": "The archive door swings on its hinges.",
+                    "visual_continuity": "Soft daylight.",
+                    "editing_style": "Motivated coverage.",
+                    "initial_state": "Ada stands by the desk.",
+                    "ambient_audio": "Quiet room tone.",
+                    "music": "N/A",
+                    "required_final_outcome": "Ada waits beside the corridor window.",
+                    "generated_dialogue": [],
+                })
+
+            number = properties["segment"]["minimum"]
+            repairing = "REPAIR ONLY THIS SEGMENT" in kwargs["prompt"]
+            if number == 1:
+                cards = {
+                    "event_1": {"phases": [_card(actions[2])]},
+                    **({} if repairing else {
+                        "event_2": {"phases": [_card(actions[1])]},
+                    }),
+                }
+            else:
+                cards = {
+                    "event_1": {"phases": [_card(actions[2])]},
+                    "event_2": {"phases": [_card(actions[3])]},
+                }
+            return json.dumps({
+                "segment": number,
+                "title": "Ada's archive route",
+                "coverage": "Follow Ada through the archive.",
+                "pacing": "Real time.",
+                "event_cards": cards,
+                "closing_state": actions[1] if number == 1 else actions[3],
+            })
+
+        result = plan_h3_story_segments(
+            source, segment_durations=[6, 6], mode="sliding_window",
+            camera_coverage="multi_shot", planning_style="faithful",
+            llm_generate=generate,
+        )
+        first_window_diagnostics = " ".join(result["planning_diagnostics"]).casefold()
+        self.assertIn("previews later source event e3", first_window_diagnostics)
+        self.assertTrue(result["planning_warnings"])
+        self.assertEqual(review_count, 1, calls)
+        self.assertEqual(
+            sum("REPAIR ONLY THIS SEGMENT" in call.get("prompt", "") for call in calls),
+            1,
+        )
+
     def test_cross_and_crossed_do_not_create_a_false_future_event(self):
         source = ("[0s-4s] Nora makes crossed-blade strikes with bright sparks. "
                   "[4s-8s] Nora clears the impact crater and sends a cross strike out through the doorway.")
@@ -82,7 +708,11 @@ class H3CameraCoverageTests(unittest.TestCase):
 
     def test_silent_e_inflection_is_not_a_missing_action(self):
         source = "Nora raises the device; 0.3s fast charge; Nora releases the pulse."
-        beats = [_beat(1, source)]
+        source_events = extract_source_events(source)
+        beats = [_beat(
+            1, source,
+            source_event_ids=[event["event_id"] for event in source_events],
+        )]
         draft = _camera([[1]], actions=[
             "Nora raises the device, charging rapidly for 0.3 seconds, and releases the pulse."
         ])
@@ -111,7 +741,7 @@ class H3CameraCoverageTests(unittest.TestCase):
                 # leave the local event-card repair in place.
                 checks = json.loads(kwargs["prompt"])
                 self.assertIn("glass prisms scatter reflections", checks["check_1"]["source_requirement"])
-                return json.dumps({key: {"verdict": "missing", "evidence": []}
+                return json.dumps({key: {"verdict": "missing", "evidence_span_ids": []}
                                    for key in checks})
             if "event_cards" not in props:
                 return json.dumps({"character_appearance": {"Nora": "A courier in a red coat."},
@@ -233,6 +863,22 @@ class H3CameraCoverageTests(unittest.TestCase):
         for action in actions:
             self.assertIn(action, compiled)
         self.assertNotIn("event_indices", compiled)
+
+    def test_abstract_combat_premise_allows_exchange_but_not_concrete_side_actions(self):
+        visible = (
+            "The heavy fighter advances and throws a hook. "
+            "The agile fighter ducks and drives an elbow into his ribs."
+        )
+        frames = _h3_preview_action_frames(visible, None)
+        self.assertTrue(_h3_abstract_combat_step_covered(
+            "Two adult fighters duel in a ruined courtyard.", visible, frames,
+        ))
+        self.assertFalse(_h3_abstract_combat_step_covered(
+            "The fighters duel while Nora pockets the brass key.", visible, frames,
+        ))
+        self.assertFalse(_h3_abstract_combat_step_covered(
+            "The fighters fight until one drops the weapon.", visible, frames,
+        ))
 
     def test_adjacent_events_can_share_a_shot_and_continue_into_the_next(self):
         beats = [_beat(1), _beat(2), _beat(3)]

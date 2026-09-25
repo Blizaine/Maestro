@@ -2,6 +2,8 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { X, Film, ArrowRight } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
+import { GalleryInput } from '../shared/GalleryInput'
+import { loadMediaInput } from '../../lib/mediaInput'
 
 function ClipDropZone({ label, file, url, duration, onUpload, onClear }: {
   label: string
@@ -97,21 +99,12 @@ export function BlendControls() {
     setError(null)
     try {
       const result = await api.uploadImage(file)
-      const url = URL.createObjectURL(file)
-      if (file.type.startsWith('video/')) {
-        const video = document.createElement('video')
-        video.src = url
-        video.onloadedmetadata = () => {
-          const duration = video.duration && isFinite(video.duration) ? video.duration : 0
-          if (target === 'A') setBlendClipA(file, result.path, url, duration)
-          else setBlendClipB(file, result.path, url, duration)
-        }
-      } else {
-        if (target === 'A') setBlendClipA(file, result.path, url, 0)
-        else setBlendClipB(file, result.path, url, 0)
-      }
+      const { url, duration } = await loadMediaInput(file)
+      if (target === 'A') setBlendClipA(file, result.path, url, duration)
+      else setBlendClipB(file, result.path, url, duration)
     } catch {
       setError('Failed to upload')
+      return false
     }
   }, [setBlendClipA, setBlendClipB])
 
@@ -119,6 +112,12 @@ export function BlendControls() {
 
   return (
     <div className="space-y-3">
+      <GalleryInput kind="video" label="Blend clip A" onFile={file => uploadClip(file, 'A')} />
+      <GalleryInput kind="image" label="Blend clip A" onFile={file => uploadClip(file, 'A')}
+        getImages={() => blendClipA?.type.startsWith('image/') ? [blendClipA] : []} />
+      <GalleryInput kind="video" label="Blend clip B" onFile={file => uploadClip(file, 'B')} />
+      <GalleryInput kind="image" label="Blend clip B" onFile={file => uploadClip(file, 'B')}
+        getImages={() => blendClipB?.type.startsWith('image/') ? [blendClipB] : []} />
       {/* Overlap / Insert toggle — first choice, above the clip drop zones */}
       <div>
         <div className="flex bg-bg-tertiary rounded-lg p-0.5 border border-border">

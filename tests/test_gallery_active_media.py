@@ -98,12 +98,16 @@ class GalleryActiveMediaTests(unittest.TestCase):
             "Retake a time region",
             "Extend this video",
             "Copy prompt",
-            "Use current frame as reference",
             "Download",
             "Move to workspace",
             "Delete output",
         ):
             self.assertIn(label, feed_item)
+        self.assertIn(
+            "Use ${target.kind === 'image' ? 'current frame' : 'video'} as ${target.label}",
+            feed_item,
+        )
+        self.assertIn("Use as ${target.label}", feed_item)
 
         self.assertIn("Click again to delete", feed_item)
         self.assertIn("No other workspaces", feed_item)

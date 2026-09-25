@@ -42,23 +42,77 @@ def group_qkv_rows(tensor: torch.Tensor, heads: int, head_dim: int) -> torch.Ten
     return _reorder_qkv_rows(tensor, heads, head_dim, grouped=True)
 
 
-def _is_convrot_config(tensor) -> bool:
+def _quantization_descriptor(tensor) -> dict | None:
     if not torch.is_tensor(tensor):
-        return False
+        return None
     try:
         raw = bytes(tensor.detach().cpu().to(torch.uint8).reshape(-1).tolist())
-        return bool(json.loads(raw.decode("utf-8")).get("convrot"))
+        descriptor = json.loads(raw.decode("utf-8").rstrip("\0"))
+        return descriptor if isinstance(descriptor, dict) else None
     except Exception:
-        return False
+        return None
+
+
+def _is_convrot_config(tensor) -> bool:
+    return bool((_quantization_descriptor(tensor) or {}).get("convrot"))
+
+
+def convrot_quantization_info(state_dict: dict) -> dict[str, int | bool | str | None]:
+    """Read ConvRot format and group size from concrete Comfy descriptors."""
+
+    formats = set()
+    group_sizes = set()
+    convrot = False
+    for key, tensor in state_dict.items():
+        if not str(key).endswith(".comfy_quant"):
+            continue
+        descriptor = _quantization_descriptor(tensor)
+        if descriptor is None:
+            continue
+        quantization_format = str(descriptor.get("format") or "").lower()
+        if quantization_format:
+            formats.add(quantization_format)
+        if descriptor.get("convrot"):
+            convrot = True
+            group_size = descriptor.get(
+                "convrot_groupsize",
+                descriptor.get(
+                    "convrot_group_size",
+                    descriptor.get("group_size"),
+                ),
+            )
+            try:
+                group_sizes.add(int(group_size))
+            except (TypeError, ValueError):
+                pass
+    return {
+        "convrot": convrot,
+        "quantization_format": ",".join(sorted(formats)),
+        "convrot_group_size": (
+            next(iter(group_sizes)) if len(group_sizes) == 1 else None
+        ),
+    }
+
+
+def convrot_quantization_info_from_file(
+    filename: str,
+) -> dict[str, int | bool | str | None]:
+    """Read only small Comfy quantization descriptors from a safetensors file."""
+
+    from safetensors import safe_open
+
+    descriptors = {}
+    with safe_open(str(filename), framework="pt", device="cpu") as checkpoint:
+        for key in checkpoint.keys():
+            if str(key).endswith(".comfy_quant"):
+                descriptors[key] = checkpoint.get_tensor(key)
+    return convrot_quantization_info(descriptors)
 
 
 def has_convrot_layout(state_dict: dict) -> bool:
     """Return whether checkpoint metadata declares ConvRot quantization."""
 
-    return any(
-        key.endswith(".comfy_quant") and _is_convrot_config(value)
-        for key, value in state_dict.items()
-    )
+    return bool(convrot_quantization_info(state_dict)["convrot"])
 
 
 def restore_interleaved_h3_qkv(state_dict: dict) -> dict:
@@ -91,6 +145,8 @@ def restore_interleaved_h3_qkv(state_dict: dict) -> dict:
 
 __all__ = [
     "group_qkv_rows",
+    "convrot_quantization_info",
+    "convrot_quantization_info_from_file",
     "has_convrot_layout",
     "interleave_qkv_rows",
     "restore_interleaved_h3_qkv",

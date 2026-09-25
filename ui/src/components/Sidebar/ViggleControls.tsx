@@ -6,6 +6,7 @@ import { CharacterImagePickerButton } from '../Characters/CharacterImagePicker'
 import { CharacterToolbarItem } from './SidebarPanels'
 import { newViggleCharacter, vigglePreparationKey, viggleTimeline, VIGGLE_SWAP_PROMPT } from '../../lib/viggle'
 import { VideoTimelineSelector } from '../shared/VideoTimelineSelector'
+import { GalleryInput } from '../shared/GalleryInput'
 import { characterDisplayName } from '../../lib/characters'
 import type { GenerateParams, ViggleCharacterOptions } from '../../types'
 
@@ -61,7 +62,7 @@ export function ViggleControls() {
     clearPrepared()
   }
   const upload = async (file: File | undefined, kind: 'video' | 'image' | 'audio' | 'character') => {
-    if (!file || locked) return
+    if (!file || locked) return false
     setBusy(true); setError('')
     try {
       const result = await api.uploadImage(file)
@@ -74,7 +75,7 @@ export function ViggleControls() {
       } else if (kind === 'character') changeCharacter({reference_path: result.path,
         reference_url: result.url, character_name: file.name, character_id: undefined, view_id: undefined})
       else setParam('audio_guide', result.path)
-    } catch (e) { setError(e instanceof Error ? e.message : 'Upload failed') }
+    } catch (e) { setError(e instanceof Error ? e.message : 'Upload failed'); return false }
     finally { setBusy(false) }
   }
   const input = (kind: 'video' | 'image' | 'audio' | 'character', label: string) => (
@@ -129,6 +130,12 @@ export function ViggleControls() {
   }
   return (
     <div className="space-y-3 min-w-0" aria-label="Viggle Animate inputs">
+      <GalleryInput kind="video" label="Animate control video" onFile={file => upload(file, 'video')}
+        disabledReason={locked ? 'Animate is preparing media…' : undefined} />
+      <GalleryInput kind="image" label={character ? 'character image' : 'edited frame'}
+        getImages={() => character?.reference_path ? [{url: character.reference_url || mediaUrl(character.reference_path), name: 'Animate character'}] : edited ? [{url: mediaUrl(edited), name: 'Edited frame'}] : []}
+        onFile={file => upload(file, character ? 'character' : 'image')}
+        disabledReason={locked ? 'Animate is preparing media…' : undefined} />
       <CharacterToolbarItem><CharacterImagePickerButton maxImages={1} disabled={locked} label="Characters"
         onSelect={async (selected, images) => {
           const file = await api.characterImageFile(selected, images[0])

@@ -1457,6 +1457,9 @@ def plan_h3_sliding_windows(
         dialogue_fragments = list(staged.get("dialogue_fragments") or [])
         source_intent = staged.get("source_intent") or source_intent
         story_ledger = staged["ledger"]
+        stable_camera_context = story_ledger.get("stable_camera_context")
+        if not isinstance(stable_camera_context, dict):
+            stable_camera_context = story_ledger
         windows = []
         for index, segment in enumerate(staged["segments"]):
             windows.append({
@@ -1464,10 +1467,10 @@ def plan_h3_sliding_windows(
                 "window": index + 1,
             })
         plan = {
-            "subject_continuity": story_ledger.get("subject_continuity", ""),
-            "setting_continuity": story_ledger.get("setting_continuity", ""),
-            "visual_continuity": story_ledger.get("visual_continuity", ""),
-            "editing_style": story_ledger.get("editing_style", ""),
+            "subject_continuity": stable_camera_context.get("subject_continuity", ""),
+            "setting_continuity": stable_camera_context.get("setting_continuity", ""),
+            "visual_continuity": stable_camera_context.get("visual_continuity", ""),
+            "editing_style": stable_camera_context.get("editing_style", ""),
             "initial_state": story_ledger.get("initial_state", ""),
             "ambient_audio": story_ledger.get("ambient_audio", ""),
             "music": story_ledger.get("music", "N/A"),

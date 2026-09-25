@@ -19,7 +19,7 @@ import { EditorWorkspace } from './editor/EditorWorkspace'
 import { MaestroBrand } from './components/AppModeNavigation'
 import { EditorRoundTripBanner } from './editor/EditorRoundTripBanner'
 import { useStore } from './stores/useStore'
-import { useIsMobile } from './lib/useIsMobile'
+import { useIsMobileSidecar } from './lib/useIsMobile'
 
 function App() {
   const loadModels = useStore(s => s.loadModels)
@@ -35,7 +35,7 @@ function App() {
   const setSidebarOpen = useStore(s => s.setSidebarOpen)
   const toggleSettings = useStore(s => s.toggleSettings)
   const sidebarMode = useStore(s => s.sidebarMode)
-  const isMobile = useIsMobile()
+  const isMobile = useIsMobileSidecar()
   const isEditor = sidebarMode === 'editor'
 
   useEffect(() => {
@@ -58,7 +58,7 @@ function App() {
   }, [loadLlmStatus])
 
   return (
-    <div className="flex flex-col md:flex-row h-full w-full bg-bg-primary">
+    <div className={`flex ${isMobile && !isEditor ? 'flex-col' : 'flex-col md:flex-row'} h-full w-full bg-bg-primary`}>
       {/* Mobile header */}
       {isMobile && !isEditor && (
         <header className="h-12 shrink-0 grid grid-cols-[1fr_auto_1fr] items-center gap-1 px-2 border-b border-border bg-bg-secondary">

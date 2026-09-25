@@ -350,8 +350,10 @@ class TestMiniMaxH3AssetSharing(unittest.TestCase):
     def test_convrot_loader_wiring_is_dependency_free(self):
         convrot_source = _CONVROT_PATH.read_text(encoding="utf-8")
         self.assertIn("def has_convrot_layout(", convrot_source)
-        self.assertIn('key.endswith(".comfy_quant")', convrot_source)
-        self.assertIn("and _is_convrot_config(value)", convrot_source)
+        self.assertIn("def convrot_quantization_info(", convrot_source)
+        self.assertIn('str(key).endswith(".comfy_quant")', convrot_source)
+        self.assertIn("descriptor = _quantization_descriptor(tensor)", convrot_source)
+        self.assertIn('return bool(convrot_quantization_info(state_dict)["convrot"])', convrot_source)
 
         main_source = _H3_MAIN_PATH.read_text(encoding="utf-8")
         self.assertIn(

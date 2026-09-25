@@ -27,6 +27,7 @@ from diffusers.loaders import QwenImageLoraLoaderMixin
 from .autoencoder_kl_qwenimage21 import AutoencoderKLQwenImage21
 from .transformer_qwenimage21 import QwenImage21Transformer2DModel
 from .transformer_qwenimage21 import QwenImage21KVCache
+from .memory import GIB, reference_cache_plan
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.utils import is_torch_xla_available, logging, replace_example_docstring
 from diffusers.utils.torch_utils import randn_tensor
@@ -761,6 +762,19 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         # prefills them and later steps only recompute the target image's tokens.
         num_blocks = len(self.transformer.transformer_blocks)
         cache_enabled = use_kv_cache and self.transformer.config.causal_condition
+        if cache_enabled:
+            required, budget = reference_cache_plan(
+                self.transformer, prompt_embeds, image_pad_mask,
+                0 if input_images_latents is None else input_images_latents.shape[1],
+                latents.shape[1], device,
+                negative_prompt_embeds if do_true_cfg else None,
+                negative_image_pad_mask if do_true_cfg else None,
+            )
+            cache_enabled = required <= budget
+            if not cache_enabled:
+                print(f"[Qwen Image 2.1 Memory] Reference KV cache needs {required / GIB:.1f} GB; "
+                      f"safe cache budget is {budget / GIB:.1f} GB. Recomputing the prefix "
+                      "each step; all references and output dimensions are preserved.")
         cond_cache = QwenImage21KVCache(num_blocks) if cache_enabled else None
         neg_cache = QwenImage21KVCache(num_blocks) if cache_enabled and do_true_cfg else None
 
@@ -835,6 +849,9 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                     xm.mark_step()
 
         self._current_timestep = None
+        # The reference cache belongs to denoising. Release it before MMGP
+        # brings in the VAE and its decode workspace.
+        del cond_cache, neg_cache
         if output_type == "latent":
             image = latents
         else:

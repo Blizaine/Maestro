@@ -291,7 +291,11 @@ class SparseSpeechTests(unittest.TestCase):
         mixed = {'beat_id': 'B1',
                  'description': ('Mara unlocks the door before Dev enters. '
                                  'Dev enters only after the alarm stops'),
-                 'source_event_ids': ['E1'], 'dialogue_ids': [], 'state_after': 'Dev is inside'}
+                 'source_event_ids': ['E1', 'E2'], 'dialogue_ids': [], 'state_after': 'Dev is inside'}
+        self.assertEqual(
+            [event['event_id'] for event in extract_source_events(mixed['description'])],
+            mixed['source_event_ids'],
+        )
         missing_second = segment_violations(
             mixed['description'],
             segment('Mara unlocks the door before Dev enters.', mixed),

@@ -18,7 +18,10 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 from services import director_pipeline as pipeline  # noqa: E402
-from services.director_model_compat import assess_director_model  # noqa: E402
+from services.director_model_compat import (  # noqa: E402
+    assess_director_model,
+    director_image_reference_mode,
+)
 from services.director.policies import build_character_rules_block  # noqa: E402
 from services.director.prompt_polish import (  # noqa: E402
     polish_prompts_third_pass,
@@ -53,6 +56,20 @@ def _image_editor(**updates):
         "image_ref_choices": {
             "choices": [("None", ""), ("Main plus references", "KI")],
         },
+    }
+    model_def.update(updates)
+    return model_def
+
+
+def _qwen_image_21(**updates):
+    model_def = {
+        "name": "Qwen Image 2.1",
+        "image_outputs": True,
+        "image_ref_choices": {
+            "choices": [("None", ""), ("Reference images", "I")],
+        },
+        "at_least_one_image_ref_needed": False,
+        "max_image_refs": 10,
     }
     model_def.update(updates)
     return model_def
@@ -95,9 +112,13 @@ class TestDirectorModelAssessment(unittest.TestCase):
         self.assertEqual(len(contexts), 1)
         self.assertNotIn("beep", contexts[0].lower())
         self.assertIn("mapped source audio drives this interval", contexts[0])
-        self.assertIn("explicitly lip-syncs every syllable", contexts[0])
         self.assertIn(
-            "without quoting, transcribing, or inventing words",
+            "only a person explicitly assigned as a visible vocalist lip-syncs",
+            contexts[0],
+        )
+        self.assertIn("only to their own audible part", contexts[0])
+        self.assertIn(
+            "do not add a person or transcribe lyrics",
             contexts[0],
         )
 
@@ -110,8 +131,8 @@ class TestDirectorModelAssessment(unittest.TestCase):
             vocal_activity=["silent"],
         )
 
-        self.assertIn("separated vocal stem is silent", contexts[0])
-        self.assertIn("do not depict singing, lip-sync", contexts[0])
+        self.assertIn("with no detected vocal activity", contexts[0])
+        self.assertIn("do not depict singing or lip-sync", contexts[0])
         self.assertNotIn("lip-syncs every syllable", contexts[0])
 
     def test_h3_music_context_keeps_missing_vocal_evidence_unknown(self):
@@ -124,7 +145,8 @@ class TestDirectorModelAssessment(unittest.TestCase):
         )
 
         self.assertIn("vocal activity is unknown", contexts[0])
-        self.assertIn("do not invent lyrics or assert visible singing", contexts[0])
+        self.assertIn("do not invent lyrics or visible singing", contexts[0])
+        self.assertIn("do not add anyone to represent the soundtrack", contexts[0])
         self.assertNotIn("lip-syncs every syllable", contexts[0])
 
     def test_video_only_planner_schemas_forbid_unused_image_fields(self):
@@ -875,6 +897,31 @@ class TestDirectorModelAssessment(unittest.TestCase):
     def test_reference_editor_can_bootstrap_and_edit(self):
         result = assess_director_model("editor", _image_editor())
         self.assertTrue(result["image"]["compatible"])
+        self.assertEqual(result["image_reference_mode"], "KI")
+
+    def test_qwen_21_reference_image_mode_is_compatible(self):
+        model_def = _qwen_image_21()
+        result = assess_director_model("qwen_image_21_7B", model_def)
+
+        self.assertTrue(result["image"]["compatible"])
+        self.assertEqual(director_image_reference_mode(model_def), "I")
+        self.assertEqual(result["image_reference_mode"], "I")
+        self.assertEqual(result["max_image_refs"], 10)
+
+    def test_legacy_mode_is_preferred_when_both_reference_modes_exist(self):
+        model_def = _image_editor(image_ref_choices={
+            "choices": [
+                ("None", ""),
+                ("Reference images", "I"),
+                ("Main plus references", "KI"),
+            ],
+        })
+
+        self.assertEqual(director_image_reference_mode(model_def), "KI")
+        self.assertEqual(
+            assess_director_model("editor", model_def)["image_reference_mode"],
+            "KI",
+        )
 
     def test_plain_image_model_is_not_a_director_image_model(self):
         result = assess_director_model(
@@ -882,7 +929,36 @@ class TestDirectorModelAssessment(unittest.TestCase):
             {"name": "Plain", "image_outputs": True},
         )
         self.assertFalse(result["image"]["compatible"])
-        self.assertIn("reference editing", result["image"]["reason"])
+        self.assertIn("reference-image editing", result["image"]["reason"])
+        self.assertEqual(result["image_reference_mode"], "")
+
+    def test_reference_only_i_mode_cannot_skip_plain_generation_requirement(self):
+        result = assess_director_model(
+            "reference-only",
+            _qwen_image_21(image_ref_choices={
+                "choices": [("Reference images", "I")],
+            }),
+        )
+
+        self.assertFalse(result["image"]["compatible"])
+        self.assertEqual(result["image_reference_mode"], "I")
+        self.assertIn("plain generation", result["image"]["reason"])
+
+    def test_layered_control_only_image_model_remains_unsupported(self):
+        layered = {
+            "name": "Qwen Image Layered",
+            "image_outputs": True,
+            "batch_size_label": "Number of Layers",
+            "set_video_prompt_type": "V",
+            "guide_preprocessing": {
+                "selection": ["V"],
+                "labels": {"V": "Control Image"},
+            },
+        }
+        result = assess_director_model("qwen_image_layered_20B", layered)
+
+        self.assertFalse(result["image"]["compatible"])
+        self.assertEqual(result["image_reference_mode"], "")
 
     def test_editor_that_cannot_bootstrap_is_rejected(self):
         result = assess_director_model(
@@ -1509,6 +1585,8 @@ class TestDirectorBackendValidation(unittest.TestCase):
         self.original_wgp = pipeline._wgp
         definitions = {
             "image": _image_editor(),
+            "qwen21": _qwen_image_21(),
+            "legacy_image": _image_editor(max_image_refs=10),
             "ltx": _ltx_video(),
             "ovi": {
                 "name": "Ovi",
@@ -1589,6 +1667,25 @@ class TestDirectorBackendValidation(unittest.TestCase):
             pid="test",
         )
         self.assertEqual(refs, ["source.png", "character.png"])
+
+    def test_image_reference_routing_uses_selected_format_and_source_first_cap(self):
+        self.assertEqual(
+            pipeline._director_image_prompt_type("qwen21", ["source.png", "ref.png"]),
+            "I",
+        )
+        self.assertEqual(
+            pipeline._director_image_prompt_type(
+                "legacy_image", ["source.png", "ref.png"],
+            ),
+            "KI",
+        )
+        self.assertEqual(pipeline._director_image_prompt_type("qwen21", []), "")
+
+        refs = ["source.png", *[f"ref-{index}.png" for index in range(12)]]
+        limited = pipeline._limit_director_image_refs("qwen21", refs, pid="test")
+        self.assertEqual(len(limited), 10)
+        self.assertEqual(limited[0], "source.png")
+        self.assertEqual(limited, refs[:10])
 
     def test_native_window_uses_selected_model_default(self):
         frames = pipeline._director_native_window_frames(

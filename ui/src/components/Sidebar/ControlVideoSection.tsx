@@ -3,6 +3,7 @@ import { useStore } from '../../stores/useStore'
 import { ChoiceControl } from '../shared/ChoiceControl'
 import { FileUploadZone } from '../shared/FileUploadZone'
 import * as api from '../../api/client'
+import { GalleryInput } from '../shared/GalleryInput'
 
 // Control-media guide: the video/image "process" selector (depth / pose / etc.)
 // plus the control-media upload.
@@ -11,7 +12,7 @@ import * as api from '../../api/client'
 // moved to InputsPanel, which is now the single owner of those params. When the
 // user switches the process away from KFI here, we clear the inject params so
 // they don't ride along to generation.
-export function ControlVideoSection() {
+export function ControlVideoSection({ galleryOnly = false }: { galleryOnly?: boolean }) {
   const modelOptions = useStore(s => s.modelOptions)
   const params = useStore(s => s.params)
   const setParam = useStore(s => s.setParam)
@@ -54,10 +55,24 @@ export function ControlVideoSection() {
       setGuideFilename(file.name)
     } catch (e) {
       console.error('Upload failed:', e)
+      return false
     } finally {
       setUploading(false)
     }
   }
+
+  // The Advanced popup unmounts when the gallery is clicked. Keep its active
+  // control input registered in the sidecar so the gallery can still use it.
+  const audioSources = modelOptions.audio_prompt_type_sources
+  const sourceValues = audioSources?.choices?.map(([, value]) => value) ?? audioSources?.selection ?? []
+  const framesOwnControl = generationMode === 'video' && [0, 3].includes(Number(params.image_mode))
+    && sourceValues.includes('K')
+  if (galleryOnly && framesOwnControl) return null
+  if (galleryOnly) return showUpload ? (
+    <GalleryInput kind={isImageMode ? 'image' : 'video'} label={`control ${mediaType.toLowerCase()}`}
+      getImages={() => isImageMode && restoredGuideFilename ? [{url: api.getFileUrl(restoredGuideFilename), name: restoredGuideFilename}] : []}
+      onFile={handleUpload} disabledReason={uploading ? 'Uploading control media…' : undefined} />
+  ) : null
 
   return (
     <div className="space-y-3">

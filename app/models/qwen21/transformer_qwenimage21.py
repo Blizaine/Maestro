@@ -800,6 +800,18 @@ class QwenImage21Transformer2DModel(
             ]
         )
 
+        # AI Toolkit Qwen Image 2.1 LoRAs may store the two SwiGLU input
+        # projections as one fused ``gate_up`` linear, ordered as
+        # ``[gate_layer; proj]``. MMGP uses this map to split its LoRA B
+        # matrix over the native projections while sharing LoRA A and alpha.
+        mlp_hidden_size = self.inner_dim * mlp_ratio
+        self.split_linear_modules_map = {
+            "gate_up": {
+                "mapped_modules": ["gate_layer", "proj"],
+                "split_sizes": [mlp_hidden_size, mlp_hidden_size],
+            }
+        }
+
         self.norm_out = QwenImage21AdaLayerNormContinuous(self.inner_dim, self.inner_dim, eps=eps)
         self.proj_out = nn.Linear(self.inner_dim, patch_size * patch_size * self.out_channels, bias=False)
 

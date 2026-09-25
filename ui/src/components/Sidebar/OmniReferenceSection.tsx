@@ -8,6 +8,7 @@ import { ReferenceCharacterPicker } from '../Characters/ReferenceCharacterPicker
 import { characterDisplayName } from '../../lib/characters'
 import { CharacterToolbarItem, SidebarDialog } from './SidebarPanels'
 import { MediaAddTile, MediaInputCard } from './MediaInputCard'
+import { GalleryInput } from '../shared/GalleryInput'
 import type { MiniMaxH3AudioIntent, MiniMaxH3Reference, MiniMaxH3ReferenceType, ModelOptions, SavedOmniCharacter } from '../../types'
 
 const IMAGE_RE = /\.(png|jpe?g|webp|bmp|tiff?)$/i
@@ -191,7 +192,7 @@ export function OmniReferenceSection({
   )
 
   const addFiles = async (files: File[]) => {
-    if (disabled || uploading || files.length === 0) return
+    if (disabled || uploading || files.length === 0) return false
     setUploading(true)
     setError('')
     try {
@@ -229,8 +230,10 @@ export function OmniReferenceSection({
         counts[type] += 1
       }
       update(next)
+      return next.length > references.length
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : 'Reference upload failed.')
+      return false
     } finally {
       setUploading(false)
     }
@@ -556,6 +559,13 @@ export function OmniReferenceSection({
 
   return (
     <section className="space-y-2">
+      {(['image', 'video'] as const).map(kind => <GalleryInput key={kind} kind={kind}
+        label={`${scope === 'director' ? 'Director ' : ''}reference ${kind}`}
+        getImages={() => references.filter(ref => ref.type === 'image').map(ref => ({url: ref.url || api.getFileUrl(ref.filename), name: ref.character_name || ref.filename}))}
+        onFile={file => addFiles([file])}
+        disabledReason={disabled ? 'References are currently locked.' : uploading ? 'Uploading a reference…'
+          : references.length >= limits.total || references.filter(item => item.type === kind).length >= limits[kind]
+            ? `${kind === 'image' ? 'Image' : 'Video'} reference limit reached.` : undefined} />)}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
           <label className="text-[11px] text-text-muted uppercase tracking-wider">

@@ -113,6 +113,59 @@ class ColonStoryboardTests(unittest.TestCase):
         self.assertTrue(_h3_ordered_relation_pairs(
             'Nora feels calmer than before the truck departed.'))
 
+    def test_leading_after_before_and_only_after_keep_their_ordered_pair(self):
+        controls = (
+            (
+                "Nora opens the blue case after Mara unlocks its brass clasp.",
+                "After Mara unlocks its brass clasp, Nora opens the blue case.",
+            ),
+            (
+                "Nora opens the blue case before Mara takes the folded map.",
+                "Before Mara takes the folded map, Nora opens the blue case.",
+            ),
+            (
+                "Nora opens the blue case only after Mara unlocks its brass clasp.",
+                "Only after Mara unlocks its brass clasp does Nora open the blue case.",
+            ),
+            (
+                "They set the completed frame on the worktable after the final line.",
+                "After the final line, together they lower the completed frame onto the worktable.",
+            ),
+        )
+        for source, action in controls:
+            with self.subTest(source=source, action=action):
+                self.assertEqual(_h3_missing_relation_markers(source, action), [])
+
+        self.assertEqual(
+            _h3_missing_relation_markers(
+                "Nora unlocks the blue door only after the alarm stops.",
+                "Only after the alarm stops does she unlock the blue door.",
+            ),
+            [],
+        )
+
+        self.assertEqual(
+            _h3_missing_relation_markers(
+                "Nora opens the blue case after Mara unlocks its brass clasp.",
+                "Before Mara unlocks its brass clasp, Nora opens the blue case.",
+            ),
+            ["after"],
+        )
+        self.assertEqual(
+            _h3_missing_relation_markers(
+                "Nora opens the blue case after Mara unlocks its brass clasp.",
+                "Nora opens the blue case while Mara unlocks its brass clasp.",
+            ),
+            ["after"],
+        )
+        self.assertEqual(
+            _h3_missing_relation_markers(
+                "Nora unlocks the blue door only after the alarm stops.",
+                "Only after the blue door opens does the alarm stop.",
+            ),
+            ["only after"],
+        )
+
     def test_camera_validator_accepts_comparison_note_without_repeating_it(self):
         prompt = ('Nora disappears into the horizon haze (~1s earlier than before). '
                   'Phone holds on the empty road.')

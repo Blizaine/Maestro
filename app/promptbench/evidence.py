@@ -21,7 +21,7 @@ def file_digest(path):
 def source_files(app_root):
     root = Path(app_root)
     files = {root / "launch.py", root / "wgp.py"}
-    for directory, pattern in (("services", "*.py"), ("services/llm_guides/enhance", "*.md"),
+    for directory, pattern in (("services", "*.py"), ("services/llm_guides", "*.md"),
                                ("promptbench", "*.py"), ("promptbench", "*.md"),
                                ("models/minimax_h3", "*.py"),
                                ("defaults", "*minimax_h3*.json"), ("model_definitions", "*minimax_h3*.json")):
