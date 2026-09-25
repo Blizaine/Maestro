@@ -11,6 +11,26 @@ from models.minimax_h3 import transformer as h3
 
 
 class H3NormMemoryTests(unittest.TestCase):
+    def test_normal_sequence_keeps_native_norm_and_huge_sequence_stays_bounded(self):
+        norm = torch.nn.RMSNorm(1).eval()
+        observed_sizes = []
+        hook = norm.register_forward_pre_hook(
+            lambda _, args: observed_sizes.append(args[0].shape[-2])
+        )
+        try:
+            with torch.inference_mode():
+                h3._rms_norm_in_chunks(norm, torch.ones(1, 66_148, 1))
+                normal_sizes = list(observed_sizes)
+                observed_sizes.clear()
+                h3._rms_norm_in_chunks(norm, torch.ones(1, 264_654, 1))
+                huge_sizes = list(observed_sizes)
+        finally:
+            hook.remove()
+
+        self.assertEqual(normal_sizes, [66_148])
+        self.assertGreater(len(huge_sizes), 1)
+        self.assertLessEqual(max(huge_sizes), 8_192)
+
     def test_chunked_norm_matches_native_dtype_and_preserves_input(self):
         for dtype in (torch.float32, torch.bfloat16, torch.float16):
             for weight_dtype in (dtype, torch.float32):
