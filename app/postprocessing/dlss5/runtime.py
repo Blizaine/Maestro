@@ -42,6 +42,17 @@ NR_FILES = (
 )
 DLSSG_FILES = (DLSSG_DIR / "nvngx_dlssg.dll", DLSSG_WORKER)
 
+
+def uses_experimental_backend() -> bool:
+    """Explicit installation enables only the tested Windows 10 path."""
+    if os.name != "nt" or not 19045 <= sys.getwindowsversion().build < 22000:
+        return False
+    try:
+        config = json.loads((RUNTIME / "direct/enabled.json").read_text(encoding="utf8"))
+        return config.get("enabled") is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
 NR_MODES = {
     1.0: ("DLAA", 5),
     1.5: ("Quality", 2),
@@ -165,8 +176,12 @@ def _hags_enabled() -> bool | None:
 
 
 def unavailable_reason(*, temporal: bool) -> str:
+    if not temporal and uses_experimental_backend():
+        from .experimental import installation_error
+        reason = installation_error(RUNTIME / "direct")
+        return reason or ("RTX 30+ required" if _gpu_series() < 30 else "")
     if os.name != "nt" or sys.getwindowsversion().build < 22000:
-        return "Windows 11 required"
+        return "Windows 11 required" if temporal else "Windows 11 or the opt-in experimental Windows 10 backend required"
     missing = _missing(DLSSG_FILES if temporal else NR_FILES)
     if missing:
         return f"missing {missing[0].name}"
@@ -448,14 +463,15 @@ class NeuralRenderingSession(Worker):
     FRAME_MAGIC = 0x314D5246
     OUT_MAGIC = 0x3154554F
 
-    def __init__(self, width: int, height: int, frames: int, scale: float, intensity: float = 1.0, abort_callback=None):
+    def __init__(self, width: int, height: int, frames: int, scale: float, intensity: float = 1.0, abort_callback=None, *, host_dir: Path | None = None):
         output_width = max(2, math.floor(width * scale / 2 + 0.5) * 2)
         output_height = max(2, math.floor(height * scale / 2 + 0.5) * 2)
         if max(output_width, output_height) > 7680 or min(output_width, output_height) > 4320:
             raise ValueError(f"DLSS output {output_width}x{output_height} exceeds the 7680x4320 limit")
         intensity = max(0.0, min(2.0, float(intensity)))
-        command = [str(NR_WORKER), "--nr-intensity", f"{intensity:.4f}", "--wangp-video"] if USE_DEPTH_GUIDE else [str(NR_WORKER), "--video"]
-        super().__init__(command, HOST_DIR, abort_callback)
+        worker = host_dir / "nr-depth-worker.exe" if host_dir is not None else NR_WORKER
+        command = [str(worker), "--nr-intensity", f"{intensity:.4f}", "--wangp-video"] if USE_DEPTH_GUIDE else [str(worker), "--video"]
+        super().__init__(command, host_dir or HOST_DIR, abort_callback)
         self.output_width, self.output_height = output_width, output_height
         assert self.process.stdin is not None and self.process.stdout is not None
         if USE_DEPTH_GUIDE:
@@ -499,16 +515,27 @@ class NeuralRenderingSession(Worker):
         return self.read_array((self.output_height, self.output_width, 4), output)
 
 
+def create_neural_session(width, height, frames, scale, intensity=1.0, abort_callback=None, *, still_image=False):
+    if uses_experimental_backend():
+        from .experimental import ExperimentalNeuralSession
+        return ExperimentalNeuralSession(width, height, frames, scale, intensity, abort_callback,
+                                         still_image=still_image, runtime_dir=RUNTIME / "direct")
+    return NeuralRenderingSession(width, height, frames, scale, intensity, abort_callback)
+
+
 def neural_render(sample: torch.Tensor, scale: float, *, still_image: bool, depth_resolution: str, motion_vector: str, intensity: float = 1.0, abort_callback=None, progress_callback=None) -> torch.Tensor | None:
     require_runtime(temporal=False)
     dtype, device, channels, frame_count, height, width = _sample_info(sample)
-    session = NeuralRenderingSession(width, height, frame_count, scale, intensity, abort_callback)
+    session = create_neural_session(width, height, frame_count, scale, intensity, abort_callback, still_image=still_image)
     completed = False
     try:
         output = np.empty((frame_count, session.output_height, session.output_width, 4), dtype=np.uint8)
-        flow_guides = None if still_image else FlowGuides(session.render_width, session.render_height, motion_vector)
+        needs_guides = getattr(session, "needs_guides", True)
+        # Direct same-size NR computes its motion in NVOFA. DIS is used here
+        # only for the shared scene-cut reset, without loading RAFT/depth.
+        flow_guides = None if still_image else FlowGuides(session.render_width, session.render_height, motion_vector if needs_guides else "original")
         zero_motion = np.zeros((session.render_height, session.render_width, 2), dtype=np.float16) if still_image else None
-        depth_guides = DepthGuides(session.render_width, session.render_height, depth_resolution) if USE_DEPTH_GUIDE else None
+        depth_guides = DepthGuides(session.render_width, session.render_height, depth_resolution) if USE_DEPTH_GUIDE and needs_guides else None
         for index in range(frame_count):
             if abort_callback is not None and abort_callback():
                 return None

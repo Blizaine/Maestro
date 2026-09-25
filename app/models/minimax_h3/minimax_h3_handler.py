@@ -1703,6 +1703,13 @@ class family_handler:
         fused_turbo = bool(
             (model_def or {}).get("minimax_h3_fused_turbo", False)
         )
+        explicit_video_vae = (
+            "minimax_h3_video_vae_filename" in (model_def or {})
+        )
+        video_vae_filename = str(
+            (model_def or {}).get("minimax_h3_video_vae_filename")
+            or (_VIDEO_VAE_INT8_CONVROT if fused_turbo else _VIDEO_VAE)
+        )
         singularity = bool(
             (model_def or {}).get("minimax_h3_singularity", False)
         )
@@ -2027,7 +2034,10 @@ class family_handler:
                 "res_multistep" if fused_turbo else "euler"
             ),
             "minimax_h3_video_vae_filename": (
-                _VIDEO_VAE_INT8_CONVROT if fused_turbo else _VIDEO_VAE
+                video_vae_filename
+            ),
+            "minimax_h3_video_vae_auto": (
+                not explicit_video_vae and not fused_turbo
             ),
             "loras_disabled": False,
             "minimax_h3_transformer_working_vram_gb": (
@@ -2198,6 +2208,35 @@ class family_handler:
         return 32
 
     @staticmethod
+    def resolve_runtime_model_def(model_def, runtime_context=None):
+        """Select the default video VAE from the active transformer format.
+
+        Definitions that supply ``minimax_h3_video_vae_filename`` own that
+        choice. Ordinary H3 definitions leave it automatic so an INT8
+        transformer can use the matching compact ConvRot decoder while FP8,
+        BF16, and unset runtime modes retain the established FP16 decoder.
+        """
+
+        if not isinstance(model_def, dict):
+            return model_def
+        if model_def.get("minimax_h3_video_vae_auto") is not True:
+            return model_def
+        context = runtime_context if isinstance(runtime_context, dict) else {}
+        quantization = str(
+            context.get("transformer_quantization") or ""
+        ).strip().lower()
+        filename = (
+            _VIDEO_VAE_INT8_CONVROT
+            if quantization == "int8"
+            else _VIDEO_VAE
+        )
+        if model_def.get("minimax_h3_video_vae_filename") == filename:
+            return model_def
+        resolved = dict(model_def)
+        resolved["minimax_h3_video_vae_filename"] = filename
+        return resolved
+
+    @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):
         processor_files = [
             "chat_template.json",
@@ -2211,6 +2250,11 @@ class family_handler:
         fused_turbo = bool(
             (model_def or {}).get("minimax_h3_fused_turbo", False)
         )
+        video_vae_filename = str(
+            (model_def or {}).get("minimax_h3_video_vae_filename")
+            or (_VIDEO_VAE_INT8_CONVROT if fused_turbo else _VIDEO_VAE)
+        )
+        int8_video_vae = video_vae_filename == _VIDEO_VAE_INT8_CONVROT
         vae_downloads = (
             [
                 {
@@ -2228,7 +2272,7 @@ class family_handler:
                     "fileList": [[_AUDIO_VAE]],
                 },
             ]
-            if fused_turbo
+            if int8_video_vae
             else [
                 {
                     "repoId": _COMFY_REPO,

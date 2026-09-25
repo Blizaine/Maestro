@@ -11,6 +11,8 @@ import { formatDuration } from '../../lib/durationPlanning'
 import { modelDisplayName } from '../../lib/modelDisplay'
 import { sendToGalleryInput, useGalleryInputs, type GalleryInputTarget } from '../../lib/galleryInputs'
 import { getVideoPosterUrl } from '../../lib/thumbnailCache'
+import { getMediaTimestamp } from '../../lib/mediaTimestamp'
+import { MediaMetadataDetails } from './MediaMetadataDetails'
 
 interface Props {
   file: OutputFile
@@ -93,10 +95,8 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const receivingGalleryInput = useGalleryInputs(s => s.receiving)
   const workspaces = useStore(s => s.workspaces)
   const activeWorkspace = useStore(s => s.activeWorkspace)
-  // Virtual Uploads view: browse-only. Move/favorite/delete resolve
-  // against the active OUTPUT workspace server-side, so they can't act
-  // on upload files — hide them. Download + send-to-input still work
-  // (serve_file falls back to the uploads folder).
+  // Uploads stay outside workspace move/favorite actions. Their dedicated
+  // delete endpoint is safe for this virtual folder.
   const browsingUploads = useStore(s => s.browsingUploads)
   // Used to translate the raw model_type slug (e.g.
   // "ltx2_22B_distilled_1_1") in the per-clip metadata bar into the
@@ -110,9 +110,12 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const [meta, setMeta] = useState<OutputMetadata | null>(null)
   const [metaLoaded, setMetaLoaded] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
+  const [deleting, setDeleting] = useState(false)
   const [showSaveRecipe, setShowSaveRecipe] = useState(false)
   const [showFaceRefiner, setShowFaceRefiner] = useState(false)
   const confirmRef = useRef(false)
+  const deletingRef = useRef(false)
   const timeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined)
   const [copied, setCopied] = useState(false)
   const [copiedOriginalPrompt, setCopiedOriginalPrompt] = useState(false)
@@ -129,8 +132,12 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const actionMenuRef = useRef<HTMLDivElement>(null)
   const itemRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
+  const audioRef = useRef<HTMLAudioElement>(null)
 
-  useEffect(() => () => clearTimeout(sentToInputTimer.current), [])
+  useEffect(() => () => {
+    clearTimeout(sentToInputTimer.current)
+    clearTimeout(timeoutRef.current)
+  }, [])
 
   // Measure actual height and report to parent
   useEffect(() => {
@@ -188,6 +195,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
 
   const params = meta?.params as Record<string, unknown> | null
   const uploadFilenames = meta?.upload_filenames as Record<string, string | string[]> | undefined
+  const mediaTimestamp = getMediaTimestamp(meta?.timestamp, file.created_at)
 
   const h3WindowPlan = (
     params?.h3_window_plan && typeof params.h3_window_plan === 'object'
@@ -266,7 +274,10 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const modelType = (params?.model_type as string) || ''
   const modelLabel = modelDisplayName(modelType, models)
   const isAudio = file.type === 'audio'
-  const resolution = isAudio ? '' : ((params?.resolution as string) || '')
+  const actualResolution = !isAudio && meta?.media_info?.width && meta.media_info.height
+    ? `${meta.media_info.width} × ${meta.media_info.height}`
+    : ''
+  const resolution = isAudio ? '' : (actualResolution || (params?.resolution as string) || '')
   const seed = params?.seed as number | undefined
   const generationTime = meta?.generation_time
   const inferenceSteps = params?.num_inference_steps as number | undefined
@@ -420,9 +431,11 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   )
 
   const handleDelete = async () => {
+    if (deletingRef.current) return
     if (!confirmRef.current) {
       confirmRef.current = true
       setConfirmDelete(true)
+      setDeleteError('')
       clearTimeout(timeoutRef.current)
       timeoutRef.current = setTimeout(() => {
         confirmRef.current = false
@@ -433,15 +446,55 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     clearTimeout(timeoutRef.current)
     confirmRef.current = false
     setConfirmDelete(false)
-    // Release video element src to unlock the file on Windows
-    if (videoRef.current) {
-      videoRef.current.pause()
-      videoRef.current.removeAttribute('src')
-      videoRef.current.load()
+    setDeleteError('')
+    deletingRef.current = true
+    setDeleting(true)
+
+    // Releasing the browser media request can let Windows remove an unlocked
+    // file. If deletion fails, restore the same URL, playhead and play state.
+    const media = videoRef.current || audioRef.current
+    const playback = media ? {
+      element: media,
+      source: media.getAttribute('src') || file.url,
+      currentTime: media.currentTime,
+      wasPlaying: !media.paused,
+    } : null
+    const restorePlayback = () => {
+      if (!playback || !playback.element.isConnected) return
+      const element = playback.element
+      const restore = () => {
+        element.removeEventListener('loadedmetadata', restore)
+        try { element.currentTime = playback.currentTime } catch { /* seek may be unavailable */ }
+        if (playback.wasPlaying) void element.play().catch(() => {})
+      }
+      element.addEventListener('loadedmetadata', restore, { once: true })
+      element.setAttribute('src', playback.source)
+      element.load()
+      if (element.readyState >= 1) restore()
+    }
+    if (media) {
+      media.pause()
+      media.removeAttribute('src')
+      media.load()
     }
     setSelectedOutput(index)
-    // Small delay to let the browser release the file handle
-    setTimeout(() => deleteOutput(file), 200)
+    try {
+      const result = await deleteOutput(file)
+      if (!result.ok) {
+        restorePlayback()
+        setDeleteError(result.error || `Could not delete ${browsingUploads ? 'upload' : 'output'}.`)
+        return
+      }
+      setShowActionMenu(false)
+    } catch (error) {
+      // Store actions return failures, but keep the component resilient if
+      // another caller implementation rejects in the future.
+      restorePlayback()
+      setDeleteError(error instanceof Error ? error.message : String(error))
+    } finally {
+      deletingRef.current = false
+      setDeleting(false)
+    }
   }
 
   const handleRejoin = async () => {
@@ -668,6 +721,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
             </div>
             <p className="text-xs text-text-muted mb-2">{file.name}</p>
             <audio
+              ref={audioRef}
               key={file.url}
               src={file.url}
               controls
@@ -750,6 +804,11 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
           ) : (
             <div className="text-[11px] text-text-muted animate-pulse">Loading...</div>
           )}
+          {mediaTimestamp && (
+            <div className="mt-0.5 truncate text-[10px] text-text-muted" title={`${mediaTimestamp.label} · ${mediaTimestamp.exact}`}>
+              {mediaTimestamp.compact}
+            </div>
+          )}
         </div>
 
         {browsingAllFolders && file.workspace && (
@@ -762,8 +821,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
 
         {/* Four persistent controls; secondary actions are labeled in More. */}
         <div ref={actionMenuRef} className="relative flex shrink-0 items-center gap-0.5" onClick={e => e.stopPropagation()}>
-          {params && (
-            <button
+          <button
               onClick={() => {
                 onActivate(index)
                 setShowDetails(value => !value)
@@ -775,16 +833,15 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                   ? 'bg-bg-active text-accent-blue'
                   : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
               }`}
-              title={showDetails ? 'Hide generation details' : 'Show generation details'}
-              aria-label={showDetails ? 'Hide generation details' : 'Show generation details'}
+              title={showDetails ? 'Hide media details' : 'Show media details'}
+              aria-label={showDetails ? 'Hide media details' : 'Show media details'}
               aria-expanded={showDetails}
             >
               <span className="flex items-center gap-0.5">
                 <Info size={14} />
                 {showDetails ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
               </span>
-            </button>
-          )}
+          </button>
           {params && (
             <button
               onClick={() => {
@@ -1012,40 +1069,45 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                   )}
                 </>
               )}
-              {!browsingUploads && (
-                <button
-                  role="menuitem"
-                  onClick={() => {
-                    const alreadyConfirmed = confirmRef.current
-                    handleDelete()
-                    if (alreadyConfirmed) setShowActionMenu(false)
-                  }}
-                  className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs transition-colors ${
-                    confirmDelete
-                      ? 'bg-red-500/15 text-red-400 hover:bg-red-500/25'
-                      : 'text-text-secondary hover:bg-bg-hover hover:text-red-400'
-                  }`}
-                >
-                  <Trash2 size={14} />
-                  <span>{confirmDelete ? 'Click again to delete' : 'Delete output'}</span>
-                </button>
+              <button
+                role="menuitem"
+                onClick={() => void handleDelete()}
+                disabled={deleting}
+                className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs transition-colors disabled:opacity-50 ${
+                  confirmDelete
+                    ? 'bg-red-500/15 text-red-400 hover:bg-red-500/25'
+                    : 'text-text-secondary hover:bg-bg-hover hover:text-red-400'
+                }`}
+              >
+                {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                <span>{deleting ? 'Deleting…' : confirmDelete
+                  ? `Click again to delete ${browsingUploads ? 'upload' : 'output'}`
+                  : browsingUploads ? 'Delete upload' : 'Delete output'}</span>
+              </button>
+              {browsingUploads && (
+                <p className="px-2.5 pb-1 text-[10px] leading-relaxed text-text-muted">
+                  Removes this source file from Uploads. Completed outputs stay.
+                </p>
               )}
+              {deleteError && <p role="alert" className="px-2.5 py-2 text-xs text-red-400">{deleteError}</p>}
             </div>
           )}
         </div>
       </div>
-      {showDetails && params && (
+      {showDetails && (
         <div
           className="rounded-b-[10px] border-t border-border bg-bg-secondary/70 px-3 py-3"
           onClick={event => event.stopPropagation()}
         >
+          <MediaMetadataDetails file={file} metadata={meta} />
+          {params && <>
           <div className="flex flex-wrap gap-1.5 mb-3">
             {h3Workflow && (
               <span className="rounded-full border border-border bg-bg-tertiary px-2 py-0.5 text-[10px] text-text-secondary">
                 {h3Workflow}
               </span>
             )}
-            {resolution && (
+            {resolution && !actualResolution && (
               <span className="rounded-full border border-border bg-bg-tertiary px-2 py-0.5 text-[10px] text-text-secondary">
                 {resolution}
               </span>
@@ -1103,7 +1165,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                 <dd className="text-text-secondary">{h3Workflow}</dd>
               </>
             )}
-            {resolution && (
+            {resolution && !actualResolution && (
               <>
                 <dt className="text-text-muted">Resolution</dt>
                 <dd className="text-text-secondary">{resolution}</dd>
@@ -1339,6 +1401,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
               ))}
             </div>
           )}
+          </>}
         </div>
       )}
       {showSaveRecipe && (

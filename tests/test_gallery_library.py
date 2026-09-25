@@ -2,9 +2,12 @@ import ast
 import json
 import os
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).parents[1] / 'app'))
 
 from app.services.gallery_library import GalleryLibrary
 

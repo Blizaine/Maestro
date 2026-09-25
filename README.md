@@ -51,7 +51,7 @@ Direct access to every model and every knob:
 - **Better character images:** recover native-resolution PNG views from RefMods, choose a cover, and download selected images individually or as a ZIP. Original photos/video frames are used when available; selected PNGs and the cover travel with shared Maestro characters.
 - **Characters in Image mode:** add saved characters and recovered RefMod views to models that accept image references. Choose specific views, keep source/reference order, and describe clothing or other appearance changes in the image prompt.
 - **H3 Face Refiner:** automatically refine up to five tracked faces after generation, or use **Refine faces** on a gallery video. Preview face thumbnails, map saved characters and RefMods, or skip individual faces. Saves a new copy with the original resolution and soundtrack. See [H3 Face Refiner](docs/H3-Face-Refiner.md).
-- **Media Flow** batches image/video finishing and video outpainting. RIFE 4.26 supports x2/x3/x4 frame rates. Optional **DLSS 5 Neural Rendering** and **DLSS Frame Generation** integrate with generation postprocessing and finishing tools on supported Windows 11/RTX systems. See the [DLSS installation guide](docs/DLSS5.md) and [port plan, validation and testing instructions](docs/development/wan2gp-12-71-port-plan.md).
+- **Media Flow** batches image/video finishing and video outpainting. RIFE 4.26 supports x2/x3/x4 frame rates. Optional **DLSS 5 Neural Rendering** and **DLSS Frame Generation** integrate with generation postprocessing and finishing tools on supported Windows 11/RTX systems. An opt-in **experimental Windows 10** backend adds 1x neural enhancement and 1.5x, 1.724x, 2x and 3x DLSS upscaling; Frame Generation still requires Windows 11. See the [DLSS installation guide](docs/DLSS5.md) and [port plan, validation and testing instructions](docs/development/wan2gp-12-71-port-plan.md).
 
 ### 🤖 Local LLM — built-in, no setup
 Maestro auto-downloads `llama-server` (~600 MB one-time) and your chosen GGUF model on first use. Defaults to **Gemma 4 4B (Recommended)** — fast, capable, and runs comfortably on smaller GPUs. Auto-detects CUDA and binds the LLM to GPU when available.
@@ -63,7 +63,7 @@ Maestro auto-downloads `llama-server` (~600 MB one-time) and your chosen GGUF mo
 
 ### 🗂️ Browse the whole library
 
-Choose **All folders** in the gallery folder picker to browse and search every output folder. Search includes original and enhanced prompts, and filters apply across the complete collection. Results load in pages and show their source folder. Browsing keeps your generation destination unchanged; identical filenames in different folders remain separate items. [Gallery controls](docs/Studio-controls.md#gallery-scope-and-search).
+Choose **All folders** in the gallery folder picker to browse and search every output folder. Search includes original and enhanced prompts, and filters apply across the complete collection. Results load in pages and show their source folder. Browsing keeps your generation destination unchanged; identical filenames in different folders remain separate items. Media cards show timestamps; **Info** includes file details and upscale method, scale and before/after resolution when available. **Uploads → More → Delete upload** removes an unused source with confirmation. [Gallery controls](docs/Studio-controls.md#gallery-scope-and-search).
 
 ### 🛒 Built-in CivitAI LoRA browser
 - Search, filter, and one-click install any LoRA from CivitAI without leaving Maestro
@@ -106,6 +106,21 @@ View all past Director runs with their full state — clip plans, generated imag
 ## Updates
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
+
+### v2.4.1 (2026-09-25)
+
+**More Qwen Image 2.1 tools, experimental Windows 10 DLSS, and better gallery details**
+
+- **Qwen Image 2.1:** pose/depth/edge transfer, inpainting, LanPaint, outpainting, native **2K** presets, optional reference KV caching, and managed **Viggle Turbo** 4/5/6-step profiles. Updated prompt guidance, base settings and VAE tiling; fixed the inpainting-mode error on ordinary image generation.
+- **H3 and LTX performance:** automatic H3 INT8 ConvRot video VAE selection with INT8 transformers, plus optional Comfy Kitchen kernels on supported RTX 50 hardware with compatibility fallbacks.
+- **Windows 10 DLSS — Experimental:** optional 1x neural enhancement and 1.5x/1.724x/2x/3x upscaling for images and videos. Improved frame processing, audio preservation and worker cleanup. Requires a separate opt-in installation; DLSS Frame Generation remains Windows 11 only. [Setup guide](docs/DLSS5.md).
+- **Gallery ordering:** keep results in chronological order during generation, refresh and pagination, while retaining the selected item (#155).
+- **Media Info:** timestamps, measured resolution and file details, plus finishing method, scale, before/after resolution and frame rate, source and processing time when available.
+- **Upload cleanup:** delete uploaded media from the gallery with confirmation and protection for inputs used by active jobs.
+
+Use **Update** in Pinokio, restart Maestro and refresh the browser. Your existing projects, settings and media stay in place. Optional model assets download when first used; the Windows 10 DLSS backend requires explicit installation.
+
+[Full v2.4.1 release notes](docs/RELEASE_NOTES_V2.4.1.md) · [Validation and remaining limits](docs/VALIDATION_V2.4.1.md) · [Changelog](CHANGELOG.md)
 
 ### v2.4.0 (2026-09-24)
 

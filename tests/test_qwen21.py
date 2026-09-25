@@ -137,10 +137,14 @@ class ArchitectureTests(unittest.TestCase):
         settings = {}
         family_handler.update_default_settings(MODEL_TYPE, {}, settings)
         self.assertEqual(settings["num_inference_steps"], 40)
-        self.assertEqual(settings["guidance_scale"], 1)
+        self.assertEqual(settings["guidance_scale"], 4)
         self.assertEqual(settings["video_prompt_type"], "I")
-        self.assertIsNone(family_handler.validate_generative_settings(MODEL_TYPE, {}, {"image_refs": [1] * 10}))
-        self.assertIn("10", family_handler.validate_generative_settings(MODEL_TYPE, {}, {"image_refs": [1] * 11}))
+        self.assertIsNone(family_handler.validate_generative_settings(
+            MODEL_TYPE, {}, {"video_prompt_type": "I", "image_refs": [1] * 10}
+        ))
+        self.assertIn("10", family_handler.validate_generative_settings(
+            MODEL_TYPE, {}, {"video_prompt_type": "I", "image_refs": [1] * 11}
+        ))
         self.assertTrue(family_handler.get_lora_dir(MODEL_TYPE, SimpleNamespace(), "loras").endswith("qwen21"))
         tree = ast.parse((ROOT / "app/models/qwen/qwen_handler.py").read_text(encoding="utf-8"))
         owner = next(node for node in tree.body if isinstance(node, ast.ClassDef))
@@ -245,11 +249,12 @@ class JobAdapterTests(unittest.TestCase):
         self.assertFalse(instance.transformer._forward_pre_hooks)
         instance.vae.clear_cache.assert_called_once()
 
-    def test_disabled_references_and_default_cfg(self):
+    def test_disabled_references_and_base_cfg_default(self):
         instance = self.runtime()
         instance.generate(input_prompt="Cat", input_ref_images=[Image.new("RGB", (32, 32))])
         self.assertIsNone(instance.pipeline.call_args.kwargs["image"])
-        self.assertIsNone(instance.pipeline.call_args.kwargs["negative_prompt"])
+        self.assertEqual(instance.pipeline.call_args.kwargs["negative_prompt"], " ")
+        self.assertEqual(instance.pipeline.call_args.kwargs["true_cfg_scale"], 4)
 
     def test_cancellation_does_not_save_partial_image(self):
         instance = self.runtime()

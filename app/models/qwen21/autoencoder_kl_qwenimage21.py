@@ -1204,6 +1204,13 @@ class AutoencoderKLQwenImage21(ModelMixin, AutoencoderMixin, ConfigMixin, FromOr
             else 0,
         }
 
+    @staticmethod
+    def get_VAE_tile_size(vae_config, device_mem_capacity, mixed_precision):
+        """Choose conservative pixel-space tiles from available GPU memory."""
+        if vae_config == 0:
+            vae_config = 1 if device_mem_capacity >= 16000 else 2 if device_mem_capacity >= 8000 else 3
+        return True, {1: 1024, 2: 512, 3: 256}.get(int(vae_config), 256)
+
     # Copied from diffusers.models.autoencoders.autoencoder_kl_wan.AutoencoderKLWan.enable_tiling
     def enable_tiling(
         self,
@@ -1359,6 +1366,107 @@ class AutoencoderKLQwenImage21(ModelMixin, AutoencoderMixin, ConfigMixin, FromOr
         if not return_dict:
             return (decoded,)
         return DecoderOutput(sample=decoded)
+
+    @apply_forward_hook
+    @torch.inference_mode()
+    def decode_to_cpu_uint8(self, latents, output_channels=None) -> torch.Tensor:
+        """Decode into a CPU byte image while keeping only one VAE tile on GPU.
+
+        Tiled decoding can otherwise retain every decoded tile on the GPU
+        until the full image has been assembled. This writes each finished
+        tile directly into a CPU buffer and keeps only neighboring edges for
+        seam blending.
+        """
+        z = latents.pop() if isinstance(latents, list) else latents
+        if z.ndim != 5 or z.shape[2] != 1:
+            raise ValueError("Qwen Image 2.1 decodes a single-frame latent tensor.")
+        output_channels = self.config.out_channels if output_channels is None else int(output_channels)
+        if output_channels not in (3, self.config.out_channels):
+            raise ValueError("Qwen Image 2.1 output must use RGB or all VAE channels.")
+
+        batch, _, _, latent_height, latent_width = z.shape
+        scale = int(self.spatial_compression_ratio)
+        full_height, full_width = latent_height * scale, latent_width * scale
+        tile_height = stride_height = latent_height
+        tile_width = stride_width = latent_width
+        tiled = self.use_tiling and (
+            full_height > self.tile_sample_min_height or full_width > self.tile_sample_min_width
+        )
+        if tiled:
+            tile_height = min(latent_height, max(1, self.tile_sample_min_height // scale))
+            tile_width = min(latent_width, max(1, self.tile_sample_min_width // scale))
+            stride_height = min(tile_height, max(1, self.tile_sample_stride_height // scale))
+            stride_width = min(tile_width, max(1, self.tile_sample_stride_width // scale))
+        patch_size = self.config.patch_size or 1
+        blend_height = (tile_height - stride_height) * scale
+        blend_width = (tile_width - stride_width) * scale
+        device = z.device
+        dtype = getattr(self, "_model_dtype", next(self.parameters()).dtype)
+        source = z.detach().cpu() if tiled and z.device.type != "cpu" else z.detach()
+        del z
+        output = torch.empty((batch, output_channels, 1, full_height, full_width), dtype=torch.uint8, device="cpu")
+        previous_row_edges = []
+        try:
+            for batch_index in range(batch):
+                previous_row_edges = []
+                for row_index, latent_y in enumerate(range(0, latent_height, stride_height)):
+                    current_row_edges = []
+                    left_edge = None
+                    for column_index, latent_x in enumerate(range(0, latent_width, stride_width)):
+                        self.clear_cache()
+                        tile_latents = source[
+                            batch_index:batch_index + 1, :, :,
+                            latent_y:latent_y + tile_height, latent_x:latent_x + tile_width,
+                        ].to(device=device, dtype=dtype)
+                        tile = self.post_quant_conv(tile_latents)
+                        self._conv_idx = [0]
+                        tile = self.decoder(
+                            tile, feat_cache=self._feat_map, feat_idx=self._conv_idx, first_chunk=True
+                        )
+                        del tile_latents
+                        if patch_size != 1:
+                            tile = _unpatchify(tile, patch_size=patch_size)
+
+                        if row_index and column_index < len(previous_row_edges) and previous_row_edges[column_index] is not None:
+                            top_edge = previous_row_edges[column_index].to(device=device, dtype=tile.dtype)
+                            self.blend_v(top_edge, tile, blend_height)
+                            previous_row_edges[column_index] = None
+                            del top_edge
+                        if left_edge is not None:
+                            adjacent_edge = left_edge.to(device=device, dtype=tile.dtype)
+                            self.blend_h(adjacent_edge, tile, blend_width)
+                            del adjacent_edge, left_edge
+
+                        has_next_row = latent_y + stride_height < latent_height
+                        has_next_column = latent_x + stride_width < latent_width
+                        bottom_edge = (
+                            tile[:, :, :, -blend_height:, :].detach().cpu()
+                            if has_next_row and blend_height else None
+                        )
+                        left_edge = (
+                            tile[:, :, :, :, -blend_width:].detach().cpu()
+                            if has_next_column and blend_width else None
+                        )
+                        current_row_edges.append(bottom_edge)
+
+                        write_height = min(stride_height, latent_height - latent_y) * scale
+                        write_width = min(stride_width, latent_width - latent_x) * scale
+                        tile = tile[:, :output_channels, :, :write_height, :write_width]
+                        if not torch.isfinite(tile).all():
+                            raise RuntimeError(
+                                "Qwen Image 2.1 VAE decoding produced non-finite pixels. "
+                                "Try the 32-bit VAE setting."
+                            )
+                        pixels = tile.float().clamp_(-1.0, 1.0).add_(1.0).mul_(127.5).round_().to(torch.uint8).cpu()
+                        y0, x0 = latent_y * scale, latent_x * scale
+                        output[batch_index:batch_index + 1, :, :, y0:y0 + write_height, x0:x0 + write_width].copy_(pixels)
+                        del tile, pixels, bottom_edge
+                    left_edge = None
+                    previous_row_edges = current_row_edges
+            return output
+        finally:
+            previous_row_edges.clear()
+            self.clear_cache()
 
     # Copied from diffusers.models.autoencoders.autoencoder_kl_wan.AutoencoderKLWan.blend_v
     def blend_v(self, a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor:

@@ -6195,6 +6195,9 @@ def get_model_options(model_type: str):
         "background_removal_label": md.get("background_removal_label"),
         "max_image_refs": md.get("max_image_refs"),
         "sample_solvers": solvers,
+        "qwen21_acceleration_profiles": md.get("qwen21_acceleration_profiles"),
+        "image_ref_inpaint": md.get("image_ref_inpaint", False),
+        "model_modes": md.get("model_modes"),
 
         # Self refiner
         "self_refiner": md.get("self_refiner", False),
@@ -9108,6 +9111,8 @@ async def upload_audio(request: Request, file: UploadFile = File(...)):
                         except OSError:
                             pass
 
+    from services.media_info import record_upload
+    record_upload(filepath, file.filename)
     return {
         "filename": unique_name,
         "path": filepath,
@@ -23691,7 +23696,7 @@ def _resolve_tool_clip_path(raw_path, workspace=None):
 
 def _write_tool_sidecar(
     out_dir, filename, *, source_name, tool, params, elapsed, job_id,
-    media_type="video",
+    media_type="video", source_path=None,
 ):
     """Write a .meta.json sidecar so a Tools output shows up in the gallery
     with the right mode + edit_sub_mode tag (mirrors _run_sfx_generation)."""
@@ -23705,6 +23710,14 @@ def _write_tool_sidecar(
         "generation_time": round(elapsed),
         "created_at": time.time(),
     }
+    if tool in {"upscale", "media_flow"}:
+        from services.media_info import probe_media, processing_record
+        sidecar["processing"] = processing_record(
+            spatial=params.get("spatial_upsampling") or params.get("method", ""),
+            temporal=params.get("temporal_upsampling", ""), source_name=source_name,
+            before=probe_media(source_path or params.get("media_path")),
+            after=probe_media(os.path.join(out_dir, filename)), elapsed=elapsed,
+            completed_at=sidecar["created_at"], options=params)
     meta_path = os.path.join(out_dir, os.path.splitext(filename)[0] + ".meta.json")
     try:
         with open(meta_path, "w", encoding="utf-8") as f:
@@ -23727,6 +23740,7 @@ def _run_tool_upscale(job_id: str):
                 job, message="Preparing upscale...", phase="Preparing",
             ):
                 return False
+            start_time = time.time()
             if not register_abort_state(
                 job, job_id, _active_gen_states, abort_state,
             ):
@@ -23847,6 +23861,7 @@ def _run_tool_upscale(job_id: str):
                         filename,
                         source_name=os.path.basename(media_source),
                         tool="upscale",
+                        source_path=media_source,
                         params={
                             "method": method,
                             "model_type": "post_processing",
@@ -23965,6 +23980,7 @@ def _run_tool_upscale(job_id: str):
                     out_dir, fname,
                     source_name=os.path.basename(video_source),
                     tool="upscale",
+                    source_path=video_source,
                     params={"method": method, "model_type": "post_processing"},
                     elapsed=time.time() - start_time,
                     job_id=job_id,
@@ -25723,6 +25739,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             join_output_file = None
             active_generation_seconds_by_output: dict[str, int] = {}
             model_metadata_by_output: dict[str, dict] = {}
+            processing_by_output: dict[str, dict] = {}
             active_generation_seconds_by_task: dict[int, int] = {}
             multi_window_timing_by_output: dict[str, dict] = {}
             multi_window_timing_by_task: dict[int, dict] = {}
@@ -25931,6 +25948,8 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     file_sidecar["params"] = sidecar_params.copy()
                     if fname in model_metadata_by_output:
                         file_sidecar["model_details"] = model_metadata_by_output[fname]
+                    if fname in processing_by_output:
+                        file_sidecar["processing"] = processing_by_output[fname]
                     resolved_seed = _extract_output_seed(fname)
                     if resolved_seed is not None:
                         # A request seed of -1 means "choose randomly".  The
@@ -26277,6 +26296,11 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                             for output_path in data.get("outputs") or []:
                                 if isinstance(output_path, str):
                                     model_metadata_by_output[os.path.basename(output_path)] = data["metadata"]
+                    elif cmd == "processing_metadata":
+                        if isinstance(data, dict) and isinstance(data.get("metadata"), dict):
+                            for output_path in data.get("outputs") or []:
+                                if isinstance(output_path, str):
+                                    processing_by_output[os.path.basename(output_path)] = data["metadata"]
                     elif cmd == "generation_time":
                         try:
                             timing_window_seconds = None
@@ -27158,10 +27182,18 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                             update_job(job, phase=phase, message=phase, step=int(step or 0),
                                        total_steps=int(total or 0))
                         try:
+                            from services.media_info import probe_media, processing_record
+                            before_processing = probe_media(video_path)
+                            finishing_started = time.monotonic()
                             process_video(video_path, temporary, spatial=pp_media_spatial,
                                 temporal=pp_media_temporal, options=pp_media_options,
                                 abort=lambda: is_cancel_requested(job), progress=media_progress)
                             os.replace(temporary, video_path)
+                            processing_by_output[fname] = processing_record(
+                                spatial=pp_media_spatial, temporal=pp_media_temporal,
+                                before=before_processing, after=probe_media(video_path),
+                                elapsed=time.monotonic() - finishing_started,
+                                completed_at=time.time(), options=pp_media_options)
                         finally:
                             if os.path.isfile(temporary):
                                 os.remove(temporary)
@@ -27187,7 +27219,14 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                             ):
                                 return False
                             print(f"  [Upscale] Applying {pp_spatial_upsampling} to {fname}")
+                            from services.media_info import probe_media, processing_record
+                            before_processing = probe_media(video_path)
+                            finishing_started = time.monotonic()
                             _apply_spatial_upsampling_to_file(video_path, pp_spatial_upsampling, job=job)
+                            processing_by_output[fname] = processing_record(
+                                spatial=pp_spatial_upsampling, before=before_processing,
+                                after=probe_media(video_path), elapsed=time.monotonic() - finishing_started,
+                                completed_at=time.time())
                             print(f"  [Upscale] Done: {fname}")
                         except Exception as up_err:
                             print(f"  [Upscale] Warning: failed on {fname} (keeping original): {up_err}")
@@ -28619,6 +28658,12 @@ def get_output_metadata(name: str, workspace: str = ""):
     if filepath is None or not os.path.isfile(filepath):
         raise HTTPException(status_code=404, detail="Output file not found")
 
+    from services.media_info import enrich_metadata
+
+    def _with_file_details(metadata):
+        return enrich_metadata(filepath, metadata,
+            source_roots=(out_dir, os.path.join(os.getcwd(), "uploads")))
+
     # Helper: read embedded metadata from the media file
     def _read_embedded():
         ext = os.path.splitext(name)[1].lower()
@@ -28642,8 +28687,14 @@ def get_output_metadata(name: str, workspace: str = ""):
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 sidecar = json.load(f)
+            # An upload date sidecar must not conceal generation metadata
+            # already embedded in an imported image, video or audio file.
+            if "params" not in sidecar:
+                imported_params = _read_embedded()
+                if isinstance(imported_params, dict):
+                    sidecar["params"] = imported_params
             # Merge actual seed from embedded metadata if sidecar has seed=-1
-            params = sidecar.get("params", {})
+            params = sidecar.get("params") or {}
             if params.get("seed", -1) == -1:
                 embedded = _read_embedded()
                 if embedded and "seed" in embedded:
@@ -28652,16 +28703,16 @@ def get_output_metadata(name: str, workspace: str = ""):
                     resolved_seed = _extract_output_seed(name)
                     if resolved_seed is not None:
                         params["seed"] = resolved_seed
-            return {"source": "sidecar", **sidecar}
+            return _with_file_details({"source": "sidecar", **sidecar})
         except Exception:
             pass
 
     # Strategy 2: Read embedded metadata from media file
     embedded = _read_embedded()
     if embedded:
-        return {"source": "embedded", "params": embedded}
+        return _with_file_details({"source": "embedded", "params": embedded})
 
-    return {"source": "none", "params": None}
+    return _with_file_details({"source": "none", "params": None})
 
 
 @api.post("/api/v1/outputs/rejoin")
@@ -28949,6 +29000,36 @@ def delete_output(name: str, workspace: str = ""):
     return {"deleted": name}
 
 
+@api.delete("/api/v1/uploads/{name}")
+def delete_upload(name: str):
+    """Delete one upload, preserving generated media and active job inputs."""
+    from services.upload_media import upload_path, references_upload, delete_upload_file
+    from services.win_safe_files import safe_delete
+    root = os.path.join(os.getcwd(), "uploads")
+    try:
+        path = upload_path(root, name)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    for job in list(_jobs.values()):
+        state = snapshot_job(job)
+        if state.get("status") in {"held", "queued", "running", "cancelling"} and references_upload(state.get("params"), path):
+            raise HTTPException(409, "This upload is used by an active or queued job. Finish or remove that job before deleting it.")
+    # Director may be planning or waiting for review between its child jobs.
+    # Its queued projects already copy source assets into their own directory.
+    director = sys.modules.get("services.director_pipeline")
+    if director is not None:
+        with director._pipeline_lock:
+            for pipeline in director._pipelines.values():
+                if pipeline.get("status") in director._ACTIVE_PIPELINE_STATUSES and references_upload(pipeline, path):
+                    raise HTTPException(409, "This upload is used by an active Director project. Stop that project before deleting it.")
+    try:
+        return delete_upload_file(root, name, safe_delete=safe_delete)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    except PermissionError as error:
+        raise HTTPException(409, str(error)) from error
+
+
 @api.post("/api/v1/upload")
 async def upload_image(request: Request, file: UploadFile = File(...), reuse_identical: bool = False):
     """Upload an image or audio/video asset. Image was the original use;
@@ -29027,6 +29108,8 @@ async def upload_image(request: Request, file: UploadFile = File(...), reuse_ide
                         except OSError:
                             pass
 
+    from services.media_info import record_upload
+    record_upload(filepath, file.filename)
     result = {
         "filename": unique_name,
         "path": filepath,

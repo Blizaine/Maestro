@@ -1,10 +1,31 @@
 import { useStore } from '../stores/useStore'
 import * as api from '../api/client'
 import type { GenerationJob } from '../types'
+import { useEffect, useState } from 'react'
 
 export const dlssSpatialOptions = [1, 1.5, 1.724, 2, 3].map(scale => ({
   value: `dlss5*${scale}`, label: `DLSS 5 ${scale}x${scale === 1 ? ' (native refinement)' : ''}`,
 }))
+
+export function useDlssAvailability() {
+  const [nr, setNr] = useState<{ available: boolean; scales: number[]; experimental?: boolean } | null>(null)
+  useEffect(() => {
+    let active = true
+    const refresh = () => {
+      fetch('/api/v1/media-flow/capabilities')
+        .then(response => response.ok ? response.json() : null)
+        .then(caps => { if (active && caps) setNr(caps.neural_rendering) })
+        .catch(() => { /* Finishing controls show the availability error. */ })
+    }
+    refresh()
+    window.addEventListener('maestro-dlss-refresh', refresh)
+    return () => { active = false; window.removeEventListener('maestro-dlss-refresh', refresh) }
+  }, [])
+  return {
+    disabled: (value: string) => value.startsWith('dlss5*') && !!nr && (!nr.available || !nr.scales.includes(Number(value.split('*')[1]))),
+    label: (value: string, label: string) => value.startsWith('dlss5*') && nr?.experimental ? `${label} — Win10 experimental` : label,
+  }
+}
 
 export function trackMediaFlowJobs(ids: string[]) {
   const jobs: GenerationJob[] = ids.map(id => ({ id, status: 'queued', progress: 0,

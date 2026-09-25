@@ -17,6 +17,7 @@ export function ControlVideoSection({ galleryOnly = false }: { galleryOnly?: boo
   const params = useStore(s => s.params)
   const setParam = useStore(s => s.setParam)
   const generationMode = useStore(s => s.generationMode)
+  const imageWorkflow = useStore(s => s.studioImageWorkflow)
   const [guideFilename, setGuideFilename] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
 
@@ -27,6 +28,9 @@ export function ControlVideoSection({ galleryOnly = false }: { galleryOnly?: boo
   if (!config) return null
 
   const isImageMode = generationMode === 'image'
+  // Masked image workflows own their source/mask below the model selector.
+  if (isImageMode && imageWorkflow !== 'generate') return null
+  const guideKey = isImageMode ? 'image_guide' : 'video_guide'
   const mediaType = isImageMode ? 'Image' : 'Video'
   const label = modelOptions.guide_preprocessing ? `Control ${mediaType} Process` : `${mediaType} Process`
   // Strip ONLY a trailing "T" — the temporal-alignment flag the extend path
@@ -37,13 +41,15 @@ export function ControlVideoSection({ galleryOnly = false }: { galleryOnly?: boo
   // the <select> back to "Transfer Human Motion" so those options couldn't be
   // picked. The flag is only ever appended trailing and only when no other
   // "T" is present, so /T$/ removes the flag without touching the process.
-  const currentValue = (params.video_prompt_type || config.default || '').replace(/T$/, '')
+  const currentValue = isImageMode
+    ? String(params.video_prompt_type || '').replace(/[KIA]/g, '')
+    : (params.video_prompt_type || config.default || '').replace(/T$/, '')
 
   const isFramesInjection = currentValue.includes('KFI')
   const showUpload = !isFramesInjection && modelOptions.guide_preprocessing != null && currentValue !== ''
   const restoredGuideFilename = guideFilename || (
-    typeof params.video_guide === 'string' && params.video_guide
-      ? params.video_guide.replace(/\\/g, '/').split('/').pop() || null
+    typeof params[guideKey] === 'string' && params[guideKey]
+      ? String(params[guideKey]).replace(/\\/g, '/').split('/').pop() || null
       : null
   )
 
@@ -51,7 +57,7 @@ export function ControlVideoSection({ galleryOnly = false }: { galleryOnly?: boo
     setUploading(true)
     try {
       const result = await api.uploadImage(file)
-      setParam('video_guide', result.path)
+      setParam(guideKey, result.path)
       setGuideFilename(file.name)
     } catch (e) {
       console.error('Upload failed:', e)
@@ -80,14 +86,15 @@ export function ControlVideoSection({ galleryOnly = false }: { galleryOnly?: boo
         config={config}
         value={currentValue}
         onChange={val => {
-          setParam('video_prompt_type', val)
+          const references = isImageMode ? String(params.video_prompt_type || '').replace(/[^KI]/g, '') : ''
+          setParam('video_prompt_type', val + references)
           // Leaving frame-injection mode drops the inject params InputsPanel owns.
-          if (!val.includes('KFI')) {
+          if (!isImageMode && !val.includes('KFI')) {
             setParam('image_refs', undefined)
             setParam('frames_positions', undefined)
           }
           if (!val) {
-            setParam('video_guide', undefined)
+            setParam(guideKey, undefined)
             setGuideFilename(null)
           }
         }}
@@ -106,7 +113,7 @@ export function ControlVideoSection({ galleryOnly = false }: { galleryOnly?: boo
             filename={restoredGuideFilename}
             onFile={handleUpload}
             onClear={() => {
-              setParam('video_guide', undefined)
+              setParam(guideKey, undefined)
               setGuideFilename(null)
             }}
           />

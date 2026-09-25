@@ -702,6 +702,12 @@ class QLinearInt8ConvRot(QModuleMixin, torch.nn.Linear):
         self._convrot_default_dtype = dtype
 
     def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
+        if getattr(self, "_maestro_kitchen_prequantized_input", None) is not None:
+            from shared.kernels.comfy_kitchen import use_prequantized_convrot_input
+
+            prequantized = use_prequantized_convrot_input(self, input_tensor)
+            if prequantized is not None:
+                return prequantized
         qweight = self.qweight
         if _is_fake_tensor(input_tensor):
             return input_tensor.new_empty((*input_tensor.shape[:-1], qweight.shape[0]))

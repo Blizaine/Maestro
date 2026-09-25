@@ -175,6 +175,7 @@ def public_enhancement(record: dict | None, *, summary: bool = False) -> dict | 
 
 def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
     """Construct the same native writer inputs used by interactive Enhance."""
+    mode = params.get("generation_mode") or ("image" if model.get("image_outputs") else "video")
     h3 = str(model.get("architecture") or "").startswith("minimax_h3")
     omni = bool(model.get("omni_reference"))
     fps = float(model.get("fps") or (24 if h3 else 16))
@@ -196,6 +197,11 @@ def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
         relationships, retention, _ = _reference_context(references)
         context.extend([relationships, retention])
         images.extend(ref["path"] for ref in references if ref.get("type") == "image" and ref.get("path"))
+    elif mode == "image":
+        if params.get("image_guide") and "V" in str(params.get("video_prompt_type") or ""):
+            images.append(params["image_guide"])
+            context.append("Picture 1 is the source/control image. Preserve the requested structure and change only what the user asks to edit.")
+        images.extend(params.get("image_refs") or [])
     else:
         for field, time in (("image_start", "0.00"), ("image_end", f"{total / fps:.2f}")):
             if params.get(field):
@@ -206,11 +212,9 @@ def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
         for path, position in zip(keyframes, positions):
             images.append(path)
             context.append(f"<Picture {len(images)}> is an exact injected frame at timeline position {position}.")
-        if params.get("generation_mode") == "image" and not images:
-            images.extend(params.get("image_refs") or [])
     payload = {
         "prompt": str(params.get("prompt") or ""),
-        "mode": params.get("generation_mode") or "video", "model_type": params.get("model_type"),
+        "mode": mode, "model_type": params.get("model_type"),
         "planning_style": "adaptive" if h3 else "faithful",
         "duration_seconds": total / fps, "window_count": 1, "window_size_seconds": window / fps,
         "image_paths": images, "reference_context": "\n".join(context),

@@ -2779,7 +2779,7 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         self.assertIn("First Block Cache", optimizations)
         self.assertIn("'skip_steps_cache_type', checked ? 'first_block' : ''", optimizations)
         self.assertIn("First Block Cache Tuning", advanced)
-        self.assertIn("disabled={h3TurboMode}", advanced)
+        self.assertIn("disabled={h3TurboMode || !!qwenTurboProfile}", advanced)
         self.assertIn("minimax_h3_turbo_mode?: boolean", types_source)
         self.assertIn("minimax_h3_turbo_preset?: string", types_source)
         self.assertIn("minimax_h3_runtime_advisory?:", types_source)

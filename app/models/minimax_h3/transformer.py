@@ -31,6 +31,7 @@ import torch.nn.functional as F
 
 from .sol_attention import MiniMaxH3SolAttention
 from .sla_attention import MiniMaxH3SLAAttention
+from . import denoiser_kernels
 
 MODALITY_VIDEO = 0
 MODALITY_TEXT = 1
@@ -419,6 +420,28 @@ class MiniMaxH3Attention(nn.Module):
             result = self.vdn([hidden_states[0]], [part[0] for part in raw],
                               [query, key, raw[2]], self.out_proj)
             return result.unsqueeze(0)
+        if attention_mask is not None:
+            attention_mask = attention_mask[None, None].to(device=hidden_states.device)
+        use_sla = (
+            self.sla_attention is not None
+            and self.sla_attention.use_for_layer(length, attention_mask)
+        )
+        use_sol = (
+            not use_sla
+            and self.sol_attention is not None
+            and self.sol_attention.use_for_layer(length, attention_mask)
+        )
+        fused_rms_rope = (
+            rotary is not None
+            and not use_sla
+            and not use_sol
+            and denoiser_kernels.can_rms_rope(
+                hidden_states,
+                rotary,
+                self.q_norm,
+                self.k_norm,
+            )
+        )
         projection_width = (
             self.heads * self.head_dim
             if hasattr(self, "q_proj")
@@ -457,19 +480,74 @@ class MiniMaxH3Attention(nn.Module):
                     output[:, start:end].copy_(rows)
                 return output
 
-            query = project_rows(self.q_proj, self.q_norm, rotary)
-            key = project_rows(self.k_proj, self.k_norm, rotary)
+            if fused_rms_rope:
+                query = key = None
+                for start in range(0, length, chunk_size):
+                    end = min(length, start + chunk_size)
+                    q_rows = self.q_proj(hidden_states[:, start:end]).view(
+                        batch, end - start, self.heads, self.head_dim
+                    )
+                    k_rows = self.k_proj(hidden_states[:, start:end]).view(
+                        batch, end - start, self.heads, self.head_dim
+                    )
+                    normalized = denoiser_kernels.rms_rope(
+                        q_rows,
+                        k_rows,
+                        rotary,
+                        start,
+                        end,
+                        self.q_norm,
+                        self.k_norm,
+                    )
+                    if normalized is None:
+                        q_rows = self.q_norm(q_rows)
+                        k_rows = self.k_norm(k_rows)
+                        cos, sin = rotary
+                        q_rows = _apply_rope_inplace(q_rows, cos[start:end], sin[start:end])
+                        k_rows = _apply_rope_inplace(k_rows, cos[start:end], sin[start:end])
+                    else:
+                        q_rows, k_rows = normalized
+                    if query is None:
+                        query = torch.empty(shape, device=q_rows.device, dtype=q_rows.dtype)
+                        key = torch.empty(shape, device=k_rows.device, dtype=k_rows.dtype)
+                    query[:, start:end].copy_(q_rows)
+                    key[:, start:end].copy_(k_rows)
+                assert query is not None and key is not None
+            else:
+                query = project_rows(self.q_proj, self.q_norm, rotary)
+                key = project_rows(self.k_proj, self.k_norm, rotary)
             value = project_rows(self.v_proj)
             qkv = None
         elif length <= chunk_size:
             qkv = self.qkv_proj(hidden_states)
             query, key, value = qkv.chunk(3, dim=-1)
-            query = self.q_norm(query.view(batch, length, self.heads, self.head_dim))
-            key = self.k_norm(key.view(batch, length, self.heads, self.head_dim))
+            query = query.view(batch, length, self.heads, self.head_dim)
+            key = key.view(batch, length, self.heads, self.head_dim)
             value = value.view(batch, length, self.heads, self.head_dim)
-            if rotary is not None:
-                query = _apply_rope_inplace(query, *rotary)
-                key = _apply_rope_inplace(key, *rotary)
+            if fused_rms_rope:
+                normalized = denoiser_kernels.rms_rope(
+                    query,
+                    key,
+                    rotary,
+                    0,
+                    length,
+                    self.q_norm,
+                    self.k_norm,
+                )
+                if normalized is None:
+                    query = self.q_norm(query)
+                    key = self.k_norm(key)
+                    cos, sin = rotary
+                    query = _apply_rope_inplace(query, cos, sin)
+                    key = _apply_rope_inplace(key, cos, sin)
+                else:
+                    query, key = normalized
+            else:
+                query = self.q_norm(query)
+                key = self.k_norm(key)
+                if rotary is not None:
+                    query = _apply_rope_inplace(query, *rotary)
+                    key = _apply_rope_inplace(key, *rotary)
         else:
             # Keep only Q/K/V themselves resident.  The fused projection,
             # normalization, and RoPE temporaries are bounded to one chunk.
@@ -480,14 +558,39 @@ class MiniMaxH3Attention(nn.Module):
                 qkv = self.qkv_proj(hidden_states[:, start:end])
                 q_chunk, k_chunk, v_chunk = qkv.chunk(3, dim=-1)
                 chunk_length = end - start
-                q_chunk = self.q_norm(
-                    q_chunk.view(batch, chunk_length, self.heads, self.head_dim)
-                )
-                k_chunk = self.k_norm(
-                    k_chunk.view(batch, chunk_length, self.heads, self.head_dim)
-                )
+                q_chunk = q_chunk.view(batch, chunk_length, self.heads, self.head_dim)
+                k_chunk = k_chunk.view(batch, chunk_length, self.heads, self.head_dim)
                 v_chunk = v_chunk.view(batch, chunk_length, self.heads, self.head_dim)
-                if rotary is not None:
+                if fused_rms_rope:
+                    normalized = denoiser_kernels.rms_rope(
+                        q_chunk,
+                        k_chunk,
+                        rotary,
+                        start,
+                        end,
+                        self.q_norm,
+                        self.k_norm,
+                    )
+                    if normalized is None:
+                        q_chunk = self.q_norm(q_chunk)
+                        k_chunk = self.k_norm(k_chunk)
+                        cos, sin = rotary
+                        q_chunk = _apply_rope_inplace(
+                            q_chunk,
+                            cos[start:end],
+                            sin[start:end],
+                        )
+                        k_chunk = _apply_rope_inplace(
+                            k_chunk,
+                            cos[start:end],
+                            sin[start:end],
+                        )
+                    else:
+                        q_chunk, k_chunk = normalized
+                else:
+                    q_chunk = self.q_norm(q_chunk)
+                    k_chunk = self.k_norm(k_chunk)
+                if rotary is not None and not fused_rms_rope:
                     cos, sin = rotary
                     q_chunk = _apply_rope_inplace(
                         q_chunk,
@@ -512,17 +615,8 @@ class MiniMaxH3Attention(nn.Module):
         # allocating the attention result; owned callers have already removed
         # theirs from the transfer list.
         hidden_states = None
-        if attention_mask is not None:
-            attention_mask = attention_mask[None, None].to(device=query.device)
-        use_sla = (
-            self.sla_attention is not None
-            and self.sla_attention.use_for_layer(length, attention_mask)
-        )
-        use_sol = (
-            not use_sla
-            and self.sol_attention is not None
-            and self.sol_attention.use_for_layer(length, attention_mask)
-        )
+        if attention_mask is not None and attention_mask.device != query.device:
+            attention_mask = attention_mask.to(device=query.device)
         if use_sla:
             attended = self.sla_attention([query, key, value], True)
         elif use_sol:
@@ -1066,6 +1160,8 @@ class MiniMaxH3Transformer(nn.Module):
                 raise ValueError("H3 VDN requires the packed layout and target latent geometry")
             for block in self.blocks:
                 block.attn.vdn.begin_forward(layout, *latent_shape, self.config.patch_size)
+        else:
+            rotary = denoiser_kernels.prepare_rope(rotary)
 
         if first_block_cache is None:
             for block in self.blocks:

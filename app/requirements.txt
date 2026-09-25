@@ -9,6 +9,9 @@
 # produce corrupted/noise video whenever an otherwise-compatible LoRA is active.
 mmgp==3.7.12
 
+# Optional CUDA acceleration with a guarded fallback on CUDA 12 runtimes.
+comfy-kitchen==0.2.35
+
 # Core AI stack
 diffusers==0.36.0
 transformers==4.57.1   # 4.57.x adds transformers.models.qwen3_vl (required by HiDream O1)

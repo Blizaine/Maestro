@@ -4,7 +4,7 @@ import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { MediaFlowPanel } from './MediaFlowPanel'
 import { MediaFinishingControls } from './MediaFinishingControls'
-import { dlssSpatialOptions } from '../../lib/mediaFlow'
+import { dlssSpatialOptions, useDlssAvailability } from '../../lib/mediaFlow'
 import { FaceRefinerButton } from '../Characters/FaceRefiner'
 import { GalleryInput } from '../shared/GalleryInput'
 
@@ -41,6 +41,7 @@ export function ToolsPanel({
   embedded?: boolean
 }) {
   const storedTool = useStore(s => s.toolsTool)
+  const dlss = useDlssAvailability()
   const setTool = useStore(s => s.setToolsTool)
   const storedUpscaleMedia = useStore(s => s.toolsUpscaleMedia)
   const setUpscaleMedia = useStore(s => s.setToolsUpscaleMedia)
@@ -233,7 +234,7 @@ export function ToolsPanel({
             className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
           >
             {(mediaKind === 'image' ? imageUpscaleMethods : upscaleMethods).map(o => (
-              <option key={o.value} value={o.value}>{o.label}</option>
+              <option key={o.value} value={o.value} disabled={dlss.disabled(o.value)}>{dlss.label(o.value, o.label)}</option>
             ))}
           </select>
           {!method.startsWith('flashvsr') && <MediaFinishingControls spatial={method} temporal={temporal}

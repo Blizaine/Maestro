@@ -62,7 +62,7 @@ const definition = JSON.parse(fs.readFileSync(path.join(root, 'app/defaults', `$
     await page.getByRole('button',{name:/Qwen Image 2.1 7B/}).click();
     await page.waitForFunction(id=>window.store.getState().params.model_type===id && !window.store.getState().modelOptionsLoading,id);
     const state=await page.evaluate(()=>({steps:window.store.getState().params.num_inference_steps,cfg:window.store.getState().params.guidance_scale}));
-    assert.deepEqual(state,{steps:40,cfg:1});
+    assert.deepEqual(state,{steps:40,cfg:4});
     await page.getByText('Up to 10 reference images.',{exact:true}).waitFor();
     assert.deepEqual(await page.evaluate(id=>{
       const model=window.store.getState().models.find(m=>m.model_type===id);

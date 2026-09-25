@@ -3,6 +3,49 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [2.4.1] - 2026-09-25
+
+Expanded Qwen Image 2.1 editing and acceleration, experimental Windows 10
+DLSS finishing, and gallery reliability and media details.
+
+- Add Qwen Image 2.1 control-image transfer, masked editing, LanPaint and
+  outpainting, with prompt enhancement that understands the selected workflow.
+  Add native 2K aspect presets and automatic aspect matching around 4.2 MP.
+- Add managed Viggle Turbo v0.1 (4 steps), v0.2 (5 steps) and v0.2.1 (6 steps)
+  profiles with the matching adapter, CFG and sampling schedule. Keep ordinary
+  user LoRAs when changing profiles. Add optional reference KV caching within
+  the available memory budget.
+- Use the Qwen base recipe of 40 steps / CFG 4 for new defaults, preserving
+  saved settings. Use capacity-aware VAE tiles with wider overlap to address
+  a possible source of the lines/seams reported in #153; confirmation from the
+  reporter is still needed. Accept an unset inpainting mode for normal image
+  generation instead of rejecting it.
+- Automatically select the H3 INT8 ConvRot video VAE for automatic VAE mode
+  with an INT8 transformer. Preserve explicit choices and the FP16 path for
+  other automatic formats; leave the audio VAE unchanged.
+- Install pinned Comfy Kitchen support and integrate compatible H3/LTX2.x
+  kernels on supported RTX 50 GPUs. Keep established kernels when unsupported
+  or when the optional acceleration is unavailable.
+- Add an opt-in Windows 10 DLSS backend for 1x neural enhancement and
+  1.5x, 1.724x, 2x and 3x upscaling in Tools, Studio finishing and Media Flow.
+  Isolate native workers, bound cleanup/cancellation, preserve video timing
+  and audio, and pad/crop internal alignment without resizing the source.
+  Reduce frame-processing copies and CPU overhead. Retain the Windows 11
+  backend and its Frame Generation requirements.
+- Fix gallery chronology while jobs run and overlapping refreshes or
+  pagination complete. Preserve selection using folder-qualified media
+  identity (#155).
+- Save finishing metadata and expose measured dimensions, duration, frame
+  rate/count, file size, timestamps, source, processing method, multiplier,
+  before/after dimensions and frame rate, and processing time where recorded.
+  Recover legacy information only when supported by saved data.
+- Add confirmed upload deletion from gallery menus, constrain deletion to
+  uploaded media and its matching sidecar, and reject inputs referenced by
+  active jobs. Show errors and restore playback after unsuccessful deletion.
+
+See [release notes](docs/RELEASE_NOTES_V2.4.1.md) and
+[validation scope](docs/VALIDATION_V2.4.1.md).
+
 ## [2.4.0] - 2026-09-24
 
 Immersive gallery viewing, Qwen Image 2.1 LoRA and memory improvements,

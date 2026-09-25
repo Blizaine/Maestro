@@ -28,6 +28,24 @@ apply before pagination. Each result shows its source folder; use that label to 
 the folder. Favorites, deletion, download, reference reuse and Editor import retain
 that origin even when another folder contains an identically named file.
 
+Gallery cards show a local date and time. Open **Info** for the exact timestamp,
+file size, measured resolution, and video/audio duration. Videos also show their
+frame rate and frame count when recorded in the file. Dates are labeled Generated,
+Processed, Uploaded, or File date according to the available record.
+
+Upscaled and enhanced outputs include a **Processing** section: method (such as
+DLSS, FlashVSR or Lanczos), spatial multiplier, before/after dimensions, source,
+processing time, and frame-rate changes or DLSS settings where applicable. New
+outputs retain these measurements even after the source is removed. Older Tools
+outputs recover available details from saved settings and an existing source;
+unknown dimensions are left unknown.
+
+In **Uploads**, choose **More → Delete upload**, then click again to confirm.
+This removes the uploaded source and its metadata, while generated outputs stay.
+Saved setups that reference the removed source will need a replacement upload.
+Maestro refuses deletion while an active or queued Studio job or active Director
+project still uses the file. A locked-file error leaves the item visible for retry.
+
 ## Characters and media
 
 **Characters** uses the same person icon in Reference, supported Image, Viggle and Speech workflows. It opens the saved library beside the sidebar on desktop and in a sheet on mobile. A Reference character remains one card containing its appearance and voice. Speech uses its saved voice; Image uses chosen original or recovered views. Viggle can prepare a character replacement frame or accept a manually edited frame.

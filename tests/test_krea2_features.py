@@ -218,7 +218,8 @@ class TestKrea2LoraBrowser(unittest.TestCase):
         self.assertIn('"max_image_refs": md.get("max_image_refs")', launch)
         self.assertIn("max_image_refs?: number | null", types_source)
         self.assertIn("const configuredMaxRefs = modelOptions?.max_image_refs ?? null", ref_ui)
-        self.assertIn("configuredMaxRefs - (imageMode === 2 ? 1 : 0)", ref_ui)
+        self.assertIn("const sourceSlots = imageMode === 2 || qwenHasSource ? 1 : 0", ref_ui)
+        self.assertIn("configuredMaxRefs - sourceSlots", ref_ui)
         self.assertIn("files.slice(0, room).forEach(addImageRef)", ref_ui)
         self.assertIn("canAddRef", inputs_ui)
         self.assertIn("lora.directory === activeFilter.default_dir", _read(

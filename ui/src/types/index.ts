@@ -83,6 +83,7 @@ export interface GenerateParams {
   video_length: number
   num_inference_steps: number
   guidance_scale: number
+  sample_solver?: string
   seed: number
   image_mode: number
   negative_prompt: string
@@ -778,7 +779,7 @@ export interface EditorExportCapabilities {
 
 export type MediaFilter = 'all' | 'images' | 'videos' | 'audio' | 'avatars' | 'multiclip' | 'favorites'
 export type AspectRatio = 'auto' | '21:9' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
-export type ResolutionPreset = 'auto' | '480p' | '540p' | '720p' | '768p' | '1080p'
+export type ResolutionPreset = 'auto' | '480p' | '540p' | '720p' | '768p' | '1080p' | '2k'
 export type ScailResolutionProfile = '480p' | '512p' | '704p'
 /** Backward-compatible name for saved Recast/API callers. */
 export type RecastResolutionProfile = ScailResolutionProfile
@@ -1026,6 +1027,19 @@ export interface ModelOptions {
   background_removal_label: string | null
   max_image_refs?: number | null
   sample_solvers: [string, string][] | null
+  qwen21_acceleration_profiles?: Record<string, {
+    label: string
+    sample_solver: string
+    steps: number
+    guidance: number
+  }> | null
+  image_ref_inpaint?: boolean
+  model_modes?: {
+    choices: [string, number][]
+    default: number
+    label: string
+    image_modes?: number[]
+  } | null
   self_refiner: boolean
   self_refiner_max_plans: number
   sliding_window_defaults: Record<string, number> | null
@@ -1117,6 +1131,36 @@ export interface MultiWindowTiming {
   total_generation_seconds: number
 }
 
+export interface OutputMediaInfo {
+  width?: number
+  height?: number
+  fps?: number
+  frames?: number
+  duration_seconds?: number
+  size_bytes?: number
+}
+
+export interface OutputTimestamp {
+  /** Unix timestamp in seconds. */
+  value: number
+  kind: 'generated' | 'processed' | 'uploaded' | 'file_modified'
+}
+
+export interface OutputProcessingInfo {
+  method?: string
+  method_label?: string
+  multiplier?: number
+  temporal_method?: string
+  temporal_label?: string
+  frame_multiplier?: number
+  source_name?: string
+  input?: OutputMediaInfo
+  output?: OutputMediaInfo
+  elapsed_seconds?: number
+  completed_at?: number
+  options?: Record<string, unknown>
+}
+
 export interface OutputMetadata {
   model_details?: {
     architecture?: string
@@ -1151,6 +1195,9 @@ export interface OutputMetadata {
   multi_window_timing?: MultiWindowTiming
   job_elapsed_time?: number
   created_at?: number
+  media_info?: OutputMediaInfo
+  timestamp?: OutputTimestamp
+  processing?: OutputProcessingInfo
 }
 
 export interface WebPushStatus {

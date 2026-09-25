@@ -4,6 +4,7 @@ import { Save, Trash2, FolderOpen, SlidersHorizontal, ChevronDown } from 'lucide
 import { useStore } from '../../stores/useStore'
 import { PostProcessing } from './PostProcessing'
 import { ControlVideoSection } from './ControlVideoSection'
+import { Qwen21Controls } from './Qwen21Controls'
 import { LoraSelector } from '../SettingsDrawer/LoraSelector'
 import { Yue2LoraSelector } from './Yue2LoraSelector'
 import { selectedMusicStyles } from '../../lib/musicStyles'
@@ -518,6 +519,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
         : !modelOptions?.lock_guidance_scale
     )
   )
+  const qwenTurboProfile = modelOptions?.qwen21_acceleration_profiles?.[String(params.sample_solver || '')]
   const showNegativePrompt = (
     !modelOptions?.no_negative_prompt
     && (!isScailEdit || isScailHq)
@@ -1139,6 +1141,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
 
               {/* Dedicated SCAIL edit endpoints honor this value for both
                   Fast and HQ; other distilled models retain their lock. */}
+              <Qwen21Controls />
               {showInferenceSteps && (
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
@@ -1151,7 +1154,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
                       max={inferenceStepsMax}
                       step={1}
                       value={params.num_inference_steps}
-                      disabled={h3TurboMode}
+                      disabled={h3TurboMode || !!qwenTurboProfile}
                       onChange={e => setInferenceSteps(Number(e.target.value))}
                       className="w-16 bg-bg-tertiary border border-border rounded px-2 py-0.5 text-xs text-text-primary text-center focus:outline-none focus:border-accent-blue disabled:cursor-not-allowed disabled:opacity-50"
                     />
@@ -1159,7 +1162,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
                   <input
                     type="range" min={inferenceStepsMin} max={inferenceStepsMax} step={1}
                     value={params.num_inference_steps}
-                    disabled={h3TurboMode}
+                    disabled={h3TurboMode || !!qwenTurboProfile}
                     onChange={e => setInferenceSteps(Number(e.target.value))}
                     className="w-full disabled:cursor-not-allowed disabled:opacity-50"
                   />
@@ -1167,6 +1170,9 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
                     <p className="text-[9px] text-text-muted mt-0.5">
                       Turbo mode locks this preset to {params.num_inference_steps} steps.
                     </p>
+                  )}
+                  {qwenTurboProfile && (
+                    <p className="text-[9px] text-text-muted mt-0.5">The acceleration profile uses {qwenTurboProfile.steps} steps and CFG {qwenTurboProfile.guidance}.</p>
                   )}
                   {!h3TurboMode && modelOptions?.inference_steps_help && (
                     <p className="text-[9px] text-text-muted mt-0.5">
@@ -1190,6 +1196,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
                     <input
                       type="number"
                       value={params.guidance_scale}
+                      disabled={!!qwenTurboProfile}
                       onChange={e => setParam('guidance_scale', Number(e.target.value))}
                       step={0.1}
                       className="w-16 bg-bg-tertiary border border-border rounded px-2 py-0.5 text-xs text-text-primary text-center focus:outline-none focus:border-accent-blue"
@@ -1198,6 +1205,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
                   <input
                     type="range" min={0} max={20} step={0.1}
                     value={params.guidance_scale}
+                    disabled={!!qwenTurboProfile}
                     onChange={e => setParam('guidance_scale', Number(e.target.value))}
                     className="w-full"
                   />

@@ -12,6 +12,8 @@ export function ImageRefSection() {
   const generationMode = useStore(s => s.generationMode)
   const imageWorkflow = useStore(s => s.studioImageWorkflow)
   const imageMode = useStore(s => Number(s.params.image_mode ?? 1))
+  const imageGuide = useStore(s => s.params.image_guide)
+  const videoPromptType = useStore(s => s.params.video_prompt_type)
   const imageRefs = useStore(s => s.imageRefs)
   const imageRefType = useStore(s => s.imageRefType)
   const removeBackgroundRefs = useStore(s => s.removeBackgroundRefs)
@@ -34,7 +36,12 @@ export function ImageRefSection() {
   // max_image_refs is the model's total conditioning-image budget. In Edit
   // mode the uploaded source already consumes one slot.
   const configuredMaxRefs = modelOptions?.max_image_refs ?? null
-  const maxRefs = configuredMaxRefs == null ? null : Math.max(0, configuredMaxRefs - (imageMode === 2 ? 1 : 0))
+  const qwenHasSource = modelOptions?.architecture === 'qwen_image_21_7B' && (
+    imageWorkflow === 'inpaint' || imageWorkflow === 'outpaint'
+    || (!!imageGuide && String(videoPromptType || '').includes('V'))
+  )
+  const sourceSlots = imageMode === 2 || qwenHasSource ? 1 : 0
+  const maxRefs = configuredMaxRefs == null ? null : Math.max(0, configuredMaxRefs - sourceSlots)
   const canAddMore = maxRefs == null || imageRefs.length < maxRefs
 
   const addFiles = useCallback((files: File[]) => {
@@ -122,7 +129,7 @@ export function ImageRefSection() {
           >
             <img
               src={URL.createObjectURL(file)}
-              alt={`Ref ${i + 1}`}
+              alt={`Ref ${i + 1 + (qwenHasSource ? 1 : 0)}`}
               className="w-full h-full object-cover pointer-events-none"
             />
             {i === 0 && imageRefs.length > 1 && hasLandscapeMode && imageRefType === 'KI' && (
@@ -130,14 +137,14 @@ export function ImageRefSection() {
                 Main
               </div>
             )}
-            {i === 0 && isAdaptiveImageGenerate && (
+            {i === 0 && isAdaptiveImageGenerate && !qwenHasSource && (
               <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-[8px] text-white text-center py-0.5">
                 Source
               </div>
             )}
             {/* Position number */}
             <span className="absolute top-0.5 left-0.5 bg-black/60 text-white text-[8px] px-1 rounded pointer-events-none">
-              {i + 1}
+              {i + 1 + (qwenHasSource ? 1 : 0)}
             </span>
             <button
               type="button" aria-label={`Remove reference image ${i + 1}`}
@@ -180,8 +187,11 @@ export function ImageRefSection() {
       )}
 
       {maxRefs != null && (
-        <p className="text-[9px] text-text-muted">
-          Up to {maxRefs} reference image{maxRefs === 1 ? '' : 's'}.
+        <p className={`text-[9px] ${imageRefs.length > maxRefs ? 'text-indicator-warning' : 'text-text-muted'}`}>
+          {imageRefs.length > maxRefs
+            ? `Remove ${imageRefs.length - maxRefs} reference image(s) before generating.`
+            : `Up to ${maxRefs} reference image${maxRefs === 1 ? '' : 's'}.`}
+          {qwenHasSource && ' The source/control image is image 1.'}
         </p>
       )}
 

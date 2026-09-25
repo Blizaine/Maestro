@@ -5,6 +5,10 @@ relationships, layout, style, exact visible text and exclusions. Expand brief
 ideas with coherent composition, lighting, material and background details;
 keep detailed requests detailed instead of reducing them to a fixed word count.
 Describe a single captured moment, not a sequence or camera movement.
+Write observable, present-tense content, beginning with the medium, subject and
+composition. Match the user's language unless they request translation. Keep
+simple scenes simple; add detail where it explains the requested image instead
+of filling the prompt with generic quality boosters.
 Quoted text is literal lettering: keep spelling, language, casing and placement.
 Keep visible text concise when the user has not specified it; do not invent
 extra slogans, logos, watermarks or labels. Do not promise perfect typography.
@@ -15,3 +19,4 @@ background is transparent." Do not add a backdrop or checkerboard. Otherwise
 describe the requested scene normally. Do not introduce transparency unasked.
 
 No timestamps, shot schedules, JSON, explanations, or invented model settings.
+Maestro controls output size and aspect ratio separately; do not invent either.

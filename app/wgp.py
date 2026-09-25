@@ -152,6 +152,7 @@ for handler in _HANDLER_MODULES:
 from shared.qtypes import gguf as gguf_handler
 quant_router.register_file_extension("gguf", gguf_handler)
 from shared.kernels.quanto_int8_inject import maybe_enable_quanto_int8_kernel, disable_quanto_int8_kernel
+from shared.kernels import kernel_policy
 
 # All heavyweight runtime modules are already imported at this point. Report
 # their real ABI/kernel status in this same process so startup diagnostics add
@@ -793,6 +794,12 @@ def clear_custom_setting_slots(inputs):
     for idx in range(CUSTOM_SETTINGS_MAX):
         inputs.pop(get_custom_setting_key(idx), None)
 
+def apply_model_acceleration_profile(model_type, settings):
+    """Apply an atomic model recipe before validation and adapter loading."""
+    handler = get_model_handler(model_type)
+    apply_profile = getattr(handler, "apply_acceleration_profile", None)
+    return apply_profile(dict(settings)) if apply_profile else settings
+
 def validate_settings(state, model_type, single_prompt, inputs):
     def ret():
         return None, None, None, None
@@ -801,6 +808,11 @@ def validate_settings(state, model_type, single_prompt, inputs):
     from models.minimax_h3.duration import apply_h3_duration_override
     model_def = apply_h3_duration_override(inputs, model_def)
     model_handler = get_model_handler(model_type)
+    try:
+        inputs.update(apply_model_acceleration_profile(model_type, inputs))
+    except ValueError as exc:
+        gr.Info(str(exc))
+        return ret()
     image_outputs = inputs["image_mode"] > 0
     any_steps_skipping = (
         model_def.get("tea_cache", False)
@@ -857,7 +869,9 @@ def validate_settings(state, model_type, single_prompt, inputs):
         _val_refs = inputs.get("image_refs")
         _val_start = inputs.get("image_start")
         _val_ref_path = None
-        if _val_refs:
+        if image_outputs and "V" in str(inputs.get("video_prompt_type") or "") and inputs.get("image_guide") is not None:
+            _val_ref_path = inputs["image_guide"]
+        elif _val_refs:
             _val_ref_path = _val_refs[0] if isinstance(_val_refs, list) else _val_refs
             if isinstance(_val_ref_path, (list, tuple)):
                 _val_ref_path = _val_ref_path[0] if _val_ref_path else None
@@ -2674,6 +2688,7 @@ if not Path(config_load_filename).is_file():
         "metadata_type": "metadata",
         "boost" : 1,
         "enable_int8_kernels": 1,
+        "kernel_precision": "fast",
         "clear_file_list" : 5,
         "enable_4k_resolutions": 0,
         "max_reserved_loras": -1,
@@ -2912,6 +2927,20 @@ def are_model_types_compatible(imported_model_type, current_model_type):
 
 def get_model_def(model_type):
     return models_def.get(model_type, None )
+
+
+def get_runtime_model_def(model_type):
+    """Resolve runtime-dependent assets without modifying the shared registry."""
+    model_def = get_model_def(model_type)
+    if not isinstance(model_def, dict):
+        return model_def
+    handler = model_types_handlers.get(get_base_model_type(model_type))
+    resolver = getattr(handler, "resolve_runtime_model_def", None)
+    if resolver is None:
+        return model_def
+    return resolver(dict(model_def), {
+        "transformer_quantization": transformer_quantization,
+    })
 
 
 
@@ -3527,6 +3556,9 @@ compile = server_config.get("compile", "")
 boost = server_config.get("boost", 1)
 enable_int8_kernels = server_config.get("enable_int8_kernels", 1)
 apply_int8_kernel_setting(enable_int8_kernels)
+# Optional Kitchen paths follow upstream's precision policy. Keep an explicit
+# strict setting authoritative without changing the independent INT8 toggle.
+kernel_policy.configure(server_config.get("kernel_precision", "fast"))
 vae_config = server_config.get("vae_config", 0)
 if len(args.vae_config) > 0:
     vae_config = int(args.vae_config)
@@ -4020,7 +4052,7 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
     if model_filename is None: return
 
     base_model_type = get_base_model_type(model_type)
-    model_def = get_model_def(model_type)
+    model_def = get_runtime_model_def(model_type)
     
     any_source = ("source2" if submodel_no ==2 else "source") in model_def
     any_module_source = ("module_source2" if submodel_no ==2 else "module_source") in model_def 
@@ -4347,7 +4379,7 @@ def setup_prompt_enhancer(pipe, kwargs):
 def load_models(model_type, override_profile = -1, output_type="video", **model_kwargs):
     global transformer_type, loaded_profile
     base_model_type = get_base_model_type(model_type)
-    model_def = get_model_def(model_type)
+    model_def = get_runtime_model_def(model_type)
     save_quantized = args.save_quantized and model_def != None
     model_filename = get_model_filename(model_type=model_type, quantization= "" if save_quantized else transformer_quantization, dtype_policy = transformer_dtype_policy) 
     if "URLs2" in model_def:
@@ -6248,6 +6280,9 @@ def edit_video(
     sample = None
 
     if mode == "edit_postprocessing":
+        from services.media_info import probe_media, processing_record
+        finishing_source_info = probe_media(video_source)
+        finishing_started = time.monotonic()
         if len(temporal_upsampling) > 0 or len(spatial_upsampling) > 0 or film_grain_intensity > 0:                
             send_cmd("progress", [0, get_latest_status(state,"Upsampling" if len(temporal_upsampling) > 0 or len(spatial_upsampling) > 0 else "Adding Film Grain"  )])
             sample = get_resampled_video(video_source, 0, max_source_video_frames, fps)
@@ -6346,6 +6381,13 @@ def edit_video(
 
             if configs != None:
                 from shared.utils.video_metadata import extract_source_images, save_video_metadata
+                if mode == "edit_postprocessing" and (spatial_upsampling or temporal_upsampling):
+                    configs["processing"] = processing_record(
+                        spatial=spatial_upsampling, temporal=temporal_upsampling,
+                        source_name=os.path.basename(video_source), before=finishing_source_info,
+                        after=probe_media(new_video_path), elapsed=time.monotonic() - finishing_started,
+                        completed_at=time.time())
+                    send_cmd("processing_metadata", {"outputs": [new_video_path], "metadata": configs["processing"]})
                 temp_images_path = get_available_filename(save_path, video_source, force_extension= ".temp")
                 embedded_images = extract_source_images(video_source, temp_images_path)
                 save_video_metadata(new_video_path, configs, embedded_images)
@@ -7654,6 +7696,18 @@ def generate_video(
     model_def = h3_duration_model_def(model_def, {
         "minimax_h3_extended_duration": minimax_h3_extended_duration,
     })
+    recipe = apply_model_acceleration_profile(model_type, {
+        "sample_solver": sample_solver,
+        "num_inference_steps": num_inference_steps,
+        "guidance_scale": guidance_scale,
+        "activated_loras": activated_loras,
+        "loras_multipliers": loras_multipliers,
+    })
+    sample_solver = recipe["sample_solver"]
+    num_inference_steps = recipe["num_inference_steps"]
+    guidance_scale = recipe["guidance_scale"]
+    activated_loras = recipe["activated_loras"]
+    loras_multipliers = recipe["loras_multipliers"]
     is_image = image_mode > 0
     audio_only = model_def.get("audio_only", False)
     duration_def = model_def.get("duration_slider", None)
@@ -7871,7 +7925,9 @@ def generate_video(
         # establish an output aspect ratio.
         _auto_ref = None
         _auto_ref_kind = "image"
-        if is_image and image_refs:
+        if is_image and "V" in video_prompt_type and (image_guide is not None or video_guide is not None):
+            _auto_ref = image_guide if image_guide is not None else video_guide
+        elif is_image and image_refs:
             _auto_ref = image_refs[0] if isinstance(image_refs, list) else image_refs
         elif image_start:
             _auto_ref = image_start
@@ -9850,6 +9906,16 @@ def generate_video(
                 if len(temporal_upsampling) > 0 or len(spatial_upsampling) > 0 and not "vae2" in spatial_upsampling:                
                     send_cmd("progress", [0, get_latest_status(state,"Upsampling")])
                 
+                inline_processing = None
+                finishing_started = time.monotonic()
+                finishing_input = None
+                if sample is not None and (temporal_upsampling or spatial_upsampling):
+                    # VAE enlargement happens during decoding, before this tensor.
+                    # Its pre-upscale size cannot be measured here.
+                    if spatial_upsampling not in {"vae1", "vae2"}:
+                        finishing_input = {"width": int(sample.shape[-1]), "height": int(sample.shape[-2])}
+                        if not is_image:
+                            finishing_input["fps"] = float(fps)
                 output_fps  = fps
                 if len(temporal_upsampling) > 0:
                     sample, previous_last_frame, output_fps = perform_temporal_upsampling(
@@ -9886,6 +9952,14 @@ def generate_video(
                     if sample is None or gen.get("abort", False):
                         abort = True
                         break
+                if temporal_upsampling or spatial_upsampling:
+                    from services.media_info import processing_record
+                    inline_processing = processing_record(
+                        spatial=spatial_upsampling, temporal=temporal_upsampling,
+                        before=finishing_input, options=custom_settings,
+                        # For sliding-window output this pass is only one part
+                        # of the assembled clip; don't claim a total duration.
+                        elapsed=None if sliding_window else time.monotonic() - finishing_started)
                 if film_grain_intensity> 0:
                     from postprocessing.film_grain import add_film_grain
                     sample = add_film_grain(sample, film_grain_intensity, film_grain_saturation) 
@@ -10093,6 +10167,11 @@ def generate_video(
                         "outputs": list(saved_artifacts),
                         "metadata": artifact_metadata,
                     })
+                if inline_processing:
+                    from services.media_info import probe_media
+                    for artifact_path in saved_artifacts:
+                        details = {**inline_processing, "output": probe_media(artifact_path), "completed_at": end_time}
+                        send_cmd("processing_metadata", {"outputs": [artifact_path], "metadata": details})
 
                 inputs.pop("send_cmd")
                 inputs.pop("task")
@@ -10121,6 +10200,8 @@ def generate_video(
                 configs["generation_time_basis"] = "active"
                 configs["creation_date"] = datetime.fromtimestamp(end_time).isoformat(timespec="seconds")
                 configs["creation_timestamp"] = int(end_time)
+                if inline_processing:
+                    configs["processing"] = {**inline_processing, "completed_at": end_time}
                 # if sample_is_image: configs["is_image"] = True
                 metadata_choice = server_config.get("metadata_type","metadata")
                 video_path = [video_path] if not isinstance(video_path, list) else video_path

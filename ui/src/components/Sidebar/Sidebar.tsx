@@ -270,7 +270,7 @@ export function Sidebar() {
 
         {/* Image workflows expose only the inputs their native pipeline uses. */}
         {isImage && <ImageWorkflowControls />}
-        {isImage && (imageWorkflow === 'generate' || !!modelOptions?.image_ref_choices) && <ImageRefSection />}
+        {isImage && (imageWorkflow === 'generate' || !!modelOptions?.image_ref_inpaint) && <ImageRefSection />}
 
         {/* Video/Image mode: audio controls (soundtrack, control video, etc.).
             In Frames mode (video, image_mode 0) the unified InputsPanel routes

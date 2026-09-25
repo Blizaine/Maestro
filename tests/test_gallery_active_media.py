@@ -44,7 +44,8 @@ class GalleryActiveMediaTests(unittest.TestCase):
             ROOT / "ui" / "src" / "components" / "MainContent" / "MediaFeedItem.tsx"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("Show generation details", feed_item)
+        self.assertIn("Show media details", feed_item)
+        self.assertIn("<MediaMetadataDetails", feed_item)
         self.assertIn("Active LoRAs", feed_item)
         self.assertIn("Optimizations", feed_item)
         self.assertIn("Turbo preset", feed_item)

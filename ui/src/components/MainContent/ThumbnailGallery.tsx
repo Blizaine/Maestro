@@ -4,6 +4,7 @@ import { Film, Music, PanelRightClose, PanelRightOpen, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { requestThumbnail } from '../../lib/thumbnailCache'
 import { useIsMobile } from '../../lib/useIsMobile'
+import { getMediaTimestamp } from '../../lib/mediaTimestamp'
 
 // Thumbnail dimensions: 80px wide, 16:9 aspect = 45px tall, 6px gap
 const THUMB_HEIGHT = 45
@@ -109,9 +110,13 @@ function VirtualizedThumbnailList({ activeIndex, onThumbnailClick, onMobileClick
       <div className="relative" style={{ height: totalHeight }}>
         {outputs.slice(startIdx, endIdx).map((file, i) => {
           const idx = startIdx + i
+          const timestamp = getMediaTimestamp(undefined, file.created_at)
+          const thumbLabel = timestamp ? `${file.name} · ${timestamp.compact}` : file.name
           return (
             <button
               key={outputIdentity(file)}
+              title={thumbLabel}
+              aria-label={`Show ${thumbLabel}`}
               data-thumb-index={idx}
               onClick={() => {
                 onThumbnailClick(idx)

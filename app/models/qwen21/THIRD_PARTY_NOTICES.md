@@ -18,6 +18,16 @@ from [DeepBeepMeep/Qwen_image_2](https://huggingface.co/DeepBeepMeep/Qwen_image_
 and its shared [Qwen3-VL-8B encoder](https://huggingface.co/DeepBeepMeep/Ideogram4).
 The repack's provenance identifies that same official source revision.
 
+Additional workflow code is adapted from Wan2GP's Qwen Image 2.1 integration
+at commit `2345ae148f82740f66e82c41292dbbdd592e713d`:
+`models/qwen21/pipeline.py`, `models/qwen21/vae.py`, and
+`models/qwen21/qwen21_handler.py`. The adapted additions cover the Viggle
+sampling schedules, masked denoising and LanPaint flow, red-canvas outpainting,
+VRAM-based VAE tile selection, and streamed CPU uint8 decoding. Those additions
+are licensed under the WanGP Community License 2.0; the license text is at
+`../../LICENSES/WanGP-Community-2.0.txt`. Existing Diffusers-derived files
+retain their Apache-2.0 notices and license.
+
 Qwen's materials use the **Qwen Research License**, included in
 `QWEN_RESEARCH_LICENSE`: non-commercial research/evaluation only. Commercial use
 requires a separate Qwen license. See `NOTICE` for the required attribution.

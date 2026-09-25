@@ -45,6 +45,131 @@ else:
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
+
+# These are the published Viggle Turbo schedules used by Wan2GP. Keep the
+# accelerated paths explicit: using a few steps with the base schedule does
+# not reproduce the distilled adapter's training trajectory.
+VIGGLE_SIGMAS = {
+    4: (1.0, 0.75, 0.5, 0.25),
+    5: (1.0, 0.875, 0.75, 0.5, 0.25),
+    6: (1.0, 0.9375, 0.875, 0.75, 0.5, 0.25),
+}
+_VIGGLE_PROFILE_STEPS = {"viggle_v01": 4, "viggle_v02": 5, "viggle_v021": 6}
+
+
+def qwen21_sampling_profile(sample_solver: str, num_inference_steps: int):
+    """Return scheduler overrides and sigma nodes for a named Qwen profile."""
+    solver = (sample_solver or "default").lower()
+    if solver in ("", "default", "euler"):
+        return {}, None
+    if solver in _VIGGLE_PROFILE_STEPS:
+        required = _VIGGLE_PROFILE_STEPS[solver]
+        if int(num_inference_steps) != required:
+            raise ValueError(f"{solver} requires exactly {required} inference steps.")
+        return {"shift_terminal": None}, VIGGLE_SIGMAS[int(num_inference_steps)]
+    raise ValueError(f"Unknown Qwen Image 2.1 sampler profile: {sample_solver!r}.")
+
+
+def _prepare_red_outpainting(images, width, height, outpainting_dims, input_masks, prompt):
+    """Crop WanGP's padded control image and make the reference red-canvas prompt."""
+    if outpainting_dims is None or not any(outpainting_dims):
+        return images, input_masks, prompt, None, None, None
+    if not images:
+        raise ValueError("Outpainting requires a control image or a main reference image.")
+    if images[0].size != (width, height):
+        raise ValueError("The outpainting source must match the prepared canvas dimensions.")
+
+    from shared.utils.utils import get_outpainting_frame_location
+
+    source_height, source_width, top, left = get_outpainting_frame_location(
+        height, width, outpainting_dims, 1, quantize_margins=32
+    )
+    location = (source_height, source_width, top, left)
+    if any(value % 32 for value in location):
+        raise ValueError("Outpainting source dimensions and offsets must align to 32 pixels.")
+    if min(source_height, source_width) < 32:
+        raise ValueError("Outpainting must retain at least a 32-pixel source in each dimension.")
+
+    source = images[0].crop((left, top, left + source_width, top + source_height))
+    canvas = PILImage.new("RGBA", (width, height), (255, 0, 0, 255))
+    canvas.paste(source.convert("RGBA"), (left, top))
+    from shared.utils.utils import convert_tensor_to_image
+
+    if input_masks is None:
+        mask_array = np.zeros((height, width), dtype=np.uint8)
+    else:
+        mask = convert_tensor_to_image(input_masks, mask_levels=True).convert("L")
+        if mask.size != (width, height):
+            mask = mask.resize((width, height), PILImage.Resampling.LANCZOS)
+        mask_array = np.array(mask, copy=True)
+    source_edit_mask = mask_array.copy()
+    source_edit_mask[:top] = 0
+    source_edit_mask[top + source_height:] = 0
+    source_edit_mask[:, :left] = 0
+    source_edit_mask[:, left + source_width:] = 0
+    source_edit_mask = PILImage.fromarray(source_edit_mask) if np.any(source_edit_mask > 64) else None
+    # White pixels are the area Qwen is allowed to regenerate. Outpainting
+    # margins always run the full schedule, while source pixels stay anchored.
+    mask_array[:top] = 255
+    mask_array[top + source_height:] = 255
+    mask_array[:, :left] = 255
+    mask_array[:, left + source_width:] = 255
+    input_masks = PILImage.fromarray(mask_array)
+    suffix = "Remove the red paddings on the sides and show what's behind them."
+    prompt = prompt or ""
+    if suffix not in prompt:
+        prompt = prompt.rstrip().rstrip(".") + ". " + suffix
+    return [source, *images[1:]], input_masks, prompt, location, canvas, source_edit_mask
+
+
+def _outpainting_overlap(location, width, height):
+    """Return source-edge release bands, aligned to the model's 32px canvas grid."""
+    source_height, source_width, top, left = location
+
+    def bands(size, before, after):
+        count = int(before) + int(after)
+        desired = min(256, max(128, (size // 4 // 32) * 32))
+        available = ((size - 32) // max(count, 1) // 32) * 32
+        band = min(desired, available)
+        return (band if before else 0), (band if after else 0)
+
+    upper, lower = bands(source_height, top > 0, top + source_height < height)
+    leading, trailing = bands(source_width, left > 0, left + source_width < width)
+    return upper, lower, leading, trailing
+
+
+def _outpainting_step_mask(location, width, height, sigma, device, dtype):
+    """Generation weight for upstream-style gradual anchoring and edge regeneration."""
+    source_height, source_width, top, left = location
+    upper, lower, leading, trailing = _outpainting_overlap(location, width, height)
+    mask = torch.ones((1, height // 16, width // 16), device=device, dtype=dtype)
+    region = mask[:, top // 16:(top + source_height) // 16,
+                   left // 16:(left + source_width) // 16]
+    region[:, upper // 16:(source_height - lower) // 16,
+           leading // 16:(source_width - trailing) // 16] = 0
+    region.mul_((1 - sigma).pow(4))
+    if upper:
+        region[:, :2, :] = 1
+    if lower:
+        region[:, -2:, :] = 1
+    if leading:
+        region[:, :, :2] = 1
+    if trailing:
+        region[:, :, -2:] = 1
+    return mask.reshape(1, -1, 1)
+
+
+def _mask_to_latents(mask, width, height, device, dtype):
+    if mask is None:
+        return None
+    from shared.utils.utils import convert_tensor_to_image
+
+    if not isinstance(mask, PILImage.Image):
+        mask = convert_tensor_to_image(mask, mask_levels=True)
+    mask = mask.convert("L").resize((width // 16, height // 16), PILImage.Resampling.LANCZOS)
+    values = torch.from_numpy(np.array(mask, copy=True)).to(device=device)
+    return values.gt(64).to(dtype).reshape(1, -1, 1)
+
 EXAMPLE_DOC_STRING = """
     Examples:
         ```py
@@ -540,6 +665,13 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         callback_on_step_end_tensor_inputs: list[str] = ["latents"],
         output_resolution: int = 1024,
         use_kv_cache: bool = True,
+        sample_solver: str = "default",
+        mask_image: Any | None = None,
+        inpaint_image: PipelineImageInput | None = None,
+        denoising_strength: float = 1.0,
+        masking_strength: float = 1.0,
+        model_mode: int = 0,
+        outpainting_dims: tuple[int, int, int, int] | None = None,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -601,6 +733,22 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                 and land on different rounding; both agree with an fp32 reference to the same tolerance. A one-ULP
                 difference at the first block is then amplified by 32 blocks and every sampler step, so the two
                 settings give equally valid but visibly distinct samples. Fix a sample by fixing this flag.
+            sample_solver (`str`, *optional*):
+                WanGP's `default` schedule or one of the named Viggle Turbo profiles. Each adapter uses its matching
+                trained sigma nodes.
+            mask_image (`PIL.Image`, `torch.Tensor`, or `numpy.ndarray`, *optional*):
+                White pixels mark the image area to regenerate for masked editing.
+            inpaint_image (`PIL.Image`, `torch.Tensor`, or `numpy.ndarray`, *optional*):
+                Full-resolution source image used to preserve unmasked pixels. Its reference can also be included in
+                `image` so Qwen sees it while encoding the prompt.
+            denoising_strength (`float`, *optional*):
+                Fraction of the ordinary inpaint schedule spent denoising the source image.
+            masking_strength (`float`, *optional*):
+                Fraction of inpaint steps that reapply the known source outside the mask.
+            model_mode (`int`, *optional*):
+                0 for masked denoising, or 2/3/4/5 for LanPaint's 2/5/10/15 refinement steps.
+            outpainting_dims (`tuple`, *optional*):
+                WanGP's top/bottom/left/right padding percentages for spatial outpainting.
 
         Examples:
 
@@ -609,6 +757,16 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             [`~pipelines.qwenimage.QwenImagePipelineOutput`] if `return_dict` is True, otherwise a `tuple` whose first
             element is a list with the generated images.
         """
+        if inpaint_image is not None:
+            if isinstance(inpaint_image, np.ndarray):
+                inpaint_image = PILImage.fromarray(inpaint_image)
+            elif not isinstance(inpaint_image, PILImage.Image):
+                from shared.utils.utils import convert_tensor_to_image
+
+                inpaint_image = convert_tensor_to_image(inpaint_image)
+            if image is None:
+                image = [inpaint_image]
+
         if image is not None:
             # The text encoder reads each condition image as vision context, so the pixels have to be there. Normalize
             # to PIL up front, and everything downstream — the aspect ratio below, the resize, the VAE — sees one type.
@@ -645,6 +803,35 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         multiple_of = self.vae_scale_factor * 2
         width = width // multiple_of * multiple_of
         height = height // multiple_of * multiple_of
+
+        source_location = None
+        outpainting_source = None
+        outpainting_user_mask = None
+        if image is not None:
+            image, mask_image, prompt, source_location, red_canvas, outpainting_user_mask = _prepare_red_outpainting(
+                image, width, height, outpainting_dims, mask_image, prompt
+            )
+            if source_location is not None:
+                outpainting_source = image[0]
+                inpaint_image = outpainting_source
+                image[0] = red_canvas
+        elif outpainting_dims is not None and any(outpainting_dims):
+            raise ValueError("Outpainting requires a control image or a main reference image.")
+
+        if mask_image is not None and inpaint_image is None:
+            if image is None:
+                raise ValueError("Masked editing requires a source image.")
+            inpaint_image = image[0]
+        if source_location is not None or mask_image is None or model_mode is None:
+            # WanGP sets model_mode=None when the inpainting selector is not
+            # selected. The advertised masked-edit default is standard mode 0.
+            # Outpainting has its own anchor schedule and never uses LanPaint,
+            # so normalize that selector as well.
+            model_mode = 0
+        elif model_mode not in (0, 2, 3, 4, 5):
+            raise ValueError("Qwen Image 2.1 inpainting mode must be 0, 2, 3, 4, or 5 for masked edits.")
+        denoising_strength = min(1.0, max(0.0, float(denoising_strength)))
+        masking_strength = min(1.0, max(0.0, float(masking_strength)))
 
         self._attention_kwargs = attention_kwargs or {}
         self._current_timestep = None
@@ -723,6 +910,50 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             latents,
         )
 
+        original_latents = noise_source = latent_mask = None
+        if mask_image is not None:
+            if inpaint_image is None:
+                raise ValueError("Masked editing requires a source image.")
+            source_width = outpainting_source.width if outpainting_source is not None else width
+            source_height = outpainting_source.height if outpainting_source is not None else height
+            source_pixels = self.image_processor.preprocess(
+                inpaint_image.convert("RGBA"), width=source_width, height=source_height
+            ).unsqueeze(2).to(device=device, dtype=self.vae.dtype)
+            original_latents = self._encode_vae_image(source_pixels, generator)
+            del source_pixels
+            if source_location is not None:
+                source_height, source_width, top, left = source_location
+                if original_latents.shape[-2:] != (source_height // self.vae_scale_factor,
+                                                     source_width // self.vae_scale_factor):
+                    raise ValueError("Encoded outpainting source does not match the aligned crop.")
+                canvas_latents = original_latents.new_zeros(
+                    (original_latents.shape[0], self.latent_channels, 1,
+                     height // self.vae_scale_factor, width // self.vae_scale_factor)
+                )
+                canvas_latents[..., top // self.vae_scale_factor:
+                                (top + source_height) // self.vae_scale_factor,
+                                left // self.vae_scale_factor:
+                                (left + source_width) // self.vae_scale_factor].copy_(original_latents)
+                original_latents = canvas_latents
+            original_latents = original_latents[:, :, 0].flatten(2).transpose(1, 2).to(latents.dtype)
+            if batch_size * num_images_per_prompt > original_latents.shape[0]:
+                if (batch_size * num_images_per_prompt) % original_latents.shape[0] != 0:
+                    raise ValueError("The source image batch cannot be expanded to the requested output batch.")
+                original_latents = original_latents.repeat(
+                    batch_size * num_images_per_prompt // original_latents.shape[0], 1, 1
+                )
+            latent_mask = _mask_to_latents(mask_image, width, height, latents.device, latents.dtype)
+            if latent_mask.shape[1] != latents.shape[1]:
+                raise ValueError("The inpainting mask does not match the prepared output dimensions.")
+            latent_mask = latent_mask.expand(latents.shape[0], -1, -1)
+            noise_source = latents.clone()
+
+        outpainting_user_latent_mask = None
+        if outpainting_user_mask is not None:
+            outpainting_user_latent_mask = _mask_to_latents(
+                outpainting_user_mask, width, height, latents.device, latents.dtype
+            ).expand(latents.shape[0], -1, -1)
+
         img_shapes = [
             [
                 *[
@@ -734,18 +965,24 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         ] * batch_size
 
         # 4. Prepare timesteps
-        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps) if sigmas is None else sigmas
+        scheduler_overrides, profile_sigmas = qwen21_sampling_profile(sample_solver, num_inference_steps)
+        if profile_sigmas is not None and sigmas is not None:
+            raise ValueError("A Qwen acceleration profile supplies its own sigma schedule.")
+        scheduler = FlowMatchEulerDiscreteScheduler.from_config(self.scheduler.config, **scheduler_overrides)
+        sigmas = profile_sigmas or (np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
+                                    if sigmas is None else sigmas)
         mu = calculate_shift(
             latents.shape[1],
-            self.scheduler.config.get("base_image_seq_len", 256),
-            self.scheduler.config.get("max_image_seq_len", 4096),
-            self.scheduler.config.get("base_shift", 0.5),
-            self.scheduler.config.get("max_shift", 1.15),
+            scheduler.config.get("base_image_seq_len", 256),
+            scheduler.config.get("max_image_seq_len", 4096),
+            scheduler.config.get("base_shift", 0.5),
+            scheduler.config.get("max_shift", 1.15),
         )
         timesteps, num_inference_steps = retrieve_timesteps(
-            self.scheduler, num_inference_steps, device, sigmas=sigmas, mu=mu
+            scheduler, num_inference_steps, device, sigmas=sigmas,
+            **({} if not scheduler.config.use_dynamic_shifting else {"mu": mu})
         )
-        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
+        num_warmup_steps = max(len(timesteps) - num_inference_steps * scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
         # The transformer's `img_mask` spans the joint sequence, so append one slot per 2x2 group of target latents.
@@ -779,8 +1016,62 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         neg_cache = QwenImage21KVCache(num_blocks) if cache_enabled and do_true_cfg else None
 
         # 5. Denoising loop
-        self.scheduler.set_begin_index(0)
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
+        has_mask = latent_mask is not None
+        first_step = min(int(num_inference_steps * (1 - denoising_strength)), num_inference_steps - 1) if has_mask else 0
+        lanpaint = None
+        if has_mask and model_mode in (2, 3, 4, 5) and source_location is None:
+            from shared.inpainting.lanpaint import LanPaint
+
+            lanpaint = LanPaint(NSteps={2: 2, 3: 5, 4: 10, 5: 15}[model_mode])
+            denoising_strength = masking_strength = 1.0
+            first_step = 0
+
+        step_offset = 0 if source_location is not None else first_step
+        scheduler.set_begin_index(step_offset)
+        timesteps = timesteps[step_offset:]
+        masked_steps = math.ceil((num_inference_steps - first_step) * masking_strength)
+        if has_mask and source_location is None and first_step:
+            sigma = scheduler.sigmas[first_step]
+            latents = original_latents * (1 - sigma) + noise_source * sigma
+
+        def denoise(model_latents, kv_mode, timestep):
+            model_input = model_latents
+            if input_images_latents is not None:
+                model_input = torch.cat([input_images_latents, model_latents], dim=1)
+
+            model_timestep = timestep.expand(model_latents.shape[0]).to(model_latents.dtype)
+            with self.transformer.cache_context("cond"):
+                prediction = self.transformer(
+                    hidden_states=model_input,
+                    timestep=model_timestep / 1000,
+                    encoder_hidden_states=prompt_embeds,
+                    encoder_hidden_states_mask=prompt_embeds_mask,
+                    img_shapes=img_shapes,
+                    img_mask=image_pad_mask,
+                    attention_kwargs=self.attention_kwargs,
+                    kv_cache=cond_cache,
+                    kv_cache_mode=kv_mode,
+                    return_dict=False,
+                )[0][:, -model_latents.size(1):]
+            negative_prediction = None
+            if do_true_cfg:
+                with self.transformer.cache_context("uncond"):
+                    negative_prediction = self.transformer(
+                        hidden_states=model_input,
+                        timestep=model_timestep / 1000,
+                        encoder_hidden_states=negative_prompt_embeds,
+                        encoder_hidden_states_mask=negative_prompt_embeds_mask,
+                        img_shapes=img_shapes,
+                        img_mask=negative_image_pad_mask,
+                        attention_kwargs=self.attention_kwargs,
+                        kv_cache=neg_cache,
+                        kv_cache_mode=kv_mode,
+                        return_dict=False,
+                    )[0][:, -model_latents.size(1):]
+            return prediction, negative_prediction
+
+        combine_guidance = lambda positive, negative, scale, _: positive if negative is None else negative + scale * (positive - negative)
+        with self.progress_bar(total=len(timesteps)) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     # `continue` would skip the step that prefills the cache and leave the next one decoding from an
@@ -790,59 +1081,68 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                 self._current_timestep = t
                 kv_mode = "extract" if (cache_enabled and i == 0) else ("cached" if cache_enabled else None)
 
-                latent_model_input = latents
-                if input_images_latents is not None:
-                    latent_model_input = torch.cat([input_images_latents, latents], dim=1)
+                # LanPaint converts flow sigma to VE coordinates using
+                # sigma / (1 - sigma); exact sigma=1 is singular. Run the
+                # ordinary first denoising step, then begin its refinements.
+                if lanpaint is not None and i < len(timesteps) - 1 and float(t) < 1000.0:
+                    from shared.inpainting.lanpaint import _pack_latents, _unpack_latents
 
-                timestep = t.expand(latents.shape[0]).to(latents.dtype)
-                with self.transformer.cache_context("cond"):
-                    noise_pred = self.transformer(
-                        hidden_states=latent_model_input,
-                        timestep=timestep / 1000,
-                        encoder_hidden_states=prompt_embeds,
-                        encoder_hidden_states_mask=prompt_embeds_mask,
-                        img_shapes=img_shapes,
-                        img_mask=image_pad_mask,
-                        attention_kwargs=self.attention_kwargs,
-                        kv_cache=cond_cache,
-                        kv_cache_mode=kv_mode,
-                        return_dict=False,
-                    )[0]
-                noise_pred = noise_pred[:, -latents.size(1) :]
+                    def pack(value):
+                        return _pack_latents(
+                            value.transpose(1, 2).reshape(
+                                latents.shape[0], self.latent_channels, 1,
+                                height // self.vae_scale_factor, width // self.vae_scale_factor
+                            )
+                        )
 
-                if do_true_cfg:
-                    with self.transformer.cache_context("uncond"):
-                        neg_noise_pred = self.transformer(
-                            hidden_states=latent_model_input,
-                            timestep=timestep / 1000,
-                            encoder_hidden_states=negative_prompt_embeds,
-                            encoder_hidden_states_mask=negative_prompt_embeds_mask,
-                            img_shapes=img_shapes,
-                            img_mask=negative_image_pad_mask,
-                            attention_kwargs=self.attention_kwargs,
-                            kv_cache=neg_cache,
-                            kv_cache_mode=kv_mode,
-                            return_dict=False,
-                        )[0]
-                    neg_noise_pred = neg_noise_pred[:, -latents.size(1) :]
-                    noise_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
+                    def unpack(value):
+                        return _unpack_latents(value, height, width, self.vae_scale_factor).flatten(2).transpose(1, 2)
+
+                    def packed_denoise(value, guidance):
+                        positive, negative = denoise(unpack(value), kv_mode, t)
+                        return pack(positive), None if negative is None else pack(negative)
+
+                    latents = unpack(lanpaint(
+                        packed_denoise, combine_guidance, true_cfg_scale, 1.0, pack(latents),
+                        pack(original_latents), pack(noise_source), t / 1000,
+                        pack(latent_mask.expand(latents.shape[0], -1, self.latent_channels)),
+                        height=height, width=width, vae_scale_factor=self.vae_scale_factor,
+                    ))
+
+                noise_pred, neg_noise_pred = denoise(latents, kv_mode, t)
+                noise_pred = combine_guidance(noise_pred, neg_noise_pred, true_cfg_scale, t)
 
                 latents_dtype = latents.dtype
-                latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                latents = scheduler.step(noise_pred, t, latents, return_dict=False)[0]
                 if latents.dtype != latents_dtype and torch.backends.mps.is_available():
                     # some platforms (eg. apple mps) misbehave due to a pytorch bug:
                     # https://github.com/pytorch/pytorch/pull/99272
                     latents = latents.to(latents_dtype)
 
+                absolute_step = step_offset + i
+                if source_location is not None:
+                    sigma = scheduler.sigmas[absolute_step + 1]
+                    step_mask = _outpainting_step_mask(
+                        source_location, width, height, sigma, latents.device, latents.dtype
+                    ).expand(latents.shape[0], -1, -1)
+                    if outpainting_user_latent_mask is not None and absolute_step < first_step + masked_steps:
+                        step_mask = torch.maximum(step_mask, outpainting_user_latent_mask)
+                    known = original_latents * (1 - sigma) + noise_source * sigma
+                    latents = known * (1 - step_mask) + latents * step_mask
+                elif has_mask and (absolute_step < first_step + masked_steps):
+                    sigma = scheduler.sigmas[absolute_step + 1]
+                    known = original_latents * (1 - sigma) + noise_source * sigma
+                    latents = known * (1 - latent_mask) + latents * latent_mask
+
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
                     for k in callback_on_step_end_tensor_inputs:
                         callback_kwargs[k] = locals()[k]
-                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+                    callback_outputs = callback_on_step_end(self, absolute_step, t, callback_kwargs)
                     latents = callback_outputs.pop("latents", latents)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
 
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % scheduler.order == 0):
                     progress_bar.update()
 
                 if XLA_AVAILABLE:
@@ -851,7 +1151,11 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         self._current_timestep = None
         # The reference cache belongs to denoising. Release it before MMGP
         # brings in the VAE and its decode workspace.
-        del cond_cache, neg_cache
+        # `denoise` and LanPaint's adapter close over these cells. Rebind them
+        # after denoising so the cache tensors are released before VAE decode
+        # without deleting names that the nested functions resolve statically.
+        cond_cache = None
+        neg_cache = None
         if output_type == "latent":
             image = latents
         else:
@@ -868,8 +1172,13 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                 .to(latents.device, latents.dtype)
             )
             latents = latents * latents_std + latents_mean
-            image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
-            image = self.image_processor.postprocess(image, output_type=output_type)
+            if output_type == "uint8":
+                latent_holder = [latents]
+                del latents
+                image = self.vae.decode_to_cpu_uint8(latent_holder)[:, :, 0]
+            else:
+                image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
+                image = self.image_processor.postprocess(image, output_type=output_type)
 
         self.maybe_free_model_hooks()
 

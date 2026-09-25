@@ -27,8 +27,8 @@ export function ModelOptionsPanel() {
       {sample_solvers && sample_solvers.length > 0 && (
         <ChoiceControl
           config={{ choices: sample_solvers, label: 'Sampler' }}
-          value={params.video_prompt_type || sample_solvers[0]?.[1] || ''}
-          onChange={val => setParam('video_prompt_type', val)}
+          value={String(params.sample_solver || sample_solvers[0]?.[1] || '')}
+          onChange={val => setParam('sample_solver', val)}
           label="Sampler"
         />
       )}
