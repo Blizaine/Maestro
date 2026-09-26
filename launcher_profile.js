@@ -22,7 +22,7 @@ const isRtx40 = (kernel = {}) => {
 const isSolCapable = (kernel = {}) => {
   const target = String(kernel.gpu_target || "").toLowerCase()
   return kernel.gpu === "nvidia" && (
-    ["sm_89", "sm_90", "sm_100", "sm_120"].includes(target)
+    ["sm_89", "sm_90", "sm_100", "sm_120", "sm_121"].includes(target)
     || isRtx40(kernel)
     || isRtx50(kernel)
   )

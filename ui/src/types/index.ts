@@ -1508,13 +1508,22 @@ export interface LlmStatus {
 export interface SystemStats {
   cpu: { percent: number }
   ram: { percent: number; used_gb: number; total_gb: number }
+  disk: { percent: number; used_gb: number; total_gb: number; free_gb: number }
   gpu: {
     available: boolean
+    /** NVML device name when available. */
+    name?: string | null
+    /** False when the GPU exists but dedicated-memory telemetry is not
+     *  exposed by NVML (for example unified-memory NVIDIA devices). */
+    vram_available?: boolean
     /** Headline GPU utilization. On Windows this is the 3D-engine perf
      *  counter (matches Task Manager); elsewhere the NVML/nvidia-smi value. */
     percent: number
     /** NVML / nvidia-smi compute utilization, kept for the tooltip. */
     compute_percent?: number
+    /** GPU temperature when exposed by NVML. */
+    temperature_available?: boolean
+    temperature_c?: number
     vram_used_gb: number
     vram_total_gb: number
     vram_percent: number
