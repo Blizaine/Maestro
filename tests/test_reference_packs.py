@@ -124,6 +124,22 @@ class ReferencePackTests(unittest.TestCase):
             self.assertNotIn('<Subject 4>', prompt)
         self.assertEqual(retention.count('<Subject 1>'), 1)
 
+    def test_actual_h3_media_preparation_keeps_all_five_pack_images(self):
+        from models.minimax_h3.ref2va import prepare_references
+        refs = self.refs(self.saved())
+        scene = dict(type='image', path=self.images['face_closeup'], role='Park', image_intent='scene')
+        prepared = prepare_references([scene] + refs, num_frames=24, target_height=64, target_width=64)
+        self.assertEqual(len(prepared), 6)
+        self.assertEqual(prepared[0].image_intent, 'scene')
+        for i, reference in enumerate(prepared[1:]):
+            self.assertEqual(reference.kind, 'image')
+            self.assertEqual(reference.role, 'Test person')
+            self.assertEqual(reference.image_intent, 'identity')
+            self.assertEqual(reference.image.getpixel((reference.image.width // 2, reference.image.height // 2)), (i * 35, 60, 80))
+        packs.review_revision(refs[0]['library_character_id'], refs[0]['reference_pack_revision_id'], False)
+        with self.assertRaisesRegex(ValueError, 'approve'):
+            prepare_references(refs, num_frames=24, target_height=64, target_width=64)
+
     def test_enhancement_manifest_retains_five_views_and_voice_binding(self):
         from services import llm_service
         from services.h3_sequence_planner import _reference_context
