@@ -6721,23 +6721,8 @@ def scan_model_folders():
 # imports). Both are lazy-imported so they don't slow startup or
 # break on AMD/CPU systems where torch.cuda probes might warn.
 
-@api.get("/api/v1/downloads/active")
-def get_active_downloads():
-    """Return a snapshot of in-progress model file downloads.
-
-    UI polls this during long generation prep phases to surface
-    download progress and stall warnings. Each entry includes
-    `seconds_since_progress` so the UI can render "stalled — waiting
-    for retry" badges without doing time math itself.
-
-    Empty list when nothing is downloading. Best-effort tracking —
-    if a download path bypasses `huggingface_hub`'s tqdm progress
-    bar (some upstream Wan2GP code does this for misc files), it
-    won't appear here even though the safe_download timeout
-    protections still apply.
-    """
-    from services.safe_download import get_active_downloads as _get
-    return {"downloads": _get()}
+from services.active_downloads_api import create_router as _active_downloads_router
+api.include_router(_active_downloads_router())
 
 
 @api.get("/api/v1/system-detect")
