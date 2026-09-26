@@ -29731,9 +29731,17 @@ if __name__ == "__main__":
         for candidate in [preferred] + [preferred + i for i in range(1, span + 1)]:
             s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
             try:
-                # No SO_REUSEADDR — a plain bind fails iff the port is truly
-                # in use right now, which is exactly the check we want (and
-                # avoids the Windows REUSEADDR hijack-a-live-port behavior).
+                # POSIX can safely reuse a recently closed listener whose
+                # accepted connections remain in TIME_WAIT; another live
+                # listener still prevents this bind unless SO_REUSEPORT is
+                # also enabled. Windows REUSEADDR has different semantics and
+                # can hijack a live port, so retain the strict probe there.
+                if os.name != "nt":
+                    s.setsockopt(
+                        _socket.SOL_SOCKET,
+                        _socket.SO_REUSEADDR,
+                        1,
+                    )
                 s.bind((probe_host, candidate))
                 return candidate
             except OSError:

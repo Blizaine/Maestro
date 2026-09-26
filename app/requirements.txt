@@ -42,7 +42,10 @@ openai-whisper==20250625  # Required by Scenema audio for Whisper-medium alignme
 speechbrain==1.0.3
 audio-separator==0.36.1
 pyannote.audio==3.3.2
-torchcodec==0.10.0
+torchcodec==0.10.0 ; platform_machine != "aarch64"
+# TorchCodec 0.10 has no CPython 3.12 AArch64 wheel. 0.11 is the matching
+# release for the tested Torch 2.11 CUDA 13 stack on NVIDIA GB10 systems.
+torchcodec==0.11.0 ; platform_machine == "aarch64"
 
 # UI & interaction
 gradio==5.29.0
@@ -59,10 +62,18 @@ gradio_rangeslider==0.0.8
 opencv-python==4.13.0.92
 ultralytics==8.3.228  # H3 Face Refiner detector; keep the existing Torch stack
 segment-anything==1.0
-rembg[gpu]==2.0.65
+rembg[gpu]==2.0.65 ; platform_machine != "aarch64"
+# ONNX Runtime's GPU package is not published for this pinned AArch64 ABI.
+# Keep background removal available through the CPU runtime; Qwen/LTX inference
+# remains CUDA-backed through Torch and does not depend on ONNX Runtime.
+rembg==2.0.65 ; platform_machine == "aarch64"
 onnxruntime-gpu==1.22.0; python_version < "3.11"
-onnxruntime-gpu==1.25.0.dev20260210001; python_version >= "3.11"
-decord==0.6.0
+onnxruntime-gpu==1.25.0.dev20260210001; python_version >= "3.11" and platform_machine != "aarch64"
+onnxruntime==1.24.4; python_version >= "3.11" and platform_machine == "aarch64"
+decord==0.6.0 ; platform_machine != "aarch64"
+# `decord2` is the maintained API-compatible fork with CPython 3.12 AArch64
+# wheels; it installs the same `decord` import used by Maestro.
+decord2==3.4.0 ; platform_machine == "aarch64"
 timm==1.0.24
 # insightface: prebuilt Windows wheels hosted on a deepbeepmeep GitHub
 # release mirror (PyPI only ships sdist, which fails to build on Windows
@@ -73,7 +84,9 @@ insightface @ https://github.com/deepbeepmeep/insightface/releases/download/insi
 insightface @ https://github.com/deepbeepmeep/insightface/releases/download/insightface/insightface-0.7.3-cp312-cp312-win_amd64.whl ; sys_platform == "win32" and python_version == "3.12"
 insightface==0.7.3 ; sys_platform == "linux"
 facexlib==0.3.0
-taichi==1.7.4
+# Taichi does not publish Linux AArch64 wheels. Features that depend on it stay
+# optional while the core Torch inference paths remain available.
+taichi==1.7.4 ; platform_machine != "aarch64"
 vector_quantize_pytorch==1.27.19
 
 
