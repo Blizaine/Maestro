@@ -24,6 +24,17 @@ if str(APP_ROOT) not in sys.path:
 from postprocessing.dlss5 import direct_session, direct_worker
 
 
+class _OSNameProxy:
+    """Override a module's platform name without changing pathlib globally."""
+
+    def __init__(self, module, name):
+        self._module = module
+        self.name = name
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+
+
 class _Watchdog:
     def __init__(self, _parent_pid):
         pass
@@ -413,10 +424,25 @@ class DirectNRSessionTests(unittest.TestCase):
         _FakePopen.mode = "normal"
 
     def _session(self, *, frames=1, temporal=False, abort_callback=None, width=2, height=1):
-        return direct_session.DirectNRSession(
-            width, height, frames, temporal=temporal, intensity=1.0,
-            runtime_dir=self.root, abort_callback=abort_callback,
-        )
+        # The session process protocol is platform independent. Simulate only
+        # its module-local Windows gate so the mocked protocol suite also runs
+        # on Linux CI; pathlib and the rest of Python retain the host platform.
+        with mock.patch.object(direct_session, "os", _OSNameProxy(os, "nt")):
+            return direct_session.DirectNRSession(
+                width, height, frames, temporal=temporal, intensity=1.0,
+                runtime_dir=self.root, abort_callback=abort_callback,
+            )
+
+    def test_non_windows_gate_refuses_native_launch(self):
+        with (
+            mock.patch.object(direct_session, "os", _OSNameProxy(os, "posix")),
+            mock.patch.object(direct_session.subprocess, "Popen") as popen,
+            self.assertRaisesRegex(direct_session.DirectNRSessionError, "Windows-only"),
+        ):
+            direct_session.DirectNRSession(
+                2, 1, 1, temporal=False, intensity=1.0, runtime_dir=self.root,
+            )
+        popen.assert_not_called()
 
     def test_streams_frames_and_accepts_only_finished_then_closed(self):
         session = self._session()
