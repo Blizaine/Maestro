@@ -295,6 +295,9 @@ export interface MiniMaxH3Reference {
   library_character_id?: string
   character_name?: string
   refmod_path?: string
+  reference_pack_revision_id?: string
+  reference_pack_view?: ReferencePackView
+  reference_pack_revision_number?: number
   include_audio?: boolean
   has_audio?: boolean
   audio_path?: string
@@ -374,7 +377,19 @@ export interface CharacterImageViews {
   notes?: string[]
 }
 
+export type ReferencePackView = 'face_closeup' | 'full_body_front' | 'full_body_three_quarter' | 'upper_body_three_quarter' | 'full_body_back'
+export interface ReferencePackRevision {
+  id: string
+  number: number
+  parent_revision_id?: string | null
+  label: string
+  approved: boolean
+  created_at: number
+  images: Record<ReferencePackView, { path: string; url: string; label: string; width: number; height: number; inherited: boolean }>
+}
+
 export interface SavedOmniCharacter {
+  reference_pack?: { version: number; revisions: ReferencePackRevision[] }
   id: string
   name: string
   created_at: number

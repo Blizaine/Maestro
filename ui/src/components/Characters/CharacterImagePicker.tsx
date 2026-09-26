@@ -38,7 +38,7 @@ function CharacterImagePicker({maxImages, onSelect, onClose}: Props & {onClose: 
   useEffect(() => {
     alive.current = true
     const refresh = () => void api.fetchCharacters().then(items => {
-      if (alive.current) {setCharacters(items); setMessage('')}
+      if (alive.current) {setCharacters(items.filter(item => !item.reference_pack)); setMessage('')}
     }).catch(err => {if (alive.current) {setError(String(err)); setMessage('')}})
     refresh()
     window.addEventListener('maestro-characters-changed', refresh)

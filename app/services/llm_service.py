@@ -5089,6 +5089,14 @@ def _parse_h3_ref2va_subject_manifest(
         source,
     ):
         attach(ensure(int(subject_no), name), label)
+    # A five-view pack has one native identity row with several Picture assets.
+    # Bind every view before linking voices or validating generated dialogue.
+    for subject_no, name, body in re.findall(
+        r"(?m)^<Subject (\d+)> is (.+?), ONE character jointly defined by five views: (.+)$", source,
+    ):
+        item = ensure(int(subject_no), name)
+        for label in re.findall(r"<Picture \d+>", body):
+            attach(item, label)
     for label, subject_no in re.findall(
         r"(?m)^(<Audio \d+>) is the voice-timbre reference for <Subject (\d+)>", source,
     ):

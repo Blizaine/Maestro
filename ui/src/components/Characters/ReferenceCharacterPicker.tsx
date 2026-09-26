@@ -2,19 +2,21 @@ import { useEffect, useRef, useState } from 'react'
 import { Check, Mic, MoreHorizontal, Plus, Search, Trash2, UserRound, X } from 'lucide-react'
 import type { SavedOmniCharacter } from '../../types'
 import { characterDisplayName } from '../../lib/characters'
+import { ReferencePackButton } from './ReferencePackEditor'
 import { ExportCharacterButton } from './CharacterFileActions'
 
 interface Props {
   characters: SavedOmniCharacter[]
   addedIds: string[]
   disabled: boolean
-  onAdd: (character: SavedOmniCharacter) => void
+  onAdd: (character: SavedOmniCharacter, revisionId?: string) => void
   onDelete: (character: SavedOmniCharacter) => void
   scroll?: boolean
 }
 
 export function ReferenceCharacterPicker({ characters, addedIds, disabled, onAdd, onDelete, scroll = true }: Props) {
   const [query, setQuery] = useState('')
+  const [revisionIds, setRevisionIds] = useState<Record<string, string>>({})
   const [optionsId, setOptionsId] = useState<string | null>(null)
   const optionsCard = useRef<HTMLElement>(null)
 
@@ -67,14 +69,17 @@ export function ReferenceCharacterPicker({ characters, addedIds, disabled, onAdd
         {visible.map(character => {
           const name = characterDisplayName(character.name)
           const added = addedIds.includes(character.id)
+          const approved = character.reference_pack?.revisions.filter(revision => revision.approved) || []
+          const revisionId = revisionIds[character.id] || (approved.length === 1 ? approved[0].id : '')
+          const packReady = !character.reference_pack || approved.some(revision => revision.id === revisionId)
           const optionsOpen = optionsId === character.id
           const thumbnail = character.visual.thumbnail_url || character.visual.url
           return <article key={character.id} ref={optionsOpen ? optionsCard : undefined}
             className={`relative min-w-0 rounded-xl ${optionsOpen ? 'z-10' : ''}`}>
-            <button type="button" disabled={disabled || added}
+            <button type="button" disabled={disabled || added || !packReady}
               aria-label={added ? `${name} added to references` : `Add ${name} to references`}
-              onClick={() => { setOptionsId(null); onAdd(character) }}
-              className={`group block h-full w-full overflow-hidden rounded-xl border text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-bg-secondary ${
+              onClick={() => { setOptionsId(null); onAdd(character, revisionId) }}
+              className={`group block ${character.reference_pack ? '' : 'h-full'} w-full overflow-hidden rounded-xl border text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue focus-visible:ring-offset-2 focus-visible:ring-offset-bg-secondary ${
                 added ? 'border-accent-blue bg-accent-blue/10 ring-1 ring-accent-blue/30'
                   : 'border-border bg-bg-primary enabled:hover:border-accent-blue/60 enabled:hover:bg-bg-hover'
               } ${disabled ? 'opacity-50' : ''}`}>
@@ -86,7 +91,7 @@ export function ReferenceCharacterPicker({ characters, addedIds, disabled, onAdd
                 <span className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/70 to-transparent" />
                 {added && <span className="absolute left-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-accent-blue text-white shadow-sm"><Check size={14} strokeWidth={3} /></span>}
                 <span className="absolute bottom-2 left-2 inline-flex max-w-[calc(100%-1rem)] items-center gap-1 rounded-md bg-black/40 px-1.5 py-1 text-[10px] font-medium leading-none text-white backdrop-blur-sm">
-                  {character.voice && <Mic size={11} className="shrink-0" />}{character.voice ? 'With voice' : 'Visual only'}
+                  {character.voice && <Mic size={11} className="shrink-0" />}{character.reference_pack ? 'Five-view pack' : character.voice ? 'With voice' : 'Visual only'}
                 </span>
               </span>
               <span className="block px-2.5 pb-2.5 pt-2">
@@ -97,6 +102,15 @@ export function ReferenceCharacterPicker({ characters, addedIds, disabled, onAdd
               </span>
             </button>
 
+            {character.reference_pack && <div className="space-y-1 pt-1">
+              <select aria-label={`Revision for ${name}`} value={revisionId} disabled={disabled || added}
+                onChange={event => setRevisionIds(current => ({ ...current, [character.id]: event.target.value }))}
+                className="w-full min-w-0 rounded border border-border bg-bg-primary px-1 py-2 text-xs text-text-primary">
+                <option value="">{approved.length ? 'Choose approved revision' : 'Review a draft first'}</option>
+                {approved.map(revision => <option key={revision.id} value={revision.id}>v{revision.number} · {revision.label || 'Approved'}</option>)}
+              </select>
+              <ReferencePackButton character={character} disabled={disabled} />
+            </div>}
             <button type="button" data-character-options aria-label={`Options for ${name}`}
               aria-expanded={optionsOpen} aria-controls={`character-actions-${character.id}`} disabled={disabled}
               onClick={() => setOptionsId(current => current === character.id ? null : character.id)}
@@ -105,8 +119,8 @@ export function ReferenceCharacterPicker({ characters, addedIds, disabled, onAdd
             </button>
             {optionsOpen && <div id={`character-actions-${character.id}`} role="group" aria-label={`Actions for ${name}`}
               className="absolute inset-x-1.5 top-12 z-20 space-y-0.5 rounded-lg border border-border bg-bg-secondary p-1 shadow-xl">
-              <ExportCharacterButton character={character} disabled={disabled}
-                className="flex min-h-10 w-full items-center gap-2 rounded-md px-2 text-xs text-text-primary hover:bg-bg-hover disabled:opacity-40" />
+              {!character.reference_pack && <ExportCharacterButton character={character} disabled={disabled}
+                className="flex min-h-10 w-full items-center gap-2 rounded-md px-2 text-xs text-text-primary hover:bg-bg-hover disabled:opacity-40" />}
               <button type="button" disabled={disabled} onClick={() => { setOptionsId(null); onDelete(character) }}
                 className="flex min-h-10 w-full items-center gap-2 rounded-md px-2 text-xs text-indicator-error hover:bg-bg-hover disabled:opacity-40">
                 <Trash2 size={13} className="shrink-0" /> Delete

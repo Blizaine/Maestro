@@ -425,7 +425,8 @@ def build_manual_h3_reference_sequence_plan(
 def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]:
     """Return relationship, retention, and official task-type summaries."""
 
-    from models.minimax_h3.ref2va import canonicalize_ref2va_reference_order
+    from models.minimax_h3.ref2va import canonicalize_ref2va_reference_order, _build_ref2va_character_bindings
+    from services.reference_packs import pack_prompt_definitions
     from models.minimax_h3.reference_manifest import validate_reference_manifest
 
     # Enhancement is useful before the generation manifest is complete. The
@@ -438,14 +439,14 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
         allow_empty=True,
     )
     _prompt, items, _order_remap = canonicalize_ref2va_reference_order("", items)
-    picture = video = audio = subject = 0
+    picture = video = audio = 0
+    reference_subjects, character_subjects, role_subjects, _, subject = _build_ref2va_character_bindings(items)
+    pack_definitions = pack_prompt_definitions(items, reference_subjects)
     relationships: list[str] = []
     retention: list[str] = []
     task_types = ["reference generation"]
-    role_subjects: dict[str, int] = {}
-    character_subjects: dict[str, int] = {}
     pending_voice: list[tuple[int, dict, str]] = []
-    for item in items:
+    for reference_index, item in enumerate(items):
         kind = item["type"]
         # Roles are prose within one reference row, not additional metadata
         # lines (including the machine-generated soundtrack clock).
@@ -453,6 +454,11 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
         if kind == "image":
             picture += 1
             intent = item.get("image_intent", "identity")
+            if item.get("reference_pack_revision_id"):
+                if reference_index in pack_definitions:
+                    relationships.append(pack_definitions[reference_index])
+                    retention.append(f"<Subject {reference_subjects[reference_index]}>: fully_preserved - preserve identity and appearance jointly defined by all five pack views.")
+                continue
             if intent == "composition":
                 relationships.append(
                     f"<Picture {picture}> is a composition and blocking reference for {role}, not an identity source."
@@ -480,36 +486,28 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                     "similarity in medium, palette, lighting language, and texture."
                 )
             else:
-                subject += 1
-                role_subjects[str(role).strip().casefold()] = subject
-                character_key = str(item.get("library_character_id") or "").strip()
-                if character_key:
-                    character_subjects[character_key] = subject
+                character_subject = reference_subjects[reference_index]
                 relationships.append(
-                    f"<Subject {subject}> is {role} from <Picture {picture}>, preserving "
+                    f"<Subject {character_subject}> is {role} from <Picture {picture}>, preserving "
                     "identity and visible appearance; the source background, framing, "
                     "composition, and pose do not define the target scene."
                 )
                 retention.append(
-                    f"<Subject {subject}>: fully_preserved - preserve the identity "
+                    f"<Subject {character_subject}>: fully_preserved - preserve the identity "
                     f"and appearance defined by <Picture {picture}>."
                 )
         elif kind == "video":
             video += 1
             video_intent = item.get("video_intent", "motion")
             if video_intent == "character":
-                subject += 1
-                role_subjects[str(role).strip().casefold()] = subject
-                character_key = str(item.get("library_character_id") or "").strip()
-                if character_key:
-                    character_subjects[character_key] = subject
+                character_subject = reference_subjects[reference_index]
                 relationships.append(
-                    f"<Subject {subject}> is {role} from <Video {video}>, preserving identity, "
+                    f"<Subject {character_subject}> is {role} from <Video {video}>, preserving identity, "
                     "appearance, and characteristic motion while using the newly described target "
                     "scene and action."
                 )
                 retention.append(
-                    f"<Subject {subject}>: fully_preserved - preserve the identity and appearance "
+                    f"<Subject {character_subject}>: fully_preserved - preserve the identity and appearance "
                     f"defined by <Video {video}> while generating each requested target action."
                 )
             elif video_intent == "scene":

@@ -5,6 +5,7 @@ import type { SavedOmniCharacter } from '../../types'
 import { useStore } from '../../stores/useStore'
 import { characterDisplayName } from '../../lib/characters'
 import { CharacterVoiceButton, ExportCharacterButton, ImportCharacterButton } from './CharacterFileActions'
+import { ReferencePackButton } from './ReferencePackEditor'
 import { CharacterImagesButton } from './CharacterImages'
 
 const REFMOD_COLLECTION_URL = 'https://huggingface.co/malcolmrey/minimaxh3/tree/main'
@@ -103,7 +104,7 @@ export function CharacterBrowser() {
       <p className="mt-1 text-xs text-text-muted">Import a shared character, add a voice, or export your own. Saved characters appear in Reference mode and their voices are available in TTS.</p>
     </div>
     <div className="rounded-xl border border-border bg-bg-secondary p-3 space-y-3">
-      <ImportCharacterButton />
+      <div className="flex flex-wrap gap-2"><ImportCharacterButton /><ReferencePackButton /></div>
       <p className="text-[11px] text-text-muted">Share one file such as blaine.maestro.safetensors with appearance and any saved voice embedded. Standard H3 RefMods are also supported.</p>
       <div className="border-t border-border pt-3 space-y-2">
         <label htmlFor="character-import-url" className="block text-xs text-text-secondary">Import from Hugging Face</label>
@@ -169,11 +170,11 @@ export function CharacterBrowser() {
               {confirmDelete === character.id ? 'Confirm delete' : <Trash2 size={12} />}
             </button>
           </div>
-          <p className="text-[10px] text-text-muted">{character.refmod ? 'H3 RefMod' : 'Saved reference'} · {character.voice ? 'With voice' : 'No voice'}</p>
-          <CharacterImagesButton character={character} />
+          <p className="text-[10px] text-text-muted">{character.reference_pack ? `Reference Pack · ${character.reference_pack.revisions.length} revisions` : character.refmod ? 'H3 RefMod' : 'Saved reference'} · {character.voice ? 'With voice' : 'No voice'}</p>
+          {character.reference_pack ? <ReferencePackButton character={character} /> : <CharacterImagesButton character={character} />}
           {character.description && <p className="text-[11px] text-text-secondary line-clamp-3 break-words">{character.description}</p>}
           {character.voice && <audio key={character.updated_at} controls preload="none" src={character.voice.url} aria-label={`${characterDisplayName(character.name)} voice preview`} className="w-full h-8" />}
-          <div className="flex flex-wrap items-start gap-2"><ExportCharacterButton character={character} /><CharacterVoiceButton character={character} /></div>
+          <div className="flex flex-wrap items-start gap-2">{!character.reference_pack && <ExportCharacterButton character={character} />}<CharacterVoiceButton character={character} /></div>
         </div>
       </article>)}
     </div>

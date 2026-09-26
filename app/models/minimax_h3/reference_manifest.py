@@ -174,6 +174,9 @@ def validate_reference_manifest(
             "MiniMax H3 accepts one Music / performance timeline. "
             "Use Voice reference or Music / sound style only for additional audio references."
         )
+    if any(r.get("library_character_id") or r.get("reference_pack_revision_id") or r.get("reference_pack_view") for r in normalized):
+        from services.reference_packs import validate_pack_references
+        validate_pack_references(normalized, require_files=require_files)
     return normalized
 
 

@@ -9690,6 +9690,7 @@ export const useStore = create<AppState>((set, get) => ({
         tts_enhance_mode: ttsMode || undefined,
         tts_voice_count: ttsSpeakingVoiceCount(state.ttsVoiceCount, state.modelOptions, String(params.audio_prompt_type || '')) || undefined,
         reference_context: referenceContext,
+        minimax_h3_references: params.model_type.startsWith('minimax_h3_ref2va') ? params.minimax_h3_references : undefined,
         planning_style: planningStyle,
       })
       const preserveH3Source = (
