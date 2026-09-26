@@ -106,8 +106,8 @@ function App() {
           environment is missing ffmpeg / CUDA or low on disk. Renders
           nothing when everything checks out. */}
       <PreflightBanner />
-      {/* DownloadStatusBanner — fixed bottom-right overlay, polls
-          /api/v1/downloads/active every 2s. Renders nothing unless
+      {/* DownloadStatusBanner — fixed bottom-right overlay, long-polls
+          /api/v1/downloads/active. Renders nothing unless
           a model file is being downloaded. Highlights stalled
           downloads in amber so users know the system is recovering
           rather than frozen. */}

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ChevronUp, ChevronDown, Cpu, MemoryStick, Power, Zap } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { releaseModels } from '../../api/client'
+import { usePageVisible } from '../../lib/usePageVisible'
 
 // Color a "fullness" bar (VRAM / RAM) by how close to full it is —
 // green well below, amber as it tightens, red near the ceiling. This is
@@ -100,20 +101,13 @@ export function HardwareStatusBar() {
     }
   }
 
+  const visible = usePageVisible()
   useEffect(() => {
-    const tick = () => {
-      if (typeof document !== 'undefined' && document.hidden) return
-      loadSystemStats()
-    }
-    tick() // populate immediately, don't wait for the first interval
-    const id = setInterval(tick, 2000)
-    const onVis = () => { if (!document.hidden) loadSystemStats() }
-    document.addEventListener('visibilitychange', onVis)
-    return () => {
-      clearInterval(id)
-      document.removeEventListener('visibilitychange', onVis)
-    }
-  }, [loadSystemStats])
+    if (!visible) return
+    loadSystemStats() // populate immediately, don't wait for the first interval
+    const id = setInterval(loadSystemStats, 2000)
+    return () => clearInterval(id)
+  }, [visible, loadSystemStats])
 
   const gpu = stats?.gpu
   const ram = stats?.ram

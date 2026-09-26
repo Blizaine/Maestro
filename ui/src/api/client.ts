@@ -2892,12 +2892,19 @@ export interface ActiveDownload {
   total_bytes: number | null
   status: 'downloading' | 'stalled' | 'retrying' | 'done' | 'incomplete'
   /** Seconds since the byte counter last advanced. UI uses this to
-   *  flag stalled downloads (e.g. `> 15` → show "slow / retrying"). */
+   *  flag stalled downloads (`> 30` → show "slow / retrying"). */
   seconds_since_progress: number
 }
 
-export async function fetchActiveDownloads(): Promise<{ downloads: ActiveDownload[] }> {
-  const res = await fetch(`${BASE}/api/v1/downloads/active`)
+/** Pass the `version` of the last answer as `since` to have the server hold
+ *  the request until the downloads change (up to 25 s). Older servers omit
+ *  `version` and always answer at once. */
+export async function fetchActiveDownloads(
+  since?: string,
+  signal?: AbortSignal,
+): Promise<{ downloads: ActiveDownload[]; version?: string }> {
+  const query = since === undefined ? '' : `?since=${encodeURIComponent(since)}`
+  const res = await fetch(`${BASE}/api/v1/downloads/active${query}`, { signal })
   if (!res.ok) throw new Error(`Failed to fetch active downloads (${res.status})`)
   return res.json()
 }
