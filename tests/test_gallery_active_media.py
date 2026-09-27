@@ -108,7 +108,10 @@ class GalleryActiveMediaTests(unittest.TestCase):
             "Use ${target.kind === 'image' ? 'current frame' : 'video'} as ${target.label}",
             feed_item,
         )
-        self.assertIn("Use as ${target.label}", feed_item)
+        self.assertIn(
+            "Use ${file.type === 'audio' ? 'audio ' : ''}as ${target.label}",
+            feed_item,
+        )
 
         self.assertIn("Click again to delete", feed_item)
         self.assertIn("No other workspaces", feed_item)

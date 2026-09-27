@@ -43,13 +43,20 @@ the baseline result above is not v2.4.2 CI.
 - **Public-source boundary guard passed** with all 2,614 staged/tracked source
   files included. Release version, documentation links, modified JSON defaults
   and staged whitespace checks passed. Launcher scripts are unchanged.
+- The first dev CI run found an older gallery source assertion still expecting
+  the pre-audio menu-label template. It was updated to cover the audio-aware
+  label while retaining the existing image/video and menu assertions. All eight
+  focused gallery tests passed. This correction changes no application code;
+  the four browser suites had already verified the actual menu behavior.
 
 ## Scope and remaining limits
 
-This is focused regression validation for the changes since v2.4.1, not a
-fresh full-suite, clean-install or cross-platform certification. No models
-were downloaded, no generations were submitted, and the running application
-was not restarted or its settings changed during preparation.
+Local preparation used focused regression validation for the changes since
+v2.4.1. GitHub CI additionally runs the complete Python suite and standalone
+grammar checks on Linux; use the linked runs for their result. This is not a
+clean-install or cross-platform certification. No models were downloaded,
+no generations were submitted, and the running application was not restarted
+or its settings changed during preparation.
 
 The user previously exercised gallery reuse and Krea identity controls. The
 final Krea reference-sizing correction has CPU/browser coverage, but its
