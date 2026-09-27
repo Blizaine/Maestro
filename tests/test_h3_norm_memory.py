@@ -19,15 +19,21 @@ class H3NormMemoryTests(unittest.TestCase):
         )
         try:
             with torch.inference_mode():
-                h3._rms_norm_in_chunks(norm, torch.ones(1, 66_148, 1))
-                normal_sizes = list(observed_sizes)
+                for length in (66_148, 71_344, 73_338, 75_000):
+                    observed_sizes.clear()
+                    with self.subTest(length=length):
+                        h3._rms_norm_in_chunks(norm, torch.ones(1, length, 1))
+                        self.assertEqual(observed_sizes, [length])
+                observed_sizes.clear()
+                h3._rms_norm_in_chunks(norm, torch.ones(1, 75_001, 1))
+                self.assertGreater(len(observed_sizes), 1)
+                self.assertLessEqual(max(observed_sizes), 8_192)
                 observed_sizes.clear()
                 h3._rms_norm_in_chunks(norm, torch.ones(1, 264_654, 1))
                 huge_sizes = list(observed_sizes)
         finally:
             hook.remove()
 
-        self.assertEqual(normal_sizes, [66_148])
         self.assertGreater(len(huge_sizes), 1)
         self.assertLessEqual(max(huge_sizes), 8_192)
 
