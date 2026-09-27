@@ -305,3 +305,16 @@ RefMods. The existing single-image/video characters and RefMods remain separate
 library entries with their existing behavior. Pack data lives under
 `app/uploads/characters/<character-id>/packs/<revision-id>/`; back up the entire
 character library, including its index, to retain revisions and approvals.
+
+
+When **Enhance** uses a vision-capable LLM, Maestro first inspects all five pack
+views with their exact Picture numbers and view labels. It carries the observed
+appearance into the canonical Subject definition and supplies the images and
+observations to the writer. Inspection JSON does not become part of the H3 prompt.
+Unreadable or incomplete inspection fails visibly; known text-only local models
+keep the reference bindings and show a warning that appearance was not inspected.
+Remote providers receive real image attachments and must support image inputs;
+a provider rejection is reported rather than silently dropping the images. This
+adds one LLM inspection request per pack to enhancement. Images sent to the LLM
+are resized to its existing 768-pixel maximum; H3 still receives the original
+pack images. Re-run Enhance on older prompts to apply this behavior.

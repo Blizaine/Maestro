@@ -14,6 +14,7 @@ import math
 import os
 import re
 from typing import Any
+from services.h3_pack_grounding import binding_context
 from services.h3_performance_audio import (
     PERFORMANCE_AUDIO_DIRECTION,
     has_h3_performance_audio,
@@ -53,7 +54,7 @@ from services.h3_window_planner import (
 # is persisted with reviewed/generated window prompts, so this prevents a run
 # restored from gallery metadata from silently reusing pre-fix dialogue and
 # reference bindings.
-_H3_SEQUENCE_PLANNER_VERSION = 6 + H3_STORY_LEDGER_VERSION
+_H3_SEQUENCE_PLANNER_VERSION = 7 + H3_STORY_LEDGER_VERSION
 _H3_CLIP_BOUNDARY = "\n---CLIP_BOUNDARY---\n"
 
 
@@ -1335,7 +1336,7 @@ def compile_h3_reference_sequence_prompts(
     # ``black t-shirt <Subject 1> is ...``.  Use the canonical manifest by
     # itself; visual prose belongs in the chronological shot description.
     raw_subjects = str(plan.get("subject_definitions") or "").strip()
-    canonical_subjects = str(reference_relationships or "").strip()
+    canonical_subjects = binding_context(reference_relationships).strip()
     audio_driven = has_h3_performance_audio(canonical_subjects)
     canonical_subjects = canonicalize_h3_reference_names(
         canonical_subjects,
@@ -1626,7 +1627,7 @@ def _fallback_sequence_plan(
             "closing_state": window["closing_state"],
         })
     return {
-        "subject_definitions": reference_relationships,
+        "subject_definitions": binding_context(reference_relationships),
         "retention_analysis": default_retention,
         "setting_continuity": fallback["setting_continuity"],
         "visual_style": fallback["visual_continuity"],
@@ -1685,6 +1686,14 @@ def plan_h3_reference_sequence(
             fps=fps,
         )
     relationships, default_retention, task_types = _reference_context(references)
+    from services.h3_pack_grounding import bindings, ground_context
+    pack_warning = None
+    if bindings(relationships):
+        from services import llm_service
+        image_paths = [ref['path'] for ref in references if ref.get('type') == 'image']
+        relationships, pack_warning = ground_context(llm_service.generate, relationships, image_paths, vision_available=llm_service._vision_available)
+        if not llm_service._vision_available:
+            image_paths = None
     relationships = canonicalize_h3_reference_names(relationships, source_intent["cast_names"])
     signature = h3_sequence_plan_signature(
         prompt,
@@ -1734,7 +1743,7 @@ def plan_h3_reference_sequence(
     resolved_coverage = _infer_camera_coverage(prompt, camera_coverage)
     story_ledger: dict[str, Any] | None = None
     camera_checkpoint = None
-    planning_warnings: list[str] = []
+    planning_warnings: list[str] = [pack_warning] if pack_warning else []
     planning_diagnostics: list[str] = []
     planning_notes: list[str] = []
     dialogue_fragments: list[dict[str, Any]] = []
@@ -1762,7 +1771,7 @@ def plan_h3_reference_sequence(
         )
         planned_by = staged["planned_by"]
         camera_checkpoint = staged.get("camera_checkpoint")
-        planning_warnings = list(staged.get("planning_warnings") or [])
+        planning_warnings.extend(staged.get("planning_warnings") or [])
         planning_diagnostics = list(staged.get("planning_diagnostics") or [])
         planning_notes = list(staged.get("planning_notes") or [])
         dialogue_fragments = list(staged.get("dialogue_fragments") or [])
