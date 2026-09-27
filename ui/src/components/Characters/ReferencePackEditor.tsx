@@ -61,7 +61,7 @@ export function ReferencePackEditor({ initial, onClose }: { initial?: SavedOmniC
     catch (err) { setError(err instanceof Error ? err.message : 'Could not save review.') }
     finally { setBusy(false) }
   }
-  return <SidebarDialog open title={character ? `${character.name} — Reference Pack` : 'Import five-view Reference Pack'} variant="center" onClose={() => { if (!busy) onClose() }}>
+  return <SidebarDialog open title={character ? `${character.name} — Reference Pack` : 'Import five-view Reference Pack'} variant="center" zIndex={10000} onClose={() => { if (!busy) onClose() }}>
     <div className="p-3 space-y-4">
       <p className="text-xs text-text-secondary">Five complementary views of one character. An approved revision uses five H3 image slots. Review face, proportions, hair and outfit across every view before approving.</p>
       {!character && <label className="block text-xs text-text-secondary">Character name<input aria-label="Pack character name" value={name} onChange={event => setName(event.target.value)} disabled={busy} className={field} /></label>}

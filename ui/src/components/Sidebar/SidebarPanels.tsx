@@ -46,8 +46,9 @@ export function usePanelFocus(open: boolean, ref: RefObject<HTMLDivElement | nul
   }, [open, ref, trapFocus])
 }
 
-export function SidebarDialog({ open, title, onClose, children, variant = 'center', id, headerStart, footer, closeLabel, anchor, fixedHeight, hideHeader = false }: {
+export function SidebarDialog({ open, title, onClose, children, variant = 'center', id, headerStart, footer, closeLabel, anchor, fixedHeight, hideHeader = false, zIndex }: {
   open: boolean; title: string; onClose: () => void; children: ReactNode
+  zIndex?: number
   variant?: 'center' | 'settings' | 'library' | 'workflow'; id?: string
   headerStart?: ReactNode; footer?: ReactNode; closeLabel?: string
   anchor?: HTMLElement | null
@@ -139,7 +140,7 @@ export function SidebarDialog({ open, title, onClose, children, variant = 'cente
   }, [open, anchored, layout, variant, anchor, fixedHeight])
   usePanelFocus(open, ref, onClose, !popover)
   return createPortal(
-    <div hidden={!open} className={open ? `fixed inset-0 z-[55] ${popover ? 'pointer-events-none' : anchored ? 'bg-black/25' : 'flex items-center justify-center bg-black/50 p-2 sm:p-6'}` : 'hidden'}
+    <div hidden={!open} style={zIndex == null ? undefined : { zIndex }} className={open ? `fixed inset-0 z-[55] ${popover ? 'pointer-events-none' : anchored ? 'bg-black/25' : 'flex items-center justify-center bg-black/50 p-2 sm:p-6'}` : 'hidden'}
       onClick={event => { if (event.target === event.currentTarget) onClose() }}>
       <div ref={ref} id={id} role="dialog" aria-modal={popover ? undefined : true} aria-label={title} tabIndex={-1} style={anchored ? position : undefined}
         data-sidebar-overlay={anchored ? variant : undefined}

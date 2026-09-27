@@ -16,7 +16,7 @@ const labels = ['Face close-up', 'Full body — front', 'Full body — three-qua
     window.store = useStore;
     const scope = new URLSearchParams(location.search).get('scope');
     useStore.setState({modelOptions: {omni_reference: true}, selectedModelPerMode: {video: ''}});
-    createRoot(document.getElementById('root')).render(scope ? <OmniReferenceSection scope={scope}/> : <CharacterBrowser/>);
+    createRoot(document.getElementById('root')).render(scope ? <OmniReferenceSection scope={scope}/> : <div className="fixed inset-0 z-[60]"><CharacterBrowser/></div>);
   `, resolveDir: path.join(root, 'ui'), loader: 'tsx'}, bundle: true, write: false, jsx: 'automatic',
     define: {'process.env.NODE_ENV': '"development"'}, logLevel: 'silent'});
   const assets = path.join(root, 'ui/dist/assets');
