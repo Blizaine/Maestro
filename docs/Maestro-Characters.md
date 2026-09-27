@@ -318,3 +318,38 @@ a provider rejection is reported rather than silently dropping the images. This
 adds one LLM inspection request per pack to enhancement. Images sent to the LLM
 are resized to its existing 768-pixel maximum; H3 still receives the original
 pack images. Re-run Enhance on older prompts to apply this behavior.
+
+
+### Recommended Reference Pack workflow
+
+Use five distinct, sharp views of the same appearance. Keep the face unobscured,
+include the feet in full-body views, and make the rear view useful for hair and
+outfit details. Favor simple backgrounds and consistent lighting so that the
+character is easy to inspect. Avoid changing hairstyle, outfit or body proportions
+between views; create a separate revision when the intended appearance changes.
+Review every view before approving: a five-image upload is not proof that the
+images depict a consistent identity.
+
+Select the approved revision **before** using Enhance. Write the target action,
+setting, camera movement and any dialogue in the source prompt, using the saved
+character's name. Let Maestro assign the actual Picture and Subject numbers;
+other attached references can change Picture numbering. Keep scene, style,
+motion, video and voice references in their own intended roles. All five pack
+views define the same character, not five actors or five required shots.
+
+Use a vision-capable enhancement model to ground appearance in the actual images.
+Review the enhanced prompt: the Subject definition should cite all five views,
+the summary and shots should use that same Subject label, and visible appearance
+should agree with the pack. New action, framing and scenery do not require copying
+the reference poses or backgrounds. Preserve exact requested dialogue and keep
+speaker IDs separate from Subject IDs. If you select another revision or change
+reference order, re-run Enhance from the original scene request so that image
+bindings and observed traits match the current inputs. Re-plan saved sequence
+windows when changing the pack.
+
+The extra vision pass improves the information supplied to H3; it is not a
+verified identity score or a guarantee of consistency. Test a short clip before
+a longer sequence and check the face, proportions, outfit and rear appearance
+across camera changes. MiniMax's detailed-description length is writing guidance,
+not a hard validator: review the output for concrete shot detail rather than
+assuming that every LLM follows the requested length.
