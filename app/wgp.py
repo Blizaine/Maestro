@@ -9208,7 +9208,7 @@ def generate_video(
                     image_size = calculate_new_dimensions(height, width, h, w, fit_canvas)
                 sample_fit_canvas = None
                 if repeat_no == 1:
-                    if fit_crop:
+                    if fit_crop and not model_def.get("preserve_image_ref_native_size", False):
                         if any_background_ref == 2:
                             end_ref_position = len(image_refs)
                         elif any_background_ref == 1:
@@ -9249,7 +9249,8 @@ def generate_video(
                                                                                         background_ref_outpainted = model_def.get("background_ref_outpainted", True),
                                                                                         return_tensor= model_def.get("return_image_refs_tensor", False),
                                                                                         ignore_last_refs =model_def.get("no_processing_on_last_images_refs",0),
-                                                                                        background_removal_color = model_def.get("background_removal_color", [255, 255, 255] ))
+                                                                                        background_removal_color = model_def.get("background_removal_color", [255, 255, 255] ),
+                                                                                        preserve_native_size = model_def.get("preserve_image_ref_native_size", False))
 
             custom_postprocessor = model_def.get("custom_image_ref_postprocessor", None)
             if window_no == 1 and repeat_no == 1 and custom_postprocessor is not None:

@@ -5,6 +5,7 @@ import { useStore } from '../../stores/useStore'
 import { PostProcessing } from './PostProcessing'
 import { ControlVideoSection } from './ControlVideoSection'
 import { Qwen21Controls } from './Qwen21Controls'
+import { KreaIdentityControls } from './KreaIdentityControls'
 import { LoraSelector } from '../SettingsDrawer/LoraSelector'
 import { Yue2LoraSelector } from './Yue2LoraSelector'
 import { selectedMusicStyles } from '../../lib/musicStyles'
@@ -15,6 +16,12 @@ import { MiniMaxH3Optimizations } from './MiniMaxH3Optimizations'
 import { AutomaticFaceRefiner } from '../Characters/FaceRefiner'
 import { SidebarDialog } from './SidebarPanels'
 import type { GenerateParams } from '../../types'
+import {
+  activeKreaIdentityLabels,
+  countKreaIdentityReferences,
+  isKreaIdentityEdit,
+  KREA_IDENTITY_SETTING_KEYS,
+} from '../../lib/kreaIdentityControls'
 
 const H3_LONG_SEQUENCE_EXPERIMENTS = [
   {
@@ -260,6 +267,12 @@ function useAdvancedActiveSections(): Record<AdvancedSectionKey, string[]> {
   const slidingWindowLocked = useStore(s => s.slidingWindowLocked)
   const servicesConfig = useStore(s => s.servicesConfig)
   const studioVideoWorkflow = useStore(s => s.studioVideoWorkflow)
+  const studioImageWorkflow = useStore(s => s.studioImageWorkflow)
+  const imageRefCount = useStore(s => s.imageRefs.length)
+  const imageSourcePresent = useStore(s => Boolean(
+    s.imageWorkflowSourcePath || s.imageWorkflowSourceFile
+    || (Number(s.params.image_mode) === 2 && (s.params.image_start || s.params.image_guide)),
+  ))
   const hasVoiceClone = useStore(s => s.voiceCloneEnabled && s.voiceCloneRefs.some(reference => !!reference?.path))
   const selectedModel = useStore(s => s.models.find(model => model.model_type === s.params.model_type))
   const isScailEdit = (
@@ -288,6 +301,18 @@ function useAdvancedActiveSections(): Record<AdvancedSectionKey, string[]> {
     if (params.override_attention === 'sla') items.performance.push('H3 SLA')
     if (params.skip_steps_cache_type === 'first_block') items.performance.push('First Block Cache')
     if (generationMode !== 'audio' && params.custom_settings?.audio_refinement === 'enabled') items.finishing.push('Audio refinement')
+  }
+  const kreaModel = selectedModel || { model_type: params.model_type, architecture: modelOptions?.architecture }
+  if (generationMode === 'image' && isKreaIdentityEdit(kreaModel)) {
+    const referenceCount = countKreaIdentityReferences({
+      generationMode,
+      workflow: studioImageWorkflow,
+      imageMode: params.image_mode,
+      sourceImagePresent: imageSourcePresent,
+      referenceCount: imageRefCount,
+      editReferencesSupported: modelOptions?.image_ref_inpaint === true,
+    })
+    items.generation.push(...activeKreaIdentityLabels(params.custom_settings, referenceCount))
   }
   if (generationMode === 'video' && params.face_refiner?.enabled) items.finishing.push('Face refinement')
   if (generationMode === 'video' && params.temporal_upsampling) items.finishing.push(`Smoothing (${params.temporal_upsampling})`)
@@ -452,6 +477,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
   const editSubMode = useStore(s => s.editSubMode)
   const audioSubMode = useStore(s => s.audioSubMode)
   const isAudio = generationMode === 'audio'
+  const isImage = generationMode === 'image'
   const isSfx = isAudio && audioSubMode === 'sfx'
   const isAudioOnly = modelOptions?.audio_only || isSfx
   const isVideo = generationMode === 'video'
@@ -484,6 +510,10 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
     || !!modelOptions?.minimax_h3_text_encoder_choices?.length || !!modelOptions?.ltx25_video_vae_choices?.length
   const hasFinishing = !isAudio && (!isScailEdit || (isH3 && !modelOptions?.audio_only))
   const isYue2 = params.model_type === 'yue2'
+  const isKreaImageEdit = isImage && isKreaIdentityEdit({
+    model_type: params.model_type,
+    architecture: modelOptions?.architecture,
+  })
   const canUseLoras = !isYue2 && !isOutpaint && !modelOptions?.loras_disabled
   const showH3LongSequenceExperiments = (
     H3_LONG_SEQUENCE_TESTS_VISIBLE
@@ -848,7 +878,9 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
                   </div>
 
                   {/* Auto-Split */}
-                  {modelOptions?.custom_settings_def?.map(setting => (
+                  {modelOptions?.custom_settings_def?.filter(setting => (
+                    !isKreaImageEdit || !KREA_IDENTITY_SETTING_KEYS.includes(setting.id as typeof KREA_IDENTITY_SETTING_KEYS[number])
+                  )).map(setting => (
                     <div key={setting.id}>
                       <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">{setting.name}</label>
                       <input
@@ -1142,6 +1174,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
               {/* Dedicated SCAIL edit endpoints honor this value for both
                   Fast and HQ; other distilled models retain their lock. */}
               <Qwen21Controls />
+              <KreaIdentityControls />
               {showInferenceSteps && (
                 <div>
                   <div className="flex items-center justify-between mb-1.5">

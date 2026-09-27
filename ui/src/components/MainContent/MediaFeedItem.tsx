@@ -3,9 +3,11 @@ import { useState, useRef, useEffect, useCallback, type CSSProperties } from 're
 import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked, Info, ChevronDown, ChevronUp, MoreHorizontal, ScanFace, Maximize2, Columns2 } from 'lucide-react'
 import { SaveRecipeDialog } from '../Recipes/SaveRecipeDialog'
 import { FaceRefinerDialog } from '../Characters/FaceRefiner'
+import { MediaTrimDialog } from '../shared/MediaTrimDialog'
 import { useStore } from '../../stores/useStore'
+import { isKreaIdentityEdit, normalizeKreaIdentitySettings } from '../../lib/kreaIdentityControls'
 import { getUploadUrl, fetchOutputMetadata, getFileUrl, moveOutput, uploadImage } from '../../api/client'
-import type { OutputFile, OutputMetadata } from '../../types'
+import type { EditorAsset, OutputFile, OutputMetadata } from '../../types'
 import { formatGenerationDuration } from '../../lib/format'
 import { formatDuration } from '../../lib/durationPlanning'
 import { modelDisplayName } from '../../lib/modelDisplay'
@@ -124,6 +126,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const sentToInputTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const [sendingToInput, setSendingToInput] = useState('')
   const [inputError, setInputError] = useState('')
+  const [trimInput, setTrimInput] = useState<{ target: GalleryInputTarget; source: EditorAsset } | null>(null)
   const [showActionMenu, setShowActionMenu] = useState(false)
   const [actionMenuOpensDown, setActionMenuOpensDown] = useState(false)
   const [showMoveMenu, setShowMoveMenu] = useState(false)
@@ -282,6 +285,12 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const generationTime = meta?.generation_time
   const inferenceSteps = params?.num_inference_steps as number | undefined
   const guidanceScale = params?.guidance_scale as number | undefined
+  const kreaIdentity = isKreaIdentityEdit(modelType)
+    && params?.custom_settings && typeof params.custom_settings === 'object'
+    && 'krea2_ref_boost' in params.custom_settings
+      ? normalizeKreaIdentitySettings(params.custom_settings) : null
+  const kreaReferenceCount = (Array.isArray(params?.image_refs) ? params.image_refs.length : 0)
+    + (Number(params?.image_mode) === 2 && (params?.image_start || params?.image_guide || params?.video_guide) ? 1 : 0)
   const activeLoras = (() => {
     const value = params?.activated_loras
     if (Array.isArray(value)) return value.map(item => String(item)).filter(Boolean)
@@ -545,8 +554,30 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     }
   }
 
+  const acceptGalleryMedia = async (target: GalleryInputTarget, media: File) => {
+    await sendToGalleryInput(target.id, media)
+    clearTimeout(sentToInputTimer.current)
+    setSentToInput(target.id)
+    sentToInputTimer.current = setTimeout(() => setSentToInput(''), 2000)
+    setSidebarOpen(true)
+  }
+
   const handleSendToInput = async (target: GalleryInputTarget, captureFrame = false) => {
     if (sendingToInput) return
+    if (!captureFrame && (file.type === 'audio' || file.type === 'video')) {
+      const workspace = file.workspace || (browsingUploads ? '__uploads__' : activeWorkspace)
+      const origin = workspace === '__uploads__' ? 'upload' : 'output'
+      videoRef.current?.pause()
+      audioRef.current?.pause()
+      setInputError('')
+      setShowActionMenu(false)
+      setTrimInput({ target, source: {
+        id: outputIdentity(file), name: file.name, type: file.type, origin, workspace,
+        url: origin === 'upload' ? getUploadUrl(file.name) : getFileUrl(file.name, workspace),
+        duration: 0, width: 0, height: 0, fps: 0, has_audio: true,
+      } })
+      return
+    }
     setSendingToInput(target.id)
     setInputError('')
     try {
@@ -561,11 +592,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
           type: blob.type.startsWith(`${file.type}/`) ? blob.type : file.type === 'video' ? 'video/mp4' : 'image/png',
         })
       }
-      await sendToGalleryInput(target.id, media)
-      clearTimeout(sentToInputTimer.current)
-      setSentToInput(target.id)
-      sentToInputTimer.current = setTimeout(() => setSentToInput(''), 2000)
-      setSidebarOpen(true)
+      await acceptGalleryMedia(target, media)
     } catch (e) {
       setInputError(e instanceof Error ? e.message : 'Could not send media to this input.')
     } finally {
@@ -1006,8 +1033,8 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                   <span>{copied ? 'Prompt copied' : 'Copy prompt'}</span>
                 </button>
               )}
-              {(file.type === 'image' || file.type === 'video') && inputTargets
-                .filter(target => target.kind === 'image' || file.type === 'video')
+              {inputTargets
+                .filter(target => target.kind === file.type || (file.type === 'video' && target.kind === 'image'))
                 .map(target => (
                 <button
                   key={target.id}
@@ -1022,7 +1049,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                       : <ArrowLeftToLine size={14} className="shrink-0" />}
                   <span>{file.type === 'video'
                     ? `Use ${target.kind === 'image' ? 'current frame' : 'video'} as ${target.label}`
-                    : `Use as ${target.label}`}</span>
+                    : `Use ${file.type === 'audio' ? 'audio ' : ''}as ${target.label}`}</span>
                 </button>
               ))}
               {inputError && <p role="alert" className="px-2.5 py-2 text-xs text-red-400">{inputError}</p>}
@@ -1177,6 +1204,18 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                 <dd className="text-text-secondary">
                   {inferenceSteps} steps{guidanceScale != null ? ` · guidance ${guidanceScale}` : ''}
                 </dd>
+              </>
+            )}
+            {kreaIdentity && (
+              <>
+                <dt className="text-text-muted">Subject likeness</dt>
+                <dd className="text-text-secondary">{kreaIdentity.krea2_ref_boost}</dd>
+                {kreaReferenceCount > 1 && <>
+                  <dt className="text-text-muted">Scene likeness</dt>
+                  <dd className="text-text-secondary">{kreaIdentity.krea2_ref_boost_a}</dd>
+                </>}
+                <dt className="text-text-muted">Grounding resolution</dt>
+                <dd className="text-text-secondary">{kreaIdentity.krea2_grounding_px}px</dd>
               </>
             )}
             {isMultiWindow && (
@@ -1416,6 +1455,18 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
       )}
       {showFaceRefiner && (
         <FaceRefinerDialog initialSource={{ path: file.path || file.name, name: file.name, url: file.url }} onClose={() => setShowFaceRefiner(false)} />
+      )}
+      {trimInput && (
+        <MediaTrimDialog
+          source={trimInput.source}
+          targetId={trimInput.target.id}
+          targetLabel={trimInput.target.label}
+          onClose={() => setTrimInput(null)}
+          onUse={async media => {
+            await acceptGalleryMedia(trimInput.target, media)
+            setTrimInput(null)
+          }}
+        />
       )}
     </div>
   )

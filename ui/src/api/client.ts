@@ -1,4 +1,5 @@
 import type { DirectorModelCompatibility, H3WindowPlan, LTXWindowPlan, MiniMaxH3Reference, ProductionPlan, SavedOmniCharacter, ScailResolutionProfile } from '../types'
+import type { KreaIdentitySettings } from '../lib/kreaIdentityControls'
 
 const BASE = ''  // same origin in production; Vite proxy handles /api in dev
 
@@ -272,6 +273,7 @@ export interface StudioPreferenceSettings {
   selected_model_per_mode?: Record<string, string>
   selected_model_per_audio_sub_mode?: Record<string, string>
   inference_steps_per_model?: Record<string, number>
+  krea_identity_settings_per_model?: Record<string, KreaIdentitySettings>
   enhance_on_generation_default?: boolean
   director_music_clip_seconds?: number | null
   director_max_shot_frames_per_model?: Record<string, number>
@@ -573,11 +575,13 @@ export async function deleteEditorProject(projectId: string, workspace?: string)
 export async function probeEditorMedia(
   asset: Pick<import('../types').EditorAsset, 'name' | 'origin' | 'path' | 'workspace'>,
   workspace?: string,
+  signal?: AbortSignal,
 ): Promise<import('../types').EditorMediaProbe> {
   const res = await fetch(`${BASE}/api/v1/editor/media/probe`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ workspace, asset }),
+    signal,
   })
   if (!res.ok) {
     const error = await res.json().catch(() => ({ detail: 'Unable to inspect media' }))
@@ -606,15 +610,35 @@ export async function fetchEditorMediaPreview(
   workspace: string,
   includeProxy = false,
   proxyProfile: 'auto' | 'mobile' = 'auto',
+  signal?: AbortSignal,
 ): Promise<import('../types').EditorMediaPreview> {
   const res = await fetch(`${BASE}/api/v1/editor/media/preview`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ workspace, asset, include_proxy: includeProxy, proxy_profile: proxyProfile }),
+    signal,
   })
   if (!res.ok) {
     const error = await res.json().catch(() => ({ detail: 'Unable to prepare Editor preview' }))
     throw new Error(error.detail || 'Unable to prepare Editor preview')
+  }
+  return res.json()
+}
+
+/** Create a separate excerpt; the gallery original is never modified. */
+export async function trimGalleryMedia(
+  asset: Pick<import('../types').EditorAsset, 'name' | 'origin' | 'workspace'>,
+  startTime: number,
+  endTime: number,
+): Promise<{ filename: string; media_type: 'audio' | 'video'; mime_type: string; duration: number }> {
+  const res = await fetch(`${BASE}/api/v1/media/trim`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ asset, start_time: startTime, end_time: endTime }),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Unable to trim this clip' }))
+    throw new Error(error.detail || 'Unable to trim this clip')
   }
   return res.json()
 }

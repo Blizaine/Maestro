@@ -16,6 +16,18 @@ On mobile, settings overlays fit within the sidebar. Video Duration opens direct
 
 Image generation includes **21:9** ultrawide alongside the other aspect ratios. Choosing a fixed aspect while Resolution is **Auto** selects **720p** so the generated image uses that shape; you can then choose another resolution tier.
 
+## Krea 2 Identity Edit
+
+Krea 2 RAW and Turbo Identity Edit expose three controls in **Advanced → Generation**:
+
+- **Subject likeness** controls reference fidelity from 0 to 10. The default, 1, keeps the original behavior; **Strong likeness · 4** is a useful starting point for stronger identity preservation. High values can resist requested changes or over-copy the reference.
+- **Scene likeness** appears with two references. Image 1 supplies the scene; Image 2 supplies the subject. With one image, Subject likeness controls that image. In image editing workflows, the source image comes before any additional reference.
+- **Grounding resolution** caps the reference image's longest edge for the vision encoder, from 384 to 1536 pixels. The default is 768. Lower values can favor edits; 1024 can help preserve reference detail but uses more memory. The trained range is 384–768, so higher values are experimental. This does not change output resolution or the VAE reference size, and smaller source images are not enlarged.
+
+RAW and Turbo remember these choices independently across model switches and restarts. Each queued job keeps its submitted values. Generated image information records the controls; **Load settings**, reroll and saved presets restore them for repeatable comparisons.
+
+Identity Edit preserves the aspect ratio and content of uploaded references before grounding, then fits their latent tokens to the output grid. A portrait reference used for a landscape output is not padded into a wide image before the grounding encoder sees it. Likeness values are a tuning aid rather than a guarantee; compare with the same prompt, references and seed. Turbo always runs with guidance disabled, so its ineffective Guidance Scale control is hidden. RAW retains adjustable guidance.
+
 ## Gallery scope and search
 
 The gallery folder picker offers **All folders** as a browse-only scope. It includes
@@ -47,6 +59,20 @@ Maestro refuses deletion while an active or queued Studio job or active Director
 project still uses the file. A locked-file error leaves the item visible for retry.
 
 ## Characters and media
+
+The gallery **More** menu offers **Use as…** actions for the inputs available in
+the current sidebar mode. Images and captured video frames go to image inputs;
+videos go to video inputs; audio goes to soundtrack, voice or audio-reference
+inputs. Destination labels identify the role, including individual voices.
+
+Choosing an audio or video destination opens a trim preview. Use the waveform or
+filmstrip handles, enter exact start/end times, or choose a 3-, 5- or 10-second
+excerpt from the selected start. **Preview selection** plays that range;
+**Zoom to selection** makes short excerpts from long clips easier to adjust.
+**Use selection** creates a separate excerpt and sends it to the chosen input.
+**Use full clip** skips trimming. The gallery original stays unchanged, and the
+destination's usual file limits still apply. Current-frame image actions remain
+one-click actions.
 
 **Characters** uses the same person icon in Reference, supported Image, Viggle and Speech workflows. It opens the saved library beside the sidebar on desktop and in a sheet on mobile. A Reference character remains one card containing its appearance and voice. Speech uses its saved voice; Image uses chosen original or recovered views. Viggle can prepare a character replacement frame or accept a manually edited frame.
 

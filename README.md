@@ -107,6 +107,19 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v2.4.2 (2026-09-27)
+
+**Gallery audio reuse, clip trimming, and better Krea Identity Edit controls**
+
+- **Use gallery audio:** send songs, soundtracks and voice samples directly to compatible inputs in the active sidebar, including Director, Studio references, Speech, Revoice and YuE2.
+- **Trim before using:** choose an audio or video excerpt with a waveform or filmstrip, draggable handles, exact times and quick 3/5/10-second selections. Preview or zoom into the range, or use the full clip. Originals stay unchanged.
+- **Krea Identity Edit:** Subject likeness, separate Scene likeness for two references, and Grounding resolution for RAW and Turbo. Settings persist per model and travel with queued jobs, presets and output settings.
+- **Krea reference fixes:** preserve native reference proportions before grounding, fit reference latents without stretching, and hide Turbo's ineffective guidance control while keeping RAW guidance adjustable.
+
+Use **Update** in Pinokio, restart Maestro and refresh the browser after this release is published.
+
+[Full v2.4.2 release notes](docs/RELEASE_NOTES_V2.4.2.md) · [Validation and remaining limits](docs/VALIDATION_V2.4.2.md) · [Changelog](CHANGELOG.md)
+
 ### v2.4.1 (2026-09-25)
 
 **More Qwen Image 2.1 tools, experimental Windows 10 DLSS, and better gallery details**

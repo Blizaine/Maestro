@@ -1638,6 +1638,8 @@ function UploadZone({
         dragOver ? 'border-accent-blue bg-accent-blue/10' : 'border-border hover:border-border-light'
       }`}
     >
+      {!loading && !audioFile && <GalleryInput kind="audio"
+        label={isShortFilm ? 'Director dialogue audio' : 'Director music track'} onFile={handleFile} />}
       {loading ? (
         <div className="flex flex-col items-center gap-2 py-2">
           <Loader2 size={20} className="animate-spin text-accent-blue" />
@@ -1956,6 +1958,9 @@ function AdditionalRefsSection({ disabled = false }: { disabled?: boolean }) {
           {/* LTX uses an ID-LoRA; H3 Omni maps the sample as a native voice
               reference in each shot's Ref2VA manifest. */}
           {showVoiceReference && <div>
+            {!voiceRef && <GalleryInput kind="audio" label="Director voice reference"
+              onFile={setVoiceRef}
+              disabledReason={disabled ? 'References are currently locked.' : undefined} />}
             <div className="flex items-center justify-between mb-1">
               <span className="text-[10px] text-text-secondary"><Mic size={9} className="inline mr-0.5" />Voice ref</span>
               {!voiceRef ? (

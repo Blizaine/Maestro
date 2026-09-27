@@ -1,5 +1,6 @@
 import { Mic } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
+import { GalleryInput } from '../shared/GalleryInput'
 
 const AUDIO_ACCEPT = '.wav,.mp3,.flac,.ogg,.m4a'
 
@@ -39,6 +40,7 @@ export function VoiceRefSection() {
 
   return (
     <div className="bg-bg-tertiary border border-border rounded-lg px-3 py-2.5">
+      {!voiceRef && <GalleryInput kind="audio" label="LTX voice reference" onFile={setVoiceRef} />}
       <div className="flex items-center justify-between mb-1.5">
         <span className="text-[11px] text-text-muted uppercase tracking-wider flex items-center gap-1">
           <Mic size={10} />

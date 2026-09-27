@@ -782,7 +782,8 @@ def _normalize_studio_preferences(values, current=None):
 
     Prompt text, seeds, LoRAs, uploaded paths, and other job inputs are
     intentionally excluded. This record only remembers navigation/model
-    choices, per-model inference steps, enhancement default and the opt-in H3 accelerations.
+    choices, per-model inference steps and Krea identity controls, enhancement
+    default and the opt-in H3 accelerations.
     """
     if values is None:
         values = {}
@@ -873,6 +874,19 @@ def _normalize_studio_preferences(values, current=None):
                 raise ValueError("Remembered inference steps must be whole numbers between 1 and 1000.")
             steps[model.strip()] = int(count)
         normalized["inference_steps_per_model"] = steps
+
+    if "krea_identity_settings_per_model" in values:
+        from models.krea2.identity_controls import normalize_identity_settings
+
+        raw_identity = values["krea_identity_settings_per_model"]
+        if not isinstance(raw_identity, dict) or len(raw_identity) > 2:
+            raise ValueError("Krea identity preferences must be an edit-model-to-settings object.")
+        identity = {}
+        for model, settings in raw_identity.items():
+            if model not in ("krea2_raw_edit", "krea2_turbo_edit") or not isinstance(settings, dict):
+                raise ValueError("Krea identity preferences require a Krea Identity Edit model and settings object.")
+            identity[model] = normalize_identity_settings(settings)
+        normalized["krea_identity_settings_per_model"] = identity
 
     if "h3_optimizations" in values:
         raw_h3 = values.get("h3_optimizations")
@@ -29444,6 +29458,46 @@ def editor_project_delete(project_id: str, workspace: str = ""):
     if not deleted:
         raise HTTPException(status_code=404, detail="Editor project not found")
     return {"deleted": project_id}
+
+
+@api.post("/api/v1/media/trim")
+async def gallery_media_trim(request: Request):
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError) as error:
+        raise HTTPException(status_code=400, detail="Request body must be valid JSON.") from error
+    if not isinstance(body, dict) or not isinstance(body.get("asset"), dict):
+        raise HTTPException(status_code=400, detail="Asset must be an object.")
+    asset = body["asset"]
+    workspace = asset.get("workspace") or _get_active_workspace()
+    from services.gallery_media_trim import (
+        GalleryMediaTrimBusy,
+        GalleryMediaTrimError,
+        GalleryMediaTrimTimeout,
+        GalleryMediaTrimUnavailable,
+        trim_gallery_media,
+    )
+
+    try:
+        return await asyncio.to_thread(
+            trim_gallery_media,
+            asset,
+            body.get("start_time"),
+            body.get("end_time"),
+            save_root=_editor_save_root(),
+            workspace=workspace,
+            uploads_root=_editor_uploads_root(),
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except GalleryMediaTrimBusy as error:
+        raise HTTPException(status_code=429, detail=str(error)) from error
+    except GalleryMediaTrimTimeout as error:
+        raise HTTPException(status_code=504, detail=str(error)) from error
+    except GalleryMediaTrimUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except GalleryMediaTrimError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @api.post("/api/v1/editor/media/probe")

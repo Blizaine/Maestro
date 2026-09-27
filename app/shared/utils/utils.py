@@ -458,7 +458,7 @@ def calculate_dimensions_and_resize_image(image, canvas_height, canvas_width, fi
         image = image.resize((new_width, new_height), resample=Image.Resampling.LANCZOS) 
     return image, new_height, new_width
 
-def resize_and_remove_background(img_list, budget_width, budget_height, rm_background, any_background_ref, fit_into_canvas = 0, block_size= 16, outpainting_dims = None, outpainting_ratio = "", background_ref_outpainted = True, inpaint_color = 127.5, return_tensor = False, ignore_last_refs = 0, background_removal_color =  [255, 255, 255] ):
+def resize_and_remove_background(img_list, budget_width, budget_height, rm_background, any_background_ref, fit_into_canvas = 0, block_size= 16, outpainting_dims = None, outpainting_ratio = "", background_ref_outpainted = True, inpaint_color = 127.5, return_tensor = False, ignore_last_refs = 0, background_removal_color =  [255, 255, 255], preserve_native_size = False ):
     if rm_background:
         session = new_session() 
 
@@ -467,9 +467,12 @@ def resize_and_remove_background(img_list, budget_width, budget_height, rm_backg
     for i, img in enumerate(img_list if ignore_last_refs == 0 else img_list[:-ignore_last_refs]):
         width, height =  img.size 
         resized_mask = None
-        if any_background_ref == 1 and i==0 or any_background_ref == 2:
+        is_background_reference = (any_background_ref == 1 and i == 0) or any_background_ref == 2
+        if is_background_reference:
             if outpainting_dims is not None and background_ref_outpainted:
                 resized_image, resized_mask = fit_image_into_canvas(img, (budget_height, budget_width), inpaint_color, full_frame = True, outpainting_dims = outpainting_dims, outpainting_ratio = outpainting_ratio, return_mask= True, return_image= True)
+            elif preserve_native_size:
+                resized_image = img
             elif fit_into_canvas == 1 and img.size != (budget_width, budget_height):
                 # Fit background ref to canvas preserving aspect ratio (no stretching)
                 bg_canvas = np.ones((budget_height, budget_width, 3), dtype=np.uint8) * 127
@@ -485,6 +488,8 @@ def resize_and_remove_background(img_list, budget_width, budget_height, rm_backg
                 resized_image= img.resize((budget_width, budget_height), resample=Image.Resampling.LANCZOS)
             else:
                 resized_image =img
+        elif preserve_native_size:
+            resized_image = img
         elif fit_into_canvas == 1:
             white_canvas = np.ones((budget_height, budget_width, 3), dtype=np.uint8) * 255 
             scale = min(budget_height / height, budget_width / width)
@@ -500,7 +505,7 @@ def resize_and_remove_background(img_list, budget_width, budget_height, rm_backg
             new_height = int( round(height * scale / block_size) * block_size)
             new_width = int( round(width * scale / block_size) * block_size)
             resized_image= img.resize((new_width,new_height), resample=Image.Resampling.LANCZOS) 
-        if rm_background  and not (any_background_ref and i==0 or any_background_ref == 2) :
+        if rm_background and not is_background_reference:
             # resized_image = remove(resized_image, session=session, alpha_matting_erode_size = 1,alpha_matting_background_threshold = 70, alpha_foreground_background_threshold = 100, alpha_matting = True, bgcolor=[255, 255, 255, 0]).convert('RGB')
             resized_image = remove(resized_image, session=session, alpha_matting_erode_size = 1, alpha_matting = True, bgcolor=background_removal_color + [0]).convert('RGB')
         if return_tensor:

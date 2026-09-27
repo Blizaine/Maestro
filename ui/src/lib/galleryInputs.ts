@@ -4,7 +4,7 @@ export type GalleryInputImage = File | { url: string; name: string }
 
 export type GalleryInputTarget = {
   id: string
-  kind: 'image' | 'video'
+  kind: 'image' | 'video' | 'audio'
   label: string
   disabledReason?: string
   receive: (file: File) => void | boolean | Promise<void | boolean>

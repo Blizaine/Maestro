@@ -1,5 +1,5 @@
-import math
 from dataclasses import dataclass
+import math
 
 import torch
 import torch.nn as nn
@@ -46,7 +46,13 @@ def _attention_from_blh(q: Tensor, k: Tensor, v: Tensor, mask: Tensor | None = N
         k = rearrange(k, "B G R L D -> (B G R) L 1 D")
         v = rearrange(v, "B G R L D -> (B G R) L 1 D")
         if mask is not None:
-            mask = mask.repeat_interleave(groups * repeat, dim=0).contiguous() if batch > 1 else mask.expand(groups * repeat, -1, -1, -1)
+            if mask.shape[0] == 1 and batch > 1:
+                mask = mask.expand(batch, -1, -1, -1)
+            mask = (
+                mask.repeat_interleave(groups * repeat, dim=0).contiguous()
+                if batch > 1
+                else mask.expand(groups * repeat, -1, -1, -1)
+            )
         qkv_list = [q, k, v]
         q = k = v = None
         out = pay_attention(qkv_list, attention_mask=mask, softmax_scale=scale, recycle_q=True)
@@ -54,6 +60,114 @@ def _attention_from_blh(q: Tensor, k: Tensor, v: Tensor, mask: Tensor | None = N
     qkv_list = [q, k, v]
     q = k = v = None
     return rearrange(pay_attention(qkv_list, attention_mask=mask, softmax_scale=scale, recycle_q=True), "B L H D -> B L (H D)")
+
+
+def _reference_attention_mask(
+    mask: Tensor | None,
+    *,
+    key_length: int,
+    batch_size: int,
+    key_text_length: int,
+    reference_token_lengths: tuple[int, ...],
+    ref_boost: float,
+    ref_boost_a: float,
+    device,
+    dtype: torch.dtype,
+) -> Tensor | None:
+    """Add per-reference log weights as a broadcast key-only SDPA mask."""
+    if not reference_token_lengths:
+        return mask
+    cursor = key_text_length
+    if cursor < 0:
+        raise ValueError("Krea 2 reference attention has an invalid text prefix length.")
+    active_scales = []
+    for index, length in enumerate(reference_token_lengths):
+        if type(length) is not int or length <= 0 or cursor + length > key_length:
+            raise ValueError("Krea 2 reference token lengths do not fit the attention key sequence.")
+        if index == len(reference_token_lengths) - 1:
+            scale = float(ref_boost)
+        elif index == 0 and len(reference_token_lengths) > 1:
+            scale = float(ref_boost_a)
+        else:
+            scale = 1.0
+        active_scales.append(scale)
+        cursor += length
+    if all(scale == 1.0 for scale in active_scales):
+        return mask
+
+    key_bias = torch.zeros((batch_size, 1, 1, key_length), device=device, dtype=dtype)
+    cursor = key_text_length
+    for index, length in enumerate(reference_token_lengths):
+        if index == len(reference_token_lengths) - 1:
+            scale = float(ref_boost)
+        elif index == 0 and len(reference_token_lengths) > 1:
+            scale = float(ref_boost_a)
+        else:
+            scale = 1.0
+        if scale != 1.0:
+            key_bias[..., cursor:cursor + length] = math.log(max(scale, 1e-4))
+        cursor += length
+
+    if mask is None:
+        return key_bias
+    if mask.dtype == torch.bool:
+        additive_mask = torch.zeros(mask.shape, device=mask.device, dtype=key_bias.dtype)
+        additive_mask.masked_fill_(~mask, float("-inf"))
+    else:
+        additive_mask = mask.to(device=mask.device, dtype=key_bias.dtype)
+    return additive_mask + key_bias
+
+
+def _attention_with_reference_bias(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    *,
+    mask: Tensor | None,
+    scale: float | None,
+    gqa: bool,
+    key_text_length: int,
+    reference_token_lengths: tuple[int, ...] | None,
+    target_len: int | None,
+    ref_boost: float,
+    ref_boost_a: float,
+    target_query_start: int | None = None,
+) -> Tensor:
+    references = tuple(reference_token_lengths or ())
+    biased_mask = _reference_attention_mask(
+        mask,
+        key_length=k.shape[1],
+        batch_size=q.shape[0],
+        key_text_length=key_text_length,
+        reference_token_lengths=references,
+        ref_boost=ref_boost,
+        ref_boost_a=ref_boost_a,
+        device=k.device,
+        dtype=q.dtype,
+    )
+    if biased_mask is mask:
+        return _attention_from_blh(q, k, v, mask=mask, scale=scale, gqa=gqa)
+
+    query_start = (
+        key_text_length + sum(references)
+        if target_query_start is None
+        else target_query_start
+    )
+    if type(query_start) is not int or query_start < 0 or query_start >= q.shape[1]:
+        raise ValueError("Krea 2 reference attention target query start is outside the sequence.")
+    if target_len is not None and (type(target_len) is not int or target_len <= 0 or query_start + target_len > q.shape[1]):
+        raise ValueError("Krea 2 reference attention target length is outside the sequence.")
+    if query_start:
+        prefix = _attention_from_blh(q[:, :query_start], k, v, mask=mask, scale=scale, gqa=gqa)
+    else:
+        prefix = None
+    # Any padded queries after the target are masked as keys and discarded by
+    # the denoiser output slice. Applying the same key bias to those dead
+    # queries lets the live target and padding share one broadcast SDPA call.
+    target_and_padding = _attention_from_blh(
+        q[:, query_start:], k, v, mask=biased_mask, scale=scale, gqa=gqa
+    )
+    return target_and_padding if prefix is None else torch.cat((prefix, target_and_padding), dim=1)
 
 
 def attention(
@@ -66,6 +180,10 @@ def attention(
     neg_k: Tensor | None = None,
     neg_v: Tensor | None = None,
     neg_mask: Tensor | None = None,
+    reference_token_lengths: tuple[int, ...] | None = None,
+    target_len: int | None = None,
+    ref_boost: float = 1.0,
+    ref_boost_a: float = 1.0,
 ) -> Tensor:
     q, k, v = qkv_list
     qkv_list.clear()
@@ -89,11 +207,37 @@ def attention(
         if not img_start <= query_start < query_end <= q.shape[1]:
             raise ValueError(f"Krea 2 NAG target query range [{query_start}, {query_end}) is invalid for sequence length {q.shape[1]}.")
         guidance_q = q[:, query_start:query_end].clone()
-        x_pos = _attention_from_blh(q, k, v, mask=mask, scale=scale, gqa=gqa)
+        x_pos = _attention_with_reference_bias(
+            q,
+            k,
+            v,
+            mask=mask,
+            scale=scale,
+            gqa=gqa,
+            key_text_length=txt_len,
+            reference_token_lengths=reference_token_lengths,
+            target_len=target_len,
+            ref_boost=ref_boost,
+            ref_boost_a=ref_boost_a,
+            target_query_start=query_start,
+        )
         neg_full_mask = None if mask is None else torch.cat((neg_mask, mask[..., img_start:]), dim=-1)
         k_neg = torch.cat((neg_k, k[:, img_start:]), dim=1)
         v_neg = torch.cat((neg_v, v[:, img_start:]), dim=1)
-        x_guidance = _attention_from_blh(guidance_q, k_neg, v_neg, mask=neg_full_mask, scale=scale, gqa=gqa)
+        x_guidance = _attention_with_reference_bias(
+            guidance_q,
+            k_neg,
+            v_neg,
+            mask=neg_full_mask,
+            scale=scale,
+            gqa=gqa,
+            key_text_length=neg_k.shape[1],
+            reference_token_lengths=reference_token_lengths,
+            target_len=guidance_q.shape[1],
+            ref_boost=ref_boost,
+            ref_boost_a=ref_boost_a,
+            target_query_start=0,
+        )
         q = k = v = neg_k = neg_v = k_neg = v_neg = neg_mask = neg_full_mask = None
 
         x_pos_img = x_pos[:, query_start:query_end]
@@ -116,7 +260,19 @@ def attention(
         x_pos_img.copy_(x_guidance)
         x_guidance = x_pos_img = None
         return x_pos
-    out = _attention_from_blh(q, k, v, mask=mask, scale=scale, gqa=gqa)
+    out = _attention_with_reference_bias(
+        q,
+        k,
+        v,
+        mask=mask,
+        scale=scale,
+        gqa=gqa,
+        key_text_length=txt_len or 0,
+        reference_token_lengths=reference_token_lengths,
+        target_len=target_len,
+        ref_boost=ref_boost,
+        ref_boost_a=ref_boost_a,
+    )
     q = k = v = None
     return out
 
@@ -305,6 +461,10 @@ class Attention(nn.Module):
         NAG: dict | None = None,
         neg_context: Tensor | None = None,
         neg_mask: Tensor | None = None,
+        reference_token_lengths: tuple[int, ...] | None = None,
+        target_len: int | None = None,
+        ref_boost: float = 1.0,
+        ref_boost_a: float = 1.0,
     ) -> Tensor:
         if isinstance(qkv, list):
             qkv_ = qkv[0]
@@ -332,7 +492,20 @@ class Attention(nn.Module):
             q, k = ropeapply(q, k, freqs)
         qkv_list = [q, k, v]
         q = k = v = None
-        out = attention(qkv_list, mask=mask, gqa=self.gqa, txt_len=txt_len, NAG=NAG, neg_k=neg_k, neg_v=neg_v, neg_mask=neg_mask)
+        out = attention(
+            qkv_list,
+            mask=mask,
+            gqa=self.gqa,
+            txt_len=txt_len,
+            NAG=NAG,
+            neg_k=neg_k,
+            neg_v=neg_v,
+            neg_mask=neg_mask,
+            reference_token_lengths=reference_token_lengths,
+            target_len=target_len,
+            ref_boost=ref_boost,
+            ref_boost_a=ref_boost_a,
+        )
         neg_k = neg_v = neg_mask = None
         gate = F.sigmoid(self.gate(qkv))
         del qkv
@@ -418,6 +591,10 @@ class SingleStreamBlock(nn.Module):
         NAG: dict | None = None,
         neg_context: Tensor | None = None,
         neg_mask: Tensor | None = None,
+        reference_token_lengths: tuple[int, ...] | None = None,
+        target_len: int | None = None,
+        ref_boost: float = 1.0,
+        ref_boost_a: float = 1.0,
     ) -> Tensor:
         prescale, preshift, pregate, postscale, postshift, postgate = self.mod(vec)
         x_list = [self.prenorm(x)]
@@ -425,7 +602,19 @@ class SingleStreamBlock(nn.Module):
         if NAG is not None:
             neg_context = self.prenorm(neg_context)
             neg_context.mul_(prescale).add_(preshift)
-        attn_out = self.attn(x_list, freqs, mask, txt_len=txt_len, NAG=NAG, neg_context=neg_context, neg_mask=neg_mask)
+        attn_out = self.attn(
+            x_list,
+            freqs,
+            mask,
+            txt_len=txt_len,
+            NAG=NAG,
+            neg_context=neg_context,
+            neg_mask=neg_mask,
+            reference_token_lengths=reference_token_lengths,
+            target_len=target_len,
+            ref_boost=ref_boost,
+            ref_boost_a=ref_boost_a,
+        )
         neg_context = neg_mask = None
         attn_out.mul_(pregate)
         x.add_(attn_out)
@@ -568,29 +757,80 @@ class SingleStreamDiT(nn.Module):
         neg_context: Tensor | None = None,
         neg_mask: Tensor | None = None,
         target_len: int | None = None,
+        reference_token_lengths: tuple[int, ...] | None = None,
+        ref_boost: float = 1.0,
+        ref_boost_a: float = 1.0,
     ) -> Tensor:
         img = self.first(img)
         combined, txtlen, imglen, freqs, mask = self._build_stream(img, context, pos, mask)
         del img, context, pos
         for block in self.blocks:
-            combined = block(combined, tvec, freqs, mask, txt_len=txtlen, NAG=NAG, neg_context=neg_context, neg_mask=neg_mask)
+            combined = block(
+                combined,
+                tvec,
+                freqs,
+                mask,
+                txt_len=txtlen,
+                NAG=NAG,
+                neg_context=neg_context,
+                neg_mask=neg_mask,
+                reference_token_lengths=reference_token_lengths,
+                target_len=target_len,
+                ref_boost=ref_boost,
+                ref_boost_a=ref_boost_a,
+            )
             if getattr(self, "_interrupt", False):
                 return None
             self.txtfusion._interrupt = getattr(self, "_interrupt", False)
         target_len = imglen if target_len is None else target_len
         return self.last([combined[:, txtlen + imglen - target_len : txtlen + imglen]], t)
 
-    def forward_cfg(self, img: Tensor, context: Tensor, uncond_context: Tensor, t: Tensor, tvec: Tensor, pos: Tensor, uncond_pos: Tensor, mask: Tensor, uncond_mask: Tensor, target_len: int | None = None) -> tuple[Tensor | None, Tensor | None]:
+    def forward_cfg(
+        self,
+        img: Tensor,
+        context: Tensor,
+        uncond_context: Tensor,
+        t: Tensor,
+        tvec: Tensor,
+        pos: Tensor,
+        uncond_pos: Tensor,
+        mask: Tensor,
+        uncond_mask: Tensor,
+        target_len: int | None = None,
+        reference_token_lengths: tuple[int, ...] | None = None,
+        ref_boost: float = 1.0,
+        ref_boost_a: float = 1.0,
+    ) -> tuple[Tensor | None, Tensor | None]:
         img = self.first(img)
         share_freqs = pos.shape == uncond_pos.shape
         combined, txtlen, imglen, freqs, mask = self._build_stream(img, context, pos, mask)
         uncond_combined, uncond_txtlen, uncond_imglen, uncond_freqs, uncond_mask = self._build_stream(img, uncond_context, uncond_pos, uncond_mask, freqs=freqs if share_freqs else None)
         del img, context, uncond_context, pos, uncond_pos
         for block in self.blocks:
-            combined = block(combined, tvec, freqs, mask)
+            combined = block(
+                combined,
+                tvec,
+                freqs,
+                mask,
+                txt_len=txtlen,
+                target_len=target_len,
+                reference_token_lengths=reference_token_lengths,
+                ref_boost=ref_boost,
+                ref_boost_a=ref_boost_a,
+            )
             if getattr(self, "_interrupt", False):
                 return None, None
-            uncond_combined = block(uncond_combined, tvec, uncond_freqs, uncond_mask)
+            uncond_combined = block(
+                uncond_combined,
+                tvec,
+                uncond_freqs,
+                uncond_mask,
+                txt_len=uncond_txtlen,
+                target_len=target_len,
+                reference_token_lengths=reference_token_lengths,
+                ref_boost=ref_boost,
+                ref_boost_a=ref_boost_a,
+            )
             if getattr(self, "_interrupt", False):
                 return None, None
         target_len = imglen if target_len is None else target_len

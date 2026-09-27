@@ -312,6 +312,9 @@ export function ToolsPanel({
             const label = revoiceMode === 'two' ? (idx === 0 ? 'Voice A' : 'Voice B') : 'Reference Voice'
             return (
               <div key={idx}>
+                {(!ref || !ref.path) && <GalleryInput kind="audio"
+                  label={`Revoice ${label.toLowerCase()}`} onFile={file => handleVcUpload(idx, file)}
+                  disabledReason={vcUploading === idx ? `Uploading ${label.toLowerCase()}…` : undefined} />}
                 <label className="text-[10px] text-text-muted uppercase tracking-wider mb-1 block">{label}</label>
                 {!ref || !ref.path ? (
                   <div

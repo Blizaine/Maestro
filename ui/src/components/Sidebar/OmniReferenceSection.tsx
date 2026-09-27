@@ -497,7 +497,12 @@ export function OmniReferenceSection({
     }
 
     const { reference, index } = item
+    const galleryDisabledReason = disabled ? 'References are currently locked.'
+      : uploading ? 'Uploading a reference…' : undefined
     return <div className="space-y-2">
+      {reference.type === 'audio' && <GalleryInput kind="audio"
+        label={`${labels[index]} replacement`} onFile={file => replaceReference(reference, file)}
+        disabledReason={galleryDisabledReason} />}
       <div className="flex flex-wrap gap-2">
         <label className="min-w-[140px] flex-1 space-y-1 text-[11px] text-text-muted">
           <span>Name</span>
@@ -534,6 +539,9 @@ export function OmniReferenceSection({
           onChange={event => patchReference(index, { include_audio: event.target.checked })} className="h-3.5 w-3.5 accent-accent-blue" />
         Include soundtrack
       </label>}
+      {reference.type === 'video' && <GalleryInput kind="audio"
+        label={`Audio for ${labels[index]}`} onFile={file => attachAudio(reference.id, file)}
+        disabledReason={galleryDisabledReason} />}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-text-secondary">
         <label className="inline-flex min-h-8 cursor-pointer items-center hover:text-text-primary focus-within:underline">
           Replace {reference.type}
@@ -559,13 +567,13 @@ export function OmniReferenceSection({
 
   return (
     <section className="space-y-2">
-      {(['image', 'video'] as const).map(kind => <GalleryInput key={kind} kind={kind}
+      {(['image', 'video', 'audio'] as const).map(kind => <GalleryInput key={kind} kind={kind}
         label={`${scope === 'director' ? 'Director ' : ''}reference ${kind}`}
         getImages={() => references.filter(ref => ref.type === 'image').map(ref => ({url: ref.url || api.getFileUrl(ref.filename), name: ref.character_name || ref.filename}))}
         onFile={file => addFiles([file])}
         disabledReason={disabled ? 'References are currently locked.' : uploading ? 'Uploading a reference…'
           : references.length >= limits.total || references.filter(item => item.type === kind).length >= limits[kind]
-            ? `${kind === 'image' ? 'Image' : 'Video'} reference limit reached.` : undefined} />)}
+            ? `${kind === 'image' ? 'Image' : kind === 'video' ? 'Video' : 'Audio'} reference limit reached.` : undefined} />)}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
           <label className="text-[11px] text-text-muted uppercase tracking-wider">
@@ -620,6 +628,10 @@ export function OmniReferenceSection({
               </button>
             </div>
 
+            {characterFormOpen && libraryOpen && <GalleryInput kind="audio"
+              label={`${scope === 'director' ? 'Director ' : ''}saved character voice`}
+              onFile={file => setCharacterVoice(file)}
+              disabledReason={disabled ? 'References are currently locked.' : savingCharacter ? 'Saving character…' : undefined} />}
             {characterFormOpen && (
               <div className="rounded-md border border-border bg-bg-primary p-2 space-y-1.5">
                 <input

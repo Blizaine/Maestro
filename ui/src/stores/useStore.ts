@@ -1,5 +1,6 @@
 import { galleryOutput, galleryOutputIsOlder, outputIdentity } from '../lib/galleryIdentity'
 import { create } from 'zustand'
+import { isKreaIdentityEdit, normalizeKreaIdentitySettings, type KreaIdentitySettings } from '../lib/kreaIdentityControls'
 import type { SavedOmniCharacter, TtsVoice } from '../types'
 import { applyTtsVoices, ttsAudioModeForCount, ttsCharacterEnhancePrompt, ttsSpeakingVoiceCount, ttsVoiceLimit, ttsVoicePaths } from '../lib/ttsVoices'
 import { vigglePreparationKey, viggleTimeline } from '../lib/viggle'
@@ -52,6 +53,7 @@ let _studioPreferencesSaveTask: Promise<void> = Promise.resolve()
 let _directorMusicClipChanged = false
 let _directorGpuLimitsChanged = false
 let _enhancementDefaultChanged = false
+let _kreaIdentitySettingsChanged = false
 const STUDIO_VIDEO_CREATE_ROUTE_KEY = 'maestro_studio_video_create_route_v1'
 
 type StudioVideoRoutePreferences = {
@@ -418,6 +420,7 @@ interface PersistedModeSettings {
   audioSubMode?: import('../types').AudioSubMode
   selectedModelPerAudioSubMode?: Partial<Record<import('../types').AudioSubMode, string>>
   inferenceStepsPerModel?: Record<string, number>
+  kreaIdentitySettingsPerModel?: Record<string, KreaIdentitySettings>
   enhanceOnGenerationDefault?: boolean
   h3OptimizationPreferences?: {
     override_attention?: '' | 'sol' | 'sla' | 'sdpa'
@@ -589,6 +592,7 @@ function _saveSettings(
       audioSubMode: state.audioSubMode ?? previous.audioSubMode,
       selectedModelPerAudioSubMode: state.selectedModelPerAudioSubMode ?? previous.selectedModelPerAudioSubMode,
       inferenceStepsPerModel: state.inferenceStepsPerModel ?? previous.inferenceStepsPerModel,
+      kreaIdentitySettingsPerModel: state.kreaIdentitySettingsPerModel ?? previous.kreaIdentitySettingsPerModel,
       enhanceOnGenerationDefault: state.enhanceOnGenerationDefault ?? previous.enhanceOnGenerationDefault,
       h3OptimizationPreferences: state.h3OptimizationPreferences ?? previous.h3OptimizationPreferences,
     }
@@ -663,6 +667,7 @@ function _loadSettings(): PersistedModeSettings | null {
         audioSubMode: parsed.audioSubMode,
         selectedModelPerAudioSubMode: parsed.selectedModelPerAudioSubMode || {},
         inferenceStepsPerModel: _normalizeRememberedSteps(parsed.inferenceStepsPerModel),
+        kreaIdentitySettingsPerModel: _normalizeRememberedKreaSettings(parsed.kreaIdentitySettingsPerModel),
         enhanceOnGenerationDefault: parsed.enhanceOnGenerationDefault === true,
         h3OptimizationPreferences: parsed.h3OptimizationPreferences || {},
         _loraFilenameSnapshot: snapshot,
@@ -769,6 +774,29 @@ function _normalizeRememberedSteps(values: unknown): Record<string, number> {
   )).slice(0, 1000))
 }
 
+function _normalizeRememberedKreaSettings(values: unknown): Record<string, KreaIdentitySettings> {
+  if (!values || typeof values !== 'object' || Array.isArray(values)) return {}
+  return Object.fromEntries(Object.entries(values)
+    .filter(([model, settings]) => isKreaIdentityEdit(model)
+      && settings && typeof settings === 'object' && !Array.isArray(settings))
+    .map(([model, settings]) => [model, normalizeKreaIdentitySettings(settings)]))
+}
+
+function _kreaCustomSettingsForModel(
+  existing: GenerateParams['custom_settings'],
+  modelType: string,
+  remembered: Record<string, KreaIdentitySettings>,
+): GenerateParams['custom_settings'] {
+  const settings = { ...existing }
+  delete settings.krea2_ref_boost
+  delete settings.krea2_ref_boost_a
+  delete settings.krea2_grounding_px
+  if (isKreaIdentityEdit(modelType)) {
+    Object.assign(settings, normalizeKreaIdentitySettings(remembered[modelType]))
+  }
+  return Object.keys(settings).length ? settings : undefined
+}
+
 function _rememberedModelSteps(
   state: Pick<AppState, 'inferenceStepsPerModel'>,
   modelType: string,
@@ -783,7 +811,7 @@ function _rememberedModelSteps(
 }
 
 function _applyModelDefaults(
-  storeGet: () => Pick<AppState, 'selectedModelPerMode' | 'generationMode' | 'params' | 'inferenceStepsPerModel' | 'modelOptions'>,
+  storeGet: () => Pick<AppState, 'selectedModelPerMode' | 'generationMode' | 'params' | 'inferenceStepsPerModel' | 'kreaIdentitySettingsPerModel' | 'modelOptions'>,
   storeSet: (fn: (s: { params: GenerateParams }) => { params: GenerateParams }) => void,
   modelType: string,
 ): void {
@@ -826,6 +854,7 @@ function _applyModelDefaults(
         overrides[field] = (d as Record<string, unknown>)[field]
       }
     }
+    overrides.custom_settings = _kreaCustomSettingsForModel(state.params.custom_settings, modelType, state.kreaIdentitySettingsPerModel)
     if (Object.keys(overrides).length > 0) {
       storeSet(s => ({ params: { ...s.params, ...overrides } as GenerateParams }))
     }
@@ -1543,6 +1572,7 @@ interface AppState {
   selectedModelPerAudioSubMode: Partial<Record<import('../types').AudioSubMode, string>>
   /** Step choices are independent for each model and survive restarts. */
   inferenceStepsPerModel: Record<string, number>
+  kreaIdentitySettingsPerModel: Record<string, KreaIdentitySettings>
   /** H3 accelerations live outside per-mode params so visiting Audio/Image
    *  cannot erase the user's Video optimization choices. */
   h3OptimizationPreferences: {
@@ -2947,7 +2977,7 @@ export function shouldEnhanceOnGeneration(state: Pick<AppState,
   return state.enhanceOnGenerationDefault && !hasEnhancedPrompt && !hasEnhancedWindows
 }
 
-/** Persist navigation/model choices, step counts, enhancement and H3 acceleration preferences.
+/** Persist navigation/model choices, step counts, Krea identity, enhancement and H3 acceleration preferences.
  *  This deliberately does not restore project state, prompts, uploads,
  *  seeds, LoRAs, or other Advanced controls. The server mirror makes the
  *  choices survive Pinokio assigning a different browser origin/port. */
@@ -2962,6 +2992,8 @@ function _persistStickyStudioPreferences(state: AppState) {
   // Do not replace a saved opt-in with the store's initial false value.
   const enhancementDefault = _studioPreferencesHydrated || _enhancementDefaultChanged
     ? state.enhanceOnGenerationDefault : undefined
+  const kreaIdentitySettings = _studioPreferencesHydrated || _kreaIdentitySettingsChanged
+    ? state.kreaIdentitySettingsPerModel : undefined
   _saveSettings({
     generationMode: durableGenerationMode,
     selectedModelPerMode: state.selectedModelPerMode,
@@ -2973,6 +3005,7 @@ function _persistStickyStudioPreferences(state: AppState) {
     audioSubMode: state.audioSubMode,
     selectedModelPerAudioSubMode: state.selectedModelPerAudioSubMode,
     inferenceStepsPerModel: state.inferenceStepsPerModel,
+    kreaIdentitySettingsPerModel: kreaIdentitySettings,
     enhanceOnGenerationDefault: enhancementDefault,
     h3OptimizationPreferences,
   }, state.loraIdByFilename)
@@ -2990,6 +3023,7 @@ function _persistStickyStudioPreferences(state: AppState) {
     ),
     h3_optimizations: h3OptimizationPreferences,
     inference_steps_per_model: state.inferenceStepsPerModel,
+    krea_identity_settings_per_model: kreaIdentitySettings,
     enhance_on_generation_default: enhancementDefault,
     ...(_musicDefaultsVersion > 0 ? {music_defaults_version: _musicDefaultsVersion} : {}),
     ...(_studioPreferencesHydrated ? {director_music_model: state.directorMusicModel} : {}),
@@ -3006,6 +3040,22 @@ function _persistStickyStudioPreferences(state: AppState) {
     .catch(error => {
       console.warn('Failed to save Studio preferences:', error)
     })
+}
+
+function _rememberKreaIdentitySettings(
+  storeGet: () => AppState,
+  storeSet: (update: Pick<AppState, 'kreaIdentitySettingsPerModel'>) => void,
+  modelType: string,
+  value: unknown,
+) {
+  if (!isKreaIdentityEdit(modelType)) return
+  const state = storeGet()
+  const settings = normalizeKreaIdentitySettings(value)
+  const previous = state.kreaIdentitySettingsPerModel[modelType]
+  if (previous && Object.entries(settings).every(([key, setting]) => previous[key as keyof KreaIdentitySettings] === setting)) return
+  _kreaIdentitySettingsChanged = true
+  storeSet({ kreaIdentitySettingsPerModel: { ...state.kreaIdentitySettingsPerModel, [modelType]: settings } })
+  _persistStickyStudioPreferences(storeGet())
 }
 
 function _rememberInferenceSteps(
@@ -3667,6 +3717,7 @@ export const useStore = create<AppState>((set, get) => ({
   audioSubMode: 'speech' as import('../types').AudioSubMode,
   selectedModelPerAudioSubMode: {} as Partial<Record<import('../types').AudioSubMode, string>>,
   inferenceStepsPerModel: {},
+  kreaIdentitySettingsPerModel: {},
   h3OptimizationPreferences: {
     override_attention: '',
     skip_steps_cache_type: '',
@@ -4043,6 +4094,7 @@ export const useStore = create<AppState>((set, get) => ({
       set({ savedParamsPerMode: updatedSavedParams })
     }
     if (key === 'num_inference_steps') _rememberInferenceSteps(get, set, get().params.model_type, value)
+    if (key === 'custom_settings') _rememberKreaIdentitySettings(get, set, get().params.model_type, value)
     if (
       key === 'minimax_h3_references'
       || key === 'image_start'
@@ -5174,6 +5226,11 @@ export const useStore = create<AppState>((set, get) => ({
         studioPreferences?.inference_steps_per_model ?? saved?.inferenceStepsPerModel,
       )
       set({ inferenceStepsPerModel: restoredInferenceSteps })
+      if (shouldHydrateStudioPreferences && !_kreaIdentitySettingsChanged) {
+        set({ kreaIdentitySettingsPerModel: _normalizeRememberedKreaSettings(
+          studioPreferences?.krea_identity_settings_per_model ?? saved?.kreaIdentitySettingsPerModel,
+        ) })
+      }
       const selectedModelPerMode: Partial<Record<GenerationMode, string>> = {
         ...(saved?.selectedModelPerMode || {}),
         ...(durableConfigured
@@ -8762,6 +8819,9 @@ export const useStore = create<AppState>((set, get) => ({
           flow_shift: params.flow_shift,
           self_refiner_setting: params.self_refiner_setting,
           stage2_steps: params.stage2_steps,
+          ...(isKreaIdentityEdit(params.model_type)
+            ? { custom_settings: { ...normalizeKreaIdentitySettings(params.custom_settings) } }
+            : {}),
         },
       })
       set(s => ({ presets: [...s.presets, preset] }))
@@ -8781,6 +8841,7 @@ export const useStore = create<AppState>((set, get) => ({
       loraWeights: preset.lora_weights || {},
     }))
     _rememberInferenceSteps(get, set, get().params.model_type, newParams.num_inference_steps)
+    if (newParams.custom_settings) _rememberKreaIdentitySettings(get, set, get().params.model_type, newParams.custom_settings)
   },
 
   deletePreset: async (id) => {
@@ -8974,6 +9035,7 @@ export const useStore = create<AppState>((set, get) => ({
       }
       const rememberedSteps = _rememberedModelSteps(activeState, modelType, options)
       if (rememberedSteps != null) paramUpdates.num_inference_steps = rememberedSteps
+      paramUpdates.custom_settings = _kreaCustomSettingsForModel(activeState.params.custom_settings, modelType, activeState.kreaIdentitySettingsPerModel)
       if (options.default_guidance_scale != null) {
         paramUpdates.guidance_scale = options.default_guidance_scale
       }
@@ -11345,6 +11407,7 @@ export const useStore = create<AppState>((set, get) => ({
       params: {
         ...s.params,
         model_type: modelType,
+        custom_settings: _kreaCustomSettingsForModel(s.params.custom_settings, modelType, s.kreaIdentitySettingsPerModel),
         activated_loras: [],
         loras_multipliers: '',
         minimax_h3_turbo_mode: undefined,
@@ -12200,6 +12263,11 @@ export const useStore = create<AppState>((set, get) => ({
     newParams.custom_settings = Object.keys(
       restoredH3LongSequenceSettings,
     ).length > 0 ? restoredH3LongSequenceSettings : undefined
+    if (isKreaIdentityEdit(modelType)) {
+      // Older outputs used the neutral defaults. Their recipe must not borrow
+      // a newer preference that would silently change a reroll.
+      newParams.custom_settings = { ...normalizeKreaIdentitySettings(restoredCustomSettings) }
+    }
     if (modelType === 'yue2') {
       // Keep the complete music selection when loading or rerolling a song.
       // Runtime-only LoRA fields are not part of the generic custom-setting UI.
@@ -12650,6 +12718,8 @@ export const useStore = create<AppState>((set, get) => ({
         ttsVoices: restoredVoices,
       } : {}),
     }))
+
+    _rememberKreaIdentitySettings(get, set, modelType, newParams.custom_settings)
 
     const _probeRestoredVideo = (
       file: File | null,

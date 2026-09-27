@@ -4,6 +4,7 @@ import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { MediaFinishingControls } from './MediaFinishingControls'
 import { dlssSpatialOptions, useDlssAvailability } from '../../lib/mediaFlow'
+import { GalleryInput } from '../shared/GalleryInput'
 
 const baseOptions = [
   { value: '', label: 'None' },
@@ -207,6 +208,9 @@ export function PostProcessing({ expanded = false }: { expanded?: boolean }) {
                     const label = voiceCloneMode === 'two' ? (idx === 0 ? 'Voice A' : 'Voice B') : 'Reference Voice'
                     return (
                       <div key={idx}>
+                        {(!ref || !ref.path) && <GalleryInput kind="audio"
+                          label={`SeedVC ${label.toLowerCase()}`} onFile={file => handleVcUpload(idx, file)}
+                          disabledReason={vcUploading === idx ? `Uploading ${label.toLowerCase()}…` : undefined} />}
                         <label className="text-[10px] text-text-muted uppercase tracking-wider mb-1 block">{label}</label>
                         {!ref || !ref.path ? (
                           <div

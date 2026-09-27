@@ -169,6 +169,16 @@ export function AudioModeSection() {
         selectedIds={ttsVoices.slice(0, ttsVoiceCount).flatMap(voice => voice.characterId ? [voice.characterId] : [])}
         canAdd={canAddCharacter} disabled={uploading || modelOptionsLoading} switchToClone={switchToClone}
       />}
+      {!isAudioOnly && needsAudioUpload && <GalleryInput kind="audio" label="audio prompt source"
+        onFile={file => handleLegacyUpload(file, 'audio_guide', setAudioGuideFilename)}
+        disabledReason={uploading ? 'Uploading audio…' : undefined} />}
+      {isAudioOnly && maxVoiceCount > 0 && ttsVoiceCount > 0 && ttsVoices.slice(0, ttsVoiceCount).map((_, index) => (
+        <GalleryInput key={`voice-${index}`} kind="audio"
+          label={modelOptions.architecture === 'index_tts2' && audioBaseMode === 'AB' && index === 1
+            ? 'emotion reference' : `voice ${index + 1} reference`}
+          onFile={file => handleVoiceUpload(file, index)}
+          disabledReason={uploading ? 'Uploading a voice reference…' : modelOptionsLoading ? 'Model options are loading.' : undefined} />
+      ))}
       {error && <p role="alert" className="text-[10px] text-indicator-error">{error}</p>}
       {/* Audio mode selector — shown for any model that exposes audio_prompt_type_sources
           UNLESS the model opted into voice-count-driven mode (KugelAudio). For those,

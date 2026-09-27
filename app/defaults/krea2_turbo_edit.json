@@ -13,5 +13,10 @@
     "model_mode": 0,
     "batch_size": 1,
     "num_inference_steps": 8,
-    "guidance_scale": 0
+    "guidance_scale": 0,
+    "custom_settings": {
+        "krea2_ref_boost": 1.0,
+        "krea2_ref_boost_a": 1.0,
+        "krea2_grounding_px": 768
+    }
 }

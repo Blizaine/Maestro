@@ -57,6 +57,8 @@ const read = async endpoint => {
       const json=body=>route.fulfill({json:body});
       if(key==='/') return route.fulfill({contentType:'text/html',body:'<meta name="viewport" content="width=device-width,initial-scale=1"><div id="root" style="display:flex;height:100dvh"></div>'});
       if(key==='/api/v1/models') return json(catalogue);
+      if(key==='/api/v1/editor/media/probe') return json({duration:2,width:64,height:64,fps:10,has_audio:false});
+      if(key==='/api/v1/editor/media/preview') return json({preview_id:'fixture',waveform:[]});
       if(key.includes('/model-options/')) return json(options[key.split('/').pop()] || {});
       if(key.includes('/defaults/')) return json({});
       if(key==='/api/v1/upload') {
@@ -119,6 +121,12 @@ const read = async endpoint => {
     const send=async(index,label)=>{
       const button=await menu(index,label);
       await button.click();
+      if(label.startsWith('Use video as ')) {
+        await page.getByRole('button',{name:'Use full clip',exact:true}).click();
+        // The trim preview closes the menu, so reopen it to inspect success.
+        await page.getByRole('dialog').waitFor({state:'hidden'});
+        await menu(index,label);
+      }
       try {await button.locator('svg.text-accent-green').waitFor({timeout:10000});}
       catch(error) {
         console.error('Failed destination',label,await page.evaluate(()=>({
@@ -230,9 +238,11 @@ const read = async endpoint => {
     await configure('video','animate','viggle_animate');
     failUpload=true;
     await (await menu(1,'Use video as Animate control video')).click();
-    await page.locator('[data-feed-index="1"]').getByRole('alert').filter({hasText:'Could not add media'}).waitFor();
+    await page.getByRole('button',{name:'Use full clip',exact:true}).click();
+    await page.getByRole('dialog').getByRole('alert').filter({hasText:'Could not add media'}).waitFor();
     assert.equal(await state(()=>window.store.getState().params.video_guide),undefined,'A failed upload cannot claim success or set an input');
     failUpload=false;
+    await page.getByRole('button',{name:'Close trim preview',exact:true}).click();
 
     // A removed input can never receive a late gallery fetch.
     const oldId=await state(()=>window.galleryInputs.getState().targets[0].id);

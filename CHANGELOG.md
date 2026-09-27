@@ -3,6 +3,34 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [2.4.2] - 2026-09-27
+
+Gallery audio reuse and visual clip trimming, plus Krea Identity Edit controls
+and reference preparation fixes.
+
+- Route gallery audio to compatible inputs in the active sidebar: soundtracks,
+  voice samples, reference audio, Director music/dialogue, mixer tracks and
+  YuE2 source songs. Respect visible inputs, capacity and existing upload rules.
+- Add audio/video trim previews with waveforms or filmstrips, draggable and
+  keyboard-accessible range handles, exact times, 3/5/10-second shortcuts,
+  selection playback and timeline zoom. Save a separate excerpt or use the
+  original full clip; preserve the source workspace and check destination
+  availability before sending. Image/current-frame actions remain direct.
+- Add Krea RAW/Turbo Identity Edit subject and scene likeness controls and
+  grounding resolution, with per-model persistence, queue/preset serialization
+  and output-settings restoration. Record the chosen controls in Media Info.
+- Preserve Krea edit references at native aspect before grounding and fit
+  reference latents to the output grid without stretching. Keep other models'
+  preprocessing and explicit outpaint behavior unchanged.
+- Normalize Turbo guidance to its actual value of zero and hide the ineffective
+  control; retain RAW guidance. Validate identity settings before generation.
+
+The Linux DLSS protocol-test portability fix was already published after
+v2.4.1 and is included in this release's baseline.
+
+See [release notes](docs/RELEASE_NOTES_V2.4.2.md) and
+[validation scope](docs/VALIDATION_V2.4.2.md).
+
 ## [2.4.1] - 2026-09-25
 
 Expanded Qwen Image 2.1 editing and acceleration, experimental Windows 10

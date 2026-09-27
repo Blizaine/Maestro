@@ -3,7 +3,9 @@
 import ast
 import json
 import os
+import sys
 import unittest
+from unittest.mock import patch
 
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -34,6 +36,37 @@ def _load_normalizers():
 
 
 class TestStudioPreferencePersistence(unittest.TestCase):
+    def test_krea_identity_settings_round_trip_per_model_and_legacy_save(self):
+        normalize = _load_normalizers()["_normalize_studio_preferences"]
+        settings = {
+            "krea2_raw_edit": {"krea2_ref_boost": 4, "krea2_ref_boost_a": 0, "krea2_grounding_px": 1024},
+            "krea2_turbo_edit": {},
+        }
+        with patch.object(sys, "path", [os.path.join(_ROOT, "app"), *sys.path]):
+            saved = normalize({"krea_identity_settings_per_model": settings})
+            restored = normalize(json.loads(json.dumps(saved)))
+        self.assertEqual(restored["krea_identity_settings_per_model"]["krea2_raw_edit"], settings["krea2_raw_edit"])
+        self.assertEqual(restored["krea_identity_settings_per_model"]["krea2_turbo_edit"], {
+            "krea2_ref_boost": 1, "krea2_ref_boost_a": 1, "krea2_grounding_px": 768,
+        })
+        self.assertEqual(normalize({"generation_mode": "image"}, current=restored)["krea_identity_settings_per_model"], restored["krea_identity_settings_per_model"])
+
+    def test_invalid_krea_identity_preferences_rejected_without_changing_current(self):
+        normalize = _load_normalizers()["_normalize_studio_preferences"]
+        invalid = [None, [], {"krea2_turbo": {}}, {"krea2_raw_edit": None}]
+        for key, bad_values in (
+            ("krea2_ref_boost", [True, -1, 11, float("nan"), float("inf")]),
+            ("krea2_ref_boost_a", [False, -0.1, 10.1]),
+            ("krea2_grounding_px", [True, 383, 1537, 767.5]),
+        ):
+            invalid.extend({"krea2_raw_edit": {key: value}} for value in bad_values)
+        current = {"generation_mode": "video"}
+        with patch.object(sys, "path", [os.path.join(_ROOT, "app"), *sys.path]):
+            for settings in invalid:
+                with self.subTest(settings=settings), self.assertRaises(ValueError):
+                    normalize({"krea_identity_settings_per_model": settings}, current=current)
+        self.assertEqual(current, {"generation_mode": "video"})
+
     def test_director_gpu_limit_round_trip_auto_and_other_preference_saves(self):
         normalize = _load_normalizers()["_normalize_studio_preferences"]
         saved = normalize({"director_max_shot_frames_per_model": {"minimax_h3_ref2va_fused_turbo": 345}})

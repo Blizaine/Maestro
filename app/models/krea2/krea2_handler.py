@@ -1,9 +1,12 @@
 import os
+from collections.abc import Mapping
 
 import gradio as gr
 import torch
 
 from shared.utils.hf import build_hf_url
+
+from .identity_controls import IDENTITY_SETTINGS_DEFAULTS, normalize_identity_settings
 
 
 _PROJECT_REPO = "DeepBeepMeep/krea-2"
@@ -32,6 +35,7 @@ class family_handler:
         result = {
             "image_outputs": True,
             "guidance_max_phases": 1 if base_model_type in (_RAW_MODEL_TYPE, _RAW_EDIT_MODEL_TYPE) else 0,
+            "lock_guidance_scale": base_model_type in (_TURBO_MODEL_TYPE, _TURBO_EDIT_MODEL_TYPE),
             "NAG": True,
             "NAG_scale": {"min": 1.0, "max": 1.5, "step": 0.01},
             "NAG_tau": {"min": 1.0, "max": 5.0, "step": 0.05},
@@ -98,6 +102,7 @@ class family_handler:
                 "at_least_one_image_ref_needed": False,
                 "max_image_refs": 2,
                 "no_background_removal": False,
+                "preserve_image_ref_native_size": True,
                 "background_removal_label": "Remove backgrounds only behind people or objects",
                 "video_guide_outpainting": [1, 2],
                 "outpainting_quantize_margins": 16,
@@ -114,6 +119,38 @@ class family_handler:
                     "label": "Inpainting Method",
                     "image_modes": [2],
                 },
+                "custom_settings": [
+                    {
+                        "id": "krea2_ref_boost",
+                        "name": "Reference Boost",
+                        "label": "Reference boost (subject)",
+                        "type": "float",
+                        "default": IDENTITY_SETTINGS_DEFAULTS["krea2_ref_boost"],
+                        "min": 0.0,
+                        "max": 10.0,
+                        "step": 0.1,
+                    },
+                    {
+                        "id": "krea2_ref_boost_a",
+                        "name": "Scene Reference Boost",
+                        "label": "Reference boost A (scene)",
+                        "type": "float",
+                        "default": IDENTITY_SETTINGS_DEFAULTS["krea2_ref_boost_a"],
+                        "min": 0.0,
+                        "max": 10.0,
+                        "step": 0.1,
+                    },
+                    {
+                        "id": "krea2_grounding_px",
+                        "name": "Grounding Resolution",
+                        "label": "Grounding resolution (px)",
+                        "type": "int",
+                        "default": IDENTITY_SETTINGS_DEFAULTS["krea2_grounding_px"],
+                        "min": 384,
+                        "max": 1536,
+                        "step": 64,
+                    },
+                ],
             })
         return result
 
@@ -209,10 +246,20 @@ class family_handler:
             ui_defaults.update({"num_inference_steps": 20 if base_model_type == _RAW_EDIT_MODEL_TYPE else 52, "guidance_scale": 2 if base_model_type == _RAW_EDIT_MODEL_TYPE else 3.5, "resolution": "1024x1024"})
         if edit:
             ui_defaults.update({"video_prompt_type": "KI", "remove_background_images_ref": 0})
+            custom_settings = ui_defaults.get("custom_settings")
+            if not isinstance(custom_settings, dict):
+                custom_settings = {}
+            else:
+                custom_settings = dict(custom_settings)
+            for key, value in IDENTITY_SETTINGS_DEFAULTS.items():
+                custom_settings.setdefault(key, value)
+            ui_defaults["custom_settings"] = custom_settings
 
     @staticmethod
     def fix_settings(base_model_type, settings_version, model_def, ui_defaults):
         ui_defaults.setdefault("image_mode", 1)
+        if base_model_type in (_TURBO_MODEL_TYPE, _TURBO_EDIT_MODEL_TYPE):
+            ui_defaults["guidance_scale"] = 0
         # Upstream's < 2.66 migration blocks are removed for Maestro: no
         # pre-existing krea2 settings can exist in this fork (family added at
         # settings_version 2.57), and fix_settings also runs on LIVE
@@ -223,6 +270,14 @@ class family_handler:
         if base_model_type in (_RAW_EDIT_MODEL_TYPE, _TURBO_EDIT_MODEL_TYPE):
             ui_defaults.setdefault("video_prompt_type", "KI")
             ui_defaults.setdefault("remove_background_images_ref", 0)
+            custom_settings = ui_defaults.get("custom_settings")
+            if not isinstance(custom_settings, dict):
+                custom_settings = {}
+            else:
+                custom_settings = dict(custom_settings)
+            for key, value in IDENTITY_SETTINGS_DEFAULTS.items():
+                custom_settings.setdefault(key, value)
+            ui_defaults["custom_settings"] = custom_settings
 
     @staticmethod
     def normalize_lanpaint_strengths(inputs):
@@ -244,11 +299,21 @@ class family_handler:
 
     @staticmethod
     def validate_generative_settings(base_model_type, model_def, inputs):
+        if base_model_type in (_TURBO_MODEL_TYPE, _TURBO_EDIT_MODEL_TYPE):
+            inputs["guidance_scale"] = 0
         if base_model_type in (_RAW_EDIT_MODEL_TYPE, _TURBO_EDIT_MODEL_TYPE):
             max_refs = 1 if inputs.get("image_mode") == 2 else 2
             if len(inputs.get("image_refs") or []) > max_refs:
                 label = "one additional reference image" if max_refs == 1 else "two reference images"
                 return f"Krea 2 Edit supports at most {label} in this mode."
+            try:
+                custom_settings = inputs.get("custom_settings")
+                normalized = normalize_identity_settings(custom_settings)
+            except ValueError as error:
+                return str(error)
+            merged_settings = dict(custom_settings) if isinstance(custom_settings, Mapping) else {}
+            merged_settings.update(normalized)
+            inputs["custom_settings"] = merged_settings
         model_mode_int = family_handler.normalize_lanpaint_strengths(inputs)
         if inputs.get("denoising_strength", 1) < 1 and model_mode_int != 0:
             gr.Info("Denoising Strength will be ignored if Masked Denoising is not used")

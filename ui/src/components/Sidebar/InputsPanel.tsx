@@ -624,6 +624,10 @@ export function InputsPanel() {
 
   return (
     <div>
+      {!hasSoundtrack && supportsSoundtrack && <GalleryInput kind="audio" label="soundtrack"
+        onFile={handleAddSoundtrack} />}
+      {voiceRefEnabled && !directorVoiceRef && <GalleryInput kind="audio" label="voice reference"
+        onFile={setDirectorVoiceRef} />}
       {!isExtend && <GalleryInput kind="image" label="start frame" onFile={setStartImage}
         getImages={() => startImage ? [startImage] : frameTiles.filter(tile => tile.kind === 'start').map(tile => ({url: tile.preview, name: 'Start frame'}))} />}
       {!isExtend && supportsEndFrame && <GalleryInput kind="image" label="end frame" onFile={setEndImage}

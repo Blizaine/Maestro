@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Plus, Trash2, Play, ArrowRight } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { FileUploadZone } from '../shared/FileUploadZone'
+import { GalleryInput } from '../shared/GalleryInput'
 import * as api from '../../api/client'
 
 interface MixerTrack {
@@ -142,6 +143,11 @@ export function MixerControls() {
 
   return (
     <div className="space-y-3">
+      <GalleryInput kind="audio" label="mixer base track"
+        onFile={file => handleFileUpload(file, baseTrack, setBaseTrack)} />
+      {overlays.map((track, index) => !track.path && <GalleryInput key={track.id} kind="audio"
+        label={`mixer overlay track ${index + 1}`}
+        onFile={file => handleFileUpload(file, track, next => updateOverlay(track.id, next))} />)}
       {/* Base Track */}
       <div>
         <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">

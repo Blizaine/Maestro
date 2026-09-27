@@ -22,6 +22,7 @@ from models.ideogram4.qwen3_vl_transformers import Qwen3VLModel, Qwen3VLTextMode
 from models.qwen.autoencoder_kl_qwenimage import AutoencoderKLQwenImage
 
 from .krea2_mmdit import SingleStreamDiT, config_from_diffusers
+from .identity_controls import normalize_identity_settings
 
 
 _TEXT_ENCODER_SELECT_LAYERS = (2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35)
@@ -68,6 +69,34 @@ def _prepare(img, txtlen, patch, txtmask):
 
 def _pack_image_latents(latents, patch):
     return rearrange(latents, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch, pw=patch)
+
+
+def _prepare_grounding_images(reference_images, grounding_px):
+    """Resize native reference images for vision grounding without canvas padding."""
+    grounding_images = []
+    for image in reference_images:
+        image = image.convert("RGB")
+        if max(image.size) > grounding_px:
+            scale = grounding_px / max(image.size)
+            image = image.resize((round(image.width * scale), round(image.height * scale)), Image.Resampling.LANCZOS)
+        grounding_images.append(image)
+    return grounding_images
+
+
+def _fit_reference_to_target(reference_offset, fit_all_references, frame_no):
+    resize_to_target = reference_offset is None
+    fit = resize_to_target and (fit_all_references or frame_no >= 2)
+    return fit, resize_to_target
+
+
+def _reference_position_offset(target_grid_h, target_grid_w, grid_h, grid_w, reference_offset):
+    if reference_offset is not None:
+        return reference_offset
+    return (target_grid_h - grid_h) // 2, (target_grid_w - grid_w) // 2
+
+
+def _fit_all_reference_images(identity_edit, video_prompt_type):
+    return identity_edit or ("I" in video_prompt_type and "K" not in video_prompt_type)
 
 
 class Krea2TextEncoder(torch.nn.Module):
@@ -218,6 +247,11 @@ class Krea2Pipeline:
                 align = self.compression * self.transformer.config.patch
                 fit_height = min(max(align, int(image_height * scale) // align * align), height)
                 fit_width = min(max(align, int(image_width * scale) // align * align), width)
+                crop_height = min(image_height, round(fit_height / scale))
+                crop_width = min(image_width, round(fit_width / scale))
+                top = (image_height - crop_height) // 2
+                left = (image_width - crop_width) // 2
+                image = image.crop((left, top, left + crop_width, top + crop_height))
             image = image.resize((fit_width, fit_height), resample=Image.Resampling.BICUBIC)
         elif resize_to_target:
             image = image.resize((width, height), resample=Image.Resampling.LANCZOS)
@@ -296,6 +330,7 @@ class Krea2Pipeline:
         reference_images=None,
         fit_all_references=False,
         reference_offsets=None,
+        identity_settings=None,
         vae_upsampler=None,
         vae_upsampler_seed: int = 0,
         vae_upsampler_progress_callback=None,
@@ -306,6 +341,8 @@ class Krea2Pipeline:
         if width % align != 0 or height % align != 0:
             raise ValueError(f"Krea 2 width and height must be divisible by {align}; got {width}x{height}.")
         prompts = [prompts] if isinstance(prompts, str) else prompts
+        if identity_settings is not None:
+            identity_settings = normalize_identity_settings(identity_settings)
         negative_prompts = [_DEFAULT_NEGATIVE_PROMPT] * len(prompts) if negative_prompts is None else negative_prompts
         device = self.runtime_device
         dtype = self.dtype
@@ -316,13 +353,12 @@ class Krea2Pipeline:
         edit = bool(reference_images)
         grounding_images = None
         if edit:
-            grounding_images = []
-            for image in reference_images:
-                image = image.convert("RGB")
-                if max(image.size) > 768:
-                    scale = 768 / max(image.size)
-                    image = image.resize((round(image.width * scale), round(image.height * scale)), Image.Resampling.LANCZOS)
-                grounding_images.append(image)
+            grounding_px = (
+                identity_settings["krea2_grounding_px"]
+                if identity_settings is not None
+                else 768
+            )
+            grounding_images = _prepare_grounding_images(reference_images, grounding_px)
         txt, txtmask = self._encode_prompts(prompts, device, dtype, images=grounding_images)
         if txt is None:
             return None
@@ -356,12 +392,13 @@ class Krea2Pipeline:
             reference_masks = []
             reference_offsets = [None] * len(reference_images) if reference_offsets is None else reference_offsets
             for frame_no, (image, reference_offset) in enumerate(zip(reference_images, reference_offsets), start=1):
-                latents = self._encode_image_to_latents(image, width, height, device, dtype, fit=reference_offset is None and (fit_all_references or frame_no >= 2), resize_to_target=reference_offset is None)
+                fit_reference, resize_reference = _fit_reference_to_target(reference_offset, fit_all_references, frame_no)
+                latents = self._encode_image_to_latents(image, width, height, device, dtype, fit=fit_reference, resize_to_target=resize_reference)
                 grid_h, grid_w = latents.shape[-2] // patch, latents.shape[-1] // patch
                 reference_tokens.append(_pack_image_latents(latents, patch).expand(batch_size, -1, -1).contiguous())
                 ref_pos = torch.zeros(batch_size, grid_h * grid_w, 3, device=device)
                 ref_pos[..., 0] = frame_no
-                offset_h, offset_w = ((target_grid_h - grid_h) // 2, (target_grid_w - grid_w) // 2) if reference_offset is None else reference_offset
+                offset_h, offset_w = _reference_position_offset(target_grid_h, target_grid_w, grid_h, grid_w, reference_offset)
                 ref_pos[..., 1] = (torch.arange(grid_h, device=device) + offset_h).view(-1, 1).expand(grid_h, grid_w).reshape(-1)
                 ref_pos[..., 2] = (torch.arange(grid_w, device=device) + offset_w).view(1, -1).expand(grid_h, grid_w).reshape(-1)
                 reference_positions.append(ref_pos)
@@ -371,6 +408,9 @@ class Krea2Pipeline:
             if cfg:
                 unpos = torch.cat([unpos[:, :untxt.shape[1]]] + reference_positions + [unpos[:, untxt.shape[1]:]], dim=1)
                 unmask = torch.cat([unmask[:, :untxt.shape[1]]] + reference_masks + [unmask[:, untxt.shape[1]:]], dim=1)
+        reference_token_lengths = tuple(tokens.shape[1] for tokens in reference_tokens)
+        ref_boost = 1.0 if identity_settings is None else identity_settings["krea2_ref_boost"]
+        ref_boost_a = 1.0 if identity_settings is None else identity_settings["krea2_ref_boost_a"]
         if NAG is not None:
             NAG["query_start"] = context_len + sum(tokens.shape[1] for tokens in reference_tokens)
             NAG["query_end"] = NAG["query_start"] + img.shape[1]
@@ -477,13 +517,13 @@ class Krea2Pipeline:
                     step_untxt = untxt if context_static else self.transformer.prepare_context(untxt, unmask)
                     if step_untxt is None:
                         return None, None
-                    cond, uncond = self.transformer.forward_cfg(img=model_latents, context=step_txt, uncond_context=step_untxt, t=t, tvec=tvec, pos=pos, uncond_pos=unpos, mask=mask, uncond_mask=unmask, target_len=latents.shape[1])
+                    cond, uncond = self.transformer.forward_cfg(img=model_latents, context=step_txt, uncond_context=step_untxt, t=t, tvec=tvec, pos=pos, uncond_pos=unpos, mask=mask, uncond_mask=unmask, target_len=latents.shape[1], reference_token_lengths=reference_token_lengths, ref_boost=ref_boost, ref_boost_a=ref_boost_a)
                     if cond is None or uncond is None:
                         return None, None
                     if not torch.isfinite(cond).all() or not torch.isfinite(uncond).all():
                         raise RuntimeError("Krea 2 produced non-finite CFG denoiser predictions.")
                     return cond, uncond
-                cond = self.transformer(img=model_latents, context=step_txt, t=t, tvec=tvec, pos=pos, mask=mask, NAG=NAG, neg_context=step_nagtxt, neg_mask=nagtxtmask, target_len=latents.shape[1])
+                cond = self.transformer(img=model_latents, context=step_txt, t=t, tvec=tvec, pos=pos, mask=mask, NAG=NAG, neg_context=step_nagtxt, neg_mask=nagtxtmask, target_len=latents.shape[1], reference_token_lengths=reference_token_lengths, ref_boost=ref_boost, ref_boost_a=ref_boost_a)
                 if cond is None:
                     return None, None
                 if not torch.isfinite(cond).all():
@@ -782,6 +822,8 @@ class model_factory:
         set_progress_status=None,
         **kwargs,
     ):
+        identity_edit = self.base_model_type in ("krea2_raw_edit", "krea2_turbo_edit")
+        identity_settings = normalize_identity_settings(kwargs.get("custom_settings")) if identity_edit else None
         if VAE_tile_size is not None and hasattr(self.vae, "use_tiling"):
             if isinstance(VAE_tile_size, int):
                 tiling = VAE_tile_size > 0
@@ -793,7 +835,6 @@ class model_factory:
                 self.vae.enable_tiling(tile_sample_min_height=tile_size or None, tile_sample_min_width=tile_size or None)
             else:
                 self.vae.disable_tiling()
-        identity_edit = self.base_model_type in ("krea2_raw_edit", "krea2_turbo_edit")
         turbo = self.base_model_type in ("krea2_turbo", "krea2_turbo_edit")
         if turbo:
             guide_scale = 0
@@ -868,7 +909,8 @@ class model_factory:
             NAG_tau=NAG_tau,
             NAG_alpha=NAG_alpha,
             reference_images=reference_images,
-            fit_all_references="I" in video_prompt_type and "K" not in video_prompt_type,
+            identity_settings=identity_settings,
+            fit_all_references=_fit_all_reference_images(identity_edit, video_prompt_type),
             reference_offsets=reference_offsets,
             vae_upsampler=vae_upsampler,
             vae_upsampler_seed=generator_seed,
