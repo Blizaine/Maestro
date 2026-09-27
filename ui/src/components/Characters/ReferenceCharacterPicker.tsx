@@ -71,7 +71,7 @@ export function ReferenceCharacterPicker({ characters, addedIds, activeRevisions
           const name = characterDisplayName(character.name)
           const added = addedIds.includes(character.id)
           const approved = character.reference_pack?.revisions.filter(revision => revision.approved) || []
-          const activeRevision = added ? activeRevisions[character.id] : undefined
+          const activeRevision = activeRevisions[character.id]
           const revisionId = activeRevision || revisionIds[character.id] || (approved.length === 1 ? approved[0].id : '')
           const packReady = !character.reference_pack || approved.some(revision => revision.id === revisionId)
           const optionsOpen = optionsId === character.id
@@ -105,7 +105,7 @@ export function ReferenceCharacterPicker({ characters, addedIds, activeRevisions
             </button>
 
             {character.reference_pack && <div className="space-y-1 pt-1">
-              <select aria-label={`Revision for ${name}`} value={revisionId} disabled={disabled || added}
+              <select aria-label={`Revision for ${name}`} value={revisionId} disabled={disabled || Boolean(activeRevision)}
                 onChange={event => setRevisionIds(current => ({ ...current, [character.id]: event.target.value }))}
                 className="w-full min-w-0 rounded border border-border bg-bg-primary px-1 py-2 text-xs text-text-primary">
                 <option value="">{approved.length ? 'Choose approved revision' : 'Review a draft first'}</option>

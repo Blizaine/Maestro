@@ -268,9 +268,10 @@ export function OmniReferenceSection({
     )
     const additions: MiniMaxH3Reference[] = []
     if (character.reference_pack) {
-      if (currentCharacterReferences.some(reference => reference.type !== 'audio')) return
-      try { additions.push(...referencePackImages(character, revisionId)) }
-      catch (error) { setError(error instanceof Error ? error.message : 'Could not select pack.'); return }
+      if (!currentCharacterReferences.some(reference => reference.type !== 'audio')) {
+        try { additions.push(...referencePackImages(character, revisionId)) }
+        catch (error) { setError(error instanceof Error ? error.message : 'Could not select pack.'); return }
+      }
     } else if (!currentCharacterReferences.some(reference => reference.type !== 'audio')) additions.push({
       id: newId(),
       type: character.visual.type,

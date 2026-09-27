@@ -113,6 +113,16 @@ const labels = ['Face close-up', 'Full body — front', 'Full body — three-qua
         else window.store.setState({directorH3References: refs});
       }, scope);
       assert.equal(await library.getByLabel('Revision for Pack Person').inputValue(), 'revision2');
+      character.voice = {path: '/voice.wav', url: '/voice.wav', filename: 'voice.wav'};
+      await page.evaluate(() => window.dispatchEvent(new Event('maestro-characters-changed')));
+      await library.getByRole('button', {name: 'Add Pack Person to references', exact: true}).click();
+      const withVoice = await readRefs();
+      assert.equal(withVoice.length, 7, 'Attaching a voice later adds only the audio');
+      assert.equal(withVoice.filter(ref => ref.reference_pack_view).length, 5);
+      assert.equal(withVoice.at(-1).type, 'audio');
+      assert.equal(withVoice.at(-1).library_character_id, character.id);
+      delete character.voice;
+      await page.evaluate(() => window.dispatchEvent(new Event('maestro-characters-changed')));
       // Try with five occupied image slots: reject the whole pack without touching existing inputs.
       await page.evaluate(scope => {
         const refs = Array.from({length: 5}, (_, i) => ({id: `other${i}`, type: 'image', path: `/other${i}.png`, filename: 'other.png'}));
