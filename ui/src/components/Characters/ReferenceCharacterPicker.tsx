@@ -8,13 +8,14 @@ import { ExportCharacterButton } from './CharacterFileActions'
 interface Props {
   characters: SavedOmniCharacter[]
   addedIds: string[]
+  activeRevisions?: Record<string, string>
   disabled: boolean
   onAdd: (character: SavedOmniCharacter, revisionId?: string) => void
   onDelete: (character: SavedOmniCharacter) => void
   scroll?: boolean
 }
 
-export function ReferenceCharacterPicker({ characters, addedIds, disabled, onAdd, onDelete, scroll = true }: Props) {
+export function ReferenceCharacterPicker({ characters, addedIds, activeRevisions = {}, disabled, onAdd, onDelete, scroll = true }: Props) {
   const [query, setQuery] = useState('')
   const [revisionIds, setRevisionIds] = useState<Record<string, string>>({})
   const [optionsId, setOptionsId] = useState<string | null>(null)
@@ -70,7 +71,8 @@ export function ReferenceCharacterPicker({ characters, addedIds, disabled, onAdd
           const name = characterDisplayName(character.name)
           const added = addedIds.includes(character.id)
           const approved = character.reference_pack?.revisions.filter(revision => revision.approved) || []
-          const revisionId = revisionIds[character.id] || (approved.length === 1 ? approved[0].id : '')
+          const activeRevision = added ? activeRevisions[character.id] : undefined
+          const revisionId = activeRevision || revisionIds[character.id] || (approved.length === 1 ? approved[0].id : '')
           const packReady = !character.reference_pack || approved.some(revision => revision.id === revisionId)
           const optionsOpen = optionsId === character.id
           const thumbnail = character.visual.thumbnail_url || character.visual.url
@@ -107,6 +109,7 @@ export function ReferenceCharacterPicker({ characters, addedIds, disabled, onAdd
                 onChange={event => setRevisionIds(current => ({ ...current, [character.id]: event.target.value }))}
                 className="w-full min-w-0 rounded border border-border bg-bg-primary px-1 py-2 text-xs text-text-primary">
                 <option value="">{approved.length ? 'Choose approved revision' : 'Review a draft first'}</option>
+                {activeRevision && !approved.some(revision => revision.id === activeRevision) && <option value={activeRevision}>Active revision · approval required</option>}
                 {approved.map(revision => <option key={revision.id} value={revision.id}>v{revision.number} · {revision.label || 'Approved'}</option>)}
               </select>
               <ReferencePackButton character={character} disabled={disabled} />

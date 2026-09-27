@@ -622,6 +622,7 @@ export function OmniReferenceSection({
             </p>
             <ReferencePackButton disabled={disabled} />
             <ReferenceCharacterPicker characters={characters} addedIds={addedCharacterIds} disabled={disabled} scroll={false}
+              activeRevisions={Object.fromEntries(references.filter(ref => ref.library_character_id && ref.reference_pack_revision_id).map(ref => [ref.library_character_id!, ref.reference_pack_revision_id!]))}
               onAdd={addCharacter} onDelete={character => void removeCharacter(character)} />
             {scope === 'studio' && <button type="button" onClick={() => { setLibraryOpen(false); window.dispatchEvent(new Event('maestro-open-finishing')) }}
               className="min-h-10 w-full rounded-lg border border-border px-3 text-left text-xs text-text-secondary hover:bg-bg-hover">Face refinement & character mapping…</button>}

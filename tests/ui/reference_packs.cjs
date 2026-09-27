@@ -105,6 +105,14 @@ const labels = ['Face close-up', 'Full body — front', 'Full body — three-qua
       assert.equal(refs.length, 6); assert.equal(refs[0].id, 'scene');
       assert.deepEqual(refs.slice(1).map(r => r.reference_pack_view), views);
       assert.ok(refs.slice(1).every(r => r.reference_pack_revision_id === 'revision1' && r.library_character_id === character.id));
+      // A restored active selection owns the displayed revision, not stale picker state.
+      await page.evaluate(scope => {
+        const state = window.store.getState();
+        const refs = (scope === 'studio' ? state.params.minimax_h3_references : state.directorH3References).map(ref => ref.reference_pack_revision_id ? {...ref, reference_pack_revision_id: 'revision2', reference_pack_revision_number: 2} : ref);
+        if (scope === 'studio') window.store.setState({params: {...state.params, minimax_h3_references: refs}});
+        else window.store.setState({directorH3References: refs});
+      }, scope);
+      assert.equal(await library.getByLabel('Revision for Pack Person').inputValue(), 'revision2');
       // Try with five occupied image slots: reject the whole pack without touching existing inputs.
       await page.evaluate(scope => {
         const refs = Array.from({length: 5}, (_, i) => ({id: `other${i}`, type: 'image', path: `/other${i}.png`, filename: 'other.png'}));
