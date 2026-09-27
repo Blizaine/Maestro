@@ -116,7 +116,7 @@ The version you are running is shown next to the Maestro title in the UI. To upd
 - **Krea Identity Edit:** Subject likeness, separate Scene likeness for two references, and Grounding resolution for RAW and Turbo. Settings persist per model and travel with queued jobs, presets and output settings.
 - **Krea reference fixes:** preserve native reference proportions before grounding, fit reference latents without stretching, and hide Turbo's ineffective guidance control while keeping RAW guidance adjustable.
 
-Use **Update** in Pinokio, restart Maestro and refresh the browser after this release is published.
+Use **Update** in Pinokio, restart Maestro and refresh the browser.
 
 [Full v2.4.2 release notes](docs/RELEASE_NOTES_V2.4.2.md) · [Validation and remaining limits](docs/VALIDATION_V2.4.2.md) · [Changelog](CHANGELOG.md)
 

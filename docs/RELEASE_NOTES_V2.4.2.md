@@ -1,7 +1,6 @@
 # Maestro v2.4.2
 
-Prepared September 27, 2026. Changes since v2.4.1. This candidate is prepared
-locally; publication to dev and main is pending.
+September 27, 2026. Changes since v2.4.1.
 
 ## Gallery audio and clip trimming
 
@@ -57,7 +56,7 @@ degree of likeness. See [Studio controls](Studio-controls.md#krea-2-identity-edi
 This release includes the already-public Linux DLSS protocol-test portability
 hotfix that followed v2.4.1. It does not introduce another DLSS runtime change.
 
-After publication, use **Update** in Pinokio, restart Maestro and refresh the
+Use **Update** in Pinokio, restart Maestro and refresh the
 browser. Existing models, LoRAs, projects and media stay in place.
 
 [Validation and limitations](VALIDATION_V2.4.2.md) · [Changelog](../CHANGELOG.md)

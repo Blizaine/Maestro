@@ -1,9 +1,11 @@
 # Maestro v2.4.2 validation
 
-Local release preparation, September 27, 2026. Public baseline:
+Release validation, September 27, 2026. Public baseline before v2.4.2:
 `d98af3516bcb8131d6a39c3175332798b17febeb` on both dev and main. Its
 [GitHub CI run passed](https://github.com/Blizaine/Maestro/actions/runs/36245206098).
-The candidate has not been pushed; the baseline result is not candidate CI.
+The checks below were completed during local preparation. Public release CI
+runs are listed in [GitHub Actions](https://github.com/Blizaine/Maestro/actions/workflows/ci.yml);
+the baseline result above is not v2.4.2 CI.
 
 ## Checks completed
 
