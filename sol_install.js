@@ -3,6 +3,7 @@ const {
   isSolCapable,
   needsCuda13DriverUpdate,
   solRuntimeProfile,
+  uvFailureEvent,
 } = require("./launcher_profile")
 
 module.exports = async (kernel) => {
@@ -37,6 +38,17 @@ module.exports = async (kernel) => {
           "uv pip install -r requirements.txt --index-strategy unsafe-best-match",
           "uv pip install hf-xet pip",
         ],
+        on: [{
+          event: uvFailureEvent,
+          break: true,
+        }],
+      },
+    }, {
+      // Only reached when requirements.txt installed cleanly (see install.js).
+      method: "fs.write",
+      params: {
+        path: runtime.depsMarker,
+        text: "Maestro requirements.txt installed. Delete this file and run Update to reinstall them.",
       },
     }, {
       method: "script.start",
