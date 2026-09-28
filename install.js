@@ -2,6 +2,7 @@ const {
   isSolCapable,
   needsCuda13DriverUpdate,
   runtimeProfile,
+  uvFailureEvent,
 } = require("./launcher_profile")
 
 module.exports = async (kernel) => {
@@ -36,7 +37,22 @@ module.exports = async (kernel) => {
         message: [
           "uv pip install -r requirements.txt --index-strategy unsafe-best-match",
           "uv pip install hf-xet pip"
-        ]
+        ],
+        // Stop here on a failed download instead of installing Torch
+        // (--no-deps) on top of an env that is missing its dependencies.
+        on: [{
+          event: uvFailureEvent,
+          break: true
+        }]
+      }
+    },
+    {
+      // Only reached when the step above succeeded. update.js requires this
+      // marker before it takes its no-op fast path.
+      method: "fs.write",
+      params: {
+        path: runtime.depsMarker,
+        text: "Maestro requirements.txt installed. Delete this file and run Update to reinstall them."
       }
     },
     {

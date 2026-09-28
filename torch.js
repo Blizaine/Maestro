@@ -2,6 +2,7 @@ const {
   isSolCapable,
   needsCuda13DriverUpdate,
   runtimeProfile,
+  uvFailureEvent,
 } = require("./launcher_profile")
 
 module.exports = async (kernel) => {
@@ -108,9 +109,26 @@ module.exports = async (kernel) => {
           venv: "{{args && args.venv ? args.venv : null}}",
           path: "{{args && args.path ? args.path : '.'}}",
           ...(env ? { env } : {}),
-          message: optionalMessage ? message : [...message, flashMessage],
+          message,
+          // A failed wheel download must not fall through to the marker
+          // writes below, or Update will treat a broken runtime as current.
+          // The optional attention steps that follow are deliberately unguarded.
+          on: [{
+            event: uvFailureEvent,
+            break: true,
+          }],
         },
       },
+      ...(optionalMessage ? [] : [{
+        method: "shell.run",
+        when: "{{!args || !args.flash_only}}",
+        params: {
+          venv: "{{args && args.venv ? args.venv : null}}",
+          path: "{{args && args.path ? args.path : '.'}}",
+          ...(env ? { env } : {}),
+          message: flashMessage,
+        },
+      }]),
       ...(optionalMessage ? [{
         // Optional attention packages must never invalidate an otherwise
         // working CUDA 13 / Triton Sol runtime. The helper uses prebuilt

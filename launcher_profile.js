@@ -42,6 +42,7 @@ const legacyRuntimeProfile = (kernel = {}) => {
       // v2 pins Triton 3.6 for the integrated H3 Sol Engine path. The marker
       // bump makes v1.7.5 Update migrate existing RTX 50 environments once.
       marker: "app/env-rtx50/.maestro_torch_rtx50_v2.installed",
+      depsMarker: "app/env-rtx50/.maestro_requirements_v1.installed",
       flashMarker: "app/env-rtx50/.maestro_flash_2_8_3_v1.installed",
       flashSupported: true,
       label: "RTX 50 / CUDA 13",
@@ -57,6 +58,9 @@ const legacyRuntimeProfile = (kernel = {}) => {
     env: "env",
     python: "3.10",
     marker: "app/env/.maestro_torch_v1.installed",
+    // Written only after requirements.txt installs cleanly. The Torch marker
+    // cannot prove the env is usable because torch.js installs with --no-deps.
+    depsMarker: "app/env/.maestro_requirements_v1.installed",
     // The pinned Windows 2.7.4 wheel contains only sm_89 cubins. Bump the
     // marker for older GPUs so Update removes the incompatible package once.
     flashMarker: legacyWindowsFlashSupported
@@ -73,6 +77,7 @@ const solRuntimeProfile = (kernel = {}) => {
     env: "env-sol",
     python: "3.11",
     marker: "app/env-sol/.maestro_sol_runtime_v1.installed",
+    depsMarker: "app/env-sol/.maestro_requirements_v1.installed",
     flashMarker: "app/env-sol/.maestro_sol_flash_2_8_3_v1.installed",
     flashSupported: true,
     label: "H3 Sol Engine / CUDA 13",
@@ -89,7 +94,15 @@ const runtimeProfile = (kernel = {}) => (
     : legacyRuntimeProfile(kernel)
 )
 
+// uv reports failures as lowercase "error:" / "x Failed to download" /
+// "x No solution found when resolving dependencies", which
+// Pinokio's default case-sensitive /Error:/ capture misses. Without a break,
+// a dropped connection lets install continue and publish runtime markers for
+// a half-built env. Use as `on: [{ event: uvFailureEvent, break: true }]`.
+const uvFailureEvent = "/(^|\\s)error:|Failed to (download|build|install)|No solution found/"
+
 module.exports = {
+  uvFailureEvent,
   isRtx40,
   isRtx50,
   isSolCapable,

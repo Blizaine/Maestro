@@ -1,12 +1,13 @@
 const {
   runtimeProfile,
+  uvFailureEvent,
 } = require("./launcher_profile")
 
 module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)
   const samReadyMarker = "app/services/sam/env/.maestro-sam-ready"
   const alreadyCurrentAndReady =
-    `{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('${runtime.marker}') && exists('${runtime.flashMarker}') && exists('ui/dist/index.html') && exists('ui/dist/assets') && (!exists('app/services/sam/env') || exists('${samReadyMarker}')) ? 'uptodate' : 'build'}}`
+    `{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('${runtime.depsMarker}') && exists('${runtime.marker}') && exists('${runtime.flashMarker}') && exists('ui/dist/index.html') && exists('ui/dist/assets') && (!exists('app/services/sam/env') || exists('${samReadyMarker}')) ? 'uptodate' : 'build'}}`
   return {
     run: [{
     // Pull the latest launcher + app code (single monorepo, so this one
@@ -32,8 +33,8 @@ module.exports = async (kernel) => {
     method: "jump",
     params: {
       // An already-current checkout still enters the build path when either
-      // its hardware runtime, optional FlashAttention repair marker, or
-      // compiled React bundle is missing. This keeps interrupted installs and
+      // its requirements.txt marker, hardware runtime, optional
+      // FlashAttention repair marker, or compiled React bundle is missing. This keeps interrupted installs and
       // updates resumable instead of permanently skipping a failed UI build.
       id: alreadyCurrentAndReady
     }
@@ -85,7 +86,20 @@ module.exports = async (kernel) => {
       venv: runtime.env,
       venv_python: runtime.python,
       path: "app",
-      message: "uv pip install -r requirements.txt"
+      // requirements.txt adds an extra index (ORT CUDA 13); without this flag
+      // uv refuses to look past it and cannot resolve onnxruntime-gpu.
+      message: "uv pip install -r requirements.txt --index-strategy unsafe-best-match",
+      on: [{
+        event: uvFailureEvent,
+        break: true
+      }]
+    }
+  }, {
+    // Only reached when requirements.txt installed cleanly (see install.js).
+    method: "fs.write",
+    params: {
+      path: runtime.depsMarker,
+      text: "Maestro requirements.txt installed. Delete this file and run Update to reinstall them."
     }
   }, {
     // Existing installs may have the main runtime marker but still contain a

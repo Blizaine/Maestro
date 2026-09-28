@@ -102,6 +102,34 @@ class TestPinokioGpuCompatibility(unittest.TestCase):
         self.assertIn("flash_only: true", updater)
         self.assertIn("venv: runtime.env", updater)
 
+    def test_failed_requirements_install_cannot_mark_the_env_ready(self):
+        profile = (_ROOT / "launcher_profile.js").read_text(encoding="utf-8")
+        updater = (_ROOT / "update.js").read_text(encoding="utf-8")
+
+        # uv prints lowercase "error:", which Pinokio's default /Error:/ misses.
+        self.assertIn("const uvFailureEvent", profile)
+        self.assertIn("depsMarker", profile)
+        for filename in ("install.js", "update.js", "sol_install.js", "torch.js"):
+            script = (_ROOT / filename).read_text(encoding="utf-8")
+            self.assertIn("event: uvFailureEvent", script)
+        for filename in ("install.js", "update.js", "sol_install.js"):
+            script = (_ROOT / filename).read_text(encoding="utf-8")
+            requirements = script.index("uv pip install -r requirements.txt")
+            guard = script.index("event: uvFailureEvent", requirements)
+            marker = script.index("path: runtime.depsMarker", guard)
+            self.assertLess(requirements, marker)
+            # requirements.txt pulls from an extra index; without this flag
+            # uv cannot resolve onnxruntime-gpu.
+            self.assertIn(
+                "uv pip install -r requirements.txt --index-strategy unsafe-best-match",
+                script,
+            )
+        # Resolver failures print "x No solution found", not "error:".
+        self.assertIn("No solution found", profile)
+        # Torch is installed with --no-deps, so its marker alone must never
+        # let Update skip requirements.txt.
+        self.assertIn("exists('${runtime.depsMarker}')", updater)
+
     def test_missing_react_bundle_is_rebuilt_by_update_and_start(self):
         updater = (_ROOT / "update.js").read_text(encoding="utf-8")
 
