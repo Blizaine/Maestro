@@ -1217,6 +1217,142 @@ def replace_sections_with_structure(
     return updated
 
 
+_SECTION_TAG_RE = re.compile(r"^\s*\[([^\]]+)\]\s*$", re.IGNORECASE)
+
+# Tag → canonical label, checked in order ("pre-chorus" before "chorus").
+_TAG_LABEL_MAP = [
+    ("intro", "intro"),
+    ("outro", "outro"),
+    ("pre-chorus", "bridge"),
+    ("pre chorus", "bridge"),
+    ("bridge", "bridge"),
+    ("hook", "chorus"),
+    ("chorus", "chorus"),
+    ("verse", "verse"),
+    ("rap", "verse"),
+    ("instrumental", "instrumental"),
+]
+
+
+def _tag_label(raw: str) -> str:
+    raw = raw.lower().strip()
+    for keyword, label in _TAG_LABEL_MAP:
+        if keyword in raw:
+            return label
+    return "verse"
+
+
+def build_structure_from_tagged_lyrics(
+    tagged_lyrics: Optional[str],
+    lyrics: Optional[list],
+    duration: float,
+) -> list:
+    """Build song_structure from user-supplied lyrics carrying section tags.
+
+    Parses ``[Verse]``/``[Chorus]``/``[Bridge]``/... tags (one per line) as
+    ground-truth section identities, then aligns each section's first lyric
+    line to the transcribed lyric timestamps to recover its wall-clock start
+    time. A leading empty section (e.g. ``[Intro]`` / ``[Instrumental]``) is
+    anchored to 0:00 and a trailing empty one to the last lyric, since they
+    have no text to align.
+
+    Returns ``[{label, display_label, start}, ...]`` (empty when no tags or no
+    alignment can be recovered), in the shape consumed by
+    ``replace_sections_with_structure``.
+    """
+    if not tagged_lyrics or not lyrics:
+        return []
+
+    parsed = []
+    cur_label = None
+    cur_lines = []
+
+    def _flush():
+        if cur_label is not None:
+            first = next((ln.strip() for ln in cur_lines if ln.strip()), "")
+            parsed.append((cur_label, first))
+
+    for raw in str(tagged_lyrics).splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = _SECTION_TAG_RE.match(line)
+        if m:
+            _flush()
+            cur_label = _tag_label(m.group(1))
+            cur_lines = []
+        else:
+            cur_lines.append(line)
+    _flush()
+
+    if not parsed:
+        return []
+
+    segs = [l for l in lyrics if str(l.get("text", "")).strip()]
+
+    def _norm(t):
+        return re.sub(r"[^a-z0-9 ]", "", str(t).lower()).strip()
+
+    structure = []
+    verse_num = 0
+    chorus_num = 0
+    cursor = 0
+    last_lyric_end = max(
+        (float(l.get("end", l.get("start", 0))) for l in segs),
+        default=0.0,
+    )
+
+    for idx, (label, first) in enumerate(parsed):
+        first_key = _norm(first)
+
+        if not first_key:
+            # No lyric text to align — only meaningful at the very start/end.
+            if idx == 0 and len(parsed) > 1:
+                structure.append(
+                    {"label": label, "display_label": label.title(), "start": 0}
+                )
+                continue
+            if idx == len(parsed) - 1 and structure:
+                structure.append(
+                    {
+                        "label": label,
+                        "display_label": label.title(),
+                        "start": int(last_lyric_end) + 1,
+                    }
+                )
+            continue
+
+        first_words = set(first_key.split())
+        best_idx = None
+        best_score = 0
+        for i in range(cursor, len(segs)):
+            k = _norm(segs[i]["text"])
+            if not k:
+                continue
+            overlap = len(first_words & set(k.split()))
+            if k.startswith(first_key[:18]):
+                overlap += 100
+            if overlap > best_score:
+                best_score = overlap
+                best_idx = i
+        if best_idx is None or best_score < 1:
+            continue
+
+        start = float(segs[best_idx]["start"])
+        if label == "verse":
+            verse_num += 1
+            disp = f"Verse {verse_num}"
+        elif label == "chorus":
+            chorus_num += 1
+            disp = f"Chorus {chorus_num}"
+        else:
+            disp = label.title()
+        structure.append({"label": label, "display_label": disp, "start": start})
+        cursor = best_idx + 1
+
+    return structure
+
+
 # ---------------------------------------------------------------------------
 # Dialogue-paced scene planning (Short Film mode)
 # ---------------------------------------------------------------------------
