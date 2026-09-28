@@ -4,6 +4,7 @@
 param(
     [string]$MaestroAppRoot,
     [switch]$AcceptThirdPartyRisk,
+    [switch]$FrameGenerationOnly,
     [switch]$Force
 )
 
@@ -22,14 +23,27 @@ if (-not (Test-Path -LiteralPath (Join-Path $MaestroAppRoot "wgp.py") -PathType 
     throw "WanGP root not found at '$MaestroAppRoot' (wgp.py is missing)."
 }
 
-Write-Host "WanGP optional DLSS 5 installer" -ForegroundColor Cyan
-Write-Warning @"
+Write-Host "Maestro optional DLSS installer" -ForegroundColor Cyan
+if ($FrameGenerationOnly) {
+    Write-Host "Installing only the DLSS Frame Generation worker and signed NVIDIA runtime."
+    Write-Host "Neural Rendering and Windows 10 experimental upscaling files will not be changed."
+    Write-Warning @"
+This installs the community WanGP native worker and NVIDIA's proprietary Frame
+Generation runtime, with GPU and filesystem access. Review docs/DLSS5.md and
+THIRD_PARTY_NOTICES.md before accepting their use. RTX 40 or newer, a compatible
+driver, Windows 10 build 19041 or newer, and HAGS are required. The installed
+worker's capability probe determines which frame multipliers are available.
+"@
+}
+else {
+    Write-Warning @"
 This installs native third-party binaries with GPU and filesystem access. The RenoDX
 and DLSSNR downloads are community-hosted, not official NVIDIA/RenoDX releases.
 DLSSNR 310.8.SF-v2 is NVIDIA-derived, modified, proprietary, and unsigned. WanGP
 does not grant redistribution rights or guarantee these files. Continue only if you
 accept the copyright, licensing, and security risks and their use is legal for you.
 "@
+}
 
 if (-not $AcceptThirdPartyRisk) {
     $answer = Read-Host "Type I ACCEPT to download and install these components"
@@ -146,6 +160,9 @@ $packages = @(
     [pscustomobject]@{ Id = "dlss"; Name = "DLSS Super Resolution 310.8.0"; File = "nvngx_dlss_310.8.0.zip"; Url = "https://github.com/RankFTW/rhi-repo/releases/download/dlss-310.8.0/nvngx_dlss_310.8.0.zip"; Sha256 = "FB481660F7E952B87F91760E3AFD7F9DC14CD2C3361B470E948D6346E4323009" }
     [pscustomobject]@{ Id = "dlssg"; Name = "DLSS Frame Generation 310.7.0"; File = "nvngx_dlssg_310.7.0.zip"; Url = "https://github.com/RankFTW/rhi-repo/releases/download/dlssg-310.7.0/nvngx_dlssg_310.7.0.zip"; Sha256 = "BFA977FB4451718C7D4A2217518DFC1AD30D77CE0EA026253C82BE96F5B9D35A" }
 )
+if ($FrameGenerationOnly) {
+    $packages = @($packages | Where-Object { $_.Id -in @("workers", "dlssg") })
+}
 
 $temporaryBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $temporaryRoot = Join-Path $temporaryBase ("WanGP-DLSS5-" + [Guid]::NewGuid().ToString("N"))
@@ -167,22 +184,10 @@ try {
         New-Item -ItemType Directory -Path $directory | Out-Null
     }
     Expand-Archive -LiteralPath $downloads.workers -DestinationPath $workers
-    Expand-Archive -LiteralPath $downloads.renodx -DestinationPath $renodx
-    Expand-Archive -LiteralPath $downloads.dlssnr -DestinationPath $dlssnr
-    Expand-Archive -LiteralPath $downloads.dlss -DestinationPath $dlss
     Expand-Archive -LiteralPath $downloads.dlssg -DestinationPath $dlssg
 
-    $reshade64 = Join-Path $staging "ReShade64.dll"
-    Extract-ReShade64 $downloads.reshade $reshade64 $temporaryRoot
-
     $installItems = @(
-        New-InstallItem (Join-Path $workers "host\nr-depth-worker.exe") "host\nr-depth-worker.exe" "F8E2967912E5D596E8E36049370487B83620B0CB5845937B681CF835BAFC6D0B"
-        New-InstallItem (Join-Path $workers "host\nvngx.dll") "host\nvngx.dll" "58191F4D38288C6BFBDA47EF56911D32052A9789E65714F4583F426E01464638"
         New-InstallItem (Join-Path $workers "dlssg\dlssg-worker.exe") "dlssg\dlssg-worker.exe" "D93084633E0AAB4A08C43A5EE240176716EF73D87F06F35C2293509FBFC8BD00"
-        New-InstallItem $reshade64 "host\dxgi.dll" "0CEE63F9C9F13F3AC909C5B4903F4DBB4B719A7AB3B4F13B0DEAF83C814B94F7"
-        New-InstallItem (Join-Path $renodx "renodx-dlss5.addon64") "host\renodx-dlss5.addon64" "D5ADF82EB44B065F4C590AC91FE824BAB07AFEA0EB9F994BDE936710C8593952"
-        New-InstallItem (Join-Path $dlssnr "nvngx_dlssnr.dll") "host\nvngx_dlssnr.dll" "6EB209E764F39872625DEBD6ABAF45E2BB6322F6F270F781F70C059AE30B3927"
-        New-InstallItem (Join-Path $dlss "nvngx_dlss.dll") "dlss\nvngx_dlss.dll" "C85F971CE023C9F3492FC7455F0B01A24BA18EA39636407A846902C4360B0B7E"
         New-InstallItem (Join-Path $dlssg "nvngx_dlssg.dll") "dlssg\nvngx_dlssg.dll" "135EAF0733C1E37381A8C28ABCF7A862404A54132B81787C04E35D09EFC5E36F"
         New-InstallItem (Join-Path $workers "LICENSE-DLSS5-Feeder.txt") "LICENSE-DLSS5-Feeder.txt"
         New-InstallItem (Join-Path $workers "LICENSE-Merserk.txt") "LICENSE-Merserk.txt"
@@ -190,6 +195,21 @@ try {
         New-InstallItem (Join-Path $workers "README.txt") "README.txt"
         New-InstallItem (Join-Path $workers "SHA256SUMS.txt") "SHA256SUMS.txt"
     )
+    if (-not $FrameGenerationOnly) {
+        Expand-Archive -LiteralPath $downloads.renodx -DestinationPath $renodx
+        Expand-Archive -LiteralPath $downloads.dlssnr -DestinationPath $dlssnr
+        Expand-Archive -LiteralPath $downloads.dlss -DestinationPath $dlss
+        $reshade64 = Join-Path $staging "ReShade64.dll"
+        Extract-ReShade64 $downloads.reshade $reshade64 $temporaryRoot
+        $installItems += @(
+            New-InstallItem (Join-Path $workers "host\nr-depth-worker.exe") "host\nr-depth-worker.exe" "F8E2967912E5D596E8E36049370487B83620B0CB5845937B681CF835BAFC6D0B"
+            New-InstallItem (Join-Path $workers "host\nvngx.dll") "host\nvngx.dll" "58191F4D38288C6BFBDA47EF56911D32052A9789E65714F4583F426E01464638"
+            New-InstallItem $reshade64 "host\dxgi.dll" "0CEE63F9C9F13F3AC909C5B4903F4DBB4B719A7AB3B4F13B0DEAF83C814B94F7"
+            New-InstallItem (Join-Path $renodx "renodx-dlss5.addon64") "host\renodx-dlss5.addon64" "D5ADF82EB44B065F4C590AC91FE824BAB07AFEA0EB9F994BDE936710C8593952"
+            New-InstallItem (Join-Path $dlssnr "nvngx_dlssnr.dll") "host\nvngx_dlssnr.dll" "6EB209E764F39872625DEBD6ABAF45E2BB6322F6F270F781F70C059AE30B3927"
+            New-InstallItem (Join-Path $dlss "nvngx_dlss.dll") "dlss\nvngx_dlss.dll" "C85F971CE023C9F3492FC7455F0B01A24BA18EA39636407A846902C4360B0B7E"
+        )
+    }
 
     $conflicts = @($installItems | Where-Object { (Test-Path -LiteralPath $_.Destination -PathType Leaf) -and (Get-Sha256 $_.Destination) -ne $_.Sha256 })
     if ($conflicts.Count -and -not $Force) {
@@ -218,9 +238,11 @@ try {
     }
 
     $signedNvidiaFiles = @(
-        Join-Path $MaestroAppRoot "dlss5\dlss\nvngx_dlss.dll"
         Join-Path $MaestroAppRoot "dlss5\dlssg\nvngx_dlssg.dll"
     )
+    if (-not $FrameGenerationOnly) {
+        $signedNvidiaFiles += Join-Path $MaestroAppRoot "dlss5\dlss\nvngx_dlss.dll"
+    }
     foreach ($path in $signedNvidiaFiles) {
         $signature = Get-AuthenticodeSignature -LiteralPath $path
         if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or $signature.SignerCertificate.Subject -notmatch "NVIDIA") {

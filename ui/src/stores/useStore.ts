@@ -15,7 +15,6 @@ import {
   h3OmniSequenceWindowCount,
   h3SlidingWindowCount,
   normalizeH3ClipFrameSchedule,
-  normalizeH3ClipFrames,
   normalizeH3NativeFrames,
   recommendedH3PassProfile,
   recommendedH3OmniSequenceProfile,
@@ -24,6 +23,14 @@ import {
   continuationFirstWindowFrames,
   durationWindowPlan,
 } from '../lib/durationPlanning'
+import {
+  isH3RollingFramesTimeline,
+  h3SlidingWindowPlanMatchesTiming,
+  normalizeH3TimelineFramesForSubmission,
+  normalizeSlidingWindowFrames,
+  normalizeSlidingWindowOverlap,
+  resolveH3StoryboardDiscardFrames,
+} from '../lib/h3WindowTiming'
 
 const CIVIT_DOWNLOAD_POLL_MS = 2000
 const CIVIT_DOWNLOAD_COMPLETED_VISIBLE_MS = 30_000
@@ -121,13 +128,7 @@ function _normalizeSlidingWindowOverlap(
   value: number,
   defaults?: Record<string, number> | null,
 ): number {
-  if (!defaults) return Math.max(0, Math.round(value))
-  const minimum = defaults.overlap_min ?? 1
-  const maximum = defaults.overlap_max ?? Math.max(minimum, value)
-  const step = Math.max(1, defaults.overlap_step ?? 1)
-  const offset = defaults.overlap_offset ?? minimum
-  const normalized = offset + Math.round((value - offset) / step) * step
-  return Math.max(minimum, Math.min(maximum, normalized))
+  return normalizeSlidingWindowOverlap(value, defaults)
 }
 
 const _OUTPAINT_ASPECT_RATIOS: Array<[Exclude<OutpaintAspect, 'source'>, number]> = [
@@ -4818,6 +4819,7 @@ export const useStore = create<AppState>((set, get) => ({
     await api.startCivitAIDownload({
       download_url: lora.source_url,
       filename: lora.filename,
+      version_name: lora.version_name,
       // architecture (not family) is what the backend's get_lora_dir keys on,
       // so the LoRA lands in the same per-model dir the model loads from.
       target_arch: (model?.architecture as string) || '',
@@ -5546,7 +5548,9 @@ export const useStore = create<AppState>((set, get) => ({
       ...(options?.omni_reference ? { minimax_h3_sequence_clip_frames: windowFrames } : {}) }
     delete nextParams.ltx_window_prompts
     set({ durationSeconds: seconds, slidingWindowSeconds: windowFrames / fps,
-      params: nextParams, h3WindowPlan: null, promptEnhanceError: null })
+      params: nextParams,
+      h3WindowPlan: null,
+      promptEnhanceError: null })
     get().syncClipCount()
   },
 
@@ -7105,6 +7109,22 @@ export const useStore = create<AppState>((set, get) => ({
         requestedMinimumFrames,
         Math.round(state.durationSeconds * fps),
       )
+      const preserveRollingFramesTimeline = isH3RollingFramesTimeline({
+        framesWorkflow: state.studioVideoWorkflow === 'frames',
+        multiWindowRequested: h3FirstLastMultiWindowRequested,
+        omniReference: isOmniReference,
+        requestedFrames,
+        continuationContextFrames: continuationSourceContextFrames,
+        selectedWindowFrames: supportsSlidingWindows
+          ? normalizeSlidingWindowFrames(selectedWindowFrames, {
+              ...state.modelOptions?.sliding_window_defaults,
+              window_max: params.minimax_h3_extended_duration === true
+                && supportsH3ExtendedDuration(state.modelOptions)
+                ? maximumFrames ?? state.modelOptions?.sliding_window_defaults?.window_max
+                : state.modelOptions?.sliding_window_defaults?.window_max,
+            })
+          : selectedWindowFrames,
+      })
       if (h3DirectOmniPass && maximumFrames != null) {
         // Ordinary Omni generation is one native pass. Duration is the
         // user's requested pass length; Window Length is only the VRAM-aware
@@ -7131,27 +7151,26 @@ export const useStore = create<AppState>((set, get) => ({
         supportsSlidingWindows
         && maximumFrames != null
         && requestedFrames + continuationSourceContextFrames <= maximumFrames + 1
+        && !preserveRollingFramesTimeline
       ) {
         requestedFrames = Math.min(
           maximumFrames - continuationSourceContextFrames,
           requestedFrames,
         )
       }
-      if (
-        isH3Model
-        && maximumFrames != null
-        && requestedFrames + continuationSourceContextFrames <= maximumFrames + 1
-      ) {
-        // Uploaded audio/video and old sidecars describe ordinary seconds.
-        // Convert values such as 5.0s = 120 frames to H3's first legal clip
-        // (124), and do this after all single-pass clamps so an old 5.0s
-        // window preference cannot reintroduce the invalid value.
-        requestedFrames = normalizeH3ClipFrames(
-          requestedFrames + continuationSourceContextFrames,
+      if (isH3Model && maximumFrames != null) {
+        // A rolling Frames storyboard can end on a partial continuation span;
+        // snapping its total timeline onto the native clip lattice creates an
+        // extra window (for example 336 becomes 345 at 24 fps). Single-pass,
+        // References, and continuation jobs keep their existing native repair.
+        requestedFrames = normalizeH3TimelineFramesForSubmission({
+          requestedFrames,
           minimumFrames,
           maximumFrames,
-          state.modelOptions?.frames_steps ?? 17,
-        ) - continuationSourceContextFrames
+          frameStep: state.modelOptions?.frames_steps ?? 17,
+          continuationContextFrames: continuationSourceContextFrames,
+          preserveRollingFramesTimeline,
+        })
       }
       params.video_length = requestedFrames
       if (h3ReferenceSequenceRequested && effectiveH3SequenceClipFrames != null
@@ -7167,23 +7186,26 @@ export const useStore = create<AppState>((set, get) => ({
           ? requestedFrames
           : Math.round(state.slidingWindowSeconds * fps)
         if (swDefaults) {
-          const windowMinimum = swDefaults.window_min ?? 1
           const windowMaximum = params.minimax_h3_extended_duration && supportsH3ExtendedDuration(state.modelOptions)
             ? maximumFrames ?? windowFrames : swDefaults.window_max ?? windowFrames
-          const windowStep = Math.max(1, swDefaults.window_step ?? 1)
-          windowFrames = windowMinimum
-            + Math.round((windowFrames - windowMinimum) / windowStep) * windowStep
-          windowFrames = Math.max(
-            windowMinimum,
-            Math.min(windowMaximum, windowFrames),
-          )
+          windowFrames = normalizeSlidingWindowFrames(windowFrames, {
+            ...swDefaults,
+            window_max: windowMaximum,
+          })
         }
         params.sliding_window_size = windowFrames
         params.sliding_window_overlap = _normalizeSlidingWindowOverlap(
           state.slidingWindowOverlap,
           swDefaults,
         )
-        params.sliding_window_discard_last_frames = swDefaults?.discard_last_frames ?? 0
+        const h3FramesStoryboardRequested = (
+          state.studioVideoWorkflow === 'frames'
+          && h3FirstLastMultiWindowRequested
+          && !isOmniReference
+        )
+        params.sliding_window_discard_last_frames = h3FramesStoryboardRequested
+          ? resolveH3StoryboardDiscardFrames(swDefaults, params.custom_settings)
+          : swDefaults?.discard_last_frames ?? 0
         if (isH3Model) {
           const nativeRecommendation = h3DirectOmniPass
             ? recommendedH3PassProfile(
@@ -7989,6 +8011,26 @@ export const useStore = create<AppState>((set, get) => ({
     const h3PlanActive = h3WindowStoryboardActive || (
       h3ReferenceSequenceActive && !h3ManualReferenceSequence
     )
+    if (
+      h3WindowStoryboardActive
+      && state.studioVideoWorkflow === 'frames'
+      && isH3Model
+      && !isOmniReference
+      && state.h3WindowPlan
+      && !h3SlidingWindowPlanMatchesTiming(state.h3WindowPlan, {
+        sourcePrompt: String(params.prompt || ''),
+        modelType: String(params.model_type || ''),
+        resolution: String(params.resolution || ''),
+        totalFrames: Number(params.video_length || 0),
+        windowFrames: Number(params.sliding_window_size || 0),
+        overlapFrames: Number(params.sliding_window_overlap || 0),
+        discardFrames: Number(params.sliding_window_discard_last_frames || 0),
+        cameraCoverage: String(params.minimax_h3_camera_coverage || 'auto'),
+      })
+    ) {
+      set({promptEnhanceError: 'The reviewed H3 window prompts no longer match the current Frames timing. Press Enhance to rebuild the plan before generating.'})
+      return
+    }
     if (h3ManualFirstLastSequence) {
       params.minimax_h3_window_storyboard = false
       params.h3_window_prompts = h3ManualFirstLastPrompts ?? []
@@ -8869,12 +8911,24 @@ export const useStore = create<AppState>((set, get) => ({
       // model's values — last requested wins.
       if (seq !== _modelOptionsSeq) return
       const activeState = get()
+      const sameH3FramesRefresh = activeState.modelOptions?.model_type === modelType
+        && activeState.params.model_type === modelType
+        && activeState.studioVideoWorkflow === 'frames'
+        && String(activeState.modelOptions?.architecture || '').startsWith('minimax_h3')
+        && activeState.modelOptions?.omni_reference !== true
+        && String(options.architecture || '').startsWith('minimax_h3')
+        && options.omni_reference !== true
       const { durationSeconds, slidingWindowSeconds } = activeState
       const fps = options.fps || 16
       // Set overlap from model defaults
       const swDefaults = (options as unknown as Record<string, unknown>).sliding_window_defaults as Record<string, number> | undefined
-      const overlapDefault = swDefaults?.overlap_default ?? 5
-      const discardDefault = swDefaults?.discard_last_frames ?? 0
+      const overlapDefault = sameH3FramesRefresh
+        ? _normalizeSlidingWindowOverlap(activeState.slidingWindowOverlap, swDefaults)
+        : swDefaults?.overlap_default ?? 5
+      const storedDiscard = Number(activeState.params.sliding_window_discard_last_frames)
+      const discardDefault = sameH3FramesRefresh && Number.isFinite(storedDiscard)
+        ? Math.max(0, storedDiscard)
+        : swDefaults?.discard_last_frames ?? 0
       const minimumDuration = Math.max(1, (options.frames_minimum || fps) / fps)
       const extendedDuration = activeState.params.minimax_h3_extended_duration === true
         && supportsH3ExtendedDuration(options)
@@ -8894,11 +8948,15 @@ export const useStore = create<AppState>((set, get) => ({
         : (!options.sliding_window && nativeMaximumDuration
             ? nativeMaximumDuration
             : Number.POSITIVE_INFINITY)
-      let nextDurationSeconds = Math.min(
-        maximumDuration,
-        Math.max(minimumDuration, durationSeconds),
-      )
+      let nextDurationSeconds = sameH3FramesRefresh
+        ? durationSeconds
+        : Math.min(
+            maximumDuration,
+            Math.max(minimumDuration, durationSeconds),
+          )
       if (
+        !sameH3FramesRefresh
+        &&
         options.sliding_window
         && nativeMaximumDuration
         && nextDurationSeconds <= Math.round(nativeMaximumDuration * 10) / 10
@@ -8912,7 +8970,7 @@ export const useStore = create<AppState>((set, get) => ({
         )
       }
       let nextWindowFrames = Math.round(slidingWindowSeconds * fps)
-      if (options.sliding_window && swDefaults?.window_default != null) {
+      if (options.sliding_window && swDefaults?.window_default != null && !sameH3FramesRefresh) {
         nextWindowFrames = swDefaults.window_default
       }
       if (options.sliding_window && swDefaults) {
@@ -8998,7 +9056,7 @@ export const useStore = create<AppState>((set, get) => ({
               selectedResolution,
               activeState.systemStats?.gpu.vram_total_gb ?? 0,
             )
-        const selectedFrames = extendedDuration
+        const selectedFrames = sameH3FramesRefresh || extendedDuration
           ? Math.round(slidingWindowSeconds * fps) : savedOverride ?? recommendation?.frames
         if (selectedFrames != null) {
           nextWindowFrames = normalizeH3NativeFrames(
@@ -9010,7 +9068,9 @@ export const useStore = create<AppState>((set, get) => ({
           nextWindowSeconds = nextWindowFrames / fps
           paramUpdates.sliding_window_size = nextWindowFrames
         }
-        nextWindowLocked = extendedDuration || savedOverride != null
+        nextWindowLocked = sameH3FramesRefresh
+          ? activeState.slidingWindowLocked
+          : extendedDuration || savedOverride != null
         paramUpdates.sliding_window_memory_override = nextWindowLocked
         if (options.omni_reference === true) {
           paramUpdates.minimax_h3_sequence_memory_override = nextWindowLocked
@@ -9021,7 +9081,7 @@ export const useStore = create<AppState>((set, get) => ({
         const multiWindowEnabled = options.omni_reference === true
           ? h3ReferenceSequence
           : activeState.params.minimax_h3_multi_window === true
-        if (!multiWindowEnabled) {
+        if (!multiWindowEnabled && !sameH3FramesRefresh) {
           nextDurationSeconds = Math.min(nextDurationSeconds, nextWindowSeconds)
           paramUpdates.video_length = Math.round(nextDurationSeconds * fps)
         }
@@ -9576,8 +9636,28 @@ export const useStore = create<AppState>((set, get) => ({
       // Include duration/window info for video models
       const fps = state.modelOptions?.fps ?? 16
       const swDefaults = (state.modelOptions as Record<string, unknown> | null)?.sliding_window_defaults as Record<string, number> | undefined
-      const discardFrames = swDefaults?.discard_last_frames ?? 0
-      const overlapSec = state.slidingWindowOverlap / fps
+      const windowDefaults = params.minimax_h3_extended_duration === true
+        && supportsH3ExtendedDuration(state.modelOptions)
+        ? { ...swDefaults, window_max: h3MaximumFrames(state.modelOptions, true) ?? swDefaults?.window_max }
+        : swDefaults
+      const h3FramesStoryboard = (
+        state.studioVideoWorkflow === 'frames'
+        && isH3FirstLast
+        && params.minimax_h3_multi_window === true
+      )
+      const windowFrames = normalizeSlidingWindowFrames(
+        Math.round(state.slidingWindowSeconds * fps),
+        windowDefaults,
+      )
+      const overlapFrames = _normalizeSlidingWindowOverlap(
+        state.slidingWindowOverlap,
+        swDefaults,
+      )
+      const discardFrames = h3FramesStoryboard
+        ? resolveH3StoryboardDiscardFrames(swDefaults, params.custom_settings)
+        : swDefaults?.discard_last_frames ?? 0
+      const windowSeconds = windowFrames / fps
+      const overlapSec = overlapFrames / fps
       const discardSec = discardFrames / fps
       const supportsSlidingWindows = state.modelOptions?.sliding_window === true
       const firstWindowSeconds = (
@@ -9585,13 +9665,13 @@ export const useStore = create<AppState>((set, get) => ({
         && supportsSlidingWindows
       )
         ? continuationFirstWindowFrames(
-            Math.round(state.slidingWindowSeconds * fps),
-            state.slidingWindowOverlap,
+            windowFrames,
+            overlapFrames,
           ) / fps
-        : state.slidingWindowSeconds
+        : windowSeconds
       const plannedDuration = durationWindowPlan(
         state.durationSeconds,
-        state.slidingWindowSeconds,
+        windowSeconds,
         overlapSec,
         discardSec,
         firstWindowSeconds,
@@ -9640,6 +9720,7 @@ export const useStore = create<AppState>((set, get) => ({
           resolution: params.resolution,
           total_frames: totalFrames,
           references: params.minimax_h3_references ?? [],
+          activated_loras: params.activated_loras.length > 0 ? params.activated_loras : undefined,
           sequence_clip_frames: h3SequenceClipFrames,
           sequence_memory_override: state.slidingWindowLocked,
           minimax_h3_extended_duration: params.minimax_h3_extended_duration,
@@ -9686,9 +9767,12 @@ export const useStore = create<AppState>((set, get) => ({
           model_type: params.model_type,
           resolution: params.resolution,
           total_frames: totalFrames,
-          window_frames: Math.max(1, Math.round(state.slidingWindowSeconds * fps)),
-          overlap_frames: state.slidingWindowOverlap,
+          activated_loras: params.activated_loras.length > 0 ? params.activated_loras : undefined,
+          window_frames: windowFrames,
+          overlap_frames: overlapFrames,
           discard_frames: discardFrames,
+          minimax_h3_multi_window: true,
+          custom_settings: params.custom_settings,
           sliding_window_memory_override: state.slidingWindowLocked,
           minimax_h3_extended_duration: params.minimax_h3_extended_duration,
           has_start_image: !!(startImage || params.image_start),
@@ -9699,9 +9783,14 @@ export const useStore = create<AppState>((set, get) => ({
           planning_style: planningStyle,
         })
         const effectiveWindowFrames = plan.effective_window_frames || plan.window_frames
+        const effectiveTotalFrames = plan.total_frames || totalFrames
+        const effectiveOverlapFrames = plan.overlap_frames ?? overlapFrames
+        const effectiveDiscardFrames = plan.discard_frames ?? discardFrames
         set(s => ({
           h3WindowPlan: plan,
+          durationSeconds: effectiveTotalFrames / fps,
           slidingWindowSeconds: effectiveWindowFrames / fps,
+          slidingWindowOverlap: effectiveOverlapFrames,
           // Clicking Enhance on a multi-window H3 First/Last job is an
           // explicit request to plan the idea across those windows. Turn the
           // planner back on even when an old saved setting left legacy mode
@@ -9711,7 +9800,10 @@ export const useStore = create<AppState>((set, get) => ({
             ...s.params,
             prompt: plan.source_prompt || h3PlanningSource,
             _h3_original_prompt: undefined,
+            video_length: effectiveTotalFrames,
             sliding_window_size: effectiveWindowFrames,
+            sliding_window_overlap: effectiveOverlapFrames,
+            sliding_window_discard_last_frames: effectiveDiscardFrames,
             minimax_h3_sequence_prompt_mode: params.minimax_h3_sequence_prompt_mode,
             minimax_h3_multi_window: true,
             minimax_h3_window_storyboard: true,

@@ -157,6 +157,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
       images: images.slice(0, 4).map(img => ({ url: img.url })),
       description: stripHtml(model.description || ''),
       version_description: stripHtml(version.description || ''),
+      version_name: version.name || undefined,
       base_model: version.baseModel || '',
       example_prompts: examplePrompts.slice(0, 5),
       tags: model.tags || [],

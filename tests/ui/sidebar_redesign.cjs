@@ -92,15 +92,25 @@ const read = async endpoint => {
         llmRequests.push({endpoint, ...body});
         const windowFrames = body.sequence_clip_frames || body.window_frames;
         const overlap = body.overlap_frames || 0;
-        const count = Math.max(1, Math.ceil((body.total_frames - windowFrames) / (windowFrames - overlap)) + 1);
+        const isH3Windows = endpoint.endsWith('/plan-h3-windows');
+        const discard = isH3Windows ? Number(body.discard_frames || 0) : 0;
+        const stride = Math.max(1, windowFrames - overlap - discard);
+        const count = isH3Windows
+          ? Math.max(1, 1 + Math.ceil((body.total_frames - windowFrames + discard) / stride))
+          : Math.max(1, Math.ceil((body.total_frames - windowFrames) / (windowFrames - overlap)) + 1);
+        let nextStart = 0;
         const windows = Array.from({length: count}, (_, i) => {
-          const start = i * (windowFrames - overlap), end = Math.min(body.total_frames, start + windowFrames);
+          const start = isH3Windows ? nextStart : i * (windowFrames - overlap);
+          const end = Math.min(body.total_frames, start + (isH3Windows && count > 1 && i === 0 ? windowFrames - discard : windowFrames));
+          if (isH3Windows) nextStart = end;
           return {index: i + 1, title: `Scene ${i + 1}`, start_frame: start, end_frame: end, start_seconds: start / 24,
             end_seconds: end / 24, opening_state: '', closing_state: '', prompt: `Planned ${body.planning_style} window ${i + 1}.`};
         });
         return json({...body, source_prompt: body.prompt, signature: `plan-${llmRequests.length}`, planned_by: 'llm',
           plan_kind: endpoint.endsWith('sequence') ? 'reference_sequence' : 'sliding_window', native_continuation: body.sequence_continuity,
-          window_frames: windowFrames, window_count: count, windows, window_prompts: windows.map(window => window.prompt)});
+          window_frames: windowFrames, effective_window_frames: isH3Windows ? windowFrames : undefined,
+          total_frames: body.total_frames, overlap_frames: overlap, discard_frames: discard,
+          window_count: count, windows, window_prompts: windows.map(window => window.prompt)});
       }
       if (endpoint === '/api/v1/generate') {
         requests.push(route.request().postDataJSON());

@@ -404,10 +404,10 @@ export function GalleryZoomImage({ src, name, onLoad, onError, onInteractionChan
           title="Reset zoom"
           onClick={resetZoom}
           style={{
-            top: 'max(0.75rem, env(safe-area-inset-top))',
+            bottom: 'max(0.75rem, env(safe-area-inset-bottom))',
             left: 'max(0.75rem, env(safe-area-inset-left))',
           }}
-          className="absolute left-3 top-3 z-20 rounded-full bg-black/65 px-3 py-2 text-xs font-medium text-white shadow-md hover:bg-black/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          className="absolute bottom-3 left-3 z-20 rounded-full bg-black/65 px-3 py-2 text-xs font-medium text-white shadow-md hover:bg-black/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
         >
           Reset zoom
         </button>

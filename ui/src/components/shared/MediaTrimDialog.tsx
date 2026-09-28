@@ -4,6 +4,7 @@ import { Loader2, Pause, Play, Scissors, X } from 'lucide-react'
 import { fetchEditorMediaPreview, getFileUrl, getUploadUrl, probeEditorMedia, trimGalleryMedia } from '../../api/client'
 import { useGalleryInputs } from '../../lib/galleryInputs'
 import { getVideoPosterUrl } from '../../lib/thumbnailCache'
+import { useVideoPosterSize } from '../../lib/useVideoPosterSize'
 import type { EditorAsset, EditorMediaPreview } from '../../types'
 
 interface Props {
@@ -25,6 +26,7 @@ export function MediaTrimDialog({ source, targetId, targetLabel, onUse, onClose 
   const titleId = useId()
   const dialog = useRef<HTMLDivElement>(null)
   const media = useRef<HTMLMediaElement | null>(null)
+  const posterSize = useVideoPosterSize(media, source.type === 'video' ? source.url : '')
   const track = useRef<HTMLDivElement>(null)
   const drag = useRef<'start' | 'end' | 'playhead' | null>(null)
   const submitting = useRef(false)
@@ -222,7 +224,7 @@ export function MediaTrimDialog({ source, targetId, targetLabel, onUse, onClose 
         <p className="truncate text-xs text-text-secondary" title={source.name}>{source.name}</p>
         <p className="mb-3 mt-1 text-xs text-text-muted">Use the full clip or drag the handles to choose an excerpt. The original stays unchanged.</p>
         {source.type === 'video'
-          ? <video ref={element => { media.current = element }} src={source.url} poster={getVideoPosterUrl(getFileUrl(source.name, source.workspace)) || undefined} playsInline preload="metadata" className="mb-3 max-h-[30dvh] w-full rounded-lg bg-black object-contain" onTimeUpdate={onTimeUpdate} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} onError={() => setPreviewError('This browser cannot preview the video. You can still select and use an excerpt.')} onClick={() => void togglePreview()} />
+          ? <video ref={element => { media.current = element }} src={source.url} poster={posterSize ? getVideoPosterUrl(getFileUrl(source.name, source.workspace), posterSize) || undefined : undefined} playsInline preload="metadata" className="mb-3 max-h-[30dvh] w-full rounded-lg bg-black object-contain" onTimeUpdate={onTimeUpdate} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} onError={() => setPreviewError('This browser cannot preview the video. You can still select and use an excerpt.')} onClick={() => void togglePreview()} />
           : <audio ref={element => { media.current = element }} src={source.url} preload="metadata" onTimeUpdate={onTimeUpdate} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} onError={() => setPreviewError('This browser cannot preview the audio. You can still select and use an excerpt.')} />}
         {loading && <p role="status" className="my-4 flex items-center gap-2 text-xs text-text-secondary"><Loader2 size={14} className="animate-spin" /> Reading clip…</p>}
         {duration > 0 && <>

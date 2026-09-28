@@ -1098,96 +1098,42 @@ def get_image_guide(image_model: str, mode: str = "full") -> str:
     return guide or ""
 
 
-def load_lora_guides(video_loras: list[str] = None, image_loras: list[str] = None,
-                     video_model: str = "", image_model: str = "") -> str:
-    """Load trigger words for activated LoRAs (pass 1-2 injection).
-
-    ONLY includes LoRAs that have real trainedWords in their .civitai.json
-    sidecar. LoRAs without sidecar triggers are silently skipped — their
-    .guide.md prose was causing the LLM to insert literal "trigger word
-    for LoRA" placeholder text into prompts.
-    """
-    import json as _json
-    trigger_lines = []
-
-    for loras, model_type, label in [
-        (video_loras, video_model, "Video"),
-        (image_loras, image_model, "Image"),
-    ]:
-        if not loras or not model_type:
-            continue
-        try:
-            import wgp
-            lora_dir = wgp.get_lora_dir(model_type)
-        except Exception:
-            continue
-        for lora_name in loras:
-            # Only use trainedWords from the CivitAI sidecar
-            sidecar_path = os.path.join(lora_dir, os.path.splitext(lora_name)[0] + ".civitai.json")
-            trigger_words = []
-            if os.path.isfile(sidecar_path):
-                try:
-                    with open(sidecar_path, "r", encoding="utf-8") as sf:
-                        sidecar = _json.loads(sf.read())
-                    trigger_words = sidecar.get("trainedWords", []) or []
-                except Exception:
-                    pass
-            if trigger_words:
-                trigger_lines.append(f"- {label}: {', '.join(trigger_words[:5])}")
-
-    if not trigger_lines:
+def _director_active_lora_hint(loras, model_type: str, kind: str) -> str:
+    if not loras or not model_type:
         return ""
-
-    any_leet = any(any(c.isdigit() for c in ln) for ln in trigger_lines)
-    # Stronger leet block. The previous version ("Copy them EXACTLY as
-    # written") only explained the encoding, not the appropriate-use
-    # rule. Smaller LLMs dropped leet triggers into non-sex-act scenes
-    # for "energy" — observed: a SFW football music video had
-    # "bl0wj0b" in a keyframe prompt. The new block forbids leet
-    # triggers in any context that isn't an explicit sex-act, with
-    # specific examples of what they each mean.
-    leet_block = (
-        "\n\nLEET-CODED TRIGGER WORDS (contain digits like 4/0/3/5/1) — "
-        "STRICT USAGE RULES:\n"
-        "These trigger words name SPECIFIC SEX ACTS or POSITIONS. They are "
-        "NSFW-only. Common ones include:\n"
-        "  bl0wj0b   = oral sex (giving/receiving)\n"
-        "  m15510n4ry = missionary position intercourse\n"
-        "  c0wg1rl    = woman-on-top straddle position\n"
-        "  r3v3rs3_c0wg1rl = reverse cowgirl\n"
-        "  d0gg1e     = doggy-style intercourse\n"
-        "\n"
-        "INCLUDE a leet trigger ONLY when the video_prompt's scene LITERALLY "
-        "DEPICTS that specific act. Use it ONCE per video_prompt — never "
-        "stack multiple leet triggers in one prompt.\n\n"
-        "NEVER use leet triggers in:\n"
-        "  - image_prompt or keyframe_prompts (these are still images; "
-        "    leet triggers are VIDEO LoRA triggers and don't apply)\n"
-        "  - SFW content of any kind (music video, dialogue, action, "
-        "    cooking, drama — anywhere that isn't a sex act)\n"
-        "  - Non-act NSFW content (foreplay before intercourse, "
-        "    undressing, kissing, post-coital aftermath — these are NOT "
-        "    sex acts in themselves)\n"
-        "  - As decoration / energy boosters / 'flavor' tokens\n\n"
-        "If you find yourself wanting to add a leet trigger to a "
-        "scene that doesn't literally depict the named act, the answer "
-        "is to OMIT IT. No leet trigger is better than the wrong one — "
-        "wrong placement breaks the LoRA's trained pattern and produces "
-        "weaker results in BOTH the misplaced scene AND the actual sex "
-        "scenes that needed the trigger."
-    ) if any_leet else ""
-
-    print(f"[PromptPolish] Loaded {len(trigger_lines)} LoRA trigger(s) for pass 1-2")
+    try:
+        import wgp
+        from services.lora_guidance import (
+            format_active_lora_records,
+            load_active_lora_records,
+        )
+        records = load_active_lora_records(loras, wgp.get_lora_search_dirs(model_type))
+        hint = format_active_lora_records(records)
+    except Exception:
+        return ""
+    if not hint:
+        return ""
     return (
-        "\n\nACTIVE LORA TRIGGER WORDS — include the most relevant trigger "
-        "naturally in video_prompt when it matches the scene content. "
-        "Do NOT force triggers into image_prompt or keyframe_prompts. "
-        "Do NOT include a trigger that does not match the scene. "
-        "Do NOT invent new trigger words or write placeholder text like "
-        "'trigger word for LoRA'." + leet_block + "\n"
-        + "\n".join(trigger_lines)
+        f"{hint}\n\nDIRECTOR {str(kind).upper()} PROMPT USE: Apply compatible creator notes "
+        "as visual/style context. Do not add an unrequested action or alter source events, "
+        "timing, media ownership, or dialogue merely to fit a trigger. Preserve any exact "
+        "creator-declared trainedWords token that is relevant; never emit adapter filenames "
+        "or display names as boilerplate."
     )
 
+
+def load_lora_guides(video_loras: list[str] = None, image_loras: list[str] = None,
+                     video_model: str = "", image_model: str = "") -> str:
+    """Load bounded creator guidance for the selected Director LoRAs."""
+    parts = []
+    for loras, model_type, kind in (
+        (video_loras, video_model, "video"),
+        (image_loras, image_model, "image"),
+    ):
+        hint = _director_active_lora_hint(loras, model_type, kind)
+        if hint:
+            parts.append(hint)
+    return "\n\n".join(parts)
 
 def build_polish_block(video_model: str, image_model: str, mode: str,
                        video_loras: list[str] = None, image_loras: list[str] = None) -> str:
@@ -1322,6 +1268,7 @@ def polish_prompts_third_pass(
         return clip_plans
 
     from services import llm_service
+    import re as _re
 
     polished = 0
 
@@ -1507,153 +1454,26 @@ def polish_prompts_third_pass(
             + "\n".join(char_lines)
         )
 
-    # Build LoRA hint text per mode.
-    #
-    # ONLY inject trigger words that come from the CivitAI sidecar's
-    # `trainedWords` field. These are the actual tokens the LoRA was
-    # trained on. If the sidecar has no trainedWords, the LoRA is
-    # silently skipped — it still loads and affects generation, but the
-    # LLM won't be told anything about it.
-    #
-    # We deliberately do NOT extract triggers from .guide.md files.
-    # Guide prose like "include the trigger phrase 'Unchained'" looks
-    # like a trigger but is actually a description of what the user
-    # should do — injecting it into the LLM system prompt causes it
-    # to be treated as a mandatory insertion token, producing broken
-    # output like "the doctor, Unchained, in white..."
-    import re as _re
-
-    def _build_lora_hints(loras: list[str], model_type: str) -> str:
-        if not loras or not model_type:
-            return ""
-        try:
-            import wgp
-            import json as _json
-            lora_dir = wgp.get_lora_dir(model_type)
-            trigger_lines: list[str] = []
-            for lora_name in loras:
-                sidecar_path = os.path.join(lora_dir, os.path.splitext(lora_name)[0] + ".civitai.json")
-                trigger_words: list[str] = []
-                if os.path.isfile(sidecar_path):
-                    try:
-                        with open(sidecar_path, "r", encoding="utf-8") as sf:
-                            sidecar = _json.loads(sf.read())
-                        trigger_words = sidecar.get("trainedWords", []) or []
-                    except Exception:
-                        pass
-
-                if trigger_words:
-                    trigger_lines.append(f"- {', '.join(trigger_words[:5])}")
-                # else: silently skip — do NOT inject guide prose as hints
-
-            if not trigger_lines:
-                return ""
-
-            any_leet = any(any(c.isdigit() for c in ln) for ln in trigger_lines)
-            # Leet-coded triggers (tokens containing digits like 4/0/3/5/1)
-            # name a SPECIFIC sex act / position. They're useful only when
-            # the scene actually depicts that act. Earlier guidance made
-            # them mandatory-always — that pushed the polish LLM to prepend
-            # 'm15510n4ry.' or 'bl0wj0b.' to dialogue scenes where no sex
-            # was happening, diluting the LoRA's trained association without
-            # any benefit. Inclusion is now conditional on scene content.
-            leet_block = (
-                "\n\nLEET-CODED TRIGGERS (contain digits like 4/0/3/5/1) — "
-                "INCLUDE ONLY WHEN THE SCENE DEPICTS THE TRIGGER'S ACT:\n"
-                "Triggers like 'bl0wj0b', 'm15510n4ry', 'd0gg1e', 'c0wg1rl' "
-                "name a SPECIFIC position or sex act. They are intentionally "
-                "non-natural-language tokens — the LoRA was trained to "
-                "associate them with the matching act. They are useful "
-                "ONLY when the prompt describes that act:\n"
-                "- 'bl0wj0b'   → use only if the scene shows oral sex\n"
-                "- 'm15510n4ry' → use only if the scene shows missionary position\n"
-                "- 'd0gg1e'    → use only if the scene shows doggy-style\n"
-                "- 'c0wg1rl'   → use only if the scene shows woman-on-top riding\n"
-                "- 'r3v3rs3_c0wg1rl' → use only for reverse-cowgirl specifically\n\n"
-                "If the scene is non-sexual (dialogue only, walking, looking, "
-                "talking, leaning, kissing, undressing, foreplay without "
-                "intercourse, or any other non-act content), OMIT all leet "
-                "triggers. Do not force one in for 'completeness' — the "
-                "non-act prompt won't activate the LoRA's trained pattern "
-                "and may dilute the LoRA's effect on the actual sex scenes "
-                "later.\n\n"
-                "ALSO OMIT leet triggers from CLIMAX, ORGASM, and AFTERMATH "
-                "scenes. These are reaction / resolution shots — the camera "
-                "is on faces flushing, eyes closing, breath hitching, "
-                "characters collapsing into each other, post-coital embrace, "
-                "lying entwined in sheets, breathing slowing, sweat cooling, "
-                "characters separating, fade-out moments. The position-"
-                "specific trigger no longer reflects what the camera is "
-                "showing in these shots — a 'm15510n4ry' tag belongs in "
-                "shots where missionary is ACTIVELY being performed (visible "
-                "thrusting, visible position), not in the orgasm-reaction "
-                "shot that follows it or the lying-tangled aftermath shot. "
-                "The LoRA was trained on shots OF the act, not shots of the "
-                "moments around it. Tagging a non-act shot with the position "
-                "trigger trains the model toward weaker associations.\n\n"
-                "QUICK TEST — ask: 'is the position itself the literal subject "
-                "of this frame?' If yes (visible thrusting / riding / "
-                "penetration in the described pose), include the trigger. "
-                "If no (faces, embraces, expressions, transitions, "
-                "aftermath), OMIT it.\n\n"
-                "When the scene DOES match a trigger, place it verbatim "
-                "using ONE of these forms (do NOT decode it into English — "
-                "'bl0wj0b' stays 'bl0wj0b'):\n"
-                "- First word + period:    'bl0wj0b. The woman dips her head down onto him...'\n"
-                "- Opening parenthetical:  '(m15510n4ry) The man thrusts steadily...'\n"
-                "- Em-dash action prefix:  'c0wg1rl - the woman straddles him and grinds her hips...'\n"
-                "Pick whichever fits the prompt's existing structure. The "
-                "FORBIDDEN PATTERNS below DO NOT apply to leet triggers — "
-                "those are for plain-English triggers only.\n"
-            ) if any_leet else ""
-            return (
-                "\n\n[LORA TRIGGER WORDS — these are exact tokens the model was "
-                "trained on. Pick the ONE most relevant trigger per prompt "
-                "and include it. Plain-English triggers (e.g. 'Unchained', "
-                "'BEEG', 'LTXNUDES') follow the natural-prose rule below; "
-                "leet-coded triggers are MANDATORY (see leet block at the end "
-                "of this directive).\n\n"
-                "FOR PLAIN-ENGLISH TRIGGERS — include IF AND ONLY IF it forms a "
-                "natural, grammatical part of a sentence. If you cannot weave "
-                "it in naturally, OMIT IT ENTIRELY.\n\n"
-                "FORBIDDEN INSERTION PATTERNS for plain-English triggers "
-                "(any of these ruins the prompt):\n"
-                "- At the start as a standalone tag:  'Unchained, the doctor...'\n"
-                "- As a comma-offset appositive:      'the doctor, Unchained, in white...'\n"
-                "- As a parenthetical:                'the doctor (Unchained) in white...'\n"
-                "- As a standalone label anywhere:    '...in the exam room. Unchained. She...'\n"
-                "- Attached to an unrelated character: 'the doctor, Mystic XXX, leans...'\n\n"
-                "ACCEPTABLE INSERTIONS for plain-English triggers — only if grammatically natural:\n"
-                "- Body/appearance descriptor trigger ('detailed muscle definition'): "
-                "scoped to the right character inside a sentence — "
-                "'the man with detailed muscle definition lifts the crate...'\n"
-                "- Style tag trigger ('Mystic XXX', 'Unchained'): use only when the "
-                "trigger names a genre or action the scene actually depicts. If it "
-                "does not fit grammatically, OMIT IT. Do not force it in.\n\n"
-                "Do NOT invent variants. Do NOT include a plain-English trigger that does not "
-                "match the scene." + leet_block + "]\n"
-            ) + "\n".join(trigger_lines)
-        except Exception:
-            pass
-        return ""
+    def _build_lora_hints(loras: list[str], model_type: str, kind: str) -> str:
+        return _director_active_lora_hint(loras, model_type, kind)
 
     video_lora_hints = (
-        _build_lora_hints(video_loras or [], video_model)
+        _build_lora_hints(video_loras or [], video_model, "video")
         if polish_video_prompts else ""
     )
-    image_lora_hints = _build_lora_hints(image_loras or [], image_model)
+    image_lora_hints = _build_lora_hints(image_loras or [], image_model, "image")
 
     # Director-specific system overrides — the prompts are already detailed from passes 1-2.
-    # The 3rd pass should REFINE (align structure, weave LoRA triggers) not EXPAND (add details).
+    # The 3rd pass should REFINE (align structure and apply compatible active-LoRA context) not EXPAND (add details).
     # Only mention LoRA triggers in the system prompt when we actually have
     # trigger words to inject. When hints are empty, any mention of "LoRA"
     # or "trigger" causes the LLM to hallucinate fake trigger syntax.
     _video_lora_line = (
-        "- Weave in the provided LoRA trigger words naturally if they fit the content\n"
+        "- Use exact active creator-declared trigger tokens when relevant; do not add unrequested content to fit them.\n"
         if video_lora_hints else ""
     )
     _image_lora_line = (
-        "- Weave in the provided LoRA trigger words naturally if they fit the content\n"
+        "- Use exact active creator-declared trigger tokens when relevant; do not add unrequested content to fit them.\n"
         if image_lora_hints else ""
     )
     _no_lora_line = (

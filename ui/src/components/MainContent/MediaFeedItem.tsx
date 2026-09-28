@@ -13,6 +13,7 @@ import { formatDuration } from '../../lib/durationPlanning'
 import { modelDisplayName } from '../../lib/modelDisplay'
 import { sendToGalleryInput, useGalleryInputs, type GalleryInputTarget } from '../../lib/galleryInputs'
 import { getVideoPosterUrl } from '../../lib/thumbnailCache'
+import { useVideoPosterSize } from '../../lib/useVideoPosterSize'
 import { getMediaTimestamp } from '../../lib/mediaTimestamp'
 import { MediaMetadataDetails } from './MediaMetadataDetails'
 
@@ -135,6 +136,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const actionMenuRef = useRef<HTMLDivElement>(null)
   const itemRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
+  const posterSize = useVideoPosterSize(videoRef, file.type === 'video' ? file.url : '')
   const audioRef = useRef<HTMLAudioElement>(null)
 
   useEffect(() => () => {
@@ -731,7 +733,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
             ref={videoRef}
             key={file.url}
             src={file.url}
-            poster={getVideoPosterUrl(file.url) ?? undefined}
+            poster={posterSize ? getVideoPosterUrl(file.url, posterSize) ?? undefined : undefined}
             preload="none"
             controls
             loop

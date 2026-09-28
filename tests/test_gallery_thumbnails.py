@@ -2,6 +2,7 @@ import ast
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,7 @@ from app.services.gallery_thumbnails import get_video_poster
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SUPPORTED_SIZES = (480, 960, 1920)
 
 
 class _RouteError(Exception):
@@ -65,14 +67,43 @@ class GalleryThumbnailTests(unittest.TestCase):
         Path(command[-1]).write_bytes(b"\xff\xd8\xffmock-jpeg")
         return types.SimpleNamespace(returncode=0)
 
-    def test_real_ffmpeg_video_generates_a_decodable_jpeg_when_available(self):
+    def test_real_ffmpeg_respects_requested_size_and_never_enlarges(self):
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             self.skipTest("ffmpeg is not installed")
-        source = self.root / "tiny.mp4"
-        created = subprocess.run(
+        source = self.root / "wide.mp4"
+        created = self._create_test_video(ffmpeg, source, "1280x720")
+        if created.returncode != 0 or not source.is_file():
+            self.skipTest("installed ffmpeg lacks the tiny-video test encoder")
+
+        posters = {
+            size: get_video_poster(
+                str(source), size=size, cache_dir=str(self.cache), ffmpeg=ffmpeg
+            )
+            for size in SUPPORTED_SIZES
+        }
+        self.assertTrue(all(posters.values()))
+        self.assertEqual(self._ffmpeg_image_dimensions(ffmpeg, posters[480]), (480, 270))
+        self.assertEqual(self._ffmpeg_image_dimensions(ffmpeg, posters[960]), (960, 540))
+        # A 1920 request must preserve a smaller 1280x720 source without enlarging it.
+        self.assertEqual(self._ffmpeg_image_dimensions(ffmpeg, posters[1920]), (1280, 720))
+        for poster in posters.values():
+            self.assertTrue(Path(poster).read_bytes().startswith(b"\xff\xd8\xff"))
+
+        small_source = self.root / "small.mp4"
+        created = self._create_test_video(ffmpeg, small_source, "80x64")
+        if created.returncode != 0 or not small_source.is_file():
+            self.skipTest("installed ffmpeg could not create the small-video fixture")
+        small_poster = get_video_poster(
+            str(small_source), size=1920, cache_dir=str(self.cache), ffmpeg=ffmpeg
+        )
+        self.assertIsNotNone(small_poster)
+        self.assertEqual(self._ffmpeg_image_dimensions(ffmpeg, small_poster), (80, 64))
+
+    def _create_test_video(self, ffmpeg, source, dimensions):
+        return subprocess.run(
             [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-             "-f", "lavfi", "-i", "color=c=red:s=80x64:r=5:d=0.4",
+             "-f", "lavfi", "-i", f"color=c=red:s={dimensions}:r=5:d=0.4",
              "-frames:v", "2", "-threads", "1", "-pix_fmt", "yuv420p",
              "-c:v", "mpeg4", str(source)],
             stdin=subprocess.DEVNULL,
@@ -81,22 +112,21 @@ class GalleryThumbnailTests(unittest.TestCase):
             timeout=20,
             check=False,
         )
-        if created.returncode != 0 or not source.is_file():
-            self.skipTest("installed ffmpeg lacks the tiny-video test encoder")
 
-        poster = get_video_poster(str(source), cache_dir=str(self.cache), ffmpeg=ffmpeg)
-        self.assertIsNotNone(poster)
-        self.assertTrue(Path(poster).read_bytes().startswith(b"\xff\xd8\xff"))
+    def _ffmpeg_image_dimensions(self, ffmpeg, image_path):
         decoded = subprocess.run(
-            [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-i", poster,
-             "-frames:v", "1", "-f", "null", "-"],
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-i", image_path,
+             "-frames:v", "1", "-c:v", "ppm", "-f", "image2pipe", "-"],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=10,
             check=False,
         )
         self.assertEqual(decoded.returncode, 0)
+        header = re.match(rb"P6\s+(\d+)\s+(\d+)\s+255\s", decoded.stdout)
+        self.assertIsNotNone(header, "ffmpeg did not return a PPM frame")
+        return int(header.group(1)), int(header.group(2))
 
     def test_cache_tracks_source_path_mtime_and_size(self):
         source = self.root / "clip.mp4"
@@ -121,6 +151,97 @@ class GalleryThumbnailTests(unittest.TestCase):
             third = get_video_poster(str(source), cache_dir=str(self.cache), ffmpeg="ffmpeg")
             self.assertNotEqual(third, first)
             self.assertEqual(run.call_count, 3)
+
+    def test_cache_includes_poster_format_version_and_requested_size(self):
+        source = self.root / "clip.mp4"
+        source.write_bytes(b"video")
+        with patch("app.services.gallery_thumbnails.subprocess.run", side_effect=self._mock_ffmpeg) as run:
+            small = get_video_poster(str(source), cache_dir=str(self.cache), ffmpeg="ffmpeg")
+            large = get_video_poster(
+                str(source), size=960, cache_dir=str(self.cache), ffmpeg="ffmpeg"
+            )
+            self.assertEqual(
+                get_video_poster(str(source), size=960, cache_dir=str(self.cache), ffmpeg="ffmpeg"),
+                large,
+            )
+
+        self.assertNotEqual(small, large)
+        self.assertIn("jpg-v2-480-", Path(small).name)
+        self.assertIn("jpg-v2-960-", Path(large).name)
+        self.assertEqual(run.call_count, 2)
+
+    def test_concurrent_sizes_do_not_share_inflight_render(self):
+        source = self.root / "parallel.mp4"
+        source.write_bytes(b"video")
+        calls_lock = threading.Lock()
+        calls = 0
+
+        def slow_ffmpeg(command, **_kwargs):
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            time.sleep(0.15)
+            Path(command[-1]).write_bytes(b"\xff\xd8\xffmock-jpeg")
+            return types.SimpleNamespace(returncode=0)
+
+        with patch("app.services.gallery_thumbnails.subprocess.run", side_effect=slow_ffmpeg):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                small = pool.submit(
+                    get_video_poster, str(source), size=480,
+                    cache_dir=str(self.cache), ffmpeg="ffmpeg",
+                )
+                large = pool.submit(
+                    get_video_poster, str(source), size=960,
+                    cache_dir=str(self.cache), ffmpeg="ffmpeg",
+                )
+                posters = (small.result(), large.result())
+
+        self.assertEqual(calls, 2)
+        self.assertNotEqual(posters[0], posters[1])
+
+    def test_concurrent_cache_destinations_do_not_share_inflight_render(self):
+        source = self.root / "parallel-destinations.mp4"
+        source.write_bytes(b"video")
+        calls_lock = threading.Lock()
+        calls = 0
+
+        def slow_ffmpeg(command, **_kwargs):
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            time.sleep(0.15)
+            Path(command[-1]).write_bytes(b"\xff\xd8\xffmock-jpeg")
+            return types.SimpleNamespace(returncode=0)
+
+        cache_a = self.root / "cache-a"
+        cache_b = self.root / "cache-b"
+        with patch("app.services.gallery_thumbnails.subprocess.run", side_effect=slow_ffmpeg):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(
+                    get_video_poster, str(source), size=480,
+                    cache_dir=str(cache_a), ffmpeg="ffmpeg",
+                )
+                second = pool.submit(
+                    get_video_poster, str(source), size=480,
+                    cache_dir=str(cache_b), ffmpeg="ffmpeg",
+                )
+                posters = (first.result(), second.result())
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(Path(posters[0]).parents[1], cache_a)
+        self.assertEqual(Path(posters[1]).parents[1], cache_b)
+
+    def test_unsupported_sizes_are_rejected_before_rendering(self):
+        source = self.root / "unsupported.mp4"
+        source.write_bytes(b"video")
+        with patch("app.services.gallery_thumbnails.subprocess.run") as run:
+            for size in (0, 720, 3840, True, "960"):
+                self.assertIsNone(
+                    get_video_poster(
+                        str(source), size=size, cache_dir=str(self.cache), ffmpeg="ffmpeg"
+                    )
+                )
+        run.assert_not_called()
 
     def test_identical_concurrent_requests_share_one_render(self):
         source = self.root / "parallel.webm"
@@ -241,15 +362,21 @@ class GalleryThumbnailTests(unittest.TestCase):
         package = types.ModuleType("services")
         package.__path__ = []
         service = types.ModuleType("services.gallery_thumbnails")
-        service.get_video_poster = lambda path: posters.append(path) or str(self.cache / "poster.jpg")
+        service.SUPPORTED_POSTER_SIZES = frozenset(SUPPORTED_SIZES)
+        service.get_video_poster = lambda path, *, size=480: posters.append((path, size)) or str(self.cache / f"poster-{size}.jpg")
         with patch.dict(sys.modules, {"services": package, "services.gallery_thumbnails": service}):
             with patch("os.getcwd", return_value=str(app_root)):
                 result = namespace["serve_gallery_thumbnail"]("clip.mp4", "Folder A")
+                larger = namespace["serve_gallery_thumbnail"]("clip.mp4", "Folder A", 960)
+                with self.assertRaises(_RouteError) as unsupported:
+                    namespace["serve_gallery_thumbnail"]("clip.mp4", "Folder A", 720)
 
-        self.assertEqual(posters, [str(folder / "clip.mp4")])
-        self.assertEqual(result["path"], str(self.cache / "poster.jpg"))
+        self.assertEqual(posters, [(str(folder / "clip.mp4"), 480), (str(folder / "clip.mp4"), 960)])
+        self.assertEqual(result["path"], str(self.cache / "poster-480.jpg"))
         self.assertEqual(result["media_type"], "image/jpeg")
         self.assertEqual(result["headers"]["Cache-Control"], "private, max-age=60, must-revalidate")
+        self.assertEqual(larger["path"], str(self.cache / "poster-960.jpg"))
+        self.assertEqual(unsupported.exception.status_code, 400)
 
 
 if __name__ == "__main__":

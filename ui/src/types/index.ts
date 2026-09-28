@@ -446,6 +446,7 @@ export interface H3WindowPlan {
   per_clip_frames?: number[]
   trim_tail_frames?: number
   overlap_frames?: number
+  discard_frames?: number
   native_continuation?: boolean
   resolution: string
   model_type: string
@@ -1448,6 +1449,14 @@ export interface LoraRecommendedWeights {
 
 export interface LoraInfo {
   filename: string
+  /** Resolved user-facing name: explicit override, site/guide metadata, or file stem. */
+  display_name?: string
+  /** Explicit user alias, or null when the automatic name is in use. */
+  display_name_override?: string | null
+  /** Best available automatic name before applying a user alias. */
+  suggested_name?: string
+  /** Release or variant label separate from the editable display name. */
+  version_label?: string | null
   trained_words: string[]
   preview_url: string | null
   civitai_model_id: number | null

@@ -16,16 +16,19 @@ and retains the original soundtrack in the finished file.
 
 ## Requirements
 
-- Windows 11, an up-to-date compatible NVIDIA driver, and DirectX 12.
+- An up-to-date compatible NVIDIA driver and DirectX 12.
+- Windows 11 for the standard Neural Rendering backend. Frame Generation
+  supports Windows 10 build 19041 or newer, including Windows 11, when the
+  installed native worker passes its capability probe.
 - RTX 30 or newer for this Neural Rendering integration; RTX 40 or newer for
   Frame Generation. HAGS must be enabled for Frame Generation.
 - Native components installed in `app/dlss5/`, separate from Python packages.
   Triton alone does not supply DLSS. First use downloads missing depth/flow
   model weights through Maestro's existing model paths.
 
-An opt-in **experimental Windows 10** backend is also available, described
-below. Installing it does not change the Windows 11 backend or enable DLSS
-Frame Generation on Windows 10.
+An opt-in **experimental Windows 10** Neural Rendering backend is also available,
+described below. Frame Generation uses a separate installer and runtime; the
+experimental enhancement installer does not include it.
 
 ## Experimental Windows 10 enhancement and upscaling
 
@@ -42,8 +45,8 @@ The local compatibility machine is an RTX 4090 running driver 591.86.
   history reset at scene cuts. An unavailable temporal backend fails clearly.
 - Depth and DIS/RAFT options apply to the upscaling stage. Same-size direct
   enhancement does not download or load depth/RAFT models.
-- Frame Generation remains Windows 11 only. Use RIFE for interpolation on
-  Windows 10.
+- For frame interpolation, install the separate Frame Generation components
+  below, or use RIFE. The experimental NR bridge itself does not add frames.
 
 Output dimensions are rounded to even pixels. The pinned Windows 10 SR worker
 needs aligned output rows on the tested runtime. Maestro extends the source's
@@ -113,6 +116,25 @@ quality tradeoff; they do not remove frame-transfer or encoding costs.
 
 ## Install on a supported Windows machine
 
+### Frame Generation only (Windows 10 or 11)
+
+To add DLSS temporal upsampling without installing or changing Neural Rendering,
+close Maestro and run this from its project folder:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\app\scripts\install_dlss5.ps1 -FrameGenerationOnly
+```
+
+This installs only the pinned WanGP Frame Generation worker, signed NVIDIA
+Frame Generation DLL, and their notices. It leaves the working Windows 10
+experimental upscaling files untouched. Review the disclosure, type `I ACCEPT`,
+then restart Maestro. RTX 40 or newer and HAGS are required; only multipliers
+reported by the native capability probe become selectable. The controls show
+the reason when Frame Generation is unavailable, including missing files,
+disabled HAGS, or a failed native probe. RIFE remains available independently.
+
+### Full Windows 11 bundle
+
 Close Maestro, then run in PowerShell from the Maestro project folder:
 
 ```powershell
@@ -158,5 +180,6 @@ Availability can also be inspected at `GET /api/v1/media-flow/capabilities`.
 The installer does not change your GPU driver, OS or HAGS setting.
 
 Sources: [Wan2GP DLSS5 overview and installation guide](https://github.com/deepbeepmeep/Wan2GP/blob/1e1dd2757f24923f008593d9d4ec09062234be20/docs/DLSS5.md),
+[NVIDIA Frame Generation requirements](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS_G.md#10-requirements),
 [ComfyUI-DLSS5-NR v0.3.1](https://github.com/lisitskyaa/ComfyUI-DLSS5-NR/tree/41dcdfa593cb61b6a98c65bb8ed27606260bb598).
 Licenses and provenance: [Third-party notices](../THIRD_PARTY_NOTICES.md).

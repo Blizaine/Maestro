@@ -8,7 +8,8 @@ import { dismissGalleryFullscreenHelp, type createGalleryViewerSurface } from '.
 import { GallerySwipeDeck, type GallerySwipeDeckHandle } from './GallerySwipeDeck'
 import { GalleryVideoPlayer, type GalleryVideoPlayerHandle } from './GalleryVideoPlayer'
 import { GalleryZoomImage } from './GalleryZoomImage'
-import { getVideoPosterUrl, requestThumbnail } from '../../lib/thumbnailCache'
+import { getVideoPosterUrl, requestThumbnail, type VideoPosterSize } from '../../lib/thumbnailCache'
+import { useVideoPosterSize } from '../../lib/useVideoPosterSize'
 
 export type { GalleryImageChoice } from './ImageComparison'
 
@@ -36,21 +37,22 @@ export interface GalleryViewerProps {
 
 const KEYBOARD_IGNORE = 'input,select,textarea,video,audio,[contenteditable="true"],[role="slider"]'
 
-function GalleryPreview({ file, onThumbnailReady }: {
+function GalleryPreview({ file, posterSize, onThumbnailReady }: {
   file: OutputFile
+  posterSize: VideoPosterSize | null
   onThumbnailReady?: (identity: string, thumbnail: string) => void
 }) {
   const [thumbnail, setThumbnail] = useState<string | null>(null)
   useEffect(() => {
-    if (file.type !== 'video') return
+    if (file.type !== 'video' || !posterSize) return
     let active = true
     const identity = outputIdentity(file)
-    void requestThumbnail(file.url, file.url).then(url => {
+    void requestThumbnail(file.url, file.url, posterSize).then(url => {
       if (active) setThumbnail(url)
       if (url) onThumbnailReady?.(identity, url)
     })
     return () => { active = false }
-  }, [file, file.type, file.url, onThumbnailReady])
+  }, [file, file.type, file.url, posterSize, onThumbnailReady])
   const url = file.type === 'image' ? file.url : thumbnail
   return <div className="flex h-full w-full items-center justify-center overflow-hidden bg-black">
     {url ? <img src={url} alt="" draggable={false} className="h-full w-full select-none object-contain" />
@@ -81,6 +83,7 @@ export function GalleryViewer({
   onLoadMore,
 }: GalleryViewerProps) {
   const viewerRef = useRef<HTMLDivElement>(null)
+  const posterSize = useVideoPosterSize(viewerRef, initialId)
   const swipeDeckRef = useRef<GallerySwipeDeckHandle>(null)
   const playerRef = useRef<GalleryVideoPlayerHandle>(null)
   const lastComparisonImageRef = useRef<GalleryImageChoice | null>(null)
@@ -89,6 +92,13 @@ export function GalleryViewer({
   const loadMoreInFlightRef = useRef(false)
   const lastLoadAttemptLengthRef = useRef<number | null>(null)
   const pendingNextFromRef = useRef<number | null>(null)
+  const pendingNextOriginRef = useRef<string | null>(null)
+  const pendingNextAutomaticRef = useRef(false)
+  const imageAdvanceTimerRef = useRef<number | null>(null)
+  const autoAdvanceRef = useRef(false)
+  const automaticAdvanceRef = useRef(false)
+  const activeIdentityRef = useRef('')
+  const overlayPointerRef = useRef(false)
   const previewTargetIdsRef = useRef<Set<string>>(new Set())
 
   const galleryItems = useMemo(() => items.filter(item => item.type === 'image' || item.type === 'video'), [items])
@@ -104,14 +114,28 @@ export function GalleryViewer({
   const [imageInteraction, setImageInteraction] = useState({ id: '', blocked: false })
   const [previewThumbnails, setPreviewThumbnails] = useState<Record<string, string>>({})
   const [readyVideoSrc, setReadyVideoSrc] = useState('')
+  const [autoAdvance, setAutoAdvance] = useState(false)
+  const [imageDuration, setImageDuration] = useState(3)
+  const [loadedImageKey, setLoadedImageKey] = useState('')
+  const [tabVisible, setTabVisible] = useState(() => typeof document === 'undefined' || !document.hidden)
+  const [deckBusy, setDeckBusy] = useState(false)
+  const [autoAdvanceWaiting, setAutoAdvanceWaiting] = useState(false)
+  const [endedVideoSrc, setEndedVideoSrc] = useState<string | null>(null)
+  const [videoControls, setVideoControls] = useState({ src: '', visible: false })
+  const [pinnedControlsSrc, setPinnedControlsSrc] = useState('')
 
   const activeIndex = galleryItems.findIndex(item => outputIdentity(item) === activeId)
   const resolvedIndex = activeIndex >= 0 ? activeIndex : 0
   const currentItem = galleryItems[resolvedIndex]
   const currentIdentity = currentItem ? outputIdentity(currentItem) : activeId
   const mediaKey = currentItem ? `${currentIdentity}\u0000${currentItem.url}\u0000${currentItem.type}` : ''
+  const viewerControlsVisible = currentItem?.type !== 'video'
+    || (videoControls.src === currentItem.url && videoControls.visible)
+  const overlayVisibility = viewerControlsVisible ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'
+  autoAdvanceRef.current = autoAdvance
+  activeIdentityRef.current = currentIdentity
   const currentVideoPoster = currentItem?.type === 'video'
-    ? previewThumbnails[currentIdentity] || getVideoPosterUrl(currentItem.url)
+    ? (posterSize && getVideoPosterUrl(currentItem.url, posterSize)) || previewThumbnails[currentIdentity] || null
     : null
   const hasPrevious = resolvedIndex > 0
   const hasNext = resolvedIndex >= 0 && resolvedIndex < galleryItems.length - 1
@@ -120,12 +144,43 @@ export function GalleryViewer({
     ...(hasPrevious ? [outputIdentity(galleryItems[resolvedIndex - 1])] : []),
     ...(hasNext ? [outputIdentity(galleryItems[resolvedIndex + 1])] : []),
   ])
+
+  const clearImageAdvanceTimer = useCallback(() => {
+    if (imageAdvanceTimerRef.current === null) return
+    window.clearTimeout(imageAdvanceTimerRef.current)
+    imageAdvanceTimerRef.current = null
+  }, [])
+
+  const cancelPendingAdvance = useCallback((automaticOnly = false, cancelMotion = false) => {
+    const pendingAutomatic = pendingNextAutomaticRef.current
+    const activeAutomatic = automaticAdvanceRef.current
+    if (automaticOnly && !pendingAutomatic && !activeAutomatic) return
+
+    if (!automaticOnly || pendingAutomatic) {
+      pendingNextFromRef.current = null
+      pendingNextOriginRef.current = null
+      pendingNextAutomaticRef.current = false
+    }
+    if (pendingAutomatic || activeAutomatic) {
+      automaticAdvanceRef.current = false
+      setAutoAdvanceWaiting(false)
+      if (cancelMotion) {
+        swipeDeckRef.current?.cancelGesture()
+        playerRef.current?.cancelPreparedSource()
+      }
+    }
+  }, [])
+
   const comparisonVisible = compareMode && currentItem?.type === 'image'
   const imageGestureBlocked = currentItem?.type === 'image' && imageInteraction.id === mediaKey && imageInteraction.blocked
   const handleImageInteraction = useCallback((blocked: boolean) => {
-    if (blocked) swipeDeckRef.current?.cancelGesture()
+    if (blocked) {
+      clearImageAdvanceTimer()
+      cancelPendingAdvance(false, true)
+      swipeDeckRef.current?.cancelGesture()
+    }
     setImageInteraction(previous => previous.id === mediaKey && previous.blocked === blocked ? previous : { id: mediaKey, blocked })
-  }, [mediaKey])
+  }, [cancelPendingAdvance, clearImageAdvanceTimer, mediaKey])
   const rememberPreviewThumbnail = useCallback((identity: string, thumbnail: string) => {
     if (!previewTargetIdsRef.current.has(identity)) return
     setPreviewThumbnails(current => {
@@ -135,7 +190,49 @@ export function GalleryViewer({
       return Object.fromEntries(entries.slice(-3))
     })
   }, [])
+  const handleDeckBusyChange = useCallback((busy: boolean) => {
+    setDeckBusy(current => current === busy ? current : busy)
+  }, [])
   const handleVideoFrameReady = useCallback((src: string) => setReadyVideoSrc(src), [])
+  const handleControlsVisibility = useCallback((src: string, visible: boolean) => {
+    setVideoControls(current => current.src === src && current.visible === visible ? current : { src, visible })
+  }, [])
+
+  const revealViewerControls = () => {
+    if (currentItem?.type === 'video') playerRef.current?.revealControls()
+  }
+  const overlayInteraction = {
+    onPointerDown: (event: React.PointerEvent<HTMLDivElement>) => {
+      overlayPointerRef.current = true
+      setPinnedControlsSrc(event.target instanceof Element && event.target.closest('select') ? currentItem?.url ?? '' : '')
+      revealViewerControls()
+    },
+    onKeyDown: () => {
+      overlayPointerRef.current = false
+      setPinnedControlsSrc(currentItem?.url ?? '')
+      revealViewerControls()
+    },
+    onFocus: (event: React.FocusEvent<HTMLDivElement>) => {
+      if (event.target instanceof Element && (event.target.matches('select')
+        || (!overlayPointerRef.current && event.target.matches(':focus-visible')))) {
+        setPinnedControlsSrc(currentItem?.url ?? '')
+      }
+      revealViewerControls()
+    },
+    onBlur: (event: React.FocusEvent<HTMLDivElement>) => {
+      if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setPinnedControlsSrc('')
+    },
+  }
+
+  useEffect(() => {
+    if (!viewerControlsVisible && document.activeElement === document.body) viewerRef.current?.focus()
+  }, [viewerControlsVisible])
+
+  useEffect(() => {
+    const updateVisibility = () => setTabVisible(!document.hidden)
+    document.addEventListener('visibilitychange', updateVisibility)
+    return () => document.removeEventListener('visibilitychange', updateVisibility)
+  }, [])
 
   useLayoutEffect(() => {
     const viewer = viewerRef.current
@@ -237,9 +334,7 @@ export function GalleryViewer({
   }, [currentIdentity, mediaKey])
 
   useEffect(() => {
-    if (document.activeElement === document.body) viewerRef.current?.focus()
-    const closeButton = viewerRef.current?.querySelector<HTMLButtonElement>('[data-gallery-close]')
-    closeButton?.focus()
+    viewerRef.current?.focus()
   }, [portalHost])
 
   useEffect(() => {
@@ -267,12 +362,22 @@ export function GalleryViewer({
     return () => document.removeEventListener('keydown', handleEscape)
   }, [close])
 
-  const requestMore = useCallback(async (manual = false, advance = false) => {
+  const requestMore = useCallback(async (manual = false, advance = false, automatic = false) => {
     const requestedLength = galleryItems.length
-    if (advance) pendingNextFromRef.current = requestedLength
-    if (!hasMore || !onLoadMore) return
+    if (advance) {
+      pendingNextFromRef.current = requestedLength
+      pendingNextOriginRef.current = currentIdentity
+      pendingNextAutomaticRef.current = automatic
+    }
+    if (!hasMore || !onLoadMore) {
+      if (advance) cancelPendingAdvance(automatic)
+      return
+    }
     if (loadMoreInFlightRef.current) return
-    if (!manual && lastLoadAttemptLengthRef.current === requestedLength) return
+    if (!manual && lastLoadAttemptLengthRef.current === requestedLength) {
+      if (advance) cancelPendingAdvance(automatic)
+      return
+    }
 
     loadMoreInFlightRef.current = true
     lastLoadAttemptLengthRef.current = requestedLength
@@ -282,23 +387,38 @@ export function GalleryViewer({
       await onLoadMore()
     } catch (error) {
       setLoadMoreError(error instanceof Error ? error.message : 'Could not load more images.')
+      if (advance) cancelPendingAdvance(automatic)
     } finally {
       loadMoreInFlightRef.current = false
       setLoadingMore(false)
     }
-  }, [galleryItems.length, hasMore, onLoadMore])
+  }, [cancelPendingAdvance, currentIdentity, galleryItems.length, hasMore, onLoadMore])
 
   useEffect(() => {
     const requestedLength = pendingNextFromRef.current
     if (requestedLength === null) return
-    if (galleryItems.length > requestedLength) {
-      setReadyVideoSrc('')
-      setActiveId(outputIdentity(galleryItems[requestedLength]))
-      pendingNextFromRef.current = null
-    } else if (!hasMore) {
-      pendingNextFromRef.current = null
+    const automatic = pendingNextAutomaticRef.current
+    if (activeIdentityRef.current !== pendingNextOriginRef.current || (automatic && !autoAdvanceRef.current)) {
+      cancelPendingAdvance(automatic)
+      return
     }
-  }, [galleryItems, hasMore])
+    if (automatic && (!tabVisible || deckBusy || comparisonVisible || imageGestureBlocked)) return
+    if (galleryItems.length > requestedLength) {
+      pendingNextFromRef.current = null
+      pendingNextOriginRef.current = null
+      pendingNextAutomaticRef.current = false
+      if (!automatic && (comparisonVisible || imageGestureBlocked)) {
+        setReadyVideoSrc('')
+        setActiveId(outputIdentity(galleryItems[requestedLength]))
+        automaticAdvanceRef.current = false
+        setAutoAdvanceWaiting(false)
+      } else {
+        swipeDeckRef.current?.navigate(1)
+      }
+    } else if (!hasMore && !loadingMore) {
+      cancelPendingAdvance(automatic)
+    }
+  }, [cancelPendingAdvance, comparisonVisible, deckBusy, galleryItems, hasMore, imageGestureBlocked, loadingMore, tabVisible])
 
   useEffect(() => {
     if (galleryItems.length > 0 && resolvedIndex >= galleryItems.length - 2 && hasMore && onLoadMore) {
@@ -306,24 +426,86 @@ export function GalleryViewer({
     }
   }, [galleryItems.length, hasMore, onLoadMore, requestMore, resolvedIndex])
 
-  const navigate = useCallback((direction: -1 | 1, manualLoad = false) => {
+  const navigate = useCallback((direction: -1 | 1, manualLoad = false, automatic = false) => {
+    if (!automatic) {
+      clearImageAdvanceTimer()
+      cancelPendingAdvance(false, true)
+      setEndedVideoSrc(null)
+    }
     if (galleryItems.length === 0) return
     const nextIndex = resolvedIndex + direction
     if (nextIndex >= 0 && nextIndex < galleryItems.length) {
       if (comparisonVisible || imageGestureBlocked) {
         setReadyVideoSrc('')
         setActiveId(outputIdentity(galleryItems[nextIndex]))
+        if (automatic) {
+          automaticAdvanceRef.current = false
+          setAutoAdvanceWaiting(false)
+        }
       } else swipeDeckRef.current?.navigate(direction)
       return
     }
-    if (direction > 0 && hasMore && onLoadMore) void requestMore(manualLoad, true)
-  }, [comparisonVisible, galleryItems, hasMore, imageGestureBlocked, onLoadMore, requestMore, resolvedIndex])
+    if (direction > 0 && hasMore && onLoadMore) void requestMore(manualLoad, true, automatic)
+    else if (automatic) {
+      automaticAdvanceRef.current = false
+      setAutoAdvanceWaiting(false)
+    }
+  }, [cancelPendingAdvance, clearImageAdvanceTimer, comparisonVisible, galleryItems, hasMore, imageGestureBlocked, onLoadMore, requestMore, resolvedIndex])
+
+  const startAutomaticAdvance = useCallback(() => {
+    if (!autoAdvanceRef.current || deckBusy || (!hasNext && (!hasMore || !onLoadMore))) return
+    automaticAdvanceRef.current = true
+    setAutoAdvanceWaiting(true)
+    navigate(1, false, true)
+  }, [deckBusy, hasMore, hasNext, navigate, onLoadMore])
+
+  const handleVideoEnded = useCallback((src: string) => {
+    setEndedVideoSrc(src)
+  }, [])
+
+  useEffect(() => {
+    if (!endedVideoSrc) return
+    if (!autoAdvance || currentItem?.type !== 'video' || currentItem.url !== endedVideoSrc) {
+      setEndedVideoSrc(null)
+      return
+    }
+    // The store's pagination flag can update before the viewer receives the
+    // appended items. Keep the completed clip pending through that handoff.
+    if (!tabVisible || deckBusy || (!hasNext && loadingMore)) return
+    const video = viewerRef.current?.querySelector<HTMLVideoElement>('video[data-gallery-video-active="true"]')
+    if (!video?.ended) {
+      setEndedVideoSrc(null)
+      return
+    }
+    setEndedVideoSrc(null)
+    startAutomaticAdvance()
+  }, [autoAdvance, currentItem, deckBusy, endedVideoSrc, hasNext, loadingMore, startAutomaticAdvance, tabVisible])
+
+  useEffect(() => {
+    if (!autoAdvance || currentItem?.type !== 'image' || loadedImageKey !== mediaKey
+      || comparisonVisible || imageGestureBlocked || deckBusy
+      || !tabVisible || autoAdvanceWaiting || (!hasNext && !hasMore)) return
+
+    const identity = currentIdentity
+    const timer = window.setTimeout(() => {
+      if (imageAdvanceTimerRef.current === timer) imageAdvanceTimerRef.current = null
+      if (!autoAdvanceRef.current || activeIdentityRef.current !== identity || document.hidden || deckBusy) return
+      startAutomaticAdvance()
+    }, imageDuration * 1000)
+    imageAdvanceTimerRef.current = timer
+    return () => {
+      window.clearTimeout(timer)
+      if (imageAdvanceTimerRef.current === timer) imageAdvanceTimerRef.current = null
+    }
+  }, [autoAdvance, autoAdvanceWaiting, comparisonVisible, currentIdentity, currentItem, deckBusy, hasMore, hasNext, imageDuration, imageGestureBlocked, loadedImageKey, mediaKey, startAutomaticAdvance, tabVisible])
 
   const commitNavigation = useCallback((direction: -1 | 1) => {
     const next = galleryItems[resolvedIndex + direction]
     if (next) {
       setReadyVideoSrc('')
       setActiveId(outputIdentity(next))
+      automaticAdvanceRef.current = false
+      setAutoAdvanceWaiting(false)
     }
   }, [galleryItems, resolvedIndex])
 
@@ -336,6 +518,8 @@ export function GalleryViewer({
 
   const cancelPreparedNavigation = useCallback(() => {
     playerRef.current?.cancelPreparedSource()
+    automaticAdvanceRef.current = false
+    setAutoAdvanceWaiting(false)
   }, [])
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -383,6 +567,15 @@ export function GalleryViewer({
     }
   }
 
+  const toggleAutoAdvance = () => {
+    if (autoAdvance) {
+      clearImageAdvanceTimer()
+      cancelPendingAdvance(true, true)
+      setEndedVideoSrc(null)
+    }
+    setAutoAdvance(!autoAdvance)
+  }
+
   const currentComparisonImage = useMemo<GalleryImageChoice | null>(() => currentItem?.type === 'image'
     ? { id: currentIdentity, name: currentItem.name, url: currentItem.url }
     : null, [currentIdentity, currentItem])
@@ -405,7 +598,9 @@ export function GalleryViewer({
         Swipe up or down, or use the arrow keys to browse. Tap a video to pause or resume playback.
         Pinch an image to zoom, then drag to pan. Reset zoom to swipe to another item.
       </p>
-      <div data-gallery-viewer-actions className="absolute z-30 flex items-center gap-2"
+      <div data-gallery-viewer-actions aria-hidden={!viewerControlsVisible} inert={!viewerControlsVisible}
+        {...overlayInteraction}
+        className={`absolute z-30 flex items-center gap-2 transition-opacity duration-150 ${overlayVisibility}`}
         style={{ top: 'max(0.75rem, env(safe-area-inset-top))', right: 'max(0.75rem, env(safe-area-inset-right))' }}>
         {currentItem?.type === 'image' && (
           <button
@@ -444,8 +639,39 @@ export function GalleryViewer({
         </button>
       </div>
 
-      {favoriteError && <p role="alert" className="absolute right-3 z-40 rounded-md bg-rose-950/90 px-3 py-2 text-xs text-rose-100" style={{ top: 'calc(max(0.75rem, env(safe-area-inset-top)) + 3.25rem)' }}>{favoriteError}</p>}
-      {fullscreenError && <div role="status" className="absolute inset-x-3 z-30 mx-auto flex max-w-md items-start gap-2 rounded-lg bg-black/75 px-3 py-2 text-xs text-white/80" style={{ top: 'calc(max(0.75rem, env(safe-area-inset-top)) + 3.25rem)' }}>
+      <div data-gallery-auto-advance aria-hidden={!viewerControlsVisible} inert={!viewerControlsVisible}
+        {...overlayInteraction}
+        className={`absolute z-30 flex items-center gap-1.5 transition-opacity duration-150 ${overlayVisibility}`}
+        style={{ top: 'max(0.75rem, env(safe-area-inset-top))', left: 'max(0.75rem, env(safe-area-inset-left))' }}>
+        <button
+          type="button"
+          onClick={toggleAutoAdvance}
+          aria-label="Auto advance"
+          aria-pressed={autoAdvance}
+          title={autoAdvance ? 'Turn off auto advance' : 'Turn on auto advance'}
+          className={`h-11 rounded-full px-3 text-xs font-medium shadow-md transition-colors focus-visible:ring-2 focus-visible:ring-white ${autoAdvance ? 'bg-accent-blue text-white' : 'bg-black/40 text-white hover:bg-black/65'}`}
+        >
+          <span className="sm:hidden">Auto</span><span className="hidden sm:inline">Auto advance</span>
+        </button>
+        {autoAdvance && (
+          <select
+            aria-label="Image duration"
+            title="How long to show each image"
+            value={imageDuration}
+            onChange={event => { setImageDuration(Number(event.currentTarget.value)); setPinnedControlsSrc('') }}
+            className="h-11 w-16 rounded-full border-0 bg-black/60 px-2 text-xs text-white shadow-md outline-none focus-visible:ring-2 focus-visible:ring-white [&>option]:bg-neutral-900"
+          >
+            {Array.from({ length: 10 }, (_, index) => index + 1).map(seconds => (
+              <option key={seconds} value={seconds}>{seconds}s</option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      {favoriteError && <p role="alert" aria-hidden={!viewerControlsVisible} className={`absolute right-3 z-40 rounded-md bg-rose-950/90 px-3 py-2 text-xs text-rose-100 transition-opacity duration-150 ${overlayVisibility}`} style={{ top: 'calc(max(0.75rem, env(safe-area-inset-top)) + 3.25rem)' }}>{favoriteError}</p>}
+      {fullscreenError && <div role="status" aria-hidden={!viewerControlsVisible} inert={!viewerControlsVisible}
+        {...overlayInteraction}
+        className={`absolute inset-x-3 z-30 mx-auto flex max-w-md items-start gap-2 rounded-lg bg-black/75 px-3 py-2 text-xs text-white/80 transition-opacity duration-150 ${overlayVisibility}`} style={{ top: 'calc(max(0.75rem, env(safe-area-inset-top)) + 3.25rem)' }}>
         <p className="flex-1">{fullscreenError}</p>
         <button type="button" aria-label="Dismiss fullscreen help" className="shrink-0 p-1" onClick={() => {
           dismissGalleryFullscreenHelp(fullscreenError)
@@ -472,15 +698,19 @@ export function GalleryViewer({
           onNavigate={commitNavigation}
           onPrepareNavigate={prepareNavigation}
           onCancelNavigation={cancelPreparedNavigation}
+          onBusyChange={handleDeckBusyChange}
           onTap={() => { if (currentItem?.type === 'video') playerRef.current?.togglePlayback() }}
-          previous={hasPrevious ? <GalleryPreview key={outputIdentity(galleryItems[resolvedIndex - 1])} file={galleryItems[resolvedIndex - 1]} onThumbnailReady={rememberPreviewThumbnail} /> : undefined}
-          next={hasNext ? <GalleryPreview key={outputIdentity(galleryItems[resolvedIndex + 1])} file={galleryItems[resolvedIndex + 1]} onThumbnailReady={rememberPreviewThumbnail} /> : undefined}>
+          previous={hasPrevious ? <GalleryPreview key={outputIdentity(galleryItems[resolvedIndex - 1])} file={galleryItems[resolvedIndex - 1]} posterSize={posterSize} onThumbnailReady={rememberPreviewThumbnail} /> : undefined}
+          next={hasNext ? <GalleryPreview key={outputIdentity(galleryItems[resolvedIndex + 1])} file={galleryItems[resolvedIndex + 1]} posterSize={posterSize} onThumbnailReady={rememberPreviewThumbnail} /> : undefined}>
         {/* Safari authorizes sound per media element. Keep this player mounted
             through video and image navigation, unloading its source on images. */}
         <div className={currentItem?.type === 'video' ? 'relative h-full w-full min-h-0' : 'hidden'}
           aria-hidden={currentItem?.type !== 'video'} inert={currentItem?.type !== 'video'}>
           <GalleryVideoPlayer ref={playerRef} src={currentItem?.type === 'video' ? currentItem.url : undefined} name={currentItem?.name ?? ''}
-            initialTime={currentIdentity === initialId ? initialTime : undefined} onFrameReady={handleVideoFrameReady} />
+            initialTime={currentIdentity === initialId ? initialTime : undefined} loop={!autoAdvance}
+            onFrameReady={handleVideoFrameReady} onEnded={handleVideoEnded}
+            controlsPinned={currentItem?.type === 'video' && pinnedControlsSrc === currentItem.url}
+            onControlsVisibilityChange={handleControlsVisibility} />
           {currentItem?.type === 'video' && readyVideoSrc !== currentItem.url && (
             <div data-gallery-video-preview={currentIdentity}
               className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center overflow-hidden bg-black">
@@ -497,8 +727,8 @@ export function GalleryViewer({
               src={currentItem.url}
               name={currentItem.name}
               onInteractionChange={handleImageInteraction}
-              onLoad={() => setMediaLoadError('')}
-              onError={() => setMediaLoadError('This image could not be loaded.')}
+              onLoad={() => { setMediaLoadError(''); setLoadedImageKey(mediaKey) }}
+              onError={() => { setLoadedImageKey(''); setMediaLoadError('This image could not be loaded.') }}
             />
             {mediaLoadError && <p role="alert" className="pointer-events-none absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded bg-black/85 px-3 py-2 text-center text-xs text-rose-200">{mediaLoadError}</p>}
           </div>
@@ -510,7 +740,8 @@ export function GalleryViewer({
       </main>
 
       {(loadMoreError || (!hasNext && hasMore && onLoadMore)) && (
-        <div className="absolute inset-x-3 z-30 flex flex-col items-center gap-2 text-xs" style={{ bottom: 'calc(max(0.75rem, env(safe-area-inset-bottom)) + 4rem)' }}>
+        <div aria-hidden={!viewerControlsVisible} inert={!viewerControlsVisible} {...overlayInteraction}
+          className={`absolute inset-x-3 z-30 flex flex-col items-center gap-2 text-xs transition-opacity duration-150 ${overlayVisibility}`} style={{ bottom: 'calc(max(0.75rem, env(safe-area-inset-bottom)) + 4rem)' }}>
           {loadMoreError && <p role="status" className="rounded-md bg-black/75 px-3 py-2 text-rose-200">{loadMoreError}</p>}
           {hasMore && onLoadMore && (
             <button

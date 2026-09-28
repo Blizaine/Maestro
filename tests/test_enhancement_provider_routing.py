@@ -16,7 +16,7 @@ class TestEnhancementProviderRouting(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / "app/launch.py"
         nodes = [n for n in ast.parse(path.read_text(encoding="utf-8")).body
                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                 and n.name in {"_ensure_llm_loaded", "_llm_enhance_prompt_payload"}]
+                 and n.name in {"_ensure_llm_loaded", "_llm_enhance_prompt_payload", "_active_lora_hint"}]
         for node in nodes:
             node.decorator_list = []
         cls.code = compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec")

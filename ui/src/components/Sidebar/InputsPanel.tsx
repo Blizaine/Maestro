@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import { X, Upload, Plus, Music, Film, Mic } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { GalleryInput } from '../shared/GalleryInput'
@@ -82,6 +82,7 @@ const getMediaDuration = (file: File): Promise<number | null> => {
 }
 
 export function InputsPanel() {
+  const frameImageInputRef = useRef<HTMLInputElement>(null)
   const modelOptions = useStore(s => s.modelOptions)
   const startImage = useStore(s => s.startImage)
   const endImage = useStore(s => s.endImage)
@@ -298,8 +299,6 @@ export function InputsPanel() {
     }
     input.click()
   }
-  const pickImage = (onFile: (f: File) => void) => pickFile('image/*', onFile)
-
   // ── Inject handlers ────────────────────────────────────────────────
   const syncFrameParams = (frames: InjectedFrame[]) => {
     if (frames.length === 0) {
@@ -409,6 +408,15 @@ export function InputsPanel() {
       off = 'end'
     }
     return addInjectFrame(file, null, URL.createObjectURL(file), off, w)
+  }
+
+  const handleFrameImageChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget
+    const file = input.files?.[0]
+    // Keep the input mounted, but clear its value so choosing the same image
+    // again (after removing it, for example) still fires a change event.
+    input.value = ''
+    if (file) void handleAddFrameSmart(file)
   }
 
   // Set a frame's (window, offset), re-routing it across pipelines as needed.
@@ -624,6 +632,8 @@ export function InputsPanel() {
 
   return (
     <div>
+      <input ref={frameImageInputRef} type="file" accept="image/*" className="hidden"
+        aria-label="Choose a frame image" onChange={handleFrameImageChange} />
       {!hasSoundtrack && supportsSoundtrack && <GalleryInput kind="audio" label="soundtrack"
         onFile={handleAddSoundtrack} />}
       {voiceRefEnabled && !directorVoiceRef && <GalleryInput kind="audio" label="voice reference"
@@ -688,7 +698,7 @@ export function InputsPanel() {
         ))}
         {canAddFrame && (
           <AddTile label={frameUploading ? 'Uploading…' : frameTiles.length ? 'Add frame' : supportsEndFrame ? 'Start / end frame' : 'Start frame'} icon={<Plus size={18} />}
-            onClick={() => pickImage(handleAddFrameSmart)} onDropFile={handleAddFrameSmart} dropAccept="image" />
+            onClick={() => frameImageInputRef.current?.click()} onDropFile={handleAddFrameSmart} dropAccept="image" />
         )}
 
         {/* Soundtrack (audio) */}

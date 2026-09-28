@@ -31,6 +31,8 @@ export interface GallerySwipeDeckProps {
   onCancelNavigation?: () => void
   /** A stationary tap, separate from a swipe or an interactive control. */
   onTap?: () => void
+  /** Reports active pointer gestures and settling so timed navigation can wait for the deck. */
+  onBusyChange?: (busy: boolean) => void
   enabled?: boolean
 }
 
@@ -95,6 +97,7 @@ export const GallerySwipeDeck = forwardRef<GallerySwipeDeckHandle, GallerySwipeD
   onPrepareNavigate,
   onCancelNavigation,
   onTap,
+  onBusyChange,
   enabled = true,
 }, ref) {
   const viewportRef = useRef<HTMLDivElement>(null)
@@ -103,6 +106,7 @@ export const GallerySwipeDeck = forwardRef<GallerySwipeDeckHandle, GallerySwipeD
   const onNavigateRef = useRef(onNavigate)
   const onPrepareNavigateRef = useRef(onPrepareNavigate)
   const onCancelNavigationRef = useRef(onCancelNavigation)
+  const onBusyChangeRef = useRef(onBusyChange)
   const availabilityRef = useRef({ enabled, previous: hasPreview(previous), next: hasPreview(next) })
   const pointerRef = useRef<PointerGesture | null>(null)
   const lockedRef = useRef(false)
@@ -118,6 +122,7 @@ export const GallerySwipeDeck = forwardRef<GallerySwipeDeckHandle, GallerySwipeD
   const [motion, setMotion] = useState<MotionState>({ activeId, offset: 0, phase: 'idle' })
   const [viewportHeight, setViewportHeight] = useState(0)
   const [reducedMotion, setReducedMotion] = useState(false)
+  const [pointerActive, setPointerActive] = useState(false)
   const offset = motion.activeId === activeId ? motion.offset : 0
   const phase = motion.activeId === activeId ? motion.phase : 'idle'
 
@@ -125,8 +130,13 @@ export const GallerySwipeDeck = forwardRef<GallerySwipeDeckHandle, GallerySwipeD
     onNavigateRef.current = onNavigate
     onPrepareNavigateRef.current = onPrepareNavigate
     onCancelNavigationRef.current = onCancelNavigation
+    onBusyChangeRef.current = onBusyChange
     availabilityRef.current = { enabled, previous: hasPreview(previous), next: hasPreview(next) }
-  }, [enabled, next, onCancelNavigation, onNavigate, onPrepareNavigate, previous])
+  }, [enabled, next, onBusyChange, onCancelNavigation, onNavigate, onPrepareNavigate, previous])
+
+  useEffect(() => {
+    onBusyChangeRef.current?.(pointerActive || phase !== 'idle')
+  }, [phase, pointerActive])
 
   const updateOffset = useCallback((value: number) => {
     offsetRef.current = value
@@ -160,6 +170,7 @@ export const GallerySwipeDeck = forwardRef<GallerySwipeDeckHandle, GallerySwipeD
   const releasePointerCapture = useCallback(() => {
     const gesture = pointerRef.current
     pointerRef.current = null
+    setPointerActive(false)
     if (!gesture?.captured) return
     const viewport = viewportRef.current
     if (!viewport?.hasPointerCapture(gesture.pointerId)) return
@@ -309,6 +320,7 @@ export const GallerySwipeDeck = forwardRef<GallerySwipeDeckHandle, GallerySwipeD
     return () => observer.disconnect()
   }, [cancelPendingNavigation, clearSettleTimer, releasePointerCapture])
 
+  /* eslint-disable react-hooks/set-state-in-effect -- Reset pointer state when the swipe surface is disabled or its active media changes. */
   useLayoutEffect(() => {
     if (enabled || (!pointerRef.current && !pendingSettleRef.current && !lockedRef.current)) return
     clearSettleTimer()
@@ -318,7 +330,6 @@ export const GallerySwipeDeck = forwardRef<GallerySwipeDeckHandle, GallerySwipeD
     lockedRef.current = false
     offsetRef.current = 0
     // This runs only when an in-flight gesture must be cancelled as its surface is disabled.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMotion({ activeId, offset: 0, phase: 'idle' })
   }, [activeId, cancelPendingNavigation, clearSettleTimer, enabled, releasePointerCapture])
 
@@ -332,6 +343,7 @@ export const GallerySwipeDeck = forwardRef<GallerySwipeDeckHandle, GallerySwipeD
     lockedRef.current = false
     offsetRef.current = 0
   }, [activeId, cancelPendingNavigation, clearSettleTimer, releasePointerCapture, updateOffset])
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => () => {
     clearSettleTimer()
@@ -366,6 +378,7 @@ export const GallerySwipeDeck = forwardRef<GallerySwipeDeckHandle, GallerySwipeD
       rejected: false,
       captured: false,
     }
+    setPointerActive(true)
   }
 
   const movePointer = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -381,6 +394,7 @@ export const GallerySwipeDeck = forwardRef<GallerySwipeDeckHandle, GallerySwipeD
       if (absX >= absY * 1.15) {
         gesture.rejected = true
         pointerRef.current = null
+        setPointerActive(false)
         return
       }
       if (absY < absX * 1.15) return

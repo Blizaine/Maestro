@@ -2,14 +2,17 @@ const DB_NAME = 'maestro-thumbnails'
 const STORE_NAME = 'thumbnails'
 const DB_VERSION = 1
 
-/** Managed gallery videos have small server-rendered posters. Loading an image
+export type VideoPosterSize = 480 | 960 | 1920
+
+/** Managed gallery videos have bounded server-rendered posters. Loading an image
  * does not depend on mobile Safari preloading or seeking an offscreen video. */
-export function getVideoPosterUrl(videoUrl: string): string | null {
+export function getVideoPosterUrl(videoUrl: string, size: VideoPosterSize = 480): string | null {
   try {
     const url = new URL(videoUrl, window.location.href)
     if (url.origin !== window.location.origin || !url.pathname.startsWith('/api/v1/file/')) return null
     url.pathname = url.pathname.replace('/api/v1/file/', '/api/v1/thumbnail/')
     url.hash = ''
+    url.searchParams.set('size', String(size))
     // Keep the workspace (including Uploads) and any cache-busting query.
     return `${url.pathname}${url.search}`
   } catch {
@@ -170,8 +173,8 @@ async function processQueue() {
  * Use cached server posters for managed gallery media. Other URLs retain the
  * browser capture/cache fallback, with priority for the newest requests.
  */
-export function requestThumbnail(videoUrl: string, name: string): Promise<string | null> {
-  const posterUrl = getVideoPosterUrl(videoUrl)
+export function requestThumbnail(videoUrl: string, name: string, size: VideoPosterSize = 480): Promise<string | null> {
+  const posterUrl = getVideoPosterUrl(videoUrl, size)
   if (posterUrl) return Promise.resolve(posterUrl)
   // Fast path: check if already in cache synchronously via the queue check
   return new Promise((resolve) => {

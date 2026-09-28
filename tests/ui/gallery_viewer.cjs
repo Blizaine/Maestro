@@ -53,7 +53,7 @@ const files = [output('result.png','image'), output('clip.mp4','video'), output(
   try {
     for(const scenario of [{name:'desktop',width:1280,height:900,touch:false},
       {name:'phone',width:390,height:844,touch:true}]) {
-      const context=await browser.newContext({viewport:{width:scenario.width,height:scenario.height},
+      const context=await browser.newContext({viewport:{width:scenario.width,height:scenario.height},deviceScaleFactor:scenario.touch?2:1,
         hasTouch:scenario.touch,isMobile:scenario.touch,...(scenario.touch ? {
           userAgent:'Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 Version/26.0 Mobile/15E148 Safari/604.1',
         } : {})});
@@ -159,7 +159,19 @@ const files = [output('result.png','image'), output('clip.mp4','video'), output(
         const image=page.getByRole('button',{name:'Enlarge result.png'}).first();
         await image.waitFor();
         const initialVideo=page.locator('video[data-gallery-media]').first();
-        assert.equal(await initialVideo.getAttribute('poster'),'/api/v1/thumbnail/clip.mp4?workspace=A');
+        await page.waitForFunction(()=>document.querySelector('video[data-gallery-media]')?.poster.includes('size='));
+        let posterUrl=new URL(await initialVideo.getAttribute('poster'),'http://gallery-viewer.test');
+        assert.equal(posterUrl.pathname,'/api/v1/thumbnail/clip.mp4');
+        assert.equal(posterUrl.searchParams.get('workspace'),'A');
+        if(scenario.touch) {
+          assert.equal(posterUrl.searchParams.get('size'),'960','Retina phone gallery uses a bounded mobile poster');
+        } else {
+          await page.setViewportSize({width:2300,height:1200});
+          await page.waitForFunction(()=>new URL(document.querySelector('video[data-gallery-media]').poster).searchParams.get('size')==='1920');
+          posterUrl=new URL(await initialVideo.getAttribute('poster'),'http://gallery-viewer.test');
+          assert.equal(posterUrl.searchParams.get('size'),'1920','Large desktop card requests a full-HD poster');
+          await page.setViewportSize({width:scenario.width,height:scenario.height});
+        }
         assert.equal(await initialVideo.getAttribute('preload'),'none');
         await page.evaluate(async()=>{
           const poster=new Image(); poster.src=document.querySelector('video[data-gallery-media]').poster;
@@ -168,18 +180,29 @@ const files = [output('result.png','image'), output('clip.mp4','video'), output(
         assert.ok(posterRequests.length>0,'Gallery poster images load without video playback');
         assert.equal(mediaRequests.length,0,'Browsing posters does not download or decode whole videos');
         assert.equal(await page.evaluate(()=>window.posterUrl('/api/v1/file/a%20%23b.mp4?workspace=A%20B&v=2#t=0.1')),
-          '/api/v1/thumbnail/a%20%23b.mp4?workspace=A%20B&v=2','Poster keeps encoded names and workspace without a video seek fragment');
+          '/api/v1/thumbnail/a%20%23b.mp4?workspace=A+B&v=2&size=480','Poster keeps encoded names and workspace without a video seek fragment');
         assert.equal(await page.evaluate(()=>window.posterUrl('https://elsewhere.test/api/v1/file/clip.mp4')),null,
           'External URLs are not sent to the local poster endpoint');
         assert.equal(await page.evaluate(()=>window.requestThumbnail('/api/v1/file/clip.mp4?workspace=__uploads__','clip.mp4')),
-          '/api/v1/thumbnail/clip.mp4?workspace=__uploads__','Uploads also use image posters');
+          '/api/v1/thumbnail/clip.mp4?workspace=__uploads__&size=480','Small thumbnails keep the lightweight poster tier');
         await page.waitForFunction(()=>window.galleryInputs.getState().targets.some(t=>t.getImages?.().length));
         await image.click();
         const dialog=page.getByRole('dialog');
         const activeMedia=dialog.locator('[data-gallery-swipe-current]');
         const navigate=async(direction)=>{
-          await dialog.getByRole('button',{name:'Close viewer',exact:true}).focus();
+          await dialog.focus();
           await page.keyboard.press(direction>0?'ArrowDown':'ArrowUp');
+        };
+        const revealViewerControls=async()=>{
+          if(await dialog.locator('[data-gallery-viewer-actions]').getAttribute('aria-hidden')==='true') {
+            await dialog.locator('video').click();
+            await page.waitForFunction(()=>document.querySelector('[data-gallery-viewer-actions]')?.getAttribute('aria-hidden')==='false');
+          }
+        };
+        const closeViewer=async()=>{
+          await revealViewerControls();
+          const closeButton=dialog.getByRole('button',{name:'Close viewer',exact:true});
+          await closeButton.click();
         };
         await dialog.waitFor();
         assert.deepEqual(await dialog.evaluate(el=>({width:Math.round(el.getBoundingClientRect().width),
@@ -429,6 +452,21 @@ const files = [output('result.png','image'), output('clip.mp4','video'), output(
         assert.equal(await dialog.locator('video').evaluate(video=>video.muted),false);
         await dialog.getByRole('button',{name:'Play video',exact:true}).click();
         await position.waitFor({state:'hidden'});
+        await page.waitForFunction(()=>['[data-gallery-viewer-actions]','[data-gallery-auto-advance]','[data-gallery-playback-controls]'].every(selector=>{
+          const controls=document.querySelector(selector);
+          return controls?.inert && getComputedStyle(controls).opacity==='0' && getComputedStyle(controls).pointerEvents==='none';
+        }));
+        await dialog.locator('video').click();
+        await page.waitForFunction(()=>document.querySelector('[role="dialog"] video').paused);
+        await dialog.getByRole('button',{name:'Auto advance',exact:true}).waitFor();
+        await dialog.getByRole('button',{name:'Close viewer',exact:true}).waitFor();
+        await position.waitFor();
+        assert.equal(await dialog.locator('[data-gallery-viewer-actions]').getAttribute('aria-hidden'),'false','Tapping to pause reveals all viewer actions');
+        await page.waitForTimeout(3200);
+        assert.equal(await dialog.locator('[data-gallery-auto-advance]').getAttribute('aria-hidden'),'false','Paused controls do not fade');
+        await dialog.locator('video').click();
+        await page.waitForFunction(()=>!document.querySelector('[role="dialog"] video').paused);
+        await position.waitFor({state:'hidden'});
         await page.screenshot({path:path.join(fixtures,scenario.name+'-clear-playback.png')});
         if(cdp) {
           await dragStart(x,y);await dragMove(x,y-280);await waitOffset(-280);
@@ -464,7 +502,7 @@ const files = [output('result.png','image'), output('clip.mp4','video'), output(
         await dialog.getByRole('button',{name:'Add to favorites',exact:true}).click();
         await dialog.getByRole('button',{name:'Remove from favorites',exact:true}).waitFor();
         assert.ok(mutations.at(-1).includes('workspace=B'),'Same filenames in different folders remain distinct');
-        await dialog.getByRole('button',{name:'Close viewer',exact:true}).click();
+        await closeViewer();
         await dialog.waitFor({state:'hidden'});
         // Removing a favorite must not unexpectedly advance a Favorites session.
         await page.evaluate(()=>window.store.setState({mediaFilter:'favorites',selectedOutput:0}));
@@ -472,7 +510,7 @@ const files = [output('result.png','image'), output('clip.mp4','video'), output(
         await dialog.getByRole('button',{name:'Remove from favorites',exact:true}).click();
         await dialog.getByRole('button',{name:'Add to favorites',exact:true}).waitFor();
         assert.ok(await activeMedia.locator('img[src*="workspace=A"]').isVisible(),'Unfavoriting retains current media');
-        await dialog.getByRole('button',{name:'Close viewer',exact:true}).click();
+        await closeViewer();
         await page.evaluate(()=>window.store.setState({mediaFilter:'all',selectedOutput:0}));
 
         // A text-to-image run has no source; a gallery choice enables comparison.
@@ -489,7 +527,7 @@ const files = [output('result.png','image'), output('clip.mp4','video'), output(
         if(scenario.touch) assert.equal(await dialog.getByText(/without the Safari toolbar/).count(),0,'Fullscreen fallback respects dismissed Home Screen help');
         else await dialog.getByText(/could not enter fullscreen/).waitFor();
         assert.equal(await dialog.isVisible(),true);
-        await dialog.getByRole('button',{name:'Close viewer',exact:true}).click();
+        await closeViewer();
         await page.evaluate(()=>{window.rejectFullscreen=false});
 
         // Continue the current gallery through paginated results without duplicates.
@@ -510,7 +548,7 @@ const files = [output('result.png','image'), output('clip.mp4','video'), output(
         await navigate(1);
         assert.equal(await activeMedia.locator('img[src*="workspace=C"]').isVisible(),true,'Last item does not wrap');
         assert.equal(await page.evaluate(()=>window.moreCalls),1);
-        await dialog.getByRole('button',{name:'Close viewer',exact:true}).click();
+        await closeViewer();
 
         // Opening directly from a video retains its playback position and releases it on close.
         const inlineVideo=page.locator('video[data-gallery-media]').first();
@@ -518,7 +556,7 @@ const files = [output('result.png','image'), output('clip.mp4','video'), output(
         await inlineVideo.locator('..').getByRole('button',{name:'Open full-screen gallery',exact:true}).click();
         await page.waitForFunction(()=>document.querySelector('[role="dialog"] video')?.currentTime>=1.2);
         await page.evaluate(()=>window.viewerVideo=document.querySelector('[role="dialog"] video'));
-        await dialog.getByRole('button',{name:'Close viewer',exact:true}).click();
+        await closeViewer();
         assert.equal(await page.evaluate(()=>window.viewerVideo.paused && !window.viewerVideo.hasAttribute('src')),true);
 
         // Browser autoplay restrictions still leave a clear, usable picture.
@@ -534,7 +572,7 @@ const files = [output('result.png','image'), output('clip.mp4','video'), output(
         await page.evaluate(()=>{window.playPolicy=''});
         await dialog.getByRole('button',{name:'Tap for sound',exact:true}).click();
         await page.waitForFunction(()=>!document.querySelector('[role="dialog"] video').muted);
-        await dialog.getByRole('button',{name:'Close viewer',exact:true}).click();
+        await closeViewer();
 
         await page.evaluate(()=>{window.playPolicy='all'});
         await inlineVideo.locator('..').getByRole('button',{name:'Open full-screen gallery',exact:true}).click();
@@ -552,7 +590,7 @@ const files = [output('result.png','image'), output('clip.mp4','video'), output(
         await page.evaluate(()=>{window.playPolicy=''});
         await blockedPlay.click();
         await page.waitForFunction(()=>!document.querySelector('[role="dialog"] video').paused);
-        await dialog.getByRole('button',{name:'Close viewer',exact:true}).click();
+        await closeViewer();
 
         // Sound permission and deliberate mute persist across swipes, including
         // an intervening image. Use distinct clips and real pointer gestures.
@@ -601,8 +639,111 @@ const files = [output('result.png','image'), output('clip.mp4','video'), output(
         await swipeSound(-1);await checkSound('sound-two.mp4',false);
         await swipeSound(-1);await checkSound('sound-one.mp4',false);
         if(soundCdp)await soundCdp.detach();
-        await dialog.getByRole('button',{name:'Close viewer',exact:true}).click();
+        await closeViewer();
         assert.equal(await page.evaluate(()=>window.soundVideo.paused && !window.soundVideo.hasAttribute('src')),true,'Closing releases the persistent player');
+
+        // Auto advance shares the animated swipe path and persistent player.
+        // A paused video waits; an image gets its selected reading time.
+        await page.evaluate(files=>{
+          window.playPolicy='';window.store.setState({outputs:files,outputsTotal:files.length,selectedOutput:0});
+        },[output('auto-one.mp4','video'),output('auto-still.png','image'),
+          output('auto-two.mp4','video'),output('auto-last.png','image')]);
+        await page.getByRole('button',{name:'Open full-screen gallery',exact:true}).first().click();
+        const autoAdvance=dialog.getByRole('button',{name:'Auto advance',exact:true,includeHidden:true});
+        const imageDuration=dialog.getByRole('combobox',{name:'Image duration',exact:true});
+        assert.equal(await autoAdvance.getAttribute('aria-pressed'),'false','Auto advance starts off');
+        assert.equal(await imageDuration.count(),0,'Image duration only appears with auto advance');
+        await page.waitForFunction(()=>{
+          const video=document.querySelector('[role="dialog"] video');
+          return video?.readyState>=2 && !video.paused && video.loop;
+        });
+        await revealViewerControls();
+        await page.evaluate(()=>window.autoVideo=document.querySelector('[role="dialog"] video'));
+        await autoAdvance.click();
+        assert.equal(await autoAdvance.getAttribute('aria-pressed'),'true');
+        assert.deepEqual(await imageDuration.locator('option').evaluateAll(options=>options.map(option=>option.value)),
+          Array.from({length:10},(_,i)=>String(i+1)),'Image duration supports 1–10 seconds');
+        assert.equal(await imageDuration.inputValue(),'3');
+        await imageDuration.selectOption('1');
+        assert.equal(await dialog.locator('video').evaluate(video=>video.loop),false,'Auto advance plays each clip once');
+        await page.waitForFunction(()=>window.autoVideo.paused);
+        await page.waitForTimeout(1150);
+        assert.ok((await dialog.locator('video').getAttribute('src')).includes('auto-one.mp4'),'Pause does not start a timer for video');
+        await page.screenshot({path:path.join(fixtures,scenario.name+'-auto-advance-controls.png')});
+        await dialog.getByRole('button',{name:'Play video',exact:true}).click();
+        const finishAutoVideo=async()=>{
+          await dialog.locator('video').evaluate(video=>{video.currentTime=video.duration-.15});
+          await page.waitForFunction(()=>{
+            const panel=document.querySelector('[data-gallery-swipe-current]');
+            return panel && new DOMMatrixReadOnly(getComputedStyle(panel).transform).m42 < -5;
+          },null,{polling:'raf'});
+        };
+        await finishAutoVideo();
+        await activeMedia.locator('img[src*="auto-still.png"]').waitFor();
+        await imageDuration.selectOption('10');
+        await autoAdvance.click();
+        await page.waitForTimeout(1150);
+        assert.ok(await activeMedia.locator('img[src*="auto-still.png"]').isVisible(),'Disabling clears the image timer');
+        await autoAdvance.click();
+        assert.equal(await imageDuration.inputValue(),'10','Keep the chosen duration during the viewing session');
+        await imageDuration.selectOption('1');
+        await dialog.getByRole('button',{name:'Compare images',exact:true}).click();
+        await page.waitForTimeout(1150);
+        assert.equal(await dialog.getByRole('button',{name:'Close comparison',exact:true}).count(),1,'Comparison suspends image advance');
+        await dialog.getByRole('button',{name:'Close comparison',exact:true}).click();
+        await page.waitForFunction(()=>{
+          const panel=document.querySelector('[data-gallery-swipe-current]');
+          return panel && new DOMMatrixReadOnly(getComputedStyle(panel).transform).m42 < -5;
+        },null,{polling:'raf'});
+        await page.waitForFunction(()=>window.autoVideo.getAttribute('src')?.includes('auto-two.mp4') && !window.autoVideo.paused);
+        assert.equal(await page.evaluate(()=>window.autoVideo===document.querySelector('[role="dialog"] video')),true,'Auto advance retains the sound-authorized player');
+        await finishAutoVideo();
+        await activeMedia.locator('img[src*="auto-last.png"]').waitFor();
+        await page.waitForTimeout(1300);
+        assert.ok(await activeMedia.locator('img[src*="auto-last.png"]').isVisible(),'Auto advance stops at the final item');
+        if(scenario.touch) await page.setViewportSize({width:320,height:568});
+        for(const control of [autoAdvance,imageDuration,dialog.getByRole('button',{name:'Close viewer',exact:true})]) {
+          assert.equal(await control.evaluate(el=>{
+            const b=el.getBoundingClientRect(),hit=document.elementFromPoint(b.x+b.width/2,b.y+b.height/2);
+            return b.left>=0 && b.right<=innerWidth && (hit===el || el.contains(hit));
+          }),true,'Playback preferences and close remain reachable on narrow screens');
+        }
+        await page.screenshot({path:path.join(fixtures,scenario.name+'-auto-image-controls.png')});
+        await closeViewer();
+        if(scenario.touch) await page.setViewportSize({width:scenario.width,height:scenario.height});
+
+        // A slow next gallery page still enters with an upward swipe. Turning
+        // auto advance off while loading cancels its pending navigation.
+        for(const cancelAdvance of [false,true]) {
+          await page.evaluate(file=>{
+            window.releaseAutoPage=null;
+            window.store.setState({outputs:[file],outputsTotal:2,selectedOutput:0,loadMoreOutputs:()=>new Promise(resolve=>{
+              window.releaseAutoPage=extra=>{
+                window.store.setState({outputs:[file,extra]});resolve();
+              };
+            })});
+          },output('auto-paged.mp4','video'));
+          await page.getByRole('button',{name:'Open full-screen gallery',exact:true}).first().click();
+          await revealViewerControls();
+          await autoAdvance.click();
+          await dialog.getByRole('button',{name:'Play video',exact:true}).click();
+          await page.waitForFunction(()=>window.releaseAutoPage && document.querySelector('[role="dialog"] video')?.readyState>=2);
+          await dialog.locator('video').evaluate(video=>{video.currentTime=video.duration-.15});
+          await page.waitForFunction(()=>document.querySelector('[role="dialog"] video')?.ended);
+          if(cancelAdvance) await autoAdvance.click();
+          await page.evaluate(extra=>window.releaseAutoPage(extra),output('auto-paged-last.png','image'));
+          if(cancelAdvance) {
+            await page.waitForTimeout(500);
+            assert.ok((await dialog.locator('video').getAttribute('src')).includes('auto-paged.mp4'),'Pending auto advance is cancelled when disabled');
+          } else {
+            await page.waitForFunction(()=>{
+              const panel=document.querySelector('[data-gallery-swipe-current]');
+              return panel && new DOMMatrixReadOnly(getComputedStyle(panel).transform).m42 < -5;
+            },null,{polling:'raf'});
+            await activeMedia.locator('img[src*="auto-paged-last.png"]').waitFor();
+          }
+          await closeViewer();
+        }
         await page.evaluate(files=>{
           window.playPolicy='';window.store.setState({outputs:files,outputsTotal:files.length,selectedOutput:0});
         },files);
@@ -623,7 +764,7 @@ const files = [output('result.png','image'), output('clip.mp4','video'), output(
           await page.setViewportSize({width:320,height:568});
           await page.getByRole('button',{name:'Open full-screen gallery',exact:true}).first().click();
           assert.equal(await dialog.evaluate(el=>el.scrollWidth<=el.clientWidth),true,'Viewer fits a small phone');
-          await dialog.getByRole('button',{name:'Close viewer',exact:true}).click();
+          await closeViewer();
           await page.setViewportSize({width:390,height:844});
           assert.equal(await page.locator('.maestro-sidebar').getAttribute('aria-hidden'),'true');
           // A new document loses module state and must still remember dismissal.
@@ -635,7 +776,7 @@ const files = [output('result.png','image'), output('clip.mp4','video'), output(
           await dialog.waitFor();
           await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
           assert.equal(await dialog.getByText(/without the Safari toolbar/).count(),0,'Home Screen dismissal survives page refresh');
-          await dialog.getByRole('button',{name:'Close viewer',exact:true}).click();
+          await closeViewer();
         } else {
           await page.setViewportSize({width:900,height:480});
           assert.equal(await page.getByRole('button',{name:'Open sidecar',exact:true}).count(),0,'Short desktop retains desktop layout');

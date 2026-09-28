@@ -3,6 +3,43 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [2.5.0] - 2026-09-28
+
+LoRA library and prompting improvements, immersive gallery playback, H3
+window-timing fixes, and Windows 10 DLSS Frame Generation support.
+
+- Show creator-derived LoRA titles and editable display names throughout the
+  library and Studio/Director selectors. Preserve filenames, stable identities,
+  selections and update tracking; distinguish versions and variants.
+- Base LoRA age and New sorting on release/download information rather than
+  mutable guide or metadata timestamps. Backfill available version titles and
+  release dates without treating a metadata refresh as a new download.
+- Save available creator guidance automatically on CivitAI/Hugging Face
+  downloads. Supply selected LoRA guides and trigger words to prompt enhancement,
+  including H3 Frames/References and Director; bound and isolate external notes
+  from the user's scene. Keep manual AI guide generation available.
+- Accept compatible flattened H3 LoRA module names using the actual model's
+  targets. Preserve tensor values and reject ambiguous mappings or collisions.
+- Add fullscreen gallery auto advance after one video play, a 1–10-second image
+  duration, upward swipe transitions, and playback-aware fading of all viewer
+  controls. Preserve manual navigation, pause, zoom and comparison behavior.
+- Select 480-, 960- or 1920-pixel video posters for the displayed size and device
+  density. Improve JPEG quality, avoid upscaling small sources, and version the
+  cache so existing low-resolution previews regenerate as needed.
+- Keep the Frames image picker mounted while the native picker is open so
+  selected images reliably arrive, including after rerenders or same-file retry.
+- Keep H3 Frames total duration, overlap and clean-tail boundaries consistent
+  across enhancement, submission and runtime. Prevent three planned short
+  windows becoming four through native-clip rounding (#160). Retain reviewed
+  edits through harmless option refreshes and explain genuine stale-plan errors.
+- Allow DLSS temporal upsampling on Windows 10 build 19041+ when the installed
+  worker passes its capability probe. Retain RTX 40+, HAGS and driver checks;
+  expose supported multipliers and add a Frame Generation-only installer that
+  leaves the existing Neural Rendering installation alone.
+
+See [release notes](docs/RELEASE_NOTES_V2.5.0.md) and
+[validation scope](docs/VALIDATION_V2.5.0.md).
+
 ## [2.4.2] - 2026-09-27
 
 Gallery audio reuse and visual clip trimming, plus Krea Identity Edit controls

@@ -5,7 +5,10 @@ import { Search, X, Loader2, Globe, Sparkles, BookOpen, Info, ArrowUpCircle, Ref
 import { useStore } from '../../stores/useStore'
 import { generateLoraGuide, fetchLoraGuide, fetchLoraDetails, checkLoraUpdates } from '../../api/client'
 import { formatAge } from '../../lib/format'
+import { formatResolvedLoraDate, resolveLoraDate } from '../../lib/loraDates'
+import { getLoraDisplayName, getLoraSecondaryLabel, indexLoraDisplayNames, LORA_DISPLAY_NAME_CHANGED_EVENT, type LoraDisplayNameMap } from '../../lib/loraDisplayNames'
 import type { LoraRecommendedWeights, LoraUpdateStatus } from '../../types'
+import { LoraDisplayNameEditor } from './LoraDisplayNameEditor'
 
 export function LoraGuideTooltip({ guide, label = 'LoRA usage guide' }: { guide: string; label?: string }) {
   const [show, setShow] = useState(false)
@@ -134,14 +137,13 @@ export type LoraDates = { released?: string | null; downloaded?: string | null }
  *  (answers "how new is this LoRA?"), falls back to the download/mtime date
  *  for hand-installed files. Full dates live in the tooltip. */
 export function LoraAgeChip({ released, downloaded }: LoraDates) {
-  const age = formatAge(released || downloaded)
+  const date = resolveLoraDate(released, downloaded)
+  if (!date) return null
+  const age = formatAge(date.value)
   if (!age) return null
-  const tip = [
-    released ? `Released ${new Date(released).toLocaleDateString()}` : null,
-    downloaded ? `Downloaded ${new Date(downloaded).toLocaleDateString()}` : null,
-  ].filter(Boolean).join(' — ')
+  const label = date.source === 'released' ? 'Released' : 'Downloaded'
   return (
-    <span className="text-[9px] text-text-muted shrink-0 tabular-nums" title={tip}>
+    <span className="text-[9px] text-text-muted shrink-0 tabular-nums" title={`${label} ${formatResolvedLoraDate(date)}`}>
       {age}
     </span>
   )
@@ -152,17 +154,16 @@ export function LoraAgeChip({ released, downloaded }: LoraDates) {
 // mounted pickers, e.g. Director's Image + Video accordions.
 export type LoraPickerSort = 'name' | 'newest'
 
-/** Order picker rows. 'name' keeps the backend's alphabetical order;
+/** Order picker rows alphabetically by resolved display name, or by date;
  *  'newest' sorts by the same date the age chip shows (release date,
  *  download/mtime fallback), newest first, dateless files last by name. */
-export function sortLoraNames(names: string[], sort: LoraPickerSort, dates: Record<string, LoraDates>): string[] {
-  if (sort !== 'newest') return names
-  const dateOf = (n: string) => {
-    const iso = dates[n]?.released || dates[n]?.downloaded
-    const t = iso ? Date.parse(iso) : NaN
-    return Number.isNaN(t) ? 0 : t
-  }
-  return [...names].sort((a, b) => dateOf(b) - dateOf(a) || a.localeCompare(b))
+export function sortLoraNames(names: string[], sort: LoraPickerSort, dates: Record<string, LoraDates>, displayNames: LoraDisplayNameMap = {}): string[] {
+  const byDisplayName = (a: string, b: string) => getLoraDisplayName(a, displayNames).localeCompare(getLoraDisplayName(b, displayNames))
+    || (displayNames[a]?.version_label || '').localeCompare(displayNames[b]?.version_label || '')
+    || a.localeCompare(b)
+  if (sort !== 'newest') return [...names].sort(byDisplayName)
+  const dateOf = (n: string) => resolveLoraDate(dates[n]?.released, dates[n]?.downloaded)?.timestamp ?? 0
+  return [...names].sort((a, b) => dateOf(b) - dateOf(a) || byDisplayName(a, b))
 }
 
 /** Two-state sort toggle shared by both pickers: A-Z <-> newest first. */
@@ -175,8 +176,8 @@ export function LoraSortToggle({ sort, onChange }: { sort: LoraPickerSort; onCha
         newest ? 'text-accent-blue hover:text-accent-blue-hover' : 'text-text-muted hover:text-accent-blue'
       }`}
       title={newest
-        ? 'Sorted by newest release first. Click to sort by name.'
-        : 'Sorted by name. Click to sort by newest release first.'}
+        ? 'Sorted by release date, with download date fallback. Click to sort by name.'
+        : 'Sorted by name. Click to sort by release date, with download date fallback.'}
     >
       {newest ? <Clock size={10} /> : <ArrowDownAZ size={10} />}
       {newest ? 'New' : 'A-Z'}
@@ -232,6 +233,7 @@ export function LoraSelector() {
   // rendered as an age chip so similarly-named LoRAs can be told apart
   // by how new they are.
   const [loraDates, setLoraDates] = useState<Record<string, LoraDates>>({})
+  const [displayNames, setDisplayNames] = useState<LoraDisplayNameMap>({})
   // Sticky list order shared with the Director picker via the store.
   const sortMode = useStore(s => s.loraPickerSort)
   const setSortSticky = useStore(s => s.setLoraPickerSort)
@@ -258,6 +260,7 @@ export function LoraSelector() {
       // capture, so this refetch is exactly when release dates appear —
       // refresh the age-chip map too, not just update statuses.
       const dates: Record<string, LoraDates> = {}
+      setDisplayNames(indexLoraDisplayNames(r.loras))
       for (const info of r.loras) {
         if (info.update_status) next[info.filename] = info.update_status
         if (info.released_at || info.downloaded_at) {
@@ -273,6 +276,23 @@ export function LoraSelector() {
       setChecking(false)
     }
   }, [modelType, checking])
+
+  // Names are shared across simultaneously mounted Studio/Director pickers.
+  // A rename in another view invalidates this model's cached details.
+  useEffect(() => {
+    if (!modelType) return
+    let cancelled = false
+    const refreshNames = () => {
+      fetchLoraDetails(modelType).then(result => {
+        if (!cancelled) setDisplayNames(indexLoraDisplayNames(result.loras))
+      }).catch(() => {})
+    }
+    window.addEventListener(LORA_DISPLAY_NAME_CHANGED_EVENT, refreshNames)
+    return () => {
+      cancelled = true
+      window.removeEventListener(LORA_DISPLAY_NAME_CHANGED_EVENT, refreshNames)
+    }
+  }, [modelType])
 
   // Count of LoRAs with an available update — surfaced as a badge on the
   // refresh button so the user sees at a glance whether anything's
@@ -355,6 +375,7 @@ export function LoraSelector() {
       const nsfw: Record<string, boolean> = {}
       const updates: Record<string, LoraUpdateStatus> = {}
       const dates: Record<string, LoraDates> = {}
+      setDisplayNames(indexLoraDisplayNames(r.loras))
       for (const info of r.loras) {
         if (info.recommended_weights) recs[info.filename] = info.recommended_weights
         if (info.guide) { guides[info.filename] = info.guide; statuses[info.filename] = 'exists' }
@@ -422,7 +443,7 @@ export function LoraSelector() {
   }, [modelType, loadLoras])
 
   const displayName = (filename: string) => {
-    return filename.replace(/\.(safetensors|sft)$/i, '')
+    return getLoraDisplayName(filename, displayNames)
   }
 
   // Filter by search term AND (unless overridden by toggles) exclude
@@ -435,13 +456,15 @@ export function LoraSelector() {
   // LoRAs are always hidden (except already-activated ones — they
   // stay visible so the user can deactivate them).
   const effectiveShowNsfw = nsfwEnabled && showNsfw
+  const query = search.trim().toLowerCase()
   const filtered = sortLoraNames(availableLoras.filter(name => {
-    if (!displayName(name).toLowerCase().includes(search.toLowerCase())) return false
+    const secondary = getLoraSecondaryLabel(name, displayNames)?.toLowerCase() || ''
+    if (query && !displayName(name).toLowerCase().includes(query) && !secondary.includes(query) && !name.toLowerCase().includes(query)) return false
     const isActivated = activatedLoras.includes(name)
     if (!effectiveShowNsfw && !isActivated && nsfwFlags[name]) return false
     if (updatableOnly && !isActivated && updateStatuses[name] !== 'available') return false
     return true
-  }), sortMode, loraDates)
+  }), sortMode, loraDates, displayNames)
   // "X NSFW hidden" hint only meaningful when the user CAN reveal
   // them (NSFW mode enabled). Otherwise we don't hint at the existence
   // of hidden NSFW LoRAs at all.
@@ -546,14 +569,16 @@ export function LoraSelector() {
       <div className="max-h-[120px] overflow-y-auto border border-border rounded-lg bg-bg-tertiary">
         {filtered.map(filename => {
           const isActive = activatedLoras.includes(filename)
+          const secondaryLabel = getLoraSecondaryLabel(filename, displayNames)
+          const versionLabel = displayNames[filename]?.version_label?.trim() || ''
           return (
             <div
               key={filename}
-              className={`w-full text-left px-2.5 py-1.5 text-xs flex items-center gap-2 hover:bg-bg-hover transition-colors ${
+              className={`group w-full text-left px-2.5 py-1.5 text-xs flex items-center gap-2 hover:bg-bg-hover transition-colors ${
                 isActive ? 'text-accent-blue' : 'text-text-secondary'
               }`}
             >
-              <button type="button" onClick={() => toggleLora(filename)} aria-pressed={isActive}
+              <button type="button" title={`File: ${filename}`} onClick={() => toggleLora(filename)} aria-pressed={isActive}
                 className="min-w-0 flex-1 flex items-center gap-2 text-left">
               <div className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${
                 isActive ? 'bg-accent-blue border-accent-blue' : 'border-border'
@@ -564,7 +589,19 @@ export function LoraSelector() {
                   </svg>
                 )}
               </div>
-              <span className="truncate flex-1">{displayName(filename)}</span>
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 items-center gap-1">
+                  <span className="min-w-0 flex-1 truncate">{displayName(filename)}</span>
+                  {secondaryLabel && versionLabel === secondaryLabel && (
+                    <span className="shrink-0 whitespace-nowrap rounded bg-bg-active px-1 py-0.5 text-[9px] font-medium text-text-muted"
+                      title={`Release or variant: ${versionLabel}`}>{versionLabel}</span>
+                  )}
+                </div>
+                {secondaryLabel && secondaryLabel !== versionLabel && (
+                  <span className="block whitespace-normal break-all text-[9px] leading-tight text-text-muted"
+                    title={`File: ${filename}`}>{secondaryLabel}</span>
+                )}
+              </div>
               </button>
               {loraDates[filename] && (
                 <LoraAgeChip
@@ -600,6 +637,9 @@ export function LoraSelector() {
                   aria-label="Update available"
                 />
               )}
+              {!displayNames[filename]?.managed && <LoraDisplayNameEditor filename={filename} displayName={displayName(filename)}
+                displayNameOverride={displayNames[filename]?.display_name_override} modelType={modelType}
+                onSaved={result => setDisplayNames(prev => ({ ...prev, [filename]: result }))} />}
             </div>
           )
         })}
@@ -632,11 +672,18 @@ export function LoraSelector() {
               { length: phases },
               (_, i) => storedWeights[i] ?? storedWeights[storedWeights.length - 1] ?? 1.0,
             )
+            const secondaryLabel = getLoraSecondaryLabel(filename, displayNames)
+            const versionLabel = displayNames[filename]?.version_label?.trim() || ''
             return (
               <div key={filename} className="bg-bg-tertiary border border-border rounded-lg px-2.5 py-2">
                 <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs text-text-primary truncate flex-1 mr-2 flex items-center gap-1">
-                    {displayName(filename)}
+                  <span className="min-w-0 flex-1 mr-2">
+                    <span className="flex min-w-0 items-center gap-1 text-xs text-text-primary">
+                      <span className="truncate" title={`File: ${filename}`}>{displayName(filename)}</span>
+                      {secondaryLabel && versionLabel === secondaryLabel && (
+                        <span className="max-w-[45%] shrink-0 truncate rounded bg-bg-active px-1 py-0.5 text-[9px] font-medium text-text-muted"
+                          title={`Release or variant: ${versionLabel}`}>{versionLabel}</span>
+                      )}
                     {/* Update-available indicator on the activated card —
                         same icon as in the picker so the user can scan
                         both views consistently. */}
@@ -646,6 +693,12 @@ export function LoraSelector() {
                         className="text-indicator-warning shrink-0"
                         aria-label="Update available"
                       />
+                    )}
+                    </span>
+                    {secondaryLabel && secondaryLabel !== versionLabel && (
+                      <span className="block whitespace-normal break-all text-[9px] leading-tight text-text-muted" title={`File: ${filename}`}>
+                        {secondaryLabel}
+                      </span>
                     )}
                   </span>
                   <div className="flex items-center gap-0.5 shrink-0">

@@ -36,6 +36,7 @@ from services.h3_story_ledger import (
     plan_h3_story_segments,
     recover_h3_plain_story,
 )
+from services.lora_guidance import lora_guidance_fingerprint
 from services.h3_window_planner import (
     _UNREQUESTED_SPECTACLE_PATTERNS,
     _compact,
@@ -193,6 +194,7 @@ def h3_sequence_plan_signature(
     overlap_frames: int = 0,
     native_continuation: bool = False,
     planning_style: str = "faithful",
+    lora_system_hint: str = "",
 ) -> str:
     reference_contract = [
         {
@@ -223,6 +225,9 @@ def h3_sequence_plan_signature(
         "native_continuation": bool(native_continuation),
         "planning_style": normalize_h3_planning_style(planning_style),
     }
+    guidance_fingerprint = lora_guidance_fingerprint(lora_system_hint)
+    if guidance_fingerprint:
+        payload["lora_guidance_fingerprint"] = guidance_fingerprint
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:24]
 
@@ -240,6 +245,7 @@ def reviewed_h3_sequence_plan_matches(
     overlap_frames: int,
     native_continuation: bool,
     planning_style: str = "faithful",
+    lora_system_hint: str = "",
 ) -> bool:
     """Return whether a visible Omni sequence plan still fits this request."""
 
@@ -272,6 +278,8 @@ def reviewed_h3_sequence_plan_matches(
     if int(plan.get("overlap_frames") or 0) != int(overlap_frames):
         return False
     if normalize_h3_planning_style(plan.get("planning_style")) != normalize_h3_planning_style(planning_style):
+        return False
+    if plan.get("lora_guidance_fingerprint") != lora_guidance_fingerprint(lora_system_hint):
         return False
     if [int(value) for value in (plan.get("per_clip_frames") or [])] != [
         int(item.get("frames") or 0) for item in geometry
@@ -1655,6 +1663,7 @@ def plan_h3_reference_sequence(
     overlap_frames: int = 0,
     native_continuation: bool = False,
     planning_style: str = "faithful",
+    lora_system_hint: str = "",
     retry_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Plan H3 Omni windows that share canonical references."""
@@ -1702,7 +1711,9 @@ def plan_h3_reference_sequence(
         overlap_frames=overlap_frames,
         native_continuation=native_continuation,
         planning_style=planning_style,
+        lora_system_hint=lora_system_hint,
     )
+    guidance_fingerprint = lora_guidance_fingerprint(lora_system_hint)
     from services.h3_plan_retry import finish_retry_plan, retry_fingerprint, validate_retry_plan
     fingerprint = retry_fingerprint(signature, image_paths, nsfw)
     resume = validate_retry_plan(retry_plan, fingerprint=fingerprint, count=len(clips))
@@ -1723,6 +1734,7 @@ def plan_h3_reference_sequence(
             "native_continuation": bool(native_continuation),
             "windows": [],
             "window_prompts": [],
+            **({"lora_guidance_fingerprint": guidance_fingerprint} if guidance_fingerprint else {}),
         }
 
     expect_dialogue = (
@@ -1760,6 +1772,7 @@ def plan_h3_reference_sequence(
             image_paths=image_paths,
             image_reference_roles=image_reference_roles,
             nsfw=nsfw,
+            lora_system_hint=lora_system_hint,
             resume=resume,
         )
         planned_by = staged["planned_by"]
@@ -1859,4 +1872,5 @@ def plan_h3_reference_sequence(
         "source_intent": source_intent,
         "windows": compiled,
         "window_prompts": [item["prompt"] for item in compiled],
+        **({"lora_guidance_fingerprint": guidance_fingerprint} if guidance_fingerprint else {}),
     }, retry_plan, fingerprint)

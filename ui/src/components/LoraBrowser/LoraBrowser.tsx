@@ -1,10 +1,13 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { X, Search, Loader2, BookOpen, HardDrive, Tag, Link2, ArrowUpCircle, RefreshCw, KeyRound, ExternalLink, Boxes, Trash2 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { fetchCivitAIModelFilters, fetchLoraDirectories, startLoraScan, fetchLoraScanStatus, fetchInstalledLoras, importHuggingFaceLora, checkLoraUpdates, deleteLoraFile } from '../../api/client'
 import { formatBytes } from '../../lib/format'
+import { formatResolvedLoraDate, parseLoraDate, resolveLoraDate } from '../../lib/loraDates'
 import { resolveLoraImportDirectory, suggestLoraImportDirectory } from '../../lib/loraImport'
+import { defaultLoraDisplayName, getLoraSecondaryLabel, LORA_DISPLAY_NAME_CHANGED_EVENT, type LoraDisplayNameMap } from '../../lib/loraDisplayNames'
 import type { CivitAIModelFilter, InstalledLora } from '../../api/client'
+import { LoraDisplayNameEditor } from '../SettingsDrawer/LoraDisplayNameEditor'
 import { ModelCard } from './ModelCard'
 import { ModelDetail } from './ModelDetail'
 import { DownloadBar } from './DownloadBar'
@@ -25,6 +28,14 @@ const PERIOD_OPTIONS = [
   { value: 'Week', label: 'Week' },
   { value: 'Day', label: 'Day' },
 ]
+
+function installedLoraDisplayName(lora: InstalledLora): string {
+  return lora.display_name?.trim() || lora.name || defaultLoraDisplayName(lora.filename)
+}
+
+function installedLoraKey(lora: Pick<InstalledLora, 'directory' | 'filename'>): string {
+  return `${lora.directory}\u0000${lora.filename}`
+}
 
 export function LoraBrowser() {
   const open = useStore(s => s.loraBrowserOpen)
@@ -133,6 +144,35 @@ export function LoraBrowser() {
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null)
   const [deletingKey, setDeletingKey] = useState<string | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  const installedDisplayNames = useMemo<LoraDisplayNameMap>(() => Object.fromEntries(installedLoras.map(lora => [installedLoraKey(lora), {
+    filename: lora.filename,
+    directory: lora.directory,
+    display_name: installedLoraDisplayName(lora),
+    display_name_override: lora.display_name_override,
+    version_label: lora.version_label,
+  }])), [installedLoras])
+
+  useEffect(() => {
+    if (!showInstalled) return
+    let cancelled = false
+    const refreshInstalledNames = () => {
+      fetchInstalledLoras().then(result => {
+        if (!cancelled) setInstalledLoras(result.loras)
+      }).catch(() => {})
+    }
+    window.addEventListener(LORA_DISPLAY_NAME_CHANGED_EVENT, refreshInstalledNames)
+    return () => {
+      cancelled = true
+      window.removeEventListener(LORA_DISPLAY_NAME_CHANGED_EVENT, refreshInstalledNames)
+    }
+  }, [showInstalled])
+
+  const saveInstalledDisplayName = useCallback((directory: string, filename: string, result: import('../../api/client').LoraDisplayNameResult) => {
+    setInstalledLoras(previous => previous.map(lora =>
+      lora.directory === directory && lora.filename === filename ? { ...lora, ...result } : lora,
+    ))
+  }, [])
+
   const handleDeleteLora = useCallback(async (directory: string, filename: string, e: React.MouseEvent) => {
     e.stopPropagation()
     const key = `${directory}/${filename}`
@@ -745,19 +785,24 @@ export function LoraBrowser() {
                 // Filter by search query
                 if (query.trim()) {
                   const q = query.toLowerCase()
-                  const name = (lora.name || lora.filename).toLowerCase()
-                  const words = lora.trained_words.join(' ').toLowerCase()
-                  if (!name.includes(q) && !words.includes(q) && !lora.directory.toLowerCase().includes(q)) return false
+                  const searchable = [installedLoraDisplayName(lora), lora.version_label || '', getLoraSecondaryLabel(installedLoraKey(lora), installedDisplayNames) || '',
+                    lora.filename, lora.name || '', lora.trained_words.join(' '), lora.directory].join(' ').toLowerCase()
+                  if (!searchable.includes(q)) return false
                 }
                 return true
               })
-              if (installedSort !== 'name') {
-                filtered.sort((a, b) => {
-                  if (installedSort === 'largest') return (b.size_bytes ?? 0) - (a.size_bytes ?? 0)
-                  const dateOf = (l: typeof a) => (installedSort === 'released' ? (l.released_at || l.downloaded_at) : l.downloaded_at) || ''
-                  return dateOf(b).localeCompare(dateOf(a))
-                })
-              }
+              filtered.sort((a, b) => {
+                if (installedSort === 'name') return installedLoraDisplayName(a).localeCompare(installedLoraDisplayName(b))
+                  || (a.version_label || '').localeCompare(b.version_label || '')
+                  || a.filename.localeCompare(b.filename)
+                if (installedSort === 'largest') return (b.size_bytes ?? 0) - (a.size_bytes ?? 0)
+                const dateOf = (l: typeof a) => installedSort === 'released'
+                  ? resolveLoraDate(l.released_at, l.downloaded_at)?.timestamp ?? 0
+                  : parseLoraDate(l.downloaded_at) ?? 0
+                return dateOf(b) - dateOf(a)
+                  || installedLoraDisplayName(a).localeCompare(installedLoraDisplayName(b))
+                  || a.filename.localeCompare(b.filename)
+              })
               return filtered.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-20 text-text-muted">
                   <Search size={32} className="mb-3 opacity-50" />
@@ -772,6 +817,8 @@ export function LoraBrowser() {
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 gap-3">
                 {filtered.map(lora => {
                   const cardKey = `${lora.directory}/${lora.filename}`
+                  const displayDate = resolveLoraDate(lora.released_at, lora.downloaded_at)
+                  const dateLabel = displayDate?.source === 'released' ? 'Released' : 'Downloaded'
                   const clickable = Boolean(lora.civitai_model_id || lora.hf_repo_id)
                   const openCard = () => {
                     if (lora.civitai_model_id) {
@@ -798,7 +845,7 @@ export function LoraBrowser() {
                         lora.preview_url.endsWith('.mp4') || lora.preview_url.endsWith('.webm') ? (
                           <video src={lora.preview_url} className={`w-full h-full object-cover transition-transform duration-300 ${clickable ? 'group-hover:scale-105' : ''}`} muted loop autoPlay playsInline />
                         ) : (
-                          <img src={lora.preview_url} alt={lora.name || lora.filename} className={`w-full h-full object-cover transition-transform duration-300 ${clickable ? 'group-hover:scale-105' : ''}`} loading="lazy" referrerPolicy="no-referrer" />
+                          <img src={lora.preview_url} alt={installedLoraDisplayName(lora)} className={`w-full h-full object-cover transition-transform duration-300 ${clickable ? 'group-hover:scale-105' : ''}`} loading="lazy" referrerPolicy="no-referrer" />
                         )
                       ) : (
                         <div className="w-full h-full flex flex-col items-center justify-center text-text-muted gap-1">
@@ -808,7 +855,20 @@ export function LoraBrowser() {
                       )}
                     </div>
                     <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 via-black/50 to-transparent p-2 pt-6">
-                      <div className="text-xs font-medium text-white truncate">{lora.name || lora.filename.replace(/\.(safetensors|sft)$/i, '')}</div>
+                      <div className="flex min-w-0 items-center gap-1">
+                        <div className="min-w-0 flex-1 truncate text-xs font-medium text-white" title={`File: ${lora.filename}`}>{installedLoraDisplayName(lora)}</div>
+                        <LoraDisplayNameEditor filename={lora.filename} displayName={installedLoraDisplayName(lora)}
+                          displayNameOverride={lora.display_name_override} directory={lora.directory}
+                          onSaved={result => saveInstalledDisplayName(lora.directory, lora.filename, result)} />
+                      </div>
+                      {lora.version_label && getLoraSecondaryLabel(installedLoraKey(lora), installedDisplayNames) === lora.version_label && (
+                        <div className="mt-0.5">
+                          <span className="inline-block whitespace-nowrap rounded bg-bg-active px-1.5 py-0.5 text-[9px] font-medium text-white/70"
+                            title={`Release or variant: ${lora.version_label}`}>
+                            {lora.version_label}
+                          </span>
+                        </div>
+                      )}
                       <div className="flex items-center gap-1.5 mt-0.5">
                         <span className="text-[9px] px-1.5 py-0.5 rounded bg-black/60 text-white/80">{lora.directory}</span>
                         {lora.linked && (
@@ -825,16 +885,19 @@ export function LoraBrowser() {
                           <span className="text-[9px] text-white/50 ml-auto shrink-0">{formatBytes(lora.size_bytes)}</span>
                         )}
                       </div>
-                      {(lora.downloaded_at || lora.released_at) && (
+                      {getLoraSecondaryLabel(installedLoraKey(lora), installedDisplayNames)
+                        && getLoraSecondaryLabel(installedLoraKey(lora), installedDisplayNames) !== lora.version_label && (
+                        <div className="mt-0.5 break-all text-[9px] leading-tight text-white/70"
+                          title={`File: ${lora.filename}`}>
+                          {getLoraSecondaryLabel(installedLoraKey(lora), installedDisplayNames)}
+                        </div>
+                      )}
+                      {displayDate && (
                         <div
                           className="text-[9px] text-white/40 mt-0.5 truncate"
-                          title={`Downloaded ${lora.downloaded_at ? new Date(lora.downloaded_at).toLocaleDateString() : 'unknown'}${lora.released_at ? ` — released ${new Date(lora.released_at).toLocaleDateString()}` : ''}`}
+                          title={`${dateLabel} ${formatResolvedLoraDate(displayDate)}`}
                         >
-                          {installedSort === 'released' && lora.released_at
-                            ? `released ${new Date(lora.released_at).toLocaleDateString()}`
-                            : lora.downloaded_at
-                              ? `added ${new Date(lora.downloaded_at).toLocaleDateString()}`
-                              : `released ${new Date(lora.released_at as string).toLocaleDateString()}`}
+                          {dateLabel} {formatResolvedLoraDate(displayDate)}
                         </div>
                       )}
                       {lora.trained_words.length > 0 && (

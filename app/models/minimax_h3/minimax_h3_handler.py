@@ -309,6 +309,48 @@ def normalize_h3_overlap_frames(value, *, window_frames=None) -> int:
         )
     return max(1, min(maximum, value))
 
+
+def normalize_h3_window_geometry(inputs: dict, model_def: dict) -> None:
+    """Share FL2VA timing between enhancement, submission and execution.
+
+    Only a native pass follows H3's frame lattice. A joined rolling timeline
+    does not: three 124-frame passes with 18-frame overlap total 336 frames.
+    Rounding that total to 345 silently adds a fourth window.
+    """
+
+    if any((model_def or {}).get(key) for key in (
+        "omni_reference", "audio_only", "minimax_h3_viggle",
+    )):
+        return  # These workflows own their separate timing rules.
+    maximum = int((model_def or {}).get("frames_maximum") or _H3_MAX_FRAMES)
+    window = normalize_h3_clip_frame_count(
+        inputs.get("sliding_window_size", maximum), maximum_frames=maximum,
+    )
+    try:
+        total = int(inputs.get("video_length", _H3_MIN_FRAMES))
+    except (TypeError, ValueError, OverflowError):
+        total = _H3_MIN_FRAMES
+    multi_window = inputs.get("minimax_h3_multi_window") is True
+    outpaint = str(inputs.get("video_guide_outpainting") or "").strip()
+    joined_timeline = multi_window and (
+        total > window or (bool(outpaint) and not outpaint.startswith("#"))
+    )
+    total = (
+        max(_H3_MIN_FRAMES, total) if joined_timeline
+        else normalize_h3_clip_frame_count(total, maximum_frames=maximum)
+    )
+    if not multi_window:
+        total = min(total, window)
+    inputs["video_length"] = total
+    inputs["sliding_window_size"] = window
+    inputs["sliding_window_overlap"] = normalize_h3_overlap_frames(
+        inputs.get("sliding_window_overlap", _H3_OVERLAP_DEFAULT),
+        window_frames=window,
+    )
+    inputs["sliding_window_discard_last_frames"] = resolve_h3_long_sequence_discard_frames(
+        inputs.get("custom_settings"), enabled=multi_window and total > window,
+    )
+
 # First Block Cache is intentionally opt-in. It compares a compact signature
 # from block one and can reuse the remaining 49-block residual when adjacent
 # scheduler steps are sufficiently similar. These are the thresholds exposed
@@ -2460,7 +2502,9 @@ class family_handler:
         outpaint_text = str(ui_defaults.get("video_guide_outpainting") or "").strip()
         outpainting = bool(outpaint_text) and not outpaint_text.startswith("#")
         exact_outpaint_timeline = outpainting and ui_defaults.get("minimax_h3_multi_window") is True
-        if requested_frames <= maximum_frames + 1 and not exact_outpaint_timeline:
+        if not omni_reference:
+            normalize_h3_window_geometry(ui_defaults, model_def)
+        elif requested_frames <= maximum_frames + 1 and not exact_outpaint_timeline:
             ui_defaults["video_length"] = min(
                 maximum_frames,
                 max(_H3_MIN_FRAMES, aligned_frames),
@@ -2780,7 +2824,16 @@ class family_handler:
             omni_reference
             and inputs.get("minimax_h3_reference_sequence") is True
         )
-        if omni_reference and not omni_sequence:
+        if not omni_reference:
+            # The memory policy below may turn a native-sized request into
+            # several smaller passes. Decide whether to snap the total only
+            # after that effective window is known, just as the planner does.
+            inputs["video_length"] = max(_H3_MIN_FRAMES, requested_frames)
+            inputs["sliding_window_size"] = normalize_h3_clip_frame_count(
+                inputs.get("sliding_window_size", maximum_frames),
+                maximum_frames=maximum_frames,
+            )
+        elif not omni_sequence:
             inputs["video_length"] = min(
                 maximum_frames,
                 max(_H3_MIN_FRAMES, align_h3_num_frames(max(1, requested_frames))),
@@ -2881,6 +2934,8 @@ class family_handler:
                 f"{adjustment['effective_window_frames']} frames. "
                 "Requested output duration is unchanged."
             )
+        if not omni_reference:
+            normalize_h3_window_geometry(inputs, model_def)
         if (
             not omni_reference
             and inputs.get("minimax_h3_multi_window") is not True

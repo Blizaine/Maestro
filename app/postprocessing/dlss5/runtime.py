@@ -139,6 +139,8 @@ def dlssg_capabilities() -> dict:
         return {}
     try:
         result = subprocess.run([str(DLSSG_WORKER), "--probe"], cwd=str(DLSSG_DIR), capture_output=True, text=True, timeout=15, check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if result.returncode != 0:
+            return {}
         capabilities = json.loads(result.stdout.strip())
         return capabilities if isinstance(capabilities, dict) and "available" in capabilities else {}
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
@@ -180,8 +182,13 @@ def unavailable_reason(*, temporal: bool) -> str:
         from .experimental import installation_error
         reason = installation_error(RUNTIME / "direct")
         return reason or ("RTX 30+ required" if _gpu_series() < 30 else "")
-    if os.name != "nt" or sys.getwindowsversion().build < 22000:
-        return "Windows 11 required" if temporal else "Windows 11 or the opt-in experimental Windows 10 backend required"
+    if os.name != "nt":
+        return "Windows 10 20H1 (build 19041) or newer required" if temporal else "Windows 11 or the opt-in experimental Windows 10 backend required"
+    windows_build = sys.getwindowsversion().build
+    if temporal and windows_build < 19041:
+        return "Windows 10 20H1 (build 19041) or newer required"
+    if not temporal and windows_build < 22000:
+        return "Windows 11 or the opt-in experimental Windows 10 backend required"
     missing = _missing(DLSSG_FILES if temporal else NR_FILES)
     if missing:
         return f"missing {missing[0].name}"

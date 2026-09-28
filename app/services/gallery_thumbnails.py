@@ -15,10 +15,12 @@ GENERATION_TIMEOUT_SECONDS = 10
 SLOT_WAIT_SECONDS = 8
 MAX_WAIT_SECONDS = GENERATION_TIMEOUT_SECONDS + SLOT_WAIT_SECONDS + 2
 POSTER_SIZE = 480
+SUPPORTED_POSTER_SIZES = frozenset({POSTER_SIZE, 960, 1920})
+POSTER_CACHE_VERSION = "jpg-v2"
 
 _generation_slots = threading.BoundedSemaphore(MAX_CONCURRENT_GENERATIONS)
 _inflight_lock = threading.Lock()
-_inflight: dict[tuple[str, int, int], Future[str | None]] = {}
+_inflight: dict[tuple[str, int, int, str], Future[str | None]] = {}
 
 
 def _source_signature(path: str) -> tuple[int, int] | None:
@@ -39,13 +41,19 @@ def _is_jpeg(path: str) -> bool:
         return False
 
 
-def _cache_path(source_path: str, signature: tuple[int, int], cache_dir: str) -> str:
+def _cache_path(
+    source_path: str,
+    signature: tuple[int, int],
+    cache_dir: str,
+    size: int,
+) -> str:
     source_key = hashlib.sha256(os.fsencode(source_path)).hexdigest()
     source_cache = os.path.join(cache_dir, source_key)
-    return os.path.join(source_cache, f"{signature[0]}-{signature[1]}.jpg")
+    filename = f"{POSTER_CACHE_VERSION}-{size}-{signature[0]}-{signature[1]}.jpg"
+    return os.path.join(source_cache, filename)
 
 
-def _render_poster(source_path: str, destination: str, ffmpeg: str) -> bool:
+def _render_poster(source_path: str, destination: str, ffmpeg: str, size: int) -> bool:
     """Render only the first video frame, with CPU and wall-clock limits."""
     temp_path = os.path.join(
         os.path.dirname(destination), f".{uuid.uuid4().hex}.part.jpg"
@@ -55,8 +63,8 @@ def _render_poster(source_path: str, destination: str, ffmpeg: str) -> bool:
         "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
         "-threads", "1", "-i", source_path,
         "-map", "0:v:0", "-frames:v", "1", "-an", "-sn", "-dn",
-        "-vf", f"scale={POSTER_SIZE}:{POSTER_SIZE}:force_original_aspect_ratio=decrease:force_divisible_by=2",
-        "-filter_threads", "1", "-threads", "1", "-q:v", "4", temp_path,
+        "-vf", f"scale='min(iw,{size})':'min(ih,{size})':force_original_aspect_ratio=decrease:force_divisible_by=2",
+        "-filter_threads", "1", "-threads", "1", "-q:v", "2", temp_path,
     ]
     try:
         run_options = {
@@ -85,6 +93,7 @@ def _render_poster(source_path: str, destination: str, ffmpeg: str) -> bool:
 def get_video_poster(
     source_path: str,
     *,
+    size: int = POSTER_SIZE,
     cache_dir: str | None = None,
     ffmpeg: str | None = None,
 ) -> str | None:
@@ -95,6 +104,8 @@ def get_video_poster(
     outside gallery output directories and are published with ``os.replace``.
     Invalid, missing, unsupported, or un-decodable media returns ``None``.
     """
+    if isinstance(size, bool) or not isinstance(size, int) or size not in SUPPORTED_POSTER_SIZES:
+        return None
     if not source_path or os.path.splitext(source_path)[1].lower() not in VIDEO_EXTENSIONS:
         return None
 
@@ -106,7 +117,7 @@ def get_video_poster(
     if cache_dir is None:
         cache_dir = os.path.join(os.getcwd(), "cache", "gallery-thumbnails")
     cache_dir = os.path.abspath(os.fspath(cache_dir))
-    destination = _cache_path(source_path, signature, cache_dir)
+    destination = _cache_path(source_path, signature, cache_dir, size)
     if _is_jpeg(destination):
         return destination
 
@@ -114,7 +125,7 @@ def get_video_poster(
     if not ffmpeg_bin:
         return None
 
-    key = (source_path, signature[0], signature[1])
+    key = (source_path, signature[0], signature[1], destination)
     with _inflight_lock:
         future = _inflight.get(key)
         owner = future is None
@@ -138,7 +149,7 @@ def get_video_poster(
             poster = destination
         elif _generation_slots.acquire(timeout=SLOT_WAIT_SECONDS):
             acquired = True
-            if _render_poster(source_path, destination, ffmpeg_bin):
+            if _render_poster(source_path, destination, ffmpeg_bin, size):
                 # Do not publish a frame as current if the source changed while
                 # ffmpeg was decoding it.
                 if _source_signature(source_path) == signature and _is_jpeg(destination):

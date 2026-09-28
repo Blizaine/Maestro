@@ -218,9 +218,13 @@ export async function planH3Windows(params: {
   model_type: string
   resolution: string
   total_frames: number
+  /** Active adapters stay keyed by their on-disk filename through planning. */
+  activated_loras?: string[]
   window_frames: number
   overlap_frames: number
   discard_frames: number
+  minimax_h3_multi_window?: boolean
+  custom_settings?: Record<string, unknown>
   sliding_window_memory_override?: boolean
   minimax_h3_extended_duration?: boolean
   has_start_image?: boolean
@@ -314,6 +318,8 @@ export async function planH3Sequence(params: {
   resolution: string
   total_frames: number
   references: MiniMaxH3Reference[]
+  /** Active adapters stay keyed by their on-disk filename through planning. */
+  activated_loras?: string[]
   sequence_clip_frames?: number
   sequence_memory_override?: boolean
   minimax_h3_extended_duration?: boolean
@@ -1018,6 +1024,7 @@ export interface RecipeLora {
   filename: string
   multiplier: string | number
   source_url?: string
+  version_name?: string
   size_mb?: number
 }
 
@@ -2592,7 +2599,7 @@ export async function startCivitAIDownload(params: {
   download_url: string; filename: string; target_arch: string
   model_id: number; version_id: number; trained_words: string[]
   model_name: string; images: { url: string }[]
-  description?: string; version_description?: string; base_model?: string
+  description?: string; version_description?: string; version_name?: string; base_model?: string
   example_prompts?: string[]; tags?: string[]
   nsfw?: boolean; target_dir_name?: string; published_at?: string
   // Checkpoint imports: kind='checkpoint' routes the file into ckpts/ and
@@ -2684,6 +2691,11 @@ export type LoraUpdateStatus = 'current' | 'available' | 'unknown' | 'local' | '
 export interface InstalledLora {
   filename: string
   directory: string
+  /** Resolved user-facing name, independent from the on-disk filename. */
+  display_name?: string
+  display_name_override?: string | null
+  suggested_name?: string
+  version_label?: string | null
   /** File lives in a linked install's loras folder (read-only), not
    *  Maestro's own. Sidecars/guides for it live in Maestro's mirror. */
   linked?: boolean
@@ -2731,6 +2743,41 @@ export async function fetchInstalledLoras(): Promise<{
 }> {
   const res = await fetch(`${BASE}/api/v1/loras/installed`)
   if (!res.ok) throw new Error('Failed to fetch installed LoRAs')
+  return res.json()
+}
+
+export interface LoraDisplayNameResult {
+  filename: string
+  lora_id: string
+  display_name: string
+  display_name_override: string | null
+  suggested_name: string
+  version_label: string | null
+}
+
+export type LoraDisplayNameScope =
+  | { modelType: string; directory?: never }
+  | { directory: string; modelType?: never }
+
+/** Set a custom LoRA alias, or pass null to return to the automatic name. */
+export async function updateLoraDisplayName(
+  filename: string,
+  displayName: string | null,
+  scope: LoraDisplayNameScope,
+): Promise<LoraDisplayNameResult> {
+  const res = await fetch(`${BASE}/api/v1/loras/display-name`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      filename,
+      display_name: displayName,
+      ...('modelType' in scope ? { model_type: scope.modelType } : { directory: scope.directory }),
+    }),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({})) as { detail?: string; error?: string }
+    throw new Error(error.detail || error.error || `Failed to update LoRA display name (${res.status})`)
+  }
   return res.json()
 }
 

@@ -14,7 +14,11 @@ export interface GalleryVideoPlayerProps {
   src?: string
   name: string
   initialTime?: number
+  loop?: boolean
+  controlsPinned?: boolean
   onFrameReady?: (src: string) => void
+  onEnded?: (src: string) => void
+  onControlsVisibilityChange?: (src: string, visible: boolean) => void
 }
 
 type AutoplayFallback = 'sound' | 'play' | null
@@ -122,7 +126,7 @@ async function waitForImageDecode(src: string): Promise<void> {
 }
 
 export const GalleryVideoPlayer = forwardRef<GalleryVideoPlayerHandle, GalleryVideoPlayerProps>(function GalleryVideoPlayer(
-  { src, name, initialTime, onFrameReady },
+  { src, name, initialTime, loop = true, controlsPinned = false, onFrameReady, onEnded, onControlsVisibilityChange },
   ref,
 ) {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -139,6 +143,11 @@ export const GalleryVideoPlayer = forwardRef<GalleryVideoPlayerHandle, GalleryVi
   const frameCallbackRef = useRef<{ video: HTMLVideoElement; id: number; kind: 'video' | 'animation'; fallbackId?: number } | null>(null)
   const preparedFrameRef = useRef<FrozenFrame | null>(null)
   const onFrameReadyRef = useRef(onFrameReady)
+  const onEndedRef = useRef(onEnded)
+  const onControlsVisibilityChangeRef = useRef(onControlsVisibilityChange)
+  const controlsPinnedRef = useRef(controlsPinned)
+  const previousControlsPinnedRef = useRef(false)
+  const previousControlsPinnedSourceRef = useRef(src)
   const readyReportedSrcRef = useRef<string | undefined>(undefined)
   const userMutedRef = useRef(false)
   const ignoreCleanupPauseRef = useRef(false)
@@ -157,10 +166,13 @@ export const GalleryVideoPlayer = forwardRef<GalleryVideoPlayerHandle, GalleryVi
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [autoplayFallback, setAutoplayFallback] = useState<AutoplayFallback>(null)
+  const [soundHintDismissed, setSoundHintDismissed] = useState(false)
   const [mediaLoadError, setMediaLoadError] = useState(false)
   const [frameReady, setFrameReady] = useState(false)
   const [outgoingFrameVisible, setOutgoingFrameVisible] = useState(false)
   const [preparedFrame, setPreparedFrame] = useState<FrozenFrame | null>(null)
+  const controlsSurfaceVisible = Boolean(src && (controlsVisible || mediaLoadError
+    || autoplayFallback === 'play' || (autoplayFallback === 'sound' && !soundHintDismissed)))
 
   if (stateSrc !== src) {
     setStateSrc(src)
@@ -170,6 +182,7 @@ export const GalleryVideoPlayer = forwardRef<GalleryVideoPlayerHandle, GalleryVi
     setCurrentTime(0)
     setDuration(0)
     setAutoplayFallback(null)
+    setSoundHintDismissed(false)
     setMediaLoadError(false)
     setFrameReady(false)
   }
@@ -181,8 +194,19 @@ export const GalleryVideoPlayer = forwardRef<GalleryVideoPlayerHandle, GalleryVi
   }, [src])
 
   useLayoutEffect(() => {
+    controlsPinnedRef.current = controlsPinned
+  }, [controlsPinned])
+
+  useLayoutEffect(() => {
     onFrameReadyRef.current = onFrameReady
-  }, [onFrameReady])
+    onEndedRef.current = onEnded
+    onControlsVisibilityChangeRef.current = onControlsVisibilityChange
+  }, [onControlsVisibilityChange, onEnded, onFrameReady])
+
+  useEffect(() => {
+    if (!src) return
+    onControlsVisibilityChangeRef.current?.(src, controlsSurfaceVisible)
+  }, [controlsSurfaceVisible, src])
 
   const revokeFrameLater = useCallback((previous: FrozenFrame | null, next: FrozenFrame | null) => {
     if (previous && previous.url !== next?.url) {
@@ -270,13 +294,14 @@ export const GalleryVideoPlayer = forwardRef<GalleryVideoPlayerHandle, GalleryVi
   const scheduleHide = useCallback(() => {
     clearHideTimer()
     const video = videoRef.current
-    if (!video || video.paused || controlsFocusedRef.current || revealTriggerFocusedRef.current || scrubbingRef.current) return
+    if (controlsPinnedRef.current || !video || video.paused || controlsFocusedRef.current || revealTriggerFocusedRef.current || scrubbingRef.current) return
     hideTimerRef.current = setTimeout(() => {
       hideTimerRef.current = null
       const currentVideo = videoRef.current
-      if (!currentVideo || currentVideo.paused || controlsFocusedRef.current || revealTriggerFocusedRef.current || scrubbingRef.current) return
+      if (controlsPinnedRef.current || !currentVideo || currentVideo.paused || controlsFocusedRef.current || revealTriggerFocusedRef.current || scrubbingRef.current) return
       controlsVisibleRef.current = false
       setControlsVisible(false)
+      setSoundHintDismissed(true)
     }, 3000)
   }, [clearHideTimer])
 
@@ -372,7 +397,7 @@ export const GalleryVideoPlayer = forwardRef<GalleryVideoPlayerHandle, GalleryVi
     setIsPlaying(true)
     setIsMuted(event.currentTarget.muted)
     if (isAtRequestedTime(event.currentTarget, initialTime)) markFrameReady(event.currentTarget, source, mediaGenerationRef.current)
-    if (controlsVisibleRef.current) scheduleHide()
+    scheduleHide()
   }, [initialTime, markFrameReady, scheduleHide])
 
   const handlePause = useCallback(() => {
@@ -657,6 +682,33 @@ export const GalleryVideoPlayer = forwardRef<GalleryVideoPlayerHandle, GalleryVi
   }, [cancelFrameReadyCallback, clearHideTimer, hideOutgoingFrame, initialTime, markFrameReady, seekToInitialTime, src, updatePreparedFrame])
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  /* eslint-disable react-hooks/set-state-in-effect -- Synchronize controls visibility with the externally pinned state. */
+  useEffect(() => {
+    const pinChanged = previousControlsPinnedRef.current !== controlsPinned
+    const sameSource = previousControlsPinnedSourceRef.current === src
+    previousControlsPinnedRef.current = controlsPinned
+    previousControlsPinnedSourceRef.current = src
+    if (!src || !activeMediaRef.current) return
+
+    if (controlsPinned) {
+      controlsVisibleRef.current = true
+      setControlsVisible(true)
+      clearHideTimer()
+      return
+    }
+    if (!pinChanged || !sameSource) return
+
+    const video = videoRef.current
+    if (!video || video.paused) {
+      controlsVisibleRef.current = true
+      setControlsVisible(true)
+      clearHideTimer()
+    } else {
+      scheduleHide()
+    }
+  }, [clearHideTimer, controlsPinned, scheduleHide, src])
+  /* eslint-enable react-hooks/set-state-in-effect */
+
   useEffect(() => () => {
     clearHideTimer()
     pendingPreparationRef.current?.cancel('cancelled')
@@ -712,6 +764,14 @@ export const GalleryVideoPlayer = forwardRef<GalleryVideoPlayerHandle, GalleryVi
       setAutoplayFallback('play')
     }
   }, [clearHideTimer, scheduleHide])
+
+  const handleEnded = useCallback((event: React.SyntheticEvent<HTMLVideoElement>) => {
+    const video = event.currentTarget
+    const source = activeSrcRef.current
+    if (!source || !activeMediaRef.current || desiredSrcRef.current !== source
+      || !videoHasSource(video, source) || !video.ended || video.loop) return
+    onEndedRef.current?.(source)
+  }, [])
 
   useImperativeHandle(ref, () => ({ revealControls, togglePlayback, prepareSource, cancelPreparedSource }),
     [cancelPreparedSource, prepareSource, revealControls, togglePlayback])
@@ -823,6 +883,7 @@ export const GalleryVideoPlayer = forwardRef<GalleryVideoPlayerHandle, GalleryVi
   }, [])
 
   const visibleFallback = autoplayFallback && !controlsVisible
+    && (autoplayFallback !== 'sound' || !soundHintDismissed)
   const visibleFrozenFrame = preparedFrame?.src === src ? preparedFrame : null
 
   return (
@@ -839,7 +900,7 @@ export const GalleryVideoPlayer = forwardRef<GalleryVideoPlayerHandle, GalleryVi
         className="h-full w-full object-contain"
         controls={false}
         playsInline
-        loop
+        loop={loop}
         preload="auto"
         tabIndex={-1}
         onLoadedMetadata={handleLoadedMetadata}
@@ -853,6 +914,7 @@ export const GalleryVideoPlayer = forwardRef<GalleryVideoPlayerHandle, GalleryVi
         }}
         onPlay={handlePlay}
         onPause={handlePause}
+        onEnded={handleEnded}
         onVolumeChange={event => {
           if (activeMediaRef.current) setIsMuted(event.currentTarget.muted)
         }}

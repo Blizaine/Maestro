@@ -1018,6 +1018,7 @@ class MiniMaxH3Transformer(nn.Module):
         """
 
         from .lora_affine import convert_adaln_loras
+        from .lora_names import normalize_flattened_lora_names
         from .pdd import is_pdd_state_dict, preprocess_pdd_lora_state_dict
         from .lora_vdn import normalize_diffusers_lora
 
@@ -1030,6 +1031,7 @@ class MiniMaxH3Transformer(nn.Module):
             if pdd_adapter
             else normalize_diffusers_lora(state_dict, self)
         )
+        converted = normalize_flattened_lora_names(converted, self)
         started = time.perf_counter()
         count, architecture, source_width, target_width = convert_adaln_loras(
             model_type,

@@ -3564,7 +3564,7 @@ def enhance_prompt(
             '\n- Adapt the supplied brief to the selected image model. Preserve explicit composition, left/right ownership, contact points, wardrobe, lighting and requested text. Remove instructions addressed to another assistant and redundant formatting, not visual requirements.'
             '\n- If the prompt starts with "create new scene", keep that prefix.'
             '\n- If the prompt ends with "Use original reference images" or similar, keep that suffix.'
-            '\n- NEVER include LoRA names or filenames in the output.'
+            '\n- Do not include LoRA filenames or display names as explanatory output. Exact creator-declared trainedWords tokens from active-LoRA guidance are allowed when relevant.'
         )
         if image_paths:
             system += '\n- Preserve the supplied reference constraints and edit boundaries. Do not turn an identity reference into an unwanted scene or style constraint.'
@@ -3588,7 +3588,8 @@ def enhance_prompt(
             "that character only; no other character repeats, echoes, mouths, or paraphrases it. Voice "
             "references supply timbre and delivery only, never source room tone, reverb, echo, noise, "
             "microphone coloration, or spatial acoustics. No markdown, "
-            "explanation, filenames, or LoRA names."
+            "explanation, filenames, or LoRA display names. Exact creator-declared "
+            "trainedWords tokens from active-LoRA guidance may appear when relevant."
         )
     elif is_h3_context_ir:
         system += (
@@ -3601,10 +3602,12 @@ def enhance_prompt(
             "When the user requests a discussion without supplying lines, write "
             "short meaningful dialogue that fits the supplied Duration. Once the "
             "last line ends, describe silent visible action and closed mouths; do "
-            "not invent more speech. No markdown, explanation, or LoRA filenames."
+            "not invent more speech. No markdown, explanation, LoRA filenames, or "
+            "display names. Exact creator-declared trainedWords tokens from "
+            "active-LoRA guidance may appear when relevant."
         )
     else:
-        system += "\n\nCRITICAL: Output ONLY the enhanced prompt text. No headers, no labels, no markdown, no explanation, no \"Enhancement Logic\", no \"Edit Prompt:\". No LoRA filenames (.safetensors). Just the raw prompt text."
+        system += "\n\nCRITICAL: Output ONLY the enhanced prompt text. No headers, no labels, no markdown, no explanation, no \"Enhancement Logic\", no \"Edit Prompt:\". No LoRA filenames or display names; exact creator-declared trainedWords tokens from active-LoRA guidance may appear when relevant. Just the raw prompt text."
 
     if needs_h3_dialogue:
         dialogue_requirement = _build_h3_dialogue_requirement(prompt, duration_seconds, planning_style)

@@ -1,5 +1,6 @@
 """Windows 10 opt-in, routing and media contracts; no native GPU calls."""
 import json
+from contextlib import contextmanager
 from pathlib import Path
 import sys
 import tempfile
@@ -11,7 +12,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 
 class ExperimentalRoutingTests(unittest.TestCase):
-    def test_opt_in_is_required_and_cannot_change_windows_11_or_frame_generation(self):
+    @contextmanager
+    def _windows_runtime(self, runtime, *, build, missing=(), gpu=40, hags=True, probe=None):
+        with patch.object(runtime, "os", SimpleNamespace(name="nt")), \
+                patch.object(runtime.sys, "getwindowsversion", return_value=SimpleNamespace(build=build), create=True), \
+                patch.object(runtime, "_missing", return_value=list(missing)) as missing_check, \
+                patch.object(runtime, "_gpu_series", return_value=gpu), \
+                patch.object(runtime, "_hags_enabled", return_value=hags), \
+                patch.object(runtime, "dlssg_capabilities", return_value=probe or {}) as worker_probe:
+            yield missing_check, worker_probe
+
+    def test_opt_in_is_required_and_direct_backend_does_not_enable_frame_generation(self):
         from postprocessing.dlss5 import runtime
         if sys.platform != "win32":
             self.skipTest("Windows build routing")
@@ -25,9 +36,83 @@ class ExperimentalRoutingTests(unittest.TestCase):
                 self.assertFalse(runtime.uses_experimental_backend())
             marker.write_text(json.dumps({"enabled": True}))
             self.assertTrue(runtime.uses_experimental_backend())
-            self.assertIn("Windows 11", runtime.unavailable_reason(temporal=True))
+            with patch.object(runtime, "_missing", return_value=[runtime.DLSSG_FILES[0]]):
+                self.assertIn("missing nvngx_dlssg.dll", runtime.unavailable_reason(temporal=True))
             with patch.object(runtime.sys, "getwindowsversion", return_value=SimpleNamespace(build=22631)):
                 self.assertFalse(runtime.uses_experimental_backend())
+
+    def test_win10_frame_generation_uses_supported_worker_probe_and_factor_limits(self):
+        from postprocessing.dlss5 import runtime
+        from services.media_processing import capabilities, validate_methods
+
+        probe = {"available": True, "multi_frame_count_max": 3, "worker_version": 1}
+        with self._windows_runtime(runtime, build=19045, probe=probe) as (_missing, worker_probe), \
+                patch.object(runtime, "uses_experimental_backend", return_value=False):
+            caps = capabilities()
+
+        self.assertTrue(caps["frame_generation"]["available"])
+        self.assertEqual(caps["frame_generation"]["factors"], [2])
+        worker_probe.assert_called()
+        with patch("services.media_processing.capabilities", return_value=caps):
+            validate_methods(temporal="dlssg*2")
+            with self.assertRaisesRegex(ValueError, "supports DLSS factors"):
+                validate_methods(temporal="dlssg*3")
+
+    def test_win10_frame_generation_still_requires_worker_hardware_and_hags(self):
+        from postprocessing.dlss5 import runtime
+
+        cases = (
+            (19040, (), 40, True, {"available": True}, "Windows 10 20H1"),
+            (19045, (runtime.DLSSG_FILES[0],), 40, True, {"available": True}, "missing nvngx_dlssg.dll"),
+            (19045, (), 30, True, {"available": True}, "RTX 40+ required"),
+            (19045, (), 40, False, {"available": True}, "HAGS disabled"),
+            (19045, (), 40, True, {}, "did not report its capabilities"),
+            (19045, (), 40, True, {"available": False}, "Frame Generation unavailable"),
+        )
+        for build, missing, gpu, hags, probe, expected in cases:
+            with self.subTest(build=build, missing=bool(missing), gpu=gpu, hags=hags, probe=probe):
+                with self._windows_runtime(runtime, build=build, missing=missing,
+                        gpu=gpu, hags=hags, probe=probe) as (missing_check, worker_probe):
+                    reason = runtime.unavailable_reason(temporal=True)
+                self.assertIn(expected, reason)
+                if build < 19041:
+                    missing_check.assert_not_called()
+                    worker_probe.assert_not_called()
+                elif not hags:
+                    worker_probe.assert_not_called()
+
+    def test_dlssg_probe_rejects_valid_json_from_nonzero_exit(self):
+        from postprocessing.dlss5 import runtime
+
+        runtime.dlssg_capabilities.cache_clear()
+        try:
+            with patch.object(runtime, "os", SimpleNamespace(name="nt")), \
+                    patch.object(runtime, "_missing", return_value=[]), \
+                    patch.object(runtime.subprocess, "run", return_value=SimpleNamespace(
+                        returncode=1, stdout=json.dumps({"available": True, "multi_frame_count_max": 5})
+                    )) as run:
+                self.assertEqual(runtime.dlssg_capabilities(), {})
+                run.assert_called_once()
+        finally:
+            runtime.dlssg_capabilities.cache_clear()
+
+    def test_non_windows_frame_generation_error_reports_minimum_platform(self):
+        from postprocessing.dlss5 import runtime
+
+        with patch.object(runtime, "os", SimpleNamespace(name="posix")):
+            self.assertIn("Windows 10 20H1 (build 19041)", runtime.unavailable_reason(temporal=True))
+
+    def test_win10_neural_rendering_policy_and_windows11_path_are_unchanged(self):
+        from postprocessing.dlss5 import runtime
+
+        with self._windows_runtime(runtime, build=19045), \
+                patch.object(runtime, "uses_experimental_backend", return_value=False):
+            self.assertIn("Windows 11 or the opt-in experimental Windows 10 backend",
+                          runtime.unavailable_reason(temporal=False))
+
+        with self._windows_runtime(runtime, build=22631, missing=(), gpu=30), \
+                patch.object(runtime, "uses_experimental_backend", return_value=False):
+            self.assertEqual(runtime.unavailable_reason(temporal=False), "")
 
     def test_missing_native_install_stays_unavailable(self):
         from postprocessing.dlss5 import runtime

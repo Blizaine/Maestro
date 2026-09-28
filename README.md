@@ -107,6 +107,21 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v2.5.0 (2026-09-28)
+
+**Better LoRA names and guidance, immersive gallery playback, and reliable H3 window timing**
+
+- **Readable LoRA names:** creator titles and editable display names across Studio, Director and My LoRAs, with version/variant labels and stable release/download dates. Original files and update tracking stay intact.
+- **LoRA-aware enhancement:** active adapters' guides and trigger words reach the prompt writer, including H3 Frames and References. Downloads save available creator guidance automatically without loading an LLM.
+- **Broader H3 LoRA support:** load compatible CivitAI adapters that use flattened module names, while retaining checks for incompatible or ambiguous weights.
+- **Gallery slideshow:** automatically advance after each video, choose 1–10 seconds per image, and transition with the same upward swipe. Viewer controls fade during playback and return when tapped.
+- **Sharper previews and easier uploads:** responsive video posters up to 1920 pixels, plus a fix for Frames image selections disappearing after the mobile photo picker closes.
+- **H3 timing and Windows 10 DLSS:** preserve multi-window timing from Enhance through Generate (#160); enable DLSS temporal options on supported Windows 10 systems after the separate Frame Generation installation and capability checks.
+
+Use **Update** in Pinokio, restart Maestro and refresh the browser.
+
+[Full v2.5.0 release notes](docs/RELEASE_NOTES_V2.5.0.md) · [Validation and remaining limits](docs/VALIDATION_V2.5.0.md) · [Changelog](CHANGELOG.md)
+
 ### v2.4.2 (2026-09-27)
 
 **Gallery audio reuse, clip trimming, and better Krea Identity Edit controls**

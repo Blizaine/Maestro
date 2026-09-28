@@ -93,6 +93,10 @@ class TestLoraUrlImport(unittest.TestCase):
         self.assertEqual(result['status'], 'downloading', result)
         record = self.namespace['_civitai_downloads'][result['download_id']]
         self.assertEqual(os.path.normcase(record['target_dir']), os.path.normcase(str(expected.resolve())))
+        if record.get('_model_id') == self.civit_model['id']:
+            selected = next(version for version in self.civit_model['modelVersions']
+                            if version['id'] == record['_version_id'])
+            self.assertEqual(record['_version_name'], selected['name'])
         self.assertTrue(expected.is_dir())
         self.assertEqual(list(expected.iterdir()), [])  # No weights downloaded by these tests.
         self.worker.return_value.start.assert_called_once()

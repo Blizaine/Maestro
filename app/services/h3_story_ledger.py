@@ -12377,14 +12377,20 @@ def plan_h3_story_segments(
     has_start_image: bool = False,
     nsfw: bool = False,
     llm_generate: Callable[..., str] | None = None,
+    lora_system_hint: str = "",
     resume: dict | None = None,
 ) -> dict[str, Any]:
     """Create a compact ledger and expand one validated local segment at a time."""
 
     from services import llm_service
     from services.studio_enhancement import fidelity_retry_limit
+    from services.lora_guidance import with_active_lora_guidance
 
     retry_limit = fidelity_retry_limit()
+    generate = with_active_lora_guidance(
+        llm_generate or llm_service.generate,
+        lora_system_hint,
+    )
 
     with llm_service.keep_loaded():
         context = deepcopy(resume["context"]) if resume else _prepare_h3_story_context(
@@ -12393,11 +12399,11 @@ def plan_h3_story_segments(
             expect_dialogue=expect_dialogue, planning_style=planning_style,
             image_paths=image_paths, has_start_image=has_start_image,
             image_reference_roles=image_reference_roles,
-            nsfw=nsfw, llm_generate=llm_generate,
+            nsfw=nsfw, llm_generate=generate,
             fidelity_retries=retry_limit,
         )
         return _render_h3_story_segments(
-            context, generate=llm_generate or llm_service.generate, resume=resume,
+            context, generate=generate, resume=resume,
             fidelity_retries=retry_limit,
         )
 

@@ -4,8 +4,10 @@ import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { generateLoraGuide, fetchLoraGuide, fetchLoraDetails } from '../../api/client'
 import { LoraGuideTooltip, LoraAgeChip, LoraSortToggle, sortLoraNames } from './LoraSelector'
+import { LoraDisplayNameEditor } from './LoraDisplayNameEditor'
 import type { LoraDates } from './LoraSelector'
 import type { LoraRecommendedWeights } from '../../types'
+import { getLoraDisplayName, getLoraSecondaryLabel, indexLoraDisplayNames, LORA_DISPLAY_NAME_CHANGED_EVENT, type LoraDisplayNameMap } from '../../lib/loraDisplayNames'
 
 function phaseWeights(values: number[] | undefined, phases: number): number[] {
   return Array.from({ length: phases }, (_, index) => {
@@ -101,6 +103,7 @@ export function DirectorLoraSelector({ mode, modelType }: {
   const [guideStatus, setGuideStatus] = useState<Record<string, 'none' | 'exists' | 'generating' | 'done'>>({})
   const [guideTexts, setGuideTexts] = useState<Record<string, string>>({})
   const [loraDates, setLoraDates] = useState<Record<string, LoraDates>>({})
+  const [displayNames, setDisplayNames] = useState<LoraDisplayNameMap>({})
   // Sticky list order shared with the Studio picker via the store.
   const sortMode = useStore(s => s.loraPickerSort)
   const setSortSticky = useStore(s => s.setLoraPickerSort)
@@ -161,6 +164,7 @@ export function DirectorLoraSelector({ mode, modelType }: {
       const guides: Record<string, string> = {}
       const statuses: Record<string, 'exists' | 'none'> = {}
       const dates: Record<string, LoraDates> = {}
+      setDisplayNames(indexLoraDisplayNames(r.loras))
       for (const info of r.loras) {
         if (info.recommended_weights) recs[info.filename] = info.recommended_weights
         if (info.guide) { guides[info.filename] = info.guide; statuses[info.filename] = 'exists' }
@@ -186,6 +190,21 @@ export function DirectorLoraSelector({ mode, modelType }: {
       }).catch(() => {})
     }
   }, [modelType, activatedLoras]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!modelType) return
+    let cancelled = false
+    const refreshNames = () => {
+      fetchLoraDetails(modelType).then(result => {
+        if (!cancelled) setDisplayNames(indexLoraDisplayNames(result.loras))
+      }).catch(() => {})
+    }
+    window.addEventListener(LORA_DISPLAY_NAME_CHANGED_EVENT, refreshNames)
+    return () => {
+      cancelled = true
+      window.removeEventListener(LORA_DISPLAY_NAME_CHANGED_EVENT, refreshNames)
+    }
+  }, [modelType])
 
   // Sync from store when savedLora changes externally
   useEffect(() => {
@@ -245,15 +264,18 @@ export function DirectorLoraSelector({ mode, modelType }: {
     persist([], {})
   }
 
-  const displayName = (filename: string) =>
-    filename.replace(/\.(safetensors|sft)$/i, '')
+  const displayName = (filename: string) => getLoraDisplayName(filename, displayNames)
 
+  const query = search.trim().toLowerCase()
   const filtered = sortLoraNames(
     availableLoras.filter(name =>
-      displayName(name).toLowerCase().includes(search.toLowerCase())
+      !query || displayName(name).toLowerCase().includes(query)
+        || (getLoraSecondaryLabel(name, displayNames)?.toLowerCase().includes(query) ?? false)
+        || name.toLowerCase().includes(query)
     ),
     sortMode,
     loraDates,
+    displayNames,
   )
 
   if (loading) {
@@ -316,15 +338,18 @@ export function DirectorLoraSelector({ mode, modelType }: {
         {filtered.map(filename => {
           const isActive = activatedLoras.includes(filename)
           const activeWeights = loraWeights[filename] || Array(phases).fill(1.0)
+          const secondaryLabel = getLoraSecondaryLabel(filename, displayNames)
+          const versionLabel = displayNames[filename]?.version_label?.trim() || ''
           return (
             <div
               key={filename}
-              className={`w-full px-2.5 py-1.5 text-xs flex items-center gap-1.5 hover:bg-bg-hover transition-colors ${
+              className={`group w-full px-2.5 py-1.5 text-xs flex items-center gap-1.5 hover:bg-bg-hover transition-colors ${
                 isActive ? 'text-accent-blue' : 'text-text-secondary'
               }`}
             >
               <button
                 type="button"
+                title={`File: ${filename}`}
                 onClick={() => toggleLora(filename)}
                 className="min-w-0 flex-1 flex items-center gap-2 text-left"
                 aria-pressed={isActive}
@@ -338,7 +363,19 @@ export function DirectorLoraSelector({ mode, modelType }: {
                     </svg>
                   )}
                 </div>
-                <span className="truncate flex-1">{displayName(filename)}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 items-center gap-1">
+                    <span className="min-w-0 flex-1 truncate">{displayName(filename)}</span>
+                    {secondaryLabel && versionLabel === secondaryLabel && (
+                      <span className="shrink-0 whitespace-nowrap rounded bg-bg-active px-1 py-0.5 text-[9px] font-medium text-text-muted"
+                        title={`Release or variant: ${versionLabel}`}>{versionLabel}</span>
+                    )}
+                  </div>
+                  {secondaryLabel && secondaryLabel !== versionLabel && (
+                    <span className="block whitespace-normal break-all text-[9px] leading-tight text-text-muted"
+                      title={`File: ${filename}`}>{secondaryLabel}</span>
+                  )}
+                </div>
               </button>
               {loraDates[filename] && (
                 <LoraAgeChip
@@ -363,6 +400,9 @@ export function DirectorLoraSelector({ mode, modelType }: {
                   title={loraWeightRecs[filename].source === 'civitai' ? 'CivitAI recommended settings' : 'Default settings'}
                 />
               )}
+              {!displayNames[filename]?.managed && <LoraDisplayNameEditor filename={filename}
+                displayName={displayName(filename)} displayNameOverride={displayNames[filename]?.display_name_override}
+                modelType={modelType} onSaved={result => setDisplayNames(prev => ({ ...prev, [filename]: result }))} />}
               {isActive && phases === 1 && (
                 <label
                   className="flex items-center gap-1 shrink-0 text-[9px] text-text-muted"
@@ -413,11 +453,24 @@ export function DirectorLoraSelector({ mode, modelType }: {
           </div>
           {activatedLoras.map(filename => {
             const weights = phaseWeights(loraWeights[filename], phases)
+            const secondaryLabel = getLoraSecondaryLabel(filename, displayNames)
+            const versionLabel = displayNames[filename]?.version_label?.trim() || ''
             return (
               <div key={filename} className="bg-bg-tertiary border border-border rounded-lg px-2.5 py-2">
                 <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs text-text-primary truncate flex-1 mr-2">
-                    {displayName(filename)}
+                  <span className="min-w-0 flex-1 mr-2">
+                    <span className="flex min-w-0 items-center gap-1 text-xs text-text-primary">
+                      <span className="truncate" title={`File: ${filename}`}>{displayName(filename)}</span>
+                      {secondaryLabel && versionLabel === secondaryLabel && (
+                        <span className="max-w-[45%] shrink-0 truncate rounded bg-bg-active px-1 py-0.5 text-[9px] font-medium text-text-muted"
+                          title={`Release or variant: ${versionLabel}`}>{versionLabel}</span>
+                      )}
+                    </span>
+                    {secondaryLabel && secondaryLabel !== versionLabel && (
+                      <span className="block whitespace-normal break-all text-[9px] leading-tight text-text-muted" title={`File: ${filename}`}>
+                        {secondaryLabel}
+                      </span>
+                    )}
                   </span>
                   <div className="flex items-center gap-0.5 shrink-0">
                     {guideStatus[filename] === 'exists' || guideStatus[filename] === 'done' ? (

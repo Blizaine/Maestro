@@ -1882,6 +1882,8 @@ def list_all_installed_loras():
     (where the scan writes them, since linked installs stay read-only),
     then from beside the file itself.
     """
+    from services.lora_metadata import load_lora_display_names, lora_name_fields, lora_date_fields
+    display_names = load_lora_display_names()
     lora_root = wgp.server_config.get("loras_root", "loras") if hasattr(wgp, 'server_config') else "loras"
     candidates = [lora_root]
     if not os.path.isabs(lora_root):
@@ -1965,12 +1967,6 @@ def list_all_installed_loras():
                     info["hf_repo_id"] = meta.get("repoId")
                     info["name"] = meta.get("name")
                     info["base_model"] = meta.get("baseModel")
-                    # CivitAI sidecars have carried downloadedAt since the
-                    # download path first shipped; publishedAt (the version
-                    # release date) is newer — captured at download time and
-                    # backfilled for existing files by check-updates.
-                    info["downloaded_at"] = meta.get("downloadedAt")
-                    info["released_at"] = meta.get("publishedAt")
                     # Manual override (set via /api/v1/loras/nsfw-override)
                     # takes precedence over CivitAI's `nsfw` boolean, which
                     # is sometimes overly conservative (it's "worst content
@@ -1995,13 +1991,7 @@ def list_all_installed_loras():
                             info["preview_url"] = example_media[0]
                 except Exception:
                     pass
-            # Downloaded-date fallback for HF/hand-installed files without a
-            # CivitAI sidecar: the weight file's mtime.
-            if not info.get("downloaded_at"):
-                try:
-                    info["downloaded_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(os.path.getmtime(full_path)))
-                except OSError:
-                    info["downloaded_at"] = None
+            info.update(lora_date_fields(full_path, meta))
             # Check for local preview files (downloaded from HF)
             if not info.get("preview_url"):
                 for _b in _bases:
@@ -2020,16 +2010,16 @@ def list_all_installed_loras():
             # sidecars at all.
             has_override = isinstance(meta, dict) and isinstance(meta.get("nsfw_override"), bool)
             sidecar_has_nsfw_field = isinstance(meta, dict) and "nsfw" in meta
+            guide_text = ""
+            guide_path = next((b + ".guide.md" for b in _bases if os.path.isfile(b + ".guide.md")), None)
+            if guide_path:
+                try:
+                    with open(guide_path, "r", encoding="utf-8") as gf:
+                        guide_text = gf.read(6000)
+                except OSError:
+                    pass
             if not info["nsfw"] and not has_override and not sidecar_has_nsfw_field:
                 _meta = meta if os.path.isfile(sidecar) else None
-                guide_path = next((b + ".guide.md" for b in _bases if os.path.isfile(b + ".guide.md")), None)
-                guide_text = None
-                if guide_path:
-                    try:
-                        with open(guide_path, "r", encoding="utf-8") as gf:
-                            guide_text = gf.read()
-                    except Exception:
-                        guide_text = None
                 if _classify_lora_nsfw(filename=f, display_name=info.get("name"),
                                        sidecar_meta=_meta, guide_text=guide_text):
                     info["nsfw"] = True
@@ -2037,6 +2027,7 @@ def list_all_installed_loras():
             # Survives version updates so persisted state (weights, activations,
             # NSFW stash) carries forward automatically.
             info["lora_id"] = _compute_lora_id(f, meta)
+            info.update(lora_name_fields(f, meta, rel_dir, guide_text, names=display_names))
             # Per-file update status — uses the cached manifest entry plus
             # this file's own sidecar versionId, so superseded files (older
             # version sitting next to a newer one) don't get falsely flagged
@@ -2309,6 +2300,8 @@ def list_loras(model_type: str):
 @api.get("/api/v1/loras/{model_type}/details")
 def list_loras_details(model_type: str):
     """List LoRAs with metadata from .civitai.json sidecars."""
+    from services.lora_metadata import load_lora_display_names, lora_name_fields, lora_date_fields
+    display_names = load_lora_display_names()
     md = wgp.get_model_def(model_type)
     if md is None:
         raise HTTPException(status_code=404, detail=f"Unknown model: {model_type}")
@@ -2399,11 +2392,6 @@ def list_loras_details(model_type: str):
                 info["trained_words"] = meta.get("trainedWords", [])
                 info["civitai_model_id"] = meta.get("modelId")
                 info["recommended_weights"] = meta.get("recommendedWeights")
-                # Same date semantics as /api/v1/loras/installed: downloadedAt
-                # is stamped by the download path, publishedAt (version release
-                # date) is captured at download and backfilled by check-updates.
-                info["downloaded_at"] = meta.get("downloadedAt")
-                info["released_at"] = meta.get("publishedAt")
                 # Manual override > CivitAI flag > keyword fallback. See
                 # /api/v1/loras/installed for full rationale.
                 if isinstance(meta.get("nsfw_override"), bool):
@@ -2417,13 +2405,7 @@ def list_loras_details(model_type: str):
                     info["preview_url"] = images[0]["url"]
             except Exception:
                 meta = None
-        # Downloaded-date fallback for HF/hand-installed files without a
-        # CivitAI sidecar: the weight file's mtime.
-        if not info.get("downloaded_at"):
-            try:
-                info["downloaded_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(os.path.getmtime(f)))
-            except OSError:
-                info["downloaded_at"] = None
+        info.update(lora_date_fields(f, meta))
         # Fallback: infer NSFW from filename + tags + description + guide
         # only when no authoritative signal exists.
         has_override = isinstance(meta, dict) and isinstance(meta.get("nsfw_override"), bool)
@@ -2438,6 +2420,9 @@ def list_loras_details(model_type: str):
                 info["nsfw"] = True
         # Stable identifier: civitai:{modelId} when available, else local:{filename}.
         info["lora_id"] = _compute_lora_id(basename, meta)
+        info["name"] = meta.get("name") if isinstance(meta, dict) else None
+        name_directory = os.path.relpath(os.path.abspath(lora_dir), os.path.abspath(_resolve_lora_root() or lora_dir))
+        info.update(lora_name_fields(basename, meta, name_directory, info.get("guide") or "", display_names))
         # Per-file update status (see /api/v1/loras/installed for the
         # equivalent logic). Computes against this file's own sidecar
         # versionId rather than blindly inheriting the manifest's
@@ -2492,12 +2477,76 @@ def list_loras_details(model_type: str):
                 "guide": preset["description"],
                 "update_status": "current",
             })
+            if not info.get("display_name"):
+                info.update(lora_name_fields(filename, {"name": preset.get("label") or preset.get("name")}, "", names=display_names))
         loras.sort(key=lambda item: item["filename"])
     return {
         "loras": loras,
         "guidance_max_phases": md.get("guidance_max_phases", 1),
         "manifest_last_check_at": _manifest.get("last_full_check_at") if isinstance(_manifest, dict) else None,
     }
+
+
+@api.put("/api/v1/loras/display-name")
+async def update_lora_display_name(request: Request):
+    """Rename the visible label, never the weights, sidecar or update identity."""
+    from services.lora_metadata import lora_name_fields, set_lora_display_name
+    body = await request.json()
+    if not isinstance(body, dict) or "display_name" not in body:
+        raise HTTPException(400, "display_name is required (use null to reset it).")
+    if body.get("model_type") and "directory" in body:
+        raise HTTPException(400, "Specify a model type or a directory, not both.")
+    filename = body.get("filename")
+    if not isinstance(filename, str) or not _is_safe_path_component(filename) or not filename.lower().endswith((".safetensors", ".sft")):
+        raise HTTPException(400, "A LoRA filename without a directory is required.")
+    root = _resolve_lora_root()
+    if not root:
+        raise HTTPException(404, "LoRA folder not found.")
+    model_type = body.get("model_type")
+    if model_type:
+        if not isinstance(model_type, str) or wgp.get_model_def(model_type) is None:
+            raise HTTPException(404, "Unknown model type.")
+        primary_dir = wgp.get_lora_dir(model_type)
+        if not primary_dir:
+            raise HTTPException(404, "This model has no LoRA folder.")
+        resolved_path = wgp.resolve_lora_path(model_type, filename)
+        directory = os.path.relpath(os.path.abspath(primary_dir), os.path.abspath(root))
+    else:
+        directory = body.get("directory", ".")
+        if not isinstance(directory, str):
+            raise HTTPException(400, "Invalid LoRA directory.")
+        primary_dir = _safe_join(root, directory)
+        if primary_dir is None:
+            raise HTTPException(400, "Invalid LoRA directory.")
+        candidates = [_safe_join(base, directory, filename) for base in [root, *_linked_lora_roots()]]
+        resolved_path = next((candidate for candidate in candidates if candidate and os.path.isfile(candidate)), None)
+        directory = os.path.relpath(os.path.abspath(primary_dir), os.path.abspath(root))
+    if not resolved_path or not os.path.isfile(resolved_path):
+        raise HTTPException(404, "LoRA file not found.")
+    bases = [os.path.join(primary_dir, os.path.splitext(filename)[0]), os.path.splitext(resolved_path)[0]]
+    meta = None
+    guide = ""
+    for base in dict.fromkeys(bases):
+        if meta is None:
+            try:
+                with open(base + ".civitai.json", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    meta = loaded
+            except (OSError, ValueError):
+                pass
+        if not guide:
+            try:
+                with open(base + ".guide.md", encoding="utf-8") as handle:
+                    guide = handle.read(6000)
+            except OSError:
+                pass
+    try:
+        set_lora_display_name(filename, meta, directory, body.get("display_name"))
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    return {"filename": filename, "lora_id": _compute_lora_id(filename, meta),
+            **lora_name_fields(filename, meta, directory, guide)}
 
 
 @api.post("/api/v1/loras/nsfw-override")
@@ -2668,28 +2717,31 @@ def check_lora_updates(force: bool = False):
     new_entries: dict[str, dict] = dict(manifest.get("entries", {}))
 
     def _backfill_published_at(sidecar_paths: list[str], model_data: dict):
-        """Write each version's publishedAt into local sidecars that predate
-        publishedAt capture, matched by the sidecar's versionId."""
+        """Fill missing release dates/titles, matched to the installed version."""
         versions = {}
         for v in model_data.get("modelVersions", []) or []:
             if isinstance(v, dict) and v.get("id") is not None:
                 try:
-                    versions[int(v["id"])] = v.get("publishedAt")
+                    versions[int(v["id"])] = v
                 except (TypeError, ValueError):
                     continue
         for path in sidecar_paths:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
-                if meta.get("publishedAt"):
-                    continue
                 vid = meta.get("versionId")
-                published = versions.get(int(vid)) if vid is not None else None
-                if not published:
+                version = versions.get(int(vid)) if vid is not None else None
+                if not version:
                     continue
-                meta["publishedAt"] = published
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(meta, f, indent=2)
+                changed = False
+                for key, value in (("publishedAt", version.get("publishedAt")),
+                                   ("versionName", version.get("name"))):
+                    if value and not meta.get(key):
+                        meta[key] = value
+                        changed = True
+                if changed:
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(meta, f, indent=2)
             except Exception:
                 continue
 
@@ -4234,6 +4286,7 @@ async def civitai_download(request: Request):
         "_url": url,
         "_model_id": model_id,
         "_version_id": version_id,
+        "_version_name": body.get("version_name", ""),
         "_trained_words": trained_words,
         "_model_name": model_name,
         "_images": images,
@@ -4446,6 +4499,7 @@ def _run_civitai_download(download_id: str):
         sidecar_data = {
             "modelId": dl["_model_id"],
             "versionId": dl["_version_id"],
+            "versionName": dl.get("_version_name", ""),
             "name": dl["_model_name"],
             "baseModel": dl.get("_base_model", ""),
             "trainedWords": dl["_trained_words"],
@@ -4456,6 +4510,7 @@ def _run_civitai_download(download_id: str):
             "nsfw": dl.get("_nsfw", False),
             "images": dl["_images"][:4] if dl["_images"] else [],
             "downloadedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "downloadedAtSource": "download",
         }
         if dl.get("_published_at"):
             sidecar_data["publishedAt"] = dl["_published_at"]
@@ -4516,9 +4571,8 @@ def _run_civitai_download(download_id: str):
                     continue
                 fname = os.path.basename(file_path)
                 try:
-                    dl["message"] = f"Generating guide for {fname}..."
-                    _ensure_llm_loaded()
-                    _generate_and_save_lora_guide(file_path, sidecar_data, fname)
+                    dl["message"] = f"Saving creator guide for {fname}..."
+                    _generate_and_save_lora_guide(file_path, sidecar_data, fname, source_only=True)
                 except Exception as e:
                     print(f"[CivitAI] Guide auto-generation failed for {fname} (non-fatal): {e}")
 
@@ -4699,6 +4753,7 @@ def _import_civitai_lora_by_url(url: str, target_dir_override: str = "") -> JSON
             "_url": download_url,
             "_model_id": model_id,
             "_version_id": version_id,
+            "_version_name": chosen.get("name", ""),
             "_trained_words": chosen.get("trainedWords", []) or [],
             "_model_name": model_data.get("name", ""),
             "_images": chosen.get("images", []) or [],
@@ -5031,6 +5086,8 @@ async def hf_import_lora(request: Request):
 
                 print(f"[HF Import] Downloaded {lora_filename} to {save_path}")
 
+                sidecar["downloadedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                sidecar["downloadedAtSource"] = "download"
                 with open(sidecar_path, "w", encoding="utf-8") as f:
                     f.write(json.dumps(sidecar, indent=2, ensure_ascii=False))
 
@@ -5052,8 +5109,9 @@ async def hf_import_lora(request: Request):
                 # 12. Generate guide — pass disk_filename so the guide
                 # references the file the user will actually see/use.
                 try:
-                    _generate_and_save_lora_guide(save_path, sidecar, disk_filename)
-                    print(f"[HF Import] Generated guide for {disk_filename}")
+                    guide_result = _generate_and_save_lora_guide(save_path, sidecar, disk_filename, source_only=True)
+                    if not guide_result["guide"]:
+                        print(f"[HF Import] No creator guidance supplied for {disk_filename}")
                 except Exception as e:
                     print(f"[HF Import] Guide generation failed: {e}")
 
@@ -5168,78 +5226,76 @@ def _build_lora_context(meta: dict, filename: str = "") -> str:
     return "\n".join(parts)
 
 
-def _generate_and_save_lora_guide(lora_path: str, meta: dict, filename: str = "") -> dict:
-    """Generate a LoRA guide and weight recommendations from CivitAI metadata.
+def _generate_and_save_lora_guide(lora_path: str, meta: dict, filename: str = "", *, source_only: bool = False) -> dict:
+    """Save creator guidance immediately, with optional explicit AI refinement.
 
-    Saves .guide.md and updates .civitai.json with recommended_weights.
-    Returns {"guide": str, "recommended_weights": dict}.
+    Background imports use source_only so a download never loads or competes
+    for the generation GPU. The manual Generate Guide action can refine it.
     """
-    from services import llm_service
-    from services.llm_service import _clean_enhance_output
+    from services.lora_metadata import source_lora_guide
 
-    context = _build_lora_context(meta, filename or os.path.basename(lora_path))
+    guide_path = os.path.splitext(lora_path)[0] + ".guide.md"
+    # Re-downloading an existing file must not replace a user's refined guide.
+    if source_only and os.path.isfile(guide_path):
+        with open(guide_path, "r", encoding="utf-8") as existing:
+            existing_guide = existing.read().strip()
+        if existing_guide:
+            return {"guide": existing_guide, "recommended_weights": meta.get("recommendedWeights")}
 
-    if len(context) < 80:
-        return {"guide": "", "recommended_weights": None}
-
-    # Check if LLM is loaded — skip gracefully if not
-    if not llm_service.is_loaded():
-        print(f"[LoRA Guide] LLM not loaded, skipping guide generation for {filename or os.path.basename(lora_path)}. Use 'Generate Guides' button later.")
-        return {"guide": "", "recommended_weights": None}
-
-    raw = llm_service.generate(
-        prompt=context,
-        system_prompt=_LORA_GUIDE_SYSTEM_PROMPT,
-        max_new_tokens=800,
-        temperature=0.3,
-        enable_thinking=False,
-    )
-
-    if not raw or not raw.strip():
-        return {"guide": "", "recommended_weights": None}
-
-    # Try to parse as JSON
-    guide_text = ""
+    guide_text = source_lora_guide(meta, filename or os.path.basename(lora_path))
+    guide_source = "creator"
     weights = None
-    raw = raw.strip()
+    if not source_only:
+        from services import llm_service
+        from services.llm_service import _clean_enhance_output
 
-    # Strip markdown fences if present
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-        if raw.endswith("```"):
-            raw = raw[:-3].strip()
-
-    try:
-        parsed = json.loads(raw)
-        guide_text = parsed.get("guide", "")
-        weights = parsed.get("recommended_weights")
-    except json.JSONDecodeError:
-        # LLM didn't output valid JSON — treat the whole output as guide text
-        guide_text = _clean_enhance_output(raw)
-
-    if guide_text:
-        guide_text = _clean_enhance_output(guide_text)
+        context = _build_lora_context(meta, filename or os.path.basename(lora_path))
+        if len(context) >= 80 and llm_service.is_loaded():
+            raw = llm_service.generate(
+                prompt=context,
+                system_prompt=_LORA_GUIDE_SYSTEM_PROMPT,
+                max_new_tokens=800,
+                temperature=0.3,
+                enable_thinking=False,
+            )
+            if raw and raw.strip():
+                raw = raw.strip()
+                if raw.startswith("```"):
+                    raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+                    if raw.endswith("```"):
+                        raw = raw[:-3].strip()
+                try:
+                    parsed = json.loads(raw)
+                    ai_guide = parsed.get("guide", "") if isinstance(parsed, dict) else ""
+                    weights = parsed.get("recommended_weights") if isinstance(parsed, dict) else None
+                except json.JSONDecodeError:
+                    ai_guide = raw
+                if isinstance(ai_guide, str) and ai_guide.strip():
+                    cleaned_guide = _clean_enhance_output(ai_guide)
+                    if cleaned_guide:
+                        guide_text = cleaned_guide
+                        guide_source = "ai"
 
     # Save guide
     if guide_text:
-        guide_path = os.path.splitext(lora_path)[0] + ".guide.md"
         with open(guide_path, "w", encoding="utf-8") as f:
             f.write(guide_text)
-        print(f"[LoRA Guide] Saved guide for {os.path.basename(lora_path)} ({len(guide_text)} chars)")
+        print(f"[LoRA Guide] Saved {guide_source} guide for {os.path.basename(lora_path)} ({len(guide_text)} chars)")
 
-    # Save weight recommendations to sidecar
-    if weights:
+    # Keep identity/update fields untouched, including user display-name data.
+    if guide_text:
         sidecar_path = os.path.splitext(lora_path)[0] + ".civitai.json"
         if os.path.isfile(sidecar_path):
             try:
                 with open(sidecar_path, "r", encoding="utf-8") as f:
                     sidecar = json.load(f)
-                sidecar["recommendedWeights"] = weights
+                sidecar["guideSource"] = guide_source
+                if isinstance(weights, dict) and weights:
+                    sidecar["recommendedWeights"] = weights
                 with open(sidecar_path, "w", encoding="utf-8") as f:
                     json.dump(sidecar, f, indent=2)
-                print(f"[LoRA Guide] Saved weight recommendations: {weights}")
             except Exception as e:
-                print(f"[LoRA Guide] Failed to update sidecar weights: {e}")
+                print(f"[LoRA Guide] Failed to update sidecar guidance metadata: {e}")
 
     return {"guide": guide_text, "recommended_weights": weights}
 
@@ -5885,9 +5941,12 @@ async def scan_and_generate_guides(request: Request):
                             if meta.get("prompt"):
                                 example_prompts.append(meta["prompt"])
 
+                        from services.lora_metadata import lora_date_fields
+                        scan_dates = lora_date_fields(full_path, version_data)
                         sidecar = {
                             "modelId": model_id,
                             "versionId": version_data.get("id"),
+                            "versionName": version_data.get("name", ""),
                             "name": version_data.get("model", {}).get("name", fname),
                             "baseModel": version_data.get("baseModel", ""),
                             "trainedWords": version_data.get("trainedWords", []),
@@ -5895,7 +5954,10 @@ async def scan_and_generate_guides(request: Request):
                             "examplePrompts": example_prompts,
                             "tags": tags,
                             "images": [{"url": img.get("url", "")} for img in version_data.get("images", [])[:4]],
-                            "downloadedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "downloadedAt": scan_dates["downloaded_at"],
+                            "downloadedAtSource": "weight_file",
+                            "publishedAt": scan_dates["released_at"],
+                            "metadataScannedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                         }
                         with open(base + ".civitai.json", "w", encoding="utf-8") as f:
                             json.dump(sidecar, f, indent=2)
@@ -8436,6 +8498,9 @@ async def llm_plan_h3_windows(request: Request):
     sliding_defaults = model_def.get("sliding_window_defaults") or {}
     planning_inputs = {
         "minimax_h3_extended_duration": body.get("minimax_h3_extended_duration") is True,
+        "minimax_h3_multi_window": True,
+        "custom_settings": body.get("custom_settings"),
+        "video_guide_outpainting": body.get("video_guide_outpainting"),
         "model_type": model_type,
         "resolution": body.get("resolution") or "864x480",
         "video_length": body.get("total_frames") or body.get("video_length") or 124,
@@ -8452,7 +8517,7 @@ async def llm_plan_h3_windows(request: Request):
     }
     from models.minimax_h3.minimax_h3_handler import (
         apply_h3_window_memory_policy,
-        normalize_h3_overlap_frames,
+        normalize_h3_window_geometry,
     )
 
     adjustment = apply_h3_window_memory_policy(
@@ -8462,10 +8527,7 @@ async def llm_plan_h3_windows(request: Request):
     )
     if adjustment and adjustment.get("unsupported"):
         raise HTTPException(status_code=400, detail=adjustment["message"])
-    planning_inputs["sliding_window_overlap"] = normalize_h3_overlap_frames(
-        planning_inputs.get("sliding_window_overlap"),
-        window_frames=planning_inputs.get("sliding_window_size"),
-    )
+    normalize_h3_window_geometry(planning_inputs, model_def)
 
     from services import llm_service
     from services.h3_window_planner import plan_h3_sliding_windows
@@ -8511,6 +8573,7 @@ async def llm_plan_h3_windows(request: Request):
             nsfw=bool(nsfw),
             camera_coverage=str(body.get("camera_coverage") or "auto"),
             planning_style=str(body.get("planning_style") or "faithful"),
+            lora_system_hint=_active_lora_hint(str(body.get("model_type") or ""), body.get("activated_loras")),
             retry_plan=body.get("retry_plan"),
         )
         result["effective_window_frames"] = window_frames
@@ -8642,6 +8705,7 @@ async def llm_plan_h3_sequence(request: Request):
             overlap_frames=overlap_frames,
             native_continuation=native_continuation,
             planning_style=str(body.get("planning_style") or "faithful"),
+            lora_system_hint=_active_lora_hint(str(body.get("model_type") or ""), body.get("activated_loras")),
             retry_plan=body.get("retry_plan"),
         )
         result["effective_window_frames"] = effective_clip_frames
@@ -8653,6 +8717,18 @@ async def llm_plan_h3_sequence(request: Request):
     except Exception as error:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(error)) from error
+
+
+def _active_lora_hint(model_type: str, activated_loras) -> str:
+    """Read guidance for this request's enabled files, including linked libraries."""
+    if not model_type or not activated_loras:
+        return ""
+    from services.lora_guidance import build_active_lora_hint
+    try:
+        return build_active_lora_hint(activated_loras, wgp.get_lora_search_dirs(model_type))
+    except Exception as error:
+        print(f"[Enhance] Could not read active LoRA guidance: {error}")
+        return ""
 
 
 async def _llm_enhance_prompt_payload(body: dict):
@@ -8684,6 +8760,7 @@ async def _llm_enhance_prompt_payload(body: dict):
         and requested_window_count > 1
     )
     enhancer_enabled = int(wgp.server_config.get("enhancer_enabled", 0) or 0)
+    lora_hint_text = _active_lora_hint(model_type, body.get("activated_loras"))
 
     # The generic Wan2GP cinematic enhancer cannot produce MiniMax H3's
     # required Context-IR fields, speaker IDs, or <d> dialogue tags. Route H3
@@ -8699,7 +8776,7 @@ async def _llm_enhance_prompt_payload(body: dict):
             image_paths = body.get("image_paths") or []
             if not image_paths and body.get("image_path"):
                 image_paths = [body["image_path"]]
-            return await _enhance_with_wangp(prompt, generation_mode, enhancer_enabled, image_paths=image_paths)
+            return await _enhance_with_wangp(prompt, generation_mode, enhancer_enabled, image_paths=image_paths, lora_system_hint=lora_hint_text)
         except Exception as e:
             print(f"[Enhance] Wan2GP enhancer failed, falling back to LLM: {e}")
             # Fall through to LLM
@@ -8769,74 +8846,8 @@ async def _llm_enhance_prompt_payload(body: dict):
     if not llm_image_paths and body.get("image_path"):
         llm_image_paths = [body["image_path"]]
 
-    # Load LoRA info for activated LoRAs — extract ONLY trigger words and key tips
-    lora_hint_text = ""
-    activated_loras = body.get("activated_loras") or []
-    print(f"[Enhance] LoRA check: activated_loras={activated_loras}, model_type={model_type}")
-    if activated_loras and model_type:
-        try:
-            lora_dir = wgp.get_lora_dir(model_type)
-            print(f"[Enhance] LoRA dir: {lora_dir}")
-            # Only inject trigger words from the CivitAI sidecar's
-            # trainedWords field. Do NOT extract triggers from guide prose —
-            # guide descriptions like "include the trigger phrase 'Unchained'"
-            # are instructions for the user, not actual trained tokens, and
-            # injecting them causes the LLM to insert them as broken tags.
-            trigger_lines = []
-            for lora_name in activated_loras:
-                sidecar_path = os.path.join(lora_dir, os.path.splitext(lora_name)[0] + ".civitai.json")
-                trigger_words = []
-                if os.path.isfile(sidecar_path):
-                    try:
-                        with open(sidecar_path, "r", encoding="utf-8") as sf:
-                            sidecar = json.loads(sf.read())
-                        trigger_words = sidecar.get("trainedWords", []) or []
-                    except Exception:
-                        pass
-
-                if trigger_words:
-                    trigger_lines.append(f"- {', '.join(trigger_words[:5])}")
-                print(f"[Enhance] LoRA '{lora_name}': triggers={trigger_words[:3]}, sidecar={os.path.isfile(sidecar_path)}")
-
-            if trigger_lines:
-                any_leet = any(any(c.isdigit() for c in ln) for ln in trigger_lines)
-                leet_block = (
-                    " Some trigger words are coded tokens with letters replaced by "
-                    "numbers (e.g. 'o'→'0', 'i'→'1', 's'→'5', 'e'→'3', 'a'→'4'). "
-                    "If you see one with digits, copy it EXACTLY as written — do "
-                    "not decode it into plain English."
-                ) if any_leet else ""
-                lora_hint_text = (
-                    "\n\n[LORA TRIGGER WORDS — these are exact tokens the model was "
-                    "trained on. Pick the ONE most relevant trigger and include it "
-                    "somewhere in the prompt IF AND ONLY IF it forms a natural, "
-                    "grammatical part of a sentence. If you cannot weave it in "
-                    "naturally, OMIT IT ENTIRELY.\n\n"
-                    "FORBIDDEN INSERTION PATTERNS (any of these ruins the prompt):\n"
-                    "- At the start as a standalone tag:  'Unchained, the doctor...'\n"
-                    "- As a comma-offset appositive:      'the doctor, Unchained, in white...'\n"
-                    "- As a parenthetical:                'the doctor (Unchained) in white...'\n"
-                    "- As a standalone label anywhere:    '...in the exam room. Unchained. She...'\n"
-                    "- Attached to an unrelated character: 'the doctor, Mystic XXX, leans...'\n\n"
-                    "ACCEPTABLE INSERTIONS only if grammatically natural:\n"
-                    "- Body/appearance descriptor trigger ('detailed muscle definition'): "
-                    "scoped to the right character inside a sentence — "
-                    "'the man with detailed muscle definition lifts the crate...'\n"
-                    "- Style tag trigger ('Mystic XXX', 'Unchained'): use only when the "
-                    "trigger names a genre or action the scene actually depicts. If it "
-                    "does not fit grammatically, OMIT IT. Do not force it in.\n\n"
-                    "Do NOT invent variants. Do NOT include a trigger that does not "
-                    "match the scene." + leet_block + "]\n"
-                ) + "\n".join(trigger_lines)
-                print(f"[Enhance] Loaded {len(trigger_lines)} trigger block(s): {lora_hint_text[:200]}")
-            else:
-                print(f"[Enhance] No LoRA triggers extractable from {len(activated_loras)} LoRA(s)")
-        except Exception as e:
-            print(f"[Enhance] LoRA hint loading failed: {e}")
-
     try:
-        # Pass LoRA hints as system-level context so the LLM treats them as instructions,
-        # not content to parrot. The hints go via lora_system_hint into the system prompt.
+        # Keep bounded LoRA guidance separate from the user source/events.
         result = llm_service.enhance_prompt(
             prompt=prompt,
             lora_system_hint=lora_hint_text,
@@ -8896,11 +8907,14 @@ async def llm_enhance_prompt(request: Request):
     return await _llm_enhance_prompt_payload(await request.json())
 
 
-async def _enhance_with_wangp(prompt: str, mode: str, enhancer_enabled: int, image_paths: list = None):
+async def _enhance_with_wangp(prompt: str, mode: str, enhancer_enabled: int, image_paths: list = None, lora_system_hint: str = ""):
     """Run the Wan2GP prompt enhancer using wgp's built-in offload system."""
     import secrets
     from PIL import Image
-    from shared.prompt_enhancer.prompt_enhance_utils import generate_cinematic_prompt
+    from shared.prompt_enhancer.prompt_enhance_utils import (
+        generate_cinematic_prompt, T2V_CINEMATIC_PROMPT, T2I_VISUAL_PROMPT,
+        IT2V_CINEMATIC_PROMPT, IT2I_VISUAL_PROMPT,
+    )
     from mmgp import offload
 
     # Setup enhancer with proper GPU offload (same as Wan2GP does internally)
@@ -8941,6 +8955,14 @@ async def _enhance_with_wangp(prompt: str, mode: str, enhancer_enabled: int, ima
         if hasattr(wgp.prompt_enhancer_image_caption_model, "vision_tower_model") and hasattr(wgp.prompt_enhancer_llm_model, "generate_messages"):
             post_image_caption_hook = wgp.enhancer_offloadobj.unload_all
 
+    instructions = None
+    if lora_system_hint:
+        base_instructions = (
+            (IT2V_CINEMATIC_PROMPT if is_video else IT2I_VISUAL_PROMPT)
+            if prompt_images else (T2V_CINEMATIC_PROMPT if is_video else T2I_VISUAL_PROMPT)
+        )
+        instructions = base_instructions + "\n\n" + lora_system_hint
+
     def _run():
         return generate_cinematic_prompt(
             wgp.prompt_enhancer_image_caption_model,
@@ -8951,6 +8973,7 @@ async def _enhance_with_wangp(prompt: str, mode: str, enhancer_enabled: int, ima
             prompt_images,
             video_prompt=is_video,
             text_prompt=False,
+            prompt_enhancer_instructions=instructions,
             max_new_tokens=512,
             do_sample=True,
             temperature=temperature,
@@ -10729,6 +10752,7 @@ async def _prepare_generation_submission(
             apply_h3_window_memory_policy,
             h3_runtime_preflight,
             normalize_h3_clip_frame_schedule,
+            normalize_h3_window_geometry,
             resolve_h3_long_sequence_discard_frames,
         )
 
@@ -10790,6 +10814,12 @@ async def _prepare_generation_submission(
                 f"{h3_window_adjustment['effective_window_frames']} frames. "
                 "Requested output duration is unchanged."
             )
+
+        if (
+            not _generation_model_def.get("omni_reference")
+            and int(body.get("multi_prompts_gen_type") or 0) != 3
+        ):
+            normalize_h3_window_geometry(body, _generation_model_def)
 
         try:
             h3_long_sequence_active = (
@@ -10981,6 +11011,7 @@ async def _prepare_generation_submission(
                     "[MiniMax H3 Omni] Restored the original story prompt "
                     "from the saved sequence plan."
                 )
+            h3_lora_hint = _active_lora_hint(str(body.get("model_type") or ""), body.get("activated_loras"))
             h3_sequence_signature = h3_sequence_plan_signature(
                 h3_sequence_source_prompt,
                 model_type=str(body.get("model_type") or ""),
@@ -10997,6 +11028,7 @@ async def _prepare_generation_submission(
                 overlap_frames=h3_sequence_overlap,
                 native_continuation=h3_native_sequence,
                 planning_style=h3_sequence_planning_style,
+                lora_system_hint=h3_lora_hint,
             )
             if h3_native_sequence:
                 h3_sequence_geometry = compute_h3_native_sequence_windows(
@@ -11051,6 +11083,7 @@ async def _prepare_generation_submission(
                     overlap_frames=h3_sequence_overlap,
                     native_continuation=h3_native_sequence,
                     planning_style=h3_sequence_planning_style,
+                    lora_system_hint=h3_lora_hint,
                 )
             )
             if (
@@ -11164,6 +11197,7 @@ async def _prepare_generation_submission(
                     overlap_frames=h3_sequence_overlap,
                     native_continuation=h3_native_sequence,
                     planning_style=h3_sequence_planning_style,
+                    lora_system_hint=h3_lora_hint,
                     retry_plan=h3_retry_plan,
                 )
                 cached_prompts = h3_window_plan_response["window_prompts"]
@@ -11364,7 +11398,7 @@ async def _prepare_generation_submission(
                 compute_h3_window_boundaries,
                 h3_window_plan_signature,
                 plan_h3_sliding_windows,
-                reviewed_h3_window_plan_matches,
+                reviewed_h3_window_plan_mismatch,
             )
 
             h3_fps = float(_generation_model_def.get("fps", 24) or 24)
@@ -11373,6 +11407,7 @@ async def _prepare_generation_submission(
             h3_has_start = bool(h3_start_value)
             h3_has_end = bool(h3_end_value)
             h3_injected_keyframes = _h3_injected_keyframes_from_body(body)
+            h3_lora_hint = _active_lora_hint(str(body.get("model_type") or ""), body.get("activated_loras"))
             h3_expected_signature = h3_window_plan_signature(
                 h3_first_last_source_prompt,
                 model_type=str(body.get("model_type") or ""),
@@ -11388,6 +11423,7 @@ async def _prepare_generation_submission(
                     body.get("minimax_h3_camera_coverage") or "auto"
                 ),
                 planning_style=h3_first_last_planning_style,
+                lora_system_hint=h3_lora_hint,
                 injected_keyframes=h3_injected_keyframes or None,
             )
             h3_expected_boundaries = compute_h3_window_boundaries(
@@ -11406,9 +11442,8 @@ async def _prepare_generation_submission(
                 and all(isinstance(item, str) and item.strip() for item in cached_prompts)
                 and body.get("h3_window_plan_signature") == h3_expected_signature
             )
-            reviewed_cache_is_valid = (
-                preserve_reviewed_h3_plan
-                and reviewed_h3_window_plan_matches(
+            reviewed_mismatch = (
+                reviewed_h3_window_plan_mismatch(
                     cached_plan,
                     cached_prompts,
                     source_prompt=h3_first_last_source_prompt,
@@ -11420,15 +11455,18 @@ async def _prepare_generation_submission(
                         body.get("minimax_h3_camera_coverage") or "auto"
                     ),
                     planning_style=h3_first_last_planning_style,
+                    lora_system_hint=h3_lora_hint,
                 )
+                if preserve_reviewed_h3_plan else None
             )
+            reviewed_cache_is_valid = preserve_reviewed_h3_plan and reviewed_mismatch is None
             if preserve_reviewed_h3_plan and not reviewed_cache_is_valid:
+                print(f"[MiniMax H3] Reviewed window plan mismatch: {reviewed_mismatch}.")
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        "The reviewed MiniMax H3 window prompts no longer match "
-                        "the current Duration, Window Length, model, resolution, "
-                        "or source prompt. Press Prompt Enhance to refresh the "
+                        "The reviewed MiniMax H3 window prompts no longer match: "
+                        f"{reviewed_mismatch}. Press Prompt Enhance to refresh the "
                         "plan before generating or adding it to the queue."
                     ),
                 )
@@ -11500,6 +11538,7 @@ async def _prepare_generation_submission(
                         body.get("minimax_h3_camera_coverage") or "auto"
                     ),
                     planning_style=h3_first_last_planning_style,
+                    lora_system_hint=h3_lora_hint,
                     retry_plan=h3_retry_plan,
                 )
                 cached_prompts = h3_window_plan_response["window_prompts"]
@@ -28642,11 +28681,13 @@ def _resolve_gallery_media_file(filename: str, workspace: str = "") -> str:
 
 
 @api.get("/api/v1/thumbnail/{filename:path}")
-def serve_gallery_thumbnail(filename: str, workspace: str = ""):
+def serve_gallery_thumbnail(filename: str, workspace: str = "", size: int = 480):
     """Return an on-demand first-frame JPEG for a local gallery video."""
-    from services.gallery_thumbnails import get_video_poster
+    from services.gallery_thumbnails import get_video_poster, SUPPORTED_POSTER_SIZES
+    if size not in SUPPORTED_POSTER_SIZES:
+        raise HTTPException(status_code=400, detail="Unsupported thumbnail size")
     filepath = _resolve_gallery_media_file(filename, workspace)
-    poster = get_video_poster(filepath)
+    poster = get_video_poster(filepath, size=size)
     if poster is None:
         raise HTTPException(status_code=404, detail="Thumbnail not available")
     return FileResponse(
