@@ -125,12 +125,15 @@ class TestKrea2ReferenceBoost(unittest.TestCase):
         )
         torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
 
-        neutral = self.impl["_attention_with_reference_bias"](
-            q, k, v, mask=mask, scale=None, gqa=True, key_text_length=2,
-            reference_token_lengths=(2, 1), target_len=3, ref_boost=1.0,
-            ref_boost_a=1.0,
+        # Production evaluates the prefix as a query-length-5 SDPA call while
+        # a neutral boost takes the query-length-9 fast path. Different CPU
+        # SDPA kernels may round those shapes differently, so compare against
+        # the exact same unmodified prefix call instead of requiring bitwise
+        # equality with a differently batched full-sequence result.
+        neutral_prefix = self.impl["_attention_from_blh"](
+            q[:, :5], k, v, mask=mask, scale=None, gqa=True,
         )
-        self.assertTrue(torch.equal(actual[:, :5], neutral[:, :5]))
+        self.assertTrue(torch.equal(actual[:, :5], neutral_prefix))
 
     def test_single_reference_uses_subject_boost_and_ignores_scene_boost(self):
         q, k, v = self._random_stream(q_heads=2, kv_heads=2)

@@ -242,6 +242,8 @@ class PerformanceAudioTests(unittest.TestCase):
         node = deepcopy(next(item for item in tree.body if isinstance(item, ast.AsyncFunctionDef)
                              and item.name == '_llm_enhance_prompt_payload'))
         node.decorator_list = []
+        lora_hint = deepcopy(next(item for item in tree.body if isinstance(item, ast.FunctionDef)
+                                 and item.name == '_active_lora_hint'))
 
         class ReachedModelLoad(Exception):
             pass
@@ -254,7 +256,7 @@ class PerformanceAudioTests(unittest.TestCase):
             'enhancement_settings': lambda services: services, '_PUBLIC_LLM_PROVIDERS': set(),
             '_ensure_llm_loaded': stop_before_loading,
         }
-        exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), 'launch.py', 'exec'), namespace)
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[lora_hint, node], type_ignores=[])), 'launch.py', 'exec'), namespace)
         for drive in (True, False):
             with self.subTest(drive=drive), patch.object(
                 llm_service, 'validate_h3_source_dialogue_duration', side_effect=RuntimeError('speech gate'),

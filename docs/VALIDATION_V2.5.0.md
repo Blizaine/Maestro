@@ -42,6 +42,14 @@ Release CI runs are available in [GitHub Actions](https://github.com/Blizaine/Ma
   user settings and media remain outside the public snapshot. The release uses
   the root `VERSION` file; launcher schema versions and launcher URLs are
   unchanged.
+- The first dev CI run completed 2,866 tests with 51 skips and exposed two
+  fixture issues: the isolated H3 performance-audio endpoint test omitted the
+  new LoRA-guidance helper, and an older Krea test required bitwise equality
+  between different SDPA query batch shapes. The H3 fixture now includes the
+  real helper. Krea retains its independent dense-oracle comparison and checks
+  exact prefix equality using the matching query shape. All 17 affected audio,
+  provider-routing and Krea tests passed locally after these test-only fixes.
+  Application behavior was not changed in response to those CI failures.
 
 ## Scope and limits
 
