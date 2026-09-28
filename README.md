@@ -109,46 +109,32 @@ The version you are running is shown next to the Maestro title in the UI. To upd
 
 ### v2.5.0 (2026-09-28)
 
-**Better LoRA names and guidance, immersive gallery playback, and reliable H3 window timing**
+**LoRA improvements, Qwen Image 2.1 tools, gallery playback and editing, and Windows 10 DLSS**
+
+Includes the v2.4.1 and v2.4.2 updates below.
 
 - **Readable LoRA names:** creator titles and editable display names across Studio, Director and My LoRAs, with version/variant labels and stable release/download dates. Original files and update tracking stay intact.
 - **LoRA-aware enhancement:** active adapters' guides and trigger words reach the prompt writer, including H3 Frames and References. Downloads save available creator guidance automatically without loading an LLM.
 - **Broader H3 LoRA support:** load compatible CivitAI adapters that use flattened module names, while retaining checks for incompatible or ambiguous weights.
 - **Gallery slideshow:** automatically advance after each video, choose 1–10 seconds per image, and transition with the same upward swipe. Viewer controls fade during playback and return when tapped.
 - **Sharper previews and easier uploads:** responsive video posters up to 1920 pixels, plus a fix for Frames image selections disappearing after the mobile photo picker closes.
-- **H3 timing and Windows 10 DLSS:** preserve multi-window timing from Enhance through Generate (#160); enable DLSS temporal options on supported Windows 10 systems after the separate Frame Generation installation and capability checks.
-
-Use **Update** in Pinokio, restart Maestro and refresh the browser.
-
-[Full v2.5.0 release notes](docs/RELEASE_NOTES_V2.5.0.md) · [Validation and remaining limits](docs/VALIDATION_V2.5.0.md) · [Changelog](CHANGELOG.md)
-
-### v2.4.2 (2026-09-27)
-
-**Gallery audio reuse, clip trimming, and better Krea Identity Edit controls**
-
+- **H3 window timing:** preserve multi-window timing from Enhance through Generate (#160).
 - **Use gallery audio:** send songs, soundtracks and voice samples directly to compatible inputs in the active sidebar, including Director, Studio references, Speech, Revoice and YuE2.
 - **Trim before using:** choose an audio or video excerpt with a waveform or filmstrip, draggable handles, exact times and quick 3/5/10-second selections. Preview or zoom into the range, or use the full clip. Originals stay unchanged.
 - **Krea Identity Edit:** Subject likeness, separate Scene likeness for two references, and Grounding resolution for RAW and Turbo. Settings persist per model and travel with queued jobs, presets and output settings.
 - **Krea reference fixes:** preserve native reference proportions before grounding, fit reference latents without stretching, and hide Turbo's ineffective guidance control while keeping RAW guidance adjustable.
-
-Use **Update** in Pinokio, restart Maestro and refresh the browser.
-
-[Full v2.4.2 release notes](docs/RELEASE_NOTES_V2.4.2.md) · [Validation and remaining limits](docs/VALIDATION_V2.4.2.md) · [Changelog](CHANGELOG.md)
-
-### v2.4.1 (2026-09-25)
-
-**More Qwen Image 2.1 tools, experimental Windows 10 DLSS, and better gallery details**
-
 - **Qwen Image 2.1:** pose/depth/edge transfer, inpainting, LanPaint, outpainting, native **2K** presets, optional reference KV caching, and managed **Viggle Turbo** 4/5/6-step profiles. Updated prompt guidance, base settings and VAE tiling; fixed the inpainting-mode error on ordinary image generation.
 - **H3 and LTX performance:** automatic H3 INT8 ConvRot video VAE selection with INT8 transformers, plus optional Comfy Kitchen kernels on supported RTX 50 hardware with compatibility fallbacks.
-- **Windows 10 DLSS — Experimental:** optional 1x neural enhancement and 1.5x/1.724x/2x/3x upscaling for images and videos. Improved frame processing, audio preservation and worker cleanup. Requires a separate opt-in installation; DLSS Frame Generation remains Windows 11 only. [Setup guide](docs/DLSS5.md).
+- **Windows 10 DLSS — Experimental:** optional 1x neural enhancement and 1.5x/1.724x/2x/3x upscaling for images and videos. Improved frame processing, audio preservation and worker cleanup. Requires a separate opt-in installation. DLSS Frame Generation is also available on supported Windows 10 systems after its separate installation and hardware/worker capability checks. [Setup guide](docs/DLSS5.md).
 - **Gallery ordering:** keep results in chronological order during generation, refresh and pagination, while retaining the selected item (#155).
 - **Media Info:** timestamps, measured resolution and file details, plus finishing method, scale, before/after resolution and frame rate, source and processing time when available.
 - **Upload cleanup:** delete uploaded media from the gallery with confirmation and protection for inputs used by active jobs.
 
 Use **Update** in Pinokio, restart Maestro and refresh the browser. Your existing projects, settings and media stay in place. Optional model assets download when first used; the Windows 10 DLSS backend requires explicit installation.
 
-[Full v2.4.1 release notes](docs/RELEASE_NOTES_V2.4.1.md) · [Validation and remaining limits](docs/VALIDATION_V2.4.1.md) · [Changelog](CHANGELOG.md)
+[Full v2.5.0 release notes](docs/RELEASE_NOTES_V2.5.0.md) · [Validation and remaining limits](docs/VALIDATION_V2.5.0.md) · [Changelog](CHANGELOG.md)
+
+Included update details: [v2.4.2 release notes](docs/RELEASE_NOTES_V2.4.2.md) and [validation](docs/VALIDATION_V2.4.2.md); [v2.4.1 release notes](docs/RELEASE_NOTES_V2.4.1.md) and [validation](docs/VALIDATION_V2.4.1.md).
 
 ### v2.4.0 (2026-09-24)
 
