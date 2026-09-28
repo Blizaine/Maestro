@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import glob
 import json
 import os
+import re
 import struct
 from typing import Iterable
 
@@ -96,6 +97,12 @@ _CHECKPOINT_TARGETS: dict[str, tuple[CheckpointTarget, ...]] = {
     "krea 2": (
         CheckpointTarget("krea2_raw", "krea2_raw", "Krea 2 RAW"),
         CheckpointTarget("krea2_turbo", "krea2_turbo", "Krea 2 Turbo"),
+    ),
+    "minimax h3": (
+        CheckpointTarget("minimax_h3", "minimax_h3", "H3 First / Last — Pruned"),
+        CheckpointTarget("minimax_h3_full", "minimax_h3_full", "H3 First / Last — Full"),
+        CheckpointTarget("minimax_h3_ref2va", "minimax_h3_ref2va", "H3 Omni — Pruned"),
+        CheckpointTarget("minimax_h3_ref2va_full", "minimax_h3_ref2va_full", "H3 Omni — Full"),
     ),
     "qwen": (
         CheckpointTarget("qwen_image_20B", "qwen_image_20B", "Qwen Image 20B"),
@@ -336,11 +343,187 @@ def _find_shape(
     return None, None
 
 
+_H3_ARCHITECTURES = {
+    "minimax_h3", "minimax_h3_full", "minimax_h3_ref2va", "minimax_h3_ref2va_full",
+}
+
+
+def checkpoint_import_options(architecture: str, qkv_layout: str = "", *, auto_quantize: bool = False) -> dict:
+    """Require the H3 export layout: shapes cannot identify Q/K/V row order."""
+    if architecture not in _H3_ARCHITECTURES:
+        return {}
+    if auto_quantize:
+        raise CheckpointCompatibilityError(
+            "H3 does not support Optimize VRAM / load-time INT8 conversion. "
+            "Disable this option and choose a supported pre-quantized checkpoint "
+            "if needed; H3 loads the precision stored in the file."
+        )
+    if not isinstance(qkv_layout, str) or qkv_layout not in {"grouped", "interleaved"}:
+        raise CheckpointCompatibilityError(
+            "Select the H3 checkpoint's QKV layout from its publisher's instructions: "
+            "'grouped' or 'interleaved'. Tensor shapes cannot determine row order."
+        )
+    return {
+        "minimax_h3_qkv_layout": qkv_layout,
+        "auto_quantize": False,
+        # Built-in migration aliases must not substitute a different checkpoint
+        # or override the explicitly selected layout based on its filename.
+        "compatible_model_paths": {},
+        "compatible_model_qkv_layouts": {},
+    }
+
+
+def validate_checkpoint_filename(filename: str, architecture: str) -> None:
+    """Reject explicitly unsupported H3 exports before opening a download."""
+    if architecture not in _H3_ARCHITECTURES:
+        return
+    if re.search(r"int4|nvfp4|fp4|nf4|w[ _-]?4[ _-]?a[ _-]?\d+|4[ _-]?bit|gguf", filename, re.IGNORECASE):
+        raise CheckpointCompatibilityError(
+            "This H3 file is a packed 4-bit or GGUF export, which Maestro's "
+            "CivitAI importer does not yet support. Select a different file or "
+            "version: FL2VA Pruned INT8 ConvRot is a supported export type. "
+            "Changing the base pipeline or enabling INT8 at load time does not "
+            "convert this download."
+        )
+
+
+def filter_checkpoint_catalog_model(model: dict) -> dict:
+    """Keep import candidates from metadata; never claim tensor verification.
+
+    Copy the edited levels so cached upstream responses remain reusable.
+    Check individual files, not model titles (a title may describe INT4 while
+    another version supplies supported INT8 weights).
+    """
+    versions = []
+    for version in model.get("modelVersions") or []:
+        targets = checkpoint_targets_for_base(version.get("baseModel", ""))
+        if not targets:
+            continue
+        files = []
+        for file in version.get("files") or []:
+            name = file.get("name") or ""
+            if os.path.splitext(name)[1].lower() not in {".safetensors", ".sft"}:
+                continue
+            if file.get("type") not in (None, "Model"):
+                continue
+            try:
+                validate_checkpoint_filename(name, targets[0].architecture)
+                # CivitAI sometimes supplies precision separately from the name.
+                validate_checkpoint_filename(str((file.get("metadata") or {}).get("fp", "")), targets[0].architecture)
+            except CheckpointCompatibilityError:
+                continue
+            files.append(file)
+        if files:
+            versions.append({**version, "files": files})
+    return {**model, "modelVersions": versions}
+
+
+def verified_checkpoint_chunks(chunks, base_model, architecture, *, filename, qkv_layout=""):
+    """Check the header before consuming the multi-GB tensor payload.
+
+    Works on the existing authenticated stream, including servers that ignore
+    Range requests. The final on-disk validation remains authoritative.
+    """
+    validate_checkpoint_filename(filename, architecture)
+    chunks = iter(chunks)
+    prefix = bytearray()
+    required = None
+    for chunk in chunks:
+        if not chunk:
+            continue
+        prefix.extend(chunk)
+        if required is None and len(prefix) >= 8:
+            length = struct.unpack("<Q", prefix[:8])[0]
+            if length < 2 or length > 256 * 1024 * 1024:
+                raise CheckpointCompatibilityError("Invalid SafeTensor header; download stopped before tensor transfer.")
+            required = 8 + length
+        if required is not None and len(prefix) >= required:
+            try:
+                header = json.loads(prefix[8:required])
+            except (ValueError, UnicodeError) as exc:
+                raise CheckpointCompatibilityError("Invalid SafeTensor JSON header; download stopped.") from exc
+            if not isinstance(header, dict):
+                raise CheckpointCompatibilityError("SafeTensor header is not a tensor index")
+            ensure_allowed_checkpoint_target(base_model, architecture)
+            checkpoint_import_options(architecture, qkv_layout)
+            _validate_checkpoint_matches(_detect_header_architectures(header), architecture)
+            yield bytes(prefix)
+            yield from chunks
+            return
+    raise CheckpointCompatibilityError("SafeTensor header is truncated; download stopped.")
+
+
+def _h3_checkpoint_architectures(header: dict) -> list[str]:
+    # Match only namespaces stripped by the H3 loader, not the broader aliases
+    # accepted by other families. Packed 4-bit weights need their own verified
+    # logical-shape/quantization contract and are intentionally not allowlisted.
+    shapes = {}
+    for key, value in header.items():
+        if key == "__metadata__" or not isinstance(value, dict):
+            continue
+        for prefix in ("model.diffusion_model.", "diffusion_model."):
+            if key.startswith(prefix):
+                key = key[len(prefix):]
+                break
+        if key.endswith("._data"):
+            key = key[:-6]
+        if value.get("dtype") in {"F32", "F16", "BF16", "I8", "F8_E4M3", "F8_E5M2"}:
+            shape = value.get("shape")
+            if isinstance(shape, list) and all(isinstance(dim, int) and dim > 0 for dim in shape):
+                shapes[key] = tuple(shape)
+
+    anchors = {
+        "video_patch_proj.weight": (5376, 96),
+        "audio_patch_proj.weight": (5376, 32),
+        "condition_proj.weight": (5376, 5120),
+    }
+    table = shapes.get("adaln_t_table")
+    if table is not None:
+        if len(table) != 2 or table[0] < 2 or table[1] < 1 or table[1] >= 2688:
+            return []
+        curve_dim = table[1]
+    else:
+        # A damaged pruned table must not turn the checkpoint into a full one.
+        if any(_canonical_tensor_key(k) == "adaln_t_table" for k in header):
+            return []
+        curve_dim = 2688
+        anchors.update({
+            "time_embedder.proj_in.weight": (5376, 256),
+            "time_embedder.proj_out.weight": (2688, 5376),
+        })
+    anchors.update({
+        "final_layer.video_out.weight": (96, 5376),
+        "final_layer.audio_out.weight": (32, 5376),
+        "final_layer.adaln_proj.linear.weight": (10752, curve_dim),
+    })
+    for block in range(2):
+        anchors[f"token_refiner.blocks.{block}.attn.qkv_proj.weight"] = (21504, 5376)
+    for block in range(50):
+        anchors[f"blocks.{block}.attn.qkv_proj.weight"] = (21504, 5376)
+        anchors[f"blocks.{block}.adaln_proj.linear.weight"] = (96768, curve_dim)
+    if not all(shapes.get(key) == shape for key, shape in anchors.items()):
+        return []
+    metadata = header.get("__metadata__") or {}
+    partition = str(metadata.get("partition", "")).upper() if isinstance(metadata, dict) else ""
+    suffix = "" if table is not None else "_full"
+    workflows = ["minimax_h3", "minimax_h3_ref2va"]
+    if partition in {"FL2VA", "T2VA"}:
+        workflows = ["minimax_h3"]
+    elif partition == "REF2VA":
+        workflows = ["minimax_h3_ref2va"]
+    return [workflow + suffix for workflow in workflows]
+
+
 def detect_checkpoint_architectures(path: str) -> list[str]:
     """Return every verified architecture signature matched by ``path``."""
 
-    shapes = _tensor_shapes(read_safetensors_header(path))
-    matches: list[str] = []
+    header = read_safetensors_header(path)
+    return _detect_header_architectures(header)
+
+
+def _detect_header_architectures(header: dict) -> list[str]:
+    shapes = _tensor_shapes(header)
+    matches: list[str] = _h3_checkpoint_architectures(header)
     for architecture, rules in _SIGNATURES.items():
         if all(_find_shape(shapes, keys)[1] == expected for keys, expected in rules):
             matches.append(architecture)
@@ -353,6 +536,8 @@ def validate_checkpoint_file(
     target_architecture: str,
     *,
     filename: str | None = None,
+    qkv_layout: str = "",
+    auto_quantize: bool = False,
 ) -> dict:
     """Validate metadata mapping and transformer tensor layout.
 
@@ -361,6 +546,8 @@ def validate_checkpoint_file(
     """
 
     ensure_allowed_checkpoint_target(base_model, target_architecture)
+    options = checkpoint_import_options(target_architecture, qkv_layout, auto_quantize=auto_quantize)
+    validate_checkpoint_filename(filename or path, target_architecture)
     extension = os.path.splitext(filename or path)[1].casefold()
     if extension not in {".safetensors", ".sft"}:
         raise CheckpointCompatibilityError(
@@ -368,6 +555,18 @@ def validate_checkpoint_file(
         )
 
     matches = detect_checkpoint_architectures(path)
+    _validate_checkpoint_matches(matches, target_architecture)
+    return {
+        "model_options": options,
+        "status": "verified",
+        "architecture": target_architecture,
+        "base_model": str(base_model or ""),
+        "matched_layouts": sorted(matches),
+        "signature_version": 1,
+    }
+
+
+def _validate_checkpoint_matches(matches: list[str], target_architecture: str) -> None:
     if target_architecture not in matches:
         if matches:
             detected = ", ".join(sorted(matches))
@@ -380,13 +579,6 @@ def validate_checkpoint_file(
             f"{target_architecture} layout. It may be a full Diffusers bundle, "
             "an unsupported architecture, or a mislabeled upload. It cannot be registered."
         )
-    return {
-        "status": "verified",
-        "architecture": target_architecture,
-        "base_model": str(base_model or ""),
-        "matched_layouts": sorted(matches),
-        "signature_version": 1,
-    }
 
 
 _QUARANTINE_KEY = "maestro_checkpoint_quarantine"
@@ -412,7 +604,14 @@ def _definition_compatibility(
                 ".safetensors",
                 ".sft",
             }:
-                validate_checkpoint_file(candidate, base_model, architecture)
+                validate_checkpoint_file(
+                    candidate, base_model, architecture,
+                    qkv_layout=model.get("minimax_h3_qkv_layout", ""),
+                )
+            elif architecture in _H3_ARCHITECTURES:
+                raise CheckpointCompatibilityError(
+                    "H3 checkpoint imports require a verified SafeTensor transformer."
+                )
             return True, "", True
     except CheckpointCompatibilityError as exc:
         return False, str(exc), True

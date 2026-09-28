@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib.util
+import ast
+import asyncio
 import json
 import os
 import struct
@@ -206,6 +208,250 @@ class TestCheckpointTensorSignatures(unittest.TestCase):
                 "outside the downloaded payload",
             ):
                 compatibility.read_safetensors_header(path)
+
+
+class TestH3CheckpointImports(unittest.TestCase):
+    @staticmethod
+    def header(*, full=False, partition="", dtype="I8", prefix=""):
+        # Dimensions cross-checked against pinned DeepBeepMeep/Comfy H3
+        # SafeTensor headers, without downloading their 20/33B payloads.
+        dim = 2688 if full else 8
+        shapes = {
+            "video_patch_proj.weight": (5376, 96),
+            "audio_patch_proj.weight": (5376, 32),
+            "condition_proj.weight": (5376, 5120),
+            "final_layer.video_out.weight": (96, 5376),
+            "final_layer.audio_out.weight": (32, 5376),
+            "final_layer.adaln_proj.linear.weight": (10752, dim),
+        }
+        if full:
+            shapes.update({"time_embedder.proj_in.weight": (5376, 256),
+                           "time_embedder.proj_out.weight": (2688, 5376)})
+        else:
+            shapes["adaln_t_table"] = (1025, 8)
+        for block in range(50):
+            shapes[f"blocks.{block}.attn.qkv_proj.weight"] = (21504, 5376)
+            shapes[f"blocks.{block}.adaln_proj.linear.weight"] = (96768, dim)
+        for block in range(2):
+            shapes[f"token_refiner.blocks.{block}.attn.qkv_proj.weight"] = (21504, 5376)
+        header = {prefix + key: {"shape": list(shape), "dtype": dtype, "data_offsets": [0, 2]}
+                  for key, shape in shapes.items()}
+        header["__metadata__"] = {"partition": partition}
+        return header
+
+    def validate(self, header, architecture="minimax_h3", layout="grouped"):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "h3.safetensors")
+            encoded = json.dumps(header).encode()
+            with open(path, "wb") as f:
+                f.write(struct.pack("<Q", len(encoded)) + encoded + b"\0\0")
+            return compatibility.validate_checkpoint_file(
+                path, "MiniMax H3", architecture, qkv_layout=layout)
+
+    def test_stream_rejects_wrong_architecture_without_consuming_weights(self):
+        header = json.dumps(self.header(partition="REF2VA")).encode()
+        def chunks():
+            yield struct.pack("<Q", len(header)) + header
+            self.fail("Read tensor payload after incompatible header")
+        with self.assertRaisesRegex(compatibility.CheckpointCompatibilityError, "matches"):
+            list(compatibility.verified_checkpoint_chunks(chunks(), "MiniMax H3", "minimax_h3", filename="model.safetensors", qkv_layout="grouped"))
+
+    def test_stream_preserves_valid_file_across_header_boundaries(self):
+        header = json.dumps(self.header(partition="FL2VA")).encode()
+        data = struct.pack("<Q", len(header)) + header + b"tensor payload"
+        for split in (1, 8, 20, len(data) - 5):
+            chunks = [data[:split], data[split:]]
+            result = compatibility.verified_checkpoint_chunks(chunks, "MiniMax H3", "minimax_h3", filename="model.safetensors", qkv_layout="grouped")
+            self.assertEqual(b"".join(result), data)
+
+    def test_stream_rejects_corrupt_and_truncated_headers_early(self):
+        for data in (b"short", struct.pack("<Q", 2**40), struct.pack("<Q", 2) + b"[]", struct.pack("<Q", 2) + b"xx"):
+            with self.assertRaises(compatibility.CheckpointCompatibilityError):
+                list(compatibility.verified_checkpoint_chunks([data], "MiniMax H3", "minimax_h3", filename="model.safetensors", qkv_layout="grouped"))
+
+    def test_catalog_filters_files_versions_and_preserves_source(self):
+        model = {"name": "INT4 collection", "modelVersions": [
+            {"id": 1, "baseModel": "MiniMax H3", "files": [
+                {"name": "H3_int4.safetensors", "type": "Model"},
+                {"name": "H3_int8.safetensors", "type": "Model"},
+                {"name": "vae.safetensors", "type": "VAE"},
+                {"name": "bundle.zip", "type": "Model"},
+                {"name": "unnamed.safetensors", "metadata": {"fp": "nf4"}},
+            ]},
+            {"id": 2, "baseModel": "MiniMax H3", "files": [{"name": "H3.gguf"}]},
+            {"id": 3, "baseModel": "SDXL 1.0", "files": [{"name": "sdxl.safetensors"}]},
+        ]}
+        original = json.dumps(model)
+        result = compatibility.filter_checkpoint_catalog_model(model)
+        self.assertEqual([v["id"] for v in result["modelVersions"]], [1])
+        self.assertEqual([f["name"] for f in result["modelVersions"][0]["files"]], ["H3_int8.safetensors"])
+        self.assertEqual(json.dumps(model), original)
+
+    def test_catalog_hides_unknown_or_missing_metadata(self):
+        for model in ({}, {"modelVersions": [{"baseModel": "MiniMax H3"}]}, {"modelVersions": [{"files": [{"name": "weights.safetensors"}]}]}):
+            self.assertEqual(compatibility.filter_checkpoint_catalog_model(model)["modelVersions"], [])
+
+    def test_unsupported_filename_does_not_start_stream(self):
+        def chunks():
+            self.fail("Started unsupported download")
+            yield b""
+        for name in ("minimaxH3INT4Convrot_fl2vaPrunedInt4.safetensors", "H3_NVFP4.safetensors", "H3_4-bit.safetensors", "H3.gguf"):
+            with self.assertRaisesRegex(compatibility.CheckpointCompatibilityError, "different file"):
+                list(compatibility.verified_checkpoint_chunks(chunks(), "MiniMax H3", "minimax_h3", filename=name, qkv_layout="grouped"))
+        compatibility.validate_checkpoint_filename("H3_pruned_int8_convrot.safetensors", "minimax_h3")
+        compatibility.validate_checkpoint_filename("unrelated_int4.safetensors", "flux")
+
+    def test_w4a_exports_are_hidden_and_rejected_before_transfer(self):
+        for name in ("minimaxH3ComfyNativeRef2vaW4a8_v10.safetensors", "H3_W4A16.safetensors", "H3_w4_a8.safetensors", "H3_W-4-A-8.safetensors"):
+            with self.subTest(name=name):
+                for target in compatibility.checkpoint_targets_for_base("MiniMax H3"):
+                    with self.assertRaisesRegex(compatibility.CheckpointCompatibilityError, "4-bit"):
+                        compatibility.validate_checkpoint_filename(name, target.architecture)
+                model = {"modelVersions": [{"baseModel": "MiniMax H3", "files": [{"name": name}]}]}
+                self.assertEqual(compatibility.filter_checkpoint_catalog_model(model)["modelVersions"], [])
+        metadata_model = {"modelVersions": [{"baseModel": "MiniMax H3", "files": [{"name": "weights.safetensors", "metadata": {"fp": "W4A8"}}]}]}
+        self.assertEqual(compatibility.filter_checkpoint_catalog_model(metadata_model)["modelVersions"], [])
+        compatibility.validate_checkpoint_filename("H3_W8A8.safetensors", "minimax_h3")
+
+    def test_h3_requires_explicit_workflow_and_size_choice(self):
+        self.assertEqual(len(compatibility.checkpoint_targets_for_base(" MiniMax H3 ")), 4)
+        self.assertIsNone(compatibility.suggested_checkpoint_architecture("MiniMax H3"))
+
+    def test_supported_precisions_and_loader_namespaces(self):
+        for dtype in ("BF16", "F16", "F8_E4M3", "I8"):
+            for prefix in ("", "model.diffusion_model.", "diffusion_model."):
+                with self.subTest(dtype=dtype, prefix=prefix):
+                    result = self.validate(self.header(dtype=dtype, prefix=prefix))
+                    self.assertEqual(result["model_options"]["minimax_h3_qkv_layout"], "grouped")
+
+    def test_full_and_pruned_cannot_be_swapped(self):
+        for full, correct, wrong in ((True, "minimax_h3_full", "minimax_h3"),
+                                     (False, "minimax_h3", "minimax_h3_full")):
+            self.validate(self.header(full=full), correct, "interleaved")
+            with self.assertRaises(compatibility.CheckpointCompatibilityError):
+                self.validate(self.header(full=full), wrong)
+
+    def test_declared_partition_must_match_selected_workflow(self):
+        self.validate(self.header(partition="Ref2VA"), "minimax_h3_ref2va")
+        self.validate(self.header(full=True, partition="Ref2VA"), "minimax_h3_ref2va_full")
+        with self.assertRaises(compatibility.CheckpointCompatibilityError):
+            self.validate(self.header(partition="Ref2VA"))
+        with self.assertRaises(compatibility.CheckpointCompatibilityError):
+            self.validate(self.header(partition="FL2VA"), "minimax_h3_ref2va")
+
+    def test_h3_load_time_quantization_is_rejected_before_reading_weights(self):
+        for target in compatibility.checkpoint_targets_for_base("MiniMax H3"):
+            with self.subTest(target=target.architecture):
+                with self.assertRaisesRegex(compatibility.CheckpointCompatibilityError, "load-time INT8"):
+                    compatibility.validate_checkpoint_file("/missing/weights.safetensors", "MiniMax H3", target.architecture, qkv_layout="interleaved", auto_quantize=True)
+                self.assertFalse(compatibility.checkpoint_import_options(target.architecture, "interleaved")["auto_quantize"])
+        self.assertEqual(compatibility.checkpoint_import_options("flux", auto_quantize=True), {})
+
+    def test_api_rejects_h3_quantization_before_starting_download(self):
+        source_path = os.path.join(_ROOT, "app", "launch.py")
+        with open(source_path) as handle:
+            tree = ast.parse(handle.read())
+        endpoint = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "civitai_download")
+        endpoint.decorator_list = []
+        class HTTPError(Exception):
+            def __init__(self, status_code, detail):
+                self.status_code = status_code
+                super().__init__(detail)
+        class Request:
+            async def json(self):
+                return {"download_url": "https://civitai.com/api/download/models/1", "filename": "H3_bf16.safetensors", "kind": "checkpoint", "base_model": "MiniMax H3", "target_architecture": "minimax_h3", "h3_qkv_layout": "interleaved", "auto_quantize": True}
+        namespace = {"Request": Request, "HTTPException": HTTPError,
+            "_is_safe_civitai_url": lambda _: True, "_is_safe_path_component": lambda _: True,
+            "ensure_allowed_checkpoint_target": compatibility.ensure_allowed_checkpoint_target,
+            "validate_checkpoint_filename": compatibility.validate_checkpoint_filename,
+            "checkpoint_import_options": compatibility.checkpoint_import_options,
+            "CheckpointCompatibilityError": compatibility.CheckpointCompatibilityError}
+        exec(compile(ast.Module(body=[endpoint], type_ignores=[]), source_path, "exec"), namespace)
+        with self.assertRaisesRegex(HTTPError, "load-time INT8") as caught:
+            asyncio.run(namespace["civitai_download"](Request()))
+        self.assertEqual(caught.exception.status_code, 400)
+
+    def test_qkv_order_cannot_be_guessed_from_shapes(self):
+        for layout in ("", "auto", "contiguous", None, [], {}):
+            with self.subTest(layout=layout), self.assertRaisesRegex(
+                    compatibility.CheckpointCompatibilityError, "QKV layout"):
+                self.validate(self.header(), layout=layout)
+
+    def test_rejects_missing_blocks_heads_and_invalid_adaln(self):
+        for key in ("blocks.49.attn.qkv_proj.weight", "final_layer.audio_out.weight", "adaln_t_table"):
+            header = self.header()
+            header.pop(key)
+            with self.subTest(key=key), self.assertRaises(compatibility.CheckpointCompatibilityError):
+                self.validate(header)
+        header = self.header()
+        header["adaln_t_table"]["shape"] = [1025, 16]
+        with self.assertRaises(compatibility.CheckpointCompatibilityError):
+            self.validate(header)
+
+    def test_rejects_packed_low_bit_weights_and_unsupported_wrapper(self):
+        header = self.header()
+        header["blocks.0.attn.qkv_proj.weight"]["shape"] = [21504, 2688]
+        with self.assertRaises(compatibility.CheckpointCompatibilityError):
+            self.validate(header)
+        with self.assertRaises(compatibility.CheckpointCompatibilityError):
+            self.validate(self.header(prefix="transformer."))
+
+    def test_unrelated_checkpoint_and_lora_cannot_be_imported_as_h3(self):
+        for header in ({}, {"blocks.0.attn.qkv_proj.lora_A.weight": {
+                "dtype": "F16", "shape": [16, 5376], "data_offsets": [0, 2]}}):
+            with self.assertRaises(compatibility.CheckpointCompatibilityError):
+                self.validate(header)
+
+
+class TestH3CheckpointRegistration(unittest.TestCase):
+    def test_registration_preserves_export_layout_and_survives_startup_audit(self):
+        source_path = os.path.join(_ROOT, "app", "launch.py")
+        with open(source_path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                     and node.name in {"_ckpt_slugify", "_register_checkpoint_finetune"}]
+        for full in (False, True):
+            with self.subTest(full=full), tempfile.TemporaryDirectory() as directory:
+                os.makedirs(os.path.join(directory, "ckpts"))
+                path = os.path.join(directory, "ckpts", "custom.safetensors")
+                header = TestH3CheckpointImports.header(full=full, partition="Ref2VA")
+                encoded = json.dumps(header).encode()
+                with open(path, "wb") as handle:
+                    handle.write(struct.pack("<Q", len(encoded)) + encoded + b"\0\0")
+                namespace = {
+                    "os": os, "json": json,
+                    "validate_checkpoint_file": compatibility.validate_checkpoint_file,
+                    "checkpoint_template_model_type": compatibility.checkpoint_template_model_type,
+                    "CheckpointCompatibilityError": compatibility.CheckpointCompatibilityError,
+                    "_DEFAULTS_DIR": os.path.join(_ROOT, "app", "defaults"),
+                    "_FINETUNES_DIR": os.path.join(directory, "finetunes"),
+                }
+                exec(compile(ast.Module(body=functions, type_ignores=[]), source_path, "exec"), namespace)
+                architecture = "minimax_h3_ref2va" + ("_full" if full else "")
+                _, definition_path = namespace["_register_checkpoint_finetune"](
+                    path, {"baseModel": "MiniMax H3", "modelId": 123, "name": "Custom H3"},
+                    architecture, qkv_layout="grouped")
+                with open(definition_path) as handle:
+                    definition = json.load(handle)
+                self.assertEqual(definition["model"]["URLs"], ["custom.safetensors"])
+                self.assertEqual(definition["model"]["architecture"], architecture)
+                # In particular, override the Full template's interleaved default.
+                self.assertEqual(definition["model"]["minimax_h3_qkv_layout"], "grouped")
+                self.assertEqual(definition["model"]["compatible_model_paths"], {})
+                self.assertEqual(definition["model"]["compatible_model_qkv_layouts"], {})
+                self.assertFalse(definition["model"]["auto_quantize"])
+                with self.assertRaisesRegex(compatibility.CheckpointCompatibilityError, "load-time INT8"):
+                    namespace["_register_checkpoint_finetune"](
+                        path, {"baseModel": "MiniMax H3", "modelId": 124}, architecture,
+                        qkv_layout="interleaved", auto_quantize=True)
+                self.assertIn("num_inference_steps", definition)
+                self.assertEqual(compatibility.quarantine_incompatible_checkpoint_definitions(directory), [])
+                definition["model"].pop("minimax_h3_qkv_layout")
+                with open(definition_path, "w") as handle:
+                    json.dump(definition, handle)
+                changes = compatibility.quarantine_incompatible_checkpoint_definitions(directory)
+                self.assertFalse(changes[0]["compatible"])
+                self.assertTrue(os.path.isfile(path))
 
 
 class TestLegacyCheckpointQuarantine(unittest.TestCase):
