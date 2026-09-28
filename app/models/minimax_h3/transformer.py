@@ -46,6 +46,7 @@ MODALITY_COUNT = 3
 MINIMAX_H3_ACTIVATION_CHUNK_TOKENS = 8192
 MINIMAX_H3_ADAPTIVE_CHUNK_MAX_TOKENS = 32768
 MINIMAX_H3_LARGE_SEQUENCE_TOKENS = 50000
+MINIMAX_H3_RMS_NORM_NATIVE_MAX_TOKENS = 75000
 
 
 def _activation_chunk_tokens(
@@ -99,6 +100,17 @@ def _rms_norm_in_chunks(norm: nn.RMSNorm, hidden_states: torch.Tensor) -> torch.
     if torch.is_grad_enabled() or hidden_states.ndim < 2 or len(norm.normalized_shape) != 1:
         return norm(hidden_states)
     length, width = hidden_states.shape[-2:]
+    # Native RMSNorm avoids chunking overhead for moderate consumer-GPU
+    # workloads, including observed 71K-73K-row two-window reference jobs.
+    # Keep the bounded path for genuinely large
+    # reference sequences, including the 264K-row case that motivated it.
+    # An explicit activation-chunk override still forces chunking for tests
+    # and advanced diagnostics.
+    if (
+        MINIMAX_H3_ACTIVATION_CHUNK_TOKENS == 8192
+        and length <= MINIMAX_H3_RMS_NORM_NATIVE_MAX_TOKENS
+    ):
+        return norm(hidden_states)
     chunk = _activation_chunk_tokens(length, width, width)
     if length <= chunk:
         return norm(hidden_states)
