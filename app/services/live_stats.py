@@ -21,6 +21,8 @@ Design notes:
     degrades one number to 0 instead of failing the whole poll.
 """
 
+from pathlib import Path
+
 import psutil
 
 try:
@@ -60,21 +62,69 @@ def get_live_stats() -> dict:
     except Exception:
         ram_percent = ram_used_gb = ram_total_gb = 0.0
 
+    # ---- Storage -----------------------------------------------------
+    # Report the filesystem containing Maestro rather than assuming the
+    # application lives on the system/root volume.
+    try:
+        disk = psutil.disk_usage(str(Path(__file__).resolve().parent))
+        disk_percent = float(disk.percent)
+        disk_used_gb = disk.used / (1024 ** 3)
+        disk_total_gb = disk.total / (1024 ** 3)
+        disk_free_gb = disk.free / (1024 ** 3)
+    except Exception:
+        disk_percent = disk_used_gb = disk_total_gb = disk_free_gb = 0.0
+
     # ---- GPU (NVIDIA / NVML) -----------------------------------------
     gpu_available = False
+    gpu_name = None
     gpu_percent = vram_used_gb = vram_total_gb = vram_percent = 0.0
+    gpu_temp_c = 0.0
+    vram_available = False
+    temperature_available = False
     if _nvml_ok and pynvml is not None:
         try:
             handle = pynvml.nvmlDeviceGetHandleByIndex(0)  # GPU 0
-            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            gpu_percent = float(util.gpu)
-            vram_used_gb = mem.used / (1024 ** 3)
-            vram_total_gb = mem.total / (1024 ** 3)
-            vram_percent = (mem.used / mem.total) * 100.0 if mem.total else 0.0
+            # A valid NVML device handle means the GPU exists.  Some unified-
+            # memory devices (for example NVIDIA GB10) do not implement the
+            # conventional NVML device-memory query.
             gpu_available = True
+            try:
+                gpu_name = pynvml.nvmlDeviceGetName(handle)
+                if isinstance(gpu_name, bytes):
+                    gpu_name = gpu_name.decode("utf-8", errors="replace")
+            except Exception:
+                gpu_name = None
+
+            try:
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                gpu_percent = float(util.gpu)
+            except Exception:
+                gpu_percent = 0.0
+
+            try:
+                gpu_temp_c = float(
+                    pynvml.nvmlDeviceGetTemperature(
+                        handle,
+                        pynvml.NVML_TEMPERATURE_GPU,
+                    )
+                )
+                temperature_available = True
+            except Exception:
+                # Temperature reporting is optional and must not invalidate
+                # otherwise valid GPU telemetry.
+                pass
+
+            try:
+                mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                vram_used_gb = mem.used / (1024 ** 3)
+                vram_total_gb = mem.total / (1024 ** 3)
+                vram_percent = (mem.used / mem.total) * 100.0 if mem.total else 0.0
+                vram_available = True
+            except Exception:
+                # Unified-memory GPUs may not expose dedicated VRAM via NVML.
+                pass
         except Exception:
-            # GPU asleep / driver transient — report unavailable this tick.
+            # No usable NVML device handle this tick.
             gpu_available = False
 
     # NVML util.gpu is a coarse, sampled compute number that under-reports for
@@ -100,10 +150,20 @@ def get_live_stats() -> dict:
             "used_gb": round(ram_used_gb, 2),
             "total_gb": round(ram_total_gb, 2),
         },
+        "disk": {
+            "percent": round(disk_percent, 1),
+            "used_gb": round(disk_used_gb, 2),
+            "total_gb": round(disk_total_gb, 2),
+            "free_gb": round(disk_free_gb, 2),
+        },
         "gpu": {
             "available": gpu_available,
+            "name": gpu_name,
+            "vram_available": vram_available,
             "percent": round(gpu_percent, 1),
             "compute_percent": round(gpu_compute_percent, 1),
+            "temperature_available": temperature_available,
+            "temperature_c": round(gpu_temp_c, 1),
             "vram_used_gb": round(vram_used_gb, 2),
             "vram_total_gb": round(vram_total_gb, 2),
             "vram_percent": round(vram_percent, 1),

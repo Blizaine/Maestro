@@ -69,7 +69,7 @@ def main() -> int:
         and hasattr(torch.ops.lightx2v_kernel, "cutlass_scaled_nvfp4_mm_sm120")
     )
     lightx2v_ok = lightx2v_import_ok and lightx2v_ops
-    sol_capability = capability in {(8, 9), (9, 0), (10, 0), (12, 0)}
+    sol_capability = capability in {(8, 9), (9, 0), (10, 0), (12, 0), (12, 1)}
     sol_ready = bool(
         cuda_available
         and sol_capability

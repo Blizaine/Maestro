@@ -6,7 +6,7 @@ import sys
 from collections.abc import Sequence
 
 
-SUPPORTED_CAPABILITIES = {(8, 9), (9, 0), (10, 0), (12, 0)}
+SUPPORTED_CAPABILITIES = {(8, 9), (9, 0), (10, 0), (12, 0), (12, 1)}
 
 
 def _version_tuple(value: object, parts: int = 2) -> tuple[int, ...]:
