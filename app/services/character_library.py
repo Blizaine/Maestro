@@ -149,6 +149,9 @@ def _public_record(record: dict) -> dict:
         ]
         visual["thumbnail_url"] = f"/api/v1/characters/{character_id}/media/thumbnail?v={version}"
     result["visual"] = visual
+    if record.get("reference_pack"):
+        from .reference_packs import public_pack
+        result["reference_pack"] = public_pack(character_id, record["reference_pack"])
     if isinstance(result.get("refmod"), dict):
         refmod = dict(result["refmod"])
         refmod["path"] = str((_root() / character_id / "reference.safetensors").resolve())
@@ -228,6 +231,8 @@ def recover_character_images(character_id: str, *, decode_views, update=lambda _
     from .refmod import load_visual_latent
 
     record = _get_character_record(character_id)
+    if record.get("reference_pack"):
+        raise ValueError("Use Reference Pack revisions to review all five views; single-visual RefMod export and recovery do not support packs.")
     directory = _character_directory(character_id)
     previous = record.get("image_views")
     if previous and previous.get("version") == VERSION and not force:
@@ -308,6 +313,8 @@ def export_character(character_id: str, *, encode_visual=None) -> Path:
                          new_refmod_metadata, write_refmod)
 
     record = get_character(character_id)
+    if record.get("reference_pack"):
+        raise ValueError("Use Reference Pack revisions to review all five views; single-visual RefMod export and recovery do not support packs.")
     directory = _character_directory(character_id)
     reference_path = directory / "reference.safetensors"
     visual_path = get_character_media(character_id, "visual")

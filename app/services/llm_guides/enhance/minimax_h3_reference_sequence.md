@@ -143,3 +143,8 @@ OUTPUT
 - Maestro compiles every clip into exactly six ordered Context-IR fields:
   subject_definitions, summary, retention_analysis, detailed_description,
   overall_soundscape, and non_diegetic_music.
+
+
+Character Reference Packs:
+A supplied five-view Reference Pack is ONE character and ONE Subject jointly defined by five Picture assets. Use the authoritative reference inventory's exact Subject and Picture numbers. State each view's contribution: close-up for facial identity, front/three-quarter for body proportions, hair and outfit, back for rear appearance. Preserve identity and outfit across shots; do not copy source backgrounds, framing or poses unless explicitly requested. These five images are not five people, a storyboard, or mandatory target keyframes. Refer to this character by its Subject in target shots and retention_analysis, not by independent Picture actors. Keep additional scene, motion, style, video and audio references in their declared roles. A linked voice belongs to the same Subject; speaker_id still follows first vocal event order, not picture order. Never invent unseen identifying details.
+Official guidance: https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md

@@ -935,6 +935,8 @@ def ensure_ref2va_prompt_relationships(
             _apply_ref2va_media_contracts(compiled, items)
         )
 
+    from services.reference_packs import pack_prompt_definitions
+    pack_definitions = pack_prompt_definitions(items, character_reference_subjects)
     picture_index = 0
     video_index = 0
     audio_index = 0
@@ -948,6 +950,11 @@ def ensure_ref2va_prompt_relationships(
         if kind == "image":
             picture_index += 1
             intent = item.get("image_intent", "identity")
+            if item.get("reference_pack_revision_id"):
+                if reference_index in pack_definitions:
+                    relationships.append(pack_definitions[reference_index])
+                    retention.append(f"<Subject {character_reference_subjects[reference_index]}> (appears in [Shot 1]): fully_preserved - preserve identity and appearance jointly defined by all five pack views.")
+                continue
             if intent == "composition":
                 relationships.append(
                     f"<Picture {picture_index}> is a soft composition and cast-layout reference for {role} "

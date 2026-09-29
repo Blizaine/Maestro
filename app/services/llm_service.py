@@ -2254,14 +2254,16 @@ def _image_to_data_url(image_path: str, max_size: int = 768) -> Optional[str]:
         return f"data:{mime};base64,{data}"
 
 
-def _user_message(prompt: str, image_paths: Optional[list]) -> dict:
+def _user_message(prompt: str, image_paths: Optional[list], image_labels: Optional[list[str]] = None) -> dict:
     """Build a user message, failing visibly if a remote image cannot be read."""
 
     if not image_paths or not _vision_available:
         return {"role": "user", "content": prompt}
 
+    if image_labels is not None and len(image_labels) != len(image_paths):
+        raise ValueError("Image labels must match attached images exactly.")
     content_parts = []
-    for image_path in image_paths:
+    for image_index, image_path in enumerate(image_paths):
         try:
             data_url = _image_to_data_url(image_path)
         except Exception as exc:
@@ -2272,12 +2274,16 @@ def _user_message(prompt: str, image_paths: Optional[list]) -> dict:
                 ) from exc
             raise
         if not data_url:
+            if image_labels is not None:
+                raise ValueError("A labeled reference image could not be attached.")
             if _provider in ("remote", "openai", "anthropic"):
                 raise RuntimeError(
                     "Could not attach an image to the remote LLM request. "
                     "Check that each selected image exists and can be read."
                 )
             continue
+        if image_labels is not None:
+            content_parts.append({"type": "text", "text": image_labels[image_index]})
         content_parts.append({
             "type": "image_url",
             "image_url": {"url": data_url},
@@ -2385,6 +2391,7 @@ def generate(
     presence_penalty: float = 0.0,
     stop: Optional[list[str]] = None,
     json_schema: Optional[dict] = None,
+    image_labels: Optional[list[str]] = None,
 ) -> str:
     """Generate text via llama-server's OpenAI-compatible chat endpoint.
 
@@ -2416,7 +2423,7 @@ def generate(
             image_paths=image_paths, thinking_budget=thinking_budget,
             enable_thinking=enable_thinking, reasoning_effort=reasoning_effort,
             frequency_penalty=frequency_penalty, presence_penalty=presence_penalty,
-            json_schema=json_schema, stop=stop,
+            json_schema=json_schema, stop=stop, image_labels=image_labels,
         )
 
     if not is_loaded():
@@ -2453,7 +2460,7 @@ def generate(
 
     # Remote provider support is unknown until a request is made; remote
     # load_model() enables this path so image inputs are never discarded.
-    messages.append(_user_message(prompt, image_paths))
+    messages.append(_user_message(prompt, image_paths, image_labels))
 
     payload = {
         "messages": messages,
@@ -2612,6 +2619,7 @@ def generate_streaming(
     presence_penalty: float = 0.0,
     json_schema: Optional[dict] = None,
     stop: Optional[list[str]] = None,
+    image_labels: Optional[list[str]] = None,
 ) -> str:
     """Generate text using SSE streaming, populating the stream buffer in real-time.
 
@@ -2668,7 +2676,7 @@ def generate_streaming(
 
     # Match generate() so remote image paths reach both request modes.
     try:
-        messages.append(_user_message(prompt, image_paths))
+        messages.append(_user_message(prompt, image_paths, image_labels))
     except Exception as exc:
         with _stream_lock:
             _stream_buffer = f"Error: {exc}"
@@ -3230,6 +3238,19 @@ def enhance_prompt(
         and not is_h3_ref2va
     )
     is_h3_structured = is_h3_context_ir or is_h3_ref2va
+    pack_image_labels = None
+    if is_h3_ref2va:
+        from services.h3_pack_grounding import bindings, ground_context, image_labels as pack_labels
+        if bindings(reference_context):
+            reference_context, pack_warning = ground_context(generate, reference_context, image_paths, vision_available=_vision_available)
+            if pack_warning:
+                from services.studio_enhancement import record_review_warning
+                record_review_warning(pack_warning)
+                print(f"[Enhance] {pack_warning}")
+            if _vision_available:
+                pack_image_labels = pack_labels(reference_context, image_paths)
+            else:
+                image_paths = None
     audio_driven = is_h3_ref2va and has_h3_performance_audio(reference_context)
     needs_h3_dialogue = is_h3_structured and not audio_driven
     if needs_h3_dialogue and not system_override:
@@ -3579,8 +3600,13 @@ def enhance_prompt(
         system += (
             "\n\nCRITICAL MINIMAX H3 REF2VA OUTPUT CONTRACT: Output ONLY the six required fields, "
             "in order: subject_definitions:, summary:, retention_analysis:, detailed_description:, "
-            "overall_soundscape:, and non_diegetic_music:. Use only the supplied <Picture n>, <Video n>, "
+            "overall_soundscape:, and non_diegetic_music:. Use only the supplied <Subject n>, <Picture n>, <Video n>, "
             "and <Audio n> labels. These labels and fields are model syntax, not explanatory headings. "
+            "Use the exact <Subject n> labels in summary and at each subject's first shot appearance, "
+            "with observed appearance, position and action; a character name alone is insufficient. "
+            "The summary prefix uses official task types, such as [reference generation], never [Visual]. "
+            "For generation, normally write 350-500 words in detailed_description even for one shot; "
+            "use concrete visible detail, not extra events or filler. "
             "Every VOICE REFERENCE must be bound inside subject_definitions to its matching <Subject n> "
             "and its stable speaker ID. Subject numbering follows reusable-reference order, while (S1), "
             "(S2), etc. are assigned independently by first actual vocal-event order. Spoken lines require "
@@ -3627,7 +3653,7 @@ def enhance_prompt(
     if window_count and window_count > 1:
         effective_max_tokens = max(max_new_tokens, window_count * 300 + 256)
     if is_h3_ref2va:
-        effective_max_tokens = max(effective_max_tokens, 1200)
+        effective_max_tokens = max(effective_max_tokens, 2400)
     elif is_h3_context_ir:
         # Leave enough room for all three required fields plus timed dialogue.
         # H3 receives the complete prompt; this output allowance is a quality
@@ -3677,6 +3703,7 @@ def enhance_prompt(
         max_new_tokens=effective_max_tokens,
         temperature=temperature,
         image_paths=image_paths,
+        **({"image_labels": pack_image_labels} if pack_image_labels else {}),
         enable_thinking=use_thinking,
         thinking_budget=prompt_thinking_budget,
         frequency_penalty=0.3,  # prevent repetition loops
@@ -3778,7 +3805,7 @@ def enhance_prompt(
                 prompt=user_prompt + "\n\nPREVIOUS DRAFT TO REPAIR:\n" + result,
                 system_prompt=(
                     system
-                    + f"\n\nRETRY REQUIREMENT: Be concise. {field_requirement} "
+                    + f"\n\nRETRY REQUIREMENT: Keep bindings economical and shot descriptions detailed. {field_requirement} "
                     "Do not repeat a subject definition or reference mapping. Never replace a requested "
                     "spoken line with the words 'speaks', 'talks', or 'dialogue'; write the actual <d> block. "
                     "The numbered Saved character Subject map in the request is immutable: never renumber it, "
@@ -3788,6 +3815,7 @@ def enhance_prompt(
                 max_new_tokens=effective_max_tokens,
                 temperature=min(float(temperature), 0.35),
                 image_paths=image_paths,
+                **({"image_labels": pack_image_labels} if pack_image_labels else {}),
                 enable_thinking=False,
                 thinking_budget=4096,
                 frequency_penalty=0.6,
@@ -5092,6 +5120,14 @@ def _parse_h3_ref2va_subject_manifest(
         source,
     ):
         attach(ensure(int(subject_no), name), label)
+    # A five-view pack has one native identity row with several Picture assets.
+    # Bind every view before linking voices or validating generated dialogue.
+    for subject_no, name, body in re.findall(
+        r"(?m)^<Subject (\d+)> is (.+?), ONE character jointly defined by five views: (.+)$", source,
+    ):
+        item = ensure(int(subject_no), name)
+        for label in re.findall(r"<Picture \d+>", body):
+            attach(item, label)
     for label, subject_no in re.findall(
         r"(?m)^(<Audio \d+>) is the voice-timbre reference for <Subject (\d+)>", source,
     ):

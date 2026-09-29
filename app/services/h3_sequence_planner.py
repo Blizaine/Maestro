@@ -14,6 +14,7 @@ import math
 import os
 import re
 from typing import Any
+from services.h3_pack_grounding import binding_context
 from services.h3_performance_audio import (
     PERFORMANCE_AUDIO_DIRECTION,
     has_h3_performance_audio,
@@ -54,7 +55,7 @@ from services.h3_window_planner import (
 # is persisted with reviewed/generated window prompts, so this prevents a run
 # restored from gallery metadata from silently reusing pre-fix dialogue and
 # reference bindings.
-_H3_SEQUENCE_PLANNER_VERSION = 6 + H3_STORY_LEDGER_VERSION
+_H3_SEQUENCE_PLANNER_VERSION = 7 + H3_STORY_LEDGER_VERSION
 _H3_CLIP_BOUNDARY = "\n---CLIP_BOUNDARY---\n"
 
 
@@ -433,7 +434,8 @@ def build_manual_h3_reference_sequence_plan(
 def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]:
     """Return relationship, retention, and official task-type summaries."""
 
-    from models.minimax_h3.ref2va import canonicalize_ref2va_reference_order
+    from models.minimax_h3.ref2va import canonicalize_ref2va_reference_order, _build_ref2va_character_bindings
+    from services.reference_packs import pack_prompt_definitions
     from models.minimax_h3.reference_manifest import validate_reference_manifest
 
     # Enhancement is useful before the generation manifest is complete. The
@@ -446,14 +448,14 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
         allow_empty=True,
     )
     _prompt, items, _order_remap = canonicalize_ref2va_reference_order("", items)
-    picture = video = audio = subject = 0
+    picture = video = audio = 0
+    reference_subjects, character_subjects, role_subjects, _, subject = _build_ref2va_character_bindings(items)
+    pack_definitions = pack_prompt_definitions(items, reference_subjects)
     relationships: list[str] = []
     retention: list[str] = []
     task_types = ["reference generation"]
-    role_subjects: dict[str, int] = {}
-    character_subjects: dict[str, int] = {}
     pending_voice: list[tuple[int, dict, str]] = []
-    for item in items:
+    for reference_index, item in enumerate(items):
         kind = item["type"]
         # Roles are prose within one reference row, not additional metadata
         # lines (including the machine-generated soundtrack clock).
@@ -461,6 +463,11 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
         if kind == "image":
             picture += 1
             intent = item.get("image_intent", "identity")
+            if item.get("reference_pack_revision_id"):
+                if reference_index in pack_definitions:
+                    relationships.append(pack_definitions[reference_index])
+                    retention.append(f"<Subject {reference_subjects[reference_index]}>: fully_preserved - preserve identity and appearance jointly defined by all five pack views.")
+                continue
             if intent == "composition":
                 relationships.append(
                     f"<Picture {picture}> is a composition and blocking reference for {role}, not an identity source."
@@ -488,36 +495,28 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                     "similarity in medium, palette, lighting language, and texture."
                 )
             else:
-                subject += 1
-                role_subjects[str(role).strip().casefold()] = subject
-                character_key = str(item.get("library_character_id") or "").strip()
-                if character_key:
-                    character_subjects[character_key] = subject
+                character_subject = reference_subjects[reference_index]
                 relationships.append(
-                    f"<Subject {subject}> is {role} from <Picture {picture}>, preserving "
+                    f"<Subject {character_subject}> is {role} from <Picture {picture}>, preserving "
                     "identity and visible appearance; the source background, framing, "
                     "composition, and pose do not define the target scene."
                 )
                 retention.append(
-                    f"<Subject {subject}>: fully_preserved - preserve the identity "
+                    f"<Subject {character_subject}>: fully_preserved - preserve the identity "
                     f"and appearance defined by <Picture {picture}>."
                 )
         elif kind == "video":
             video += 1
             video_intent = item.get("video_intent", "motion")
             if video_intent == "character":
-                subject += 1
-                role_subjects[str(role).strip().casefold()] = subject
-                character_key = str(item.get("library_character_id") or "").strip()
-                if character_key:
-                    character_subjects[character_key] = subject
+                character_subject = reference_subjects[reference_index]
                 relationships.append(
-                    f"<Subject {subject}> is {role} from <Video {video}>, preserving identity, "
+                    f"<Subject {character_subject}> is {role} from <Video {video}>, preserving identity, "
                     "appearance, and characteristic motion while using the newly described target "
                     "scene and action."
                 )
                 retention.append(
-                    f"<Subject {subject}>: fully_preserved - preserve the identity and appearance "
+                    f"<Subject {character_subject}>: fully_preserved - preserve the identity and appearance "
                     f"defined by <Video {video}> while generating each requested target action."
                 )
             elif video_intent == "scene":
@@ -1345,7 +1344,7 @@ def compile_h3_reference_sequence_prompts(
     # ``black t-shirt <Subject 1> is ...``.  Use the canonical manifest by
     # itself; visual prose belongs in the chronological shot description.
     raw_subjects = str(plan.get("subject_definitions") or "").strip()
-    canonical_subjects = str(reference_relationships or "").strip()
+    canonical_subjects = binding_context(reference_relationships).strip()
     audio_driven = has_h3_performance_audio(canonical_subjects)
     canonical_subjects = canonicalize_h3_reference_names(
         canonical_subjects,
@@ -1636,7 +1635,7 @@ def _fallback_sequence_plan(
             "closing_state": window["closing_state"],
         })
     return {
-        "subject_definitions": reference_relationships,
+        "subject_definitions": binding_context(reference_relationships),
         "retention_analysis": default_retention,
         "setting_continuity": fallback["setting_continuity"],
         "visual_style": fallback["visual_continuity"],
@@ -1696,6 +1695,14 @@ def plan_h3_reference_sequence(
             fps=fps,
         )
     relationships, default_retention, task_types = _reference_context(references)
+    from services.h3_pack_grounding import bindings, ground_context
+    pack_warning = None
+    if bindings(relationships):
+        from services import llm_service
+        image_paths = [ref['path'] for ref in references if ref.get('type') == 'image']
+        relationships, pack_warning = ground_context(llm_service.generate, relationships, image_paths, vision_available=llm_service._vision_available)
+        if not llm_service._vision_available:
+            image_paths = None
     relationships = canonicalize_h3_reference_names(relationships, source_intent["cast_names"])
     signature = h3_sequence_plan_signature(
         prompt,
@@ -1748,7 +1755,7 @@ def plan_h3_reference_sequence(
     resolved_coverage = _infer_camera_coverage(prompt, camera_coverage)
     story_ledger: dict[str, Any] | None = None
     camera_checkpoint = None
-    planning_warnings: list[str] = []
+    planning_warnings: list[str] = [pack_warning] if pack_warning else []
     planning_diagnostics: list[str] = []
     planning_notes: list[str] = []
     dialogue_fragments: list[dict[str, Any]] = []
@@ -1777,7 +1784,7 @@ def plan_h3_reference_sequence(
         )
         planned_by = staged["planned_by"]
         camera_checkpoint = staged.get("camera_checkpoint")
-        planning_warnings = list(staged.get("planning_warnings") or [])
+        planning_warnings.extend(staged.get("planning_warnings") or [])
         planning_diagnostics = list(staged.get("planning_diagnostics") or [])
         planning_notes = list(staged.get("planning_notes") or [])
         dialogue_fragments = list(staged.get("dialogue_fragments") or [])

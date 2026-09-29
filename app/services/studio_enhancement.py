@@ -220,6 +220,8 @@ def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
         "image_paths": images, "reference_context": "\n".join(context),
         "activated_loras": deepcopy(params.get("activated_loras") or []),
     }
+    if omni:
+        payload["minimax_h3_references"] = references
     return payload, sequence
 
 

@@ -4,6 +4,8 @@ import * as api from '../../api/client'
 import { useStore } from '../../stores/useStore'
 import { readPersistentDisclosure, writePersistentDisclosure } from '../../lib/persistentDisclosure'
 import { ImportCharacterButton } from '../Characters/CharacterFileActions'
+import { referencePackImages, PACK_VIEWS } from '../../lib/referencePacks'
+import { ReferencePackButton } from '../Characters/ReferencePackEditor'
 import { ReferenceCharacterPicker } from '../Characters/ReferenceCharacterPicker'
 import { characterDisplayName } from '../../lib/characters'
 import { CharacterToolbarItem, SidebarDialog } from './SidebarPanels'
@@ -259,13 +261,18 @@ export function OmniReferenceSection({
     finally { setUploading(false) }
   }
 
-  const addCharacter = (character: SavedOmniCharacter) => {
+  const addCharacter = (character: SavedOmniCharacter, revisionId?: string) => {
     const current = currentReferences()
     const currentCharacterReferences = current.filter(
       reference => reference.library_character_id === character.id,
     )
     const additions: MiniMaxH3Reference[] = []
-    if (!currentCharacterReferences.some(reference => reference.type !== 'audio')) additions.push({
+    if (character.reference_pack) {
+      if (!currentCharacterReferences.some(reference => reference.type !== 'audio')) {
+        try { additions.push(...referencePackImages(character, revisionId)) }
+        catch (error) { setError(error instanceof Error ? error.message : 'Could not select pack.'); return }
+      }
+    } else if (!currentCharacterReferences.some(reference => reference.type !== 'audio')) additions.push({
       id: newId(),
       type: character.visual.type,
       path: character.visual.path,
@@ -485,8 +492,15 @@ export function OmniReferenceSection({
           {voiceEntry && <span className="flex items-center gap-1"><FileAudio size={12} /> Voice reference</span>}
         </div>
         <p className="text-[11px] text-text-muted">{item.entries.map(entry => labels[entry.index]).join(' + ')} · Linked to this saved character</p>
+        {visualEntry?.reference.reference_pack_revision_id && <div className="space-y-2">
+          <p>Reference Pack v{visualEntry.reference.reference_pack_revision_number} · five image slots</p>
+          <div className="grid grid-cols-2 gap-2">{item.entries.filter(entry => entry.reference.reference_pack_view).map(entry => <figure key={entry.reference.id}>
+            <img src={entry.reference.url} alt={PACK_VIEWS.find(([view]) => view === entry.reference.reference_pack_view)?.[1]} className="h-24 w-full object-contain rounded bg-bg-primary" />
+            <figcaption className="text-[10px]">{labels[entry.index]} · {PACK_VIEWS.find(([view]) => view === entry.reference.reference_pack_view)?.[1]}</figcaption>
+          </figure>)}</div>
+        </div>}
         {visualEntry?.reference.refmod_path && <p className="text-[11px] text-text-muted">Uses the saved H3 RefMod appearance.</p>}
-        {visualEntry?.reference.type === 'image' && !visualEntry.reference.refmod_path && <label
+        {visualEntry?.reference.type === 'image' && !visualEntry.reference.refmod_path && !visualEntry.reference.reference_pack_revision_id && <label
           className="flex min-h-8 cursor-pointer items-center gap-2 text-[11px]"
           title="Place the character on neutral white before generation when the portrait background leaks into the scene. Leave off to preserve the original lighting context.">
           <input type="checkbox" disabled={disabled} checked={visualEntry.reference.remove_background === true}
@@ -615,7 +629,9 @@ export function OmniReferenceSection({
             <p className="text-[11px] leading-relaxed text-text-secondary">
               Choose who appears in your scene. Their saved voice comes with them.
             </p>
+            <ReferencePackButton disabled={disabled} />
             <ReferenceCharacterPicker characters={characters} addedIds={addedCharacterIds} disabled={disabled} scroll={false}
+              activeRevisions={Object.fromEntries(references.filter(ref => ref.library_character_id && ref.reference_pack_revision_id).map(ref => [ref.library_character_id!, ref.reference_pack_revision_id!]))}
               onAdd={addCharacter} onDelete={character => void removeCharacter(character)} />
             {scope === 'studio' && <button type="button" onClick={() => { setLibraryOpen(false); window.dispatchEvent(new Event('maestro-open-finishing')) }}
               className="min-h-10 w-full rounded-lg border border-border px-3 text-left text-xs text-text-secondary hover:bg-bg-hover">Face refinement & character mapping…</button>}

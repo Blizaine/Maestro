@@ -2220,6 +2220,7 @@ export async function llmEnhancePrompt(params: {
   tts_voice_count?: number
   max_new_tokens?: number
   reference_context?: string
+  minimax_h3_references?: MiniMaxH3Reference[]
   planning_style?: 'faithful' | 'creative' | 'adaptive'
 }): Promise<{
   original: string
@@ -3000,4 +3001,22 @@ export async function retryEnhancedJob(jobId: string, action: 'retry' | 'refresh
     throw new Error(error.detail || 'Could not retry this job.')
   }
   return response.json() as Promise<{job_id: string; status: import('../types').GenerationJob['status']}>
+}
+
+
+export async function saveReferencePack(params: { name: string; images: Record<string, string>; label: string; base_revision_id?: string }, characterId?: string): Promise<SavedOmniCharacter> {
+  const route = characterId ? `${encodeURIComponent(characterId)}/reference-packs` : 'reference-packs'
+  const res = await fetch(`${BASE}/api/v1/characters/${route}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
+  })
+  if (!res.ok) throw new Error((await res.json()).detail || 'Reference Pack import failed')
+  return res.json()
+}
+
+export async function reviewReferencePack(characterId: string, revisionId: string, approved: boolean): Promise<SavedOmniCharacter> {
+  const res = await fetch(`${BASE}/api/v1/characters/${encodeURIComponent(characterId)}/reference-packs/${encodeURIComponent(revisionId)}/review`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ approved }),
+  })
+  if (!res.ok) throw new Error((await res.json()).detail || 'Reference Pack review failed')
+  return res.json()
 }

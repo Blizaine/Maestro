@@ -8746,6 +8746,16 @@ async def _llm_enhance_prompt_payload(body: dict):
 
     model_type = str(body.get("model_type", "") or "")
     generation_mode = str(body.get("mode", "video") or "video")
+    if model_type.lower().startswith("minimax_h3_ref2va") and "minimax_h3_references" in body:
+        from models.minimax_h3.reference_manifest import validate_reference_manifest
+        from services.h3_sequence_planner import _reference_context
+        try:
+            refs = validate_reference_manifest(body["minimax_h3_references"], require_visual=False, allow_empty=True)
+            relationships, retention, task_types = _reference_context(refs)
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+        body = {**body, "reference_context": f"{relationships}\nRetention:\n{retention}\nTask types: {task_types}",
+                "image_paths": [ref["path"] for ref in refs if ref["type"] == "image"]}
     needs_h3_context_ir = (
         model_type.lower().startswith("minimax_h3")
         and generation_mode in ("video", "avatar")
@@ -9199,6 +9209,8 @@ def _import_downloaded_character(path, download_id):
 
 from services.character_transfer import build_router as _character_transfer_router
 api.include_router(_character_transfer_router(_run_character_codec))
+from services.reference_packs import create_router as _reference_pack_router
+api.include_router(_reference_pack_router())
 
 
 def _release_models_for_music_training():

@@ -1992,7 +1992,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             "says in an off-screen voiceover",
             "voice-timbre reference",
             "2.8 words per second by default, allowing up to 3 words per second",
-            "do not inflate it to a word quota",
+            "normally write 350–500 English words",
+            "dialogue-dense requests prioritize fitting the complete spoken timeline",
         ):
             self.assertIn(official_rule, _read(_H3_REF2VA_GUIDE_PATH))
         self.assertIn("At MM:SS.mmm", enhance_guide)
@@ -2021,7 +2022,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn('mode in ("video", "avatar") and not is_h3_structured', llm_service)
         self.assertIn("CRITICAL MINIMAX H3 OUTPUT CONTRACT", llm_service)
         self.assertIn("effective_max_tokens = max(effective_max_tokens, 1280)", llm_service)
-        self.assertIn("effective_max_tokens = max(effective_max_tokens, 1200)", llm_service)
+        self.assertIn("effective_max_tokens = max(effective_max_tokens, 2400)", llm_service)
 
     def test_ref2va_prompt_guide_uses_official_labels_and_six_sections(self):
         self.assertIn(

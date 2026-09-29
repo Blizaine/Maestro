@@ -253,3 +253,103 @@ Use the returned IDs when updating the selection, for example:
 ```json
 {"selected_ids": ["view-0002", "view-0005"], "cover_id": "view-0002"}
 ```
+
+## Five-view Reference Packs for H3 Omni (Ref2VA)
+
+Use **Characters → Import five-view pack** in Studio or Director, or the same
+button in **Model Browser → Characters**. Supply five existing images of the same
+person, with consistent hair, proportions and outfit:
+
+1. Face close-up.
+2. Full body, front.
+3. Full body, three-quarter turn.
+4. Upper body, three-quarter turn.
+5. Full body, back.
+
+The importer stores full-resolution, EXIF-oriented RGB PNG copies. It accepts
+single images up to 32 megapixels and rejects identical views. Saving creates a
+**draft**. Open each view at full size and review consistency yourself, then choose
+**Approve all five views**. Approval is a human review, not an automated identity
+quality score. No image-generation service or GPU is needed to import a pack.
+
+In the character picker, select an approved revision and add it. All five images
+are added together as one character. They consume **five of H3's nine image
+slots**, leaving four for other images; video/audio slots remain available within
+the model's total reference limit. Capacity failures add nothing and preserve
+existing inputs. One full five-view pack fits within the nine-image budget; two
+do not. A saved voice can be attached using the existing character voice action.
+
+**Pack views & revisions → New revision from this one** creates a child of the
+selected revision. Replace any views that need correction; the other views are
+copied from that base. Every revision owns its images, starts as a draft, and
+records its parent. New revisions never silently replace a selected revision.
+Remove an active pack and add the desired approved revision to switch. Revoking
+approval blocks new generation requests and queued jobs when they prepare their
+references; it cannot undo an already-running generation.
+
+Prompt enhancement and raw H3 prompt compilation represent the five pictures as
+**one Subject**, using actual Picture ordinals even when other images precede the
+pack. The inventory explains each view's identity contribution, while the target
+prompt supplies new action, framing and environment. A pack is not five actors,
+a sequence of shots or five mandatory keyframes. Voice speaker IDs retain H3's
+first-vocal-event ordering. This follows MiniMax's
+[official Ref2VA prompt guide](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md).
+
+Example source prompt: “Maya walks through a sunlit courtyard, turns to look over
+her shoulder, and smiles. The camera follows at waist height.” Name the saved
+character normally; enhancement receives the pack-to-Subject relationship.
+
+This first version imports and revises existing views. It does not generate the
+views, train a LoRA, or export packs as single-visual `.maestro.safetensors`
+RefMods. The existing single-image/video characters and RefMods remain separate
+library entries with their existing behavior. Pack data lives under
+`app/uploads/characters/<character-id>/packs/<revision-id>/`; back up the entire
+character library, including its index, to retain revisions and approvals.
+
+
+When **Enhance** uses a vision-capable LLM, Maestro first inspects all five pack
+views with their exact Picture numbers and view labels. It carries the observed
+appearance into the canonical Subject definition and supplies the images and
+observations to the writer. Inspection JSON does not become part of the H3 prompt.
+Unreadable or incomplete inspection fails visibly; known text-only local models
+keep the reference bindings and show a warning that appearance was not inspected.
+Remote providers receive real image attachments and must support image inputs;
+a provider rejection is reported rather than silently dropping the images. This
+adds one LLM inspection request per pack to enhancement. Images sent to the LLM
+are resized to its existing 768-pixel maximum; H3 still receives the original
+pack images. Re-run Enhance on older prompts to apply this behavior.
+
+
+### Recommended Reference Pack workflow
+
+Use five distinct, sharp views of the same appearance. Keep the face unobscured,
+include the feet in full-body views, and make the rear view useful for hair and
+outfit details. Favor simple backgrounds and consistent lighting so that the
+character is easy to inspect. Avoid changing hairstyle, outfit or body proportions
+between views; create a separate revision when the intended appearance changes.
+Review every view before approving: a five-image upload is not proof that the
+images depict a consistent identity.
+
+Select the approved revision **before** using Enhance. Write the target action,
+setting, camera movement and any dialogue in the source prompt, using the saved
+character's name. Let Maestro assign the actual Picture and Subject numbers;
+other attached references can change Picture numbering. Keep scene, style,
+motion, video and voice references in their own intended roles. All five pack
+views define the same character, not five actors or five required shots.
+
+Use a vision-capable enhancement model to ground appearance in the actual images.
+Review the enhanced prompt: the Subject definition should cite all five views,
+the summary and shots should use that same Subject label, and visible appearance
+should agree with the pack. New action, framing and scenery do not require copying
+the reference poses or backgrounds. Preserve exact requested dialogue and keep
+speaker IDs separate from Subject IDs. If you select another revision or change
+reference order, re-run Enhance from the original scene request so that image
+bindings and observed traits match the current inputs. Re-plan saved sequence
+windows when changing the pack.
+
+The extra vision pass improves the information supplied to H3; it is not a
+verified identity score or a guarantee of consistency. Test a short clip before
+a longer sequence and check the face, proportions, outfit and rear appearance
+across camera changes. MiniMax's detailed-description length is writing guidance,
+not a hard validator: review the output for concrete shot detail rather than
+assuming that every LLM follows the requested length.
