@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+import sys
 import types
 import unittest
 
@@ -170,6 +171,17 @@ def _load_engine_resolver(*, vllm_supported: bool):
     return namespace["resolve_lm_decoder_engine"]
 
 
+def _load_nanovllm_attention_runtime():
+    app_path = str(_APP)
+    if app_path not in sys.path:
+        sys.path.insert(0, app_path)
+    from shared.llm_engines.cudagraph_kit import CUDAGraphRunner
+    from shared.llm_engines.nanovllm.layers.attention import Attention
+    from shared.llm_engines.nanovllm.utils.context import reset_context, set_context
+
+    return Attention, CUDAGraphRunner, set_context, reset_context
+
+
 class MiniMaxMusic3Tests(unittest.TestCase):
     def test_default_definition_is_visible_and_license_aware(self):
         default = json.loads(_read(_DEFAULT))
@@ -221,6 +233,115 @@ class MiniMaxMusic3Tests(unittest.TestCase):
         self.assertEqual(without_flash_attention("", available), "cg")
         self.assertEqual(without_flash_attention("vllm", available), "cg")
         self.assertEqual(with_flash_attention("", available), "vllm")
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("torch") is not None,
+        "PyTorch is required for KV-cache dtype regression coverage",
+    )
+    def test_sdpa_cache_normalizes_float32_quanto_outputs_to_bfloat16(self):
+        import torch
+
+        (
+            Attention,
+            CUDAGraphRunner,
+            set_context,
+            reset_context,
+        ) = _load_nanovllm_attention_runtime()
+        devices = [torch.device("cpu")]
+        if torch.cuda.is_available():
+            devices.append(torch.device("cuda"))
+
+        for device in devices:
+            with self.subTest(device=device.type):
+                def randn(shape):
+                    return torch.randn(
+                        shape,
+                        device=device,
+                        dtype=torch.float32,
+                    )
+
+                def int_tensor(values):
+                    return torch.tensor(
+                        values,
+                        device=device,
+                        dtype=torch.int32,
+                    )
+
+                attention = Attention(2, 4, 0.5, 1)
+                attention.flash_attn_varlen_func = None
+                attention.flash_attn_with_kvcache = None
+                attention.use_triton_kv_cache = False
+                attention.k_cache = torch.empty(
+                    (1, 4, 1, 4),
+                    device=device,
+                    dtype=torch.bfloat16,
+                )
+                attention.v_cache = torch.empty_like(attention.k_cache)
+
+                try:
+                    set_context(
+                        True,
+                        cu_seqlens_q=int_tensor([0, 3]),
+                        cu_seqlens_k=int_tensor([0, 3]),
+                        max_seqlen_q=3,
+                        max_seqlen_k=3,
+                        slot_mapping=int_tensor([0, 1, 2]),
+                    )
+                    prefill = attention(
+                        randn((3, 2, 4)),
+                        randn((3, 1, 4)),
+                        randn((3, 1, 4)),
+                    )
+                    self.assertEqual(prefill.dtype, torch.bfloat16)
+
+                    set_context(
+                        False,
+                        slot_mapping=int_tensor([3]),
+                        context_lens=int_tensor([4]),
+                        block_tables=int_tensor([[0]]),
+                    )
+                    decoded = attention(
+                        randn((1, 2, 4)),
+                        randn((1, 1, 4)),
+                        randn((1, 1, 4)),
+                    )
+                    self.assertEqual(decoded.dtype, torch.bfloat16)
+
+                    if device.type == "cuda":
+                        def graph_decode(q, k, v, slots, context_lens, blocks):
+                            set_context(
+                                False,
+                                slot_mapping=slots,
+                                context_lens=context_lens,
+                                block_tables=blocks,
+                            )
+                            return attention(q, k, v)
+
+                        runner = CUDAGraphRunner(
+                            "test:minimax_music3_kv_dtype",
+                            graph_decode,
+                        )
+                        try:
+                            graph_decoded = runner.run(
+                                randn((1, 2, 4)),
+                                randn((1, 1, 4)),
+                                randn((1, 1, 4)),
+                                int_tensor([3]),
+                                int_tensor([4]),
+                                int_tensor([[0]]),
+                            )
+                            torch.cuda.synchronize()
+                            self.assertEqual(
+                                graph_decoded.dtype,
+                                torch.bfloat16,
+                            )
+                            self.assertTrue(
+                                bool(torch.isfinite(graph_decoded).all())
+                            )
+                        finally:
+                            runner.release()
+                finally:
+                    reset_context()
 
     def test_settings_validation(self):
         handler = _load_handler_namespace()["family_handler"]
