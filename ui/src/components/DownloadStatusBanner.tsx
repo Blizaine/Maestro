@@ -1,21 +1,28 @@
 import { useEffect, useState } from 'react'
 import { Download, AlertTriangle } from 'lucide-react'
 import { fetchActiveDownloads, type ActiveDownload } from '../api/client'
+import { useLongPoll } from '../lib/useLongPoll'
+
+// Mirrors STALLED_AFTER_SECONDS in services/safe_download.py, which wakes a
+// held request when a download crosses it.
+const STALLED_AFTER_SECONDS = 30
+
+const NO_DOWNLOADS: { downloads: ActiveDownload[]; receivedAt: number } = { downloads: [], receivedAt: 0 }
 
 /**
  * DownloadStatusBanner — fixed-position overlay shown while
  * model files are being downloaded from HuggingFace (or other CDNs).
  *
- * Polls /api/v1/downloads/active every 2s and renders nothing when
+ * Long-polls /api/v1/downloads/active and renders nothing when
  * the list is empty. When downloads are active, shows a compact
  * banner with the current file's progress + a "stalled / retrying"
- * badge if the byte counter hasn't advanced in >15s.
+ * badge if the byte counter hasn't advanced in >30s.
  *
  * Polling is unconditional (vs gated on "is a job running") because
  * model downloads can fire from several paths in Maestro: job
- * submission, model selection, etc. Polling
- * is cheap (a 2s GET every 2s) and only ever returns data when the
- * banner needs to be visible.
+ * submission, model selection, etc. The server holds each request
+ * until the downloads change, so an idle focused window makes one
+ * request per 25 s; see useLongPoll for unfocused and hidden tabs.
  *
  * Pairs with services/safe_download.py — that module patches HF
  * downloads to detect mid-stream stalls and recover automatically.
@@ -23,30 +30,19 @@ import { fetchActiveDownloads, type ActiveDownload } from '../api/client'
  * of the previous "frozen progress bar in console" UX.
  */
 export function DownloadStatusBanner() {
-  const [downloads, setDownloads] = useState<ActiveDownload[]>([])
+  const [{ downloads, receivedAt }, setSnapshot] = useState(NO_DOWNLOADS)
+  const [now, setNow] = useState(0)
 
-  useEffect(() => {
-    let cancelled = false
-
-    const tick = async () => {
-      try {
-        const result = await fetchActiveDownloads()
-        if (!cancelled) setDownloads(result.downloads)
-      } catch {
-        // Endpoint not available (older backend) or transient — ignore
-        if (!cancelled) setDownloads([])
-      }
-    }
-
-    tick()
-    const interval = setInterval(tick, 2000)
-    return () => {
-      cancelled = true
-      clearInterval(interval)
-    }
-  }, [])
-
-  if (downloads.length === 0) return null
+  useLongPoll(
+    fetchActiveDownloads,
+    result => setSnapshot(prev => (
+      prev.downloads.length === 0 && result.downloads.length === 0
+        ? prev
+        : { downloads: result.downloads, receivedAt: Date.now() }
+    )),
+    // Endpoint not available (older backend) or transient — hide the banner
+    () => setSnapshot(NO_DOWNLOADS),
+  )
 
   // Pick the highest-priority download to feature: any "stalled"
   // first, then the one with the most progress (closest to done).
@@ -60,7 +56,19 @@ export function DownloadStatusBanner() {
   // takes top priority — the file is likely truncated and the user should
   // know rather than hit a mysterious load failure next generation.
   const incomplete = downloads.find(d => d.status === 'incomplete')
-  const stalled = downloads.find(d => d.seconds_since_progress > 30 && d.status !== 'incomplete')
+  const stalled = downloads.find(d => d.seconds_since_progress > STALLED_AFTER_SECONDS && d.status !== 'incomplete')
+
+  // A stalled download produces no new answers while it stays stalled, so
+  // its "No progress for Ns" counter advances locally.
+  const showsStallCounter = !!stalled
+  useEffect(() => {
+    if (!showsStallCounter) return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [showsStallCounter])
+
+  if (downloads.length === 0) return null
+
   const featured = incomplete ?? stalled ?? downloads.reduce((best, cur) => {
     const bestPct = best.total_bytes ? best.downloaded_bytes / best.total_bytes : 0
     const curPct = cur.total_bytes ? cur.downloaded_bytes / cur.total_bytes : 0
@@ -126,7 +134,7 @@ export function DownloadStatusBanner() {
               <DownloadProgressBar download={featured} stalled={!!stalled} />
               {stalled && (
                 <div className="text-[11px] text-text-secondary mt-1.5 leading-snug">
-                  No progress for {Math.round(featured.seconds_since_progress)}s.
+                  No progress for {Math.round(featured.seconds_since_progress + Math.max(0, now - receivedAt) / 1000)}s.
                   The download will resume from where it left off as soon as
                   the connection recovers — no action needed from you.
                 </div>

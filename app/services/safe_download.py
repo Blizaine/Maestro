@@ -156,6 +156,31 @@ def get_active_downloads() -> list:
         return results
 
 
+# The UI shows "Download is slow — waiting for retry" past this many seconds
+# without progress (DownloadStatusBanner.tsx mirrors it).
+STALLED_AFTER_SECONDS = 30
+
+
+def downloads_change_key(downloads: list) -> tuple:
+    """What the download banner shows, reduced to a comparable value.
+
+    `seconds_since_progress` grows every second, so only whether it crossed
+    the stall threshold counts; otherwise a stalled download would look like
+    a change on every read.
+    """
+    return tuple(sorted(
+        (
+            d["file_id"],
+            d.get("filename"),
+            d.get("status"),
+            d.get("downloaded_bytes"),
+            d.get("total_bytes"),
+            d.get("seconds_since_progress", 0) > STALLED_AFTER_SECONDS,
+        )
+        for d in downloads
+    ))
+
+
 def _record_download_progress(
     file_id: str,
     filename: str,
