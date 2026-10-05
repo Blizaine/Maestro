@@ -29,6 +29,10 @@ def planning_reference_inputs(params: dict) -> dict:
             continue
         if str(reference.get("type") or reference.get("kind") or "").lower() != "image":
             continue
+        if reference.get("image_intent") == "object":
+            # Legacy cast planners describe people, not props. The object
+            # stays in the typed Omni manifest for H3's render compiler.
+            continue
         path = str(reference.get("path") or "").strip()
         if not path or not os.path.isfile(path):
             continue

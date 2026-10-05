@@ -617,7 +617,7 @@ class H3CameraCoverageTests(unittest.TestCase):
         self.assertEqual(result["planning_warnings"], [])
         self.assertIn("eases the hinged panel flush", result["segments"][0]["shots"][0]["action"])
 
-    def test_postrepair_review_skips_omission_when_a_hard_preview_error_remains(self):
+    def test_postrepair_reviews_omission_without_clearing_a_hard_preview_error(self):
         actions = [
             "Ada lifts a red folder from the desk.",
             "Ada carries the folder to the archive doorway.",
@@ -685,7 +685,7 @@ class H3CameraCoverageTests(unittest.TestCase):
         first_window_diagnostics = " ".join(result["planning_diagnostics"]).casefold()
         self.assertIn("previews later source event e3", first_window_diagnostics)
         self.assertTrue(result["planning_warnings"])
-        self.assertEqual(review_count, 1, calls)
+        self.assertEqual(review_count, 2, calls)
         self.assertEqual(
             sum("REPAIR ONLY THIS SEGMENT" in call.get("prompt", "") for call in calls),
             1,

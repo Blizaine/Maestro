@@ -1,0 +1,32 @@
+{
+  "model": {
+    "name": "DaSiWa Krea 2 Turbo UC (Mature, Experimental)",
+    "architecture": "krea2_turbo",
+    "description": "Official DaSiWa Krea 2 DarkDesire V3 Turbo UC checkpoint. Fast distilled text-to-image variant.",
+    "selector_help": "MATURE MODE REQUIRED — experimental 8-step Turbo UC image generation. Maestro keeps this Turbo workflow CFG-free (guidance locked at 0). Set a Civitai API key in Settings > Services before downloading.",
+    "nsfw_only": true,
+    "URLs": [
+      "DasiwaKrea2TurboRaw_darkdesireV3TurboUC_3250905.safetensors"
+    ],
+    "download_sources": {
+      "DasiwaKrea2TurboRaw_darkdesireV3TurboUC_3250905.safetensors": {
+        "url": "https://civitai.com/api/download/models/3362930?fileId=3250905",
+        "sha256": "1435f17badf998894ed6db2228a39b973b489be7782c119da5075dd303b6a24e",
+        "size_bytes": 26283336596
+      }
+    },
+    "source_repo": "https://civitai.com/models/2760803/dasiwa-krea2-or-turbo-or-raw",
+    "source_revision": "3362930:3250905",
+    "source_sha256": "1435f17badf998894ed6db2228a39b973b489be7782c119da5075dd303b6a24e",
+    "source_size_bytes": 26283336596,
+    "license_name": "Krea Open Source License and DaSiWa creator distribution terms",
+    "license_url": "https://civitai.com/models/2760803/dasiwa-krea2-or-turbo-or-raw"
+  },
+  "prompt": "a fox walking in fresh snow at golden hour, natural light, detailed fur",
+  "negative_prompt": "",
+  "batch_size": 1,
+  "denoising_strength": 1.0,
+  "masking_strength": 1.0,
+  "num_inference_steps": 8,
+  "guidance_scale": 0
+}

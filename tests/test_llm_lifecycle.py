@@ -173,13 +173,26 @@ class LlmLifecycleTests(unittest.TestCase):
                     "editing_style": "Anticipation followed by explosive impacts",
                     "ambient_audio": "Wind and tumbling stone",
                 })
-            number = schema["segment"]["minimum"]
-            duration = durations[number - 1]
-            return json.dumps({"segment": number, "shots": [{
-                "end_seconds": duration * (index + 1) / 4,
-                "framing": "Wide view of the two fighters",
-                "camera": "a deliberate tracking shot",
-            } for index in range(4)]})
+            # Long locked passages now use source-owned event cards. Supply
+            # valid camera-only fields so this lifecycle test does not invoke
+            # repairs for the retired shots response shape.
+            def camera_value(field_schema, field=""):
+                if "const" in field_schema:
+                    return field_schema["const"]
+                if field_schema.get("type") == "object":
+                    return {key: camera_value(value, key)
+                            for key, value in field_schema["properties"].items()}
+                if field_schema.get("type") == "integer":
+                    return field_schema["minimum"]
+                return {
+                    "coverage": "A lateral medium view keeps the ruins and fighters in frame.",
+                    "framing": "Wide view of the two fighters",
+                    "camera": "A deliberate tracking shot",
+                    "transition": "continuous reframe",
+                    "sound_effects": "Wind and tumbling stone",
+                }.get(field, "Readable physical action")
+
+            return json.dumps(camera_value(kwargs["json_schema"]))
 
         result = plan_h3_story_segments(
             prompt, segment_durations=durations, mode="sliding_window",

@@ -3,6 +3,34 @@ const {
   needsCuda13DriverUpdate,
   runtimeProfile,
 } = require("./launcher_profile")
+
+const localWebEndpoint = (local) => {
+  if (
+    !local
+    || typeof local.url !== "string"
+    || local.url.includes("{{")
+    || local.url.includes("}}")
+  ) return null
+
+  try {
+    const url = new URL(local.url)
+    const port = String(local.port ?? "")
+    const defaultPort = url.protocol === "http:" ? "80" : url.protocol === "https:" ? "443" : ""
+    const urlPort = url.port || defaultPort
+    if (
+      !["http:", "https:"].includes(url.protocol)
+      || !url.hostname
+      || !/^[1-9]\d{0,4}$/.test(port)
+      || Number(port) > 65535
+      || urlPort !== port
+    ) return null
+
+    return { url: local.url, port }
+  } catch {
+    return null
+  }
+}
+
 module.exports = {
   version: "8.0",
   title: "Maestro",
@@ -88,13 +116,13 @@ module.exports = {
       }]
     } else if (installed) {
       if (running.start) {
-        let local = info.local("start.js")
-        if (local && local.url) {
+        const endpoint = localWebEndpoint(info.local("start.js"))
+        if (endpoint) {
           return [{
             default: true,
             icon: "fa-solid fa-rocket",
             text: "Open Web UI",
-            href: local.url,
+            href: endpoint.url,
           }, {
             icon: "fa-solid fa-shield-halved",
             text: running.tailscale_setup
@@ -102,7 +130,7 @@ module.exports = {
               : "Secure Remote Access (Tailscale)",
             href: "tailscale_setup.js",
             params: {
-              port: local.port,
+              port: endpoint.port,
             },
           }, {
             icon: 'fa-solid fa-terminal',
@@ -117,13 +145,13 @@ module.exports = {
           }]
         }
       } else if (running.start_sol) {
-        let local = info.local("start_sol.js")
-        if (local && local.url) {
+        const endpoint = localWebEndpoint(info.local("start_sol.js"))
+        if (endpoint) {
           return [{
             default: true,
             icon: "fa-solid fa-bolt",
             text: "Open Web UI (Sol Runtime)",
-            href: local.url,
+            href: endpoint.url,
           }, {
             icon: "fa-solid fa-shield-halved",
             text: running.tailscale_setup
@@ -131,7 +159,7 @@ module.exports = {
               : "Secure Remote Access (Tailscale)",
             href: "tailscale_setup.js",
             params: {
-              port: local.port,
+              port: endpoint.port,
             },
           }, {
             icon: 'fa-solid fa-terminal',

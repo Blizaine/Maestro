@@ -1,6 +1,7 @@
 import { Settings, X } from 'lucide-react'
 import { useEffect, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
 import { useStore } from '../../stores/useStore'
+import { AvatarControls } from './AvatarControls'
 import { ViggleControls } from './ViggleControls'
 import { useIsMobileSidecar } from '../../lib/useIsMobile'
 import { GenerationModeSelector } from './GenerationModeSelector'
@@ -170,6 +171,7 @@ export function Sidebar() {
   )
   const isFramesWorkflow = isVideo && Number(imageMode) === 0 && videoWorkflow === 'frames'
   const isAnimate = isVideo && videoWorkflow === 'animate'
+  const isAvatarWorkflow = isVideo && videoWorkflow === 'avatar'
   const isReferencesWorkflow = isVideo && Number(imageMode) === 0 && videoWorkflow === 'references'
   const isMultiClip = isVideo && imageMode === 2
   const isContinue = isVideo && imageMode === 3
@@ -242,7 +244,7 @@ export function Sidebar() {
           <ToolsPanel forcedTool="revoice" embedded />
         ) : (
         <>
-        {(isImage || isVideo) && !isAnimate && !isOmniReference && !modelOptions?.minimax_h3_media_sources && (
+        {(isImage || isVideo) && !isAnimate && !isAvatarWorkflow && !isOmniReference && !modelOptions?.minimax_h3_media_sources && (
           <ControlVideoSection galleryOnly />
         )}
         {/* Video Transform workflows use the established Edit engines. */}
@@ -252,6 +254,7 @@ export function Sidebar() {
             start/end anchors — so the generic Duration slider and
             start/end ImageUpload don't apply there. */}
         {isAnimate && <ViggleControls />}
+        {isAvatarWorkflow && <AvatarControls />}
         {/* Frames (image_mode 0) AND Extend (image_mode 3) both use the unified
             InputsPanel. In Extend mode its first tile is the source video to
             continue from; otherwise it's the start frame. */}

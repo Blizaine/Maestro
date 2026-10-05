@@ -2,8 +2,8 @@ import { useState, useEffect, useMemo, useCallback } from 'react'
 import { ArrowLeft, Download, Tag, Loader2, Check, ExternalLink, KeyRound, Boxes, AlertTriangle } from 'lucide-react'
 import DOMPurify from 'dompurify'
 import { useStore } from '../../stores/useStore'
-import { fetchLoraDirectories, fetchCheckpointArchitectures } from '../../api/client'
-import type { CheckpointArchitecture } from '../../api/client'
+import { fetchLoraDirectories, fetchCheckpointArchitectures, inspectH3Checkpoint } from '../../api/client'
+import type { CheckpointArchitecture, H3CheckpointInspection } from '../../api/client'
 import type { CivitAIModel, CivitAIModelVersion, CivitAIFile, CivitAIDownload } from '../../types'
 import { formatBytes } from '../../lib/format'
 
@@ -65,7 +65,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
   const activeDownload = useMemo(() => {
     if (!file) return undefined
     return downloads.reduce<CivitAIDownload | undefined>((newest, candidate) => {
-      if (candidate.filename !== file.name) return newest
+      if (candidate.filename !== file.name && candidate.source_filename !== file.name) return newest
       if (!newest) return candidate
       const newestStarted = Number(newest.started_at) || 0
       const candidateStarted = Number(candidate.started_at) || 0
@@ -77,6 +77,27 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
   // For checkpoints we don't pick a loras directory — we pick which supported
   // base architecture to register the full model under.
   const baseModel = version?.baseModel || ''
+  const isH3Checkpoint = isCheckpoint && baseModel.trim().toLowerCase() === 'minimax h3'
+  const [h3SamplingProfile, setH3SamplingProfile] = useState('auto')
+  const [h3NativeWorkflow, setH3NativeWorkflow] = useState('auto')
+  const [h3QkvLayout, setH3QkvLayout] = useState('auto')
+  const [h3Inspection, setH3Inspection] = useState<H3CheckpointInspection | null>(null)
+  const [inspectionRetry, setInspectionRetry] = useState(0)
+  const [downloadError, setDownloadError] = useState<string | null>(null)
+  const [downloadStarting, setDownloadStarting] = useState(false)
+  useEffect(() => {
+    setH3SamplingProfile('auto')
+    setH3NativeWorkflow('auto')
+    setH3QkvLayout('auto')
+    setDownloadError(null)
+    if (!isH3Checkpoint) return
+    const choices = version?.files || []
+    const supportedFile = choices.findIndex(candidate =>
+      /\.gguf$/i.test(candidate.name) || (/\.(safetensors|sft)$/i.test(candidate.name) && ['int4', 'w4a8', 'int8', 'bf16', 'fp16', 'fp8'].includes(candidate.metadata?.fp?.toLowerCase() || ''))
+    )
+    setSelectedFileIdx(supportedFile >= 0 ? supportedFile : 0)
+  }, [isH3Checkpoint, version])
+  useEffect(() => { setH3QkvLayout('auto') }, [model.id, version?.id, file?.id])
   const [architectures, setArchitectures] = useState<CheckpointArchitecture[]>([])
   const [targetArchitecture, setTargetArchitecture] = useState('')
   const [checkpointSupportReason, setCheckpointSupportReason] = useState<string | null>(null)
@@ -96,23 +117,32 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
     setArchitectures([])
     setTargetArchitecture('')
     setCheckpointSupportReason(null)
+    setH3Inspection(null)
     setCheckpointArchitectureLoading(true)
-    fetchCheckpointArchitectures(baseModel)
+    const inspection = isH3Checkpoint && version && file
+      ? inspectH3Checkpoint({ model_id: model.id, version_id: version.id, file_id: file.id,
+          h3_sampling_profile: h3SamplingProfile, h3_native_workflow: h3NativeWorkflow, h3_qkv_layout: h3QkvLayout })
+          .then(result => {
+            if (!cancelled) setH3Inspection(result)
+            return { ...result, unsupported_reason: result.reason }
+          })
+      : fetchCheckpointArchitectures(baseModel)
+    inspection
       .then(r => {
         if (cancelled) return
         setArchitectures(r.architectures)
         setTargetArchitecture(r.suggested_architecture || '')
         setCheckpointSupportReason(r.supported ? null : r.unsupported_reason)
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (cancelled) return
-        setCheckpointSupportReason('Could not verify checkpoint compatibility. Try again after updating or restarting Maestro.')
+        setCheckpointSupportReason(error instanceof Error ? error.message : 'Could not verify checkpoint compatibility. Try again after updating or restarting Maestro.')
       })
       .finally(() => {
         if (!cancelled) setCheckpointArchitectureLoading(false)
       })
     return () => { cancelled = true }
-  }, [isCheckpoint, baseModel])
+  }, [isCheckpoint, baseModel, isH3Checkpoint, model.id, version, file, h3SamplingProfile, h3NativeWorkflow, h3QkvLayout, inspectionRetry])
 
   // Group architectures by family for an <optgroup> picker.
   const groupedArchs = useMemo(() => {
@@ -128,10 +158,10 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
   const LARGE_CKPT_BYTES = 12 * 1024 * 1024 * 1024 // 12 GB
   const [autoQuantize, setAutoQuantize] = useState(false)
   useEffect(() => {
-    if (isCheckpoint) setAutoQuantize(fileBytes > LARGE_CKPT_BYTES)
-  }, [isCheckpoint, fileBytes, LARGE_CKPT_BYTES])
+    if (isCheckpoint) setAutoQuantize(fileBytes > LARGE_CKPT_BYTES && (!isH3Checkpoint || ['bf16', 'fp16'].includes(file?.metadata?.fp?.toLowerCase() || '')))
+  }, [isCheckpoint, isH3Checkpoint, file, fileBytes, LARGE_CKPT_BYTES])
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     if (!file || !version) return
     if (isCheckpoint && (checkpointArchitectureLoading || checkpointSupportReason || !targetArchitecture)) return
 
@@ -152,6 +182,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
       filename: file.name,
       model_id: model.id,
       version_id: version.id,
+      file_id: file.id,
       trained_words: trainedWords,
       model_name: model.name,
       images: images.slice(0, 4).map(img => ({ url: img.url })),
@@ -166,10 +197,19 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
       // sort by newest release.
       published_at: version.publishedAt || undefined,
     }
-    if (isCheckpoint) {
-      startDownload({ ...common, target_arch: '', kind: 'checkpoint', target_architecture: targetArchitecture, auto_quantize: autoQuantize })
-    } else {
-      startDownload({ ...common, target_arch: localArch || '', target_dir_name: targetDirOverride || autoTargetDir || undefined })
+    setDownloadStarting(true)
+    setDownloadError(null)
+    try {
+      if (isCheckpoint) {
+        await startDownload({ ...common, target_arch: '', kind: 'checkpoint', target_architecture: targetArchitecture,
+          auto_quantize: autoQuantize, ...(isH3Checkpoint ? { h3_sampling_profile: h3SamplingProfile, h3_native_workflow: h3NativeWorkflow, h3_qkv_layout: h3QkvLayout } : {}) })
+      } else {
+        await startDownload({ ...common, target_arch: localArch || '', target_dir_name: targetDirOverride || autoTargetDir || undefined })
+      }
+    } catch (error) {
+      setDownloadError(error instanceof Error ? error.message : 'Could not start the download.')
+    } finally {
+      setDownloadStarting(false)
     }
   }
 
@@ -320,7 +360,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                 value={targetArchitecture}
                 onChange={e => setTargetArchitecture(e.target.value)}
                 disabled={checkpointArchitectureLoading || !!checkpointSupportReason}
-                className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
+                className={`w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue ${isH3Checkpoint ? 'hidden' : ''}`}
               >
                 <option value="">
                   {checkpointArchitectureLoading ? 'Checking compatibility…' : 'Select base architecture…'}
@@ -333,15 +373,70 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                   </optgroup>
                 ))}
               </select>
+              {isH3Checkpoint && (
+                <div className="space-y-2">
+                  <p className="text-xs text-text-secondary flex items-center gap-1.5">
+                    {checkpointArchitectureLoading && <Loader2 size={12} className="animate-spin" />}
+                    {checkpointArchitectureLoading ? 'Inspecting the selected H3 file…'
+                      : h3Inspection?.supported ? `Verified H3 · ${h3Inspection.profile?.quantization_format === 'asym_w4a8_int8' ? 'W4A8 INT4 · ' : h3Inspection.profile?.quantization_format === 'gguf' ? `GGUF ${h3Inspection.profile.gguf_quant_types?.join(' / ') || ''} · ` : ''}${h3Inspection.profile?.sampling_profile} · ${h3Inspection.profile?.default_steps} steps`
+                        : 'H3 file verification required'}
+                  </p>
+                  {h3Inspection?.supported && (
+                    <p className="text-[10px] text-text-muted">
+                      {architectures.length > 1 ? 'Adds Frames and References models sharing one checkpoint.' : 'Adds a Frames model for this FL2VA checkpoint.'}
+                      {' '}Matching installed weights are verified and reused.
+                    </p>
+                  )}
+                  {(h3Inspection?.profile?.needs_selection?.includes('native_workflow') || h3NativeWorkflow !== 'auto') && (
+                    <label className="block text-[11px] text-text-secondary">
+                      Native workflow (as listed by the creator)
+                      <select value={h3NativeWorkflow} onChange={event => setH3NativeWorkflow(event.target.value)}
+                        className="mt-1 w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm">
+                        <option value="auto">Detect from checkpoint metadata</option>
+                        <option value="fl2va">Frames / first-last frames (FL2VA)</option>
+                        <option value="ref2va">References / hybrid (Ref2VA)</option>
+                      </select>
+                    </label>
+                  )}
+                  {(h3Inspection?.profile?.needs_selection?.includes('qkv_layout') || h3QkvLayout !== 'auto') && (
+                    <label className="block text-[11px] text-text-secondary">
+                      QKV row order (as listed by the creator)
+                      <select value={h3QkvLayout} onChange={event => setH3QkvLayout(event.target.value)}
+                        className="mt-1 w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm">
+                        <option value="auto">Detect from checkpoint metadata</option>
+                        <option value="grouped">Grouped Q / K / V (Comfy exports)</option>
+                        <option value="interleaved">Head-interleaved (native H3 exports)</option>
+                      </select>
+                      <span className="block mt-1 text-text-muted">This GGUF file omits row-order metadata. Follow the creator's conversion instructions; the wrong order can produce noise.</span>
+                    </label>
+                  )}
+                  {(h3Inspection?.profile?.needs_selection?.some(choice => choice === 'sampling_profile' || choice === 'sampling_recipe') || h3SamplingProfile !== 'auto') && (
+                    <label className="block text-[11px] text-text-secondary">
+                      Sampling recipe (as listed by the creator)
+                      <select value={h3SamplingProfile} onChange={event => setH3SamplingProfile(event.target.value)}
+                        className="mt-1 w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm">
+                        <option value="auto">Detect from checkpoint metadata</option>
+                        <option value="standard">Standard / non-distilled</option>
+                        <option value="turbo">Baked Turbo / 8-step</option>
+                        <option value="fused">Baked fused / 4-step</option>
+                      </select>
+                    </label>
+                  )}
+                </div>
+              )}
               <p className="text-[10px] text-text-muted mt-1 leading-snug">
-                The base model this checkpoint was trained for{baseModel ? ` (CivitAI base: ${baseModel})` : ''}.
-                Compatible SafeTensor shapes are verified before the file is installed.
+                {isH3Checkpoint
+                  ? 'Supports BF16 / FP16, scaled FP8, INT8 ConvRot, W4A8 INT4, and supported GGUF quants. The layout is checked before downloading, then verified again with its SHA-256 before installation.'
+                  : <>The base model this checkpoint was trained for{baseModel ? ` (CivitAI base: ${baseModel})` : ''}. Compatible SafeTensor shapes are verified before the file is installed.</>}
               </p>
               {checkpointSupportReason && (
                 <div className="flex items-start gap-2 mt-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-text-primary leading-snug">
                   <AlertTriangle size={13} className="text-indicator-warning shrink-0 mt-0.5" />
                   <span>{checkpointSupportReason}</span>
                 </div>
+              )}
+              {isH3Checkpoint && checkpointSupportReason && !checkpointArchitectureLoading && (
+                <button onClick={() => setInspectionRetry(value => value + 1)} className="mt-1 text-[11px] text-accent-blue hover:underline">Check again</button>
               )}
             </div>
           ) : (
@@ -363,7 +458,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
           )}
 
           {/* Ask-per-download int8 (checkpoint only) */}
-          {isCheckpoint && architectures.length > 0 && (
+          {isCheckpoint && architectures.length > 0 && (!isH3Checkpoint || ['bf16', 'fp16'].includes(file?.metadata?.fp?.toLowerCase() || '')) && (
             <label className="flex items-start gap-2 cursor-pointer">
               <input
                 type="checkbox"
@@ -383,6 +478,9 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
 
           {/* Download button (with optional API-key advisory above) */}
           <div className="pt-2 space-y-2">
+            {downloadError && (
+              <div role="alert" className="text-[11px] text-red-400 bg-red-500/10 border border-red-500/30 rounded px-2 py-1.5">{downloadError}</div>
+            )}
             {activeDownload && activeDownload.status !== 'failed' ? (
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-xs">
@@ -390,7 +488,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                     {activeDownload.status === 'completed' ? (
                       <span className="flex items-center gap-1 text-accent-green"><Check size={12} /> {isCheckpoint ? 'Imported — added to models' : 'Downloaded'}</span>
                     ) : (
-                      <span className="flex items-center gap-1"><Loader2 size={12} className="animate-spin" /> Downloading...</span>
+                      <span className="flex items-center gap-1"><Loader2 size={12} className="animate-spin" /> {activeDownload.message || 'Downloading...'}</span>
                     )}
                   </span>
                   {activeDownload.status === 'downloading' && (
@@ -460,11 +558,11 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                 )}
                 <button
                   onClick={handleDownload}
-                  disabled={!file || (isCheckpoint && (checkpointArchitectureLoading || !!checkpointSupportReason || !targetArchitecture))}
+                  disabled={downloadStarting || !file || (isCheckpoint && (checkpointArchitectureLoading || !!checkpointSupportReason || !targetArchitecture))}
                   className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-accent-blue text-white text-sm rounded-lg hover:bg-accent-blue-hover transition-colors disabled:opacity-50"
                 >
                   <Download size={14} />
-                  {activeDownload?.status === 'failed'
+                  {downloadStarting ? 'Verifying import…' : activeDownload?.status === 'failed'
                     ? `Retry ${file?.name || (isCheckpoint ? 'checkpoint' : 'LoRA')}`
                     : isCheckpoint
                       ? `Import ${file?.name || 'checkpoint'}`

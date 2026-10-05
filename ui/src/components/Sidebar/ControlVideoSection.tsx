@@ -111,6 +111,7 @@ export function ControlVideoSection({ galleryOnly = false }: { galleryOnly?: boo
             label={uploading ? 'Uploading...' : isImageMode ? 'Drop control image (.png, .jpg, .webp)' : 'Drop control video (.mp4, .webm)'}
             accept={isImageMode ? '.png,.jpg,.jpeg,.webp,.bmp' : '.mp4,.webm,.avi,.mov'}
             filename={restoredGuideFilename}
+            videoUrl={!isImageMode && restoredGuideFilename ? api.getFileUrl(restoredGuideFilename) : undefined}
             onFile={handleUpload}
             onClear={() => {
               setParam(guideKey, undefined)

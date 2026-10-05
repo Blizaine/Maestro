@@ -124,7 +124,8 @@ class TestDownloadState(unittest.TestCase):
         self.assertIn("download.status === 'completed'", store_source)
         self.assertIn("!!download.model_type", store_source)
         self.assertIn("await api.reloadModels()", store_source)
-        self.assertIn("await get().loadModels()", store_source)
+        # Catalog refresh must preserve the active generation's parameters.
+        self.assertIn("await get().loadModels({ catalogOnly: true })", store_source)
         self.assertNotIn("reloadModels", detail_source)
 
     def test_terminal_helpers_set_completed_at_under_registry_lock(self):

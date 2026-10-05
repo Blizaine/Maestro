@@ -14,12 +14,14 @@ import {
   h3OmniSequenceWindowCount,
   h3TimelineFrames,
   h3WindowOverrideKey,
+  normalizeH3ClipFrames,
   normalizeH3NativeFrames,
   recommendedH3PassProfile,
   recommendedH3OmniSequenceProfile,
 } from '../../lib/h3Memory'
 import { DurationPresetControl } from './DurationPresetControl'
 import { viggleTimeline } from '../../lib/viggle'
+import { H3DurationGuidance } from './H3DurationGuidance'
 
 export const formatSeconds = (seconds: number) => {
   const rounded = Math.round(seconds * 10) / 10
@@ -140,9 +142,10 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
     ? LONG_FORM_MAX_SECONDS
     : Math.max(minDuration, nativeMaxSeconds ?? LONG_FORM_MAX_SECONDS)
   const discardFrames = swDefaults?.discard_last_frames ?? 0
-  const overlapSeconds = overlap / fps
-  const discardSeconds = discardFrames / fps
-  const firstWindowSeconds = isVideoExtend
+  const independentOmniClips = isOmniReference && !nativeOmniContinuation
+  const overlapSeconds = independentOmniClips ? 0 : overlap / fps
+  const discardSeconds = independentOmniClips ? 0 : discardFrames / fps
+  const firstWindowSeconds = isVideoExtend && !independentOmniClips
     ? continuationFirstWindowSeconds(windowSize, overlap, fps)
     : windowSize
   const durationPlan = durationWindowPlan(
@@ -205,14 +208,35 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
     reference.type === 'audio' && reference.audio_intent === 'drive'
   ))
   const driveDuration = Number(driveReference?.duration_seconds)
+  const referenceVideoDuration = studioVideoWorkflow === 'references' && isOmniReference
+    ? (h3References ?? []).reduce((longest, reference) => {
+        const followsTimeline = reference.follow_timeline
+          ?? (!reference.library_character_id && reference.video_intent !== 'character')
+        if (reference.type !== 'video'
+          || !followsTimeline
+          || reference.refmod_path
+          || (reference as { _maestro_generated_continuity?: boolean })._maestro_generated_continuity) {
+          return longest
+        }
+        const durationSeconds = Number(reference.duration_seconds)
+        const sourceDurationSeconds = Number(reference.source_duration_seconds)
+        const seconds = Number.isFinite(durationSeconds) && durationSeconds > 0
+          ? durationSeconds
+          : sourceDurationSeconds
+        return Number.isFinite(seconds) && seconds > longest ? seconds : longest
+      }, 0)
+    : 0
+  const hasReferenceVideoTimeline = referenceVideoDuration > 0
   const hasTimedGuide = Boolean(audioGuide || videoGuide)
   const viggleSourceSeconds = useStore(s => viggleTimeline(s.params).length)
   const autoSourceSeconds = Number.isFinite(driveDuration) && driveDuration > 0
     ? driveDuration
+    : hasReferenceVideoTimeline ? referenceVideoDuration
     : modelType === 'viggle_animate' && viggleSourceSeconds ? viggleSourceSeconds
       : hasTimedGuide ? duration : null
   const autoSourceLabel = Number.isFinite(driveDuration) && driveDuration > 0
     ? 'music / performance timeline'
+    : hasReferenceVideoTimeline ? 'reference video timeline'
     : videoGuide ? 'control video' : audioGuide ? 'audio track' : undefined
 
   return (
@@ -231,15 +255,16 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
         enablePlanningModes={isH3 || isLtx || supportsSlidingWindows}
         planningMode={durationPlanningMode}
         onPlanningModeChange={mode => {
-          if (mode === 'auto' && extendedDuration) setExtendedDuration(false)
           setParam('_duration_planning_mode', mode)
+          if (mode === 'auto' && extendedDuration) setExtendedDuration(false)
         }}
+        useSelectedWindowForWindowMode={extendedDuration}
         autoPrompt={durationPlanningPrompt}
         autoSourceSeconds={autoSourceSeconds == null ? null : Math.round(autoSourceSeconds * fps) / fps}
         autoSourceLabel={autoSourceLabel}
         autoMediaOnly={modelType === 'viggle_animate'}
         autoWindowSeconds={planningWindowSeconds}
-        autoFirstWindowSeconds={isVideoExtend
+        autoFirstWindowSeconds={isVideoExtend && !independentOmniClips
           ? continuationFirstWindowSeconds(planningWindowSeconds, overlap, fps)
           : planningWindowSeconds}
         nativeTiming={{ minimumFrames: Math.round(minDuration * fps), frameStep, fps }}
@@ -292,6 +317,7 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
 /** Shared by the Duration panel and specialized Transform settings. */
 export function WindowSettings() {
   const studioDuration = useStore(s => s.durationSeconds)
+  const durationPlanningMode = useStore(s => s.params._duration_planning_mode ?? 'auto')
   const generationMode = useStore(s => s.generationMode)
   const editSubMode = useStore(s => s.editSubMode)
   const outpaintTrimStart = useStore(s => s.outpaintTrimStart)
@@ -319,6 +345,7 @@ export function WindowSettings() {
   const h3FirstLastMultiWindow = useStore(s => s.params.minimax_h3_multi_window === true)
   const ltxMultiWindow = useStore(s => s.params.ltx_multi_window === true)
   const modelType = useStore(s => s.params.model_type)
+  const studioVideoWorkflow = useStore(s => s.studioVideoWorkflow)
   const resolution = useStore(s => s.params.resolution)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
   const isOutpaint = generationMode === 'avatar' && editSubMode === 'outpaint'
@@ -414,6 +441,17 @@ export function WindowSettings() {
     && safeWindowSeconds != null
     && windowSize > safeWindowSeconds + 0.0001
   )
+  const sourceContextFrames = isH3 && (isOutpaint || studioVideoWorkflow === 'extend')
+    ? Math.max(0, overlap - 1) : 0
+  // A capacity of 30s does not make a shorter requested clip a 30s workload.
+  // Estimate the largest actual pass, including source-tail context in Extend.
+  const generatedWindowFrames = Math.min(currentWindowFrames, normalizeH3ClipFrames(
+    Math.round(duration * fps) + sourceContextFrames,
+    minimumFrames,
+    maximumFrames,
+    frameStep,
+  ))
+  const showH3Guidance = generationMode === 'video' && supportsH3ExtendedDuration(modelOptions)
 
   if (
     modelType === 'viggle_animate'
@@ -422,20 +460,6 @@ export function WindowSettings() {
 
   return (
     <div className="space-y-3">
-      {generationMode === 'video' && supportsH3ExtendedDuration(modelOptions) && (
-        <label className="flex items-start gap-2 rounded-lg border border-border p-2.5 text-xs">
-          <input type="checkbox" className="mt-0.5 accent-accent-blue"
-            checked={extendedDuration}
-            onChange={event => setExtendedDuration(event.target.checked)} />
-          <span>
-            <span className="text-text-primary">Allow 30s clips <span className="text-amber-400">· Experimental</span></span>
-            <span className="block mt-1 text-[10px] text-text-muted">
-              Raises Window Length to 30s so one clip can run without continuation windows.
-              Uses more VRAM and takes longer; quality may drift. Auto restores the recommended limit.
-            </span>
-          </span>
-        </label>
-      )}
       <div>
         <div className="flex items-center justify-between mb-1.5">
           <div className="flex items-center gap-1.5">
@@ -506,24 +530,56 @@ export function WindowSettings() {
             setWindowSize(isH3 ? sliderValue / fps : sliderValue)
           }}
         />
+        {generationMode === 'video' && (
+          <p className="text-[9px] leading-snug text-text-muted mt-1" data-testid="window-length-behavior">
+            {durationPlanningMode === 'windows'
+              ? 'Window count stays fixed; total duration follows.'
+              : durationPlanningMode === 'duration'
+                ? `Total stays ${formatSeconds(studioDuration)}; choose Window to follow length.`
+                : 'Auto follows your prompt or source media.'}
+          </p>
+        )}
         {showSlidingWindow && (
           <div className="text-[10px] text-text-muted mt-1">
             {windowCount} {omniReferenceSequence && !nativeOmniContinuation ? 'independent clip' : 'window'}{windowCount > 1 ? 's' : ''} of up to {formatSeconds(windowSize)}
           </div>
         )}
-        {windowRecommendation != null && (
+        {showH3Guidance && <H3DurationGuidance
+          frames={generatedWindowFrames}
+          selectedFrames={currentWindowFrames}
+          minimumFrames={minimumFrames}
+          maximumFrames={maximumFrames}
+          continuationFrames={sourceContextFrames > 0 || (windowCount > 1 && (!isOmniReference || nativeOmniContinuation)) ? Math.max(0, overlap - 1) : 0}
+        />}
+        {windowRecommendation != null && (!showH3Guidance || unsupportedAutoResolution
+          || (exceedsSafeRecommendation && currentWindowFrames > generatedWindowFrames)) && (
           <div className={`text-[10px] mt-1 ${unsupportedAutoResolution || exceedsSafeRecommendation ? 'text-amber-400' : 'text-text-muted'}`}>
             {unsupportedAutoResolution
               ? (locked
                 ? `Manual override enabled: ${resolution} is above the automatic profile for ${totalVramGb.toFixed(0)} GB and may run out of VRAM.`
                 : `Auto does not recommend ${resolution} on ${totalVramGb.toFixed(0)} GB. Choose ${windowRecommendation.fallbackResolution ?? 'a lower resolution'}, or manually set Window Length to try it experimentally.`)
               : (exceedsSafeRecommendation
-                ? `Manual override exceeds the ${formatSeconds(safeWindowSeconds!)} recommendation for ${totalVramGb.toFixed(0)} GB at this resolution and may run out of VRAM.`
+                ? `Window limit exceeds the ${formatSeconds(safeWindowSeconds!)} recommendation for ${totalVramGb.toFixed(0)} GB at this resolution. A pass using the full limit may run out of VRAM.`
                 : `Recommended: ${formatSeconds(safeWindowSeconds!)} for ${totalVramGb.toFixed(0)} GB at this resolution. The slider remains available through ${formatSeconds(maximumFrames / fps)}.${omniReferenceSequence && (windowRecommendation.referenceMarginFrames ?? 0) > 0 ? ' Includes Ref2VA reference headroom.' : ''}`)}
           </div>
         )}
       </div>
 
+      {showH3Guidance && (
+        <label className="flex items-start gap-2 rounded-lg border border-border p-2.5 text-xs">
+          <input type="checkbox" className="mt-0.5 accent-accent-blue"
+            checked={extendedDuration}
+            onChange={event => setExtendedDuration(event.target.checked)} />
+          <span>
+            <span className="text-text-primary">Allow 30s clips <span className="text-amber-400">· Experimental</span></span>
+            <span className="block mt-1 text-[10px] text-text-muted">
+              Raises Window Length to 30s so one clip can run without continuation windows.
+              Beyond 14.4s is outside the recommended H3 window and may be much slower or run out of memory.
+              Auto restores the recommended limit.
+            </span>
+          </span>
+        </label>
+      )}
       {supportsSlidingWindows && showSlidingWindow && overlapStep > 0 && (!omniReferenceSequence || nativeOmniContinuation) && (
         <details className="group/overlap rounded-lg border border-border px-2.5 py-2">
           <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-text-muted [&::-webkit-details-marker]:hidden">

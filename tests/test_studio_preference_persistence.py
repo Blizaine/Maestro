@@ -36,6 +36,23 @@ def _load_normalizers():
 
 
 class TestStudioPreferencePersistence(unittest.TestCase):
+    def test_avatar_workflow_and_model_survive_restart_and_unrelated_saves(self):
+        normalize = _load_normalizers()["_normalize_studio_preferences"]
+        saved = normalize({
+            "generation_mode": "video",
+            "studio_video_workflow": "avatar",
+            "selected_model_per_mode": {"video": "longcat_avatar_multi"},
+        })
+        restored = normalize(json.loads(json.dumps(saved)))
+        updated = normalize({"audio_sub_mode": "music"}, current=restored)
+        self.assertEqual(updated["generation_mode"], "video")
+        self.assertEqual(updated["studio_video_workflow"], "avatar")
+        self.assertEqual(updated["selected_model_per_mode"]["video"], "longcat_avatar_multi")
+        # The existing avatar engine still represents Retake/Recast editing.
+        legacy_edit = normalize({"generation_mode": "avatar", "studio_video_workflow": "retake"})
+        self.assertEqual(legacy_edit["generation_mode"], "avatar")
+        self.assertEqual(legacy_edit["studio_video_workflow"], "retake")
+
     def test_krea_identity_settings_round_trip_per_model_and_legacy_save(self):
         normalize = _load_normalizers()["_normalize_studio_preferences"]
         settings = {

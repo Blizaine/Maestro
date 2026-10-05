@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from pathlib import Path, PureWindowsPath
+import sys
 import tempfile
 import threading
 import time
@@ -13,6 +14,13 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 import uuid
+
+import requests
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'app'))
+
+from services.download_control import create_download_control, download_scope
 
 
 class Response(dict):
@@ -27,10 +35,11 @@ class TestLoraUrlImport(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.app_dir = Path(self.temp.name) / 'app'
         self.app_dir.mkdir()
-        tree = ast.parse((Path(__file__).resolve().parents[1] / 'app/launch.py').read_text(encoding='utf-8'))
+        tree = ast.parse((ROOT / 'app/launch.py').read_text(encoding='utf-8'))
         names = {'hf_import_lora', '_safe_join', '_is_safe_path_component',
                  '_hf_disk_filename', '_is_minimax_h3_identity', '_is_qwen21_identity',
                  '_new_download_record', '_civitai_lora_arch', '_import_civitai_lora_by_url',
+                 '_update_download_record', '_start_import_download_worker', '_fail_download_record',
                  'civitai_download', '_is_safe_civitai_url', 'civitai_model_detail',
                  'civitai_search', 'civitai_base_models'}
         constants = {'HF_BASE_TO_LOCAL_DIR', '_GENERIC_HF_LORA_FILENAMES',
@@ -52,7 +61,11 @@ class TestLoraUrlImport(unittest.TestCase):
              'files': [{'primary': True, 'name': 'old.safetensors',
                         'downloadUrl': 'https://civitai.com/api/download/models/20'}]},
         ]}
-        self.http = SimpleNamespace(get=Mock(side_effect=self.provider_response), RequestException=OSError)
+        self.http = SimpleNamespace(
+            get=Mock(side_effect=self.provider_response),
+            RequestException=requests.RequestException,
+            Timeout=requests.Timeout,
+        )
         lora_dir = Mock(side_effect=lambda arch: str(self.app_dir / 'loras' / {
             'qwen_image_21_7B': 'qwen21', 'qwen_image_20B': 'qwen',
         }[arch]))
@@ -61,6 +74,7 @@ class TestLoraUrlImport(unittest.TestCase):
             'threading': threading, 'uuid': uuid, 'json': json,
             'Request': object, 'JSONResponse': Response,
             '__file__': str(self.app_dir / 'launch.py'), 'requests': self.http,
+            'create_download_control': create_download_control, 'download_scope': download_scope,
             'wgp': SimpleNamespace(server_config={}, get_lora_dir=lora_dir),
             '_civitai_downloads': {}, '_civitai_download_lock': threading.Lock(),
             'CIVITAI_BASE_URL': 'https://civitai.com/api/v1',

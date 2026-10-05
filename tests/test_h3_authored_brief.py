@@ -67,6 +67,25 @@ class AuthoredBriefTests(unittest.TestCase):
 
     def test_final_prompts_keep_complete_ai_actions_cameras_constraints_and_ending(self):
         source = " ".join(self.source.split())
+        authored_events = authored_timed_brief(source)["events"]
+        source_consequence_clauses = [
+            "whole body rocketing sideways like a cannonball for hundreds of meters",
+            "B's whole body embeds deep into the fractured mountainside",
+            "finally blasting off the platform edge to crater into the nearby cliff wall",
+            "whole body wrenches free from the mountainside debris",
+            "landing still locked in combat stance",
+            "fist winds gouging twin shallow trenches in the ground",
+            "nearby rubble sucked from ground to orbit the leg in rotation",
+            "stone platform wholly shattering and sinking, nearby statues snapping and flying apart",
+        ]
+        self.assertEqual(len(authored_events), len(source_consequence_clauses))
+
+        def assert_source_clauses_present(prompts, event_indices):
+            for event_index in event_indices:
+                clause = source_consequence_clauses[event_index]
+                self.assertIn(clause, authored_events[event_index]["text"])
+                self.assertIn(clause, prompts[event_index // 4])
+
         calls = []
         actions = [
             "Character A parries, winds up his fist, and punches Character B hundreds of meters into the cliff.",
@@ -78,8 +97,8 @@ class AuthoredBriefTests(unittest.TestCase):
             "The two briefly separate, taking positions at opposite ends; Character A sinks low and draws his fists back while Character B steps back, lowers his stance, and lifts one leg as rubble orbits its charged wind.",
             "A's ultimate fist and B's storm whip kick collide; the platform collapses and they remain frozen in clash pose.",
         ]
-        # Deliberately put a meaningful consequence beyond the former 330-char
-        # cut and make the complete prompt exceed the cosmetic token target.
+        # Keep a long action-bearing response for the legacy schema branch;
+        # camera-only plans are checked against authored clauses below.
         for index in range(8):
             actions[index] += (
                 " The grey and earth-yellow robes react to the wind pressure; the force has a clear source, "
@@ -87,8 +106,10 @@ class AuthoredBriefTests(unittest.TestCase):
                 "driving dust, waterfall spray and fragments outward without changing the two fighters' identities. "
                 f"The final physical consequence of phase {index + 1} remains visible."
             )
+        used_camera_only_schema = False
 
         def generate(**kwargs):
+            nonlocal used_camera_only_schema
             calls.append(kwargs)
             if kwargs["json_schema"] is None:
                 return json.dumps({"character_appearance": {
@@ -111,6 +132,38 @@ class AuthoredBriefTests(unittest.TestCase):
             self.assertEqual(kwargs["json_schema"]["properties"]["event_cards"]["required"],
                              ["event_1", "event_2", "event_3", "event_4"])
             duration = [14.375, 13.625][number - 1]
+            event_schemas = kwargs["json_schema"]["properties"]["event_cards"]["properties"]
+            first_event_fields = event_schemas["event_1"]["properties"]
+            if "phases" not in first_event_fields and any(
+                key == "opening" or key.startswith("phase_") for key in first_event_fields
+            ):
+                used_camera_only_schema = True
+                # Source-owned camera planning asks the writer for optical
+                # metadata only. The compiler inserts the complete source
+                # actions into the returned event cards.
+                camera_events = {}
+                for event_index, (event_key, event_schema) in enumerate(event_schemas.items(), start=1):
+                    camera_events[event_key] = {}
+                    for phase_key, phase_schema in event_schema["properties"].items():
+                        values = {
+                            "framing": "Wide view of both fighters",
+                            "camera": f"Track the contact and consequence of authored phase {4 * (number - 1) + event_index}.",
+                            "transition": "cut",
+                            "sound_effects": "Stone impacts and wind.",
+                        }
+                        camera_events[event_key][phase_key] = {
+                            field: field_schema.get("const", values[field])
+                            for field, field_schema in phase_schema["properties"].items()
+                        }
+                return json.dumps({
+                    "segment": number, "title": "The duel",
+                    "coverage": "Readable impact coverage",
+                    "pacing": "Authored slow motion and explosive speed",
+                    "event_cards": camera_events,
+                })
+
+            # Legacy writers still return action-bearing event cards. Keep this
+            # branch covered while the camera-only schema owns current plans.
             return json.dumps({
                 "segment": number, "title": "The duel", "opening_state": "Match the supplied scene.",
                 "coverage": "Readable impact coverage", "pacing": "Authored slow motion and explosive speed",
@@ -131,9 +184,13 @@ class AuthoredBriefTests(unittest.TestCase):
         self.assertEqual(result["source_intent"]["cast_names"], ["Character A", "Character B"])
         self.assertLess(result["windows"][0]["shots"][0]["end_seconds"], 4)
         self.assertEqual(result["windows"][1]["opening_state"], result["windows"][0]["closing_state"])
+        if used_camera_only_schema:
+            assert_source_clauses_present(result["window_prompts"], range(len(authored_events)))
         for number, prompt in enumerate(result["window_prompts"]):
-            for action in actions[number * 4:(number + 1) * 4]:
-                self.assertIn(action, prompt)
+            if not used_camera_only_schema:
+                # Keep the action-bearing legacy response contract covered.
+                for action in actions[number * 4:(number + 1) * 4]:
+                    self.assertIn(action, prompt)
             self.assertIn("no third parties", prompt)
             self.assertIn("no weapons", prompt)
             self.assertIn("no dialogue", prompt)
@@ -145,12 +202,13 @@ class AuthoredBriefTests(unittest.TestCase):
         # context. The model-authored closing prose is not accepted as a state
         # fact when no source-grounded handoff supports it.
         final_state = result["windows"][-1]["closing_state"]
-        self.assertTrue(final_state.startswith("Continue from the visible result of:"))
-        self.assertIn(
-            "A's ultimate fist and B's storm whip kick collide; the platform collapses "
-            "and they remain frozen in clash pose.",
-            final_state,
+        final_source_tail = (
+            "Ends lingering in smoke-dust and rubble storm, the two still frozen in clash pose"
         )
+        self.assertIn(final_source_tail, authored_events[-1]["text"])
+        self.assertIn(final_source_tail, result["window_prompts"][-1])
+        self.assertTrue(final_state.startswith("Continue from the visible result of:"))
+        self.assertIn(final_source_tail, final_state)
         self.assertNotIn(
             "Both fighters remain frozen in clash pose amid the ruined platform.",
             final_state,
@@ -180,8 +238,11 @@ class AuthoredBriefTests(unittest.TestCase):
         self.assertEqual(len(calls), 4)
         self.assertIn("REPAIR ONLY THIS SEGMENT", calls[2]["prompt"])
         self.assertEqual(repaired["planning_warnings"], [])
-        for action in actions[:4]:
-            self.assertIn(action, repaired["window_prompts"][0])
+        if used_camera_only_schema:
+            assert_source_clauses_present(repaired["window_prompts"], range(4))
+        else:
+            for action in actions[:4]:
+                self.assertIn(action, repaired["window_prompts"][0])
 
     def test_incomplete_camera_json_is_not_repaired_into_a_successful_draft(self):
         self.assertIsNone(_parse_json_object('{"segment": 2, "shots": [{"action": "unfinished', allow_repair=False))

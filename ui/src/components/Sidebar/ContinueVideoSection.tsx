@@ -2,15 +2,22 @@ import { useState, useRef, useCallback } from 'react'
 import { X, Film } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
+import { VideoInputPreview } from '../shared/VideoInputPreview'
 
 export function ContinueVideoSection() {
   const continueVideo = useStore(s => s.continueVideo)
+  const continueVideoPath = useStore(s => s.continueVideoPath)
   const continueVideoUrl = useStore(s => s.continueVideoUrl)
   const continueVideoDuration = useStore(s => s.continueVideoDuration)
   const setContinueVideo = useStore(s => s.setContinueVideo)
   const clearContinueVideo = useStore(s => s.clearContinueVideo)
   const inputVideoStrength = useStore(s => s.params.input_video_strength ?? 1.0)
   const setParam = useStore(s => s.setParam)
+  const previewUrl = continueVideoPath
+    ? continueVideoPath.includes('/api/v1/file/') || continueVideoPath.includes('/api/v1/uploads/')
+      ? continueVideoPath
+      : api.getFileUrl(continueVideoPath.replace(/\\/g, '/').split('/').pop() || continueVideoPath)
+    : continueVideoUrl
 
   const [error, setError] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
@@ -79,11 +86,11 @@ export function ContinueVideoSection() {
         </div>
       ) : (
         <div className="relative rounded-lg overflow-hidden border border-border">
-          {continueVideoUrl && (
-            <video
-              src={continueVideoUrl}
+          {previewUrl && (
+            <VideoInputPreview
+              src={previewUrl}
+              alt="Source video preview"
               className="w-full h-20 object-cover"
-              muted
             />
           )}
           <button

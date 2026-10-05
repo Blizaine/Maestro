@@ -1,0 +1,32 @@
+{
+  "model": {
+    "name": "DaSiWa Krea 2 RAW (Experimental)",
+    "architecture": "krea2_raw",
+    "inference_steps_max": 100,
+    "description": "Official DaSiWa Krea 2 MirroredSkies V1 RAW checkpoint. Undistilled text-to-image variant for CFG-guided generation.",
+    "selector_help": "Experimental undistilled image generation. The creator recommends 52+ steps with CFG 3.5. Set a Civitai API key in Settings > Services before downloading.",
+    "URLs": [
+      "DasiwaKrea2TurboRaw_mirroredskiesV1Raw_2997717.safetensors"
+    ],
+    "download_sources": {
+      "DasiwaKrea2TurboRaw_mirroredskiesV1Raw_2997717.safetensors": {
+        "url": "https://civitai.com/api/download/models/3115455?fileId=2997717",
+        "sha256": "70d43a13c3c2d94109582b313ee53500e70095733c2f8608b83d0634cd0780dd",
+        "size_bytes": 26283336841
+      }
+    },
+    "source_repo": "https://civitai.com/models/2760803/dasiwa-krea2-or-turbo-or-raw",
+    "source_revision": "3115455:2997717",
+    "source_sha256": "70d43a13c3c2d94109582b313ee53500e70095733c2f8608b83d0634cd0780dd",
+    "source_size_bytes": 26283336841,
+    "license_name": "Krea Open Source License and DaSiWa creator distribution terms",
+    "license_url": "https://civitai.com/models/2760803/dasiwa-krea2-or-turbo-or-raw"
+  },
+  "prompt": "a fox walking in fresh snow at golden hour, natural light, detailed fur",
+  "negative_prompt": "",
+  "batch_size": 1,
+  "denoising_strength": 1.0,
+  "masking_strength": 1.0,
+  "num_inference_steps": 52,
+  "guidance_scale": 3.5
+}

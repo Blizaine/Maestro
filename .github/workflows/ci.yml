@@ -15,6 +15,10 @@ jobs:
   guard:
     name: Clean-repo guard + Python checks
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: app
+      CUDA_VISIBLE_DEVICES: ""
+      XFORMERS_FORCE_DISABLE_TRITON: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,9 +27,11 @@ jobs:
       - name: Clean-repo boundary guard
         run: python scripts/verify_clean_repo.py
       - name: Python syntax check (our modules)
-        # compileall only compiles (never imports), so it needs no deps and
-        # skips heavy vendored model code. Covers the surface we edit.
-        run: python -m compileall -q app/services app/launch.py scripts
+        # compileall only compiles (never imports), so it needs no deps.
+        run: >-
+          python -m compileall -q app/services app/launch.py
+          app/models/minimax_h3 app/models/longcat app/shared/tinyvae
+          app/shared/preview_runtime.py app/shared/qtypes scripts
       - name: Undefined Python names (our modules)
         # Syntax compilation cannot detect a missing import or a value read
         # before assignment on an infrequently exercised request path.
@@ -59,6 +65,7 @@ jobs:
           "librosa==0.11.0"
           "timm==1.0.24"
           "ftfy==6.3.1"
+          "pytest==8.4.2"
       - name: Install CPU PyTorch test dependency
         run: >-
           python -m pip install
@@ -69,13 +76,14 @@ jobs:
       - name: Install pinned core model test dependencies
         run: >-
           python -m pip install
-          "mmgp==3.7.12"
+          "mmgp==3.8.2"
           "diffusers==0.36.0"
           "transformers==4.57.1"
           "tokenizers==0.22.1"
           "accelerate==1.12.0"
           "einops==0.8.2"
           "safetensors==0.8.0"
+          "gguf==0.17.1"
           "triton==3.3.1"
       - name: Python unit tests
         run: python -m unittest discover -s tests -p "test_*.py"
@@ -83,6 +91,18 @@ jobs:
         # These are standalone test functions, so unittest discovery does not
         # execute them yet. Keep this explicit runner until they are migrated.
         run: python tests/test_call_llm_json_grammar.py
+      - name: Standalone preview, source-camera and media regressions
+        # Plain unittest discovery omits pytest functions/fixtures in these
+        # modules. CUDA-only checks retain their own skips.
+        run: >-
+          python -m pytest -q
+          tests/test_generation_preview.py
+          tests/test_generation_preview_support.py
+          tests/test_generation_preview_wiring.py
+          tests/test_h3_scheduler_clean_preview.py
+          tests/test_h3_source_camera.py
+          tests/test_media_flow.py
+          tests/test_tinyvae.py
 
   ui-build:
     name: UI type-check + build
@@ -97,6 +117,9 @@ jobs:
       - name: Install UI deps
         working-directory: ui
         run: npm ci
+      - name: Frontend lint
+        working-directory: ui
+        run: npm run lint
       - name: Type-check + build (tsc -b && vite build)
         working-directory: ui
         run: npm run build

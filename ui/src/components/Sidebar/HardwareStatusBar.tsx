@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ChevronUp, ChevronDown, Cpu, MemoryStick, Power, Zap } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { releaseModels } from '../../api/client'
+import { usePageVisible } from '../../lib/usePageVisible'
 
 // Color a "fullness" bar (VRAM / RAM) by how close to full it is —
 // green well below, amber as it tightens, red near the ceiling. This is
@@ -100,20 +101,13 @@ export function HardwareStatusBar() {
     }
   }
 
+  const visible = usePageVisible()
   useEffect(() => {
-    const tick = () => {
-      if (typeof document !== 'undefined' && document.hidden) return
-      loadSystemStats()
-    }
-    tick() // populate immediately, don't wait for the first interval
-    const id = setInterval(tick, 2000)
-    const onVis = () => { if (!document.hidden) loadSystemStats() }
-    document.addEventListener('visibilitychange', onVis)
-    return () => {
-      clearInterval(id)
-      document.removeEventListener('visibilitychange', onVis)
-    }
-  }, [loadSystemStats])
+    if (!visible) return
+    loadSystemStats() // populate immediately, don't wait for the first interval
+    const id = setInterval(loadSystemStats, 2000)
+    return () => clearInterval(id)
+  }, [visible, loadSystemStats])
 
   const gpu = stats?.gpu
   const ram = stats?.ram
@@ -140,7 +134,7 @@ export function HardwareStatusBar() {
         {gpu?.available && (
           <span
             className="flex items-center gap-1 shrink-0 text-text-secondary"
-            title={`GPU ${gpu.percent.toFixed(0)}% (3D engine)${gpu.compute_percent != null ? ` · compute ${gpu.compute_percent.toFixed(0)}%` : ''} · VRAM ${fmtGb(gpu.vram_used_gb, gpu.vram_total_gb)}`}
+            title={`GPU compute ${gpu.percent.toFixed(0)}% (NVIDIA) · VRAM ${fmtGb(gpu.vram_used_gb, gpu.vram_total_gb)}`}
           >
             <Zap size={11} className="text-text-muted" />
             <span className="tabular-nums">{gpu.percent.toFixed(0)}%</span>
@@ -184,7 +178,7 @@ export function HardwareStatusBar() {
         {gpu?.available ? (
           <>
             <Gauge label="GPU" percent={gpu.percent} value={`${gpu.percent.toFixed(0)}%`} fill="bg-accent-blue"
-              title={gpu.compute_percent != null ? `3D engine (matches Task Manager) · compute (nvidia-smi): ${gpu.compute_percent.toFixed(0)}%` : undefined} />
+              title="GPU compute activity (NVIDIA, as reported by nvidia-smi)" />
             <Gauge
               label="VRAM"
               percent={gpu.vram_percent}

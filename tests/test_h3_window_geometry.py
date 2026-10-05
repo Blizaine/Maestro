@@ -10,6 +10,8 @@ import types
 import unittest
 from unittest.mock import patch
 
+from fastapi import HTTPException
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app"))
 
@@ -150,17 +152,25 @@ class H3WindowGeometryTests(unittest.TestCase):
         # Execute the real endpoint without importing/starting the application
         # or invoking a writer. This catches drift in request serialization.
         path = ROOT / "app" / "launch.py"
-        node = next(n for n in ast.parse(path.read_text(encoding="utf-8")).body
-                    if isinstance(n, ast.AsyncFunctionDef) and n.name == "llm_plan_h3_windows")
-        node.decorator_list = []
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        nodes = [
+            n for n in tree.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name in {"_validate_h3_source_quote_boundaries", "llm_plan_h3_windows"}
+        ]
+        self.assertEqual({node.name for node in nodes}, {
+            "_validate_h3_source_quote_boundaries", "llm_plan_h3_windows",
+        })
+        for node in nodes:
+            node.decorator_list = []
         namespace = dict(
-            Request=object, asyncio=asyncio, os=os,
+            Request=object, HTTPException=HTTPException, asyncio=asyncio, os=os,
             wgp=types.SimpleNamespace(get_model_def=lambda _: MODEL, server_config={}),
             _get_cached_hardware=lambda: {}, _ensure_llm_loaded=lambda: None,
             enhancement_settings=lambda _: {}, _PUBLIC_LLM_PROVIDERS=(),
             _h3_injected_keyframes_from_body=lambda _: [], _active_lora_hint=lambda *_: "",
         )
-        exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), namespace)
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), namespace)
         async def body():
             return {"prompt": "A silent walk.", "model_type": "minimax_h3_fused_turbo",
                     "total_frames": 336, "window_frames": 124, "overlap_frames": 17,

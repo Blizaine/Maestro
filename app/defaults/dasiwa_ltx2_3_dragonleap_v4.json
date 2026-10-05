@@ -1,0 +1,30 @@
+{
+  "model": {
+    "name": "DaSiWa LTX 2.3 DragonLeap v4 FP8 (Experimental)",
+    "architecture": "ltx2_22B",
+    "description": "Full DaSiWa LTX 2.3 DragonLeap v4 distilled checkpoint (creator metadata identifies FP8 SafeTensors). Uses Maestro's existing LTX 2.3 22B distilled runtime profile; checkpoint loading and generation have not yet been render-tested.",
+    "selector_help": "Experimental distilled LTX 2.3 video with audio. Checkpoint loading and rendering are not verified yet. Set a Civitai API key in Settings > Services before downloading.",
+    "URLs": [
+      "DasiwaLTX23_dragonleapV4_2972051.safetensors"
+    ],
+    "preload_URLs": "ltx2_22B",
+    "ltx2_pipeline": "distilled",
+    "download_sources": {
+      "DasiwaLTX23_dragonleapV4_2972051.safetensors": {
+        "url": "https://civitai.com/api/download/models/3092188?fileId=2972051",
+        "sha256": "32be71cd26cefafce29b16d882b5458b5c0cad6b0eb9133f5d1c1844ca98ae41",
+        "size_bytes": 27618449814
+      }
+    },
+    "source_repo": "https://civitai.com/models/2543443/dasiwa-ltx-23",
+    "source_revision": "3092188:2972051",
+    "source_sha256": "32be71cd26cefafce29b16d882b5458b5c0cad6b0eb9133f5d1c1844ca98ae41",
+    "source_size_bytes": 27618449814,
+    "license_name": "LTX-2.3 Community License and DaSiWa creator distribution terms",
+    "license_url": "https://civitai.com/models/2543443/dasiwa-ltx-23"
+  },
+  "prompt": "A quiet cinematic shot of a small sailboat crossing a misty lake at sunrise, gentle camera movement, natural soundscape.",
+  "num_inference_steps": 8,
+  "video_length": 241,
+  "resolution": "1280x720"
+}

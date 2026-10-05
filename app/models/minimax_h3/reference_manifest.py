@@ -21,8 +21,8 @@ MINIMAX_H3_MAX_REFERENCES = 12
 _IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 _VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
 _AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"}
-_AUDIO_INTENTS = {"voice", "drive", "style"}
-_IMAGE_INTENTS = {"identity", "scene", "style", "composition"}
+_AUDIO_INTENTS = {"voice", "drive", "style", "sound"}
+_IMAGE_INTENTS = {"identity", "object", "scene", "style", "composition"}
 _VIDEO_INTENTS = {"character", "motion", "scene"}
 _AUDIO_REFERENCE_TAG_RE = re.compile(
     r"(?P<tag><Audio\s+(?P<tag_index>\d+)>)|(?P<plain>\bAudio\s+(?P<plain_index>\d+)\b)",
@@ -123,11 +123,10 @@ def validate_reference_manifest(
                 raise ValueError(
                     f"Reference {index + 1} remove_background must be true or false."
                 )
-            # Background removal is intentionally unavailable to locations,
-            # styles, and composition references: their surroundings are the
-            # information the model is meant to retain.
+            # Characters and objects can be isolated from their source scene.
+            # Locations, styles, and composition references retain surroundings.
             item["remove_background"] = bool(
-                remove_background and image_intent == "identity"
+                remove_background and image_intent in {"identity", "object"}
             )
         if kind == "audio":
             audio_intent = str(raw.get("audio_intent") or "voice").strip().lower()
@@ -149,6 +148,22 @@ def validate_reference_manifest(
                     f"{video_intent!r}; expected one of: {choices}."
                 )
             item["video_intent"] = video_intent
+            follow_timeline = raw.get("follow_timeline")
+            if follow_timeline is None:
+                follow_timeline = not bool(
+                    item.get("library_character_id")
+                    or item.get("refmod_path")
+                    or video_intent == "character"
+                )
+            elif not isinstance(follow_timeline, bool):
+                raise ValueError(
+                    f"Reference {index + 1} follow_timeline must be true or false."
+                )
+            if item.get("refmod_path") and follow_timeline:
+                raise ValueError(
+                    "An encoded RefMod video cannot follow the timeline; use the original video reference."
+                )
+            item["follow_timeline"] = follow_timeline
             item["include_audio"] = bool(raw.get("include_audio", True))
             audio_path = str(raw.get("audio_path") or "").strip()
             if audio_path:
@@ -172,9 +187,23 @@ def validate_reference_manifest(
     if drive_audio_count > 1:
         raise ValueError(
             "MiniMax H3 accepts one Music / performance timeline. "
-            "Use Voice reference or Music / sound style only for additional audio references."
+            "Use Voice reference, Sound effect reference, or Music / sound style only for additional audio references."
         )
     return normalized
+
+
+def object_reference_prompt_contract(picture_label: str, role: str = "") -> tuple[str, str]:
+    """Describe an object image without allocating a character or speaker."""
+
+    name = " ".join(str(role or "the requested object").split())[:500]
+    return (
+        f"{picture_label} is an object / prop reference for {name}; preserve its design, "
+        "shape, proportions, materials, colors, and distinguishing details. The target "
+        "prompt determines its count, scale, placement, and action; the reference "
+        "background, camera, composition, and pose do not define the target scene.",
+        f"{picture_label}: fully_preserved - preserve the requested object's design "
+        "and appearance while rendering it naturally inside the target scene.",
+    )
 
 
 def split_exact_drive_audio_reference(references) -> tuple[list[dict], str | None, int | None]:
@@ -184,7 +213,7 @@ def split_exact_drive_audio_reference(references) -> tuple[list[dict], str | Non
     rhythm, or performance, but it does not freeze the supplied waveform on the
     target timeline. Maestro's ``drive`` intent promises the latter. The
     generation request therefore sends that one file through H3's target-audio
-    conditioning path and keeps only visual/voice/style media in the packed
+    conditioning path and keeps visual, voice, style, and sound-effect media in the packed
     Omni reference sequence.
 
     The returned ordinal is the drive file's original ``<Audio N>`` number so
@@ -218,7 +247,7 @@ def split_exact_drive_audio_reference(references) -> tuple[list[dict], str | Non
         if drive_path is not None:
             raise ValueError(
                 "MiniMax H3 accepts one Music / performance timeline. "
-                "Use Voice reference or Music / sound style only for additional audio references."
+                "Use Voice reference, Sound effect reference, or Music / sound style only for additional audio references."
             )
         drive_path = str(item.get("path") or "").strip() or None
         drive_ordinal = audio_ordinal

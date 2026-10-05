@@ -577,7 +577,9 @@ export function PromptInput() {
               ? (isLtxSequence
                   ? `Describe your complete video, then press Enhance to plan ${windowCount} LTX windows.`
                   : `Line 1 = window 1, line 2 = window 2... (${windowCount} windows)`)
-            : modePlaceholder}
+            : studioVideoWorkflow === 'avatar' && generationMode === 'video'
+              ? 'Describe the people, setting and motion. Voice audio supplies their speech.'
+              : modePlaceholder}
           className={`studio-prompt-textarea block w-full resize-none px-3 py-2 text-base md:text-sm text-text-primary placeholder:text-text-muted focus:outline-none transition-colors ${compact ? 'min-h-[72px] bg-transparent border border-transparent rounded-lg focus:border-border-light' : `${composer?.expanded ? 'min-h-[260px]' : 'min-h-[104px]'} bg-bg-tertiary border border-border rounded-xl focus:border-accent-blue`}`}
         />
         <ComposerToolbarItem>{isAudioOnly ? (

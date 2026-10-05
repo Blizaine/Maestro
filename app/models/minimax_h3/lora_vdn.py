@@ -6,6 +6,32 @@ Namespace, SwiGLU ordering and fused-QKV conversion adapted from Wan2GP
 import torch
 
 
+def interleave_qkv_lora_b_rows(
+    weight: torch.Tensor,
+    heads: int,
+    head_dim: int,
+) -> torch.Tensor:
+    """Reorder a known grouped fused LoRA B matrix to H3 head order.
+
+    Independent Q/K/V adapters are first fused with grouped output rows. Their
+    B matrix's row axis can then be permuted to ``[head, QKV, channel]`` while
+    retaining the rank-block columns and therefore the exact adapter delta.
+    """
+
+    expected_rows = int(heads) * 3 * int(head_dim)
+    if weight.ndim != 2 or int(weight.shape[0]) != expected_rows:
+        raise ValueError(
+            "Fused H3 LoRA B rows do not match the target attention shape: "
+            f"got {tuple(weight.shape)}, expected {expected_rows} rows."
+        )
+    return (
+        weight.reshape(3, int(heads), int(head_dim), weight.shape[1])
+        .permute(1, 0, 2, 3)
+        .reshape_as(weight)
+        .contiguous()
+    )
+
+
 def normalize_diffusers_lora(state_dict, transformer):
     prefixes = (("token_refiner.refiner_blocks.", "token_refiner.blocks."),
         ("transformer_blocks.", "blocks."),
@@ -57,5 +83,21 @@ def normalize_diffusers_lora(state_dict, transformer):
                 alpha = converted.pop(prefix + projection + ".alpha", None)
                 up.append(weight if alpha is None else weight * (float(alpha) / down[-1].shape[0]))
             converted[prefix + "qkv_proj." + down_suffix] = torch.cat(down)
-            converted[prefix + "qkv_proj." + up_suffix] = torch.block_diag(*up)
+            fused_up = torch.block_diag(*up)
+            layout = str(getattr(attention, "qkv_layout", "grouped"))
+            layout = layout.strip().lower().replace("-", "_")
+            if layout in {"interleaved", "head_interleaved"}:
+                fused_up = interleave_qkv_lora_b_rows(
+                    fused_up,
+                    attention.heads,
+                    attention.head_dim,
+                )
+            elif layout not in {"grouped", "contiguous"}:
+                raise ValueError(
+                    f"Unsupported MiniMax H3 QKV LoRA target layout {layout!r}"
+                )
+            converted[prefix + "qkv_proj." + up_suffix] = fused_up
     return converted
+
+
+__all__ = ["interleave_qkv_lora_b_rows", "normalize_diffusers_lora"]

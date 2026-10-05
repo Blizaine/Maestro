@@ -48,6 +48,8 @@ interface DurationPresetControlProps {
   /** Stable capacity for Auto; independent of Time's duration-following window. */
   autoWindowSeconds?: number
   autoFirstWindowSeconds?: number
+  /** Window mode can retain a manual experimental limit instead of Auto's capacity. */
+  useSelectedWindowForWindowMode?: boolean
   /** Studio popup: Time/Window tabs with Auto as a toggle, and fewer presets. */
   compact?: boolean
 }
@@ -83,6 +85,7 @@ export function DurationPresetControl({
   nativeTiming,
   autoWindowSeconds,
   autoFirstWindowSeconds,
+  useSelectedWindowForWindowMode = false,
   compact = false,
 }: DurationPresetControlProps) {
   const inputRef = useRef<HTMLInputElement>(null)
@@ -172,8 +175,10 @@ export function DurationPresetControl({
     if (onPlanningModeChange) onPlanningModeChange(mode)
     else setInternalPlanningMode(mode)
     if (mode === 'windows') {
-      const capacity = autoWindowSeconds ?? effectiveWindow
-      const firstCapacity = autoFirstWindowSeconds ?? effectiveFirstWindow
+      const capacity = useSelectedWindowForWindowMode
+        ? effectiveWindow : autoWindowSeconds ?? effectiveWindow
+      const firstCapacity = useSelectedWindowForWindowMode
+        ? effectiveFirstWindow : autoFirstWindowSeconds ?? effectiveFirstWindow
       const count = durationWindowPlan(value, capacity, overlapSeconds, discardSeconds, firstCapacity).windowCount
       const plan = wholeWindowDuration(
         count,

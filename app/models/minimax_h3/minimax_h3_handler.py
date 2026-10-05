@@ -20,6 +20,7 @@ _EXPERIMENTAL_VAE_REVISION = "a3e7d8da4ae7ba8df0779094cf5ab9d6ee855fe4"
 _FUSED_MODEL_REPO = "MATLOWAI/minimax-h3-fused-turbo-int8-convrot"
 _FUSED_MODEL_REVISION = "3b51096a1bf67608d98131116558202208fcf195"
 _SINGULARITY_MODEL_ID = "minimax_h3_ref2va_singularity"
+_SINGULARITY_FRAMES_MODEL_ID = "minimax_h3_singularity"
 _SINGULARITY_DEFAULT_TURBO_PRESET = "lightx2v-ref2va-turbo4-v0.1-comfy-bf16"
 _SINGULARITY_CHECKPOINT_REQUIREMENTS = {
     "compressed_modulation": True,
@@ -1755,17 +1756,29 @@ class family_handler:
         singularity = bool(
             (model_def or {}).get("minimax_h3_singularity", False)
         )
+        dasiwa = bool((model_def or {}).get("minimax_h3_dasiwa", False))
+        baked_turbo = bool((model_def or {}).get("minimax_h3_baked_turbo", False))
+        import_profile = (model_def or {}).get("minimax_h3_import_profile")
+        if dasiwa and (
+            base_model_type not in {_MODEL_TYPE, _REF2VA_MODEL_TYPE}
+            or audio_only or full_checkpoint or singularity or fused_turbo
+        ):
+            raise ValueError("DaSiWa H3 Hybrid requires a separate Pruned Frames or References workflow.")
+        if baked_turbo and not dasiwa and not import_profile:
+            raise ValueError("The baked Turbo flag requires a DaSiWa H3 Hybrid checkpoint.")
+        if import_profile and (import_profile.get("status") != "verified" or base_model_type not in import_profile.get("architectures", [])):
+            raise ValueError("Imported H3 model definition does not match its verified architecture profile.")
         if singularity and fused_turbo:
             raise ValueError(
                 "MiniMax H3 Singularity is a separate checkpoint, not the fused Turbo model."
             )
         if singularity and (
-            base_model_type != _REF2VA_MODEL_TYPE
+            base_model_type not in {_MODEL_TYPE, _REF2VA_MODEL_TYPE}
             or audio_only
             or full_checkpoint
         ):
             raise ValueError(
-                "MiniMax H3 Singularity v1.3 is only supported as a Ref2VA References model."
+                "MiniMax H3 Singularity v1.3 requires a Pruned Frames or References workflow."
             )
         window_memory_policy = (
             (
@@ -1809,9 +1822,11 @@ class family_handler:
             "the next window."
         )
         checkpoint_help = (
-            "SINGULARITY V1.3 — REFERENCES (EXPERIMENTAL)\n"
-            "Reference-focused experimental model with a pinned 21 GB pruned "
-            "INT8 ConvRot checkpoint. The recommended LightX2V Ref2VA Turbo4 "
+            "SINGULARITY V1.3 (EXPERIMENTAL)\n"
+            "Frames supports text, start/end pictures, and Control Video editing; "
+            "References supports ordered image, video, and audio references. "
+            "Both entries share one pinned 21 GB pruned INT8 ConvRot checkpoint. "
+            "The recommended LightX2V Ref2VA Turbo4 "
             "adapter is 1.96 GB and defaults to four Euler steps. Turbo off "
             "uses the ordinary 20-step H3 recipe."
             if singularity
@@ -2010,7 +2025,8 @@ class family_handler:
             "minimax_h3_fused_turbo": fused_turbo,
             "minimax_h3_singularity": singularity,
             "minimax_h3_model_id": (
-                _SINGULARITY_MODEL_ID if singularity else ""
+                (_SINGULARITY_MODEL_ID if omni_reference else _SINGULARITY_FRAMES_MODEL_ID)
+                if singularity else ""
             ),
             "minimax_h3_default_turbo_preset": (
                 str(
@@ -2227,6 +2243,55 @@ class family_handler:
                 "duration_slider": {"label": "Maximum Audio Duration (seconds)", "min": MIN_AUDIO_SECONDS,
                     "max": MAX_AUDIO_SECONDS, "increment": 0.1, "default": 15},
                 "selector_help": "H3 Voice Audio saves 32 kHz stereo audio. Generate up to 45 seconds per segment and 5 minutes per output. Long scripts split automatically, with stable speaker references and Whisper boundary trimming. Duration is a maximum; short speech ends when the script finishes. Use plain dialogue, Speaker 1: / Speaker 2: blocks, [language, acting directions], or Sound: for general audio."})
+        if dasiwa:
+            result.update({
+                "minimax_h3_dasiwa": True,
+                "minimax_h3_baked_turbo": baked_turbo,
+                "minimax_h3_model_id": str((model_def or {}).get("minimax_h3_model_id") or ""),
+                "minimax_h3_qkv_layout": "grouped",
+                "minimax_h3_sampler": "euler",
+                "minimax_h3_lora_workflow": "ref2va",
+                "compatible_model_paths": {},
+                "compatible_model_qkv_layouts": {},
+                "minimax_h3_turbo_mode_default": False,
+                "minimax_h3_unaccelerated_default_steps": 8 if baked_turbo else 25,
+                "minimax_h3_video_shift": 9.0 if baked_turbo else 11.0,
+                "minimax_h3_audio_shift": 4.0,
+                "inference_steps_min": 4 if baked_turbo else 2,
+                "inference_steps_max": 8 if baked_turbo else 50,
+                "inference_steps_label": "Denoising Steps",
+                "inference_steps_help": "Turbo is baked into this checkpoint. Start with 8 steps; 4–8 are supported." if baked_turbo else "Start with the creator's 25-step non-distilled recipe.",
+                "sol_attention": True,
+                "first_block_cache": not baked_turbo,
+                "sla_attention": False,
+                "sla_attention_default": False,
+                "selector_help": str((model_def or {}).get("selector_help") or workflow_help),
+                "lora_compatibility_note": "Turbo is already baked in. Additional Turbo/PDD, VDN and DoRA adapters are excluded; ordinary H3 LoRAs remain experimental." if baked_turbo else "Hybrid uses the Ref2VA AdaLN basis in both workflows; compatible H3 adapters are converted when needed.",
+            })
+            if baked_turbo:
+                result["custom_settings"] = result["custom_settings"][:1]
+        if import_profile:
+            result.update({
+                "minimax_h3_import_profile": import_profile,
+                "minimax_h3_baked_turbo": baked_turbo,
+                "minimax_h3_model_id": str((model_def or {}).get("minimax_h3_model_id") or ""),
+                "minimax_h3_qkv_layout": import_profile["qkv_layout"],
+                "minimax_h3_lora_workflow": import_profile["native_workflow"],
+                "minimax_h3_sampler": import_profile["sampler"],
+                "minimax_h3_video_shift": import_profile["video_shift"],
+                "minimax_h3_audio_shift": import_profile["audio_shift"],
+                "minimax_h3_turbo_mode_default": False,
+                "minimax_h3_unaccelerated_default_steps": import_profile["default_steps"],
+                "compatible_model_paths": {}, "compatible_model_qkv_layouts": {},
+                "inference_steps_min": import_profile["min_steps"],
+                "inference_steps_max": import_profile["max_steps"],
+                "inference_steps_help": f"Imported {import_profile['sampling_profile']} recipe; start with {import_profile['default_steps']} steps.",
+                "sol_attention": True, "first_block_cache": not baked_turbo,
+                "sla_attention": False, "sla_attention_default": False,
+                "selector_help": str((model_def or {}).get("selector_help") or workflow_help),
+            })
+            if baked_turbo:
+                result["custom_settings"] = result["custom_settings"][:1]
         return result
 
     @staticmethod
@@ -2456,9 +2521,25 @@ class family_handler:
                 "override_attention": "sla" if fused_turbo else "",
             }
         )
+        if (model_def or {}).get("minimax_h3_dasiwa"):
+            baked_turbo = bool(model_def.get("minimax_h3_baked_turbo"))
+            ui_defaults.update({"num_inference_steps": 8 if baked_turbo else 25,
+                                "flow_shift": 9.0 if baked_turbo else 11.0,
+                                "audio_flow_shift": 4.0,
+                                "minimax_h3_turbo_mode": False,
+                                "minimax_h3_turbo_preset": "",
+                                "override_attention": ""})
         if base_model_type == _TTS_MODEL_TYPE:
             ui_defaults.update({"resolution": "32x32", "duration_seconds": 15, "video_length": 362,
                                 "sliding_window_size": 362, "audio_prompt_type": "", "multi_prompts_gen_type": 2})
+        import_profile = (model_def or {}).get("minimax_h3_import_profile")
+        if import_profile:
+            ui_defaults.update({"num_inference_steps": import_profile["default_steps"],
+                                "flow_shift": import_profile["video_shift"],
+                                "audio_flow_shift": import_profile["audio_shift"],
+                                "minimax_h3_turbo_mode": False, "minimax_h3_turbo_preset": ""})
+            if (model_def or {}).get("minimax_h3_baked_turbo"):
+                ui_defaults.update({"override_attention": "", "skip_steps_cache_type": ""})
 
     @staticmethod
     def fix_settings(base_model_type, settings_version, model_def, ui_defaults):
@@ -2574,6 +2655,19 @@ class family_handler:
             ui_defaults["override_attention"] = (
                 "" if ui_defaults.get("override_attention") == "sdpa" else "sla"
             )
+        if (model_def or {}).get("minimax_h3_baked_turbo"):
+            from .imported import normalize_baked_h3_attention, normalize_baked_h3_request
+            ui_defaults["override_attention"] = normalize_baked_h3_attention(
+                ui_defaults.get("override_attention")
+            )
+            try:
+                normalize_baked_h3_request(ui_defaults, model_def)
+            except ValueError:
+                # Migrate stale settings, while generation validation remains strict.
+                ui_defaults["num_inference_steps"] = ((model_def or {}).get("minimax_h3_import_profile") or {}).get("default_steps", 8)
+                ui_defaults["minimax_h3_turbo_mode"] = False
+                ui_defaults["minimax_h3_turbo_preset"] = ""
+                ui_defaults["skip_steps_cache_type"] = ""
         ui_defaults.setdefault("denoising_strength", 1.0)
         ui_defaults.setdefault("masking_strength", 1.0)
         cache_value = float(ui_defaults.get("skip_steps_multiplier", 0.08))
@@ -2659,6 +2753,12 @@ class family_handler:
         from models.minimax_h3.duration import apply_h3_duration_override
         model_def = apply_h3_duration_override(inputs, model_def or {})
         maximum_frames = int(model_def.get("frames_maximum") or _H3_MAX_FRAMES)
+        if model_def.get("minimax_h3_baked_turbo"):
+            from .imported import normalize_baked_h3_request
+            try:
+                normalize_baked_h3_request(inputs, model_def)
+            except ValueError as error:
+                return str(error)
         custom = inputs.get("custom_settings") or {}
         if custom.get("audio_refinement") == "enabled":
             if (model_def or {}).get("lock_inference_steps") or (model_def or {}).get("minimax_h3_fused_turbo"):

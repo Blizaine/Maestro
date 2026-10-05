@@ -391,9 +391,12 @@ def _create_director_video_execution_profile(
     if normalized_resolution:
         video_params["resolution"] = normalized_resolution
     if profile.get("turbo_mode"):
-        from models.minimax_h3.turbo import minimax_h3_turbo_preset
+        from models.minimax_h3.turbo import (
+            minimax_h3_adapter_workflow,
+            minimax_h3_turbo_preset,
+        )
 
-        workflow = "ref2va" if model_def.get("omni_reference") else "fl2va"
+        workflow = minimax_h3_adapter_workflow(model_def)
         turbo_preset = minimax_h3_turbo_preset(
             video_params.get("minimax_h3_turbo_preset"),
             workflow=workflow,
@@ -664,7 +667,10 @@ def _prepare_director_generation_params(params: dict) -> None:
         params["sliding_window_memory_override"] = True
 
     if params.get("minimax_h3_turbo_mode") is True:
-        from models.minimax_h3.turbo import normalize_minimax_h3_turbo_request
+        from models.minimax_h3.turbo import (
+            minimax_h3_adapter_workflow,
+            normalize_minimax_h3_turbo_request,
+        )
 
         getter = getattr(_wgp, "get_model_def", None)
         model_def = getter(model_type) if callable(getter) else {}
@@ -674,11 +680,7 @@ def _prepare_director_generation_params(params: dict) -> None:
             full_checkpoint=bool(
                 (model_def or {}).get("minimax_h3_full_checkpoint", False)
             ),
-            workflow=(
-                "ref2va"
-                if (model_def or {}).get("omni_reference")
-                else "fl2va"
-            ),
+            workflow=minimax_h3_adapter_workflow(model_def),
         )
 
 

@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { RefreshCw, ShieldAlert, ShieldCheck, Lock } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { ApiKeyField } from '../shared/ApiKeyField'
+import { RemoteModelMemoryControls } from './RemoteModelMemoryControls'
 
 const PUBLIC_PROVIDERS = new Set(['openai', 'anthropic'])
 
@@ -363,6 +364,11 @@ export function ServicesSettingsPanel() {
             </p>
           )}
         </div>
+
+        {isRemote && <RemoteModelMemoryControls
+          key={servicesConfig.llm_remote_url}
+          modelId={servicesConfig.llm_model_id}
+        />}
 
         {/* Device selector (local only) */}
         {isLocal && (

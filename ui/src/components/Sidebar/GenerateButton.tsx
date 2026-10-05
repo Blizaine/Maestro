@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { AlertTriangle, ListPlus, Loader2, Play } from 'lucide-react'
+import { isLongCatAvatarModel } from '../../lib/avatarWorkflow'
 import {
+  studioAvatarInputError,
   modelSupportsImageWorkflow,
   modelSupportsStudioVideoMediaIntent,
   useStore,
@@ -21,7 +23,7 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
   const modelOptions = useStore(s => s.modelOptions)
   const imageMode = useStore(s => Number(s.params.image_mode || 0))
   const isPrimaryCreate = generationMode === 'video'
-    && (studioVideoWorkflow === 'frames' || studioVideoWorkflow === 'references')
+    && ['frames', 'references', 'avatar'].includes(studioVideoWorkflow)
     && imageMode === 0
   const modelIsOmniReference = Boolean(
     currentModel?.omni_reference
@@ -58,11 +60,14 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
       && s.params.frames_positions
     ),
   ))
+  const avatarInputError = useStore(s => s.generationMode === 'video' && s.studioVideoWorkflow === 'avatar'
+    ? studioAvatarInputError(s) : null)
   const hasStartImage = useStore(s => !!(s.startImage || s.params.image_start))
   const viggleMissing = useStore(s => s.generationMode === 'video' && s.studioVideoWorkflow === 'animate'
     && (!s.params.video_guide || !(s.params.viggle_character ? s.params.viggle_character.reference_path : s.params._viggle_edited_frame)
       || (s.params.audio_prompt_type === 'A' && !s.params.audio_guide)))
-  const createWorkflow = studioVideoWorkflow === 'references' ? 'references' : 'frames'
+  const createWorkflow = studioVideoWorkflow === 'references' ? 'references'
+    : studioVideoWorkflow === 'avatar' ? 'avatar' : 'frames'
   const studioMediaIntent = {
     workflow: createWorkflow,
     hasFrameGuidance: createWorkflow === 'frames' && hasGuidedInput,
@@ -72,10 +77,13 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
   const routeModelCompatible = !isPrimaryCreate
     || modelSupportsStudioVideoMediaIntent(currentModel, studioMediaIntent)
   const needsCreateModel = isPrimaryCreate && !routeModelCompatible
+  const needsWorkflowModel = generationMode === 'video' && studioVideoWorkflow !== 'avatar'
+    && isLongCatAvatarModel(currentModel)
   const needsGuidance = isPrimaryCreate
     && studioVideoEffectiveCreateRoute === 'guided'
     && !hasGuidedInput
   const needsImage = generationMode === 'video'
+    && studioVideoWorkflow !== 'avatar'
     && isI2vOnly
     && !isOmniReference
     && !hasStartImage
@@ -117,7 +125,8 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
     && Object.values(imagePadding).every(value => value === 0)
   const incompatibleImageModel = generationMode === 'image'
     && !modelSupportsImageWorkflow(currentModel, imageWorkflow, imageRefs.length > 0)
-  const blocked = viggleMissing || needsCreateModel || needsGuidance || needsImage || needsReference || needsOutpaintSource || needsOutpaintArea
+  const blocked = viggleMissing || needsCreateModel || needsWorkflowModel || !!avatarInputError
+    || needsGuidance || needsImage || needsReference || needsOutpaintSource || needsOutpaintArea
     || needsImageGenerateSource || needsImageWorkflowSource || needsImageMask
     || needsImageOutpaintArea || incompatibleImageModel
   const queueSupported = generationMode !== 'avatar'
@@ -139,12 +148,14 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
   }
 
   if (blocked) {
-    const label = viggleMissing ? 'Need inputs' : needsCreateModel
+    const label = viggleMissing ? 'Need inputs' : needsCreateModel || needsWorkflowModel
       ? 'Need model'
+      : avatarInputError
+        ? avatarInputError.startsWith('Choose') ? 'Choose speakers' : 'Need inputs'
       : needsGuidance
         ? 'Need frame'
       : needsImage
-      ? 'Need image'
+        ? 'Need image'
       : needsReference
         ? 'Need reference'
       : incompatibleImageModel
@@ -160,8 +171,13 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
         : 'Choose canvas'
     const title = needsOutpaintArea
       ? 'Choose a larger output aspect or resize the source to create an area for Outpaint to generate.'
+      : avatarInputError
+        ? avatarInputError
+      : needsWorkflowModel
+        ? 'Choose a video model for this workflow. LongCat Avatar uses the Avatar workflow.'
       : needsCreateModel
-        ? `Enable or select a video model compatible with the current ${studioVideoEffectiveCreateRoute === 'omni' ? 'reference' : studioVideoEffectiveCreateRoute === 'guided' ? 'frame-guided' : studioVideoEffectiveCreateRoute === 'audio' ? 'audio-driven' : 'text'} inputs.`
+          ? createWorkflow === 'avatar' ? 'Enable or select a LongCat Avatar model.'
+            : `Enable or select a video model compatible with the current ${studioVideoEffectiveCreateRoute === 'omni' ? 'reference' : studioVideoEffectiveCreateRoute === 'guided' ? 'frame-guided' : studioVideoEffectiveCreateRoute === 'audio' ? 'audio-driven' : 'text'} inputs.`
         : needsGuidance
           ? 'Add a start frame, end frame, or timed frame.'
       : needsReference

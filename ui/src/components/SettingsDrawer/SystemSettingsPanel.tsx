@@ -3,7 +3,7 @@ import { ChevronDown, ChevronRight, RotateCcw, Check, Download, Trash2, Cpu, Ref
 import type { ModelFolderCandidate } from '../../types'
 import { useStore, getFamiliesForMode, getModelsForFamily } from '../../stores/useStore'
 import * as api from '../../api/client'
-import type { GenerationMode } from '../../types'
+import type { GenerationMode, GenerationPreviewMode, GenerationPreviewSupport } from '../../types'
 import { FAMILIES, resolveVariant, onOsThemeChange, type FamilyId, type ThemeMode } from '../../lib/theme'
 
 const profileLabels: Record<string, string> = {
@@ -91,6 +91,10 @@ function ModelVisibilitySection() {
   // the per-row spinner and the completion refresh.
   const [downloading, setDownloading] = useState<Set<string>>(new Set())
   const [downloadErrors, setDownloadErrors] = useState<Record<string, string>>({})
+  const [downloadStatuses, setDownloadStatuses] = useState<Record<string, api.ModelDownloadSnapshot>>({})
+  const [cancellingModels, setCancellingModels] = useState<Set<string>>(new Set())
+  const [cancelErrors, setCancelErrors] = useState<Record<string, string>>({})
+  const refreshedCompletedModels = useRef(new Set<string>())
   const sectionRef = useRef<HTMLDivElement>(null)
 
   // Poll download status while any model download is in flight. Also runs
@@ -104,39 +108,108 @@ function ModelVisibilitySection() {
         if (cancelled) return
         const active = new Set<string>()
         const errors: Record<string, string> = {}
-        let anyCompleted = false
         for (const [mt, d] of Object.entries(downloads)) {
-          if (d.status === 'downloading') active.add(mt)
+          if (d.status === 'downloading' || d.status === 'cancelling') active.add(mt)
           else if (d.status === 'failed' && d.error) errors[mt] = d.error
-          else if (d.status === 'completed') anyCompleted = true
         }
+        setDownloadStatuses(downloads)
         setDownloading(prev => {
           if (prev.size === active.size && [...prev].every(mt => active.has(mt))) return prev
           return active
         })
+        setCancellingModels(prev => {
+          const next = new Set([...prev].filter(mt => active.has(mt)))
+          return next.size === prev.size ? prev : next
+        })
         setDownloadErrors(errors)
-        // A download finished since the last poll — refresh so the row
-        // flips to the downloaded check mark.
-        if (anyCompleted && downloading.size > 0 && active.size < downloading.size) loadModels()
+        // Refresh only models whose own transfer completed. A cancelled
+        // sibling or an old completion record must not look like success.
+        const completed = Object.entries(downloads).some(([mt, status]) => {
+          const model = models.find(candidate => candidate.model_type === mt)
+          if (status.status !== 'completed' || !model || model.is_downloaded === true
+            || refreshedCompletedModels.current.has(mt)) return false
+          refreshedCompletedModels.current.add(mt)
+          return true
+        })
+        if (completed) void loadModels({ catalogOnly: true })
       } catch { /* endpoint unavailable — ignore */ }
     }
     tick()
-    if (downloading.size === 0) return
-    const interval = setInterval(tick, 2000)
-    return () => { cancelled = true; clearInterval(interval) }
-  }, [downloading.size, loadModels])
+    const interval = downloading.size > 0 ? setInterval(tick, 2000) : null
+    return () => {
+      cancelled = true
+      if (interval !== null) clearInterval(interval)
+    }
+  }, [downloading.size, loadModels, models])
 
   const handleDownload = useCallback(async (modelType: string) => {
+    refreshedCompletedModels.current.delete(modelType)
     setDownloadErrors(prev => { const next = { ...prev }; delete next[modelType]; return next })
+    setCancelErrors(prev => { const next = { ...prev }; delete next[modelType]; return next })
+    setDownloadStatuses(prev => ({
+      ...prev,
+      [modelType]: { ...prev[modelType], status: 'downloading', error: null },
+    }))
     setDownloading(prev => new Set(prev).add(modelType))
     try {
-      await api.downloadModel(modelType)
+      const result = await api.downloadModel(modelType)
+      setDownloadStatuses(prev => ({
+        ...prev,
+        [modelType]: { ...prev[modelType], status: result.status, error: null },
+      }))
+      if (result.status === 'downloading' || result.status === 'cancelling') {
+        // A mount-time status poll can finish with an old empty snapshot while
+        // the POST is starting. Re-arm polling after the server acknowledges it.
+        setDownloading(prev => new Set(prev).add(modelType))
+        if (result.status === 'cancelling') {
+          setCancellingModels(prev => new Set(prev).add(modelType))
+        }
+      } else {
+        setDownloading(prev => { const next = new Set(prev); next.delete(modelType); return next })
+        setCancellingModels(prev => { const next = new Set(prev); next.delete(modelType); return next })
+        if (result.status === 'completed') void loadModels({ catalogOnly: true })
+        if (result.status === 'failed') {
+          setDownloadErrors(prev => ({ ...prev, [modelType]: 'Download failed' }))
+        }
+      }
     } catch (e) {
       console.error('Download start failed:', e)
+      const message = e instanceof Error ? e.message : String(e)
       setDownloading(prev => { const next = new Set(prev); next.delete(modelType); return next })
-      setDownloadErrors(prev => ({ ...prev, [modelType]: String(e) }))
+      setDownloadStatuses(prev => ({
+        ...prev,
+        [modelType]: { ...prev[modelType], status: 'failed', error: message, cancellable: false },
+      }))
+      setDownloadErrors(prev => ({ ...prev, [modelType]: message }))
     }
-  }, [])
+  }, [loadModels])
+
+  const handleCancelDownload = useCallback(async (modelType: string) => {
+    setCancelErrors(prev => { const next = { ...prev }; delete next[modelType]; return next })
+    setCancellingModels(prev => new Set(prev).add(modelType))
+    try {
+      const result = await api.cancelModelDownload(modelType)
+      if (result.status === 'cancelling') return
+      setCancellingModels(prev => { const next = new Set(prev); next.delete(modelType); return next })
+      setDownloading(prev => { const next = new Set(prev); next.delete(modelType); return next })
+      setDownloadStatuses(prev => ({
+        ...prev,
+        [modelType]: {
+          ...prev[modelType], status: result.status, error: null, cancellable: false,
+        },
+      }))
+      if (result.status === 'completed') void loadModels({ catalogOnly: true })
+      if (result.status === 'failed') {
+        setDownloadErrors(prev => ({ ...prev, [modelType]: 'Download failed while cancellation was pending' }))
+      }
+    } catch (e) {
+      setCancellingModels(prev => { const next = new Set(prev); next.delete(modelType); return next })
+      setCancelErrors(prev => ({
+        ...prev,
+        [modelType]: e instanceof Error ? e.message : String(e),
+      }))
+    }
+  }, [loadModels])
 
   // When the ModelSelector "+N more" hint fires, open this section, expand
   // the requested mode, and scroll it into view — then clear the request.
@@ -332,32 +405,6 @@ function ModelVisibilitySection() {
                             onChange={() => toggleModelEnabled(m.model_type)}
                             className="w-3.5 h-3.5 rounded border-border bg-bg-tertiary accent-accent-blue shrink-0"
                           />
-                          {/* Download status / click-to-download. preventDefault
-                              keeps the label from forwarding the click to the
-                              enable checkbox. MMAudio rows are virtual entries
-                              with no backend model def, so no button there —
-                              their files fetch on first SFX generation. */}
-                          {m.is_downloaded ? (
-                            <Check size={10} className="text-indicator-success shrink-0" />
-                          ) : downloading.has(m.model_type) ? (
-                            <Loader2 size={10} className="text-accent-blue shrink-0 animate-spin" />
-                          ) : m.architecture === 'mmaudio' ? (
-                            <Download size={10} className="text-text-muted shrink-0" />
-                          ) : (
-                            <button
-                              onClick={e => { e.preventDefault(); e.stopPropagation(); handleDownload(m.model_type) }}
-                              className={`p-0.5 -m-0.5 rounded transition-colors shrink-0 ${
-                                downloadErrors[m.model_type]
-                                  ? 'text-red-400 hover:text-red-300'
-                                  : 'text-text-muted hover:text-accent-blue'
-                              }`}
-                              title={downloadErrors[m.model_type]
-                                ? `Download failed: ${downloadErrors[m.model_type]} — click to retry`
-                                : 'Download model files now'}
-                            >
-                              <Download size={10} />
-                            </button>
-                          )}
                           <span className={`text-xs truncate ${
                             m.is_downloaded
                               ? 'text-text-primary'
@@ -366,15 +413,104 @@ function ModelVisibilitySection() {
                             {m.name}
                           </span>
                         </label>
+                        {/* Keep download controls outside the checkbox label so
+                            a download click can never toggle model visibility. */}
+                        <div className="flex items-center gap-1 shrink-0">
+                          {cancelErrors[m.model_type]
+                            && downloadStatuses[m.model_type]?.status === 'downloading'
+                            && !cancellingModels.has(m.model_type) && (
+                              <span className="text-[9px] text-red-400" role="alert" title={cancelErrors[m.model_type]}>
+                                Cancel failed
+                              </span>
+                            )}
+                          {downloading.has(m.model_type) ? (
+                            cancellingModels.has(m.model_type) || downloadStatuses[m.model_type]?.status === 'cancelling' ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] text-text-secondary" role="status" aria-live="polite">
+                                <Loader2 size={10} className="animate-spin" /> Cancelling
+                              </span>
+                            ) : downloadStatuses[m.model_type]?.cancellable === true ? (
+                              <button
+                                type="button"
+                                onClick={() => handleCancelDownload(m.model_type)}
+                                className="min-h-[40px] min-w-[72px] px-3 py-2 text-[11px] leading-tight border border-border rounded text-text-secondary hover:text-red-300 hover:border-red-400/60 transition-colors"
+                                title={cancelErrors[m.model_type] || `Cancel download for ${m.name}`}
+                                aria-label={`Cancel download for ${m.name}`}
+                              >
+                                Cancel
+                              </button>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-[10px] text-text-muted" role="status" aria-label={`Downloading ${m.name}`}>
+                                <Loader2 size={10} className="text-accent-blue animate-spin" /> Downloading
+                              </span>
+                            )
+                          ) : downloadStatuses[m.model_type]?.status === 'cancelled'
+                            || downloadStatuses[m.model_type]?.status === 'failed' ? (
+                            <>
+                              {downloadStatuses[m.model_type]?.status === 'cancelled' ? (
+                                <span className="text-[10px] text-text-muted shrink-0" role="status">Cancelled</span>
+                              ) : (
+                                <span className="text-[9px] text-red-400" role="alert" title={downloadErrors[m.model_type]}>
+                                  Download failed
+                                </span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => handleDownload(m.model_type)}
+                                className="min-h-[40px] min-w-[80px] px-3 py-2 text-[11px] leading-tight border border-border rounded text-text-secondary hover:text-accent-blue hover:border-accent-blue/60 transition-colors shrink-0"
+                                title={downloadErrors[m.model_type]
+                                  ? `Retry download: ${downloadErrors[m.model_type]}`
+                                  : `Retry download for ${m.name}`}
+                                aria-label={`Retry download model files for ${m.name}`}
+                              >
+                                Retry
+                              </button>
+                            </>
+                          ) : m.is_downloaded ? (
+                            <span className="inline-flex items-center gap-1 text-[10px] text-indicator-success" title="Model files are downloaded">
+                              <Check size={10} /> Downloaded
+                            </span>
+                          ) : downloadStatuses[m.model_type]?.status === 'completed' ? (
+                            <span className="inline-flex items-center gap-1 text-[10px] text-indicator-success" role="status">
+                              <Check size={10} /> Complete
+                            </span>
+                          ) : m.architecture === 'mmaudio' ? (
+                            <span className="inline-flex items-center gap-1 text-[10px] text-text-muted" title="Files download when first used">
+                              <Download size={10} /> On first use
+                            </span>
+                          ) : (
+                            <>
+                              {downloadErrors[m.model_type] && (
+                                <span className="text-[9px] text-red-400" role="alert" title={downloadErrors[m.model_type]}>
+                                  Download failed
+                                </span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => handleDownload(m.model_type)}
+                                className={`min-h-[40px] min-w-[80px] px-3 py-2 text-[11px] leading-tight border border-border rounded transition-colors shrink-0 ${
+                                  downloadErrors[m.model_type]
+                                    ? 'text-red-300 hover:border-red-400/60'
+                                    : 'text-text-secondary hover:text-accent-blue hover:border-accent-blue/60'
+                                }`}
+                                title={downloadErrors[m.model_type]
+                                  ? `Retry download: ${downloadErrors[m.model_type]}`
+                                  : `Download model files for ${m.name}`}
+                                aria-label={`${downloadErrors[m.model_type] ? 'Retry' : 'Download'} model files for ${m.name}`}
+                              >
+                                {downloadErrors[m.model_type] ? 'Retry' : 'Download'}
+                              </button>
+                            </>
+                          )}
+                        </div>
                         {/* Delete button — only for downloaded models */}
                         {m.is_downloaded && (
                           <button
                             onClick={() => handleDelete(m.model_type)}
-                            disabled={deleting === m.model_type}
+                            disabled={deleting === m.model_type || downloading.has(m.model_type)}
                             className={`p-0.5 rounded transition-colors shrink-0 ${
                               confirmDelete === m.model_type
                                 ? 'bg-red-500/20 text-red-400'
-                                : deleting === m.model_type
+                                : deleting === m.model_type || downloading.has(m.model_type)
                                   ? 'text-text-muted cursor-wait'
                                   : 'text-text-muted opacity-0 group-hover:opacity-100 hover:text-red-400'
                             }`}
@@ -1063,6 +1199,8 @@ export function SystemSettingsPanel() {
           conditionally hidden based on autoOn. */}
       <AutoPerformanceCard />
 
+      <GenerationPreviewSetting />
+
       {/* Auto ON: collapse the advanced fields under an expander.
           The expander defaults closed — power users who want to peek
           at what auto picked can open it without leaving the page. */}
@@ -1111,5 +1249,95 @@ export function SystemSettingsPanel() {
         />
       </div>
     </div>
+  )
+}
+
+export function GenerationPreviewSetting() {
+  const systemConfig = useStore(s => s.systemConfig)
+  const updateConfig = useStore(s => s.updateSystemConfig)
+  const modelType = useStore(s => s.params.model_type)
+  const models = useStore(s => s.models)
+  const generationMode = useStore(s => s.generationMode)
+
+  if (!systemConfig) return null
+
+  const model = models.find(candidate => candidate.model_type === modelType)
+  const support = model?.preview_support
+  const isVisualGenerationMode = generationMode !== 'audio' && generationMode !== 'tools'
+  const supportRows: { key: keyof GenerationPreviewSupport; label: string }[] = [
+    { key: 'rgb', label: 'Fast Frames' },
+    { key: 'tiny_vae_frames', label: 'Clearer Frames (Tiny VAE)' },
+    { key: 'tiny_vae_video', label: 'Live Video (Tiny VAE)' },
+  ]
+  const description = generationMode === 'audio'
+    ? 'Audio generation has no visual previews. This global preference applies to your next image or video generation.'
+    : generationMode === 'tools'
+      ? 'Tools mode does not use visual previews. This global preference applies to your next image or video generation.'
+      : 'Previews are approximate and may be silent; they add GPU work and time. Takes effect on the next generation.'
+
+  return (
+    <section className="space-y-2">
+      <label htmlFor="generation-preview-mode" className="text-[11px] text-text-muted uppercase tracking-wider block">
+        Generation Preview
+      </label>
+      <select
+        id="generation-preview-mode"
+        aria-describedby={`generation-preview-details generation-preview-description${generationMode === 'image' ? ' generation-preview-image-description' : ''}`}
+        value={systemConfig.generation_preview ?? 'off'}
+        onChange={event => updateConfig({generation_preview: event.target.value as GenerationPreviewMode})}
+        className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
+      >
+        <option value="off">Off</option>
+        <option value="rgb">Fast Frames</option>
+        <option value="tiny_vae_frames">Clearer Frames (Tiny VAE)</option>
+        <option value="tiny_vae_video">Live Video (Tiny VAE)</option>
+      </select>
+      <div id="generation-preview-details" className="space-y-1 text-[10px] text-text-muted">
+        <p className="min-w-0 break-words [overflow-wrap:anywhere]" style={{minWidth: 0, overflowWrap: 'anywhere'}}>
+          {model
+            ? <>Studio model: <span className="text-text-secondary">{model.name}</span></>
+            : modelType
+              ? <>Selected Studio model is unavailable ({modelType}).</>
+              : 'No Studio model selected.'}
+        </p>
+        {isVisualGenerationMode ? (
+          <>
+            <div role="group" aria-label="Preview support" className="space-y-1">
+              {supportRows.map(({key, label}) => {
+                const supported = support?.[key]
+                const status = typeof supported !== 'boolean'
+                  ? 'Unknown'
+                  : supported
+                    ? generationMode === 'image' && key === 'tiny_vae_video'
+                      ? 'Supported · still previews'
+                      : 'Supported'
+                    : 'Unavailable'
+                return (
+                  <div
+                    key={key}
+                    data-preview-capability={key}
+                    className="flex items-start justify-between gap-2"
+                  >
+                    <span className="min-w-0 break-words [overflow-wrap:anywhere]" style={{minWidth: 0, overflowWrap: 'anywhere'}}>{label}</span>
+                    <span data-preview-capability-status className="shrink-0 text-text-secondary">{status}</span>
+                  </div>
+                )
+              })}
+            </div>
+            {!model
+              ? <p>Choose a Studio model to check preview support.</p>
+              : supportRows.some(({key}) => typeof support?.[key] !== 'boolean')
+                ? <p>Preview support hasn't been reported for this model.</p>
+                : null}
+          </>
+        ) : null}
+      </div>
+      <p id="generation-preview-description" className="text-[10px] text-text-muted">{description}</p>
+      {generationMode === 'image' && (
+        <p id="generation-preview-image-description" className="text-[10px] text-text-muted">
+          Image generations show still previews, including when Live Video is selected.
+        </p>
+      )}
+    </section>
   )
 }

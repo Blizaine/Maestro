@@ -1,10 +1,12 @@
 import { useCallback } from 'react'
 import { Upload, X } from 'lucide-react'
+import { VideoInputPreview } from './VideoInputPreview'
 
-export function FileUploadZone({ label, accept, filename, onFile, onClear }: {
+export function FileUploadZone({ label, accept, filename, videoUrl, onFile, onClear }: {
   label: string
   accept: string
   filename: string | null
+  videoUrl?: string | null
   onFile: (file: File) => void
   onClear: () => void
 }) {
@@ -17,6 +19,7 @@ export function FileUploadZone({ label, accept, filename, onFile, onClear }: {
   if (filename) {
     return (
       <div className="flex items-center gap-2 bg-bg-tertiary border border-border rounded-lg px-3 py-2">
+        {videoUrl && <VideoInputPreview src={videoUrl} alt={`${filename} preview`} className="h-8 w-12 shrink-0 rounded object-cover" />}
         <span className="text-xs text-text-primary truncate flex-1">{filename}</span>
         <button
           onClick={onClear}

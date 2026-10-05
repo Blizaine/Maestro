@@ -68,6 +68,69 @@ class TestJobLifecycleWiring(unittest.TestCase):
         self.assertEqual(job['error'], 'Notation package could not load')
         self.assertEqual(job['message'], 'Error: Notation package could not load')
 
+    def test_skipped_or_outputless_generation_never_emits_completed(self):
+        from app.services.job_lifecycle import finish_job, register_terminal_listener, unregister_terminal_listener, update_job
+        worker = _function(self.launch, "_run_generation")
+        success_assignment = next(node for node in ast.walk(worker) if isinstance(node, ast.Assign)
+                                  and any(isinstance(target, ast.Name) and target.id == "success" for target in node.targets))
+        output_guard = next(node for node in ast.walk(worker) if isinstance(node, ast.If)
+                            and ast.unparse(node.test) == "not new_files")
+        terminal = next(node for node in ast.walk(worker) if isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name) and node.func.id == "finish_job"
+                        and any(isinstance(value, ast.Constant) and value.value == "Generation failed"
+                                for value in ast.walk(node)))
+        module = ast.fix_missing_locations(ast.Module(
+            body=[success_assignment, output_guard, ast.Expr(value=terminal)], type_ignores=[],
+        ))
+        observed_statuses = []
+        listener = lambda job, status: observed_statuses.append(status)
+        register_terminal_listener(listener)
+        try:
+            for total, completed, files, error, status in (
+                (1, 0, [], "Task 1 failed validation", "failed"),
+                (2, 1, ["partial.mp4"], "Task 2 failed validation", "failed"),
+                (1, 1, [], None, "failed"),
+                (0, 0, [], None, "failed"),
+                (1, 1, ["clip.mp4"], None, "completed"),
+                (2, 2, ["first.mp4", "second.mp4"], None, "completed"),
+            ):
+                with self.subTest(total=total, completed=completed, files=files):
+                    job = {"id": "output-check", "status": "running", "error": error, "output_files": files}
+                    namespace = {
+                        "job": job, "cancelled": False, "total_tasks": total, "completed": completed,
+                        "new_files": files, "update_job": update_job, "finish_job": finish_job,
+                    }
+                    exec(compile(module, "generation-output-check", "exec"), namespace)
+                    self.assertEqual(job["status"], status)
+                    self.assertEqual(observed_statuses[-1], status)
+                    self.assertEqual(job["output_files"], files, "Partial outputs remain available on failure")
+                    if error:
+                        self.assertEqual(job["error"], error, "Keep the original validation error")
+                    elif status == "failed":
+                        self.assertIn("no output", job["error"])
+                    else:
+                        self.assertEqual(job["message"], "Done")
+        finally:
+            unregister_terminal_listener(listener)
+
+    def test_validation_skip_has_an_actionable_job_error(self):
+        from app.services.job_lifecycle import update_job
+        worker = _function(self.launch, "_run_generation")
+        invalid = next(node for node in ast.walk(worker) if isinstance(node, ast.If)
+                       and ast.unparse(node.test) == "validated_params is None")
+        # Run the actual skip branch inside its loop, retaining its continue.
+        loop = ast.For(target=ast.Name(id="_", ctx=ast.Store()),
+                       iter=ast.List(elts=[ast.Constant(value=0)], ctx=ast.Load()),
+                       body=[invalid], orelse=[])
+        module = ast.fix_missing_locations(ast.Module(body=[loop], type_ignores=[]))
+        job = {"id": "invalid-injected-frames", "status": "running", "error": None}
+        namespace = {"validated_params": None, "task_no": 1, "skipped": 0,
+                     "job": job, "update_job": update_job, "print": lambda *args: None}
+        exec(compile(module, "generation-validation-error", "exec"), namespace)
+        self.assertEqual(namespace["skipped"], 1)
+        self.assertIn("failed validation", job["error"])
+        self.assertIn("required inputs", job["message"])
+
     def test_each_worker_uses_lifecycle_transitions(self):
         expected = {
             "_run_generation": {

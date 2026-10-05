@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +16,7 @@ if str(APP) not in sys.path:
     sys.path.insert(0, str(APP))
 
 MODEL_DEFAULT = APP / "defaults" / "minimax_h3_ref2va_singularity.json"
+FRAMES_DEFAULT = APP / "defaults" / "minimax_h3_singularity.json"
 TURBO_ID = "lightx2v-ref2va-turbo4-v0.1-comfy-bf16"
 TURBO_FILENAME = "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors"
 
@@ -68,13 +71,52 @@ class TestSingularityModelDefinition(unittest.TestCase):
         from models.minimax_h3.minimax_h3_handler import family_handler
 
         model = _read_default()["model"]
-        with self.assertRaisesRegex(ValueError, "Ref2VA References"):
-            family_handler.query_model_def("minimax_h3_ref2va_full", model)
+        for architecture in ("minimax_h3_full", "minimax_h3_ref2va_full", "minimax_h3_voice_audio"):
+            with self.subTest(architecture=architecture):
+                with self.assertRaisesRegex(ValueError, "Pruned Frames or References"):
+                    family_handler.query_model_def(architecture, model)
         with self.assertRaisesRegex(ValueError, "separate checkpoint"):
             family_handler.query_model_def(
                 "minimax_h3_ref2va",
                 {**model, "minimax_h3_fused_turbo": True},
             )
+
+    def test_frames_and_references_share_weights_with_distinct_conditioning(self):
+        from models.minimax_h3.minimax_h3_handler import family_handler
+
+        reference = _read_default()
+        frames = json.loads(FRAMES_DEFAULT.read_text(encoding="utf-8"))
+        for key in ("URLs", "source_revision", "source_sha256", "source_size_bytes",
+                    "minimax_h3_checkpoint_requirements", "minimax_h3_qkv_layout"):
+            self.assertEqual(frames["model"][key], reference["model"][key], key)
+        for key in ("num_inference_steps", "minimax_h3_turbo_mode", "minimax_h3_turbo_preset"):
+            self.assertEqual(frames[key], reference[key], key)
+        definitions = []
+        for default in (frames, reference):
+            model = default["model"]
+            definition = family_handler.query_model_def(model["architecture"], model)
+            self.assertEqual(definition["minimax_h3_model_id"], model["minimax_h3_model_id"])
+            self.assertEqual(definition["compatible_model_paths"], {})
+            self.assertEqual(definition["compatible_model_qkv_layouts"], {})
+            definitions.append(definition)
+        frame_def, ref_def = definitions
+        self.assertFalse(frame_def.get("omni_reference", False))
+        self.assertTrue(frame_def["t2v_class"])
+        self.assertTrue(frame_def["i2v_class"])
+        self.assertTrue(frame_def["end_frames_always_enabled"])
+        self.assertTrue(frame_def["custom_frames_injection"])
+        self.assertTrue(frame_def["video_to_video_inpaint"])
+        self.assertIn(("Use Control Video", "GV"), frame_def["guide_custom_choices"]["choices"])
+        self.assertEqual(frame_def["mask_preprocessing"]["labels"][""], "Whole Frame")
+        self.assertTrue(ref_def["omni_reference"])
+        self.assertFalse(ref_def["i2v_class"])
+        self.assertNotIn("video_to_video_inpaint", ref_def)
+        self.assertEqual(frame_def["minimax_h3_assets_root"], ref_def["minimax_h3_assets_root"])
+        self.assertEqual(frame_def["text_encoder_folder"], ref_def["text_encoder_folder"])
+        self.assertEqual(
+            family_handler.query_model_files([], "minimax_h3", frame_def),
+            family_handler.query_model_files([], "minimax_h3_ref2va", ref_def),
+        )
 
     def test_singularity_reuses_standard_ref2va_assets(self):
         from models.minimax_h3.minimax_h3_handler import family_handler
@@ -104,6 +146,27 @@ class TestSingularityModelDefinition(unittest.TestCase):
 
 
 class TestSingularityTurboRecipe(unittest.TestCase):
+    def test_adapter_family_follows_checkpoint_instead_of_visible_workflow(self):
+        from models.minimax_h3.turbo import (
+            minimax_h3_adapter_workflow,
+            normalize_minimax_h3_turbo_request,
+        )
+
+        for path in (FRAMES_DEFAULT, MODEL_DEFAULT):
+            with self.subTest(model=path.stem):
+                definition = json.loads(path.read_text(encoding="utf-8"))["model"]
+                workflow = minimax_h3_adapter_workflow(definition)
+                self.assertEqual(workflow, "ref2va")
+                body = {}
+                normalize_minimax_h3_turbo_request(
+                    body, full_checkpoint=False, workflow=workflow, model_def=definition,
+                )
+                self.assertEqual(body["activated_loras"], [TURBO_FILENAME])
+                self.assertEqual(body["num_inference_steps"], 4)
+        self.assertEqual(minimax_h3_adapter_workflow({}), "fl2va")
+        self.assertEqual(minimax_h3_adapter_workflow({"omni_reference": True}), "ref2va")
+        self.assertEqual(minimax_h3_adapter_workflow({"minimax_h3_fused_turbo": True}), "fl2va")
+
     def test_exact_adapter_is_pinned_and_detected_as_ref2va_turbo(self):
         from models.minimax_h3.turbo import (
             find_minimax_h3_accelerators,
@@ -237,6 +300,35 @@ class TestSingularityTurboRecipe(unittest.TestCase):
 
 
 class TestSingularityCheckpointAndLoraContracts(unittest.TestCase):
+    def test_frames_adaln_conversion_uses_ref2va_checkpoint_basis(self):
+        import torch
+        from models.minimax_h3 import lora_affine
+        from models.minimax_h3.transformer import MiniMaxH3Transformer
+
+        table = torch.randn(32, 8)
+        affine = torch.zeros(9, 2688)
+        affine[:8, :8] = torch.eye(8)
+        stub = SimpleNamespace(
+            h3_lora_model_type="minimax_h3_ref2va",
+            use_adaln_curves=True,
+            adaln_t_table=table.clone(),
+        )
+        prefix = "blocks.0.adaln_proj.linear"
+        down = torch.randn(2, 2688)
+        state = {f"{prefix}.lora_A.weight": down,
+                 f"{prefix}.lora_B.weight": torch.randn(4, 2)}
+
+        def load_package(architecture, width):
+            self.assertEqual((architecture, width), ("ref2va", 8))
+            return table, affine
+
+        with patch.object(lora_affine, "_load_affine_package", side_effect=load_package) as loader:
+            converted = MiniMaxH3Transformer.preprocess_loras(stub, "minimax_h3", state)
+        loader.assert_called()
+        self.assertEqual(tuple(converted[f"{prefix}.lora_A.weight"].shape), (2, 8))
+        self.assertTrue(torch.allclose(converted[f"{prefix}.lora_A.weight"], down[:, :8], atol=1e-4))
+        self.assertEqual(tuple(converted[f"{prefix}.diff_b"].shape), (4,))
+
     def test_checkpoint_gate_requires_native_grouped_int8_convrot(self):
         from models.minimax_h3.singularity import (
             validate_minimax_h3_singularity_checkpoint,

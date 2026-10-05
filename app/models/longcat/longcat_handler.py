@@ -1,6 +1,96 @@
 import os
+import math
 import torch
 from shared.utils.hf import build_hf_url
+
+
+LONGCAT_SLIDING_WINDOW_DEFAULTS = {
+    # Use the existing 93-frame recipe for local inference. Longer timelines
+    # continue through windows; they must not inherit another engine's 40s pass.
+    "window_min": 17,
+    "window_max": 93,
+    "window_step": 4,
+    "window_default": 93,
+    "overlap_min": 1,
+    "overlap_max": 13,
+    "overlap_step": 4,
+    "overlap_default": 13,
+    "discard_last_frames": 0,
+}
+
+
+def normalize_longcat_window_params(params, model_def):
+    """Bound each LongCat pass without shortening the requested timeline."""
+    model_type = str(params.get("model_type") or "")
+    architecture = str((model_def or {}).get("architecture") or model_type)
+    if architecture not in {"longcat_video", "longcat_avatar"} and model_type not in {
+        "longcat_video", "longcat_avatar", "longcat_avatar_multi",
+    }:
+        return False
+
+    def frame_count(value, default, label, minimum):
+        if value is None:
+            return default
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"LongCat {label} must be a whole frame count") from None
+        if isinstance(value, bool) or not math.isfinite(number) or not number.is_integer() or number < minimum:
+            raise ValueError(f"LongCat {label} must be a whole frame count")
+        return int(number)
+
+    previous = {key: params.get(key) for key in (
+        "sliding_window_size", "sliding_window_overlap", "sliding_window_discard_last_frames",
+    )}
+    frames = frame_count(params.get("sliding_window_size"), 93, "window size", 1)
+    frames = max(17, min(93, 17 + ((frames - 17 + 2) // 4) * 4))
+    overlap = frame_count(params.get("sliding_window_overlap"), 13, "overlap", 0)
+    overlap = max(1, min(13, 1 + ((overlap - 1 + 2) // 4) * 4))
+    params.update(sliding_window_size=frames, sliding_window_overlap=overlap,
+                  sliding_window_discard_last_frames=0)
+    return any(params[key] != value for key, value in previous.items())
+
+
+def longcat_avatar_weight_budget(total_vram_gb, resolution, window_frames,
+                                additional_reserve_gb=0, continuation=False):
+    """Reserve activation workspace before placing Avatar weights on the GPU.
+
+    Avatar modulation, Q/K normalization and rotary embeddings use FP32 even
+    with INT8 weights. A 93-frame 720p pass spilled into WDDM shared memory
+    with the full transformer resident on a 24 GB card. Allow 17 GB of
+    workspace at that token count, scaling the variable portion by the
+    VAE/patch token grid. Continuation adds a reference latent and separate
+    reference/overlap/noise attention buffers; reserve another 3 GB at the
+    same grid size. This changes weight residency, not model precision.
+    """
+    total_vram_gb = max(0.0, float(total_vram_gb or 0))
+    width, height = 1280, 720
+    try:
+        requested_width, requested_height = map(int, str(resolution).lower().split("x"))
+        if requested_width > 0 and requested_height > 0:
+            width, height = requested_width, requested_height
+    except (TypeError, ValueError):
+        pass
+    frames = max(1, int(window_frames or 93))
+    latent_frames = 1 + (frames - 1) // 4
+    reference_latent_frames = 1 if continuation else 0
+    latent_frames += reference_latent_frames
+    tokens = math.ceil(width / 16) * math.ceil(height / 16) * latent_frames
+    continuation_reserve = 3.0 * tokens / 86400 if continuation else 0.0
+    requested_reserve = (2.0 + 15.0 * tokens / 86400 + continuation_reserve
+                         + max(0.0, additional_reserve_gb))
+    # Keep a small streaming slice on cards where this resolution cannot fit.
+    # The clamped estimate remains visible for diagnostics.
+    reserve = min(requested_reserve, max(0.0, total_vram_gb - 3.5))
+    return {
+        "weight_budget_gb": max(0.0, total_vram_gb - reserve),
+        "activation_reserve_gb": reserve,
+        "requested_activation_reserve_gb": requested_reserve,
+        "activation_reserve_clamped": reserve < requested_reserve,
+        "window_tokens": tokens,
+        "reference_latent_frames": reference_latent_frames,
+        "continuation_reserve_gb": continuation_reserve,
+    }
 
 
 class family_handler:
@@ -47,6 +137,7 @@ class family_handler:
             "frames_minimum": 5,
             "frames_steps": 4,
             "sliding_window": True,
+            "sliding_window_defaults": dict(LONGCAT_SLIDING_WINDOW_DEFAULTS),
             "guidance_max_phases": 1,
             "image_prompt_types_allowed": "TSVL",
             "video_continuation": True,
@@ -69,6 +160,8 @@ class family_handler:
                 {
                     "fps": 15,
                     "profiles_dir": ["longcat_video"],
+                    "t2v_class": True,
+                    "i2v_class": True,
                 }
             )
         elif base_model_type == "longcat_avatar":
@@ -76,11 +169,15 @@ class family_handler:
                 {
                     "fps": 16,
                     "profiles_dir": [base_model_type],
-                    "audio_guide_label": "Voice to follow",
-                    "audio_guide2_label": "Voice to follow #2",
                     "audio_guidance": True,
                     "any_audio_prompt": True,
-                    "audio_prompt_choices": True,                
+                    "audio_prompt_choices": True,
+                    "audio_guide_label": "Voice to follow",
+                    "audio_guide2_label": "Voice to follow #2",
+                    "infer_audio_prompt_from_guide": True,
+                    "max_image_refs": 1,
+                    "t2v_class": True,
+                    "i2v_class": True,
                     "image_ref_choices": {
                         "choices": [("None", ""), ("Anchor Reference Image", "KI")],
                         "letters_filter": "KI",
@@ -92,6 +189,17 @@ class family_handler:
                     "image_prompt_types_allowed": "TSVL",
                 }
             )
+            # WanGP's classic UI creates its paired guide control dynamically
+            # for multi-speaker checkpoints. A single-choice config is used
+            # only for the one-guide Studio-compatible checkpoint.
+            if not (model_def or {}).get("multi_speakers_only", False):
+                extra_model_def["audio_prompt_type_sources"] = {
+                    "selection": ["A"],
+                    "labels": {"A": "Use voice to drive the avatar"},
+                    "default": "A",
+                    "letters_filter": "A",
+                    "show_label": False,
+                }
 
 
         return extra_model_def

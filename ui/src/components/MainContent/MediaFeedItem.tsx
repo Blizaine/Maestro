@@ -1,5 +1,6 @@
 import { outputIdentity } from '../../lib/galleryIdentity'
-import { useState, useRef, useEffect, useCallback, type CSSProperties } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, type CSSProperties } from 'react'
+import { createPortal } from 'react-dom'
 import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked, Info, ChevronDown, ChevronUp, MoreHorizontal, ScanFace, Maximize2, Columns2 } from 'lucide-react'
 import { SaveRecipeDialog } from '../Recipes/SaveRecipeDialog'
 import { FaceRefinerDialog } from '../Characters/FaceRefiner'
@@ -129,11 +130,12 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const [inputError, setInputError] = useState('')
   const [trimInput, setTrimInput] = useState<{ target: GalleryInputTarget; source: EditorAsset } | null>(null)
   const [showActionMenu, setShowActionMenu] = useState(false)
-  const [actionMenuOpensDown, setActionMenuOpensDown] = useState(false)
   const [showMoveMenu, setShowMoveMenu] = useState(false)
   const [showDetails, setShowDetails] = useState(false)
   const [moving, setMoving] = useState(false)
   const actionMenuRef = useRef<HTMLDivElement>(null)
+  const actionMenuButtonRef = useRef<HTMLButtonElement>(null)
+  const actionMenuPopupRef = useRef<HTMLDivElement>(null)
   const itemRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const posterSize = useVideoPosterSize(videoRef, file.type === 'video' ? file.url : '')
@@ -518,23 +520,75 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     }
   }
 
-  // Keep the labeled action popover transient. Workspace choices live inside
-  // the same popover, so one outside-click boundary handles both levels.
+  // Render outside the scrolling feed: an upward-opening menu on the first
+  // card otherwise gets clipped by the gallery toolbar, regardless of z-index.
+  useLayoutEffect(() => {
+    if (!showActionMenu) return
+    const menu = actionMenuPopupRef.current
+    const anchor = actionMenuButtonRef.current
+    if (!menu || !anchor) return
+    const viewport = window.visualViewport
+    const place = () => {
+      const padding = 12, gap = 8
+      const left = (viewport?.offsetLeft ?? 0) + padding
+      const top = (viewport?.offsetTop ?? 0) + padding
+      const width = Math.max(1, (viewport?.width ?? window.innerWidth) - padding * 2)
+      const bottom = top + Math.max(1, (viewport?.height ?? window.innerHeight) - padding * 2)
+      const rect = anchor.getBoundingClientRect()
+      const above = Math.max(0, Math.min(rect.top - gap, bottom) - top)
+      const below = Math.max(0, bottom - Math.max(rect.bottom + gap, top))
+      const opensDown = below > above
+      const menuWidth = Math.min(256, width)
+      menu.style.width = `${menuWidth}px`
+      menu.style.maxHeight = `${Math.min(420, Math.max(above, below))}px`
+      const height = menu.getBoundingClientRect().height
+      menu.style.left = `${Math.max(left, Math.min(rect.right - menuWidth, left + width - menuWidth))}px`
+      menu.style.top = `${Math.max(top, Math.min(opensDown ? rect.bottom + gap : rect.top - gap - height, bottom - height))}px`
+    }
+    place()
+    menu.focus({ preventScroll: true })
+    const observer = new ResizeObserver(place)
+    observer.observe(menu)
+    const onScroll = (event: Event) => {
+      // Scrolling the choices must not move their container or the gallery.
+      if (event.target instanceof Node && menu.contains(event.target)) return
+      place()
+    }
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', place)
+    viewport?.addEventListener('resize', place)
+    viewport?.addEventListener('scroll', place)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', place)
+      viewport?.removeEventListener('resize', place)
+      viewport?.removeEventListener('scroll', place)
+    }
+  }, [showActionMenu])
+
+  // The trigger and portaled menu share an outside-click boundary; workspace
+  // choices stay within the same scrollable menu.
   useEffect(() => {
     if (!showActionMenu) return
-    const handler = (e: MouseEvent) => {
-      if (actionMenuRef.current && !actionMenuRef.current.contains(e.target as Node)) {
+    const handler = (e: PointerEvent) => {
+      if (!actionMenuRef.current?.contains(e.target as Node)
+        && !actionMenuPopupRef.current?.contains(e.target as Node)) {
         setShowActionMenu(false)
         setShowMoveMenu(false)
       }
     }
     const escape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { setShowActionMenu(false); setShowMoveMenu(false) }
+      if (e.key === 'Escape') {
+        setShowActionMenu(false)
+        setShowMoveMenu(false)
+        actionMenuButtonRef.current?.focus({ preventScroll: true })
+      }
     }
-    document.addEventListener('mousedown', handler)
+    document.addEventListener('pointerdown', handler)
     document.addEventListener('keydown', escape)
     return () => {
-      document.removeEventListener('mousedown', handler)
+      document.removeEventListener('pointerdown', handler)
       document.removeEventListener('keydown', escape)
     }
   }, [showActionMenu])
@@ -900,14 +954,9 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
             </button>
           )}
           <button
+            ref={actionMenuButtonRef}
             onClick={() => {
               onActivate(index)
-              const rect = actionMenuRef.current?.getBoundingClientRect()
-              if (rect) {
-                const spaceAbove = rect.top - 8
-                const spaceBelow = window.innerHeight - rect.bottom - 8
-                setActionMenuOpensDown(spaceBelow > spaceAbove)
-              }
               setShowActionMenu(value => !value)
               setShowMoveMenu(false)
             }}
@@ -924,13 +973,13 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
             <MoreHorizontal size={15} />
           </button>
 
-          {showActionMenu && (
+          {showActionMenu && createPortal(
             <div
+              ref={actionMenuPopupRef}
               role="menu"
               aria-label="Clip actions"
-              className={`absolute right-0 z-50 max-h-[min(420px,65vh)] w-64 max-w-[calc(100vw-2rem)] overflow-y-auto rounded-xl border border-border bg-bg-secondary p-1.5 shadow-2xl ${
-                actionMenuOpensDown ? 'top-full mt-2' : 'bottom-full mb-2'
-              }`}
+              tabIndex={-1}
+              className="fixed z-[60] overflow-y-auto overscroll-contain rounded-xl border border-border bg-bg-secondary p-1.5 shadow-2xl outline-none"
             >
               <div className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
                 Clip actions
@@ -1119,7 +1168,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                 </p>
               )}
               {deleteError && <p role="alert" className="px-2.5 py-2 text-xs text-red-400">{deleteError}</p>}
-            </div>
+            </div>, document.body
           )}
         </div>
       </div>

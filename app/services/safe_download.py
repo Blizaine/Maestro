@@ -55,6 +55,12 @@ import threading
 import time
 from typing import Optional
 
+from .download_control import (
+    current_download_control,
+    find_download_control,
+    install_huggingface_cancellation,
+)
+
 # ── Layer 1: timeouts ──────────────────────────────────────────────
 
 # 30s without bytes flowing is a near-universal indicator that the
@@ -99,11 +105,19 @@ def _install_request_timeouts() -> None:
         _original_session_request = requests.Session.request
 
         def _session_request(self, method, url, **kwargs):
+            control = current_download_control()
+            if control is not None:
+                control.check()
             if kwargs.get("timeout") is None:
                 kwargs["timeout"] = (
                     _CONNECT_TIMEOUT_SECONDS, _READ_TIMEOUT_SECONDS
                 )
-            return _original_session_request(self, method, url, **kwargs)
+            response = _original_session_request(self, method, url, **kwargs)
+            if control is not None:
+                if kwargs.get("stream"):
+                    return control.wrap_response(response)
+                control.check()
+            return response
 
         _session_request._maestro_timeout_patched = True
         requests.Session.request = _session_request
@@ -139,21 +153,55 @@ def get_active_downloads() -> list:
     with _active_downloads_lock:
         # Expire terminal (incomplete) markers after a minute so the banner
         # shows an interrupted download briefly, then clears on its own.
-        for fid in [
-            fid for fid, st in _active_downloads.items()
-            if st.get("status") == "incomplete" and now - st.get("ended_at", now) > 60
-        ]:
-            _active_downloads.pop(fid, None)
         results = []
-        for file_id, state in _active_downloads.items():
+        for file_id, state in tuple(_active_downloads.items()):
+            control = find_download_control(state.get("cancel_id"))
+            snapshot = control.snapshot() if control is not None else {}
+            status = snapshot.get("status")
+            display_status = status if status in {"cancelling", "cancelled"} else state.get("status")
+            ended_at = control.ended_at if display_status == "cancelled" and control is not None else state.get("ended_at", now)
+            if display_status in {"incomplete", "cancelled"} and now - (ended_at or now) > 60:
+                _active_downloads.pop(file_id, None)
+                continue
             results.append({
                 **state,
+                "status": display_status,
+                "cancel_id": state.get("cancel_id"),
+                "cancellable": bool(snapshot.get("cancellable")) and display_status not in {"incomplete", "cancelled"},
                 "file_id": file_id,
                 "seconds_since_progress": (
                     round(now - state.get("last_active_at", now), 1)
                 ),
             })
         return results
+
+
+# The UI shows "Download is slow — waiting for retry" past this many seconds
+# without progress (DownloadStatusBanner.tsx mirrors it).
+STALLED_AFTER_SECONDS = 30
+
+
+def downloads_change_key(downloads: list) -> tuple:
+    """What the download banner shows, reduced to a comparable value.
+
+    `seconds_since_progress` grows every second, so only whether it crossed
+    the stall threshold counts; otherwise a stalled download would look like
+    a change on every read. Cancellation fields are included so a held poll
+    wakes as soon as cancellation is requested or completed.
+    """
+    return tuple(sorted(
+        (
+            d["file_id"],
+            d.get("filename"),
+            d.get("status"),
+            d.get("downloaded_bytes"),
+            d.get("total_bytes"),
+            d.get("seconds_since_progress", 0) > STALLED_AFTER_SECONDS,
+            d.get("cancel_id"),
+            bool(d.get("cancellable")),
+        )
+        for d in downloads
+    ))
 
 
 def _record_download_progress(
@@ -164,6 +212,7 @@ def _record_download_progress(
     status: str = "downloading",
 ) -> None:
     now = time.time()
+    control = current_download_control()
     with _active_downloads_lock:
         existing = _active_downloads.get(file_id, {})
         _active_downloads[file_id] = {
@@ -173,6 +222,7 @@ def _record_download_progress(
             "downloaded_bytes": downloaded,
             "total_bytes": total,
             "status": status,
+            "cancel_id": control.download_id if control is not None else existing.get("cancel_id"),
         }
 
 
@@ -191,6 +241,16 @@ def _record_download_done(
     short-lived "incomplete" marker the UI can show. A clean finish (or
     an unknown-size bar) is popped as before.
     """
+    with _active_downloads_lock:
+        existing = _active_downloads.get(file_id, {})
+        control = find_download_control(existing.get("cancel_id"))
+        if control is not None and control.cancel_requested:
+            _active_downloads[file_id] = {
+                **existing,
+                "status": "cancelling",
+                "ended_at": time.time(),
+            }
+            return
     if total and downloaded is not None and downloaded < total:
         short = total - downloaded
         print(
@@ -282,6 +342,9 @@ def _install_tqdm_hook() -> None:
         _original_close = Tqdm.close
 
         def _patched_init(self, *args, **kwargs):
+            control = current_download_control()
+            if control is not None:
+                control.check()
             _original_init(self, *args, **kwargs)
             try:
                 if not _is_download_tqdm(self):
@@ -292,7 +355,7 @@ def _install_tqdm_hook() -> None:
                 # writes "Fetching N files: ..." for HF group bars.
                 # Strip the meaningless padding/whitespace for display.
                 desc = str(desc).strip(": ()") or f"download-{id(self)}"
-                self._maestro_file_id = desc
+                self._maestro_file_id = f"{control.download_id}:{id(self)}" if control is not None else desc
                 self._maestro_filename = desc
                 _record_download_progress(
                     self._maestro_file_id,
@@ -304,6 +367,9 @@ def _install_tqdm_hook() -> None:
                 self._maestro_file_id = None
 
         def _patched_update(self, n=1):
+            control = current_download_control()
+            if control is not None:
+                control.check()
             result = _original_update(self, n)
             try:
                 file_id = getattr(self, "_maestro_file_id", None)
@@ -359,6 +425,10 @@ def install() -> None:
         _install_tqdm_hook()
     except Exception as e:
         print(f"[safe_download] tqdm hook install failed: {e}")
+    try:
+        install_huggingface_cancellation()
+    except Exception as e:
+        print(f"[safe_download] HF cancellation hook install failed: {e}")
 
 
 # Auto-install on import — this is the whole point of the module.

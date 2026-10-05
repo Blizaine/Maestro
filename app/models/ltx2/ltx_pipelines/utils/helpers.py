@@ -1863,10 +1863,18 @@ def _invoke_callback(
     if callback is None or video_state is None:
         return
     preview_latents = None
-    if preview_tools is not None:
-        preview_state = preview_tools.clear_conditioning(video_state)
-        preview_state = preview_tools.unpatchify(preview_state)
-        preview_latents = preview_state.latent[0].detach()
+    try:
+        wants_preview = getattr(callback, "wants_preview", None)
+        if preview_tools is not None and (
+            not callable(wants_preview) or wants_preview(step_idx, pass_no=pass_no)
+        ):
+            preview_state = preview_tools.clear_conditioning(video_state)
+            preview_state = preview_tools.unpatchify(preview_state)
+            preview_latents = preview_state.latent[0].detach()
+    except Exception as error:
+        report_preview_error = getattr(callback, "preview_error", None)
+        if callable(report_preview_error):
+            report_preview_error(error)
     callback(step_idx, preview_latents, False, pass_no=pass_no)
 
 

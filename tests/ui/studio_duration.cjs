@@ -117,7 +117,346 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
     assert.equal(await page.evaluate(() => window.updates), beforeNoop, 'Repeated canonical writes do not notify React');
     assert.deepEqual(errors, []);
     console.log('Time slider: native steps, GPU cap, manual 14.4s cap, 60m preset, Window mode and idempotence passed');
+
+    const configureDurationScenario = async scenario => {
+      await page.evaluate(scenario => {
+        const current = window.store.getState();
+        const h3 = scenario.kind === 'h3';
+        const ltx = scenario.kind === 'ltx';
+        const omni = h3 && scenario.omni !== false;
+        const options = h3 ? {
+          architecture: omni ? 'minimax_h3_ref2va' : 'minimax_h3',
+          model_type: omni ? 'minimax_h3_ref2va' : 'minimax_h3', fps: 24,
+          frames_minimum: 124, frames_maximum: 345, frames_steps: 17,
+          sliding_window: true, omni_reference: omni,
+          sliding_window_defaults: {window_min:124, window_max:345, window_step:17,
+            overlap_min:1, overlap_max:97, overlap_step:17, overlap_offset:1, overlap_default:18, discard_last_frames:0},
+          ...(omni ? {omni_sequence_memory_policy: {resolution_bands:[{min_pixels:0,
+            vram_tiers:[{max_vram_gb:null,frames:243}]}], reference_margin_steps:1}} : {}),
+        } : {
+          architecture: ltx ? 'ltx-duration-test' : 'sliding-duration-test',
+          model_type: ltx ? 'ltx-duration-test' : 'sliding-duration-test', fps:24,
+          frames_minimum:24, frames_maximum:144, frames_steps:1, sliding_window:true,
+          ...(ltx ? {multi_window_sequence_controls:true} : {}),
+          sliding_window_defaults: {window_min:48, window_max:144, window_step:24,
+            overlap_min:4, overlap_max:20, overlap_step:4, discard_last_frames:4},
+        };
+        const params = {
+          ...current.params,
+          model_type: options.model_type,
+          image_mode: 0,
+          prompt: 'A traveler crosses a quiet garden in warm morning light.',
+          _duration_planning_mode: scenario.mode,
+          video_length: scenario.durationFrames,
+          sliding_window_size: scenario.windowFrames,
+          sliding_window_overlap: scenario.overlapFrames,
+          minimax_h3_extended_duration: false,
+          minimax_h3_reference_sequence: h3 && omni && scenario.sequence,
+          minimax_h3_multi_window: h3 && !omni && scenario.sequence,
+          minimax_h3_sequence_continuity: scenario.continuity !== false,
+          minimax_h3_sequence_clip_frames: scenario.windowFrames,
+          ltx_multi_window: ltx && scenario.sequence,
+          minimax_h3_references: scenario.mediaSeconds ? [{
+            type:'video', path:'/uploads/timeline.mp4', duration_seconds:scenario.mediaSeconds,
+            follow_timeline:true, video_intent:'environment',
+          }] : [],
+          video_guide: '', audio_guide: '',
+        };
+        window.store.setState({
+          generationMode:'video',
+          studioVideoWorkflow:scenario.workflow,
+          durationSeconds:scenario.durationFrames / 24,
+          slidingWindowSeconds:scenario.windowFrames / 24,
+          slidingWindowOverlap:scenario.overlapFrames,
+          slidingWindowLocked:scenario.locked,
+          modelOptions:options,
+          h3WindowPlan:null,
+          promptEnhanceError:null,
+          params,
+        });
+      }, scenario);
+      await page.waitForTimeout(100);
+      await page.evaluate(scenario => {
+        const current = window.store.getState();
+        const isH3 = String(current.modelOptions?.architecture || '').startsWith('minimax_h3');
+        const isLtx = current.modelOptions?.multi_window_sequence_controls === true;
+        const isOmni = current.modelOptions?.omni_reference === true;
+        window.store.setState({
+          durationSeconds:scenario.durationFrames / 24,
+          slidingWindowSeconds:scenario.windowFrames / 24,
+          slidingWindowOverlap:scenario.overlapFrames,
+          slidingWindowLocked:scenario.locked,
+          params:{
+            ...current.params,
+            _duration_planning_mode:scenario.mode,
+            video_length:scenario.durationFrames,
+            sliding_window_size:scenario.windowFrames,
+            sliding_window_overlap:scenario.overlapFrames,
+            minimax_h3_reference_sequence:isH3 && isOmni && scenario.sequence,
+            minimax_h3_multi_window:isH3 && !isOmni && scenario.sequence,
+            ltx_multi_window:isLtx && scenario.sequence,
+          },
+        });
+      }, scenario);
+      await page.waitForTimeout(100);
+    };
+    const resizeWindow = async frames => {
+      await page.evaluate(frames => window.store.getState().setSlidingWindowSeconds(frames / 24), frames);
+      await page.waitForTimeout(100);
+      return page.evaluate(() => {
+        const s = window.store.getState();
+        return {durationFrames:s.params.video_length, windowFrames:s.params.sliding_window_size,
+          duration:s.durationSeconds, sequence:s.params.minimax_h3_reference_sequence,
+          h3MultiWindow:s.params.minimax_h3_multi_window, ltxSequence:s.params.ltx_multi_window,
+          mode:s.params._duration_planning_mode,
+          clipFrames:s.params.minimax_h3_sequence_clip_frames,
+          h3Plan:s.h3WindowPlan, enhanceError:s.promptEnhanceError};
+      });
+    };
+
+    await configureDurationScenario({kind:'h3', workflow:'references', mode:'duration',
+      durationFrames:226, windowFrames:243, overlapFrames:18, sequence:false,
+      continuity:true, locked:false});
+    await page.getByRole('button', {name:'Window', exact:true}).click();
+    const h3WindowSlider = page.getByRole('slider', {name:'Window length', exact:true});
+    await h3WindowSlider.focus();
+    await h3WindowSlider.press('ArrowRight');
+    await page.waitForTimeout(100);
+    let resized = await page.evaluate(() => {
+      const s = window.store.getState();
+      return {durationFrames:s.params.video_length, windowFrames:s.params.sliding_window_size,
+        sequence:s.params.minimax_h3_reference_sequence, mode:s.params._duration_planning_mode};
+    });
+    assert.deepEqual(resized, {durationFrames:243, windowFrames:243, sequence:false, mode:'windows'},
+      'One H3 window grows on the native frame lattice without enabling a sequence');
+    await h3WindowSlider.press('ArrowLeft');
+    await h3WindowSlider.press('ArrowLeft');
+    await page.waitForTimeout(100);
+    resized = await page.evaluate(() => {
+      const s = window.store.getState();
+      return {durationFrames:s.params.video_length, windowFrames:s.params.sliding_window_size,
+        sequence:s.params.minimax_h3_reference_sequence};
+    });
+    assert.deepEqual(resized, {durationFrames:209, windowFrames:209, sequence:false},
+      'One H3 window shrinks with its total and stays a single pass');
+
+    await configureDurationScenario({kind:'h3', workflow:'references', mode:'windows',
+      durationFrames:468, windowFrames:243, overlapFrames:18, sequence:true,
+      continuity:true, locked:true});
+    await h3WindowSlider.focus();
+    await h3WindowSlider.press('ArrowRight');
+    await page.waitForTimeout(100);
+    resized = await page.evaluate(() => {
+      const s = window.store.getState();
+      return {durationFrames:s.params.video_length, windowFrames:s.params.sliding_window_size,
+        sequence:s.params.minimax_h3_reference_sequence};
+    });
+    assert.deepEqual(resized, {durationFrames:502, windowFrames:260, sequence:true},
+      'Two continuation windows retain their count when the native H3 length grows');
+    await h3WindowSlider.press('ArrowLeft');
+    await h3WindowSlider.press('ArrowLeft');
+    await page.waitForTimeout(100);
+    resized = await page.evaluate(() => {
+      const s = window.store.getState();
+      return {durationFrames:s.params.video_length, windowFrames:s.params.sliding_window_size,
+        sequence:s.params.minimax_h3_reference_sequence};
+    });
+    assert.deepEqual(resized, {durationFrames:434, windowFrames:226, sequence:true},
+      'Two continuation windows retain their count when the native H3 length shrinks');
+
+    await configureDurationScenario({kind:'h3', workflow:'extend', mode:'windows',
+      durationFrames:451, windowFrames:243, overlapFrames:18, sequence:true,
+      continuity:true, locked:true});
+    resized = await resizeWindow(260);
+    assert.deepEqual({durationFrames:resized.durationFrames, windowFrames:resized.windowFrames,
+      sequence:resized.sequence}, {durationFrames:485, windowFrames:260, sequence:true},
+      'Extend preserves two windows using overlap minus one frame as first-pass context');
+    resized = await resizeWindow(226);
+    assert.deepEqual({durationFrames:resized.durationFrames, windowFrames:resized.windowFrames,
+      sequence:resized.sequence}, {durationFrames:417, windowFrames:226, sequence:true},
+      'Extend keeps its two-window count while shrinking the native pass');
+
+    await configureDurationScenario({kind:'h3', omni:false, workflow:'frames', mode:'windows',
+      durationFrames:468, windowFrames:243, overlapFrames:18, sequence:true,
+      continuity:true, locked:true});
+    resized = await resizeWindow(260);
+    assert.deepEqual({durationFrames:resized.durationFrames, windowFrames:resized.windowFrames,
+      sequence:resized.sequence, h3MultiWindow:resized.h3MultiWindow},
+      {durationFrames:502, windowFrames:260, sequence:false, h3MultiWindow:true},
+      'Non-Omni H3 Frames uses the First/Last multi-window sequence flag');
+
+    await configureDurationScenario({kind:'h3', workflow:'references', mode:'windows',
+      durationFrames:486, windowFrames:243, overlapFrames:18, sequence:true,
+      continuity:false, locked:true});
+    await page.evaluate(() => window.store.setState({
+      h3WindowPlan:{plan_kind:'reference_sequence'}, promptEnhanceError:'Stale window plan',
+    }));
+    resized = await resizeWindow(260);
+    assert.deepEqual({durationFrames:resized.durationFrames, windowFrames:resized.windowFrames,
+      sequence:resized.sequence, clipFrames:resized.clipFrames},
+      {durationFrames:520, windowFrames:260, sequence:true, clipFrames:260},
+      'Hard-cut Omni windows keep two independent clips without overlap');
+    assert.equal(resized.h3Plan, null, 'Changing window length invalidates a reviewed H3 window plan');
+    assert.equal(resized.enhanceError, null, 'Changing window length clears stale enhancement errors');
+    resized = await resizeWindow(226);
+    assert.deepEqual({durationFrames:resized.durationFrames, windowFrames:resized.windowFrames,
+      sequence:resized.sequence}, {durationFrames:452, windowFrames:226, sequence:true},
+      'Hard-cut Omni clips keep their count while shrinking');
+
+    await configureDurationScenario({kind:'ltx', workflow:'references', mode:'windows',
+      durationFrames:176, windowFrames:96, overlapFrames:8, sequence:true,
+      continuity:true, locked:true});
+    resized = await resizeWindow(120);
+    assert.deepEqual({durationFrames:resized.durationFrames, windowFrames:resized.windowFrames,
+      ltxSequence:resized.ltxSequence}, {durationFrames:224, windowFrames:120, ltxSequence:true},
+      'LTX preserves two windows using overlap and discarded tail frames');
+    resized = await resizeWindow(72);
+    assert.deepEqual({durationFrames:resized.durationFrames, windowFrames:resized.windowFrames,
+      ltxSequence:resized.ltxSequence}, {durationFrames:128, windowFrames:72, ltxSequence:true},
+      'LTX keeps the same count when window length decreases');
+
+    await configureDurationScenario({kind:'sliding', workflow:'references', mode:'windows',
+      durationFrames:176, windowFrames:96, overlapFrames:8, sequence:false,
+      continuity:true, locked:true});
+    resized = await resizeWindow(120);
+    assert.deepEqual({durationFrames:resized.durationFrames, windowFrames:resized.windowFrames,
+      sequence:resized.sequence, ltxSequence:resized.ltxSequence},
+      {durationFrames:224, windowFrames:120, sequence:false, ltxSequence:false},
+      'Ordinary sliding windows preserve count using overlap and discard geometry');
+    const beforeWindowNoop = await page.evaluate(() => window.updates);
+    await resizeWindow(120);
+    assert.equal(await page.evaluate(() => window.updates), beforeWindowNoop,
+      'Setting the current window length is idempotent');
+
+    await configureDurationScenario({kind:'h3', workflow:'references', mode:'duration',
+      durationFrames:243, windowFrames:243, overlapFrames:18, sequence:false,
+      continuity:true, locked:true});
+    resized = await resizeWindow(345);
+    assert.equal(resized.durationFrames, 243, 'Time keeps its runtime while the window grows from 243 to 345 frames');
+    assert.equal(resized.windowFrames, 345);
+    assert.equal(resized.sequence, false, 'A 243-frame runtime still fits a 345-frame pass');
+    resized = await resizeWindow(124);
+    assert.equal(resized.durationFrames, 243, 'Time keeps its runtime while the window shrinks to 124 frames');
+    assert.equal(resized.windowFrames, 124);
+    assert.equal(resized.sequence, true, 'Mounted duration reconciliation enables continuation when the pass becomes shorter');
+
+    await configureDurationScenario({kind:'h3', workflow:'references', mode:'auto',
+      durationFrames:840, windowFrames:243, overlapFrames:18, sequence:true,
+      continuity:true, locked:true, mediaSeconds:35});
+    resized = await resizeWindow(260);
+    assert.ok(Math.abs(resized.duration - 35) < 1e-8,
+      'Auto continues to follow the full 35-second reference video when window length changes');
+    assert.equal(resized.durationFrames, 840);
+
+    await configureDurationScenario({kind:'h3', workflow:'references', mode:'windows',
+      durationFrames:86400, windowFrames:243, overlapFrames:18, sequence:true,
+      continuity:true, locked:true});
+    resized = await resizeWindow(260);
+    assert.ok(resized.duration <= 3600 && resized.durationFrames <= 86400,
+      'Window mode respects the one-hour ceiling');
+    const completeH3Windows = 1 + (resized.durationFrames - resized.windowFrames)
+      / (resized.windowFrames - 18);
+    assert.ok(Number.isInteger(completeH3Windows), 'The capped H3 timeline ends on a complete native window');
+    assert.deepEqual(errors, [], 'Window length changes remain stable across Window, Time, and Auto modes');
+    console.log('Window length: count-preserving H3, Extend, hard-cut Omni, LTX and sliding timelines passed');
+
+    await page.evaluate(() => {window.updates = 0; window.durationHistory = [];});
+    const extendedPhaseErrorCount = errors.length;
+    const readExtendedState = () => page.evaluate(() => {
+      const s = window.store.getState();
+      return {
+        mode:s.params._duration_planning_mode,
+        extended:s.params.minimax_h3_extended_duration === true,
+        durationFrames:s.params.video_length,
+        windowFrames:s.params.sliding_window_size,
+      };
+    });
+    const dragExtendedWindowTo = async frames => {
+      const slider = page.getByRole('slider', {name:'Window length', exact:true});
+      await slider.scrollIntoViewIfNeeded();
+      const bounds = await slider.boundingBox();
+      const limits = await slider.evaluate(input => ({min:Number(input.min), max:Number(input.max)}));
+      const current = await page.evaluate(() => window.store.getState().params.sliding_window_size);
+      const xAt = value => bounds.x + 8
+        + ((value - limits.min) / (limits.max - limits.min)) * (bounds.width - 16);
+      const y = bounds.y + bounds.height / 2;
+      await page.mouse.move(xAt(current), y);
+      await page.mouse.down();
+      await page.mouse.move(xAt(frames), y, {steps:4});
+      await page.mouse.up();
+      await page.waitForTimeout(100);
+      return readExtendedState();
+    };
+    const exactWindowCount = async () => Number(
+      await page.getByRole('spinbutton', {name:'Window count', exact:true}).inputValue(),
+    );
+    for (const omni of [false, true]) {
+      const workflow = omni ? 'references' : 'frames';
+      const h3Fixture = {kind:'h3', omni, workflow, overlapFrames:18, continuity:true, locked:true};
+      await configureDurationScenario({...h3Fixture, mode:'windows', durationFrames:243,
+        windowFrames:243, sequence:false});
+      await page.getByRole('checkbox', {name:/Allow 30s clips/}).check();
+      assert.deepEqual(await readExtendedState(), {mode:'windows', extended:true,
+        durationFrames:719, windowFrames:719}, `${workflow}: extending a one-window plan keeps Window mode and its count`);
+      assert.equal(await exactWindowCount(), 1);
+      let extended = await dragExtendedWindowTo(345);
+      assert.deepEqual(extended, {mode:'windows', extended:true, durationFrames:345, windowFrames:345},
+        `${workflow}: a one-window plan follows a shorter extended length`);
+      extended = await dragExtendedWindowTo(719);
+      assert.deepEqual(extended, {mode:'windows', extended:true, durationFrames:719, windowFrames:719},
+        `${workflow}: a one-window plan follows a longer extended length`);
+      assert.equal(await exactWindowCount(), 1);
+
+      await configureDurationScenario({...h3Fixture, mode:'windows', durationFrames:468,
+        windowFrames:243, sequence:true});
+      await page.getByRole('checkbox', {name:/Allow 30s clips/}).check();
+      assert.deepEqual(await readExtendedState(), {mode:'windows', extended:true,
+        durationFrames:1420, windowFrames:719}, `${workflow}: extending keeps two windows`);
+      assert.equal(await exactWindowCount(), 2);
+      extended = await dragExtendedWindowTo(345);
+      assert.deepEqual(extended, {mode:'windows', extended:true, durationFrames:672, windowFrames:345},
+        `${workflow}: two windows follow a shorter extended length`);
+      assert.equal(await exactWindowCount(), 2);
+      extended = await dragExtendedWindowTo(719);
+      assert.deepEqual(extended, {mode:'windows', extended:true, durationFrames:1420, windowFrames:719},
+        `${workflow}: two windows follow a longer extended length`);
+      await page.getByRole('checkbox', {name:/Allow 30s clips/}).uncheck();
+      assert.deepEqual(await readExtendedState(), {mode:'windows', extended:false,
+        durationFrames:672, windowFrames:345}, `${workflow}: disabling normalizes capacity and retains the two-window count`);
+      assert.equal(await exactWindowCount(), 2);
+      await page.getByRole('checkbox', {name:/Allow 30s clips/}).check();
+      await page.getByRole('button', {name:/^Auto/}).click();
+      await page.waitForTimeout(100);
+      assert.equal((await readExtendedState()).mode, 'auto', `${workflow}: Auto remains selected`);
+      assert.equal((await readExtendedState()).extended, false, `${workflow}: Auto exits the experiment`);
+      const autoState = await page.evaluate(() => {
+        const s = window.store.getState();
+        return {locked:s.slidingWindowLocked, windowFrames:s.params.sliding_window_size};
+      });
+      assert.deepEqual(autoState, {locked:false, windowFrames:omni ? 226 : 345},
+        `${workflow}: Auto restores its ordinary window recommendation`);
+      assert.equal(await page.getByRole('slider', {name:'Window length', exact:true}).getAttribute('max'), '345',
+        `${workflow}: Auto restores the native recommendation range`);
+
+      await configureDurationScenario({...h3Fixture, mode:'duration', durationFrames:243,
+        windowFrames:243, sequence:false});
+      await page.getByRole('checkbox', {name:/Allow 30s clips/}).check();
+      assert.deepEqual(await readExtendedState(), {mode:'duration', extended:true,
+        durationFrames:243, windowFrames:719}, `${workflow}: Time retains its target while exposing the 719-frame window`);
+      await page.getByRole('button', {name:'Window', exact:true}).click();
+      assert.deepEqual(await readExtendedState(), {mode:'windows', extended:true,
+        durationFrames:719, windowFrames:719}, `${workflow}: entering Window uses the selected extended capacity`);
+      await page.getByRole('checkbox', {name:/Allow 30s clips/}).uncheck();
+      assert.deepEqual(await readExtendedState(), {mode:'windows', extended:false,
+        durationFrames:345, windowFrames:345}, `${workflow}: disabling in Window retains one window`);
+      assert.equal(await exactWindowCount(), 1);
+    }
+    assert.equal(errors.length, extendedPhaseErrorCount,
+      'Allow 30s Window interactions converge within the existing update guard');
+    console.log('Allow 30s: Frames and References preserve Window counts, Time targets and Auto recommendations');
+
     // The opt-in must survive real UI reconciliation and the generation request.
+    await page.evaluate(() => {window.updates = 0; window.durationHistory = [];});
     let extendedSubmission;
     await page.route('**/api/v1/generate', route => {
       extendedSubmission = route.request().postDataJSON();
@@ -254,5 +593,41 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
     assert.deepEqual(returned, {mode:'video',model:'viggle_animate',source:'/uploads/control.mp4',
       image:'/uploads/returned-edit.png',preset:'480p',duration:30,planning:'duration',target:null});
     console.log('Viggle image return: fresh edit selected, source, resolution and manual duration restored');
+    // The return starts an asynchronous model-options request. Let the mocked
+    // request finish before installing the independent LongCat fixture below.
+    await page.waitForFunction(() => !window.store.getState().modelOptionsLoading);
+    await page.evaluate(() => {
+      const s = window.store.getState();
+      window.store.setState({generationMode: 'video', studioVideoWorkflow: 'avatar',
+        durationSeconds: 1275 / 16, slidingWindowSeconds: 93 / 16,
+        slidingWindowOverlap: 13, slidingWindowLocked: false,
+        modelOptions: {model_type: 'longcat_avatar', architecture: 'longcat_avatar',
+          fps: 16, frames_minimum: 5, frames_steps: 4, sliding_window: true,
+          sliding_window_defaults: {window_min: 17, window_max: 93, window_step: 4,
+            window_default: 93, overlap_min: 1, overlap_max: 13, overlap_step: 4,
+            overlap_default: 13, discard_last_frames: 0}},
+        params: {...s.params, model_type: 'longcat_avatar', image_mode: 0,
+          prompt: 'Man sings', audio_guide: '/voice.wav', video_guide: '',
+          _duration_planning_mode: 'auto', video_length: 1275, sliding_window_size: 93,
+          minimax_h3_extended_duration: false, minimax_h3_references: []}});
+      window.mount();
+    });
+    await page.waitForTimeout(100);
+    const longcatWindow = page.getByRole('slider', {name: 'Window size', exact: true});
+    assert.equal(await longcatWindow.getAttribute('max'), String(93 / 16));
+    assert.equal(await longcatWindow.getAttribute('step'), String(4 / 16));
+    assert.equal(await page.evaluate(() => window.store.getState().params.video_length), 1275,
+      'Avatar auto duration preserves the full audio timeline across short windows');
+    assert.ok((await page.locator('#root').innerText()).includes('16 windows'));
+    await longcatWindow.focus();
+    await longcatWindow.press('ArrowLeft');
+    assert.equal(await page.evaluate(() => window.store.getState().params.sliding_window_size), 89,
+      'LongCat window controls use the four-frame model step');
+    await longcatWindow.press('End');
+    assert.equal(await page.evaluate(() => window.store.getState().params.sliding_window_size), 93,
+      'The slider cannot submit an inherited forty-second window');
+    assert.equal(await page.evaluate(() => window.store.getState().params.video_length), 1275);
+    assert.deepEqual(errors, []);
+    console.log('LongCat Avatar: 93-frame cap, native window steps, full audio duration and 16-pass continuation schedule passed');
   } finally { await browser.close(); }
 })().catch(e => { console.error(e); process.exitCode = 1; });

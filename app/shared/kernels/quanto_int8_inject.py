@@ -52,6 +52,9 @@ _FUSED_LAUNCH_CACHE_FIFO = []
 _SCALED_LAUNCH_CACHE_MAX = 4096
 _SCALED_LAUNCH_CACHE = {}
 _SCALED_LAUNCH_CACHE_FIFO = []
+_RESOURCE_SAFE_LAUNCH_CACHE_MAX = 256
+_RESOURCE_SAFE_LAUNCH_CACHE = {}
+_RESOURCE_SAFE_LAUNCH_CACHE_FIFO = []
 _QBYTES_TENSOR_CLS = None
 _WEIGHT_QBYTES_CLS = None
 _NATIVE_FALLBACK_MAX_M = 0
@@ -192,6 +195,8 @@ def _reset_runtime_state(reset_triton_module: bool = True) -> None:
     _FUSED_LAUNCH_CACHE_FIFO = []
     _SCALED_LAUNCH_CACHE = {}
     _SCALED_LAUNCH_CACHE_FIFO = []
+    _RESOURCE_SAFE_LAUNCH_CACHE.clear()
+    _RESOURCE_SAFE_LAUNCH_CACHE_FIFO.clear()
     _SHAPE_COUNTS_FUSED = {}
     _SHAPE_COUNTS_SCALED = {}
     _TIME_PROFILE_EVENTS = []
@@ -318,6 +323,64 @@ def _cache_launch_params(cache: dict, fifo: list, max_size: int, key: tuple[int,
         stale_key = fifo.pop(0)
         cache.pop(stale_key, None)
     return params
+
+
+def _shared_memory_resource_limit(exc: Exception) -> bool:
+    detail = str(exc).lower()
+    return (
+        "shared memory" in detail
+        and "resource" in detail
+        and ("required" in detail or "hardware limit" in detail)
+    )
+
+
+def _resource_safe_cache_key(
+    kernel_kind: str,
+    m: int,
+    k: int,
+    n: int,
+    device: torch.device,
+    output_dtype: torch.dtype,
+    original_params: tuple[int, int, int, int, int, int, int],
+) -> tuple:
+    device_index = int(device.index if device.type == "cuda" else -1)
+    return (kernel_kind, device_index, str(output_dtype), m, k, n, original_params)
+
+
+def _resource_safe_launch_params(
+    kernel_kind: str,
+    m: int,
+    k: int,
+    n: int,
+    device: torch.device,
+    output_dtype: torch.dtype,
+    params: tuple[int, int, int, int, int, int, int],
+) -> tuple[int, int, int, int, int, int, int]:
+    key = _resource_safe_cache_key(
+        kernel_kind, m, k, n, device, output_dtype, params
+    )
+    return _RESOURCE_SAFE_LAUNCH_CACHE.get(key, params)
+
+
+def _remember_resource_safe_launch_params(
+    kernel_kind: str,
+    m: int,
+    k: int,
+    n: int,
+    device: torch.device,
+    output_dtype: torch.dtype,
+    original_params: tuple[int, int, int, int, int, int, int],
+    safe_params: tuple[int, int, int, int, int, int, int],
+) -> None:
+    key = _resource_safe_cache_key(
+        kernel_kind, m, k, n, device, output_dtype, original_params
+    )
+    if key not in _RESOURCE_SAFE_LAUNCH_CACHE:
+        _RESOURCE_SAFE_LAUNCH_CACHE_FIFO.append(key)
+        if len(_RESOURCE_SAFE_LAUNCH_CACHE_FIFO) > _RESOURCE_SAFE_LAUNCH_CACHE_MAX:
+            stale_key = _RESOURCE_SAFE_LAUNCH_CACHE_FIFO.pop(0)
+            _RESOURCE_SAFE_LAUNCH_CACHE.pop(stale_key, None)
+    _RESOURCE_SAFE_LAUNCH_CACHE[key] = safe_params
 
 
 def _fused_launch_params(m: int, k: int, n: int, device: torch.device) -> tuple[int, int, int, int, int, int, int]:
@@ -475,14 +538,18 @@ def _fused_quant_scaled_mm_direct_call(x2d: torch.Tensor, qweight: torch.Tensor,
     if k != k2:
         raise RuntimeError(f"Triton int8 GEMM shape mismatch: x={x2d.shape}, w={qweight.shape}")
 
-    block_m, block_n, block_k, num_warps, num_stages, grid_m, grid_n = _fused_launch_params(m, k, n, x2d.device)
-    out = torch.empty((m, n), device=x2d.device, dtype=output_dtype)
-    try:
+    original_params = _fused_launch_params(m, k, n, x2d.device)
+    params = _resource_safe_launch_params(
+        "fused", m, k, n, x2d.device, output_dtype, original_params
+    )
+
+    def launch(output, launch_params):
+        block_m, block_n, block_k, num_warps, num_stages, grid_m, grid_n = launch_params
         mod._fused_dynamic_int8_blockscale_gemm_kernel[(grid_m, grid_n)](
             x2d,
             qweight,
             qweight_scale,
-            out,
+            output,
             m,
             n,
             k,
@@ -490,19 +557,57 @@ def _fused_quant_scaled_mm_direct_call(x2d: torch.Tensor, qweight: torch.Tensor,
             x2d.stride(1),
             qweight.stride(0),
             qweight.stride(1),
-            out.stride(0),
-            out.stride(1),
+            output.stride(0),
+            output.stride(1),
             block_m=block_m,
             block_n=block_n,
             block_k=block_k,
             num_warps=num_warps,
             num_stages=num_stages,
         )
+
+    out = torch.empty((m, n), device=x2d.device, dtype=output_dtype)
+    try:
+        launch(out, params)
     except Exception as exc:
+        error_detail = str(exc)
+        block_m, block_n, block_k, num_warps, num_stages, grid_m, grid_n = params
+        if _shared_memory_resource_limit(exc) and block_n > 128:
+            exc.__traceback__ = None
+            out = None
+            retry_params = (
+                block_m,
+                128,
+                block_k,
+                num_warps,
+                num_stages,
+                mod.triton.cdiv(m, block_m),
+                mod.triton.cdiv(n, 128),
+            )
+            out = torch.empty((m, n), device=x2d.device, dtype=output_dtype)
+            try:
+                launch(out, retry_params)
+            except Exception as retry_exc:
+                retry_detail = str(retry_exc)
+                out = None
+                retry_exc.__traceback__ = None
+                retry_m, retry_n, retry_k, retry_warps, retry_stages, _, _ = retry_params
+                raise RuntimeError(
+                    "Triton fused int8 kernel launch failed after shared-memory retry "
+                    f"(shape m={m}, k={k}, n={n}; tile=({retry_m},{retry_n},{retry_k}); "
+                    f"warps={retry_warps}, stages={retry_stages}). {retry_detail}"
+                ) from retry_exc
+            _remember_resource_safe_launch_params(
+                "fused", m, k, n, x2d.device, output_dtype, original_params, retry_params
+            )
+            return out
+        out = None
+        exc.__traceback__ = None
+        block_m, block_n, block_k, num_warps, num_stages, _, _ = params
         raise RuntimeError(
             "Triton fused int8 kernel launch failed "
             f"(shape m={m}, k={k}, n={n}; tile=({block_m},{block_n},{block_k}); "
-            f"warps={num_warps}, stages={num_stages}). {exc}"
+            f"warps={num_warps}, stages={num_stages}). {error_detail}"
         ) from exc
     return out
 
@@ -525,15 +630,19 @@ def _scaled_int8_mm_direct_call(
     if k != k2:
         raise RuntimeError(f"Triton int8 GEMM shape mismatch: a={a_int8.shape}, w={b_int8.shape}")
 
-    block_m, block_n, block_k, num_warps, num_stages, grid_m, grid_n = _scaled_launch_params(m, k, n, a_int8.device)
-    out = torch.empty((m, n), device=a_int8.device, dtype=output_dtype)
-    try:
+    original_params = _scaled_launch_params(m, k, n, a_int8.device)
+    params = _resource_safe_launch_params(
+        "scaled", m, k, n, a_int8.device, output_dtype, original_params
+    )
+
+    def launch(output, launch_params):
+        block_m, block_n, block_k, num_warps, num_stages, grid_m, grid_n = launch_params
         mod._scaled_int8_gemm_kernel[(grid_m, grid_n)](
             a_int8,
             b_int8,
             a_scale,
             b_scale,
-            out,
+            output,
             m,
             n,
             k,
@@ -541,19 +650,57 @@ def _scaled_int8_mm_direct_call(
             a_int8.stride(1),
             b_int8.stride(0),
             b_int8.stride(1),
-            out.stride(0),
-            out.stride(1),
+            output.stride(0),
+            output.stride(1),
             block_m=block_m,
             block_n=block_n,
             block_k=block_k,
             num_warps=num_warps,
             num_stages=num_stages,
         )
+
+    out = torch.empty((m, n), device=a_int8.device, dtype=output_dtype)
+    try:
+        launch(out, params)
     except Exception as exc:
+        error_detail = str(exc)
+        block_m, block_n, block_k, num_warps, num_stages, grid_m, grid_n = params
+        if _shared_memory_resource_limit(exc) and block_n > 128:
+            exc.__traceback__ = None
+            out = None
+            retry_params = (
+                block_m,
+                128,
+                block_k,
+                num_warps,
+                num_stages,
+                mod.triton.cdiv(m, block_m),
+                mod.triton.cdiv(n, 128),
+            )
+            out = torch.empty((m, n), device=a_int8.device, dtype=output_dtype)
+            try:
+                launch(out, retry_params)
+            except Exception as retry_exc:
+                retry_detail = str(retry_exc)
+                out = None
+                retry_exc.__traceback__ = None
+                retry_m, retry_n, retry_k, retry_warps, retry_stages, _, _ = retry_params
+                raise RuntimeError(
+                    "Triton scaled int8 kernel launch failed after shared-memory retry "
+                    f"(shape m={m}, k={k}, n={n}; tile=({retry_m},{retry_n},{retry_k}); "
+                    f"warps={retry_warps}, stages={retry_stages}). {retry_detail}"
+                ) from retry_exc
+            _remember_resource_safe_launch_params(
+                "scaled", m, k, n, a_int8.device, output_dtype, original_params, retry_params
+            )
+            return out
+        out = None
+        exc.__traceback__ = None
+        block_m, block_n, block_k, num_warps, num_stages, _, _ = params
         raise RuntimeError(
             "Triton scaled int8 kernel launch failed "
             f"(shape m={m}, k={k}, n={n}; tile=({block_m},{block_n},{block_k}); "
-            f"warps={num_warps}, stages={num_stages}). {exc}"
+            f"warps={num_warps}, stages={num_stages}). {error_detail}"
         ) from exc
     return out
 

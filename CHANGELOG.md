@@ -3,6 +3,82 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [2.6.0] - 2026-10-04
+
+Live previews, community H3 checkpoint imports, more model workflows, long
+reference timelines and clearer duration planning.
+
+- Add optional Fast Frames, Tiny VAE still frames and looping Tiny VAE video
+  inside Studio's generation card. Preserve progress, clip/window labels,
+  playback pause, phone autoplay recovery and reconnect after refresh. Report
+  selected-model support, use still previews for supported image models and
+  keep preview failure/cleanup separate from generation and gallery outputs.
+- Preview H3's predicted clean result during denoising rather than displaying
+  noisy schedule latents until the final step. Preserve final sampling output.
+- Import compatible community H3 BF16/FP16, scaled FP8, Comfy INT8 ConvRot,
+  asymmetric W4A8 INT4 and supported GGUF checkpoints. Verify full/pruned
+  architecture, native workflow, QKV order, quantization, sampling recipe and
+  complete SHA-256 before registering Frames/References companion entries.
+  Retain fused GGUF weights and native LoRA/AdaLN routing; reuse matching files.
+- Support header-based INT8 descriptors, including Eros Max exports, mixed
+  supported quantizations and compatible floating-point rotary buffers. Keep
+  unknown formats/layouts and incomplete verification data blocked.
+- Add experimental DaSiWa H3 Hybrid v3 standard/Turbo, Krea 2 RAW/Turbo, Wan 2.2
+  Lightspeed v9 and LTX-2.3 DragonLeap v4 selections (#167), with pinned creator
+  files and native recipes. Expand Singularity from References to paired Frames
+  and References workflows using its existing checkpoint and recommended adapter.
+- Use the configured dense Auto backend for DaSiWa H3; allow optional Sol Engine
+  on supported DaSiWa/imported baked-Turbo checkpoints without changing their
+  recipe or adding duplicate Turbo/PDD acceleration.
+- Move LongCat Single/Multi to dedicated Avatar mode below References and before
+  Extend. Add anchor/voice/speaker-region controls, workflow migration and input
+  checks. Fix Multi identification and audio offsets; bound native passes and
+  reserve activation memory with sequential guidance and shorter buffer lifetimes.
+- Advance Frames control videos/masks and H3 timeline video/audio references
+  through consecutive windows and independent clips. Account for overlap and
+  trimmed tails, preserve source files and keep character/voice samples reusable.
+- Follow the longest timeline reference video in Auto duration; update after
+  replacement/removal and retain music/performance soundtrack precedence.
+- Add Object / prop images and reusable Sound effect audio roles in Studio,
+  enhancement and Director. Preserve object design separately from cast identity;
+  guide generated effects in each window without replaying the exact waveform.
+- Keep count fixed in Window duration mode and runtime fixed in Time mode.
+  Update totals through the experimental 30s range and on experiment toggles;
+  selecting Auto exits the experiment and restores automatic window sizing.
+- Add H3 normalization-path and separate checkpoint/GPU memory guidance, with
+  reference/history estimates, expandable uncertainty and the 14.4s recommended
+  boundary. Assess the actual largest pass and avoid universal speed/OOM promises.
+- Use native RMSNorm for ordinary H3 packed sequences through 75,000 rows (#152);
+  retain bounded normalization above the threshold and explicit chunk overrides.
+- Preserve eligible long locked physical actions in source-owned phases and let
+  the writer supply camera coverage. Repair scoped failed cards, recover safe
+  individual events and retain source/timing/ownership checks.
+- Bound and batch semantic fidelity reviews, keep exact scoped evidence and
+  make repair feedback name missing clauses. Improve optical versus physical
+  action classification, actor/alias/contact ownership and global style handling.
+- Reject unclosed authored speech before planning/generation and keep later
+  entrances out of the reference fallback's opening composition.
+- Add cancellation for controllable model, CivitAI and Hugging Face downloads,
+  separate enable/download placement and preserve terminal cancellation status,
+  retries and complete files. Never register partially downloaded checkpoints.
+- Long-poll active download changes (#156), pause hidden-page updates and retain
+  compatibility polling. Keep cancellation changes visible immediately.
+- Navigate gallery thumbnails by asset identity, retain a clicked target through
+  metadata/result changes and keep strip selection aligned. Prevent clipped
+  gallery action menus and show server posters in video input controls.
+- Add explicit LM Studio loaded-instance/unload controls with verification and
+  busy-state checks. Report NVIDIA GPU compute activity rather than Windows 3D.
+- Clear stale launcher readiness and only show Web UI links for valid captured
+  URLs. Surface Windows App Control/Device Guard startup errors (#164); this does
+  not establish trust for an interpreter blocked by Windows policy.
+- Mark skipped/invalid generation tasks as failures rather than successful jobs.
+  Retry supported INT8 shared-memory launch failures using smaller cached tiles.
+- Pin MMGP 3.8.2, document Tiny VAE attribution and expand release regressions.
+  Keep promptbench camera-repair sampling/reasoning experiments opt-in.
+
+See [release notes](docs/RELEASE_NOTES_V2.6.0.md) and
+[validation scope](docs/VALIDATION_V2.6.0.md).
+
 ## [2.5.0] - 2026-09-28
 
 LoRA library and prompting improvements, immersive gallery playback, H3

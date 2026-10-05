@@ -106,7 +106,7 @@ AUTOSAVE_ERROR_FILENAME = "error_queue.zip"
 AUTOSAVE_TEMPLATE_PATH = AUTOSAVE_FILENAME
 CONFIG_FILENAME = "wgp_config.json"
 PROMPT_VARS_MAX = 10
-target_mmgp_version = "3.7.12"
+target_mmgp_version = "3.8.2"
 WanGP_version = "10.9875"
 settings_version = 2.58
 max_source_video_frames = 15000  # raised to support frame injection in long sliding-window videos (e.g. 9 windows × 20s × 25fps = 4500 frames)
@@ -144,6 +144,7 @@ _HANDLER_MODULES = [
     "shared.qtypes.nunchaku_int4",
     "shared.qtypes.nunchaku_fp4",
     "shared.qtypes.int8_convrot",
+    "shared.qtypes.asym_w4a8_int8",
     "shared.qtypes.gguf",
 ]
 quant_router.unregister_handler(".fp8_quanto_bridge")
@@ -2743,6 +2744,7 @@ else:
     server_config = json.loads(text)
 
 server_config.setdefault("prompt_enhancer_quantization", "quanto_int8")
+server_config.setdefault("generation_preview", "off")
 
 checkpoints_paths = server_config.get("checkpoints_paths", None)
 if checkpoints_paths is None: checkpoints_paths = server_config["checkpoints_paths"] = fl.default_checkpoints_paths
@@ -4069,13 +4071,24 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
             local_model_filename = fl.get_smart_download_location(os.path.basename(model_filename), force_path= force_path)
             url = model_filename
 
-            if not url.startswith("http"):
-                raise Exception(f"Model '{model_filename}' was not found locally and no URL was provided to download it. Please add an URL in the model definition file.")
-            try:
-                download_file(url, local_model_filename)
-            except Exception as e:
-                if os.path.isfile(local_model_filename): os.remove(local_model_filename) 
-                raise Exception(f"'{url}' is invalid for Model '{model_type}' : {str(e)}'")
+            from shared.checkpoint_downloads import download_named_checkpoint, find_named_checkpoint_source
+            named_source = find_named_checkpoint_source(model_def, os.path.basename(model_filename))
+            if named_source is not None:
+                from shared.utils.download import create_progress_hook
+                download_named_checkpoint(
+                    named_source,
+                    local_model_filename,
+                    civitai_api_key=(server_config.get("services") or {}).get("civitai_api_key", ""),
+                    progress_hook=create_progress_hook(os.path.basename(model_filename)),
+                )
+            else:
+                if not url.startswith("http"):
+                    raise Exception(f"Model '{model_filename}' was not found locally and no URL was provided to download it. Please add an URL in the model definition file.")
+                try:
+                    download_file(url, local_model_filename)
+                except Exception as e:
+                    if os.path.isfile(local_model_filename): os.remove(local_model_filename)
+                    raise Exception(f"'{url}' is invalid for Model '{model_type}' : {str(e)}'")
             if file_type!=0: return
 
     for prop, recursive in zip(["preload_URLs", "VAE_URLs"], [True, False]):
@@ -4316,6 +4329,12 @@ def init_pipe(pipe, kwargs, profile):
     elif mmgp_profile == 3:
         source_budgets.update({ "*" : "70%" })
 
+    # Per-job activation-heavy models also need an explicit transformer
+    # slice under profiles that ordinarily keep the whole model resident.
+    # The worker restores this temporary allowance after each job.
+    if mmgp_profile in (1, 3) and preload == 0 and transformer_budget > 0:
+        source_budgets["transformer"] = transformer_budget
+
     if "transformer2" in pipe:
         if profile in [3,4]:
             kwargs["pinnedMemory"] = ["transformer", "transformer2"]
@@ -4376,7 +4395,7 @@ def setup_prompt_enhancer(pipe, kwargs):
 
 
 
-def load_models(model_type, override_profile = -1, output_type="video", **model_kwargs):
+def load_models(model_type, override_profile = -1, output_type="video", preview_mode=None, preview_gen=None, **model_kwargs):
     global transformer_type, loaded_profile
     base_model_type = get_base_model_type(model_type)
     model_def = get_runtime_model_def(model_type)
@@ -4563,6 +4582,14 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
         kwargs = pipe
         pipe = kwargs.pop("pipe")
     if "coTenantsMap" not in kwargs: kwargs["coTenantsMap"] = {}
+    from shared.preview_runtime import prepare_preview_decoder
+    preview_decoder, preview_key, preview_notice = prepare_preview_decoder(
+        preview_mode or server_config.get("generation_preview", "off"),
+        base_model_type, model_def, gen=preview_gen,
+    )
+    if preview_decoder is not None:
+        pipe["tiny_vae"] = preview_decoder
+        kwargs["coTenantsMap"]["tiny_vae"] = "*"
     mmgp_profile = init_pipe(pipe, kwargs, profile)
     if server_config.get("enhancer_mode", 1) == 0:
         setup_prompt_enhancer(pipe, kwargs)
@@ -4596,7 +4623,44 @@ def load_models(model_type, override_profile = -1, output_type="video", **model_
     if compile_modules == False:
         print("Pytorch compilation is not supported for this Model")
     # kwargs["pinnedMemory"] = "text_encoder"
-    offloadobj = offload.profile(pipe, profile_no= mmgp_profile, compile = compile_modules, quantizeTransformer = False, loras = loras_transformer, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)  
+    previous_last_offload = getattr(offload, "last_offload_obj", None)
+    preview_profile_failed = False
+    try:
+        offloadobj = offload.profile(pipe, profile_no= mmgp_profile, compile = compile_modules, quantizeTransformer = False, loras = loras_transformer, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)
+    except Exception as error:
+        if preview_decoder is None or isinstance(error, offload.LoadingCancelled):
+            raise
+        # MMGP can partially wrap the main models before configuring the
+        # optional decoder. Retry once with freshly loaded model objects;
+        # reprofiling that partially wrapped pipeline would be unsafe.
+        print(f"[Preview] Model profile failed while Tiny VAE was included: {error}. Retrying without Tiny VAE.")
+        preview_profile_failed = True
+    if preview_profile_failed:
+        partial_offload = getattr(offload, "last_offload_obj", None)
+        if partial_offload is not None and partial_offload is not previous_last_offload:
+            try:
+                partial_offload.release()
+            except Exception as cleanup_error:
+                print(f"[Preview] Partial profile cleanup: {cleanup_error}")
+            finally:
+                offload.last_offload_obj = previous_last_offload
+        partial_offload = None
+        pipe.clear()
+        wan_model = preview_decoder = None
+        gc.collect()
+        offload.flush_torch_caches()
+        if len(args.gpu) > 0:
+            torch.set_default_device(args.gpu)
+        wan_model, offloadobj = load_models(
+            model_type, override_profile, output_type=output_type,
+            preview_mode="rgb", preview_gen=preview_gen, **model_kwargs,
+        )
+        offloadobj.preview_decoder_key = preview_key
+        offloadobj.preview_notice = "Clearer previews could not start. Using fast frames where supported."
+        return wan_model, offloadobj
+    offloadobj.tiny_vae = preview_decoder
+    offloadobj.preview_decoder_key = preview_key
+    offloadobj.preview_notice = preview_notice
     # Let the job-level memory planner tell whether a resident model was
     # profiled with enough activation headroom for a later, heavier request
     # (notably H3 Ref2VA with a video reference). Record the requested budget
@@ -4713,9 +4777,64 @@ def get_gen_info(state):
         state["gen"] = cache
     return initialize_gen_info(cache)
 
-def build_callback(state, pipe, send_cmd, status, num_inference_steps, preview_meta=None):
+def build_callback(state, pipe, send_cmd, status, num_inference_steps, preview_meta=None,
+                   preview_mode=None, preview_image=False, preview_duration=None):
     gen = get_gen_info(state)
     gen["num_inference_steps"] = num_inference_steps
+    from services.generation_preview import preview_mode as normalize_preview_mode
+    from shared.preview_runtime import RGBPreviewSession, preview_context, rgb_preview_supported
+    mode = normalize_preview_mode(preview_mode if preview_mode is not None else server_config.get("generation_preview"))
+    context = preview_context(gen)
+    disabled = [False]
+    tiny_preview = None
+    session_notice = None
+    model_handler = get_model_handler(transformer_type) if mode != "off" else None
+    rgb_supported = rgb_preview_supported(model_handler)
+
+    def emit_preview(cmd, data=None):
+        try:
+            if cmd == "preview":
+                send_cmd(cmd, {"media": data, "context": dict(context)})
+            else:
+                send_cmd(cmd, data)
+        except Exception as error:
+            disabled[0] = True
+            print(f"[Preview] Could not publish preview update: {error}")
+
+    def capture_rgb(latent):
+        payload = pipe.prepare_preview_payload(latent, preview_meta) if hasattr(pipe, "prepare_preview_payload") else latent
+        if isinstance(payload, dict):
+            payload = payload.copy()
+            if torch.is_tensor(payload.get("latents")):
+                payload["latents"] = payload["latents"].detach().to("cpu")
+        elif torch.is_tensor(payload):
+            payload = payload.detach().to("cpu")
+        if payload is not None:
+            rgb_context = {**context, "mode": "rgb"}
+            send_cmd("preview", {"latents": payload, "context": rgb_context})
+
+    rgb_preview = RGBPreviewSession(capture_rgb, emit_preview, gen) if mode != "off" and rgb_supported else None
+    decoder = getattr(offloadobj, "tiny_vae", None)
+    if mode.startswith("tiny_vae") and decoder is not None:
+        try:
+            from shared.tinyvae.session import PreviewSession
+            context["mode"] = "tiny_vae_video" if mode == "tiny_vae_video" and not preview_image else "tiny_vae_frames"
+            tiny_preview = PreviewSession(decoder, emit_preview, gen, image=preview_image,
+                                          video=mode == "tiny_vae_video", duration=preview_duration)
+        except Exception as error:
+            print(f"[Preview] Could not start preview session: {error}")
+            session_notice = "Live previews could not start. Using fast frames where supported."
+    if mode != "off":
+        if tiny_preview is None:
+            context["mode"] = "rgb"
+        emit_preview("preview_context", dict(context))
+        notice = session_notice or getattr(offloadobj, "preview_notice", None)
+        if notice and mode.startswith("tiny_vae"):
+            emit_preview("preview_notice", notice)
+        elif mode.startswith("tiny_vae") and decoder is None:
+            emit_preview("preview_notice", "Clearer previews are unavailable for this model. Using fast frames where supported.")
+        elif mode == "rgb" and not rgb_supported:
+            emit_preview("preview_notice", "Fast frames are unavailable for this model. Try Clearer Frames or Live Video where supported.")
     start_time = time.time()
     # Cumulative progress tracking across multi-pass pipelines (e.g. 3-stage progressive)
     _cumulative_offset = [0]      # steps completed in previous passes
@@ -4847,21 +4966,45 @@ def build_callback(state, pipe, send_cmd, status, num_inference_steps, preview_m
         
         # progress(*progress_args)
         send_cmd("progress", progress_args)
-        if latent is not None:
-            payload = pipe.prepare_preview_payload(latent, preview_meta) if hasattr(pipe, "prepare_preview_payload") else latent
-            if isinstance(payload, dict):
-                data = payload.copy()
-                lat = data.get("latents")
-                if torch.is_tensor(lat):
-                    data["latents"] = lat.to("cpu", non_blocking=True)
-                payload = data
-            elif torch.is_tensor(payload):
-                payload = payload.to("cpu", non_blocking=True)
-            if payload is not None:
-                send_cmd("preview", payload)
+        if latent is not None and not disabled[0]:
+            try:
+                if tiny_preview is not None and not tiny_preview.failed:
+                    if tiny_preview.wants_capture(step_idx - 1, _current_pass_steps[0], pass_no):
+                        payload = pipe.prepare_preview_payload(latent, preview_meta) if hasattr(pipe, "prepare_preview_payload") else latent
+                        lat = payload.get("latents") if isinstance(payload, dict) else payload
+                        if torch.is_tensor(lat):
+                            tiny_preview.capture(lat, step_idx - 1, _current_pass_steps[0], pass_no)
+                elif rgb_preview is not None:
+                    rgb_preview.capture(latent, step_idx - 1, _current_pass_steps[0], pass_no)
+            except Exception as error:
+                preview_error(error)
             
         # gen["progress_args"] = progress_args
             
+    def wants_preview(step, total=None, pass_no=-1):
+        if disabled[0] or gen.get("abort", False):
+            return False
+        session = tiny_preview if tiny_preview is not None and not tiny_preview.failed else rgb_preview
+        return bool(session and session.wants_capture(step, total or _current_pass_steps[0], pass_no))
+
+    def close_preview(cancel=False):
+        for session in (tiny_preview, rgb_preview):
+            if session is not None:
+                try:
+                    session.close(cancel=cancel)
+                except Exception as error:
+                    print(f"[Preview] Could not close preview session: {error}")
+
+    def preview_error(error):
+        if not disabled[0]:
+            disabled[0] = True
+            print(f"[Preview] Preview disabled: {error}")
+            emit_preview("preview_notice", "Live previews are unavailable for this render. Generation will continue.")
+            close_preview(cancel=True)
+
+    callback.wants_preview = wants_preview
+    callback.close_preview = close_preview
+    callback.preview_error = preview_error
     return callback
 
 def pause_generation(state):
@@ -7556,6 +7699,7 @@ def generate_video(
     mode,
     plugin_data=None,
     audio_frame_offset=0,
+    video_frame_offset=0,
     multi_clip_info=None,
     trim_tail_frames=0,
     stage2_steps=0,
@@ -7678,6 +7822,10 @@ def generate_video(
     gen = get_gen_info(state)
     if gen.get("abort", False):
         return False
+    from services.generation_preview import preview_mode as normalize_preview_mode
+    generation_preview_mode = normalize_preview_mode(
+        state.get("_generation_preview_mode", server_config.get("generation_preview")),
+    )
     gen["early_stop"] = False
     gen["early_stop_forwarded"] = False
     torch.set_grad_enabled(False) 
@@ -7710,6 +7858,8 @@ def generate_video(
     loras_multipliers = recipe["loras_multipliers"]
     is_image = image_mode > 0
     audio_only = model_def.get("audio_only", False)
+    if audio_only:
+        generation_preview_mode = "off"
     duration_def = model_def.get("duration_slider", None)
 
     set_video_prompt_type = model_def.get("set_video_prompt_type", None)
@@ -7808,6 +7958,17 @@ def generate_video(
     output_type = get_output_type_for_model(model_type, image_mode)
     profile = compute_profile(override_profile, output_type)
     enhancer_mode = server_config.get("enhancer_mode", 1)
+    try:
+        from shared.preview_runtime import decoder_key
+        requested_preview_key = decoder_key(generation_preview_mode, get_base_model_type(model_type), model_def)
+    except Exception as preview_setup_error:
+        print(f"[Preview] Could not select preview decoder: {preview_setup_error}")
+        requested_preview_key = None
+    if offloadobj is not None:
+        if getattr(offloadobj, "preview_decoder_key", None) != requested_preview_key or (
+            requested_preview_key is not None and getattr(offloadobj, "tiny_vae", None) is None
+        ):
+            reload_needed = True
     if model_type != transformer_type or reload_needed or profile != loaded_profile:
         release_model()
         # Pre-flight: detect first-use download so the UI can show
@@ -7846,6 +8007,8 @@ def generate_video(
             model_type,
             override_profile,
             output_type=output_type,
+            preview_mode=generation_preview_mode,
+            preview_gen=gen,
             **model_kwargs,
         )
         send_cmd("status", "Model loaded")
@@ -7882,6 +8045,21 @@ def generate_video(
         )
         send_cmd("exit")
         return True
+    elif attn == "sol" and attn not in override_attention_modes_supported:
+        from shared.attention import get_default_attention_mode, get_sol_attention_status
+
+        status = get_sol_attention_status()
+        attn = get_default_attention_mode()
+        print(
+            "[MiniMax H3 Sol] Requested sparse attention is unavailable "
+            f"({status.get('reason') or 'unsupported runtime'}); "
+            f"using {attn}."
+        )
+        send_cmd(
+            "info",
+            "Sol Engine is unavailable in this runtime; this generation will "
+            f"use the safe dense {attn} backend.",
+        )
     elif attn == "sla" and attn not in override_attention_modes_supported:
         from shared.attention import get_default_attention_mode, get_sla_attention_status
 
@@ -8684,6 +8862,8 @@ def generate_video(
         gen["extra_windows"] = 0
         gen["total_windows"] = 1
         gen["window_no"] = 1
+        from shared.preview_runtime import begin_preview_window
+        begin_preview_window(send_cmd, gen, generation_preview_mode)
         input_waveform, input_waveform_sample_rate = None, 0
         # ID-LoRA: load voice reference audio for identity preservation.
         # Max reference duration matches WanGP's constant
@@ -8811,6 +8991,7 @@ def generate_video(
                 break
             window_no += 1
             gen["window_no"] = window_no
+            begin_preview_window(send_cmd, gen, generation_preview_mode)
             # Gallery metadata needs the real wall-clock cost of each native
             # window, including conditioning, denoising, VAE decode, and the
             # cumulative save.  Start the window timer before any of that
@@ -8937,6 +9118,12 @@ def generate_video(
             aligned_guide_start_frame = guide_start_frame - alignment_shift
             aligned_guide_end_frame = guide_end_frame - alignment_shift
             aligned_window_start_frame = window_start_frame - alignment_shift  
+            # References and exact soundtrack conditioning share the same
+            # source clock, including overlap and independent-clip origins.
+            reference_start_frame = aligned_window_start_frame
+            if reset_control_aligment:
+                reference_start_frame += source_video_overlap_frames_count
+            reference_start_frame += max(0, int(audio_frame_offset or 0))
             input_waveform, input_waveform_sample_rate = None, 0
             if audio_guide is not None and model_def.get("audio_guide_window_slicing", False):
                 audio_start_frame = aligned_window_start_frame
@@ -9113,6 +9300,11 @@ def generate_video(
                     guide_slice_to_extract  = guide_frames_extract_count
                     guide_frames_extract_count = (-guide_frames_extract_start if guide_frames_extract_start  <0 else 0) +  len( keep_frames_parsed_full[max(0, guide_frames_extract_start):] )
 
+                # Keep-frame choices are local to the clip; decoding uses the
+                # common source video's absolute timeline. Masks use this same
+                # origin through both preprocessor routes below.
+                guide_frames_extract_start += max(0, int(video_frame_offset or 0))
+
                 # Extract Faces to video
                 if "B" in video_prompt_type:
                     send_cmd("progress", [0, get_latest_status(state, "Extracting Face Movements")])
@@ -9123,7 +9315,7 @@ def generate_video(
                 # Sparse Video to Video
                 sparse_video_image = None
                 if "R" in video_prompt_type:
-                    sparse_video_image = get_video_frame(video_guide, aligned_guide_start_frame, return_last_if_missing = True, target_fps = fps, return_PIL = True)
+                    sparse_video_image = get_video_frame(video_guide, aligned_guide_start_frame + max(0, int(video_frame_offset or 0)), return_last_if_missing = True, target_fps = fps, return_PIL = True)
 
                 if not process_all or cached_video_video_start_frame < 0:
                     # Generic Video Preprocessing
@@ -9336,7 +9528,11 @@ def generate_video(
             gen["progress_status"] = status
             progress_phase = "Generating Audio" if audio_only else "Encoding Prompt"
             gen["progress_phase"] = (progress_phase , -1 )
-            callback = build_callback(state, trans, send_cmd, status, num_inference_steps)
+            callback = build_callback(
+                state, trans, send_cmd, status, num_inference_steps,
+                preview_mode="off" if audio_only else generation_preview_mode, preview_image=is_image,
+                preview_duration=max(1, current_video_length) / max(1, fps),
+            )
             progress_args = [0, merge_status_context(status, progress_phase )]
             send_cmd("progress", progress_args)
 
@@ -9544,7 +9740,11 @@ def generate_video(
                        if str(model_def.get("architecture") or "").startswith("minimax_h3") else {}),
                     save_masks=args.save_masks,
                     temperature=temperature,
-                    window_start_frame_no = window_start_frame,
+                    window_start_frame_no = (
+                        reference_start_frame
+                        if model_def.get("omni_reference", False)
+                        else window_start_frame
+                    ),
                     input_video_strength = input_video_strength,
                     self_refiner_setting = self_refiner_setting,
                     self_refiner_plan=self_refiner_plan,
@@ -9684,6 +9884,8 @@ def generate_video(
                 send_cmd("error", new_error)
                 clear_status(state)
                 return False
+            finally:
+                callback.close_preview(cancel=gen.get("abort", False))
             src_video = src_video2 = src_mask = src_mask2 = None
             if skip_steps_cache != None :
                 skip_steps_cache.previous_residual = None
@@ -10842,8 +11044,12 @@ def process_tasks(state):
                     current_model_type = queue[0]["params"].get("model_type")
             
             try:
-                torch.cuda.current_stream().synchronize()
-                preview = None if data is None else generate_preview(current_model_type, data) 
+                if isinstance(data, dict) and "context" in data:
+                    preview = data.get("media")
+                    if "latents" in data:
+                        preview = generate_preview(current_model_type, data["latents"])
+                else:
+                    preview = None if data is None else generate_preview(current_model_type, data)
                 gen["preview"] = preview
                 yield time.time(), gr.Text(), gr.update()
             except Exception:
@@ -12751,6 +12957,8 @@ def refresh_preview(state):
     preview_image = gen.get("preview", None)
     if preview_image is None:
         return ""
+    if callable(getattr(preview_image, "to_html", None)):
+        return preview_image.to_html()
     
     preview_base64 = pil_to_base64_uri(preview_image, format="jpeg", quality=85)
     if preview_base64 is None:
@@ -12796,6 +13004,8 @@ def show_modal_image(state, action_string):
         if parts[0] == 'preview':
             preview_image = gen.get("preview", None)
             if preview_image:
+                if callable(getattr(preview_image, "to_html", None)):
+                    return gr.HTML(value=preview_image.to_html(modal=True)), gr.Column(visible=True)
                 preview_base64 = pil_to_base64_uri(preview_image)
                 if preview_base64:
                     html_content = get_modal_image(preview_base64, "Preview")

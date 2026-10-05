@@ -54,6 +54,15 @@ curl -X POST "http://127.0.0.1:PORT/api/v1/generate" -H "Content-Type: applicati
 
 Retry actions are `retry` (reuse completed enhancement or repair flagged H3 windows when a resumable draft exists), `refresh` (rewrite every prompt from the original), `as_written` (generate the whole job from the original prompt with enhancement off), and `accept_draft` (generate the whole job using the saved draft, including flagged windows). Normal input and window validation still applies to `as_written`. Retries create a new job; an active retry is returned instead of being submitted twice. A successful writing retry continues to full-job generation; unresolved review warnings pause it again.
 
+H3 requests with an unclosed quoted utterance return an input error before writing or generation. Close each spoken quote so dialogue ownership and timing include every line. Quotes used for visible labels, titles, or character descriptions are separate from spoken dialogue. Put nonverbal directions outside the quote, for example:
+
+```text
+Alex says in a frustrated voice, "You son of a..."
+A sharp censor beep interrupts the unfinished insult. The audience laughs.
+```
+
+An annotation such as `[beep censor]` inside a spoken quote is not a reliable sound-effect instruction. Describe the beep and audience reaction separately. At the normal planning pace of 2.8 words per second, reserve additional time for entrances, pauses, sounds, and reactions; use another window when the complete scene needs it. A reference fallback keeps the source's entrance order instead of placing every referenced character in the opening frame.
+
 H3 plans expose `retryable_windows` as one-based window numbers and retain a `camera_checkpoint`. Keep that checkpoint with the plan. A targeted retry retains the shared schedule, exact dialogue and neighbouring entry/exit states; passed window prompts are copied unchanged. `refresh` explicitly discards this checkpoint. Older drafts without one and failures in shared story planning require full re-enhancement.
 
 For interactive planning, send the saved plan as `retry_plan` alongside the same inputs to `POST /api/v1/llm/plan-h3-windows` or `POST /api/v1/llm/plan-h3-sequence`. This updates the draft only. A changed prompt, model, references, timing or relevant settings invalidates targeted repair; the server returns an error rather than silently rewriting all windows. Manual prompt edits disable the old repair checkpoint because they may change continuity boundaries.

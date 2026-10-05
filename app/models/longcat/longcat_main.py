@@ -53,6 +53,76 @@ def optimized_scale(positive_flat, negative_flat):
     return dot_product / squared_norm
 
 
+def _is_multi_speaker_avatar(model_type):
+    """LongCat Avatar checkpoints share one architecture but have distinct IDs."""
+    return model_type == "longcat_avatar_multi"
+
+
+def _build_avatar_audio_embeddings(
+    model_type,
+    audio_guide,
+    audio_guide2,
+    build_audio_windows,
+    frame_num,
+    fps,
+    window_start_frame_no,
+    concatenate_audio,
+    audio_stride=2,
+):
+    if audio_guide is None:
+        raise ValueError("Audio guide is required for LongCat Avatar.")
+    is_multi_speaker = _is_multi_speaker_avatar(model_type)
+    if is_multi_speaker and audio_guide2 is None:
+        raise ValueError("Second audio guide is required for LongCat Avatar Multi.")
+
+    audio_emb = build_audio_windows(
+        audio_guide, frame_num, fps, window_start_frame_no, audio_stride
+    )
+    if is_multi_speaker:
+        audio_emb2 = build_audio_windows(
+            audio_guide2, frame_num, fps, window_start_frame_no, audio_stride
+        )
+        audio_emb = concatenate_audio(audio_emb, audio_emb2)
+    return audio_emb
+
+
+def _should_use_joint_pass(joint_pass, is_avatar, any_guidance):
+    """Keep guided Avatar branches sequential to limit live transformer activations."""
+    return bool(joint_pass) and not (is_avatar and any_guidance)
+
+
+def _build_avatar_guidance_branches(
+    latents,
+    prompt_embeds,
+    neg_embeds,
+    prompt_mask,
+    neg_mask,
+    audio_cond,
+    audio_uncond,
+    ref_target_masks,
+):
+    """Return Avatar CFG inputs in positive, text-unconditional, audio-unconditional order."""
+    return (
+        (latents, prompt_embeds, prompt_mask, audio_cond, ref_target_masks),
+        (latents, neg_embeds, neg_mask, audio_cond, ref_target_masks),
+        (latents, neg_embeds, neg_mask, audio_uncond, ref_target_masks),
+    )
+
+
+def _combine_avatar_guidance(
+    noise_pred_cond,
+    noise_pred_uncond_text,
+    noise_pred_uncond,
+    guide_scale,
+    audio_cfg_scale,
+):
+    return (
+        noise_pred_uncond
+        + guide_scale * (noise_pred_cond - noise_pred_uncond_text)
+        + audio_cfg_scale * (noise_pred_uncond_text - noise_pred_uncond)
+    )
+
+
 class LongCatModel:
     def __init__(
         self,
@@ -73,6 +143,7 @@ class LongCatModel:
         self.dtype = dtype
         self.VAE_dtype = VAE_dtype
         self.model_def = model_def or {}
+        self.model_type = model_type
         self.base_model_type = base_model_type
         self.is_avatar = base_model_type in ["longcat_avatar"]
         self.sparse_attention_enabled = bool(self.model_def.get("sparse_attention", False))
@@ -423,7 +494,7 @@ class LongCatModel:
 
     def _build_audio_windows(self, audio_path, frame_num, fps, window_start_frame_no, audio_stride):
         speech_array, sr = librosa.load(audio_path, sr=16000)
-        target_len = int(frame_num / fps * sr)
+        target_len = int((window_start_frame_no + frame_num) / fps * sr)
         if len(speech_array) < target_len:
             pad = target_len - len(speech_array)
             speech_array = np.pad(speech_array, (0, pad), mode="constant")
@@ -539,6 +610,7 @@ class LongCatModel:
             if audio_cfg_scale is None:
                 audio_cfg_scale = 1.0
             any_guidance = any_guidance or audio_cfg_scale > 1
+        use_joint_pass = _should_use_joint_pass(joint_pass, self.is_avatar, any_guidance)
 
         reference_image_enabled = self.is_avatar and bool(
             kwargs.get("reference_image_enabled", self.model_def.get("reference_image_enabled", True))
@@ -741,19 +813,21 @@ class LongCatModel:
         audio_emb = None
         ref_target_masks = None
         if self.is_avatar:
-            if audio_guide is None:
-                raise ValueError("Audio guide is required for LongCat Avatar.")
             audio_stride = 2
-            audio_emb = self._build_audio_windows(
-                audio_guide, frame_num, fps, window_start_frame_no, audio_stride
+            audio_emb = _build_avatar_audio_embeddings(
+                model_type=self.model_type,
+                audio_guide=audio_guide,
+                audio_guide2=audio_guide2,
+                build_audio_windows=self._build_audio_windows,
+                frame_num=frame_num,
+                fps=fps,
+                window_start_frame_no=window_start_frame_no,
+                concatenate_audio=lambda first, second: torch.cat(
+                    [first, second], dim=0
+                ),
+                audio_stride=audio_stride,
             )
-            if self.base_model_type == "longcat_avatar_multi":
-                if audio_guide2 is None:
-                    raise ValueError("Second audio guide is required for LongCat Avatar Multi.")
-                audio_emb2 = self._build_audio_windows(
-                    audio_guide2, frame_num, fps, window_start_frame_no, audio_stride
-                )
-                audio_emb = torch.cat([audio_emb, audio_emb2], dim=0)
+            if _is_multi_speaker_avatar(self.model_type):
                 speakers_bboxes = kwargs.get("speakers_bboxes")
                 ref_target_masks = self._build_ref_target_masks(height, width, speakers_bboxes)
             if ref_target_masks is not None:
@@ -799,12 +873,20 @@ class LongCatModel:
                 if self.is_avatar and audio_emb is not None and any_guidance:
                     audio_cond = audio_emb.to(self.device, dtype=self.dtype)
                     audio_uncond = torch.zeros_like(audio_cond)
-                    x_list = [latents, latents, latents]
-                    ctx_list = [prompt_embeds, neg_embeds, neg_embeds]
-                    mask_list = [prompt_mask, neg_mask, neg_mask]
-                    audio_list = [audio_cond, audio_cond, audio_uncond]
-                    ref_list = [ref_target_masks, ref_target_masks, ref_target_masks]
-                    if joint_pass:
+                    guidance_branches = _build_avatar_guidance_branches(
+                        latents,
+                        prompt_embeds,
+                        neg_embeds,
+                        prompt_mask,
+                        neg_mask,
+                        audio_cond,
+                        audio_uncond,
+                        ref_target_masks,
+                    )
+                    if use_joint_pass:
+                        x_list, ctx_list, mask_list, audio_list, ref_list = map(
+                            list, zip(*guidance_branches)
+                        )
                         outputs = self.transformer(
                             hidden_states=x_list,
                             timestep=[timestep] * len(x_list),
@@ -819,9 +901,7 @@ class LongCatModel:
                             return None
                     else:
                         outputs = []
-                        for x_i, ctx_i, mask_i, audio_i, ref_i in zip(
-                            x_list, ctx_list, mask_list, audio_list, ref_list
-                        ):
+                        for x_i, ctx_i, mask_i, audio_i, ref_i in guidance_branches:
                             output = self.transformer(
                                 hidden_states=x_i,
                                 timestep=timestep,
@@ -836,16 +916,18 @@ class LongCatModel:
                                 return None
                             outputs.append(output)
                     noise_pred_cond, noise_pred_uncond_text, noise_pred_uncond = outputs
-                    noise_pred = (
-                        noise_pred_uncond
-                        + guide_scale * (noise_pred_cond - noise_pred_uncond_text)
-                        + audio_cfg_scale * (noise_pred_uncond_text - noise_pred_uncond)
+                    noise_pred = _combine_avatar_guidance(
+                        noise_pred_cond,
+                        noise_pred_uncond_text,
+                        noise_pred_uncond,
+                        guide_scale,
+                        audio_cfg_scale,
                     )
                 elif any_guidance:
                     x_list = [latents, latents]
                     ctx_list = [prompt_embeds, neg_embeds]
                     mask_list = [prompt_mask, neg_mask]
-                    if joint_pass:
+                    if use_joint_pass:
                         outputs = self.transformer(
                             hidden_states=x_list,
                             timestep=[timestep] * len(x_list),

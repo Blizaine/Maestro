@@ -57,9 +57,12 @@ class MiniMaxH3SchedulerOutput(BaseOutput):
     Args:
         prev_sample (`torch.FloatTensor`):
             Computed sample `x_{t+1}` for the next step of the denoising loop.
+        denoised (`torch.FloatTensor`, optional):
+            The clean estimate `x_0` used to calculate `prev_sample`, when requested.
     """
 
     prev_sample: torch.FloatTensor
+    denoised: torch.FloatTensor | None = None
 
 
 def res_multistep_coefficients(
@@ -324,6 +327,8 @@ class MiniMaxH3Scheduler(SchedulerMixin, ConfigMixin):
         timestep: float | torch.FloatTensor,
         sample: torch.FloatTensor,
         return_dict: bool = True,
+        *,
+        return_denoised: bool = False,
     ) -> MiniMaxH3SchedulerOutput | tuple:
         r"""
         Take one Euler (`eta = 0`) step.
@@ -342,9 +347,12 @@ class MiniMaxH3Scheduler(SchedulerMixin, ConfigMixin):
                 The current sample `x_t`.
             return_dict (`bool`, defaults to `True`):
                 Whether to return a [`MiniMaxH3SchedulerOutput`] instead of a plain tuple.
+            return_denoised (`bool`, defaults to `False`):
+                Also return the `x_0` estimate already computed for this update.
 
         Returns:
-            [`MiniMaxH3SchedulerOutput`] or `tuple`: the sample for the next step.
+            [`MiniMaxH3SchedulerOutput`] or `tuple`: the sample for the next step, and optionally
+            the clean estimate used to calculate it.
         """
         if isinstance(timestep, int) or (isinstance(timestep, torch.Tensor) and not timestep.is_floating_point()):
             raise ValueError(
@@ -387,7 +395,14 @@ class MiniMaxH3Scheduler(SchedulerMixin, ConfigMixin):
         self._step_index += 1
 
         if not return_dict:
+            if return_denoised:
+                return (prev_sample, denoised)
             return (prev_sample,)
+        if return_denoised:
+            return MiniMaxH3SchedulerOutput(
+                prev_sample=prev_sample,
+                denoised=denoised,
+            )
         return MiniMaxH3SchedulerOutput(prev_sample=prev_sample)
 
 

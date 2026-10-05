@@ -7,6 +7,8 @@ EXPERIMENTS = (
     "action_first",
     "fight_choreography",
     "planning_thinking",
+    "camera_repair_sampling",
+    "camera_repair_reasoning",
 )
 _experiment = ContextVar("promptbench_experiment", default="baseline")
 
@@ -27,6 +29,14 @@ def fight_choreography_enabled():
 
 def planning_thinking_enabled():
     return _experiment.get() == "planning_thinking"
+
+
+def camera_repair_sampling_enabled():
+    return _experiment.get() == "camera_repair_sampling"
+
+
+def camera_repair_reasoning_enabled():
+    return _experiment.get() == "camera_repair_reasoning"
 
 
 @contextmanager

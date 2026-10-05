@@ -25,23 +25,28 @@ Detects your GPU, VRAM, and RAM on first launch and picks the right profile, qua
 
 - **Recommendations stay current:** while Auto is enabled, revised recommendations apply once at startup. Manual mode and customized values are preserved. See [Performance Auto-Tune](docs/Performance-auto-tune.md) for memory profiles and controlled performance comparisons.
 - **OOM recovery banner** auto-suggests lowering the VRAM headroom when a generation runs out, with one-click apply.
+- **LM Studio memory:** explicitly unload a selected external writer instance from Settings → Integrations before image or video generation. Requires LM Studio 0.4 or newer; release is verified against its loaded-model list. [Memory controls and API](docs/LM-Studio-memory.md).
 - **Live download status** during model setup ("Downloading transcription model (first use downloads ~300MB)..." instead of a vague spinner).
+- **Cancel model downloads:** use **Cancel** beside an active download in **Settings → Performance → Enabled Models**, the model browser, or the download banner. Download actions are separate from the enable checkbox. **Cancelling** stays visible until the transfer stops; completed files stay installed and the download can be retried. Hugging Face may retain incomplete cache data for a resumable retry. [Download controls and API](docs/Download-controls.md).
+- **Generation previews:** Settings → Performance → Generation Preview offers Fast Frames, Clearer Frames and a looping Live Video in Studio's generating card. Off is the default; previews add work and show approximate motion in the current window. Click the video to pause/resume playback. [Preview controls and API](docs/Generation-preview.md).
 
 ### 🎨 Studio Mode — full manual control
 Direct access to every model and every knob:
 - **Video** — create, extend, blend, retake, edit anything, outpaint, repaint, recast, upscale, and finish clips with MiniMax H3, LTX-2.5/2.3, SCAIL-2, Wan, Hunyuan, and many more.
+- **LongCat Avatar:** open **Studio → Video → Avatar**, choose Single or Multi, and add an anchor image plus **Voice audio #1**. Multi also needs **Voice audio #2**; use the preview and percentage-based speaker boxes to match each voice to a person. Swap exchanges the two speaker boxes, and Reset restores left/right assignments. Required inputs are checked for both Generate and Add to Queue. Load Settings restores voices and boxes, including older LongCat Frames outputs. These original Avatar checkpoints use **50 sampling steps**, **Auto** sampler, and text/audio guidance of **4** by default; one-step diagnostic renders do not establish visual quality. LongCat uses windows of up to 93 frames (about 5.8 seconds for Avatar), with 13 frames of overlap, and continues across windows for the full requested audio duration. **LongCat Video** remains in **Frames** for text/image-to-video generation.
 - **Image** — create, edit, upscale, or outpaint with Flux 2 Klein 9B, Krea 2 RAW/Turbo and Identity Edit, Qwen Image Edit, and more.
 - **Audio** — generate music with MiniMax-Music3, ACE-Step or **YuE2**, speech and cloned voices with H3 Voice Audio, Kugelaudio or Qwen3 TTS, sound effects with H3 or MMAudio, and revoice existing clips.
 - **YuE2 songs and personal styles:** 48 kHz stereo music with optional melody/chord planning, ABC scores and source-song covers. **My music (Experimental)** adds full-song transcription and voice-group review, resumable training, fixed auditions and portable styles. Choose AR song-style training or the author's tokenizer/decoder sound adaptation, with original/before/after listening comparisons. Check-only recordings help evaluate learning on another song. Training is optional; matching a specific singer's voice is not guaranteed. The exercised training GPU has 24 GB VRAM. YuE2 and the real-audio tokenizer weights have their own noncommercial model terms. [YuE2 music guide](docs/YuE2-music.md).
 - **Multi-clip generation** with per-clip prompts, seamless overlapping (sliding window) transitions, and shared LoRAs
 - **YuE2 Instrumental:** automatically applies a dedicated instrumental LoRA and melody/chord planning. The adapter downloads on first use; artist LoRAs pause while Instrumental is selected. [Instrumental guide](docs/YuE2-music.md#instrumental).
-- **Long-form planning up to 60 minutes** with one-window, friendly duration, exact timecode, window-count, and Auto controls; unified H3 Enhance develops short concepts and preserves detailed scripts across windows
+- **Long-form planning up to 60 minutes** with one-window, friendly duration, exact timecode, window-count, and Auto controls. Time holds the total runtime while Window holds the count and updates total duration as window length changes; unified H3 Enhance develops short concepts and preserves detailed scripts across windows.
 - **Blend video Mode** Remember Sora 1 blend mode, where you could overlap two videos, and use AI to blend them together? 
 - **Frames Injection (KFI)** for character continuity in long videos
 - **Sliding window** for arbitrarily long generations
 - **Viggle Animate:** select a saved character or image, describe its appearance, and let Flux 2 Klein prepare the replacement frame before three-step H3 animation. Preview the frame first or run both steps together; manual edited frames remain supported. See [Viggle Animate](docs/Viggle-Animate.md).
 - **Studio composition workspace:** compact reference cards above a large prompt editor. Characters stays on the left; Recipes, Resolution, Aspect, Duration and Advanced group on the right. The model selector sits beside Generate / Add to Queue, with a direct Model Browser shortcut. The magic button runs Enhance now; its menu can instead arm **Enhance on generation** for the next job. Advanced groups Performance, Finishing, LoRAs and Generation. Time retains model-aligned steps through five minutes and presets through one hour; Auto shows its recommended duration. See [Studio controls](docs/Studio-controls.md).
 - **Enhancement in the queue:** submit a brief while the GPU is busy and let Maestro enhance it when the job gets its turn, then generate automatically. Original inputs and completed drafts are saved for review and retries. Add to Queue keeps jobs held until Run queue; interrupted jobs are held after an app restart. Enhancement failures stop for attention instead of silently generating a fallback.
+- **Detailed H3 source actions:** for eligible silent, locked scripts with long authored events, Maestro preserves the physical source phases and asks the writer for camera coverage and nonverbal sound. If individual camera cards still fail, it can recover those events while retaining the other cards. Recovered drafts identify the affected events and remain available for review or retry. Dialogue, creative staging, recurring actions and timed holds retain their existing planning paths.
 - **Spatial upsampling, film grain, codec selection** as post-processing options
 - **H3 VDN**, an optional trained hybrid-attention model with dedicated Full/Pruned and eight-step presets; requires Triton and additional VRAM.
 - **TaoMate H3 three-step:** an optional Frames adapter preset with its own Euler/CFG settings and verified downloads. Existing fused and PDD recipes remain available. [TaoMate guide and tested scope](docs/TaoMate-H3.md).
@@ -65,13 +70,14 @@ Maestro auto-downloads `llama-server` (~600 MB one-time) and your chosen GGUF mo
 
 Choose **All folders** in the gallery folder picker to browse and search every output folder. Search includes original and enhanced prompts, and filters apply across the complete collection. Results load in pages and show their source folder. Browsing keeps your generation destination unchanged; identical filenames in different folders remain separate items. Media cards show timestamps; **Info** includes file details and upscale method, scale and before/after resolution when available. **Uploads → More → Delete upload** removes an unused source with confirmation. [Gallery controls](docs/Studio-controls.md#gallery-scope-and-search).
 
-### 🛒 Built-in CivitAI LoRA browser
+### 🛒 Built-in CivitAI model browser
 - Search, filter, and one-click install any LoRA from CivitAI without leaving Maestro
 - **LoRA update detection** — Check button refreshes from CivitAI, shows update badges on outdated LoRAs
 - **My LoRAs view** with filters for Updates and direct uninstall
 - **AI-generated LoRA prompting guides** Helps remove the guesswork from LoRAs. AI generates LoRA guides when LoRA is downloaded based on CIVITAI and HuggingFace repos. The guides explain what each LoRA does and how to use it, provide prompt examples, and recommend weight settings that are automatically applied when LoRA is selected. 
 - **Recommended weight ranges** (sourced from CivitAI sidecars, HuggingFace, or fallback heuristics) shown directly on the weight sliders
 - **Multi-LoRA pack auto-extraction** for archives that bundle several LoRAs
+- **MiniMax H3 checkpoints:** import compatible community SafeTensor and GGUF transformers, including DaSiWa W4A8 INT4, from the Checkpoints tab. Includes format/layout preflight, SHA-256 verification, native workflow pairing and sampling defaults. Matching installed weights are reused. [H3 checkpoint import](docs/H3-checkpoint-import.md).
 
 ### 🎭 Themes
 Three theme families, each with a dark and a light variant, switchable in Settings → System:
@@ -106,6 +112,26 @@ View all past Director runs with their full state — clip plans, generated imag
 ## Updates
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
+
+### v2.6.0 (2026-10-04)
+
+- **Live generation previews:** Fast Frames, Clearer Frames and looping Tiny VAE video inside Studio, with pause/resume, phone playback, selected-model support labels and still previews for supported image models. H3 previews use the predicted clean result during denoising. [Preview guide](docs/Generation-preview.md).
+- **Community H3 checkpoint imports:** compatible BF16/FP16, scaled FP8, INT8 ConvRot, W4A8 INT4 and GGUF checkpoints register native Frames and, when supported, References entries. Includes standard/Turbo/fused recipes, tensor-layout and SHA-256 verification, installed-weight reuse and Eros Max header-INT8 compatibility. [Import guide](docs/H3-checkpoint-import.md).
+- **DaSiWa checkpoints (#167):** H3 Hybrid v3 standard and baked Turbo in Frames and References, Krea 2 RAW/Turbo images, Wan 2.2 Lightspeed v9 and LTX-2.3 DragonLeap v4. Pinned creator downloads, model-specific defaults and existing Mature-mode controls. Experimental; test each checkpoint's render quality. [Model guide](docs/DaSiWa-models.md).
+- **Singularity across video workflows:** experimental Frames and References entries support text, start/end/timed images, Control Video editing and ordered references, sharing the existing v1.3 checkpoint and recommended adapter. [Usage guide](docs/H3-Singularity.md).
+- **LongCat Avatar:** a dedicated Avatar workflow below References, anchor/voice and two-speaker controls, corrected multi-speaker/audio-window routing, native window defaults and lower peak activation memory use.
+- **Long source timelines:** Frames control videos/masks and H3 reference videos/soundtracks advance with each window. Auto duration follows timeline reference videos; character and voice samples remain reusable. [Studio controls](docs/Studio-controls.md#long-source-media-across-windows).
+- **Object and sound-effect references:** preserve a prop's design without treating it as a character, or reuse a short effect sample in each window to guide matching generated sound.
+- **Clearer duration planning:** Window keeps the selected count and updates total duration as Window Length changes, including experimental 30s H3 windows. Time keeps the total runtime; Auto follows the prompt or source. H3 guidance separates normalization speed estimates from GPU memory recommendations and marks the 14.4s recommended boundary.
+- **H3 performance (#152):** native RMSNorm through 75,000 ordinary packed rows, bounded normalization for larger workloads, and explicit overrides. DaSiWa and compatible imported Turbo checkpoints support the configured dense backend and optional Sol Engine without adding another accelerator.
+- **H3 prompt fidelity:** preserve eligible long locked action passages, repair failed camera cards with more precise feedback, bound semantic reviews, reduce camera-language/identity false positives, reject unclosed spoken quotes and preserve entrances in reference fallbacks.
+- **Download cancellation and quieter status (#156):** separate enable/download actions, Cancel and Retry controls, safe cleanup, change-waiting status and hidden-tab suspension with compatibility fallback.
+- **Gallery reliability:** thumbnail clicks stay with the intended asset while metadata loads, the thumbnail strip follows selection, action menus fit the viewport and video inputs display posters.
+- **Runtime fixes:** explicit LM Studio model-memory controls, NVIDIA compute utilization, clearer Windows startup failures, correct failure status for skipped generation tasks and guarded INT8 kernel retries. MMGP is pinned to 3.8.2.
+
+Use **Update** in Pinokio, restart Maestro and refresh the browser. See the
+[complete release notes](docs/RELEASE_NOTES_V2.6.0.md) and
+[validation scope](docs/VALIDATION_V2.6.0.md).
 
 ### v2.5.0 (2026-09-28)
 
@@ -1107,3 +1133,23 @@ present in your bug report.
 Include the last roughly 50 lines around the failure, plus your GPU, VRAM,
 operating system, mode, and model. Review the excerpt and redact personal
 information before sharing it.
+
+### Windows blocks Python before startup
+
+If Windows reports that `python.exe` was blocked by a **Device Guard policy**
+or an **Application Control policy**, Windows has prevented the Python runtime
+from starting. Maestro's current uv-managed runtime has not been validated with
+Smart App Control enforcement enabled; see [issue #164](https://github.com/Blizaine/Maestro/issues/164).
+
+Keep your existing installation and Smart App Control setting while this is
+investigated. Reset recreates a managed Python environment and does not establish
+Windows trust. A signed replacement interpreter also needs verification with
+Maestro's native dependencies before it can be offered as a supported repair.
+[Microsoft describes the trust requirements here](https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/overview).
+
+For this startup failure, a short report is sufficient: the exact block message,
+the blocked file name with personal path details redacted, the file's signature
+status and publisher, and the CodeIntegrity event ID and policy name/ID. Full
+system logs and screenshots are not required. **Open Web UI** is available only
+after startup captures a valid server URL; the startup terminal retains the
+failure if Python cannot run.

@@ -50,7 +50,13 @@ from .reference_manifest import (
     MINIMAX_H3_MAX_REFERENCE_IMAGES,
     MINIMAX_H3_MAX_REFERENCE_VIDEOS,
     MINIMAX_H3_MAX_REFERENCES,
+    object_reference_prompt_contract,
     validate_reference_manifest,
+)
+from .reference_media import (
+    allocate_reference_durations,
+    extract_reference_audio_window,
+    extract_reference_video_window,
 )
 
 
@@ -851,8 +857,71 @@ def _ensure_ref2va_identity_isolation_contract(text: str, items: list[dict]) -> 
     return f"{source} {_REF2VA_IDENTITY_ISOLATION_CONTRACT}".strip()
 
 
+def _ensure_ref2va_object_contract(text: str, items: list[dict]) -> str:
+    """Keep object roles explicit when a manual prompt already has media tags."""
+
+    compiled = str(text or "")
+    picture = 0
+    for item in items:
+        if item.get("type") != "image":
+            continue
+        picture += 1
+        if item.get("image_intent", "identity") != "object":
+            continue
+        definition, retention = object_reference_prompt_contract(
+            f"<Picture {picture}>", item.get("role", ""),
+        )
+        for clause, field, next_field in (
+            (definition, "subject_definitions", "summary"),
+            (retention, "retention_analysis", "detailed_description"),
+        ):
+            if clause.casefold() in compiled.casefold():
+                continue
+            pattern = re.compile(
+                rf"(?ms)(^\s*{field}\s*:.*?)(?=^\s*{next_field}\s*:)",
+            )
+            if pattern.search(compiled):
+                compiled = pattern.sub(
+                    lambda match: f"{match.group(1).rstrip()} {clause}\n\n",
+                    compiled, count=1,
+                )
+            else:
+                compiled = f"{compiled.rstrip()} {clause}".strip()
+    return compiled
+
+
+def _ensure_ref2va_sound_effect_contract(text: str, items: list[dict]) -> str:
+    """Keep short effect samples reusable in raw and enhanced window prompts."""
+
+    compiled = str(text or "")
+    audio_ordinals = _ref2va_audio_ordinals_by_item(items)
+    for index, item in enumerate(items):
+        if item.get("type") != "audio" or item.get("audio_intent") != "sound":
+            continue
+        contract = (
+            f"Use the timbre and texture of <Audio {audio_ordinals[index]}> for the "
+            "explicitly requested matching sound effects in this window, synchronized "
+            "to the visible actions; the sample supplies reusable sound character "
+            "rather than a continuous soundtrack."
+        )
+        if contract.casefold() in compiled.casefold():
+            continue
+        music = re.search(r"(?mi)^\s*non_diegetic_music\s*:", compiled)
+        if music:
+            insert_at = music.start()
+            compiled = (
+                f"{compiled[:insert_at].rstrip()} {contract}\n\n"
+                f"{compiled[insert_at:].lstrip()}"
+            )
+        else:
+            compiled = f"{compiled.rstrip()} {contract}".strip()
+    return compiled
+
+
 def _apply_ref2va_media_contracts(text: str, items: list[dict]) -> str:
     compiled = _ensure_ref2va_identity_isolation_contract(text, items)
+    compiled = _ensure_ref2va_object_contract(compiled, items)
+    compiled = _ensure_ref2va_sound_effect_contract(compiled, items)
     if any(
         item.get("type") == "audio"
         and item.get("audio_intent", "voice") == "voice"
@@ -948,7 +1017,13 @@ def ensure_ref2va_prompt_relationships(
         if kind == "image":
             picture_index += 1
             intent = item.get("image_intent", "identity")
-            if intent == "composition":
+            if intent == "object":
+                definition, analysis = object_reference_prompt_contract(
+                    f"<Picture {picture_index}>", role,
+                )
+                relationships.append(definition)
+                retention.append(analysis)
+            elif intent == "composition":
                 relationships.append(
                     f"<Picture {picture_index}> is a soft composition and cast-layout reference for {role} "
                     "that preserves the intended subjects, wardrobe, setting, and spatial arrangement "
@@ -1060,6 +1135,16 @@ def ensure_ref2va_prompt_relationships(
             retention.append(
                 f"<Audio {audio_index}>: weak_reference - retain broad similarity in sound, rhythm, "
                 "texture, or music style."
+            )
+        elif intent == "sound":
+            relationships.append(
+                f"<Audio {audio_index}> is a reusable sound-effect reference for {role}; "
+                "generate matching effects for the requested actions using its timbre and "
+                "texture, with timing determined by those actions in each window."
+            )
+            retention.append(
+                f"<Audio {audio_index}>: reference - retain the sound effect's timbre and "
+                "texture without copying its waveform or original timing."
             )
         else:
             character_key = str(item.get("library_character_id") or "").strip()
@@ -1174,7 +1259,7 @@ def ensure_ref2va_prompt_relationships(
         task_types.append("audio reuse")
     if any(
         item.get("type") == "audio"
-        and item.get("audio_intent", "voice") in {"voice", "style"}
+        and item.get("audio_intent", "voice") in {"voice", "style", "sound"}
         for item in items
     ):
         task_types.append("audio reference")
@@ -1417,7 +1502,7 @@ def _isolate_reference_image_background_cached(
     modified_ns: int,
     file_size: int,
 ) -> Image.Image:
-    """Return a cached white-background identity portrait.
+    """Return a cached white-background character or object reference.
 
     The stat values intentionally participate in the cache key so replacing a
     file at the same path cannot reuse an obsolete cutout.
@@ -1442,16 +1527,16 @@ def _isolate_reference_image_background_cached(
             bgcolor=(255, 255, 255, 0),
         )
     if not isinstance(cutout, Image.Image):
-        raise ValueError("U2Net returned an unsupported character cutout.")
+        raise ValueError("U2Net returned an unsupported reference cutout.")
     print(
-        "[MiniMax H3 Ref2VA] Isolated character background: "
+        "[MiniMax H3 Ref2VA] Isolated reference background: "
         f"{os.path.basename(normalized_path)}."
     )
     return cutout.convert("RGB")
 
 
 def isolate_reference_image_background(path: str) -> Image.Image:
-    """Remove one identity portrait's source background without changing it."""
+    """Remove a character or object's source background without changing its file."""
 
     normalized_path = os.path.normcase(os.path.realpath(path))
     stat = os.stat(normalized_path)
@@ -1577,6 +1662,75 @@ def prepare_reference_waveform(
     return waveform.contiguous()
 
 
+def _reference_pass_budgets(items: list[dict], kind: str, pass_duration: float) -> dict[int, float]:
+    """Fairly cap each pass's video or audio references at 15 seconds total."""
+
+    selected = [
+        (index, item)
+        for index, item in enumerate(items)
+        if item.get("type") == kind
+    ]
+    if not selected:
+        return {}
+
+    durations: list[float] = []
+    for _index, item in selected:
+        duration = None
+        for key in ("effective_duration_seconds", "source_duration_seconds"):
+            try:
+                candidate = float(item.get(key))
+            except (TypeError, ValueError):
+                candidate = 0.0
+            if math.isfinite(candidate) and candidate > 0:
+                duration = candidate
+                break
+        if duration is None:
+            from .reference_media import _probe_duration
+
+            duration = _probe_duration(item["path"])
+        durations.append(max(2.0, duration))
+
+    allocated = allocate_reference_durations(durations)
+    pass_duration = max(0.0, float(pass_duration))
+    budgets = [min(pass_duration, budget) for budget in allocated]
+    allowed_seconds = min(15.0, pass_duration * len(selected))
+    excess = max(0.0, sum(budgets) - allowed_seconds)
+    for index in sorted(range(len(budgets)), key=budgets.__getitem__, reverse=True):
+        reduction = min(excess, budgets[index])
+        budgets[index] -= reduction
+        excess -= reduction
+        if excess <= 1e-9:
+            break
+
+    if kind == "video":
+        frame_counts = [max(1, int(round(value * MINIMAX_H3_FPS))) for value in budgets]
+        max_total_frames = min(
+            int(round(15.0 * MINIMAX_H3_FPS)),
+            int(round(pass_duration * MINIMAX_H3_FPS)) * len(selected),
+        )
+        while sum(frame_counts) > max_total_frames:
+            longest = max(range(len(frame_counts)), key=frame_counts.__getitem__)
+            if frame_counts[longest] <= 1:
+                break
+            frame_counts[longest] -= 1
+        budgets = [count / MINIMAX_H3_FPS for count in frame_counts]
+
+    return {index: budget for (index, _item), budget in zip(selected, budgets)}
+
+
+def _decode_timeline_audio_window(
+    path: str,
+    start_time: float,
+    duration: float,
+) -> tuple[torch.Tensor, int]:
+    """Decode one bounded FFmpeg-cached window from the original timeline."""
+
+    segment_path = extract_reference_audio_window(path, start_time, duration)
+    if not segment_path:
+        raise ValueError(f"No audio stream was found in {os.path.basename(path)}.")
+    return decode_reference_audio(segment_path)
+
+
 def prepare_references(
     manifest,
     *,
@@ -1603,9 +1757,11 @@ def prepare_references(
         max_duration = 15.0
     timeline_start_frame = max(0, int(timeline_start_frame or 0))
     timeline_start_time = timeline_start_frame / MINIMAX_H3_FPS
+    video_budgets = _reference_pass_budgets(items, "video", max_duration)
+    audio_budgets = _reference_pass_budgets(items, "audio", max_duration)
     prepared: list[MiniMaxH3PreparedReference] = []
 
-    for item in items:
+    for item_index, item in enumerate(items):
         kind = item["type"]
         reference = MiniMaxH3PreparedReference(
             kind=kind,
@@ -1622,7 +1778,7 @@ def prepare_references(
                     # Background isolation improves identity cleanliness but
                     # must never turn a valid reference into a failed render.
                     print(
-                        "[MiniMax H3 Ref2VA] Character background isolation "
+                        "[MiniMax H3 Ref2VA] Reference background isolation "
                         f"failed for {os.path.basename(item['path'])}; using the "
                         f"original image ({error})."
                     )
@@ -1642,41 +1798,98 @@ def prepare_references(
             wants_embedded_audio = bool(item.get("include_audio", True)) and not item.get("audio_path")
             if item.get("has_audio") is False:
                 wants_embedded_audio = False
-            frames, fps, soundtrack = decode_reference_video(item["path"], decode_audio=wants_embedded_audio)
+            video_budget = video_budgets.get(item_index, max_duration)
+            video_frame_budget = max(1, int(round(video_budget * MINIMAX_H3_FPS)))
+            follows_timeline = bool(item.get("follow_timeline", False))
+            video_start_time = timeline_start_time if follows_timeline else 0.0
+            video_path = extract_reference_video_window(
+                item["path"],
+                video_start_time,
+                video_budget,
+                include_audio=wants_embedded_audio,
+                target_fps=MINIMAX_H3_FPS,
+            )
+            frames, fps, soundtrack = decode_reference_video(video_path, decode_audio=False)
             frames = resample_reference_frames(reference_media_to_uint8(frames), fps)
             source_height, source_width = frames.shape[1:3]
             reference.frames = prepare_reference_frames(
                 frames,
-                num_frames,
+                video_frame_budget,
                 detail=detail,
                 target_height=target_height,
                 target_width=target_width,
             )
             prepared_height, prepared_width = reference.frames.shape[1:3]
+            video_window_end = video_start_time + video_frame_budget / MINIMAX_H3_FPS
+            window_mode = "timeline" if follows_timeline else "static"
             print(
                 "[MiniMax H3 Ref2VA] Prepared reference video "
                 f"{source_width}x{source_height} -> {prepared_width}x{prepared_height} "
-                f"({reference.frames.shape[0]} frames, detail={detail})."
+                f"({reference.frames.shape[0]} frames, {window_mode} window "
+                f"{video_start_time:.2f}-{video_window_end:.2f}s, detail={detail})."
             )
             if item.get("include_audio", True):
+                audio_window_duration = video_frame_budget / MINIMAX_H3_FPS
+                audio_start_time = timeline_start_time if follows_timeline else 0.0
+                pad_audio = follows_timeline
                 if item.get("audio_path"):
-                    soundtrack = decode_reference_audio(item["audio_path"])
+                    audio_path = extract_reference_audio_window(
+                        item["audio_path"],
+                        audio_start_time,
+                        audio_window_duration,
+                        pad_to_duration=pad_audio,
+                    )
+                    if not audio_path:
+                        raise ValueError(
+                            f"No audio stream was found in {os.path.basename(item['audio_path'])}."
+                        )
+                    soundtrack = decode_reference_audio(audio_path)
+                elif wants_embedded_audio:
+                    audio_path = extract_reference_audio_window(
+                        item["path"],
+                        audio_start_time,
+                        audio_window_duration,
+                        pad_to_duration=pad_audio,
+                    )
+                    soundtrack = decode_reference_audio(audio_path) if audio_path else None
                 if soundtrack is not None:
                     waveform, sample_rate = soundtrack
                     reference.waveform = prepare_reference_waveform(
-                        waveform, sample_rate, audio_sample_rate, max_duration
+                        waveform,
+                        sample_rate,
+                        audio_sample_rate,
+                        audio_window_duration,
+                        pad_to_duration=pad_audio,
                     )
                     reference.has_audio = reference.waveform.shape[-1] > 0
         else:
-            waveform, sample_rate = decode_reference_audio(item["path"])
             intent = item.get("audio_intent", "voice")
+            # Voices and short sound-effect samples are reusable references.
+            # Music/performance tracks instead advance with the sequence clock.
             follows_sequence_timeline = intent in {"drive", "style"}
-            segment_start_time = timeline_start_time if follows_sequence_timeline else 0.0
+            audio_budget = audio_budgets.get(item_index, max_duration)
+            audio_window_duration = audio_budget
+            if follows_sequence_timeline:
+                waveform, sample_rate = _decode_timeline_audio_window(
+                    item["path"], timeline_start_time, audio_window_duration
+                )
+                segment_start_time = 0.0
+            else:
+                audio_path = extract_reference_audio_window(
+                    item["path"],
+                    0.0,
+                    audio_window_duration,
+                    pad_to_duration=False,
+                )
+                if not audio_path:
+                    raise ValueError(f"No audio stream was found in {os.path.basename(item['path'])}.")
+                waveform, sample_rate = decode_reference_audio(audio_path)
+                segment_start_time = 0.0
             reference.waveform = prepare_reference_waveform(
                 waveform,
                 sample_rate,
                 audio_sample_rate,
-                max_duration,
+                audio_window_duration,
                 start_time=segment_start_time,
                 pad_to_duration=follows_sequence_timeline,
             )
@@ -1685,7 +1898,14 @@ def prepare_references(
                 print(
                     "[MiniMax H3 Ref2VA] Prepared "
                     f"{intent} audio timeline segment "
-                    f"{segment_start_time:.2f}-{segment_start_time + max_duration:.2f}s "
+                    f"{timeline_start_time:.2f}-{timeline_start_time + audio_window_duration:.2f}s "
+                    f"from {os.path.basename(item['path'])}."
+                )
+            elif intent == "sound":
+                print(
+                    "[MiniMax H3 Ref2VA] Reused sound-effect reference "
+                    f"0.00-{reference.waveform.shape[-1] / audio_sample_rate:.2f}s "
+                    f"for window at {timeline_start_time:.2f}s "
                     f"from {os.path.basename(item['path'])}."
                 )
 

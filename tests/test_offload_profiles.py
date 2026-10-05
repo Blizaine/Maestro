@@ -44,12 +44,13 @@ class OffloadProfileTests(unittest.TestCase):
                     "transformer": expected, "text_encoder": expected, "*": expected,
                 })
 
-    def test_residency_override_does_not_change_full_residency_profiles(self):
+    def test_activation_reserve_changes_only_transformer_in_resident_profiles(self):
         for profile in (1, 3, 3.5):
             with self.subTest(profile=profile):
                 expected, actual = {}, {}
                 init_pipe()({"transformer": object()}, expected, profile)
                 init_pipe(transformer_budget=9500)({"transformer": object()}, actual, profile)
+                expected["budgets"]["transformer"] = 9500
                 self.assertEqual(actual, expected)
 
     def test_nonpositive_budget_keeps_model_default(self):

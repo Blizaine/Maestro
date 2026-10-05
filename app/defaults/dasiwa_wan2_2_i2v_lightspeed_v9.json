@@ -1,0 +1,51 @@
+{
+  "model": {
+    "name": "DaSiWa Wan 2.2 SynthSeduction Lightspeed v9 (Mature, Experimental)",
+    "architecture": "i2v_2_2",
+    "group": "wan2_2",
+    "description": "Experimental 4-step distilled Wan 2.2 I2V SynthSeduction Lightspeed v9. Supply a source image as the first frame and use the matching High/Low v9 checkpoints as a pair.",
+    "selector_help": "MATURE MODE REQUIRED — experimental four-step I2V. Upload the source image used for the first frame; both matching SynthSeduction v9 High and Low checkpoints are required. Set a Civitai API key in Settings > Services before downloading. Creator recommends Euler with a Simple, Normal, or Linear Quadratic schedule.",
+    "nsfw_only": true,
+    "URLs": [
+      "DasiwaWAN22I2V14BLightspeed_synthseductionHighV9.safetensors"
+    ],
+    "URLs2": [
+      "DasiwaWAN22I2V14BLightspeed_synthseductionLowV9.safetensors"
+    ],
+    "download_sources": {
+      "DasiwaWAN22I2V14BLightspeed_synthseductionHighV9.safetensors": {
+        "url": "https://civitai.com/api/download/models/2555640?fileId=2455463",
+        "sha256": "f1a2e7b4b65fa918931b9194df6dfc50ab6309ef492394c32c0da5f7ef630870",
+        "size_bytes": 14528641504
+      },
+      "DasiwaWAN22I2V14BLightspeed_synthseductionLowV9.safetensors": {
+        "url": "https://civitai.com/api/download/models/2555652?fileId=2455626",
+        "sha256": "ae436c2d8c8d19ce51d8070b3f8089aa942441aa16c1d3b22cc65263dd56f67e",
+        "size_bytes": 14528641504
+      }
+    },
+    "source_repo": "https://civitai.com/models/1981116/dasiwa-wan-22-i2v-14b-lightspeed-synthseduction-v9",
+    "source_revision": "2555640:2455463 + 2555652:2455626",
+    "source_sha256": {
+      "high": "f1a2e7b4b65fa918931b9194df6dfc50ab6309ef492394c32c0da5f7ef630870",
+      "low": "ae436c2d8c8d19ce51d8070b3f8089aa942441aa16c1d3b22cc65263dd56f67e"
+    },
+    "source_size_bytes": {
+      "high": 14528641504,
+      "low": 14528641504
+    },
+    "license_name": "Wan 2.2 license and DaSiWa creator distribution terms",
+    "license_url": "https://civitai.com/models/1981116/dasiwa-wan-22-i2v-14b-lightspeed-synthseduction-v9"
+  },
+  "prompt": "The subject turns toward the camera and smiles as a soft breeze moves through the scene.",
+  "negative_prompt": "",
+  "num_inference_steps": 4,
+  "guidance_phases": 2,
+  "switch_threshold": 900,
+  "guidance_scale": 1.0,
+  "guidance2_scale": 1.0,
+  "masking_strength": 0.1,
+  "denoising_strength": 0.9,
+  "flow_shift": 5,
+  "sample_solver": "euler"
+}

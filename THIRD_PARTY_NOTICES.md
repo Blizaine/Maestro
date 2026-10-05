@@ -121,6 +121,37 @@ These pinned archives contain no separate license or notice file. They are
 runtime downloads, not source assets redistributed in Maestro; neither this
 attribution nor the bridge's MIT license grants a license to NVIDIA software.
 
+## Tiny VAE generation previews
+
+The optional generation-preview integration adapts Wan2GP's live previews,
+contributed by **GOvEy1nw**, from revision
+`b8b18f8114e432eea8f3d7e853a51dd91fa99571`.
+
+- Upstream preview integration: https://github.com/deepbeepmeep/Wan2GP/tree/b8b18f8114e432eea8f3d7e853a51dd91fa99571
+- **madebyollin/taesd** and **madebyollin/taehv** decoder implementations retain
+  their MIT licenses in `app/shared/tinyvae/LICENSES/taesd-MIT.txt` and
+  `app/shared/tinyvae/LICENSES/taehv-MIT.txt`.
+- The H3 approximate decoder's Apache-2.0 license text is distributed in
+  `app/shared/tinyvae/LICENSES/taeh3-Apache-2.0.txt`; its pinned weight source is
+  **Kijai/MiniMax-H3-TAE**.
+- Decoder weight download identities and SHA-256 values are recorded in
+  `app/shared/tinyvae/decoders.json`; revision-pinned upstream reference sources
+  are recorded in `app/shared/tinyvae/sources.json`.
+
+Decoder weights download on demand and are not redistributed in this source
+repository. Their source/model terms remain separate from Maestro's application
+license. See `docs/Generation-preview.md` for support and behavior.
+
+## DaSiWa and imported community checkpoints
+
+Optional DaSiWa H3, Krea 2, Wan 2.2 and LTX-2.3 definitions download the
+creator's pinned files rather than redistributing weights. Their official source
+links, file identities, sizes and hashes are documented in `docs/DaSiWa-models.md`
+and the corresponding model definitions. Imported CivitAI H3 files retain
+creator/source provenance and verification receipts. Underlying model licenses
+and creator distribution terms continue to apply; Maestro's application license
+does not grant rights in these weights. See `docs/H3-checkpoint-import.md`.
+
 ## MATLOWAI MiniMax H3 fused four-step checkpoint
 
 The optional experimental model definitions

@@ -1,0 +1,57 @@
+{
+  "model": {
+    "name": "H3 DaSiWa Hybrid v3 — Frames (Experimental)",
+    "architecture": "minimax_h3",
+    "minimax_h3_model_id": "minimax_h3_dasiwa",
+    "minimax_h3_dasiwa": true,
+    "minimax_h3_baked_turbo": false,
+    "minimax_h3_qkv_layout": "grouped",
+    "minimax_h3_checkpoint_requirements": {
+      "compressed_modulation": true,
+      "adaln_curve_grid": 1025,
+      "time_embed_dim": 8,
+      "quantization_format": "int8_tensorwise",
+      "convrot": true,
+      "convrot_group_size": 256,
+      "qkv_layout": "grouped"
+    },
+    "minimax_h3_sampler": "euler",
+    "minimax_h3_video_shift": 11,
+    "minimax_h3_audio_shift": 4,
+    "minimax_h3_unaccelerated_default_steps": 25,
+    "description": "Experimental DaSiWa MiniMax H3 Hybrid v3 non-distilled checkpoint. Generate from text, start/end/timed frames, or a Control Video. Shares one 21 GB INT8 checkpoint with its References companion.",
+    "selector_help": "DASIWA H3 HYBRID V3 — FRAMES (EXPERIMENTAL)\nGenerate from text, start/end/timed frames, or a Control Video. Non-distilled: start at 25 Euler steps. Optional H3 accelerators use the Ref2VA AdaLN basis.\nFrames and References share one pinned 21 GB pruned INT8 ConvRot checkpoint, with synchronized audio. Downloads come directly from the creator on Civitai and use the key in Settings > Services.",
+    "URLs": [
+      "DasiwaMinimaxH3_dasiwaHybridV3_3263052.safetensors"
+    ],
+    "download_sources": {
+      "DasiwaMinimaxH3_dasiwaHybridV3_3263052.safetensors": {
+        "url": "https://civitai.com/api/download/models/3374445?fileId=3263052",
+        "sha256": "0ce4dfecce862b010823a5a74903543bd7f2ad21872272232f70f9a836d30e53",
+        "size_bytes": 20967668624
+      }
+    },
+    "source_repo": "https://civitai.com/models/2877206/dasiwa-minimax-h3",
+    "source_revision": "3374445:3263052",
+    "source_sha256": "0ce4dfecce862b010823a5a74903543bd7f2ad21872272232f70f9a836d30e53",
+    "source_size_bytes": 20967668624,
+    "model_size_gb": 21,
+    "license_name": "MiniMax H3 Community License and DaSiWa derivative terms",
+    "license_url": "https://civitai.com/models/2877206/dasiwa-minimax-h3"
+  },
+  "prompt": "A cinematic medium shot of a traveler standing on a windswept overlook at sunrise. The camera slowly arcs around them as their coat moves naturally in the breeze. Distant birds and soft wind are audible.",
+  "num_inference_steps": 25,
+  "minimax_h3_turbo_mode": false,
+  "minimax_h3_turbo_preset": "",
+  "video_length": 124,
+  "sliding_window_size": 345,
+  "sliding_window_overlap": 18,
+  "sliding_window_discard_last_frames": 0,
+  "resolution": "864x480",
+  "guidance_scale": 1,
+  "flow_shift": 11,
+  "audio_flow_shift": 4,
+  "skip_steps_cache_type": "",
+  "override_attention": "",
+  "image_prompt_type": ""
+}

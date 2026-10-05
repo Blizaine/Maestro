@@ -10,6 +10,26 @@ experiment and exact source are saved in the run manifest; resume refuses change
 Ordinary Studio/Director requests and the default `--experiment baseline` retain
 the current production behavior. The candidate has not been approved by render tests.
 
+Two camera-repair profiles can be compared separately against the same baseline:
+`--experiment camera_repair_sampling` honors the structured repair call's requested
+temperature (0.08) and top-p (0.78) while retaining other model defaults.
+`--experiment camera_repair_reasoning` adds one bounded, unconstrained reasoning
+request before the first repair of a rejected window. Its advice cannot approve a
+plan; the subsequent JSON repair keeps thinking disabled and must pass the usual
+source, chronology, ownership and cited-evidence checks. Ordinary requests enable
+neither profile. Compare warnings, unresolved actions, native prompts, call counts
+and latency; a completed enhancement or fewer fallbacks alone does not prove
+creative or rendered quality.
+
+Camera coverage review packs at most eight independent decisions per call, with
+up to 64 action obligations per review. Each production camera window shares a
+six-call semantic-review allowance across its initial draft and all focused
+repairs. When that allowance is spent, remaining requirements stay unresolved
+and retain specific repair feedback; budget exhaustion never approves a draft.
+Visual evidence is sent once as exact, scoped text spans, while the application
+retains the full cards for receipt validation. The five focused repair attempts
+and hard source, timing, chronology and ownership checks remain in place.
+
 Developer tooling for measuring H3 enhancement through Maestro's actual generation-preparation code. It captures a source snapshot, per-call effective payloads and drafts, final native prompts, warnings and telemetry. It prepares settings without starting video generation. GPT-5.6 Sol or another agent can operate it using [the operator skill](operator/SKILL.md).
 
 ## Setup
@@ -63,6 +83,34 @@ python -m promptbench report ../.codex-tmp/promptbench/pilot
 The bench pauses admission when user jobs are queued/running. The server owns the ordinary generation lock for every enhancement and its cleanup. Writer selection is scoped to that request and never written to preferences. Idle model residency can change, as in ordinary queued enhancement; the bench unloads its writer before releasing the slot. There are no separate uncoordinated GPU processes.
 
 Mechanical checks identify format, missing exact speech, unexpected speech in silent scenes, window count, trace coverage and fallbacks. They do not certify speaker ownership, creative quality or rendered quality. Apply [the review rubric](rubric.md) separately. The report does not produce a misleading combined quality score.
+
+For a CPU replay of captured camera drafts, merge each focused `event_cards`
+patch into the preceding complete draft before validation. A patch is not a
+complete window. Retained job checkpoints contain materialized visual text and
+may omit the original draft ownership and semantic-review receipts; restoring
+their event mapping can check the surviving text, but cannot reproduce the
+historical acceptance decision. Compare identical drafts before and after a
+parser change before spending another writer run, and keep deterministic
+validation results separate from actual fallbacks and rendered quality.
+
+Detailed silent locked scripts use compiler-owned physical source phases when
+at least one authored event exceeds the existing 90-word substantial-action
+card target. The writer supplies camera metadata rather than paraphrasing the
+actions. Exact ordered source text, bindings and source hashes establish
+coverage; JSON cannot supply the compiler's proof. Timing, camera metadata,
+future-event previews and scene contracts remain checked. Mixed optical/action
+sentences retain their complete source wording. Short or creative briefs,
+dialogue, recurrence, connective/enabling events and timed holds keep their
+existing planning paths when a source-only contract is ineligible.
+
+Record **event camera recovery** separately from whole-window fallback. A
+recovered event is still a review warning; retaining the other camera cards
+does not make it a clean pass. For before/after comparisons, freeze both source
+snapshots, repeat matched cases with the same installed writers, and inspect
+the complete native prompts for contact instruments, ownership, ordering and
+endings. Do not infer improved rendered action from fewer review calls or
+fallback warnings. A replay of an older checkpoint must also disclose any
+source-parser/hash mismatch rather than treating it as a current writer failure.
 
 ## Developer API
 

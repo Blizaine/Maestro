@@ -1,0 +1,59 @@
+{
+  "model": {
+    "name": "H3 DaSiWa Hybrid Turbo v3 — References (Experimental)",
+    "architecture": "minimax_h3_ref2va",
+    "minimax_h3_model_id": "minimax_h3_ref2va_dasiwa_turbo",
+    "minimax_h3_dasiwa": true,
+    "minimax_h3_baked_turbo": true,
+    "minimax_h3_qkv_layout": "grouped",
+    "minimax_h3_checkpoint_requirements": {
+      "compressed_modulation": true,
+      "adaln_curve_grid": 1025,
+      "time_embed_dim": 8,
+      "quantization_format": "int8_tensorwise",
+      "convrot": true,
+      "convrot_group_size": 256,
+      "qkv_layout": "grouped"
+    },
+    "minimax_h3_sampler": "euler",
+    "minimax_h3_video_shift": 9,
+    "minimax_h3_audio_shift": 4,
+    "minimax_h3_unaccelerated_default_steps": 8,
+    "description": "Experimental DaSiWa MiniMax H3 Hybrid v3 baked Turbo checkpoint. Use ordered image, video, and audio references. Shares one 21 GB INT8 checkpoint with its Frames companion.",
+    "selector_help": "DASIWA H3 HYBRID TURBO V3 — REFERENCES (EXPERIMENTAL)\nUse ordered image, video, and audio references. Turbo is baked into the checkpoint: start at 8 Euler steps, with 4–8 denoising steps available. Do not add another Turbo or PDD accelerator.\nFrames and References share one pinned 21 GB pruned INT8 ConvRot checkpoint, with synchronized audio. Downloads come directly from the creator on Civitai and use the key in Settings > Services.",
+    "URLs": [
+      "DasiwaMinimaxH3_dasiwaHybridTurboV3_3263048.safetensors"
+    ],
+    "download_sources": {
+      "DasiwaMinimaxH3_dasiwaHybridTurboV3_3263048.safetensors": {
+        "url": "https://civitai.com/api/download/models/3374439?fileId=3263048",
+        "sha256": "5da4bbf303f91b468010f504951e3959cd77420ec5f93ae007c9660b485f7df6",
+        "size_bytes": 20967668632
+      }
+    },
+    "source_repo": "https://civitai.com/models/2877206/dasiwa-minimax-h3",
+    "source_revision": "3374439:3263048",
+    "source_sha256": "5da4bbf303f91b468010f504951e3959cd77420ec5f93ae007c9660b485f7df6",
+    "source_size_bytes": 20967668632,
+    "model_size_gb": 21,
+    "license_name": "MiniMax H3 Community License and DaSiWa derivative terms",
+    "license_url": "https://civitai.com/models/2877206/dasiwa-minimax-h3"
+  },
+  "prompt": "Use the ordered references to create a coherent cinematic scene with faithful identities, appearance, motion, and sound.",
+  "num_inference_steps": 8,
+  "minimax_h3_turbo_mode": false,
+  "minimax_h3_turbo_preset": "",
+  "video_length": 124,
+  "sliding_window_size": 345,
+  "sliding_window_overlap": 18,
+  "sliding_window_discard_last_frames": 0,
+  "resolution": "864x480",
+  "guidance_scale": 1,
+  "flow_shift": 9,
+  "audio_flow_shift": 4,
+  "skip_steps_cache_type": "",
+  "override_attention": "",
+  "image_prompt_type": "",
+  "minimax_h3_references": [],
+  "minimax_h3_reference_detail": "match"
+}

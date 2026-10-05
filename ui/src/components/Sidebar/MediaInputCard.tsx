@@ -1,6 +1,7 @@
 import { Eye, FileAudio, Image as ImageIcon, Plus, X } from 'lucide-react'
 import { useRef, useState, type HTMLAttributes } from 'react'
 import { SidebarDialog } from './SidebarPanels'
+import { VideoInputPreview } from '../shared/VideoInputPreview'
 
 /** A reference thumbnail; its parent places the editor below the active row. */
 export function MediaInputCard({ title, subtitle, preview, mediaUrl, kind = 'image', disabled, onRemove, onEarlier, onLater, expanded, onEdit, editorId, ...drag }: {
@@ -22,7 +23,7 @@ export function MediaInputCard({ title, subtitle, preview, mediaUrl, kind = 'ima
       }} className="block w-full rounded-xl p-1.5 text-left hover:bg-bg-hover focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent-blue">
       <div className="flex h-14 items-center justify-center overflow-hidden rounded-lg bg-bg-primary text-text-muted">
         {preview ? <img src={preview} alt="" draggable={false} loading="lazy" className="h-full w-full object-cover"/>
-          : kind === 'video' && mediaUrl ? <video src={`${mediaUrl}#t=0.1`} muted playsInline preload="metadata" className="h-full w-full object-cover"/>
+          : kind === 'video' && mediaUrl ? <VideoInputPreview src={mediaUrl} alt={`${title} preview`} className="h-full w-full object-cover"/>
           : kind === 'audio' ? <FileAudio size={25}/> : <ImageIcon size={25}/>}
       </div>
       <div className="mt-1 truncate text-[11px] font-medium text-text-primary" title={title}>{title}</div>

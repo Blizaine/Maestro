@@ -1,4 +1,4 @@
-import type { DirectorModelCompatibility, H3WindowPlan, LTXWindowPlan, MiniMaxH3Reference, ProductionPlan, SavedOmniCharacter, ScailResolutionProfile } from '../types'
+import type { DirectorModelCompatibility, GenerationPreview, GenerationPreviewSupport, H3WindowPlan, LTXWindowPlan, MiniMaxH3Reference, ProductionPlan, SavedOmniCharacter, ScailResolutionProfile } from '../types'
 import type { KreaIdentitySettings } from '../lib/kreaIdentityControls'
 
 const BASE = ''  // same origin in production; Vite proxy handles /api in dev
@@ -21,6 +21,8 @@ export interface ApiModel {
   supports_audio_input?: boolean
   generates_audio?: boolean
   supports_ref_images?: boolean
+  /** Native preview decoders supported by this model, when reported by the backend. */
+  preview_support?: GenerationPreviewSupport
   /** Per-workflow eligibility computed by the Director backend. */
   director?: DirectorModelCompatibility
   is_downloaded?: boolean
@@ -79,6 +81,9 @@ export interface ApiJobStatus {
   phase: string
   message: string
   output_files: string[]
+  /** Small job-specific preview; absent on older backends. */
+  preview?: GenerationPreview | null
+  preview_notice?: string | null
   viggle_preparation?: import('../types').VigglePreparedFrame | null
   error: string | null
   /** Present only on failed jobs that look like CUDA OOMs.
@@ -155,7 +160,16 @@ export async function deleteModel(modelType: string): Promise<{ deleted: string[
   return res.json()
 }
 
-export type ModelDownloadStatus = 'downloading' | 'completed' | 'failed'
+export type ModelDownloadStatus = 'downloading' | 'cancelling' | 'cancelled' | 'completed' | 'failed'
+
+export interface ModelDownloadSnapshot {
+  status: ModelDownloadStatus
+  error: string | null
+  /** Opaque backend cancellation token. Absent on older backends. */
+  cancel_id?: string | null
+  /** Only true when the current transfer can be interrupted safely. */
+  cancellable?: boolean
+}
 
 export async function downloadModel(modelType: string): Promise<{ status: ModelDownloadStatus; model_type: string }> {
   const res = await fetch(`${BASE}/api/v1/models/${encodeURIComponent(modelType)}/download`, { method: 'POST' })
@@ -163,7 +177,19 @@ export async function downloadModel(modelType: string): Promise<{ status: ModelD
   return res.json()
 }
 
-export async function fetchModelDownloads(): Promise<{ downloads: Record<string, { status: ModelDownloadStatus; error: string | null }> }> {
+export async function cancelModelDownload(modelType: string): Promise<{
+  status: 'cancelling' | 'cancelled' | 'completed' | 'failed'
+  model_type: string
+}> {
+  const res = await fetch(`${BASE}/api/v1/models/${encodeURIComponent(modelType)}/download/cancel`, { method: 'POST' })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to cancel model download' }))
+    throw new Error(err?.detail || err?.error || 'Failed to cancel model download')
+  }
+  return res.json()
+}
+
+export async function fetchModelDownloads(): Promise<{ downloads: Record<string, ModelDownloadSnapshot> }> {
   const res = await fetch(`${BASE}/api/v1/models/downloads/status`)
   if (!res.ok) throw new Error('Failed to fetch model download status')
   return res.json()
@@ -2199,6 +2225,40 @@ export async function unloadLlm(): Promise<void> {
   if (!res.ok) throw new Error('Failed to unload LLM')
 }
 
+export interface RemoteLoadedModel {
+  instance_id: string
+  model_key: string
+  display_name: string
+}
+
+export interface RemoteLoadedModels {
+  server_url: string
+  instances: RemoteLoadedModel[]
+}
+
+async function remoteManagementResponse<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    const error = await res.json().catch(() => null)
+    throw new Error(typeof error?.detail === 'string' ? error.detail : 'LM Studio model management failed')
+  }
+  return res.json()
+}
+
+export async function fetchRemoteLoadedModels(): Promise<RemoteLoadedModels> {
+  return remoteManagementResponse(await fetch(`${BASE}/api/v1/llm/remote/loaded-models`))
+}
+
+export async function unloadRemoteModel(params: {
+  instance_id: string
+  server_url: string
+}): Promise<{ status: 'unloaded' | 'not_loaded' }> {
+  return remoteManagementResponse(await fetch(`${BASE}/api/v1/llm/remote/unload`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  }))
+}
+
 export async function fetchLlmModels(): Promise<{ models: import('../types').LlmModelOption[] }> {
   const res = await fetch(`${BASE}/api/v1/llm/models`)
   if (!res.ok) throw new Error('Failed to fetch LLM models')
@@ -2512,6 +2572,35 @@ export interface CheckpointArchitecture {
   template_model_type: string
 }
 
+export interface H3CheckpointInspection {
+  supported: boolean
+  status: 'verified' | 'needs_selection' | 'blocked'
+  reason: string | null
+  architectures: CheckpointArchitecture[]
+  suggested_architecture?: string | null
+  profile?: {
+    sampling_profile?: string
+    native_workflow?: string
+    default_steps?: number
+    compressed_modulation?: boolean
+    quantization_format?: string
+    gguf_quant_types?: string[]
+    qkv_layout?: string
+    needs_selection?: string[]
+  }
+}
+
+export async function inspectH3Checkpoint(params: {
+  model_id: number; version_id: number; file_id: number
+  h3_sampling_profile?: string; h3_native_workflow?: string; h3_qkv_layout?: string
+}): Promise<H3CheckpointInspection> {
+  const res = await fetch(`${BASE}/api/v1/civitai/checkpoint-inspect`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
+  })
+  if (!res.ok) throw new Error('Could not inspect this H3 checkpoint. Restart Maestro after updating and try again.')
+  return res.json()
+}
+
 // List only architectures verified for the exact CivitAI baseModel, plus an
 // unambiguous default and a user-facing reason when import is unsupported.
 export async function fetchCheckpointArchitectures(
@@ -2606,6 +2695,7 @@ export async function startCivitAIDownload(params: {
   // registers a finetune for target_architecture instead of saving a LoRA.
   // auto_quantize=true sets the finetune to load-time int8 (mmgp).
   kind?: string; target_architecture?: string; auto_quantize?: boolean
+  file_id?: number; h3_sampling_profile?: string; h3_native_workflow?: string; h3_qkv_layout?: string
 }): Promise<{ download_id: string }> {
   const res = await fetch(`${BASE}/api/v1/civitai/download`, {
     method: 'POST',
@@ -2622,6 +2712,23 @@ export async function startCivitAIDownload(params: {
 export async function fetchCivitAIDownloads(): Promise<{ downloads: import('../types').CivitAIDownload[] }> {
   const res = await fetch(`${BASE}/api/v1/civitai/downloads`)
   if (!res.ok) throw new Error('Failed to fetch downloads')
+  return res.json()
+}
+
+/** Cancel one server-confirmed cancellable transfer using its opaque token. */
+export async function cancelDownload(cancelId: string): Promise<{
+  status: 'cancelling' | 'cancelled' | 'completed' | 'failed'
+  download_id: string
+}> {
+  const res = await fetch(`${BASE}/api/v1/downloads/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ download_id: cancelId }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to cancel download' }))
+    throw new Error(err?.detail || err?.error || 'Failed to cancel download')
+  }
   return res.json()
 }
 
@@ -2969,14 +3076,25 @@ export interface ActiveDownload {
   last_active_at: number
   downloaded_bytes: number
   total_bytes: number | null
-  status: 'downloading' | 'stalled' | 'retrying' | 'done' | 'incomplete'
+  status: 'downloading' | 'stalled' | 'retrying' | 'cancelling' | 'cancelled' | 'done' | 'incomplete'
+  /** Opaque backend cancellation token. Absent on older backends. */
+  cancel_id?: string | null
+  /** Only true when the current transfer can be interrupted safely. */
+  cancellable?: boolean
   /** Seconds since the byte counter last advanced. UI uses this to
-   *  flag stalled downloads (e.g. `> 15` → show "slow / retrying"). */
+   *  flag stalled downloads (`> 30` → show "slow / retrying"). */
   seconds_since_progress: number
 }
 
-export async function fetchActiveDownloads(): Promise<{ downloads: ActiveDownload[] }> {
-  const res = await fetch(`${BASE}/api/v1/downloads/active`)
+/** Pass the `version` of the last answer as `since` to have the server hold
+ *  the request until the downloads change (up to 25 s). Older servers omit
+ *  `version` and always answer at once. */
+export async function fetchActiveDownloads(
+  since?: string,
+  signal?: AbortSignal,
+): Promise<{ downloads: ActiveDownload[]; version?: string }> {
+  const query = since === undefined ? '' : `?since=${encodeURIComponent(since)}`
+  const res = await fetch(`${BASE}/api/v1/downloads/active${query}`, { signal })
   if (!res.ok) throw new Error(`Failed to fetch active downloads (${res.status})`)
   return res.json()
 }

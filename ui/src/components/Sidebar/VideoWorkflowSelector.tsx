@@ -28,6 +28,7 @@ const VIDEO_WORKFLOW_GROUPS: StudioWorkflowGroup<DisplayVideoWorkflow>[] = [
     options: [
       { value: 'frames', label: 'Frames', description: 'Text, first / last, injected frames, audio, or control video', icon: PanelsTopLeft },
       { value: 'references', label: 'References', description: 'Generate with H3 Omni people, scenes, motion, or voices', icon: Images },
+      { value: 'avatar', label: 'Avatar', description: 'Animate people from an anchor image and one or two voice tracks', icon: UsersRound },
       { value: 'extend', label: 'Extend', description: 'Continue an existing clip', icon: StepForward },
       { value: 'blend', label: 'Blend', description: 'Bridge two visual anchors', icon: Blend },
     ],
@@ -99,6 +100,7 @@ function deriveActiveWorkflow(
   // authoritative for Transform and Finish outputs.
   if (
     rememberedWorkflow === 'animate'
+    || rememberedWorkflow === 'avatar'
     || rememberedWorkflow === 'frames'
     || rememberedWorkflow === 'references'
     || rememberedWorkflow === 'extend'

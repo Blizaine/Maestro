@@ -1919,6 +1919,17 @@ def _reference_relationships(
             picture_no += 1
             label = f"<Picture {picture_no}>"
             intent = str(reference.get("image_intent") or "identity").lower()
+            if intent == "object":
+                from models.minimax_h3.reference_manifest import object_reference_prompt_contract
+
+                definition, analysis = object_reference_prompt_contract(label, role)
+                definitions.append(definition)
+                retention.append(analysis)
+                detail_bindings.append(
+                    f"The requested object uses {label}'s design and appearance with "
+                    "the count, scale, placement, and action described in the target scene."
+                )
+                continue
             if intent == "composition":
                 definitions.append(
                     f"{label} is the soft composition and cast-layout anchor "
@@ -2049,6 +2060,19 @@ def _reference_relationships(
                 )
                 detail_bindings.append(
                     f"The requested audio treatment broadly follows {label}."
+                )
+            elif intent == "sound":
+                add_task_type("audio reference")
+                definitions.append(
+                    f"{label} is a reusable sound-effect reference for {role}."
+                )
+                retention.append(
+                    f"{label}: reference - retain the sound effect's timbre and "
+                    "texture without copying its waveform or original timing."
+                )
+                detail_bindings.append(
+                    f"Generate the requested matching sound effects using {label}'s "
+                    "timbre and texture, synchronized to the visible actions in this window."
                 )
             else:
                 add_task_type("audio reference")

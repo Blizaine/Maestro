@@ -203,6 +203,14 @@ class GroupedCameraPhaseTests(unittest.TestCase):
         self.assertEqual(grouped_check["source_event"], " ".join(
             event["text"] for event in events
         ))
+        self.assertEqual(
+            [item["action_focus"]["predicate"] for item in grouped_check["action_obligations"]],
+            ["carry", "open"],
+        )
+        self.assertTrue(all(
+            "Preserve the full ordered source group" not in item["source_clause"]
+            for item in grouped_check["action_obligations"]
+        ))
 
         def accept_with_ordered_visual_spans(**kwargs):
             checks = json.loads(kwargs["prompt"])
@@ -239,6 +247,30 @@ class GroupedCameraPhaseTests(unittest.TestCase):
         )
         remaining = clear_confirmed_coverage_errors(errors, segment, accepted)
         self.assertNotIn(order_error, remaining)
+
+    def test_group_wrapper_does_not_hide_an_unknown_physical_predicate(self):
+        events = [
+            {"event_id": "E1", "text": "Mara opens the blue gate"},
+            {"event_id": "E2", "text": "Mara skitters the pebble"},
+        ]
+        beat = {"beat_id": "B1", "source_event_ids": ["E1", "E2"]}
+        requirement = (
+            "Preserve the full ordered source group, staging each assigned action once: "
+            "E1: Mara opens the blue gate Then E2: Mara skitters the pebble"
+        )
+        error = "B1 shot action omits required source step: " + requirement
+        segment = _segment("Mara opens the blue gate.", beat)
+        calls = []
+        feedback = {}
+        receipts = review_missing_camera_actions(
+            [error], segment, assigned_beats=[beat], source_events=events,
+            generate=lambda **kwargs: calls.append(kwargs) or "{}",
+            repair_feedback=feedback,
+        )
+        self.assertEqual(calls, [])
+        self.assertEqual(receipts, {})
+        self.assertIn("could not be split safely", feedback[error][0])
+        self.assertEqual(clear_confirmed_coverage_errors([error], segment, receipts), [error])
 
     def test_close_before_return_is_not_silently_accepted(self):
         prompt = (

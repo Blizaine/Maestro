@@ -806,9 +806,11 @@ def _apply_model_defaults(
     defaults.update(entry.get(mode_key, {}))
     if not defaults:
         return temperature, top_p
-    if "temperature" in defaults:
+    from services.llm_sampling import caller_sampling_enabled
+    override_sampling = caller_sampling_enabled()
+    if "temperature" in defaults and not override_sampling:
         temperature = defaults["temperature"]
-    if "top_p" in defaults:
+    if "top_p" in defaults and not override_sampling:
         top_p = defaults["top_p"]
     if "top_k" in defaults:
         payload["top_k"] = defaults["top_k"]
@@ -2217,6 +2219,23 @@ def unload_model() -> None:
         print("[LLM] Model unloaded")
 
 
+def unload_remote_instance(remote_url: str, api_key: str = "", *,
+                           instance_id: str | None = None, model_id: str = "") -> dict:
+    """Explicit LM Studio unload, separate from local/idle connection cleanup."""
+    from services import lmstudio_management
+    with _lock:
+        if _active_uses or not _stream_done:
+            raise lmstudio_management.ModelBusyError("The writer is busy. Wait for planning to finish before unloading.")
+        result = lmstudio_management.unload_model(
+            remote_url, api_key, instance_id=instance_id, model_id=model_id,
+        )
+        if (_provider == "remote" and _remote_url
+                and lmstudio_management.server_url(_remote_url) == result["server_url"]
+                and _model_id in {result.get("instance_id"), result.get("model_key")}):
+            _unload_inner()
+        return result
+
+
 def _image_to_data_url(image_path: str, max_size: int = 768) -> Optional[str]:
     """Read an image file, resize if needed, and return a data URL (base64-encoded).
 
@@ -3232,8 +3251,14 @@ def enhance_prompt(
     is_h3_structured = is_h3_context_ir or is_h3_ref2va
     audio_driven = is_h3_ref2va and has_h3_performance_audio(reference_context)
     needs_h3_dialogue = is_h3_structured and not audio_driven
-    if needs_h3_dialogue and not system_override:
-        validate_h3_source_dialogue_duration(prompt, duration_seconds)
+    if needs_h3_dialogue:
+        # The admission check also rejects clearly attributed, unterminated
+        # quotes before any enhancer can silently omit them. Director overrides
+        # retain their existing timing policy, so pass no duration on that path.
+        validate_h3_source_dialogue_duration(
+            prompt,
+            duration_seconds if not system_override else None,
+        )
     if planning_style == "adaptive" and is_h3_ref2va and not reference_context and not image_paths:
         reference_context = (
             "No reference media were supplied. Develop prompt-native characters with "
@@ -4962,7 +4987,11 @@ def validate_h3_source_dialogue_duration(prompt: str, duration_seconds: Optional
     from services.dialogue_timing import DIALOGUE_DEFAULT_WORDS_PER_SECOND, DIALOGUE_MAX_WORDS_PER_SECOND
     from services.dialogue_writing import spoken_word_count
     from services.h3_prompt_budget import H3PromptBudgetError
+    from services.h3_dialogue_source import unclosed_h3_spoken_quote_error
 
+    source_error = unclosed_h3_spoken_quote_error(prompt)
+    if source_error:
+        raise H3PromptBudgetError(source_error)
     if duration_seconds is None or float(duration_seconds) <= 0:
         return
     duration = float(duration_seconds)
@@ -5055,6 +5084,17 @@ def _parse_h3_ref2va_subject_manifest(
     rows = _h3_ref2va_reference_rows(source)
     subjects: dict[int, dict] = {}
     claimed: set[str] = set()
+    object_pictures = {
+        label.casefold() for label, description in rows
+        if label.startswith("<Picture") and re.search(
+            r"(?i)\b(?:intent\s*=\s*OBJECT REFERENCE|image_intent\s*=\s*object)(?=\s*(?:;|$))",
+            description,
+        )
+    }
+    object_pictures.update(label.casefold() for label in re.findall(
+        r"(?mi)^\s*(<Picture\s+\d+>)\s+is\s+an\s+object\s*/\s*prop\s+reference\b",
+        source,
+    ))
 
     def ensure(index: int, name: str = "") -> dict:
         item = subjects.setdefault(index, {
@@ -5069,6 +5109,8 @@ def _parse_h3_ref2va_subject_manifest(
         return item
 
     def attach(item: dict, label: str) -> None:
+        if label.casefold() in object_pictures:
+            return
         kind = label[1:].split(None, 1)[0].casefold()
         key = {"picture": "pictures", "video": "videos", "audio": "audios"}.get(kind)
         if key and label not in item[key]:
@@ -5080,8 +5122,11 @@ def _parse_h3_ref2va_subject_manifest(
         r'<Subject\s+(\d+)>(?:\s+\(S\d+\))?\s*:\s*(.*?)\s*$'
     )
     for name, subject_no, body in exact_pattern.findall(source):
+        labels = re.findall(r"<(?:Picture|Video|Audio)\s+\d+>", body)
+        if labels and all(label.casefold() in object_pictures for label in labels):
+            continue
         item = ensure(int(subject_no), name)
-        for label in re.findall(r"<(?:Picture|Video|Audio)\s+\d+>", body):
+        for label in labels:
             attach(item, label)
 
     # Queued Enhance uses the native inventory from _reference_context, while
@@ -5107,7 +5152,7 @@ def _parse_h3_ref2va_subject_manifest(
     next_index = max(subjects, default=0) + 1
     for name, body in old_pattern.findall(source):
         labels = re.findall(r"<(?:Picture|Video|Audio)\s+\d+>", body)
-        if labels and all(label.casefold() in claimed for label in labels):
+        if labels and all(label.casefold() in claimed or label.casefold() in object_pictures for label in labels):
             continue
         item = ensure(next_index, name)
         next_index += 1
@@ -5116,7 +5161,7 @@ def _parse_h3_ref2va_subject_manifest(
 
     # Add visual identities that were not part of a saved-character row.
     for label, description in rows:
-        if label.casefold() in claimed or not label.startswith(("<Picture", "<Video")):
+        if label.casefold() in claimed or label.casefold() in object_pictures or not label.startswith(("<Picture", "<Video")):
             continue
         name_match = re.search(
             r"(?i)(?:reference|evidence)\s+for\s+([^;]+)", description
@@ -5255,7 +5300,30 @@ def _canonical_h3_ref2va_subject_fields(
                 )
             continue
         if label.startswith("<Audio"):
+            if re.search(r"(?i)\bintent\s*=\s*SOUND EFFECT REFERENCE\b", description):
+                definitions.append(
+                    f"{label} is a reusable sound-effect reference; generate matching "
+                    "effects for the requested actions using its timbre and texture, "
+                    "with timing determined by those actions in each window."
+                )
+                retention.append(
+                    f"{label}: reference - retain the sound effect's timbre and "
+                    "texture without copying its waveform or original timing."
+                )
+                continue
             marker = "fully_copy" if "AUDIO REUSE" in description.upper() else "weak_reference"
+        elif label.startswith("<Picture") and re.search(
+            r"(?i)\b(?:intent\s*=\s*OBJECT REFERENCE|image_intent\s*=\s*object)(?=\s*(?:;|$))",
+            description,
+        ):
+            from models.minimax_h3.reference_manifest import object_reference_prompt_contract
+
+            name_match = re.search(r"(?i)reference\s+for\s+([^;]+)", description)
+            role = name_match.group(1) if name_match else description.split(";", 1)[0]
+            definition, analysis = object_reference_prompt_contract(label, role)
+            definitions.append(definition)
+            retention.append(analysis)
+            continue
         elif label.startswith("<Video"):
             marker = "partially_preserved"
         else:
@@ -5779,6 +5847,13 @@ def _build_h3_ref2va_tagged_fallback(
     planning_style: str = "faithful",
 ) -> str:
     """Create a deterministic six-field fallback when the local LLM loops."""
+    from services.h3_prompt_budget import H3PromptBudgetError
+    from services.h3_dialogue_source import unclosed_h3_spoken_quote_error
+
+    source_error = unclosed_h3_spoken_quote_error(prompt)
+    if source_error:
+        raise H3PromptBudgetError(source_error)
+
     from services.studio_enhancement import record_review_warning
     record_review_warning("The AI draft did not produce a valid H3 reference prompt. Review the source-based draft before generating.")
     if has_h3_performance_audio(reference_context):
@@ -5834,10 +5909,6 @@ def _build_h3_ref2va_tagged_fallback(
     task_types = "reference generation"
     if any(subject["audios"] for subject in manifest):
         task_types += " + audio reference"
-    visible_subjects = " ".join(
-        f"<Subject {int(subject['index'])}> is visible in the opening composition."
-        for subject in manifest
-    )
     return (
         f"subject_definitions: {subject_mapping}\n"
         f"summary: [{task_types}] A finished video matching the requested action, identity, "
@@ -5845,7 +5916,7 @@ def _build_h3_ref2va_tagged_fallback(
         f"retention_analysis: {retention_mapping}\n"
         "detailed_description: The target video maintains the requested visual style, lighting, "
         "color, and cinematic texture. "
-        f"[Shot 1] {visible_subjects} The finished target video follows this request: {request} "
+        f"[Shot 1] The finished target video follows this request: {request} "
         "Reference pictures provide identity and appearance only, never their original background, "
         f"framing, pose, or an opening still. {speech_boundary} Each tagged dialogue block is spoken exactly once by its adjacent "
         "mapped speaker only; no other subject repeats, echoes, mouths, or paraphrases another "

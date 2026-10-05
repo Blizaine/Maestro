@@ -6,7 +6,7 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '../..');
 const esbuild = require(path.join(root, 'ui/node_modules/esbuild'));
 const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
-  'C:/Users/bliza/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+  'playwright');
 
 const processedAt = 1780000012;
 const uploadedAt = 1780000456;
@@ -134,7 +134,7 @@ const metadata = {
     await page.evaluate(file => window.mount(file, true), files.upload);
     const uploadCard = page.locator('[data-feed-index="0"]');
     await uploadCard.getByRole('button', {name: 'More clip actions'}).click();
-    const uploadMenu = uploadCard.getByRole('menu', {name: 'Clip actions'});
+    const uploadMenu = page.getByRole('menu', {name: 'Clip actions'});
     await uploadMenu.getByRole('menuitem', {name: 'Delete upload', exact: true}).waitFor();
     assert.ok(await uploadMenu.getByText('Removes this source file from Uploads. Completed outputs stay.').isVisible());
     assert.equal(await uploadMenu.getByRole('menuitem', {name: 'Move to workspace'}).count(), 0, 'uploads still cannot be moved');
@@ -143,7 +143,7 @@ const metadata = {
     await video.evaluate(element => element.play());
     await uploadMenu.getByRole('menuitem', {name: 'Delete upload', exact: true}).click();
     await uploadMenu.getByRole('menuitem', {name: 'Click again to delete upload', exact: true}).click();
-    await uploadCard.getByRole('alert').getByText('This upload is in use by a running job.').waitFor();
+    await uploadMenu.getByRole('alert').getByText('This upload is in use by a running job.').waitFor();
     assert.equal(await video.getAttribute('src'), files.upload.url, 'failed deletion restores the media URL');
     assert.equal(await video.getAttribute('data-test-playing'), 'true', 'failed deletion resumes prior playback');
     assert.deepEqual(mutations, [{method: 'DELETE', path: '/api/v1/uploads/held-upload.mp4', query: ''}],

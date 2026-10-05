@@ -54,7 +54,7 @@ from services.h3_window_planner import (
 # is persisted with reviewed/generated window prompts, so this prevents a run
 # restored from gallery metadata from silently reusing pre-fix dialogue and
 # reference bindings.
-_H3_SEQUENCE_PLANNER_VERSION = 6 + H3_STORY_LEDGER_VERSION
+_H3_SEQUENCE_PLANNER_VERSION = 8 + H3_STORY_LEDGER_VERSION
 _H3_CLIP_BOUNDARY = "\n---CLIP_BOUNDARY---\n"
 
 
@@ -434,7 +434,10 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
     """Return relationship, retention, and official task-type summaries."""
 
     from models.minimax_h3.ref2va import canonicalize_ref2va_reference_order
-    from models.minimax_h3.reference_manifest import validate_reference_manifest
+    from models.minimax_h3.reference_manifest import (
+        object_reference_prompt_contract,
+        validate_reference_manifest,
+    )
 
     # Enhancement is useful before the generation manifest is complete. The
     # actual Ref2VA generation path still performs strict file + visual-media
@@ -461,7 +464,11 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
         if kind == "image":
             picture += 1
             intent = item.get("image_intent", "identity")
-            if intent == "composition":
+            if intent == "object":
+                definition, analysis = object_reference_prompt_contract(f"<Picture {picture}>", role)
+                relationships.append(definition)
+                retention.append(analysis)
+            elif intent == "composition":
                 relationships.append(
                     f"<Picture {picture}> is a composition and blocking reference for {role}, not an identity source."
                 )
@@ -567,6 +574,19 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                     f"<Audio {audio}> supplies sound, music, rhythm, or texture style for {role}, without copying its signal."
                 )
                 retention.append(f"<Audio {audio}>: weak_reference")
+                if "audio reference" not in task_types:
+                    task_types.append("audio reference")
+            elif intent == "sound":
+                audio += 1
+                relationships.append(
+                    f"<Audio {audio}> is a reusable sound-effect reference for {role}; "
+                    "generate matching effects for the requested actions using its timbre "
+                    "and texture, with timing determined by those actions in each window."
+                )
+                retention.append(
+                    f"<Audio {audio}>: reference - retain the sound effect's timbre and "
+                    "texture without copying its waveform or original timing."
+                )
                 if "audio reference" not in task_types:
                     task_types.append("audio reference")
             else:

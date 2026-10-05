@@ -85,6 +85,24 @@ def _normalize_workflow(workflow: str | None) -> str | None:
     raise ValueError(f"Unknown MiniMax H3 workflow '{workflow}'.")
 
 
+def minimax_h3_adapter_workflow(model_def: dict | None) -> str:
+    """Return the checkpoint's adapter family, independent of Studio mode.
+
+    Singularity uses the pruned Ref2VA checkpoint's AdaLN layout and recommended
+    Turbo adapter in both its Frames and References workflows.
+    """
+
+    definition = model_def or {}
+    native_workflow = definition.get("minimax_h3_lora_workflow")
+    if native_workflow in {"fl2va", "ref2va"}:
+        return native_workflow
+    return (
+        "ref2va"
+        if definition.get("minimax_h3_singularity") or definition.get("minimax_h3_dasiwa") or definition.get("omni_reference")
+        else "fl2va"
+    )
+
+
 def minimax_h3_turbo_presets_for_workflow(
     workflow: str | None,
     *,
@@ -323,6 +341,10 @@ def normalize_minimax_h3_turbo_request(
 
     if not isinstance(body, dict):
         return False
+    if (model_def or {}).get("minimax_h3_baked_turbo"):
+        from .imported import normalize_baked_h3_request
+        normalize_baked_h3_request(body, model_def)
+        return False
     turbo_mode = body.get("minimax_h3_turbo_mode")
     if turbo_mode is None and model_def:
         # Experimental model defaults are opt-in at the model-definition
@@ -472,6 +494,7 @@ __all__ = [
     "minimax_h3_turbo_preset",
     "minimax_h3_turbo_preset_for_path",
     "minimax_h3_turbo_presets_for_workflow",
+    "minimax_h3_adapter_workflow",
     "minimax_h3_default_turbo_preset",
     "normalize_minimax_h3_turbo_request",
     "safetensors_header",

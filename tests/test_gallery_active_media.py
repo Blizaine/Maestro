@@ -91,8 +91,11 @@ class GalleryActiveMediaTests(unittest.TestCase):
         self.assertIn("Four persistent controls", feed_item)
         self.assertIn('aria-label="More clip actions"', feed_item)
         self.assertIn('aria-label="Clip actions"', feed_item)
-        self.assertIn("spaceBelow > spaceAbove", feed_item)
-        self.assertIn("actionMenuOpensDown ? 'top-full mt-2' : 'bottom-full mb-2'", feed_item)
+        self.assertIn("window.visualViewport", feed_item)
+        self.assertIn("below > above", feed_item)
+        self.assertIn("menu.style.maxHeight", feed_item)
+        self.assertIn("menu.style.top", feed_item)
+        self.assertIn("createPortal(", feed_item)
         for label in (
             "Save as Recipe",
             "Regenerate with same settings",
@@ -135,9 +138,11 @@ class GalleryActiveMediaTests(unittest.TestCase):
             ROOT / "ui" / "src" / "components" / "MainContent" / "MainContent.tsx"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("const [measureEpoch, setMeasureEpoch] = useState(0)", main_content)
-        self.assertIn("estimatedItemHeight, measureEpoch]", main_content)
-        self.assertIn("setMeasureEpoch(e => e + 1)", main_content)
+        self.assertIn("const [measuredHeights, setMeasuredHeights] = useState", main_content)
+        self.assertIn("measuredHeights.get(outputIds[index])", main_content)
+        self.assertIn("[outputIds, measuredHeights, containerWidth, estimatedItemHeight]", main_content)
+        self.assertIn("next.set(id, { height, width: containerWidth })", main_content)
+        self.assertIn("scheduleCenteredSelection()", main_content)
 
 
 if __name__ == "__main__":

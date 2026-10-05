@@ -45,6 +45,12 @@ class CheckpointTarget:
 # Additional families can be enabled once their checkpoint layout is verified
 # against Maestro's loader.
 _CHECKPOINT_TARGETS: dict[str, tuple[CheckpointTarget, ...]] = {
+    "minimax h3": (
+        CheckpointTarget("minimax_h3", "minimax_h3", "H3 Frames — Pruned"),
+        CheckpointTarget("minimax_h3_ref2va", "minimax_h3_ref2va", "H3 References — Pruned"),
+        CheckpointTarget("minimax_h3_full", "minimax_h3_full", "H3 Frames — Full"),
+        CheckpointTarget("minimax_h3_ref2va_full", "minimax_h3_ref2va_full", "H3 References — Full"),
+    ),
     "flux.1 d": (
         CheckpointTarget("flux", "flux", "Flux 1 Dev"),
     ),
@@ -353,6 +359,10 @@ def validate_checkpoint_file(
     target_architecture: str,
     *,
     filename: str | None = None,
+    source: dict | None = None,
+    sampling_profile: str = "auto",
+    native_workflow: str = "auto",
+    qkv_layout: str = "auto",
 ) -> dict:
     """Validate metadata mapping and transformer tensor layout.
 
@@ -362,10 +372,30 @@ def validate_checkpoint_file(
 
     ensure_allowed_checkpoint_target(base_model, target_architecture)
     extension = os.path.splitext(filename or path)[1].casefold()
-    if extension not in {".safetensors", ".sft"}:
+    is_h3 = _base_key(base_model) == "minimax h3"
+    if extension not in ({".safetensors", ".sft", ".gguf"} if is_h3 else {".safetensors", ".sft"}):
         raise CheckpointCompatibilityError(
             "Maestro checkpoint import currently supports SafeTensor files only."
         )
+
+    if is_h3:
+        from services.civitai_checkpoints import inspect_local_h3
+        try:
+            profile = inspect_local_h3(path, source or {}, sampling_profile=sampling_profile,
+                                       native_workflow=native_workflow, qkv_layout=qkv_layout)
+        except ValueError as exc:
+            raise CheckpointCompatibilityError(str(exc)) from exc
+        if profile.get("status") != "verified":
+            raise CheckpointCompatibilityError(
+                "Choose the requested H3 workflow, sampling recipe or creator's QKV row order in the model browser before importing it."
+            )
+        if target_architecture not in profile.get("architectures", []):
+            raise CheckpointCompatibilityError(
+                f"This H3 checkpoint supports {', '.join(profile.get('architectures', []))}, not {target_architecture}."
+            )
+        return {"status": "verified", "architecture": target_architecture,
+                "base_model": str(base_model), "signature_version": 2,
+                "matched_layouts": profile["architectures"], "h3_profile": profile}
 
     matches = detect_checkpoint_architectures(path)
     if target_architecture not in matches:
@@ -411,8 +441,12 @@ def _definition_compatibility(
             if os.path.splitext(filename)[1].casefold() in {
                 ".safetensors",
                 ".sft",
-            }:
-                validate_checkpoint_file(candidate, base_model, architecture)
+            } or (_base_key(base_model) == "minimax h3" and filename.casefold().endswith(".gguf")):
+                profile = (civitai.get("compatibility") or {}).get("h3_profile") or {}
+                validate_checkpoint_file(candidate, base_model, architecture, source=civitai,
+                                         sampling_profile=profile.get("sampling_profile", "auto"),
+                                         native_workflow=profile.get("native_workflow", "auto"),
+                                         qkv_layout=profile.get("qkv_layout_selection", "auto"))
             return True, "", True
     except CheckpointCompatibilityError as exc:
         return False, str(exc), True

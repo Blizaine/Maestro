@@ -65,6 +65,7 @@ export function SfxControls() {
           label={uploading ? 'Uploading...' : 'Drop video to generate matching audio'}
           accept=".mp4,.webm,.avi,.mov,.mkv"
           filename={restoredVideoFilename}
+          videoUrl={restoredVideoFilename ? api.getFileUrl(restoredVideoFilename) : undefined}
           onFile={handleVideoUpload}
           onClear={() => {
             setParam('video_guide' as keyof typeof params, undefined)

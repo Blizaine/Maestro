@@ -387,7 +387,7 @@ class LTX25HandlerTests(unittest.TestCase):
     def test_int8_convrot_loras_keep_native_linear_forward(self):
         requirements = REQUIREMENTS_PATH.read_text(encoding="utf-8")
         ltx2 = LTX2_PATH.read_text(encoding="utf-8")
-        self.assertIn("mmgp==3.7.12", requirements)
+        self.assertIn("mmgp==3.8.2", requirements)
         self.assertIn(
             "from shared.qtypes.int8_convrot import "
             "install_native_lora_forwards",

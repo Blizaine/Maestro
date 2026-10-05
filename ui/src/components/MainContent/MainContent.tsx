@@ -1,10 +1,11 @@
 import { outputIdentity } from '../../lib/galleryIdentity'
-import { useRef, useCallback, useState, useEffect, useMemo, type JSX } from 'react'
+import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo, type JSX } from 'react'
 import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Upload, Trash2, ChevronDown, ChevronUp, Maximize2 } from 'lucide-react'
 import { TabFilter } from './TabFilter'
 import { ThumbnailGallery } from './ThumbnailGallery'
 import { MediaFeedItem } from './MediaFeedItem'
 import { GalleryViewer, type GalleryImageChoice } from './GalleryViewer'
+import { GenerationPreview } from './GenerationPreview'
 import { GlobalQueuePopover } from '../GlobalQueuePopover'
 import { useStore } from '../../stores/useStore'
 import { useIsMobileSidecar } from '../../lib/useIsMobile'
@@ -25,6 +26,14 @@ type ViewerSession = {
   workspace: string
   allowFavorite: boolean
   surface: ReturnType<typeof createGalleryViewerSurface>
+}
+
+function galleryNavigationScope(state: {
+  activeWorkspace: string; browsingAllFolders: boolean; browsingUploads: boolean
+  mediaFilter: string; outputSearchQuery: string
+}) {
+  return JSON.stringify([state.activeWorkspace, state.browsingAllFolders,
+    state.browsingUploads, state.mediaFilter, state.outputSearchQuery])
 }
 
 function WorkspaceSelector() {
@@ -212,11 +221,13 @@ function stripTimeSuffix(msg: string): string {
   return msg.replace(/\s*\|\s*\d+:\d+.*$/, '').trim()
 }
 
-function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop?: () => void; onDismiss: () => void }) {
+export function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop?: () => void; onDismiss: () => void }) {
   const hasSteps = job.totalSteps > 0
   const progressPct = hasSteps ? (job.step / job.totalSteps) * 100 : job.progress * 100
   const phase = stripTimeSuffix(job.phase || job.message)
   const isFailed = job.status === 'failed' || job.status === 'cancelled'
+  const preview = isFailed ? null : job.preview ?? null
+  const [previewPausedByUser, setPreviewPausedByUser] = useState(false)
   const isPromptPlanning = job.kind === 'prompt_enhancement'
   const errorText = job.error || job.message || (job.status === 'cancelled' ? 'Cancelled' : 'Generation failed')
   const h3PlanSignature = job.h3WindowPlan?.signature
@@ -241,10 +252,15 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
   ) || job.h3WindowPlan?.windows[0]
 
   return (
-    <div className={`rounded-xl border overflow-hidden ${
+    <div data-generation-job-id={job.id} className={`rounded-xl border overflow-hidden ${
       isFailed ? 'border-red-500/30 bg-bg-tertiary' : 'border-accent-blue/30 bg-bg-tertiary'
     }`}>
       <div className="w-full aspect-video flex items-center justify-center relative">
+        {preview && <GenerationPreview
+          preview={preview}
+          initiallyPaused={previewPausedByUser}
+          onPausedChange={setPreviewPausedByUser}
+        />}
         {/* Dismiss button (top-right, failed only) */}
         {isFailed && (
           <button
@@ -255,11 +271,13 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
             <X size={14} />
           </button>
         )}
-        <div className="flex flex-col items-center gap-3 text-text-muted w-full max-w-md px-4">
-          <Film size={40} className={isFailed ? 'text-red-400' : 'animate-pulse'} />
+        <div className={`flex flex-col items-center gap-3 w-full max-w-md px-4 text-text-muted ${preview
+          ? 'absolute inset-x-0 bottom-0 z-10 max-w-none bg-gradient-to-t from-black/95 via-black/75 to-transparent px-3 pb-2 pt-9 text-white'
+          : ''}`}>
+          {!preview && <Film size={40} className={isFailed ? 'text-red-400' : 'animate-pulse'} />}
 
           <div className="text-center w-full">
-            <p className={`text-sm font-medium ${isFailed ? 'text-red-400' : 'text-text-secondary'}`}>
+            <p className={`text-sm font-medium ${isFailed ? 'text-red-400' : preview ? 'text-white' : 'text-text-secondary'}`}>
               {isFailed
                 ? (job.status === 'cancelled' ? 'Cancelled' : 'Generation Failed')
                 : isPromptPlanning
@@ -270,6 +288,11 @@ function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob; onStop
             </p>
             {!isFailed && phase && (
               <p className="text-xs mt-1 truncate">{phase}</p>
+            )}
+            {!isFailed && job.previewNotice && (
+              <p className={`text-[10px] mt-0.5 truncate ${preview ? 'text-white/75' : 'text-text-muted'}`}>
+                {job.previewNotice}
+              </p>
             )}
             {hasSteps && !isFailed && (
               <p className="text-[10px] text-text-muted mt-0.5">
@@ -563,6 +586,7 @@ export function MainContent() {
   const stopGeneration = useStore(s => s.stopGeneration)
   const dismissJob = useStore(s => s.dismissJob)
   const activeIndex = useStore(s => s.selectedOutput)
+  const galleryScope = useStore(galleryNavigationScope)
   const setSelectedOutput = useStore(s => s.setSelectedOutput)
   const [viewerSession, setViewerSession] = useState<ViewerSession | null>(null)
   const releaseViewerImages = useRef<(() => void) | null>(null)
@@ -624,20 +648,45 @@ export function MainContent() {
   )
 
   const feedRef = useRef<HTMLDivElement>(null)
-  const scrollTargetIndex = useRef<number | null>(null)
+  const placeholdersRef = useRef<HTMLDivElement>(null)
+  const [navigationTarget, setNavigationTarget] = useState<{ id: string; scope: string } | null>(null)
+  const scrollTargetId = useRef<string | null>(null)
   const centerSelectionFrame = useRef<number | null>(null)
+  const navigationReleaseFrame = useRef<number | null>(null)
+  const previousGalleryScope = useRef(galleryScope)
+
+  useLayoutEffect(() => {
+    if (previousGalleryScope.current === galleryScope) return
+    previousGalleryScope.current = galleryScope
+    // Folder/filter/search changes select the start of a new result list.
+    // An old scroll position must not immediately replace that selection.
+    feedRef.current?.scrollTo({ top: 0, behavior: 'auto' })
+  }, [galleryScope])
+
+  const releaseNavigationTarget = useCallback(() => {
+    if (navigationReleaseFrame.current !== null) {
+      cancelAnimationFrame(navigationReleaseFrame.current)
+      navigationReleaseFrame.current = null
+    }
+    scrollTargetId.current = null
+    setNavigationTarget(null)
+  }, [])
 
   const activateIndex = useCallback((index: number) => {
-    if (index < 0 || index >= useStore.getState().filteredOutputs().length) return
+    const file = useStore.getState().filteredOutputs()[index]
+    if (!file) return
+    if (scrollTargetId.current !== null && scrollTargetId.current !== outputIdentity(file)) {
+      releaseNavigationTarget()
+    }
     // Avoid re-fetching the same output metadata on every scroll event.
     if (useStore.getState().selectedOutput !== index) {
       setSelectedOutput(index)
     }
-  }, [setSelectedOutput])
+  }, [setSelectedOutput, releaseNavigationTarget])
 
   const selectViewportCenteredItem = useCallback(() => {
     centerSelectionFrame.current = null
-    if (scrollTargetIndex.current !== null) return
+    if (scrollTargetId.current !== null) return
 
     const feedEl = feedRef.current
     if (!feedEl) return
@@ -734,6 +783,11 @@ export function MainContent() {
   useEffect(() => () => {
     if (centerSelectionFrame.current !== null) {
       cancelAnimationFrame(centerSelectionFrame.current)
+      centerSelectionFrame.current = null
+    }
+    if (navigationReleaseFrame.current !== null) {
+      cancelAnimationFrame(navigationReleaseFrame.current)
+      navigationReleaseFrame.current = null
     }
   }, [])
 
@@ -741,31 +795,45 @@ export function MainContent() {
   const [scrollTop, setScrollTop] = useState(0)
   const [containerHeight, setContainerHeight] = useState(800)
   const [containerWidth, setContainerWidth] = useState(800)
-  const [measureEpoch, setMeasureEpoch] = useState(0)
-  const measuredHeights = useRef<Map<number, number>>(new Map())
+  const [measuredHeights, setMeasuredHeights] = useState<Map<string, { height: number; width: number }>>(() => new Map())
+  const [placeholderTotalHeight, setPlaceholderTotalHeight] = useState(0)
+  const outputIds = useMemo(() => outputs.map(outputIdentity), [outputs])
+  const retainedOutputIds = useMemo(() => new Set(outputIds), [outputIds])
+  const previousOutputIds = useRef(retainedOutputIds)
+  const navigationIndex = navigationTarget?.scope === galleryScope ? outputIds.indexOf(navigationTarget.id) : -1
+
+  useLayoutEffect(() => {
+    if (previousOutputIds.current.size > 0 && outputIds.length > 0
+      && !outputIds.some(id => previousOutputIds.current.has(id))) {
+      feedRef.current?.scrollTo({ top: 0, behavior: 'auto' })
+    }
+    previousOutputIds.current = retainedOutputIds
+  }, [outputIds, retainedOutputIds])
 
   // Dynamic estimated item height based on actual container width
   const estimatedItemHeight = Math.round(containerWidth * ASPECT_RATIO) + INFO_BAR_HEIGHT
 
-  // Total height of all job placeholders at top
-  const placeholderTotalHeight = galleryJobs.length > 0
-    ? galleryJobs.length * estimatedItemHeight + (galleryJobs.length - 1) * GAP + GAP
-    : 0
+  // Pipeline and job cards have different heights, including expanded/error
+  // states. Their actual flow height is the origin of the virtual output list.
+  useEffect(() => {
+    const el = placeholdersRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      setPlaceholderTotalHeight(el.getBoundingClientRect().height + GAP)
+      scheduleCenteredSelection()
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [scheduleCenteredSelection])
 
-  // Measure container on mount and resize; clear stale heights on width change
+  // Measurements include their width so a resize cannot reuse stale heights.
   useEffect(() => {
     const el = feedRef.current
     if (!el) return
-    let prevWidth = 0
     const ro = new ResizeObserver((entries) => {
       const rect = entries[0].contentRect
       setContainerHeight(rect.height)
-      const newWidth = rect.width
-      setContainerWidth(newWidth)
-      if (prevWidth && Math.abs(newWidth - prevWidth) > 2) {
-        measuredHeights.current.clear()
-      }
-      prevWidth = newWidth
+      setContainerWidth(rect.width)
       scheduleCenteredSelection()
     })
     ro.observe(el)
@@ -773,13 +841,13 @@ export function MainContent() {
   }, [scheduleCenteredSelection])
 
   const getItemHeight = useCallback((index: number) => {
-    return measuredHeights.current.get(index) ?? estimatedItemHeight
-  }, [estimatedItemHeight])
+    const measurement = measuredHeights.get(outputIds[index])
+    return measurement && Math.abs(measurement.width - containerWidth) <= 1
+      ? measurement.height
+      : estimatedItemHeight
+  }, [outputIds, measuredHeights, containerWidth, estimatedItemHeight])
 
   const { startIndex, endIndex, totalHeight, itemOffsets } = useMemo(() => {
-    // Measurement changes must invalidate the virtual layout even though the
-    // actual values live in a ref rather than in React state.
-    void measureEpoch
     const count = outputs.length
     const offsets: number[] = new Array(count)
     let cumulative = placeholderTotalHeight
@@ -809,16 +877,25 @@ export function MainContent() {
       totalHeight: Math.max(total, placeholderTotalHeight),
       itemOffsets: offsets,
     }
-  }, [outputs.length, scrollTop, containerHeight, getItemHeight, placeholderTotalHeight, estimatedItemHeight, measureEpoch])
+  }, [outputs.length, scrollTop, containerHeight, getItemHeight, placeholderTotalHeight, estimatedItemHeight])
 
   const handleItemMeasured = useCallback((index: number, height: number) => {
-    const prev = measuredHeights.current.get(index)
-    if (prev !== height) {
-      measuredHeights.current.set(index, height)
-      setMeasureEpoch(e => e + 1)
-      scheduleCenteredSelection()
-    }
-  }, [scheduleCenteredSelection])
+    const id = outputIds[index]
+    // ResizeObserver can deliver a zero-size record as a virtual row leaves
+    // the DOM. Caching it collapses that row and makes navigation oscillate.
+    if (!id || !Number.isFinite(height) || height <= 0) return
+    setMeasuredHeights(current => {
+      const previous = current.get(id)
+      if (previous?.height === height && previous.width === containerWidth) return current
+      const next = new Map(current)
+      for (const key of next.keys()) {
+        if (!retainedOutputIds.has(key)) next.delete(key)
+      }
+      next.set(id, { height, width: containerWidth })
+      return next
+    })
+    scheduleCenteredSelection()
+  }, [outputIds, retainedOutputIds, containerWidth, scheduleCenteredSelection])
 
   const handlePlaybackStart = useCallback((index: number, media: HTMLMediaElement) => {
     activateIndex(index)
@@ -832,88 +909,59 @@ export function MainContent() {
     media.muted = false
   }, [activateIndex])
 
-  const handleThumbnailClick = useCallback((index: number) => {
+  const handleThumbnailClick = useCallback((id: string) => {
+    const state = useStore.getState()
+    // A generation can insert a new row between pointer-down and click.
+    // Resolve the rendered thumbnail's identity against the latest list.
+    const index = state.filteredOutputs().findIndex(file => outputIdentity(file) === id)
+    if (index < 0) return
+    // Hold the user's selection while virtual rows and delayed metadata settle.
+    // A fresh object also realigns a second click on the same thumbnail.
+    scrollTargetId.current = id
+    setNavigationTarget({ id, scope: galleryNavigationScope(state) })
     setSelectedOutput(index)
-    scrollTargetIndex.current = index
-    const feedEl = feedRef.current
-    if (!feedEl) return
+  }, [setSelectedOutput])
 
-    // ── Why this is two phases ──
-    // The virtualizer only renders items inside [startIndex, endIndex].
-    // Items outside that window have NEVER been measured — their height
-    // is an estimate. Summing the estimates to compute an offset for a
-    // distant target accumulates error linearly with distance: a click
-    // 200 items away can land hundreds of px off.
-    //
-    // The previous implementation did a single smooth scrollTo to the
-    // estimated offset. As items entered the viewport mid-animation,
-    // they got measured and the total height shifted under the
-    // animation, so the smooth scroll landed on the wrong item. The
-    // 800ms guard then expired and the IntersectionObserver picked up
-    // a wrong-active item → thumbnail strip auto-scrolled away from
-    // what the user clicked → infinite oscillation.
-    //
-    // The fix:
-    //   Phase 1: INSTANT jump to the estimated offset. This is allowed
-    //            to be slightly wrong; its only job is to bring the
-    //            target item into the virtualizer's render window so
-    //            it actually mounts in the DOM.
-    //   Phase 2: requestAnimationFrame wait until the DOM contains an
-    //            element with `data-feed-index="${index}"`, then call
-    //            scrollIntoView on it for pixel-precise alignment.
-    //            By the time the element exists, its height has been
-    //            measured, so this final align is accurate.
-    //   Guard:   scrollTargetIndex.current is held until phase 2
-    //            finishes (not a fixed timeout). The gallery-level center
-    //            selector ignores scroll events while this is non-null,
-    //            so no wrong-active selection can leak through.
-    //   Re-entrancy: a stale align loop checks scrollTargetIndex
-    //            against its captured target on every frame and bails
-    //            if a newer click overrode it.
-
-    const estimatedOffset = placeholderTotalHeight +
-      Array.from({ length: index }, (_, i) => getItemHeight(i) + GAP).reduce((a, b) => a + b, 0)
-    feedEl.scrollTo({ top: estimatedOffset, behavior: 'auto' })
-
-    const targetIndexAtStart = index
-    let attempts = 0
-    const MAX_ATTEMPTS = 30 // ~500ms at 60fps
-    const align = () => {
-      // Newer click overrode our target — bail.
-      if (scrollTargetIndex.current !== targetIndexAtStart) return
-      attempts++
-      const targetEl = feedEl.querySelector(`[data-feed-index="${index}"]`) as HTMLElement | null
-      if (targetEl) {
-        targetEl.scrollIntoView({ behavior: 'auto', block: 'start' })
-        // One more frame so any post-mount measurement settles
-        // before we release the guard.
-        requestAnimationFrame(() => {
-          if (scrollTargetIndex.current === targetIndexAtStart) {
-            scrollTargetIndex.current = null
-            scheduleCenteredSelection()
-          }
-        })
-      } else if (attempts < MAX_ATTEMPTS) {
-        requestAnimationFrame(align)
-      } else {
-        // Item didn't mount within the budget — release the guard so
-        // the user isn't stuck. Rare; happens if outputs.length changed
-        // mid-flight or the index is out of range.
-        if (scrollTargetIndex.current === targetIndexAtStart) {
-          scrollTargetIndex.current = null
-          scheduleCenteredSelection()
-        }
-      }
+  useLayoutEffect(() => {
+    if (!navigationTarget || scrollTargetId.current !== navigationTarget.id) return
+    if (navigationIndex < 0) {
+      scrollTargetId.current = null
+      navigationReleaseFrame.current = requestAnimationFrame(() => {
+        navigationReleaseFrame.current = null
+        // Removing/filtering the target must not cancel a newer click.
+        if (scrollTargetId.current === null) releaseNavigationTarget()
+      })
+      scheduleCenteredSelection()
+      return
     }
-    requestAnimationFrame(align)
-  }, [setSelectedOutput, getItemHeight, placeholderTotalHeight, scheduleCenteredSelection])
+    const feedEl = feedRef.current
+    const targetEl = feedEl?.querySelector<HTMLElement>(`[data-feed-index="${navigationIndex}"]`)
+    if (!feedEl || !targetEl) return
+
+    const viewport = feedEl.getBoundingClientRect()
+    const target = targetEl.getBoundingClientRect()
+    const padding = parseFloat(getComputedStyle(feedEl).paddingTop) || 0
+    const delta = target.height >= feedEl.clientHeight - padding * 2
+      ? target.top - viewport.top - padding
+      : (target.top + target.bottom - viewport.top - viewport.bottom) / 2
+    const top = Math.max(0, Math.min(
+      feedEl.scrollTop + delta,
+      feedEl.scrollHeight - feedEl.clientHeight,
+    ))
+    if (Math.abs(feedEl.scrollTop - top) > 1) {
+      // Scroll only this feed. scrollIntoView can also move the page/sidecar.
+      feedEl.scrollTo({ top, behavior: 'auto' })
+    }
+    const state = useStore.getState()
+    if (state.selectedOutput !== navigationIndex) state.setSelectedOutput(navigationIndex)
+  }, [navigationTarget, navigationIndex, itemOffsets, containerHeight, containerWidth,
+    placeholderTotalHeight, releaseNavigationTarget, scheduleCenteredSelection])
 
   const closeViewer = useCallback((id: string) => {
     setViewerSession(null)
     releaseViewerImages.current?.()
     releaseViewerImages.current = null
-    const index = useStore.getState().filteredOutputs().findIndex(file => outputIdentity(file) === id)
-    if (index >= 0) handleThumbnailClick(index)
+    handleThumbnailClick(id)
   }, [handleThumbnailClick])
 
   // Infinite scroll: load more when near the bottom
@@ -935,13 +983,21 @@ export function MainContent() {
   }, [scheduleCenteredSelection])
 
   useEffect(() => {
-    measuredHeights.current.clear()
+    // Appending a page or inserting a new generation must not erase heights
+    // of still-mounted cards: ResizeObserver may never report them again.
     scheduleCenteredSelection()
-  }, [outputs.length, scheduleCenteredSelection])
+  }, [outputIds, scheduleCenteredSelection])
 
   const visibleItems = useMemo(() => {
     const items: JSX.Element[] = []
-    for (let i = startIndex; i < endIndex; i++) {
+    const indices = Array.from({ length: endIndex - startIndex }, (_, i) => startIndex + i)
+    // Mount a distant target immediately, without rendering all intervening
+    // cards. Its real height can then correct the estimated virtual offset.
+    if (navigationIndex >= 0 && (navigationIndex < startIndex || navigationIndex >= endIndex)) {
+      indices.push(navigationIndex)
+      indices.sort((a, b) => a - b)
+    }
+    for (const i of indices) {
       const file = outputs[i]
       if (!file) continue
       items.push(
@@ -964,7 +1020,7 @@ export function MainContent() {
       )
     }
     return items
-  }, [startIndex, endIndex, outputs, activeIndex, activateIndex, handlePlaybackStart, handleItemMeasured, itemOffsets, openViewer])
+  }, [startIndex, endIndex, navigationIndex, outputs, activeIndex, activateIndex, handlePlaybackStart, handleItemMeasured, itemOffsets, openViewer])
 
   return (
     <main className="flex-1 flex flex-col min-h-0 min-w-0 h-full overflow-hidden">
@@ -998,10 +1054,23 @@ export function MainContent() {
         <div
           ref={feedRef}
           className="flex-1 overflow-y-auto p-3 md:p-4"
+          style={{ overflowAnchor: 'none' }}
           onScroll={handleFeedScroll}
+          onWheelCapture={releaseNavigationTarget}
+          onTouchMove={releaseNavigationTarget}
+          onPointerDown={event => {
+            // Native scrollbar/empty-feed drags surrender navigation, while
+            // opening details on the selected card keeps its layout anchored.
+            if (event.target === event.currentTarget) releaseNavigationTarget()
+          }}
+          onKeyDown={event => {
+            if (!['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) return
+            if ((event.target as HTMLElement).closest('input, textarea, select, button, video, audio, [contenteditable="true"]')) return
+            releaseNavigationTarget()
+          }}
         >
           {/* Pipeline + Job placeholders at top (not virtualized — small count) */}
-          <div className="space-y-3 mb-3">
+          <div ref={placeholdersRef} className="space-y-3 mb-3">
             <PipelinePlaceholder />
             {galleryJobs.map((j, i) => (
               <JobPlaceholder

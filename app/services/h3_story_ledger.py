@@ -98,7 +98,7 @@ from services.director.long_form_story import (
 )
 
 
-H3_STORY_LEDGER_VERSION = 112
+H3_STORY_LEDGER_VERSION = 116
 
 
 _H3_WINDOW_BOOKKEEPING_RE = re.compile(
@@ -475,10 +475,71 @@ def _is_style_only_fragment(value: str) -> bool:
     text = sanitize_h3_prompt_text(value).strip(" ,;:-.!?")
     if not text or not _STYLE_WORD_RE.search(text):
         return False
+    if _h3_explicit_style_direction(text):
+        return True
     # Style tails are usually noun/adjective lists. Narrative clauses can use
     # verbs outside the camera planner's bounded action vocabulary, so use
     # grammar-shaped predicate evidence as well as known physical verbs.
     return not _h3_has_narrative_predicate(text)
+
+
+_H3_EXPLICIT_STYLE_SUBJECT = (
+    r"(?:the\s+)?(?:(?:cinematography|cinematographic|visual|film|filmic|movie)"
+    r"\s+style|visual\s+aesthetic)"
+)
+_H3_EXPLICIT_STYLE_PREDICATE = (
+    r"\s+(?:must|should|shall|needs?\s+to|has\s+to)\s+"
+    r"(?:always\s+)?(?:stay|remain|be)\s+(?:always\s+)?"
+)
+
+
+def _h3_explicit_style_direction(value: str) -> bool:
+    """Recognize a style-owned modal predicate without hiding story verbs."""
+
+    text = re.sub(r"^(?:but|while|and)\s+", "", value.strip(), flags=re.I)
+    match = re.fullmatch(
+        _H3_EXPLICIT_STYLE_SUBJECT + _H3_EXPLICIT_STYLE_PREDICATE + r"(?P<body>.+)",
+        text, flags=re.I,
+    )
+    return bool(
+        match and _STYLE_WORD_RE.search(match.group("body"))
+        and not _h3_has_narrative_predicate(match.group("body"))
+    )
+
+
+def _h3_inline_style_direction_spans(source: str) -> list[tuple[int, int, str]]:
+    """Find explicit style clauses attached to an otherwise physical sentence."""
+
+    from services.h3_source_grammar import _quoted_ranges
+
+    quoted = _quoted_ranges(source)
+    spans = []
+    for match in re.finditer(
+        r"(?:^|(?<=[.!?;:\r\n])\s*|,\s*|\s+(?=(?:but|while|and)\b))"
+        r"(?P<clause>(?:(?:but|while|and)\s+)?"
+        + _H3_EXPLICIT_STYLE_SUBJECT + _H3_EXPLICIT_STYLE_PREDICATE + r")",
+        source, flags=re.I,
+    ):
+        start = match.start("clause")
+        stop = re.search(r"(?<!\d)\.(?!\d)|[!?;\r\n]", source[match.end():])
+        end = match.end() + stop.start() if stop else len(source)
+        if any(start < right and end > left for left, right in quoted):
+            continue
+        candidate = sanitize_h3_prompt_text(source[start:end]).strip(" ,;:-.!?")
+        if not _h3_explicit_style_direction(candidate):
+            # A subsequent named/unknown story predicate must remain an event.
+            # A comma can delimit it without requiring us to understand the verb.
+            for delimiter in re.finditer(r",\s*", source[match.end():end]):
+                prefix_end = match.end() + delimiter.start()
+                prefix = sanitize_h3_prompt_text(source[start:prefix_end]).strip(" ,;:-.!?")
+                tail = source[match.end() + delimiter.end():end]
+                if _h3_explicit_style_direction(prefix) and _h3_has_narrative_predicate(tail):
+                    end, candidate = prefix_end, prefix
+                    break
+            else:
+                continue
+        spans.append((start, end, candidate))
+    return spans
 
 
 def _h3_has_narrative_predicate(value: Any) -> bool:
@@ -1138,6 +1199,9 @@ def _h3_persistent_instruction_spans(source: str) -> list[tuple[int, int, str]]:
                 text = sanitize_h3_prompt_text(source[start:end]).strip(" \t\r\n")
             if end > start:
                 spans.append((start, end, text))
+    for style_span in _h3_inline_style_direction_spans(source):
+        if not any(style_span[0] < end and start < style_span[1] for start, end, _ in spans):
+            spans.append(style_span)
     return sorted(spans, key=lambda item: item[0])
 
 
@@ -2461,6 +2525,11 @@ def extract_h3_source_intent(prompt: str) -> dict[str, Any]:
         for fragment in re.split(r"(?<=[.!?])\s+", directive_source)
         if _is_style_only_fragment(fragment)
     ]
+    style_fragments = list(dict.fromkeys([
+        *style_fragments,
+        *(re.sub(r"^(?:but|while|and)\s+", "", text, flags=re.I)
+          for _start, _end, text in _h3_inline_style_direction_spans(directive_source)),
+    ]))
     camera_fragments = [
         fragment.strip(" ,;:-.!?")
         for fragment in re.split(r"(?<=[.!?])\s+", directive_source)
@@ -3489,6 +3558,10 @@ def extract_source_events(prompt: str) -> list[dict[str, Any]]:
             )
             if pose_prefix:
                 text = text[pose_prefix.end():]
+            # Authored time ranges keep their physical paragraph atomic, but
+            # an inline global style requirement still belongs to context.
+            for start, end, _style in reversed(_h3_inline_style_direction_spans(text)):
+                text = text[:start] + ". " + text[end:]
             parts = re.split(r"(?<=[.!?])\s+", text)
             kept = [
                 part for part in parts
@@ -4503,6 +4576,12 @@ _H3_STATIVE_PREVIEW_VERBS = frozenset({
     "be", "face", "have", "hold", "keep", "look", "remain", "seem", "stand",
     "stay", "wait", "watch",
 })
+_H3_PREVIEW_LEADING_MANNER_ADVERBS = frozenset({
+    "carefully", "deliberately", "directly", "forcefully", "gently",
+    "gracefully", "heavily", "immediately", "instantly", "lightly",
+    "quietly", "quickly", "rapidly", "roughly", "silently", "slowly",
+    "smoothly", "suddenly", "subtly", "violently", "visibly",
+})
 _H3_PREVIEW_VERB_CANONICAL: dict[str, str] = {}
 for _preview_verb in _H3_PREVIEW_ACTION_VERBS:
     for _preview_stem in _h3_contract_token_stems(_preview_verb):
@@ -4537,6 +4616,9 @@ def _h3_preview_action_frames(
     the same visible prop or, for an objectless action, the same named actor.
     """
 
+    from services.h3_action_identity import expand_labeled_actor_shorthand
+    value = expand_labeled_actor_shorthand(str(value or ""), cast_pattern)
+
     # Dialogue instructions and modal purpose can name a later action without
     # showing it. Keep those as source context, not completed choreography.
     text = _strip_planner_speech_cues(sanitize_h3_prompt_text(
@@ -4545,27 +4627,31 @@ def _h3_preview_action_frames(
     # This is an audio-field label, not a scene action. Remove only the label;
     # physical action text that follows it remains available to the parser.
     text = re.sub(r"\bloop[-‐‑‒–—]open\s*:\s*", " ", text, flags=re.IGNORECASE)
-    # A close-up is camera grammar, not the physical verb "close". Mask the
-    # compound before tokenization so it cannot satisfy a door-close check or
-    # preview a later close event.
-    text = re.sub(r"\bclose[-‐‑‒–—]up\b", " ", text, flags=re.IGNORECASE)
+    # Framing and proximity labels are not the physical verb "close". Mask
+    # them before tokenization, including space-separated camera spelling.
+    text = re.sub(r"\bclose[-‐‑‒–— ](?:up|range|quarters?)\b", " ", text, flags=re.IGNORECASE)
+    # Possessive anatomical framing ("A's lower body") is not a lowering
+    # predicate. Keep actual actions such as "A lowers her body" intact.
+    text = re.sub(r"(\b(?:\w+['’]s|his|her|their|its|the)\s+)lower(?=\s+body\b)",
+                  r"\1", text, flags=re.IGNORECASE)
+    # Photographic nouns must not become shoot/take/cut action frames. Keep
+    # actual predicates such as "Nora shoots Eli" and "Nora takes the key".
+    text = re.sub(
+        r"\b(?:(?:mid|ultra)[- ]+)?(?:wide|medium|close|long|tight|full|"
+        r"establishing|tracking|reaction|worship|two|low[- ]angle|high[- ]angle)"
+        r"[- ,]+shot\b|\bshot(?=\s+of\b)",
+        "view", text, flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\b(?:hard|match|jump|quick|rapid|straight|sharp)\s+cut\b",
+                  "edit", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bcontinuous\s+take\b", "continuous coverage", text, flags=re.IGNORECASE)
     # Hyphenated push-ins and pull-backs are camera moves, not movement of a
     # physical prop. A literal "push in the drawer" remains ordinary action.
     text = re.sub(r"\b(?:push[-‐‑‒–—]in|pull[-‐‑‒–—]back)\b", " ", text, flags=re.IGNORECASE)
-    # Pure lens/camera sentences describe framing, not physical source steps.
-    # Keep camera-led sentences that also name a cast member, pronoun, or
-    # subordinate human action so an action such as "the lens follows Nora as
-    # she enters" remains available to the physical-action checks.
-    sentences = re.split(r"(?<=[.!?;])\s+", text)
-    text = ". ".join(
-        sentence for sentence in sentences
-        if not (
-            re.match(r"\s*(?:the\s+)?(?:lens|camera)\b", sentence, re.IGNORECASE)
-            and not (cast_pattern and cast_pattern.search(sentence))
-            and not re.search(r"\b(?:he|she|they|him|her|them)\b", sentence, re.I)
-            and not re.search(r"\b(?:as|while|when|before|after)\b", sentence, re.I)
-        )
-    )
+    # An optical predicate belongs to the camera even when a person is its
+    # framing target. Retain subordinate physical actions and their owners.
+    from services.h3_optical_actions import physical_action_text
+    text = physical_action_text(text, cast_pattern)
     frames = []
     previous_single_actor: str | None = None
     base_form_leads = {
@@ -4808,9 +4894,19 @@ def _h3_preview_action_frames(
             continue
         first_verb_index = min(index for _verb, index in found_verbs)
         leading_actor: str | None = None
+        leading_modifier = re.match(r"(?P<modifier>[A-Za-z][\w'’-]*)\s+", clause)
+        leading_action_adverb = bool(
+            leading_modifier
+            and leading_modifier.group("modifier").casefold()
+            in _H3_PREVIEW_LEADING_MANNER_ADVERBS
+        )
+        leading_name_clause = (
+            clause[leading_modifier.end():]
+            if leading_action_adverb and leading_modifier else clause
+        )
         leading_name = re.match(
             r"(?P<name>[A-Z][\w'’-]*(?:\s+[A-Z][\w'’-]*){0,2})(?=\s|['’]|$)",
-            clause,
+            leading_name_clause,
         )
         if leading_name and leading_name.group("name").split()[0].casefold() not in {
             "a", "an", "the", "one", "two", "three", "both", "each",
@@ -4822,6 +4918,10 @@ def _h3_preview_action_frames(
             # "The heavy fighter advances and throws" still belongs to the
             # heavy fighter.
             subject_words = [word.group(0) for word in words[:first_verb_index]]
+            if (leading_action_adverb and subject_words
+                    and subject_words[0].casefold()
+                    == leading_modifier.group("modifier").casefold()):
+                subject_words.pop(0)
             while subject_words and subject_words[-1] in {
                 "and", "then", "also", "still", "immediately",
             }:
@@ -4835,6 +4935,11 @@ def _h3_preview_action_frames(
                 leading_actor = "role:" + _normalize_key(" ".join(subject_words))
 
         verb_indices = [index for _verb, index in found_verbs]
+        initial_cast_subjects = {
+            mention.group(0).casefold()
+            for mention in cast_mentions
+            if mention.end() <= words[first_verb_index].start()
+        }
         clause_frames: list[tuple[str, frozenset[str], frozenset[str], bool]] = []
         for position, (verb, verb_index) in enumerate(found_verbs):
             token_match = words[verb_index]
@@ -4928,7 +5033,10 @@ def _h3_preview_action_frames(
             frame_actors: set[str] = set()
             if prior_cast:
                 frame_actors.add(prior_cast[-1].group(0).casefold())
-            elif len(cast_mentions) == 1:
+            elif len(cast_mentions) == 1 and (
+                not leading_action_adverb
+                or cast_mentions[0].start() < token_match.start()
+            ):
                 frame_actors.add(cast_mentions[0].group(0).casefold())
             elif prior_pronouns:
                 pronoun = prior_pronouns[-1].group(0).casefold()
@@ -4945,6 +5053,12 @@ def _h3_preview_action_frames(
                     frame_actors.add(previous_single_actor)
                 else:
                     frame_actors.update(actor_pronouns)
+            elif leading_action_adverb and previous_single_actor:
+                # "Then slowly draws back his fist" is a reduced continuation,
+                # not an actor named Slowly. Inherit only the immediately
+                # preceding unambiguous actor; an explicit cast subject above
+                # still takes priority.
+                frame_actors.add(previous_single_actor)
             elif previous_single_actor and re.match(
                 r"^[a-z][a-z'’-]*ing\b", clause, re.IGNORECASE,
             ):
@@ -4972,7 +5086,11 @@ def _h3_preview_action_frames(
             if len(clause_frames) == 1 and len(clause_frames[0][2]) == 1
             else leading_actor
         )
-        if carry_actor:
+        if len(initial_cast_subjects) > 1:
+            # A coordinated multi-person subject does not establish a unique
+            # antecedent for a later reduced clause or singular pronoun.
+            previous_single_actor = None
+        elif carry_actor:
             actor_label = carry_actor.removeprefix("role:").strip()
             # "They" and "their gaze" do not introduce another person.
             # Otherwise a glance can replace the established commuter as
@@ -5518,8 +5636,20 @@ def _h3_visible_chronology_text(value: Any) -> str:
     )
 
 
+def _h3_optical_clause_key(value: Any) -> str:
+    """Compare an optical source clause after the contract splitter's connectors."""
+
+    text = sanitize_h3_prompt_text(value).strip(" ,;:-.!?")
+    return re.sub(
+        r"^(?:(?:and\s+)?(?:then|finally|afterward|afterwards|meanwhile)|but|while|as|when)\s+",
+        "", text, flags=re.I,
+    ).casefold()
+
+
 def _h3_contract_clauses(value: Any) -> list[str]:
     """Split explicit event steps without treating every ``and`` as a cut."""
+
+    from services.h3_optical_actions import optical_only_clauses
 
     text = _h3_visible_chronology_text(mask_modal_purpose(str(value or "")))
     # A named appositive is one subject, not a separate physical step:
@@ -5557,7 +5687,10 @@ def _h3_contract_clauses(value: Any) -> list[str]:
         # carrying "film grain" must not count as carrying an adjacent action.
         action_sentences = []
         for sentence in re.split(r"(?<=[.!?])\s+", part):
-            if authored_optical_settings(sentence) or is_standalone_sound_cue(sentence):
+            optical_sentence = optical_only_clauses(sentence)
+            if (authored_optical_settings(sentence) or is_standalone_sound_cue(sentence)
+                    or any(_h3_optical_clause_key(sentence) == _h3_optical_clause_key(clause)
+                           for clause in optical_sentence)):
                 if action_sentences:
                     clauses.append(" ".join(action_sentences))
                     action_sentences = []
@@ -5584,15 +5717,22 @@ def _h3_contract_clauses(value: Any) -> list[str]:
 def _camera_repair_feedback(
     violations: list[str], assigned_beats: list[dict[str, Any]],
     segment: dict[str, Any] | None = None,
+    coverage_feedback: dict[str, list[str]] | None = None,
 ) -> list[str]:
-    """Translate beat and shot violations into the cards the writer received."""
+    """Translate violations into named cards and specific unresolved actions."""
     feedback = []
     for error in violations:
         mapped = False
         for index, beat in enumerate(assigned_beats, 1):
             prefix = str(beat.get("beat_id") or "").upper() + " "
             if error.startswith(prefix):
-                error = f"event_cards.event_{index}: {error[len(prefix):]}"
+                details = (coverage_feedback or {}).get(error)
+                if details:
+                    error = (f"event_cards.event_{index}: show these unresolved source actions: "
+                             + "; ".join(details)
+                             + ". Preserve the already evidenced actions and their source order.")
+                else:
+                    error = f"event_cards.event_{index}: {error[len(prefix):]}"
                 if "chronology relation" in error.casefold():
                     source_anchor = sanitize_h3_prompt_text(
                         beat.get("_canonical_action") or beat.get("description")
@@ -5626,6 +5766,42 @@ def _camera_repair_feedback(
                 continue
         feedback.append(error)
     return feedback
+
+
+def _recover_source_camera_events(
+    draft, *, errors, assigned_beats, segment, source_camera,
+    canonicalize, validate, coverage_feedback=None,
+):
+    """Keep accepted camera cards and replace only fully identified failures.
+
+    A global or ambiguous failure cannot authorize a partial recovery. The
+    replacement must pass the complete window validation before being used.
+    """
+    if source_camera is None or not errors or not isinstance(draft, dict):
+        return None
+    cards = draft.get("event_cards")
+    if not isinstance(cards, dict):
+        return None
+    feedback = _camera_repair_feedback(
+        errors, assigned_beats, segment, coverage_feedback,
+    )
+    matches = [re.match(r"^event_cards\.(event_\d+):", item) for item in feedback]
+    if not matches or not all(matches):
+        return None
+    keys = list(dict.fromkeys(match.group(1) for match in matches))
+    expected = {f"event_{i}" for i in range(1, len(assigned_beats) + 1)}
+    if not set(keys).issubset(expected) or set(cards) - expected or set(keys) == expected:
+        return None
+    recovered = deepcopy(draft)
+    try:
+        for key in keys:
+            recovered["event_cards"][key] = source_camera.fallback_event(key)
+        candidate = canonicalize(recovered)
+        if not candidate or validate(candidate):
+            return None
+    except (TypeError, ValueError, KeyError):
+        return None
+    return candidate, recovered, keys
 
 
 def _h3_required_relation_markers(value: Any) -> list[str]:
@@ -10089,6 +10265,107 @@ def _h3_literal_final_state_visible(requirement: str, visuals: str) -> bool:
     return False
 
 
+def _h3_camera_metadata_performer_action(value, cast_names):
+    """Catch performer predicates even outside the bounded action vocabulary.
+
+    Camera prose may locate or frame a person. A named subject followed by a
+    new action verb instead retells choreography, including uncommon verbs.
+    """
+    names = [re.escape(str(name)) for name in cast_names if str(name).strip()]
+    names.extend(
+        r"(?-i:" + re.escape(match.group(1)) + r")"
+        for name in cast_names
+        if (match := re.fullmatch(r"Character\s+([A-Z])", str(name), re.I))
+    )
+    names.extend([r"he", r"she", r"they"])
+    pattern = re.compile(
+        r"(?<![\w])(?P<actor>" + "|".join(names) + r")(?![\w'’])\s+"
+        r"(?P<modifiers>(?:(?:is|are|was|were|slowly|quickly|suddenly|briefly|then|still)\s+)*)"
+        r"(?P<predicate>[a-z][\w'-]*)", re.I,
+    )
+    optical_or_location = {
+        "and", "or", "at", "in", "on", "by", "to", "from", "with", "within",
+        "beside", "behind", "before", "between", "above", "below", "under",
+        "near", "along", "through", "across", "against", "off", "left", "right",
+        "foreground", "background", "center", "centre", "framed", "visible",
+        "readable", "sharp", "soft", "blurred", "silhouetted", "backlit",
+        "shown", "seen", "kept", "positioned", "caught",
+        "facing", "profile", "front", "rear", "centered", "centred",
+        # Character A's short alias also occurs as an indefinite article.
+        "low", "high", "wide", "tight", "close", "medium", "long", "short",
+        "reverse", "lateral", "stable", "gentle", "fast", "slow", "clear",
+        "readable", "continuous", "motivated", "cinematic", "locked",
+    }
+    text = str(value or "")
+    subject_position = re.compile(
+        r"(?:^|[.!?;:,]|\b(?:then|and|but|while|as|when)\b)\s*$", re.I,
+    )
+    for match in pattern.finditer(text):
+        predicate = match.group("predicate").casefold()
+        if not subject_position.search(text[:match.start()]) or predicate in optical_or_location:
+            continue
+        if match.group("actor") == "A":
+            # The role shorthand is also the English article. "A thunderous
+            # crack", "A whip pan" and "A rapid dolly" are camera/sound nouns,
+            # not a performer followed by an unknown action verb. Bare A needs
+            # positive finite-verb evidence; full Character A stays unambiguous.
+            auxiliary = bool(re.search(r"\b(?:is|are|was|were)\b", match.group("modifiers"), re.I))
+            known_verb = any(stem in _H3_PREVIEW_VERB_CANONICAL
+                             or stem in {"punch", "kick", "elbow", "headbutt", "slam"}
+                             for stem in _h3_contract_token_stems(predicate))
+            inflected = predicate.endswith(("s", "ed"))
+            motion_complement = bool(re.match(
+                r"\s+(?:into|onto|toward|towards|past|through|against|over|under)\b",
+                text[match.end():], re.I,
+            ))
+            if not auxiliary and not (inflected and (known_verb or motion_complement)):
+                continue
+        return True
+    return False
+
+
+def _h3_source_camera_optics_only(draft, cast_names):
+    """Retain optical choices without duplicating narrative reference tails.
+
+    The fixed physical phase already says what happens. A camera writer's
+    'whip-pan ... as they skid' can become 'whip-pan ...'; a standalone
+    performer action remains invalid because there is no optical choice to keep.
+    """
+    result = deepcopy(draft)
+    if not isinstance(result, dict):
+        return result
+    optical_prefix = re.compile(
+        r"\b(?:camera|lens|shot|view|frame|framing|close[- ]?up|wide|angle|pan|"
+        r"whip[- ]?pan|dolly|zoom|track|tracking|push|pull|orbit|orbital|shake|"
+        r"cut|reframe|rack[- ]?focus|sound|boom|crack|rumble|rush|wind|"
+        r"whoosh|thud|impact|inhale|exhale)\b", re.I,
+    )
+
+    def clean(value):
+        if not isinstance(value, str):
+            return value
+        for boundary in re.finditer(r"\b(?:as|while|when|and|then|but)\s+|,\s*", value, re.I):
+            prefix = value[:boundary.start()].rstrip(" ,;:-")
+            tail = value[boundary.end():]
+            if optical_prefix.search(prefix) and _h3_camera_metadata_performer_action(tail, cast_names):
+                return prefix
+        return value
+
+    for field in ("coverage", "pacing"):
+        if field in result:
+            result[field] = clean(result[field])
+    for event in (result.get("event_cards") or {}).values():
+        if not isinstance(event, dict):
+            continue
+        for phase in event.values():
+            if not isinstance(phase, dict):
+                continue
+            for field in ("framing", "camera", "transition", "sound_effects"):
+                if field in phase:
+                    phase[field] = clean(phase[field])
+    return result
+
+
 def segment_violations(
     prompt: str,
     segment: dict[str, Any] | None,
@@ -10130,6 +10407,20 @@ def segment_violations(
         str(item.get("event_id") or "").upper(): sanitize_h3_prompt_text(item.get("text"))
         for item in source_events
     }
+    from services.h3_source_camera import SourceCameraProof
+    source_proof = segment.get("_source_camera_proof")
+    proven_beat_ids = {
+        str(beat.get("beat_id") or "").upper()
+        for beat in assigned_beats
+        if isinstance(source_proof, SourceCameraProof)
+        and source_proof.covers_beat(segment, beat, source_event_map)
+    }
+    if isinstance(source_proof, SourceCameraProof):
+        violations.extend(
+            f"{beat.get('beat_id')} compiler-owned source action or binding was modified"
+            for beat in assigned_beats
+            if str(beat.get("beat_id") or "").upper() not in proven_beat_ids
+        )
     final_state_ids = {
         str(item.get("event_id") or "").upper()
         for item in source_events if item.get("requirement_kind") == "final_state"
@@ -10164,6 +10455,26 @@ def segment_violations(
             flags=re.IGNORECASE,
         ) if cast_names else None
     )
+    if proven_beat_ids:
+        # A camera-only response cannot introduce choreography through a field
+        # named camera, framing, transition or sound_effects. Descriptive views
+        # of subjects are fine; explicit performer actions belong to the source.
+        for field in ("coverage", "pacing"):
+            if _h3_camera_metadata_performer_action(segment.get(field), cast_names):
+                violations.append(f"{field} must describe camera coverage or pacing without performer actions")
+        for shot in shots:
+            shot_ids = [str(value or "").upper() for value in shot.get("beat_ids") or []]
+            if not shot_ids or not all(value in proven_beat_ids for value in shot_ids):
+                continue
+            for field in ("camera", "framing", "transition", "sound_effects"):
+                # The action parser treats camera nouns like "shot" as shoot
+                # and optical "cut" as a performer action. Metadata requires
+                # an actual subject/predicate, not inferred action frames.
+                if _h3_camera_metadata_performer_action(shot.get(field), cast_names):
+                    violations.append(
+                        f"{shot_ids[0]} camera metadata supplies physical action in {field}; "
+                        "describe only the view, lens movement, edit or nonverbal sound"
+                    )
     used_beat_ids: list[str] = []
     beat_actions: dict[str, list[str]] = {}
     beat_camera: dict[str, list[str]] = {}
@@ -10209,6 +10520,12 @@ def segment_violations(
     for beat in assigned_beats:
         beat_id = str(beat.get("beat_id") or "").upper()
         action_text = " ".join(beat_actions.get(beat_id, []))
+        if beat_id in proven_beat_ids:
+            # These physical phases came from the immutable source, not the
+            # writer. Exact ordered text and source binding were checked above;
+            # reparsing them as paraphrases can invent omissions and actors.
+            # Camera metadata and the local clock are still validated below.
+            continue
         recurrence_ids = list(beat.get("_scheduled_recurrence_source_event_ids") or [])
         if int((beat.get("_spaced_recurrence") or {}).get("occurrence") or 0) > 1:
             recurrence_ids.extend(beat.get("source_event_ids") or [])
@@ -10256,6 +10573,14 @@ def segment_violations(
                 _strip_planner_speech_cues(source_requirement)
                 if _find_spoken_verb(source_requirement) else source_requirement
             )
+            from services.h3_contact_identity import omitted_h3_contact_instruments
+            for selector in omitted_h3_contact_instruments(required_action, action_text):
+                # A specific elbow/shoulder/knee substitution is an identity
+                # error, not an uncertain paraphrase a review receipt can waive.
+                violations.append(
+                    f"{beat_id} shot action changes required contact instrument: {selector}"
+                )
+        from services.h3_optical_actions import optical_only_clauses
         if segment.get("semantic_actions") and immutable_source_events:
             # Split every immutable event on its own. A grouped beat can
             # contain several short source events whose combined text is over
@@ -10269,10 +10594,13 @@ def segment_violations(
                 )
                 if _find_spoken_verb(source_event):
                     source_event = _strip_planner_speech_cues(source_event)
-                source_parts = (
-                    _h3_contract_clauses(source_event)
-                    if len(source_event) <= 500 else [source_event]
-                )
+                optical_source_keys = {
+                    _h3_optical_clause_key(clause)
+                    for clause in optical_only_clauses(source_event, cast_pattern)
+                }
+                # Diagnose the actual clause even in a long source paragraph.
+                # Pronoun resolution below still sees the complete event.
+                source_parts = _h3_contract_clauses(source_event) or [source_event]
                 for source_part in source_parts:
                     if _h3_is_averted_impact_clause(
                         source_event, source_part, cast_pattern,
@@ -10284,10 +10612,15 @@ def segment_violations(
                             source_event, source_part, cast_pattern,
                         ),
                         final_state_requirement,
+                        _h3_optical_clause_key(source_part) in optical_source_keys,
                     ))
         else:
-            required_part_contexts = [(required_action, {}, False)]
-        for part, source_pronoun_antecedents, final_state_requirement in required_part_contexts:
+            optical_requirement = any(
+                _h3_optical_clause_key(required_action) == _h3_optical_clause_key(clause)
+                for clause in optical_only_clauses(required_action, cast_pattern)
+            )
+            required_part_contexts = [(required_action, {}, False, optical_requirement)]
+        for part, source_pronoun_antecedents, final_state_requirement, optical_requirement in required_part_contexts:
             if final_state_requirement:
                 if not _h3_literal_final_state_visible(part, action_text):
                     violations.append(f"{beat_id} shot action omits required source step: {part}")
@@ -10304,7 +10637,7 @@ def segment_violations(
                 action_text, cast_pattern,
             )
             camera_requirement = bool(
-                authored_optical_settings(part) or re.search(
+                optical_requirement or authored_optical_settings(part) or re.search(
                     r"\b(?:camera|framing|shot|push[- ]?in|pull[- ]?back|zoom|pan|tilt|dolly|"
                     r"close[- ]?up|rack[- ]?focus|depth\s+of\s+field)\b",
                     part,
@@ -10355,7 +10688,8 @@ def segment_violations(
                 )
                 continue
             frame_coverage = (
-                None if camera_requirement else _h3_required_action_frames_covered(
+                None if camera_requirement and (optical_requirement or not required_action_frames)
+                else _h3_required_action_frames_covered(
                     required_action_frames,
                     visible_action_frames,
                     source_text=part,
@@ -10690,7 +11024,15 @@ def segment_violations(
             visible_action_frames = [
                 (shot_index, frame)
                 for shot_index, shot in enumerate(shots)
-                for frame in _h3_preview_action_frames(shot.get("action"), cast_pattern)
+                for frame in _h3_preview_action_frames(
+                    " ".join(str(shot.get(key) or "") for key in (
+                        ("framing", "camera", "transition")
+                        if shot.get("beat_ids") and all(
+                            str(value or "").upper() in proven_beat_ids
+                            for value in shot["beat_ids"]
+                        ) else ("action",)
+                    )), cast_pattern,
+                )
             ]
             for future in source_events[last_position + 1:]:
                 future_action_frames = _h3_preview_action_frames(future.get("text"), cast_pattern)
@@ -10733,7 +11075,14 @@ def segment_violations(
                     if len(distinctive) < minimum_overlap:
                         continue
                     for index, shot in enumerate(shots):
-                        overlap = distinctive & event_action_tokens(shot.get("action"))
+                        preview_text = (
+                            " ".join(str(shot.get(key) or "") for key in ("framing", "camera", "transition"))
+                            if shot.get("beat_ids") and all(
+                                str(value or "").upper() in proven_beat_ids
+                                for value in shot["beat_ids"]
+                            ) else shot.get("action")
+                        )
+                        overlap = distinctive & event_action_tokens(preview_text)
                         if (
                             len(overlap) >= minimum_overlap
                             and len(overlap) / len(distinctive) >= 0.35
@@ -14038,6 +14387,49 @@ def _render_h3_story_segments(
                 "their own actions in order; they do not need to fit inside the opening card. Move the "
                 "camera from its observed position before adopting a new framing; do not begin with a cut."
             )
+        from services.h3_source_camera import build_source_camera_contract
+        source_camera = None
+        if (
+            faithful_locked_schedule and not long_form_hierarchical
+            and (has_authored_timing or planning_style == "faithful")
+            and not allow_generated_dialogue and not audio_driven
+            and not context.get("timed_hold_contracts")
+            and any(len(str(event.get("text") or "").split()) > 90 for event in source_events)
+        ):
+            # Long locked events exceed the old 30–90 word action-card brief.
+            # Condensing and then semantically judging them loses qualifiers;
+            # preserve the source and ask the writer only for camera coverage.
+            source_camera = build_source_camera_contract(
+                beats, source_events=source_events, camera_coverage=camera_coverage,
+                cast_names=source_intent.get("cast_names") or [],
+            )
+        if source_camera is not None:
+            creative_beats = source_camera.prompt_events()
+            segment_prompt = (
+                segment_prompt.split(f"{event_heading}\n", 1)[0]
+                + "Compiler-owned chronological physical phases:\n"
+                + json.dumps(creative_beats, ensure_ascii=False, indent=2)
+                + "\n\nMaestro inserts these complete physical actions and their timing. "
+                "Fill only the camera metadata for every fixed phase key in the schema. "
+                "Use framing for view and lens choice, camera for optical movement, "
+                "transition for the edit or continuous reframe, and sound_effects for "
+                "nonverbal synchronized sound. Do not write character actions, change "
+                "actors, targets, contacts or results, or add a recovery, attack or reaction "
+                "through camera metadata. Describe pure coverage, such as a low wide view "
+                "or a fast dolly back, instead of retelling choreography. Preserve the "
+                "authored camera directions listed with each phase.\n"
+                "Write concise coverage describing landmarks, screen axis and camera energy. "
+                "For continuous coverage, every phase advances the same take. For multiple "
+                "shots, choose motivated edits without replaying an action. The first supplied "
+                "frame retains its exact composition before the camera moves.\n\n"
+                + f"User production directions and constraints:\n{production_directions}"
+            )
+            note = (
+                f"Window {segment_number}: Maestro preserved the locked physical source "
+                "phases; the writer supplied camera coverage and nonverbal sound."
+            )
+            if note not in planning_notes:
+                planning_notes.append(note)
         if long_form_hierarchical and not saved_segment:
             # Chapter expansion already supplied the local visible progression.
             # Compile the camera clock deterministically instead of making one
@@ -14081,7 +14473,7 @@ def _render_h3_story_segments(
             segments.append(materialized)
             previous_closing = materialized["closing_state"]
             continue
-        schema = _segment_schema(
+        schema = source_camera.schema(segment_number) if source_camera is not None else _segment_schema(
             segment_number,
             maximum_shots=_segment_shot_limit(beats),
             event_count=len(beats),
@@ -14092,7 +14484,7 @@ def _render_h3_story_segments(
                 else 1
             ),
         )
-        if saved_segment:
+        if saved_segment and source_camera is None:
             schema["properties"]["closing_state"] = {
                 "type": "string", "enum": [saved_segment["closing_state"]],
             }
@@ -14104,6 +14496,14 @@ def _render_h3_story_segments(
         segment_token_budget = min(6144, max(4096, 1400 + len(beats) * 650 + len(assigned_dialogue) * 150))
         camera_images = image_paths[:1] if start_frame_supplied and segment_number == 1 else None
         camera_guide = segment_guide
+        if source_camera is not None:
+            camera_guide = (
+                "You are a cinematographer filling a camera-only JSON schema. Maestro "
+                "already owns and inserts the complete source choreography. Follow the "
+                "fixed event and phase keys. Describe optical coverage, edit transitions "
+                "and nonverbal sound only. Never write action or recovery fields, "
+                "performer movements, new plot, dialogue or a closing-state prediction."
+            )
         if camera_images:
             camera_guide = (
                 "The attached image is the actual first video frame. Start from the pose, contacts, "
@@ -14112,7 +14512,26 @@ def _render_h3_story_segments(
                 "actor, target, object, and result. Do not invent an attack, opponent response, or "
                 "reset, and do not perform later assigned actions early. The still is initial-state "
                 "context, not an additional movement to repeat.\n\n"
-            ) + segment_guide
+            ) + camera_guide
+
+        def canonicalize_camera_draft(draft):
+            if source_camera is not None:
+                try:
+                    draft = _h3_source_camera_optics_only(draft, cast_names)
+                    draft = source_camera.bind(draft)
+                except ValueError as error:
+                    return {"segment": segment_number, "event_assignment_error": str(error)}
+            return _canonicalize_segment_contract(
+                draft, segment_number=segment_number, duration=duration,
+                assigned_beats=beats, dialogue_catalog=catalog,
+                opening_state=previous_closing, source_intent=source_intent,
+                source_events=source_events,
+                use_camera_handoff=(
+                    source_camera is None and faithful_locked_schedule
+                    and segment_number < segment_count
+                ),
+            )
+
         try:
             raw = generate(
                 prompt=segment_prompt,
@@ -14130,17 +14549,7 @@ def _render_h3_story_segments(
 
             segment = _parse_json_object(raw, allow_repair=False)
             camera_draft = deepcopy(segment)
-            segment = _canonicalize_segment_contract(
-                segment,
-                segment_number=segment_number,
-                duration=duration,
-                assigned_beats=beats,
-                dialogue_catalog=catalog,
-                opening_state=previous_closing,
-                source_intent=source_intent,
-                source_events=source_events,
-                use_camera_handoff=faithful_locked_schedule and segment_number < segment_count,
-            )
+            segment = canonicalize_camera_draft(segment)
             segment_errors = segment_violations(
                 prompt,
                 segment,
@@ -14151,13 +14560,19 @@ def _render_h3_story_segments(
                 accepted_segments=segments,
             )
             from services.h3_camera_fidelity import (
-                clear_confirmed_coverage_errors, review_missing_camera_actions,
+                CameraReviewBudget, clear_confirmed_coverage_errors,
+                review_missing_camera_actions,
             )
+            # Share a finite review allowance across the initial draft and all
+            # focused repairs so a difficult window cannot multiply review calls.
+            camera_review_budget = CameraReviewBudget(max_requests=6)
+            coverage_feedback: dict[str, list[str]] = {}
             coverage_receipts = review_missing_camera_actions(
                 segment_errors, segment, assigned_beats=beats,
                 source_events=source_events, generate=generate,
                 timed_hold_contracts=context.get("timed_hold_contracts") or [],
-                accepted_segments=segments,
+                accepted_segments=segments, repair_feedback=coverage_feedback,
+                review_budget=camera_review_budget,
             )
             segment_errors = clear_confirmed_coverage_errors(
                 segment_errors, segment or {}, coverage_receipts,
@@ -14165,13 +14580,17 @@ def _render_h3_story_segments(
             if coverage_receipts:
                 print(f"[MiniMax H3] Segment {segment_number}: source coverage review "
                       f"confirmed {len(coverage_receipts)} faithful paraphrase(s).")
+            repair_advice = ""
+            advice_errors: tuple[str, ...] = ()
             while segment_errors and camera_repair_attempts < fidelity_retries:
                 print(
                     f"[MiniMax H3] Segment {segment_number} repair "
                     f"{camera_repair_attempts + 1}/{fidelity_retries}: "
                     + "; ".join(segment_errors)
                 )
-                feedback = _camera_repair_feedback(segment_errors, beats, segment)
+                feedback = _camera_repair_feedback(
+                    segment_errors, beats, segment, coverage_feedback,
+                )
                 card_matches = [re.match(r"event_cards\.(event_\d+):", item) for item in feedback]
                 repair_keys = (
                     list(dict.fromkeys(match.group(1) for match in card_matches))
@@ -14217,28 +14636,41 @@ def _render_h3_story_segments(
                         "Do not write their actions into the selected cards. Return only the named "
                         "event_card keys; preserve their source action, camera and effects."
                     )
+                from services.h3_camera_repair import camera_repair_advice
+                if camera_repair_attempts == 0:
+                    advice_errors = tuple(segment_errors)
+                    repair_advice = camera_repair_advice(
+                        generate, source_prompt=repair_prompt, rejected=rejected,
+                        feedback=feedback, image_paths=camera_images,
+                    )
+                if repair_advice and tuple(segment_errors) == advice_errors:
+                    repair_prompt += ("\n\nAdvisory repair analysis (source contracts take precedence):\n"
+                                      + repair_advice)
+                from services.llm_sampling import caller_sampling
+                from promptbench.experiments import camera_repair_sampling_enabled
                 camera_repair_attempts += 1
-                raw = generate(
-                    prompt=(
-                        repair_prompt
-                        + "\n\nPREVIOUS REJECTED SEGMENT JSON:\n"
-                        + rejected
-                        + "\n\nREPAIR ONLY THIS SEGMENT. Correct these violations:\n- "
-                        + "\n- ".join(feedback)
-                        + "\nReturn the complete event_cards object required by the schema. Maestro supplies the clock and ownership. "
-                        "Correct the named cards and preserve the other cards. "
-                        "Do not add, repeat, recap, or preview any event."
-                    ),
-                    system_prompt=camera_guide,
-                    max_new_tokens=min(8192, segment_token_budget * 2),
-                    temperature=0.08,
-                    top_p=0.78,
-                    image_paths=camera_images,
-                    enable_thinking=False,
-                    frequency_penalty=0.0,
-                    presence_penalty=0.0,
-                    json_schema=repair_schema,
-                )
+                with caller_sampling(camera_repair_sampling_enabled()):
+                    raw = generate(
+                        prompt=(
+                            repair_prompt
+                            + "\n\nPREVIOUS REJECTED SEGMENT JSON:\n"
+                            + rejected
+                            + "\n\nREPAIR ONLY THIS SEGMENT. Correct these violations:\n- "
+                            + "\n- ".join(feedback)
+                            + "\nReturn the complete event_cards object required by the schema. Maestro supplies the clock and ownership. "
+                            "Correct the named cards and preserve the other cards. "
+                            "Do not add, repeat, recap, or preview any event."
+                        ),
+                        system_prompt=camera_guide,
+                        max_new_tokens=min(8192, segment_token_budget * 2),
+                        temperature=0.08,
+                        top_p=0.78,
+                        image_paths=camera_images,
+                        enable_thinking=False,
+                        frequency_penalty=0.0,
+                        presence_penalty=0.0,
+                        json_schema=repair_schema,
+                    )
                 segment = _parse_json_object(raw, allow_repair=False)
                 if repair_keys:
                     patches = segment.get("event_cards") if isinstance(segment, dict) else None
@@ -14252,17 +14684,7 @@ def _render_h3_story_segments(
                     # A later retry must see the newest rejected draft, not
                     # the original response that began this repair sequence.
                     camera_draft = deepcopy(segment)
-                segment = _canonicalize_segment_contract(
-                    segment,
-                    segment_number=segment_number,
-                    duration=duration,
-                    assigned_beats=beats,
-                    dialogue_catalog=catalog,
-                    opening_state=previous_closing,
-                    source_intent=source_intent,
-                    source_events=source_events,
-                    use_camera_handoff=faithful_locked_schedule and segment_number < segment_count,
-                )
+                segment = canonicalize_camera_draft(segment)
                 segment_errors = segment_violations(
                     prompt,
                     segment,
@@ -14285,17 +14707,52 @@ def _render_h3_story_segments(
                     item for item in segment_errors
                     if re.match(r"^\S+ shot action omits required source step:", item)
                 ]
-                if residual_omissions and len(residual_omissions) == len(segment_errors):
+                # Review uncertain omissions independently; hard preview and
+                # ownership failures remain in segment_errors for repair.
+                coverage_feedback = {}
+                if residual_omissions:
                     refreshed_receipts = review_missing_camera_actions(
                         residual_omissions, segment, assigned_beats=beats,
                         source_events=source_events, generate=generate,
                         timed_hold_contracts=context.get("timed_hold_contracts") or [],
-                        accepted_segments=segments,
+                        accepted_segments=segments, repair_feedback=coverage_feedback,
+                        review_budget=camera_review_budget,
                     )
                     coverage_receipts.update(refreshed_receipts)
                     segment_errors = clear_confirmed_coverage_errors(
                         segment_errors, segment or {}, refreshed_receipts,
                     )
+            if segment_errors and source_camera is not None:
+                recovery = _recover_source_camera_events(
+                    camera_draft, errors=segment_errors, assigned_beats=beats,
+                    segment=segment, source_camera=source_camera,
+                    canonicalize=canonicalize_camera_draft,
+                    validate=lambda value: segment_violations(
+                        prompt, value, segment_number=segment_number,
+                        duration=duration, assigned_beats=beats,
+                        dialogue_catalog=catalog, accepted_segments=segments,
+                    ),
+                    coverage_feedback=coverage_feedback,
+                )
+                if recovery is not None:
+                    planning_diagnostics.extend(
+                        f"Window {segment_number}: {item}" for item in segment_errors
+                    )
+                    segment, camera_draft, recovered_keys = recovery
+                    event_numbers = ", ".join(key.removeprefix("event_") for key in recovered_keys)
+                    planning_warnings.append(
+                        f"Window {segment_number}'s camera coverage for event(s) {event_numbers} "
+                        f"did not satisfy Maestro's fidelity checks after {camera_repair_attempts} "
+                        "focused repair attempts. Maestro compiled only those event camera cards "
+                        "from the locked source and preserved the other camera cards."
+                    )
+                    review_windows.add(segment_number)
+                    planning_notes.append(
+                        f"Window {segment_number}: source camera recovery replaced "
+                        f"{len(recovered_keys)} of {len(beats)} event camera cards."
+                    )
+                    print(f"[MiniMax H3] Segment {segment_number}: recovered camera cards {event_numbers}.")
+                    segment_errors = []
             if segment_errors or not segment:
                 raise ValueError("; ".join(segment_errors or ["invalid segment JSON"]))
         except InterruptedError:
@@ -14315,7 +14772,31 @@ def _render_h3_story_segments(
                 f"{'s' if camera_repair_attempts != 1 else ''}, so Maestro compiled that window directly from "
                 "the locked source events."
             )
-            segment = _fallback_segment(
+            source_fallback = None
+            if source_camera is not None:
+                # Replacing every camera card is whole-window fallback. Keep
+                # the same source phase clock and fixed first-frame opening;
+                # do not call it partial recovery or imply other cards survived.
+                source_fallback = canonicalize_camera_draft({
+                    "segment": segment_number,
+                    "title": "Source-compiled camera coverage",
+                    "coverage": (
+                        "single continuous shot" if camera_coverage == "continuous"
+                        else "dynamic multi-shot cinematic coverage"
+                    ),
+                    "pacing": "Source-authored pacing",
+                    "event_cards": {
+                        f"event_{index}": source_camera.fallback_event(f"event_{index}")
+                        for index in range(1, len(beats) + 1)
+                    },
+                })
+                if segment_violations(
+                    prompt, source_fallback, segment_number=segment_number,
+                    duration=duration, assigned_beats=beats,
+                    dialogue_catalog=catalog, accepted_segments=segments,
+                ):
+                    source_fallback = None
+            segment = source_fallback or _fallback_segment(
                 segment_number,
                 duration=duration,
                 beats=beats,

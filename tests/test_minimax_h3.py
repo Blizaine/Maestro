@@ -2441,9 +2441,9 @@ class TestMiniMaxH3Definition(unittest.TestCase):
 class TestMiniMaxH3RuntimeSource(unittest.TestCase):
     def test_runtime_uses_the_official_dual_scheduler_and_audio_output(self):
         main = _read(_MAIN_PATH)
-        self.assertIn("shift=3.0 if self.viggle else 12.0", main)
+        self.assertIn('shift=3.0 if self.viggle else float(model_def.get("minimax_h3_video_shift", 12.0))', main)
         self.assertIn("solver=self.sample_solver", main)
-        self.assertIn("MiniMaxH3Scheduler(shift=3.0)", main)
+        self.assertIn('MiniMaxH3Scheduler(shift=float(model_def.get("minimax_h3_audio_shift", 3.0)))', main)
         self.assertIn('"audio_sampling_rate": MINIMAX_H3_AUDIO_SAMPLE_RATE', main)
         self.assertIn("MINIMAX_H3_KEYFRAME_ENCODE_SEED", main)
         self.assertIn("prepare_keyframe_image", main)
@@ -3694,6 +3694,14 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
             with mock.patch(
                 "models.minimax_h3.ref2va.decode_reference_audio",
                 return_value=(waveform, 10),
+            ), mock.patch(
+                "models.minimax_h3.ref2va._decode_timeline_audio_window",
+                side_effect=lambda _path, start, duration: (
+                    waveform[:, round(start * 10):round((start + duration) * 10)], 10,
+                ),
+            ), mock.patch(
+                "models.minimax_h3.ref2va.extract_reference_audio_window",
+                side_effect=lambda path, *_args, **_kwargs: path,
             ):
                 references = prepare_references(
                     [
@@ -3702,16 +3710,19 @@ class TestMiniMaxH3RuntimeMath(unittest.TestCase):
                             "type": "audio",
                             "path": str(audio_paths[0]),
                             "audio_intent": "drive",
+                            "effective_duration_seconds": 5.0,
                         },
                         {
                             "type": "audio",
                             "path": str(audio_paths[1]),
                             "audio_intent": "style",
+                            "effective_duration_seconds": 5.0,
                         },
                         {
                             "type": "audio",
                             "path": str(audio_paths[2]),
                             "audio_intent": "voice",
+                            "effective_duration_seconds": 5.0,
                         },
                     ],
                     num_frames=24,

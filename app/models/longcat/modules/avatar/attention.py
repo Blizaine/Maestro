@@ -129,11 +129,14 @@ class Attention(nn.Module):
             k_cond = k[:, :num_cond_latents_thw].contiguous()
             v_cond = v[:, :num_cond_latents_thw].contiguous()
             x_cond = self._process_attn(q_cond, k_cond, v_cond, shape, out_dtype)
+            del q_cond, k_cond, v_cond
             # process the noise tokens
             q_noise = q[:, num_cond_latents_thw:].contiguous()
             x_noise = self._process_attn(q_noise, k, v, shape, out_dtype)
+            del q_noise
             # merge x_cond and x_noise
             x = torch.cat([x_cond, x_noise], dim=1).contiguous()
+            del x_cond, x_noise
         elif num_cond_latents is not None and num_cond_latents > 1:
             # video continuation
             assert num_ref_latents is not None and ref_img_index is not None, f"No specified insertion position for reference frame"
@@ -148,11 +151,17 @@ class Attention(nn.Module):
             v_cond = v[:, num_ref_latents_thw:num_cond_latents_thw].contiguous()
             x_ref = self._process_attn(q_ref, k_ref, v_ref, shape, out_dtype)
             x_cond = self._process_attn(q_cond, k_cond, v_cond, shape, out_dtype)
+            del q_ref, k_ref, v_ref, q_cond, k_cond, v_cond
             if num_cond_latents == N_t:
                 x = torch.cat([x_ref, x_cond], dim=1).contiguous()
+                del x_ref, x_cond
             else:
                 # process the noise tokens
-                q_noise = q[:, num_cond_latents_thw:].contiguous()
+                # Keep a view until the optional reference-mask split. In that
+                # branch, the three contiguous slices below cover this region,
+                # so materializing q_noise first would retain a redundant copy
+                # of every noisy query token through all three attention calls.
+                q_noise = q[:, num_cond_latents_thw:]
                 
                 start_noise, end_noise, num_noisy_frames = 0, 0, N_t - num_cond_latents
                 if mask_frame_range is not None and mask_frame_range > 0:
@@ -172,10 +181,22 @@ class Attention(nn.Module):
                     x_noise_back = self._process_attn(q_noise_back, k, v, shape, out_dtype) # q_back has attention with ref + cond + noisy
                     x_noise_maskref = self._process_attn(q_noise_maskref, k_non_ref, v_non_ref, shape, out_dtype) # q_mask has attention with cond+noisy
                     x_noise = torch.cat([x_noise_front, x_noise_maskref, x_noise_back], dim=1).contiguous()
+                    del (
+                        q_noise_front,
+                        q_noise_maskref,
+                        q_noise_back,
+                        k_non_ref,
+                        v_non_ref,
+                        x_noise_front,
+                        x_noise_maskref,
+                        x_noise_back,
+                    )
                 else:
-                    x_noise = self._process_attn(q_noise, k, v, shape, out_dtype)
+                    x_noise = self._process_attn(q_noise.contiguous(), k, v, shape, out_dtype)
+                del q_noise
                 # merge x_cond and x_noise
                 x = torch.cat([x_ref, x_cond, x_noise], dim=1).contiguous()
+                del x_ref, x_cond, x_noise
 
         else:
             # text to video
@@ -183,6 +204,12 @@ class Attention(nn.Module):
 
         x_output_shape = (B, N, C)
         x = x.reshape(x_output_shape)
+        if not return_kv and ref_target_masks is None:
+            # q/k/v are no longer needed by the single-speaker path once the
+            # attention output is assembled. In particular, v is a view into
+            # qkv's backing allocation, so all four references must be dropped
+            # together to release that storage before the output projection.
+            del qkv, q, k, v
         x = self.proj(x)
 
         # calculate attention mask for the given area in reference image

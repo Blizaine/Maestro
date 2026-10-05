@@ -1706,6 +1706,25 @@ class H3StoryLedgerTests(unittest.TestCase):
                     })
                 number = schema["segment"]["minimum"]
                 duration = durations[number - 1]
+                if "event_cards" in schema and "closing_state" not in schema:
+                    events = {}
+                    camera_index = 0
+                    for key, event_schema in schema["event_cards"]["properties"].items():
+                        events[key] = {}
+                        for phase_key, phase_schema in event_schema["properties"].items():
+                            fields = phase_schema["properties"]
+                            events[key][phase_key] = {
+                                "framing": fields["framing"].get("const", "Readable wide coverage of Character A and Character B"),
+                                "camera": cameras[camera_index % len(cameras)],
+                                "transition": fields["transition"].get("const", "continuous reframe"),
+                                "sound_effects": "Wind and stone impacts",
+                            }
+                            camera_index += 1
+                    return json.dumps({
+                        "segment": number, "title": "Mountain duel coverage",
+                        "coverage": "Readable mountain-platform screen axis",
+                        "pacing": "Heavy impact instants", "event_cards": events,
+                    })
                 result = _segment(number, duration=duration)
                 result["shots"] = [{
                     "shot": index + 1, "start_seconds": duration * index / 4,
@@ -1731,7 +1750,8 @@ class H3StoryLedgerTests(unittest.TestCase):
                 self.assertEqual(result["source_intent"]["cast_names"], ["Character A", "Character B"])
                 self.assertEqual(result["ledger"]["beats"], ledger["beats"])
                 for segment, duration in zip(result["segments"], durations):
-                    self.assertEqual([shot["camera"] for shot in segment["shots"]], cameras)
+                    for index, shot in enumerate(segment["shots"]):
+                        self.assertIn(cameras[index % len(cameras)], shot["camera"])
                     self.assertEqual(segment["shots"][0]["start_seconds"], 0)
                     self.assertEqual(segment["shots"][-1]["end_seconds"], duration)
                     self.assertTrue(all(shot["end_seconds"] - shot["start_seconds"] >= 0.67 for shot in segment["shots"]))

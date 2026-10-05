@@ -9,6 +9,7 @@ import {
 } from '../../stores/useStore'
 import { InfoTooltip } from './InfoTooltip'
 import { SidebarDialog } from './SidebarPanels'
+import { isLongCatAvatarModel } from '../../lib/avatarWorkflow'
 
 type Placement = 'above' | 'below' | 'footer'
 
@@ -78,9 +79,10 @@ export function ModelSelector({ placement = 'above' }: { placement?: Placement }
   const audioSubMode = useStore(s => s.audioSubMode)
 
   const currentModel = models.find(m => m.model_type === currentModelType)
-  const createWorkflow = studioVideoWorkflow === 'references' ? 'references' : 'frames'
+  const createWorkflow = studioVideoWorkflow === 'references' ? 'references'
+    : studioVideoWorkflow === 'avatar' ? 'avatar' : 'frames'
   const isPrimaryStudioCreate = generationMode === 'video'
-    && (studioVideoWorkflow === 'frames' || studioVideoWorkflow === 'references')
+    && ['frames', 'references', 'avatar'].includes(studioVideoWorkflow)
     && videoImageMode === 0
   const studioMediaIntent = {
     workflow: createWorkflow,
@@ -89,6 +91,8 @@ export function ModelSelector({ placement = 'above' }: { placement?: Placement }
     hasAudioDrive: createWorkflow === 'references' ? hasReferenceAudioDrive : hasFrameAudioDrive,
   } as const
   const currentModelCompatible = (
+    generationMode !== 'video' || studioVideoWorkflow === 'avatar' || !isLongCatAvatarModel(currentModel)
+  ) && (
     generationMode !== 'image'
     || modelSupportsImageWorkflow(currentModel, imageWorkflow, hasImageReferences)
   ) && (
@@ -99,7 +103,9 @@ export function ModelSelector({ placement = 'above' }: { placement?: Placement }
     ? imageWorkflow === 'generate' && hasImageReferences
       ? 'Add or enable an image edit model for the supplied source or reference images.'
       : `Add or enable an image model compatible with ${imageWorkflow}.`
-    : createWorkflow === 'references'
+    : createWorkflow === 'avatar'
+      ? 'Add or enable a LongCat Avatar Single or Multi model for image-and-voice animation.'
+      : createWorkflow === 'references'
       ? 'Add or enable an H3 Omni model for these references or characters.'
       : hasFrameGuidance && hasFrameAudioDrive
         ? 'Add or enable a frame-capable model that accepts an exact audio timeline.'
@@ -118,6 +124,7 @@ export function ModelSelector({ placement = 'above' }: { placement?: Placement }
   const workflowFilter = (model: typeof models[number]) => (
     (generationMode !== 'video' || (studioVideoWorkflow === 'animate'
       ? model.model_type === 'viggle_animate' : model.model_type !== 'viggle_animate'))
+    && (generationMode !== 'video' || studioVideoWorkflow === 'avatar' || !isLongCatAvatarModel(model))
     &&
     (generationMode !== 'image' || modelSupportsImageWorkflow(model, imageWorkflow, hasImageReferences))
     && (
@@ -205,7 +212,7 @@ export function ModelSelector({ placement = 'above' }: { placement?: Placement }
                         onClick={() => {
                           if (
                             generationMode === 'video'
-                            && (studioVideoWorkflow === 'frames' || studioVideoWorkflow === 'references')
+                            && ['frames', 'references', 'avatar'].includes(studioVideoWorkflow)
                             && videoImageMode === 0
                           ) selectStudioVideoModel(model.model_type)
                           else selectModel(model.model_type)

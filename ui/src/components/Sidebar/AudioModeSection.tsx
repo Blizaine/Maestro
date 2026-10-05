@@ -382,6 +382,7 @@ export function AudioModeSection() {
             label={uploading ? 'Uploading...' : 'Drop video file (.mp4)'}
             accept=".mp4,.webm,.mkv"
             filename={restoredVideoGuideFilename}
+            videoUrl={restoredVideoGuideFilename ? api.getFileUrl(restoredVideoGuideFilename) : undefined}
             onFile={file => handleLegacyUpload(file, 'video_guide', setVideoGuideFilename)}
             onClear={() => {
               setParam('video_guide', undefined)

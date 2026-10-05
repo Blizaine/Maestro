@@ -116,7 +116,7 @@ const read = async endpoint => {
         await page.keyboard.press('Escape');
         await toggle.click();
       }
-      return card.getByRole('menuitem',{name:label,exact:true});
+      return page.getByRole('menu', {name:'Clip actions'}).getByRole('menuitem',{name:label,exact:true});
     };
     const send=async(index,label)=>{
       const button=await menu(index,label);

@@ -10,6 +10,7 @@ import functools
 import json
 import math
 import os
+from collections.abc import Mapping
 
 import torch
 from optimum.quanto import QModuleMixin
@@ -35,6 +36,13 @@ _QINT8_CONVROT_QTYPE = _quanto_qtypes[_QTYPE_NAME]
 _HADAMARD_CACHE = {}
 _DTYPE_DEBUG_COUNT = 0
 _FUSED_SPLIT_MARKER_SUFFIX = ".qweight"
+_HEADER_INT8_FORMATS = {"int8_tensorwise", "int8_convrot"}
+_SUPPORTED_HEADER_CONVROT_GROUPS = {64, 256}
+_METADATA_WRAPPER_PREFIXES = (
+    "model.diffusion_model.",
+    "diffusion_model.",
+    "module.",
+)
 
 try:
     from torch._subclasses.fake_tensor import is_fake as _torch_is_fake_tensor
@@ -252,7 +260,7 @@ def _decode_json_tensor(tensor):
         return {}
     try:
         data = tensor.detach().cpu().to(torch.uint8).reshape(-1).tolist()
-        return json.loads(bytes(data).decode("utf-8"))
+        return json.loads(bytes(data).decode("utf-8").rstrip("\0 \t\r\n"))
     except Exception:
         return {}
 
@@ -484,27 +492,214 @@ def install_native_lora_forwards(model) -> int:
     )
 
 
-def _collect_specs(state_dict):
+def _normalize_metadata_layer_name(name):
+    if not isinstance(name, str) or not name or name != name.strip():
+        raise ValueError("Invalid _quantization_metadata layer name")
+    normalized = name
+    while True:
+        for prefix in _METADATA_WRAPPER_PREFIXES:
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):]
+                break
+        else:
+            break
+    if normalized.endswith(".weight"):
+        normalized = normalized[:-len(".weight")]
+    if not normalized:
+        raise ValueError("Invalid _quantization_metadata layer name")
+    return normalized
+
+
+def _quantization_metadata_layers(metadata):
+    if not isinstance(metadata, Mapping):
+        return {}
+    raw = metadata.get("_quantization_metadata")
+    if raw is None:
+        return {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("SafeTensor _quantization_metadata is not valid JSON") from exc
+    if not isinstance(raw, Mapping):
+        raise ValueError("SafeTensor _quantization_metadata must be an object")
+    version = str(raw.get("format_version", "1.0"))
+    if version not in {"1.0", "1", ""}:
+        raise ValueError(f"Unsupported _quantization_metadata version {version!r}")
+    layers = raw.get("layers")
+    if not isinstance(layers, Mapping):
+        raise ValueError("SafeTensor _quantization_metadata must contain a per-layer object")
+    normalized = {}
+    for name, descriptor in layers.items():
+        if not isinstance(descriptor, Mapping):
+            raise ValueError(f"Invalid _quantization_metadata descriptor for {name!r}")
+        base = _normalize_metadata_layer_name(name)
+        if base in normalized:
+            raise ValueError(f"Ambiguous _quantization_metadata entries for {base!r}")
+        normalized[base] = descriptor
+    return normalized
+
+
+def _header_int8_config(descriptor, base):
+    """Return a validated ConvRot config for this handler's metadata format."""
+
+    quant_format = str(descriptor.get("format") or "").strip().lower().replace("-", "_")
+    if quant_format not in _HEADER_INT8_FORMATS:
+        if "int8" in quant_format and quant_format not in {
+            "asym_w4a8_int8",
+            "w4a8_int8",
+        }:
+            raise ValueError(
+                f"Unsupported INT8 ConvRot format for '{base}': {quant_format!r}"
+            )
+        return None
+    convrot = descriptor.get("convrot")
+    if type(convrot) is not bool or not convrot:
+        raise ValueError(f"INT8 ConvRot metadata for '{base}' must set convrot to true")
+
+    group_fields = ("convrot_groupsize", "convrot_group_size", "group_size")
+    declared_groups = [descriptor[key] for key in group_fields if key in descriptor]
+    if not declared_groups or any(type(group) is not int for group in declared_groups):
+        raise ValueError(f"INT8 ConvRot metadata for '{base}' needs an explicit integer group size")
+    if len(set(declared_groups)) != 1:
+        raise ValueError(f"Conflicting INT8 ConvRot group sizes for '{base}'")
+    group_size = declared_groups[0]
+    if group_size not in _SUPPORTED_HEADER_CONVROT_GROUPS:
+        raise ValueError(
+            f"Unsupported INT8 ConvRot group size for '{base}': {group_size}"
+        )
+
+    original_dtype = descriptor.get("orig_dtype")
+    if original_dtype is not None:
+        original_dtype = str(original_dtype).strip().lower().removeprefix("torch.")
+        if original_dtype not in {"bf16", "bfloat16", "f16", "fp16", "float16"}:
+            raise ValueError(f"Unsupported INT8 ConvRot source dtype for '{base}'")
+    return {
+        # Both accepted labels select this handler's same ConvRot storage.
+        "format": "int8_tensorwise",
+        "convrot": True,
+        "convrot_groupsize": group_size,
+    }
+
+
+def _validate_header_int8_tensors(base, weight, scale, config):
+    if not torch.is_tensor(weight) or weight.dtype != torch.int8 or weight.ndim != 2:
+        raise ValueError(f"INT8 ConvRot weight for '{base}' must be a rank-2 int8 tensor")
+    rows, columns = weight.shape
+    if rows <= 0 or columns <= 0:
+        raise ValueError(f"INT8 ConvRot weight for '{base}' has an empty shape")
+    if (
+        not torch.is_tensor(scale)
+        or scale.dtype != torch.float32
+        or tuple(scale.shape) != (rows, 1)
+    ):
+        raise ValueError(
+            f"INT8 ConvRot scale for '{base}' must be float32[{rows}, 1]"
+        )
+    group_size = config["convrot_groupsize"]
+    if columns % group_size:
+        raise ValueError(
+            f"INT8 ConvRot input width for '{base}' is not divisible by group size {group_size}"
+        )
+
+
+def _marker_matches_header(marker_config, header_config, base):
+    if not isinstance(marker_config, Mapping):
+        raise ValueError(f"Invalid Comfy quantization marker for '{base}'")
+    marker_format = str(marker_config.get("format") or "").strip().lower().replace("-", "_")
+    if marker_format not in _HEADER_INT8_FORMATS:
+        raise ValueError(f"Comfy marker format conflicts with INT8 ConvRot metadata for '{base}'")
+    if type(marker_config.get("convrot")) is not bool or not marker_config["convrot"]:
+        raise ValueError(f"Comfy marker ConvRot flag conflicts with metadata for '{base}'")
+    marker_groups = [
+        marker_config[key]
+        for key in ("convrot_groupsize", "convrot_group_size", "group_size")
+        if key in marker_config
+    ]
+    if not marker_groups or any(type(group) is not int for group in marker_groups):
+        raise ValueError(f"Comfy marker for '{base}' needs an explicit integer ConvRot group size")
+    if len(set(marker_groups)) != 1:
+        raise ValueError(f"Comfy marker contains conflicting ConvRot groups for '{base}'")
+    if marker_groups[0] != header_config["convrot_groupsize"]:
+        raise ValueError(f"Comfy marker and _quantization_metadata disagree for '{base}'")
+
+
+def _collect_specs(state_dict, metadata=None):
+    metadata_layers = _quantization_metadata_layers(metadata)
+    metadata_configs = {}
+    state_bases = {}
+    for key, tensor in state_dict.items():
+        if not key.endswith(".weight") or getattr(tensor, "dtype", None) != torch.int8:
+            continue
+        raw_base = key[:-7]
+        canonical_base = _normalize_metadata_layer_name(raw_base)
+        state_bases.setdefault(canonical_base, []).append(raw_base)
+
+    for canonical_base, descriptor in metadata_layers.items():
+        config = _header_int8_config(descriptor, canonical_base)
+        if config is None:
+            continue
+        candidates = state_bases.get(canonical_base, [])
+        if len(candidates) != 1:
+            label = "missing" if not candidates else "ambiguous"
+            raise ValueError(
+                f"{label.capitalize()} INT8 ConvRot state-dict layer for '{canonical_base}'"
+            )
+        raw_base = candidates[0]
+        weight = state_dict.get(raw_base + ".weight")
+        scale = state_dict.get(raw_base + ".weight_scale")
+        _validate_header_int8_tensors(canonical_base, weight, scale, config)
+        metadata_configs[canonical_base] = config
+
     specs = []
     for key, tensor in state_dict.items():
         if not key.endswith(".weight") or getattr(tensor, "dtype", None) != torch.int8:
             continue
         base = key[:-7]
+        canonical_base = _normalize_metadata_layer_name(base)
         scale = state_dict.get(base + ".weight_scale")
         quant_config = state_dict.get(base + ".comfy_quant")
-        if not torch.is_tensor(scale) or not torch.is_tensor(quant_config):
-            continue
-        config = _decode_json_tensor(quant_config)
-        if not isinstance(config, dict):
+        header_config = metadata_configs.get(canonical_base)
+        if quant_config is not None:
+            if not torch.is_tensor(quant_config):
+                if header_config is not None:
+                    raise ValueError(f"Invalid Comfy quantization marker for '{base}'")
+                continue
+            config = _decode_json_tensor(quant_config)
+            if not isinstance(config, dict):
+                if header_config is not None:
+                    raise ValueError(f"Invalid Comfy quantization marker for '{base}'")
+                continue
+            if header_config is not None:
+                _marker_matches_header(config, header_config, base)
+                _validate_header_int8_tensors(base, tensor, scale, header_config)
+                # Use the normalized header config so accepted marker field
+                # aliases keep the verified group size through MMGP conversion.
+                config = header_config
+            elif canonical_base in metadata_layers:
+                raise ValueError(
+                    f"Comfy marker and _quantization_metadata use different formats for '{base}'"
+                )
+            if not torch.is_tensor(scale):
+                continue
+        elif header_config is not None:
+            _validate_header_int8_tensors(base, tensor, scale, header_config)
+            config = header_config
+        else:
             continue
         specs.append(
-            {"name": base, "weight": tensor, "scale": scale, "config": config}
+            {
+                "name": base,
+                "weight": tensor,
+                "scale": scale,
+                "config": config,
+            }
         )
     return specs
 
 
-def detect(state_dict, verboseLevel=1):
-    specs = _collect_specs(state_dict)
+def detect(state_dict, verboseLevel=1, metadata=None):
+    specs = _collect_specs(state_dict, metadata)
     if not specs:
         return {"matched": False, "kind": "none", "details": {}}
     names = [spec["name"] for spec in specs[:8]]
@@ -522,10 +717,10 @@ def detect(state_dict, verboseLevel=1):
     }
 
 
-def convert_to_quanto(state_dict, default_dtype, verboseLevel=1, detection=None):
+def convert_to_quanto(state_dict, default_dtype, verboseLevel=1, detection=None, metadata=None):
     if detection is not None and not detection.get("matched", False):
         return {"state_dict": state_dict, "quant_map": {}}
-    specs = _collect_specs(state_dict)
+    specs = _collect_specs(state_dict, metadata)
     if not specs:
         return {"state_dict": state_dict, "quant_map": {}}
     quant_map = {}

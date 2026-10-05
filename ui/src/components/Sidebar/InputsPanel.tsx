@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect, useRef } from 'react'
 import { X, Upload, Plus, Music, Film, Mic } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { GalleryInput } from '../shared/GalleryInput'
+import { VideoInputPreview } from '../shared/VideoInputPreview'
 import { loadMediaInput } from '../../lib/mediaInput'
 import * as api from '../../api/client'
 import {
@@ -68,6 +69,11 @@ const snapToOffsetPreset = (pct: number): string => {
 
 const basename = (p: string) => p.replace(/\\/g, '/').split('/').pop() || p
 
+function mediaFileUrl(pathOrUrl: string): string {
+  if (pathOrUrl.includes('/api/v1/file/') || pathOrUrl.includes('/api/v1/uploads/')) return pathOrUrl
+  return api.getFileUrl(basename(pathOrUrl))
+}
+
 const getMediaDuration = (file: File): Promise<number | null> => {
   const isVid = file.type.startsWith('video/') || /\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(file.name)
   return new Promise(resolve => {
@@ -122,6 +128,7 @@ export function InputsPanel() {
   const removeBackgroundRefs = useStore(s => s.removeBackgroundRefs)
   const setRemoveBackgroundRefs = useStore(s => s.setRemoveBackgroundRefs)
   const continueVideo = useStore(s => s.continueVideo)
+  const continueVideoPath = useStore(s => s.continueVideoPath)
   const continueVideoUrl = useStore(s => s.continueVideoUrl)
   const continueVideoDuration = useStore(s => s.continueVideoDuration)
   const setContinueVideo = useStore(s => s.setContinueVideo)
@@ -215,6 +222,10 @@ export function InputsPanel() {
   const guideProcess = ((params.video_prompt_type as string) || guideDefault).replace(/T$/, '')
   const supportsGuideVid = !!guideCfg && !modelOptions?.guide_preprocessing && !supportsControlVid && guideProcess.includes('V')
   const hasGuideVid = supportsGuideVid && !!params.video_guide
+  const videoGuidePreviewUrl = typeof params.video_guide === 'string' && params.video_guide
+    ? mediaFileUrl(params.video_guide)
+    : null
+  const continueVideoPreviewUrl = continueVideoPath ? mediaFileUrl(continueVideoPath) : continueVideoUrl || null
 
   // ── Reference images (image_ref_choices) ───────────────────────────
   const refCfg = modelOptions?.image_ref_choices as { choices?: [string, string][] } | undefined
@@ -657,7 +668,8 @@ export function InputsPanel() {
         {isExtend && (continueVideo ? (
           <div onClick={() => setSelected(selected === 'extend' ? null : 'extend')}
             className={`relative w-[90px] h-[90px] shrink-0 rounded-xl overflow-hidden border cursor-pointer transition-colors ${selected === 'extend' ? 'border-accent-blue' : 'border-border hover:border-border-light'}`}>
-            {continueVideoUrl && <video src={continueVideoUrl} muted className="absolute inset-0 w-full h-full object-cover" />}
+            {continueVideoPreviewUrl && <VideoInputPreview src={continueVideoPreviewUrl} alt="Extend source video"
+              className="absolute inset-0 w-full h-full object-cover" />}
             <button onClick={e => { e.stopPropagation(); clearContinueVideo(); if (selected === 'extend') setSelected(null) }}
               className="absolute top-1 right-1 z-10 rounded-full bg-black/45 text-white p-0.5 hover:bg-black/70" aria-label="Remove"><X size={12} /></button>
             <div className="absolute inset-x-0 bottom-0 bg-black/55 px-1.5 py-1">
@@ -713,7 +725,7 @@ export function InputsPanel() {
         {/* Control video */}
         {hasControlVid ? (
           <Tile role="Control video" filledIcon={<Film size={20} />} filledLabel={controlVidName ?? undefined}
-            imgSrc={null} selected={selected === 'ctrlvid'} onClear={removeControlVid}
+            imgSrc={null} videoSrc={videoGuidePreviewUrl} selected={selected === 'ctrlvid'} onClear={removeControlVid}
             onSelect={() => setSelected(selected === 'ctrlvid' ? null : 'ctrlvid')} />
         ) : supportsControlVid && (
           <AddTile label="Control video" icon={<Film size={18} />} onClick={() => pickFile('.mp4,.webm,.mkv,.mov', handleAddControlVid)} onDropFile={handleAddControlVid} dropAccept="video" />
@@ -722,7 +734,7 @@ export function InputsPanel() {
         {/* Guide video (motion source) — guide_custom_choices models (SCAIL-2 etc.) */}
         {hasGuideVid ? (
           <Tile role="Control video" filledIcon={<Film size={20} />} filledLabel={controlVidName ?? undefined}
-            imgSrc={null} selected={selected === 'guidevid'} onClear={removeGuideVid}
+            imgSrc={null} videoSrc={videoGuidePreviewUrl} selected={selected === 'guidevid'} onClear={removeGuideVid}
             onSelect={() => setSelected(selected === 'guidevid' ? null : 'guidevid')} />
         ) : supportsGuideVid && (
           <AddTile label="Control video" icon={<Film size={18} />} onClick={() => pickFile('.mp4,.webm,.mkv,.mov', handleAddGuideVid)} onDropFile={handleAddGuideVid} dropAccept="video" />
@@ -861,6 +873,9 @@ export function InputsPanel() {
       {/* Option strip — control-video audio stays independent from motion. */}
       {selected === 'ctrlvid' && hasControlVid && (
         <Strip>
+          {modelOptions?.sliding_window && <p className="text-[10px] leading-relaxed text-text-muted">
+            Each window uses the matching segment of the control video, its mask and any selected soundtrack. Set the output duration and window count below.
+          </p>}
           {h3VideoEditing && audioBase !== '2' && (
             <>
               <label className="text-[10px] text-text-muted uppercase tracking-wider">
@@ -1055,9 +1070,10 @@ function AddTile({ label, icon, onClick, onDropFile, dropAccept }: {
   )
 }
 
-function Tile({ role, imgSrc, icon, badge, selected, filledIcon, filledLabel, onPick, onClear, onSelect, onDropFile }: {
+function Tile({ role, imgSrc, videoSrc, icon, badge, selected, filledIcon, filledLabel, onPick, onClear, onSelect, onDropFile }: {
   role: string
   imgSrc: string | null
+  videoSrc?: string | null
   icon?: React.ReactNode
   badge?: number
   selected: boolean
@@ -1073,7 +1089,7 @@ function Tile({ role, imgSrc, icon, badge, selected, filledIcon, filledLabel, on
     const f = e.dataTransfer.files[0]
     if (f && f.type.startsWith('image/') && onDropFile) onDropFile(f)
   }
-  const filled = !!imgSrc || !!filledIcon
+  const filled = !!imgSrc || !!videoSrc || !!filledIcon
   return (
     <div onDrop={handleDrop} onDragOver={e => e.preventDefault()}
       onClick={() => (filled ? onSelect() : onPick?.())}
@@ -1084,6 +1100,8 @@ function Tile({ role, imgSrc, icon, badge, selected, filledIcon, filledLabel, on
         <>
           {imgSrc ? (
             <img src={imgSrc} alt={role} className="absolute inset-0 w-full h-full object-cover" />
+          ) : videoSrc ? (
+            <VideoInputPreview src={videoSrc} alt={role} className="absolute inset-0 w-full h-full object-cover" />
           ) : (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-bg-tertiary/50 text-text-secondary">
               {filledIcon}

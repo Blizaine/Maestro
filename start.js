@@ -4,6 +4,10 @@ const {
   runtimeProfile,
 } = require("./launcher_profile")
 
+const appControlFailureEvent = "/(?:smart app control|application control|app control|device guard|wdac).*\\b(?:block(?:ed|ing)?|deny|denied|denial|prevent(?:ed|ing)?|restrict(?:ed|ion)?|unsigned|untrusted|reject(?:ed|ion)?|not allowed|not permitted)\\b|\\b(?:block(?:ed|ing)?|deny|denied|denial|prevent(?:ed|ing)?|restrict(?:ed|ion)?|unsigned|untrusted|reject(?:ed|ion)?|not allowed|not permitted)\\b.*(?:smart app control|application control|app control|device guard|wdac)|this app has been blocked by (?:your )?system administrator|blocked by group policy/i"
+const readyUrlPattern = /^http:\/\/(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d):(?:[1-9]\d{0,3}|[1-5]\d{4}|6[0-4]\d{3}|65[0-4]\d{2}|655[0-2]\d|6553[0-5])$/
+const hasReadyUrl = `input && input.event && typeof input.event[1] === "string" && ${readyUrlPattern}.test(input.event[1])`
+
 module.exports = async (kernel) => {
   const fallbackPort = await kernel.port()
   // A successful one-time Tailscale setup records the exact Maestro backend
@@ -43,6 +47,12 @@ module.exports = async (kernel) => {
     },
     daemon: true,
     run: [
+      {
+        // Assigning even a null URL invokes Pinokio's sharing hook.
+        // Remove stale readiness keys without starting a share before launch.
+        method: "local.rm",
+        params: ["url", "port"],
+      },
       ...runtimeGuard,
       {
         when: "{{exists('app/settings/remote_access.json')}}",
@@ -114,17 +124,33 @@ module.exports = async (kernel) => {
             "event": "/Incorrect version of mmgp/i",
             "break": true
           }, {
+            // Windows App Control / Device Guard can block the unsigned
+            // interpreter before the backend starts. Stop on those messages
+            // so the user sees the security failure directly.
+            "event": appControlFailureEvent,
+            "break": true
+          }, {
             "event": "/(http:\/\/[0-9.:]+)/",
             "done": true
           }]
         }
       },
       {
+        when: `{{${hasReadyUrl}}}`,
         method: "local.set",
         params: {
           url: "{{input.event[1]}}",
           port: "{{input.event[1].split(':').pop()}}"
-        }
+        },
+      },
+      {
+        when: "{{!local.url || !local.port}}",
+        method: "input",
+        params: {
+          title: "Maestro failed to start",
+          description: "The backend stopped before reporting a valid local Web UI address. Check the Terminal output for the startup error. On Windows, App Control or Device Guard may have blocked the unsigned Python executable."
+        },
+        next: null
       }
     ]
   }

@@ -8,8 +8,8 @@
     "minimax_h3_default_turbo_preset": "lightx2v-ref2va-turbo4-v0.1-comfy-bf16",
     "minimax_h3_turbo_mode_default": true,
     "minimax_h3_unaccelerated_default_steps": 20,
-    "description": "Experimental reference-focused MiniMax H3 Singularity v1.3 using its pinned 21 GB pruned INT8 ConvRot checkpoint.",
-    "selector_help": "SINGULARITY V1.3 — REFERENCES (EXPERIMENTAL)\nReference-focused model with a pinned 21 GB pruned INT8 ConvRot checkpoint. The recommended LightX2V Ref2VA Turbo4 adapter is 1.96 GB and defaults to four Euler steps. Turbo off uses the ordinary 20-step H3 recipe.",
+    "description": "Experimental MiniMax H3 Singularity v1.3 for ordered image, video, and audio references. Shares its pinned 21 GB checkpoint with Singularity Frames.",
+    "selector_help": "SINGULARITY V1.3 — REFERENCES (EXPERIMENTAL)\nUse ordered image, video, and audio references. Shares one pinned 21 GB pruned INT8 ConvRot checkpoint with Singularity Frames. Both use the recommended 1.96 GB LightX2V Ref2VA Turbo4 adapter at four Euler steps. Turbo off uses the ordinary 20-step H3 recipe.",
     "URLs": [
       "https://huggingface.co/WarmBloodAban/Minimax-h3_Singularity/resolve/af671d9214a6e41ab8c2f43e9f871ea56246115f/Minimax-h3_Singularity_ref2va_Pruned_v1.3_int8.safetensors"
     ],
