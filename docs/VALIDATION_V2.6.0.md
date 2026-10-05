@@ -2,8 +2,9 @@
 
 Release preparation, October 4, 2026. Public baseline:
 `194cd36a40be631885d846f675d8d8dca1047cc1` on both dev and main, including
-v2.5.0 and its regression/readme follow-ups. This record describes local
-verification; public CI has not run for the unpublished release candidate.
+v2.5.0 and its regression/readme follow-ups. The initial checks below describe
+local verification before publication. The October 5 public CI follow-up is
+recorded separately below.
 
 ## Initial release preparation checks
 
@@ -31,7 +32,7 @@ Backend checks used the installed Python 3.11 runtime with CUDA hidden. Pytest
 environment was not changed. Optional hardware/runtime tests retain their skips.
 Dependency deprecation, disabled CUDA autocast and CPU fallback notices were
 nonblocking. Public CI uses its pinned Python 3.10/CPU PyTorch environment and
-has not yet run on this candidate.
+was checked separately after publication.
 
 Release review fixed grouped camera coverage parsing: application-issued
 ordering/enabler instructions remain in the semantic contract, while action
@@ -102,6 +103,37 @@ snapshot. This follow-up uses focused regressions for the changed defaults and
 retained import/preview behavior, without repeating a full GPU render or restart.
 Browser compatibility limits for Wan pairs and LTX distilled recipes are recorded
 in [the DaSiWa guide](DaSiWa-models.md).
+
+## October 5 public CI follow-up
+
+The initial public runs on both branches failed the same INT8 shared-memory
+retry regression on Python 3.10. The UI build, source boundary guard, Python
+syntax and undefined-name checks passed. Backend discovery ran 3,235 tests with
+55 skips and two failing subtests, covering fused and scaled kernel wrappers.
+
+The failure was reproduced on Ubuntu Python 3.10.12. Clearing an exception's
+`__traceback__` inside its handler leaves Python 3.10's active exception state
+holding the original traceback and launch arguments. The failed output buffer
+therefore remains alive when the smaller-tile retry starts. Python 3.11 updates
+that state from the exception object, explaining why the earlier local checks
+passed. A direct interpreter probe confirmed the difference.
+
+The correction captures launch failure type/message in a helper that exits its
+handler before the caller releases the failed output and allocates a retry.
+Terminal error causes are rebuilt without launch tracebacks. The existing
+shared-memory classifier, smaller-tile cache and no-retry policy for CUDA OOM
+remain intact. Tests now check release before allocation as well as launch,
+and retain a terminal retry exception while checking that neither output survives.
+
+| Correction check | Result |
+| --- | --- |
+| Kernel retry regressions | All four cases passed on Ubuntu Python 3.10.12, Windows Python 3.10.20 and Python 3.11.13. |
+| Installed Quanto/MMGP dispatch and ConvRot checks | 16 cases run, 15 passed and one opt-in GPU case skipped. |
+| Python 3.10 syntax and scoped undefined-name checks | Passed. |
+
+The correction keeps product version 2.6.0 and triggers a new public CI run on
+both branches. The initial failed run is retained as historical evidence;
+the current branch checks determine the corrected release's CI status.
 
 ## Scope and limits
 

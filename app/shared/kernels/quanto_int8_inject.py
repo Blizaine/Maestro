@@ -325,13 +325,35 @@ def _cache_launch_params(cache: dict, fifo: list, max_size: int, key: tuple[int,
     return params
 
 
-def _shared_memory_resource_limit(exc: Exception) -> bool:
+def _shared_memory_resource_limit(exc: Exception | str) -> bool:
     detail = str(exc).lower()
     return (
         "shared memory" in detail
         and "resource" in detail
         and ("required" in detail or "hardware limit" in detail)
     )
+
+
+def _capture_launch_failure(
+    launch, output, launch_params
+) -> tuple[Optional[type[Exception]], str]:
+    """Keep launch tracebacks from retaining failed output tensors during retry."""
+    try:
+        launch(output, launch_params)
+    except Exception as exc:
+        error_type = type(exc)
+        error_detail = str(exc)
+        exc.__traceback__ = None
+        return error_type, error_detail
+    return None, ""
+
+
+def _rebuild_launch_error(error_type: type[Exception], error_detail: str) -> Exception:
+    """Recreate a traceback-free cause with the closest available error class."""
+    try:
+        return error_type(error_detail)
+    except Exception:
+        return RuntimeError(error_detail)
 
 
 def _resource_safe_cache_key(
@@ -567,49 +589,47 @@ def _fused_quant_scaled_mm_direct_call(x2d: torch.Tensor, qweight: torch.Tensor,
         )
 
     out = torch.empty((m, n), device=x2d.device, dtype=output_dtype)
-    try:
-        launch(out, params)
-    except Exception as exc:
-        error_detail = str(exc)
-        block_m, block_n, block_k, num_warps, num_stages, grid_m, grid_n = params
-        if _shared_memory_resource_limit(exc) and block_n > 128:
-            exc.__traceback__ = None
-            out = None
-            retry_params = (
-                block_m,
-                128,
-                block_k,
-                num_warps,
-                num_stages,
-                mod.triton.cdiv(m, block_m),
-                mod.triton.cdiv(n, 128),
-            )
-            out = torch.empty((m, n), device=x2d.device, dtype=output_dtype)
-            try:
-                launch(out, retry_params)
-            except Exception as retry_exc:
-                retry_detail = str(retry_exc)
-                out = None
-                retry_exc.__traceback__ = None
-                retry_m, retry_n, retry_k, retry_warps, retry_stages, _, _ = retry_params
-                raise RuntimeError(
-                    "Triton fused int8 kernel launch failed after shared-memory retry "
-                    f"(shape m={m}, k={k}, n={n}; tile=({retry_m},{retry_n},{retry_k}); "
-                    f"warps={retry_warps}, stages={retry_stages}). {retry_detail}"
-                ) from retry_exc
-            _remember_resource_safe_launch_params(
-                "fused", m, k, n, x2d.device, output_dtype, original_params, retry_params
-            )
-            return out
+    error_type, error_detail = _capture_launch_failure(launch, out, params)
+    if error_type is None:
+        return out
+
+    block_m, block_n, block_k, num_warps, num_stages, grid_m, grid_n = params
+    if _shared_memory_resource_limit(error_detail) and block_n > 128:
+        error_type = None
         out = None
-        exc.__traceback__ = None
-        block_m, block_n, block_k, num_warps, num_stages, _, _ = params
-        raise RuntimeError(
-            "Triton fused int8 kernel launch failed "
-            f"(shape m={m}, k={k}, n={n}; tile=({block_m},{block_n},{block_k}); "
-            f"warps={num_warps}, stages={num_stages}). {error_detail}"
-        ) from exc
-    return out
+        retry_params = (
+            block_m,
+            128,
+            block_k,
+            num_warps,
+            num_stages,
+            mod.triton.cdiv(m, block_m),
+            mod.triton.cdiv(n, 128),
+        )
+        out = torch.empty((m, n), device=x2d.device, dtype=output_dtype)
+        retry_error_type, retry_detail = _capture_launch_failure(
+            launch, out, retry_params
+        )
+        if retry_error_type is not None:
+            out = None
+            retry_m, retry_n, retry_k, retry_warps, retry_stages, _, _ = retry_params
+            raise RuntimeError(
+                "Triton fused int8 kernel launch failed after shared-memory retry "
+                f"(shape m={m}, k={k}, n={n}; tile=({retry_m},{retry_n},{retry_k}); "
+                f"warps={retry_warps}, stages={retry_stages}). {retry_detail}"
+            ) from _rebuild_launch_error(retry_error_type, retry_detail)
+        _remember_resource_safe_launch_params(
+            "fused", m, k, n, x2d.device, output_dtype, original_params, retry_params
+        )
+        return out
+
+    out = None
+    block_m, block_n, block_k, num_warps, num_stages, _, _ = params
+    raise RuntimeError(
+        "Triton fused int8 kernel launch failed "
+        f"(shape m={m}, k={k}, n={n}; tile=({block_m},{block_n},{block_k}); "
+        f"warps={num_warps}, stages={num_stages}). {error_detail}"
+    ) from _rebuild_launch_error(error_type, error_detail)
 
 
 def _scaled_int8_mm_direct_call(
@@ -660,49 +680,47 @@ def _scaled_int8_mm_direct_call(
         )
 
     out = torch.empty((m, n), device=a_int8.device, dtype=output_dtype)
-    try:
-        launch(out, params)
-    except Exception as exc:
-        error_detail = str(exc)
-        block_m, block_n, block_k, num_warps, num_stages, grid_m, grid_n = params
-        if _shared_memory_resource_limit(exc) and block_n > 128:
-            exc.__traceback__ = None
-            out = None
-            retry_params = (
-                block_m,
-                128,
-                block_k,
-                num_warps,
-                num_stages,
-                mod.triton.cdiv(m, block_m),
-                mod.triton.cdiv(n, 128),
-            )
-            out = torch.empty((m, n), device=a_int8.device, dtype=output_dtype)
-            try:
-                launch(out, retry_params)
-            except Exception as retry_exc:
-                retry_detail = str(retry_exc)
-                out = None
-                retry_exc.__traceback__ = None
-                retry_m, retry_n, retry_k, retry_warps, retry_stages, _, _ = retry_params
-                raise RuntimeError(
-                    "Triton scaled int8 kernel launch failed after shared-memory retry "
-                    f"(shape m={m}, k={k}, n={n}; tile=({retry_m},{retry_n},{retry_k}); "
-                    f"warps={retry_warps}, stages={retry_stages}). {retry_detail}"
-                ) from retry_exc
-            _remember_resource_safe_launch_params(
-                "scaled", m, k, n, a_int8.device, output_dtype, original_params, retry_params
-            )
-            return out
+    error_type, error_detail = _capture_launch_failure(launch, out, params)
+    if error_type is None:
+        return out
+
+    block_m, block_n, block_k, num_warps, num_stages, grid_m, grid_n = params
+    if _shared_memory_resource_limit(error_detail) and block_n > 128:
+        error_type = None
         out = None
-        exc.__traceback__ = None
-        block_m, block_n, block_k, num_warps, num_stages, _, _ = params
-        raise RuntimeError(
-            "Triton scaled int8 kernel launch failed "
-            f"(shape m={m}, k={k}, n={n}; tile=({block_m},{block_n},{block_k}); "
-            f"warps={num_warps}, stages={num_stages}). {error_detail}"
-        ) from exc
-    return out
+        retry_params = (
+            block_m,
+            128,
+            block_k,
+            num_warps,
+            num_stages,
+            mod.triton.cdiv(m, block_m),
+            mod.triton.cdiv(n, 128),
+        )
+        out = torch.empty((m, n), device=a_int8.device, dtype=output_dtype)
+        retry_error_type, retry_detail = _capture_launch_failure(
+            launch, out, retry_params
+        )
+        if retry_error_type is not None:
+            out = None
+            retry_m, retry_n, retry_k, retry_warps, retry_stages, _, _ = retry_params
+            raise RuntimeError(
+                "Triton scaled int8 kernel launch failed after shared-memory retry "
+                f"(shape m={m}, k={k}, n={n}; tile=({retry_m},{retry_n},{retry_k}); "
+                f"warps={retry_warps}, stages={retry_stages}). {retry_detail}"
+            ) from _rebuild_launch_error(retry_error_type, retry_detail)
+        _remember_resource_safe_launch_params(
+            "scaled", m, k, n, a_int8.device, output_dtype, original_params, retry_params
+        )
+        return out
+
+    out = None
+    block_m, block_n, block_k, num_warps, num_stages, _, _ = params
+    raise RuntimeError(
+        "Triton scaled int8 kernel launch failed "
+        f"(shape m={m}, k={k}, n={n}; tile=({block_m},{block_n},{block_k}); "
+        f"warps={num_warps}, stages={num_stages}). {error_detail}"
+    ) from _rebuild_launch_error(error_type, error_detail)
 
 
 def _fused_quant_scaled_mm_call(x2d: torch.Tensor, qweight: torch.Tensor, qweight_scale: torch.Tensor, output_dtype: torch.dtype) -> torch.Tensor:

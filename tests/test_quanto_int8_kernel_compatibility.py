@@ -64,6 +64,10 @@ class _FakeTriton:
         return (size + block - 1) // block
 
 
+class _FakeOutOfMemoryError(RuntimeError):
+    pass
+
+
 class _FakeKernel:
     def __init__(self, failure):
         self.failure = failure
@@ -73,14 +77,18 @@ class _FakeKernel:
         def launch(*args, **kwargs):
             self.calls.append((grid, kwargs.copy()))
             error = self.failure(kwargs)
+            if isinstance(error, Exception):
+                raise error
             if error:
                 raise RuntimeError(error)
 
         return launch
 
 
-def _direct_case(kind, kernel, allocated):
+def _direct_case(kind, kernel, allocated, cleanup_before_retry_allocate=None):
     def allocate(shape, *, device, dtype):
+        if len(allocated) == 1 and cleanup_before_retry_allocate is not None:
+            cleanup_before_retry_allocate.append(allocated[0]() is None)
         output = _FakeOutput(shape)
         allocated.append(weakref.ref(output))
         return output
@@ -90,6 +98,8 @@ def _direct_case(kind, kernel, allocated):
         "_RESOURCE_SAFE_LAUNCH_CACHE_MAX",
         "_RESOURCE_SAFE_LAUNCH_CACHE_FIFO",
         "_shared_memory_resource_limit",
+        "_capture_launch_failure",
+        "_rebuild_launch_error",
         "_resource_safe_cache_key",
         "_resource_safe_launch_params",
         "_remember_resource_safe_launch_params",
@@ -158,6 +168,7 @@ class TestLargeMKernelCompatibility(unittest.TestCase):
             with self.subTest(kind=kind):
                 allocated = []
                 cleanup_observed = []
+                cleanup_before_retry_allocate = []
 
                 def fail_wide_tile(kwargs):
                     if kwargs["block_n"] == 128:
@@ -172,7 +183,12 @@ class TestLargeMKernelCompatibility(unittest.TestCase):
                 kernel = _FakeKernel(
                     fail_wide_tile
                 )
-                namespace, call, args = _direct_case(kind, kernel, allocated)
+                namespace, call, args = _direct_case(
+                    kind,
+                    kernel,
+                    allocated,
+                    cleanup_before_retry_allocate,
+                )
 
                 first_result = call(*args)
                 self.assertEqual(
@@ -186,6 +202,7 @@ class TestLargeMKernelCompatibility(unittest.TestCase):
                 self.assertEqual(len(allocated), 2)
                 self.assertIsNone(allocated[0]())
                 self.assertIs(allocated[1](), first_result)
+                self.assertEqual(cleanup_before_retry_allocate, [True])
                 self.assertEqual(cleanup_observed, [True])
 
                 second_result = call(*args)
@@ -196,20 +213,58 @@ class TestLargeMKernelCompatibility(unittest.TestCase):
                 self.assertIs(allocated[-1](), second_result)
                 self.assertTrue(namespace["_RESOURCE_SAFE_LAUNCH_CACHE"])
 
+    def test_failed_shared_memory_retry_releases_outputs_without_caching(self):
+        failure = (
+            "out of resource: shared memory, Required: 102400, "
+            "Hardware limit: 101376"
+        )
+        for kind in ("fused", "scaled"):
+            with self.subTest(kind=kind):
+                allocated = []
+                cleanup_before_retry_allocate = []
+                kernel = _FakeKernel(lambda kwargs: failure)
+                namespace, call, args = _direct_case(
+                    kind,
+                    kernel,
+                    allocated,
+                    cleanup_before_retry_allocate,
+                )
+
+                with self.assertRaisesRegex(
+                    RuntimeError, "failed after shared-memory retry"
+                ) as raised:
+                    call(*args)
+
+                self.assertEqual(len(kernel.calls), 2)
+                self.assertEqual(len(allocated), 2)
+                self.assertEqual(cleanup_before_retry_allocate, [True])
+                self.assertIsNone(allocated[0]())
+                self.assertIsNone(allocated[1]())
+                self.assertEqual(namespace["_RESOURCE_SAFE_LAUNCH_CACHE"], {})
+                self.assertIsInstance(raised.exception.__cause__, RuntimeError)
+                self.assertIn(failure, str(raised.exception.__cause__))
+
     def test_cuda_oom_does_not_trigger_smaller_tile_retry(self):
         for kind in ("fused", "scaled"):
             with self.subTest(kind=kind):
                 allocated = []
                 kernel = _FakeKernel(
-                    lambda kwargs: "CUDA out of memory. Tried to allocate 675 MiB"
+                    lambda kwargs: _FakeOutOfMemoryError(
+                        "CUDA out of memory. Tried to allocate 675 MiB"
+                    )
                 )
                 namespace, call, args = _direct_case(kind, kernel, allocated)
-                with self.assertRaisesRegex(RuntimeError, "CUDA out of memory"):
+                with self.assertRaisesRegex(
+                    RuntimeError, "CUDA out of memory"
+                ) as raised:
                     call(*args)
                 self.assertEqual(len(kernel.calls), 1)
                 self.assertEqual(len(allocated), 1)
                 self.assertIsNone(allocated[0]())
                 self.assertEqual(namespace["_RESOURCE_SAFE_LAUNCH_CACHE"], {})
+                self.assertIsInstance(
+                    raised.exception.__cause__, _FakeOutOfMemoryError
+                )
 
 
 if __name__ == "__main__":
