@@ -8,7 +8,8 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 Live previews, community H3 checkpoint imports, more model workflows, long
 reference timelines and clearer duration planning.
 
-- Add optional Fast Frames, Tiny VAE still frames and looping Tiny VAE video
+- Enable looping Tiny VAE video by default, preserving saved preview choices.
+  Offer Off, Fast Frames and Tiny VAE still frames alongside live video
   inside Studio's generation card. Preserve progress, clip/window labels,
   playback pause, phone autoplay recovery and reconnect after refresh. Report
   selected-model support, use still previews for supported image models and
@@ -23,10 +24,11 @@ reference timelines and clearer duration planning.
 - Support header-based INT8 descriptors, including Eros Max exports, mixed
   supported quantizations and compatible floating-point rotary buffers. Keep
   unknown formats/layouts and incomplete verification data blocked.
-- Add experimental DaSiWa H3 Hybrid v3 standard/Turbo, Krea 2 RAW/Turbo, Wan 2.2
-  Lightspeed v9 and LTX-2.3 DragonLeap v4 selections (#167), with pinned creator
-  files and native recipes. Expand Singularity from References to paired Frames
-  and References workflows using its existing checkpoint and recommended adapter.
+- Support DaSiWa H3 Hybrid v3 standard/Turbo recipes through verified checkpoint
+  imports (#167). Remove the eight curated DaSiWa entries and their automatic
+  visibility additions; users choose compatible files in the Model Browser.
+  Preserve imported definitions and downloaded weights. Expand Singularity to
+  paired Frames and References workflows using its existing checkpoint and recommended adapter.
 - Use the configured dense Auto backend for DaSiWa H3; allow optional Sol Engine
   on supported DaSiWa/imported baked-Turbo checkpoints without changing their
   recipe or adding duplicate Turbo/PDD acceleration.

@@ -14,10 +14,18 @@ from urllib.parse import quote
 
 
 PREVIEW_MODES = ("off", "rgb", "tiny_vae_frames", "tiny_vae_video")
+DEFAULT_PREVIEW_MODE = "tiny_vae_video"
 
 
 def preview_mode(value: Any) -> str:
     return value if isinstance(value, str) and value in PREVIEW_MODES else "off"
+
+
+def configured_preview_mode(value: Any) -> str:
+    """Resolve a saved preference, defaulting only when no value was saved."""
+    if value is None:
+        return DEFAULT_PREVIEW_MODE
+    return preview_mode(value)
 
 
 @dataclass(frozen=True)

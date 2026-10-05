@@ -350,7 +350,7 @@ from services.studio_enhancement import (
     new_enhancement, prepare_enhanced_job, public_enhancement,
 )
 from services.generation_preview import (
-    GenerationPreviewCache, PREVIEW_MODES, preview_mode, preview_response,
+    GenerationPreviewCache, PREVIEW_MODES, configured_preview_mode, preview_response,
 )
 
 _generation_previews = GenerationPreviewCache()
@@ -6753,7 +6753,7 @@ def get_system_config():
         "video_profile": cfg.get("video_profile", 2),
         "image_profile": cfg.get("image_profile", 2),
         "audio_profile": cfg.get("audio_profile", 3.5),
-        "generation_preview": preview_mode(cfg.get("generation_preview")),
+        "generation_preview": configured_preview_mode(cfg.get("generation_preview")),
         "video_output_codec": cfg.get("video_output_codec", "libx264_8"),
         "image_output_codec": cfg.get("image_output_codec", "jpeg_95"),
         "enhancer_enabled": cfg.get("enhancer_enabled", 0),
@@ -25596,7 +25596,9 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     "process_status": "process:main",
                 },
                 "loras": [],
-                "_generation_preview_mode": preview_mode(wgp.server_config.get("generation_preview")),
+                "_generation_preview_mode": configured_preview_mode(
+                    wgp.server_config.get("generation_preview")
+                ),
             }
             if state["_generation_preview_mode"] != "off":
                 _generation_previews.begin(job_id)

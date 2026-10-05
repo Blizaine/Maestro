@@ -1283,7 +1283,7 @@ export function GenerationPreviewSetting() {
       <select
         id="generation-preview-mode"
         aria-describedby={`generation-preview-details generation-preview-description${generationMode === 'image' ? ' generation-preview-image-description' : ''}`}
-        value={systemConfig.generation_preview ?? 'off'}
+        value={systemConfig.generation_preview ?? 'tiny_vae_video'}
         onChange={event => updateConfig({generation_preview: event.target.value as GenerationPreviewMode})}
         className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
       >

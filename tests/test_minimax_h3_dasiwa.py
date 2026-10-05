@@ -1,4 +1,4 @@
-"""DaSiWa model identity, conditioning, and baked acceleration boundaries."""
+"""Legacy DaSiWa model identity, conditioning, and baked recipe boundaries."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from models.minimax_h3.turbo import (  # noqa: E402
 
 def preset(refs=False, turbo=False):
     name = f"minimax_h3_{'ref2va_' if refs else ''}dasiwa{'_turbo' if turbo else ''}"
-    return json.loads((ROOT / "app/defaults" / f"{name}.json").read_text())
+    return json.loads((ROOT / "tests/fixtures/dasiwa" / f"{name}.json").read_text())
 
 
 def definition(refs=False, turbo=False):

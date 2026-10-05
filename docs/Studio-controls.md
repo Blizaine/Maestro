@@ -149,7 +149,7 @@ The green LoRA info button opens its usage guide. Guides stay within the visible
 
 ## Generation previews
 
-Open **Settings → Performance → Generation Preview** and choose **Fast Frames**, **Clearer Frames (Tiny VAE)** or **Live Video (Tiny VAE)**. **Off** is the default. The choice applies when the next generation begins, including queued jobs, and does not require disabling Performance Auto.
+Open **Settings → Performance → Generation Preview** and choose **Fast Frames**, **Clearer Frames (Tiny VAE)**, **Live Video (Tiny VAE)** or **Off**. **Live Video** is the default when no choice has been saved; existing choices are preserved. The choice applies when the next generation begins, including queued jobs, and does not require disabling Performance Auto.
 
 The preview appears inside Studio's **Generating…** card while progress and ETA remain visible. Its label identifies the current clip and window. Live Video loops silently; click the video or use its pause/play button to pause playback while generation continues. The pause choice survives refreshed previews and window changes for that job.
 

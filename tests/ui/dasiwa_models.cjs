@@ -1,4 +1,4 @@
-// Exercise actual Store model routing and persistence with isolated API/storage.
+// Retired presets stay opt-in if restored locally; preserve legacy routing.
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const assert = require('node:assert/strict');
 const root = path.resolve(__dirname, '../..');
@@ -7,8 +7,8 @@ const ids = ['minimax_h3_dasiwa', 'minimax_h3_ref2va_dasiwa',
   'minimax_h3_dasiwa_turbo', 'minimax_h3_ref2va_dasiwa_turbo'];
 const allIds = [...ids, 'dasiwa_krea2_raw', 'dasiwa_krea2_turbo',
   'dasiwa_wan2_2_i2v_lightspeed_v9', 'dasiwa_ltx2_3_dragonleap_v4'];
-const presets = new Map(allIds.map(id => [id, JSON.parse(fs.readFileSync(path.join(root, 'app/defaults', `${id}.json`)))]));
-const models = allIds.map(id => ({...presets.get(id).model, model_type: id,
+const presets = new Map(allIds.map(id => [id, JSON.parse(fs.readFileSync(path.join(root, 'tests/fixtures/dasiwa', `${id}.json`)))]));
+const models = ids.map(id => ({...presets.get(id).model, model_type: id,
   family: id.includes('krea2') ? 'krea2' : id.includes('wan2') ? 'wan' : id.includes('ltx2') ? 'ltx2' : 'minimax_h3',
   is_image: id.includes('krea2'), is_t2v: !id.includes('krea2') && !id.includes('wan2'),
   is_i2v: !id.includes('krea2'), supports_end_frame: !id.includes('ref2va'),
@@ -68,9 +68,13 @@ function fixture(storage = new Map()) {
 
 (async () => {
   const f = fixture();
+  for (const id of allIds) assert.equal(f.store.getState().enabledModels.has(id), false, `${id} absent from fresh defaults`);
   await f.store.getState().loadModels();
   await f.settle();
-  for (const id of allIds) assert.ok(f.store.getState().enabledModels.has(id), `${id} added in visibility migration`);
+  for (const id of allIds) assert.equal(f.store.getState().enabledModels.has(id), false, `${id} not added by migration`);
+  f.store.getState().toggleModelEnabled(ids[2]);
+  await f.settle();
+  assert.equal(f.store.getState().enabledModels.has(ids[2]), true, 'explicit enable still works for a restored preset');
   f.store.getState().toggleModelEnabled(ids[2]);
   await f.settle();
   const reloaded = fixture(f.storage);
@@ -113,5 +117,5 @@ function fixture(storage = new Map()) {
     assert.equal(g.supported(models.find(m => m.model_type === refs), {...intent, workflow: 'references', hasOmniReferences: true}), true);
     assert.equal(g.supported(models.find(m => m.model_type === refs), {...intent, workflow: 'frames'}), false);
   }
-  console.log('All eight DaSiWa visibility defaults, opt-out persistence, paired H3 routing, step memory, and baked Turbo settings passed');
+  console.log('DaSiWa excluded from defaults/migration; restored legacy routing, opt-out persistence and baked Turbo settings passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});

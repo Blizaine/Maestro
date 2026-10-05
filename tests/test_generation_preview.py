@@ -13,9 +13,11 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from services.generation_preview import (
+    DEFAULT_PREVIEW_MODE,
     PREVIEW_MODES,
     GenerationPreviewCache,
     PreviewMedia,
+    configured_preview_mode,
     preview_mode,
     preview_response,
 )
@@ -47,6 +49,14 @@ def test_preview_mode_accepts_only_supported_values(value):
 @pytest.mark.parametrize("value", [None, "", "RGB", "tinyvae", 1, object()])
 def test_preview_mode_normalizes_invalid_values_to_off(value):
     assert preview_mode(value) == "off"
+
+
+def test_missing_config_defaults_to_live_video_but_preserves_explicit_modes():
+    assert DEFAULT_PREVIEW_MODE == "tiny_vae_video"
+    assert configured_preview_mode(None) == "tiny_vae_video"
+    assert configured_preview_mode("off") == "off"
+    assert configured_preview_mode("tiny_vae_frames") == "tiny_vae_frames"
+    assert configured_preview_mode("invalid") == "off"
 
 
 @pytest.mark.parametrize(

@@ -144,10 +144,10 @@ license. See `docs/Generation-preview.md` for support and behavior.
 
 ## DaSiWa and imported community checkpoints
 
-Optional DaSiWa H3, Krea 2, Wan 2.2 and LTX-2.3 definitions download the
-creator's pinned files rather than redistributing weights. Their official source
-links, file identities, sizes and hashes are documented in `docs/DaSiWa-models.md`
-and the corresponding model definitions. Imported CivitAI H3 files retain
+DaSiWa checkpoints are user-selected imports rather than built-in model
+selections. No checkpoint weights are redistributed. Official source links
+and family import limits are documented in `docs/DaSiWa-models.md`.
+Imported CivitAI H3 files retain
 creator/source provenance and verification receipts. Underlying model licenses
 and creator distribution terms continue to apply; Maestro's application license
 does not grant rights in these weights. See `docs/H3-checkpoint-import.md`.

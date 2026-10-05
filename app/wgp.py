@@ -2744,7 +2744,8 @@ else:
     server_config = json.loads(text)
 
 server_config.setdefault("prompt_enhancer_quantization", "quanto_int8")
-server_config.setdefault("generation_preview", "off")
+from services.generation_preview import DEFAULT_PREVIEW_MODE
+server_config.setdefault("generation_preview", DEFAULT_PREVIEW_MODE)
 
 checkpoints_paths = server_config.get("checkpoints_paths", None)
 if checkpoints_paths is None: checkpoints_paths = server_config["checkpoints_paths"] = fl.default_checkpoints_paths
@@ -4582,9 +4583,16 @@ def load_models(model_type, override_profile = -1, output_type="video", preview_
         kwargs = pipe
         pipe = kwargs.pop("pipe")
     if "coTenantsMap" not in kwargs: kwargs["coTenantsMap"] = {}
+    from services.generation_preview import (
+        configured_preview_mode,
+        preview_mode as normalize_preview_mode,
+    )
     from shared.preview_runtime import prepare_preview_decoder
     preview_decoder, preview_key, preview_notice = prepare_preview_decoder(
-        preview_mode or server_config.get("generation_preview", "off"),
+        normalize_preview_mode(
+            preview_mode if preview_mode is not None
+            else configured_preview_mode(server_config.get("generation_preview"))
+        ),
         base_model_type, model_def, gen=preview_gen,
     )
     if preview_decoder is not None:
@@ -4781,9 +4789,15 @@ def build_callback(state, pipe, send_cmd, status, num_inference_steps, preview_m
                    preview_mode=None, preview_image=False, preview_duration=None):
     gen = get_gen_info(state)
     gen["num_inference_steps"] = num_inference_steps
-    from services.generation_preview import preview_mode as normalize_preview_mode
+    from services.generation_preview import (
+        configured_preview_mode,
+        preview_mode as normalize_preview_mode,
+    )
     from shared.preview_runtime import RGBPreviewSession, preview_context, rgb_preview_supported
-    mode = normalize_preview_mode(preview_mode if preview_mode is not None else server_config.get("generation_preview"))
+    mode = normalize_preview_mode(
+        preview_mode if preview_mode is not None
+        else configured_preview_mode(server_config.get("generation_preview"))
+    )
     context = preview_context(gen)
     disabled = [False]
     tiny_preview = None
@@ -7822,9 +7836,15 @@ def generate_video(
     gen = get_gen_info(state)
     if gen.get("abort", False):
         return False
-    from services.generation_preview import preview_mode as normalize_preview_mode
+    from services.generation_preview import (
+        configured_preview_mode,
+        preview_mode as normalize_preview_mode,
+    )
     generation_preview_mode = normalize_preview_mode(
-        state.get("_generation_preview_mode", server_config.get("generation_preview")),
+        state.get(
+            "_generation_preview_mode",
+            configured_preview_mode(server_config.get("generation_preview")),
+        ),
     )
     gen["early_stop"] = False
     gen["early_stop_forwarded"] = False

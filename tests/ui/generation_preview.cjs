@@ -160,8 +160,8 @@ const previewModels = [
       return {page, errors};
     };
 
-    // Missing config from an older backend defaults to Off. Selecting a mode
-    // persists to server config and a fresh page reads it back.
+    // Missing config defaults to Live Video. Explicit selections, including
+    // Off, persist to server config and survive a fresh page.
     const settingsContext = await browser.newContext();
     let {page: settingsPage} = await openPage(settingsContext);
     await settingsPage.evaluate(async ({models}) => {
@@ -176,7 +176,7 @@ const previewModels = [
     }, {models: previewModels});
     const selector = settingsPage.getByLabel('Generation Preview', {exact: true});
     await selector.waitFor();
-    assert.equal(await selector.inputValue(), 'off', 'missing backend setting defaults to Off');
+    assert.equal(await selector.inputValue(), 'tiny_vae_video', 'missing backend setting defaults to Live Video');
     const capabilityStatus = key => settingsPage.locator(`[data-preview-capability="${key}"] [data-preview-capability-status]`);
     assert.equal(await capabilityStatus('rgb').innerText(), 'Unavailable', 'H3 does not advertise RGB support');
     assert.equal(await capabilityStatus('tiny_vae_frames').innerText(), 'Supported', 'H3 advertises Tiny VAE frame support');
@@ -248,13 +248,16 @@ const previewModels = [
     await settingsPage.waitForFunction(() => document.getElementById('generation-preview-description')?.textContent?.startsWith('Tools mode does not use visual previews.'));
     assert.equal(await settingsPage.locator('[data-preview-capability]').count(), 0, 'Tools mode does not advertise visual preview capabilities');
     assert.equal(await selector.inputValue(), 'tiny_vae_frames', 'Tools mode leaves the global preview preference unchanged');
+    await selector.selectOption('off');
+    await settingsPage.waitForFunction(() => window.store.getState().systemConfig?.generation_preview === 'off');
+    assert.equal(savedConfig.generation_preview, 'off', 'explicit Off is persisted');
     await settingsPage.close();
     ({page: settingsPage} = await openPage(settingsContext));
     await settingsPage.evaluate(async () => {
       await window.store.getState().loadSystemConfig();
       window.mountSettings();
     });
-    assert.equal(await settingsPage.getByLabel('Generation Preview', {exact: true}).inputValue(), 'tiny_vae_frames', 'saved mode survives a fresh page');
+    assert.equal(await settingsPage.getByLabel('Generation Preview', {exact: true}).inputValue(), 'off', 'explicit Off survives a fresh page');
     await settingsPage.close();
     await settingsContext.close();
 

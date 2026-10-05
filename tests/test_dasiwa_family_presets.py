@@ -1,4 +1,4 @@
-"""Structural regressions for the official DaSiWa Krea/Wan/LTX presets."""
+"""Legacy DaSiWa recipe compatibility; these fixtures are not shipped models."""
 from __future__ import annotations
 
 import ast
@@ -11,7 +11,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULTS = ROOT / "app" / "defaults"
+DEFAULTS = ROOT / "tests" / "fixtures" / "dasiwa"
 KREA_HANDLER = ROOT / "app" / "models" / "krea2" / "krea2_handler.py"
 WAN_HANDLER = ROOT / "app" / "models" / "wan" / "wan_handler.py"
 LTX_HANDLER = ROOT / "app" / "models" / "ltx2" / "ltx2_handler.py"
@@ -71,6 +71,13 @@ def _build_hf_url(repo: str, *parts: str) -> str:
 
 
 class DaSiWaFamilyPresetTests(unittest.TestCase):
+    def test_dasiwa_fixtures_are_not_registered_as_builtin_models(self):
+        # The registry scans app/defaults, not test fixtures. Retain legacy
+        # recipe coverage without offering downloads in the built-in catalog.
+        for fixture in DEFAULTS.glob("*.json"):
+            with self.subTest(model=fixture.stem):
+                self.assertFalse((ROOT / "app" / "defaults" / fixture.name).exists())
+
     @classmethod
     def setUpClass(cls):
         cls.krea_handler = _load_family_handler(

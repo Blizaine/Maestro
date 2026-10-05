@@ -4,10 +4,13 @@ In **Settings → Performance → Generation Preview**, choose:
 
 | Option | What appears in Studio |
 | --- | --- |
-| Off (default) | The usual generating card; no preview decoder or capture work. |
+| Off | The usual generating card; no preview decoder or capture work. |
 | Fast Frames | A small set of approximate RGB frames sampled during denoising. |
 | Clearer Frames (Tiny VAE) | A small set of decoded frames from a lightweight preview VAE. |
-| Live Video (Tiny VAE) | A muted, looping preview of the current window. Images use clearer frames. |
+| Live Video (Tiny VAE) (default) | A muted, looping preview of the current window. Images use clearer frames. |
+
+Live Video is the default when no choice has been saved. Existing saved choices,
+including Off, are preserved. Choose Off here to disable previews.
 
 The setting takes effect when the next generation begins, including queued jobs. It remains available with Performance Auto enabled. The preview stays inside the Studio generating card, alongside progress and ETA, and labels its clip and window. Click the video or its pause/play button to control playback without pausing generation.
 

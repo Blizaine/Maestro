@@ -5,9 +5,11 @@ October 4, 2026. Changes since v2.5.0.
 ## Watch generation develop
 
 In **Settings → Performance → Generation Preview**, choose **Fast Frames**,
-**Clearer Frames (Tiny VAE)** or **Live Video (Tiny VAE)**. Off remains the
-default. Previews appear in Studio's generating card with progress, ETA and the
-current clip/window. Pause or resume the looping video without pausing the render.
+**Clearer Frames (Tiny VAE)** or **Live Video (Tiny VAE)**. Live Video is enabled
+by default when no preview choice is saved. Existing choices, including Off,
+are preserved; choose Off to disable previews. Previews appear in Studio's
+generating card with progress, ETA and the current clip/window. Pause or resume
+the looping video without pausing the render.
 Phones play inline, with a Play button if the browser blocks automatic playback.
 
 H3 previews use the predicted clean result so a scene can emerge before final
@@ -45,12 +47,12 @@ See [supported files, recipes and validation](H3-checkpoint-import.md).
 
 ## More models and workflows
 
-The experimental DaSiWa selections requested in [#167](https://github.com/Blizaine/Maestro/issues/167)
-include H3 Hybrid v3 standard and baked Turbo in Frames/References, Krea 2
-MirroredSkies RAW and DarkDesire Turbo UC images, Wan 2.2 SynthSeduction
-Lightspeed v9 and LTX-2.3 DragonLeap v4 FP8. They download pinned creator files
-with model-specific defaults; Mature mode controls applicable selections.
-See the [DaSiWa model guide](DaSiWa-models.md).
+DaSiWa checkpoints use the Model Browser rather than eight built-in selections.
+Verified H3 Hybrid v3 standard and baked Turbo imports retain creator-specific
+recipes and paired Frames/References workflows. Previously imported definitions
+and downloaded weights are preserved. Browser import support varies by family;
+Wan high/low pairs do not yet have a verified import pipeline. See the
+[DaSiWa model guide and family limits](DaSiWa-models.md).
 
 **Singularity** now supports Frames text generation, start/end/timed images and
 Control Video editing as well as References. Its companion entries reuse the

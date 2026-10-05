@@ -982,8 +982,6 @@ const DEFAULT_ENABLED_MODELS = new Set([
   'krea2_turbo',
   'krea2_raw_edit',
   'krea2_turbo_edit',
-  'dasiwa_krea2_raw',
-  'dasiwa_krea2_turbo',
   // Video
   // Default to just the LTX-2.3 Distilled 1.1 22B checkpoint (newer /
   // better quality). The FP8 build and every other video model
@@ -994,8 +992,6 @@ const DEFAULT_ENABLED_MODELS = new Set([
   // LTX-2.5's official split Distilled workflow. The large gated component
   // pack downloads only when selected for the first time.
   'ltx2_25',
-  'dasiwa_ltx2_3_dragonleap_v4',
-  'dasiwa_wan2_2_i2v_lightspeed_v9',
   // SCAIL-2 character animation (Animate a character with a control
   // video). Fast = lightx2v distill bundled (6 steps, no CFG, ~13x).
   'scail2_14B',
@@ -1019,10 +1015,6 @@ const DEFAULT_ENABLED_MODELS = new Set([
   'minimax_h3_ref2va_full',
   'minimax_h3_ref2va_fused_turbo',
   'minimax_h3_ref2va_singularity',
-  'minimax_h3_dasiwa',
-  'minimax_h3_ref2va_dasiwa',
-  'minimax_h3_dasiwa_turbo',
-  'minimax_h3_ref2va_dasiwa_turbo',
   // Audio — Speech
   'kugelaudio_0_open',
   'qwen3_tts_base',
@@ -1079,11 +1071,9 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   17: ['minimax_h3_ref2va_singularity'],
   // MiniMax H3 Singularity Frames companion; preserve existing visibility choices.
   18: ['minimax_h3_singularity'],
-  // DaSiWa creator checkpoints; later user opt-outs survive this migration.
-  19: ['minimax_h3_dasiwa', 'minimax_h3_ref2va_dasiwa',
-    'minimax_h3_dasiwa_turbo', 'minimax_h3_ref2va_dasiwa_turbo',
-    'dasiwa_krea2_raw', 'dasiwa_krea2_turbo',
-    'dasiwa_wan2_2_i2v_lightspeed_v9', 'dasiwa_ltx2_3_dragonleap_v4'],
+  // Reserved: DaSiWa checkpoints are user imports, without curated additions.
+  // Keep the version so earlier local visibility preferences remain valid.
+  19: [],
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 

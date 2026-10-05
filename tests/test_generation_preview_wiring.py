@@ -16,6 +16,8 @@ from PIL import Image
 APP = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP))
 
+from services.generation_preview import configured_preview_mode, preview_mode
+
 
 def isolated_function(path, name, namespace):
     tree = ast.parse((APP / path).read_text(encoding="utf-8"))
@@ -25,13 +27,71 @@ def isolated_function(path, name, namespace):
     return namespace[name]
 
 
-def make_callback(mode="off", decoder=None, sender=None, handler=None):
+@pytest.mark.parametrize(
+    ("saved_mode", "expected"),
+    [(None, "tiny_vae_video"), ("off", "off"), ("rgb", "rgb"), ("invalid", "off")],
+)
+def test_system_config_defaults_only_when_saved_preference_is_missing(saved_mode, expected):
+    config = {} if saved_mode is None else {"generation_preview": saved_mode}
+    get_system_config = isolated_function("launch.py", "get_system_config", {
+        "wgp": SimpleNamespace(
+            server_config=config,
+            attention_modes_supported=[],
+            args=SimpleNamespace(vram_safety_coefficient=0.8),
+        ),
+        "_APP_VERSION": "test",
+        "configured_preview_mode": configured_preview_mode,
+        "_get_linked_model_folders": lambda: [],
+    })
+
+    assert get_system_config()["generation_preview"] == expected
+
+
+def test_load_models_preserves_explicit_off_over_the_default():
+    tree = ast.parse((APP / "wgp.py").read_text(encoding="utf-8"))
+    load_models = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "load_models"
+    )
+    preview_assignment = next(
+        node for node in load_models.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Tuple)
+            and any(isinstance(item, ast.Name) and item.id == "preview_decoder" for item in target.elts)
+            for target in node.targets
+        )
+    )
+    mode_expression = preview_assignment.value.args[0]
+    selector = ast.FunctionDef(
+        name="select_preview_mode",
+        args=ast.arguments(
+            posonlyargs=[],
+            args=[ast.arg(arg="preview_mode"), ast.arg(arg="server_config")],
+            kwonlyargs=[], kw_defaults=[], defaults=[],
+        ),
+        body=[ast.Return(value=mode_expression)],
+        decorator_list=[],
+    )
+    namespace = {
+        "configured_preview_mode": configured_preview_mode,
+        "normalize_preview_mode": preview_mode,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[selector], type_ignores=[])),
+                 "load-model-preview-mode", "exec"), namespace)
+
+    assert namespace["select_preview_mode"]("off", {}) == "off"
+    assert namespace["select_preview_mode"](None, {}) == "tiny_vae_video"
+    assert namespace["select_preview_mode"](None, {"generation_preview": "off"}) == "off"
+
+
+def make_callback(mode="off", decoder=None, sender=None, handler=None, config=None):
     gen = {"process_status": "process:main", "progress_status": "", "window_no": 2,
            "total_windows": 3, "prompt_no": 1, "prompts_max": 2}
     events = []
     namespace = {
         "torch": torch, "time": time, "gen_lock": threading.Lock(),
-        "get_gen_info": lambda state: gen, "server_config": {},
+        "get_gen_info": lambda state: gen, "server_config": config or {},
         "get_model_handler": mock.Mock(return_value=handler or SimpleNamespace(get_rgb_factors=lambda: None)),
         "transformer_type": "test-model", "offloadobj": SimpleNamespace(tiny_vae=decoder, preview_notice=None),
         "wan_model": None, "merge_status_context": lambda status, phase: phase,
@@ -45,6 +105,15 @@ def make_callback(mode="off", decoder=None, sender=None, handler=None):
 
 def test_off_skips_model_handler_and_latent_capture_but_keeps_progress():
     callback, _, events, ns = make_callback()
+    assert not callback.wants_preview(0)
+    callback(0, torch.zeros(24, 2, 2, 2))
+    callback.close_preview()
+    ns["get_model_handler"].assert_not_called()
+    assert [cmd for cmd, _ in events] == ["progress"]
+
+
+def test_explicit_internal_off_does_not_inherit_live_video_default():
+    callback, _, events, ns = make_callback("off", config={"generation_preview": "tiny_vae_video"})
     assert not callback.wants_preview(0)
     callback(0, torch.zeros(24, 2, 2, 2))
     callback.close_preview()

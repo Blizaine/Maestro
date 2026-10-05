@@ -33,7 +33,7 @@ When a model page offers both Turbo and non-Turbo files, its shared acceleration
 
 DaSiWa Hybrid v3 standard INT8 and W4A8 INT4 use the documented 25-step Euler recipe, video shift 11 and audio shift 4. Their baked Turbo v3 versions use 8 steps by default, accept 4–8, and use video shift 9 and audio shift 4. These releases are identified by their exact CivitAI model/version/file IDs and published checksums.
 
-Baked acceleration disables managed Turbo, extra Turbo/PDD adapters, Sol, First Block Cache and audio refinement. Its stored sampler, shifts, CFG and supported step range are enforced at generation time. Ordinary compatible H3 character/style LoRAs remain available with the existing adapter checks. Creator-published schedules take precedence; an explicitly confirmed recipe uses Maestro's documented fallback defaults for missing fields.
+Baked acceleration disables managed Turbo, extra Turbo/PDD adapters, First Block Cache and audio refinement. Compatible imports allow optional Sol Engine on supported hardware. Its stored sampler, shifts, CFG and supported step range are enforced at generation time. Ordinary compatible H3 character/style LoRAs remain available with the existing adapter checks. Creator-published schedules take precedence; an explicitly confirmed recipe uses Maestro's documented fallback defaults for missing fields.
 
 “Verified” means the selected file's structure, quantization, workflow identity, sampling profile and downloaded checksum passed the import checks. It does not certify the creator's output quality or every combination of LoRAs and conditioning inputs. Test a short clip before a long production run.
 
@@ -43,7 +43,7 @@ Preflight reads a bounded SafeTensor header or GGUF tensor index (at most 8 MiB)
 
 The download goes to a temporary file. Maestro checks its expected size, SHA-256 and H3 layout before publishing it, then writes provenance and workflow definitions. A failed check preserves an existing checkpoint.
 
-If an identical checkpoint is already installed, including a curated DaSiWa file with another local filename, Maestro verifies its full SHA-256 and reuses it. Frames and References do not download duplicate transformer weights. The usual H3 text encoder and VAEs remain shared and download on first use if needed. An imported checkpoint does not silently fall back to stock H3 weights.
+If an identical checkpoint is already installed, including a previously downloaded DaSiWa file with another local filename, Maestro verifies its full SHA-256 and reuses it. Frames and References do not download duplicate transformer weights. The usual H3 text encoder and VAEs remain shared and download on first use if needed. An imported checkpoint does not silently fall back to stock H3 weights.
 
 ## API
 

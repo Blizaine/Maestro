@@ -5,7 +5,7 @@ Release preparation, October 4, 2026. Public baseline:
 v2.5.0 and its regression/readme follow-ups. This record describes local
 verification; public CI has not run for the unpublished release candidate.
 
-## Release checks
+## Initial release preparation checks
 
 The release metadata and public documentation use **2.6.0**. Pinokio's schema
 version remains **8.0**; it is independent of Maestro's product version.
@@ -71,6 +71,38 @@ and `MAESTRO_CHROME` for the browser executable. Gallery media checks additional
 accept `MAESTRO_FFMPEG`; `gallery_inputs` requires the running local Maestro URL
 as its first argument. Other selected suites use isolated fixtures.
 
+## Final defaults follow-up
+
+Before publication, the eight curated DaSiWa definitions were retired to
+test-only compatibility fixtures and removed from fresh enabled-model defaults
+and automatic visibility additions. Generic checkpoint imports remain intact;
+a new regression builds standard and Turbo DaSiWa H3 companions from verified
+headers using only the native import templates. Existing imported definitions
+and downloaded weights are not modified.
+
+Live Video (Tiny VAE) is the default when no preview preference is saved.
+Explicit saved values, including Off, remain unchanged; invalid values still
+normalize to Off. Audio-only callbacks retain explicit Off behavior.
+
+| Follow-up check | Result |
+| --- | --- |
+| Checkpoint imports, recipes, legacy compatibility and downloads | 100 backend unittest cases passed. |
+| Preview preference/cache/wiring checks | 62 pytest cases passed, including missing config, saved Off and explicit internal Off. |
+| Model support, H3 clean-result previews and Tiny VAE behavior | 43 additional pytest cases passed. |
+| Model visibility/routing and imported H3 workflows | `dasiwa_models` and `h3_checkpoint_import` UI suites passed. |
+| Preview settings, playback and saved Off reload | `generation_preview` browser suite passed. |
+| Production frontend build and full lint | Passed. Existing build notices remain nonblocking. |
+| Python syntax and undefined-name checks | Passed for the changed runtime and checkpoint-test scope. |
+| Retired definitions and import templates | Eight test fixtures parse; native H3/Krea/LTX templates remain available. |
+| Documentation links | All 121 local references resolve across the ten updated documents. |
+| Clean-repo guard and staged whitespace | Passed on all 2,751 tracked files; retired presets are test fixtures and runtime artifacts remain excluded. |
+
+The original full discovery run above belongs to the initial preparation
+snapshot. This follow-up uses focused regressions for the changed defaults and
+retained import/preview behavior, without repeating a full GPU render or restart.
+Browser compatibility limits for Wan pairs and LTX distilled recipes are recorded
+in [the DaSiWa guide](DaSiWa-models.md).
+
 ## Scope and limits
 
 Automated tests check routing, source fidelity, recipes, checkpoint structure,
@@ -84,7 +116,7 @@ user preference change or app restart. Browser regressions use intercepted APIs
 and synthetic media. Physical iPhone Safari, clean installs/updates, additional
 GPU architectures and complete model renders remain separate validation.
 
-DaSiWa and Singularity selections, approximate Sol attention, long experimental
+DaSiWa checkpoint imports and Singularity selections, approximate Sol attention, long experimental
 H3 windows and unsupported-format restrictions retain their published caveats.
 Preview decoding can add GPU work and is model-dependent; H3 has no Fast Frames
 decoder. Download cancellation is offered only where the backend controls the

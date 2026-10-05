@@ -223,6 +223,32 @@ class TestCivitaiH3Transport(unittest.TestCase):
 
 
 class TestH3RegistrationAndRuntime(unittest.TestCase):
+    def test_dasiwa_import_recipes_do_not_depend_on_retired_builtin_presets(self):
+        from services.h3_checkpoint_import import inspect_h3_header
+        from test_h3_checkpoint_import import make_header, source_record
+
+        for turbo in (False, True):
+            with self.subTest(turbo=turbo):
+                header, payloads = make_header(compressed=True, quantization="int8",
+                                               native="ref2va", qkv="grouped")
+                creator = source_record(turbo=turbo)
+                receipt = inspect_h3_header(header, tensor_reader=lambda key: payloads[key],
+                                            source=creator)
+                entries = build_h3_definitions(creator, receipt, creator["filename"],
+                                                ROOT / "app/defaults")
+                self.assertEqual(len(entries), 2)
+                for slug, definition in entries.items():
+                    model = definition["model"]
+                    self.assertEqual(model["URLs"], [creator["filename"]])
+                    self.assertEqual(set(model["h3_companion_models"].values()), set(entries))
+                    self.assertEqual(definition["num_inference_steps"], 8 if turbo else 25)
+                    self.assertEqual((definition["flow_shift"], definition["audio_flow_shift"]),
+                                     (9 if turbo else 11, 4))
+                    capabilities = family_handler.query_model_def(model["architecture"], model)
+                    self.assertTrue(capabilities["sol_attention"])
+                    self.assertEqual(model["minimax_h3_model_id"], slug)
+                    self.assertEqual(model["minimax_h3_baked_turbo"], turbo)
+
     def loader(self, metadata):
         transformer = Mock()
         transformer.eval.return_value.requires_grad_.return_value = transformer
