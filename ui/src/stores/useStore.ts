@@ -2156,6 +2156,7 @@ interface AppState {
   directorSongInstrumental: boolean
   directorSongStyle: string
   directorSongLyrics: string
+  directorUploadedLyrics: string
   directorSongDuration: number
   directorTrackGenerating: boolean
   setDirectorMusicSource: (s: 'upload' | 'generate' | null) => void
@@ -2164,10 +2165,11 @@ interface AppState {
   setDirectorSongInstrumental: (v: boolean) => void
   setDirectorSongStyle: (v: string) => void
   setDirectorSongLyrics: (v: string) => void
+  setDirectorUploadedLyrics: (v: string) => void
   setDirectorSongDuration: (v: number) => void
   directorWriteSong: () => Promise<void>
   directorGenerateTrack: (mode?: 'now' | 'queue') => Promise<void>
-  directorAnalyzeAndPlan: (audioPath: string, opts?: { transcribe?: boolean; lyricsHint?: string }) => Promise<void>
+  directorAnalyzeAndPlan: (audioPath: string, opts?: { transcribe?: boolean; lyricsHint?: string; taggedLyrics?: string }) => Promise<void>
   directorSetEnergyBias: (bias: number) => Promise<void>
   directorConfirmStructure: () => void
   directorSetSceneDescription: (prompt: string) => void
@@ -2530,6 +2532,7 @@ async function _buildDirectorRestorePatch(
     directorSongInstrumental: Boolean(ui.directorSongInstrumental),
     directorSongStyle: String(ui.directorSongStyle || ''),
     directorSongLyrics: String(ui.directorSongLyrics || ''),
+    directorUploadedLyrics: String(ui.directorUploadedLyrics || ''),
     directorSongDuration: Number(ui.directorSongDuration || analysis?.duration || 120),
     shortFilmCharacters: Array.isArray(ui.shortFilmCharacters)
       ? ui.shortFilmCharacters as ShortFilmCharacter[]
@@ -10269,6 +10272,7 @@ export const useStore = create<AppState>((set, get) => ({
   directorSongInstrumental: false,
   directorSongStyle: '',
   directorSongLyrics: '',
+  directorUploadedLyrics: '',
   directorSongDuration: 120,
   directorTrackGenerating: false,
   setDirectorMusicSource: (s) => set({ directorMusicSource: s }),
@@ -10285,6 +10289,7 @@ export const useStore = create<AppState>((set, get) => ({
   setDirectorSongInstrumental: (v) => set({ directorSongInstrumental: v }),
   setDirectorSongStyle: (v) => set({ directorSongStyle: v }),
   setDirectorSongLyrics: (v) => set({ directorSongLyrics: v }),
+  setDirectorUploadedLyrics: (v) => set({ directorUploadedLyrics: v }),
   setDirectorSongDuration: (v) => set({ directorSongDuration: v }),
   directorResolution: '720p' as ResolutionPreset,
   directorAspectRatio: '16:9' as AspectRatio,
@@ -10565,7 +10570,10 @@ export const useStore = create<AppState>((set, get) => ({
     })
     try {
       const uploaded = await api.uploadAudio(file)
-      await get().directorAnalyzeAndPlan(uploaded.path, { transcribe: true })
+      await get().directorAnalyzeAndPlan(uploaded.path, {
+        transcribe: true,
+        taggedLyrics: get().directorUploadedLyrics.trim() || undefined,
+      })
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Upload failed'
       console.error('Director upload failed:', e)
@@ -10613,18 +10621,21 @@ export const useStore = create<AppState>((set, get) => ({
         audio_path: audioPath,
         transcribe,
         extract_vocals: transcribe,
-        lyrics_hint: opts?.lyricsHint || undefined,
+        lyrics_hint: opts?.lyricsHint || opts?.taggedLyrics || undefined,
       })
       stopAnalyzePolling()
       if (Number(analysis.duration || 0) > 60 * 60 + 0.5) {
         throw new Error('Director supports source timelines up to 60 minutes. Trim this audio to one hour or less and try again.')
       }
 
-      // Try LLM-based section classification (falls back to heuristic)
+      // Try section classification (tagged lyrics first, then LLM fallback)
       if (analysis.lyrics && analysis.lyrics.length > 0) {
         try {
-          set({ directorLoadingMessage: 'Identifying sections (LLM)...' })
-          const classified = await api.classifySections({ analysis })
+          set({ directorLoadingMessage: opts?.taggedLyrics ? 'Applying tagged sections...' : 'Identifying sections (LLM)...' })
+          const classified = await api.classifySections({
+            analysis,
+            tagged_lyrics: opts?.taggedLyrics || undefined,
+          })
           analysis = {
             ...analysis,
             sections: classified.sections,
@@ -11410,6 +11421,7 @@ export const useStore = create<AppState>((set, get) => ({
       directorSongInstrumental: false,
       directorSongStyle: '',
       directorSongLyrics: '',
+      directorUploadedLyrics: '',
       directorSongDuration: 120,
       directorTrackGenerating: false,
       shortFilmCharacters: [],
@@ -14098,6 +14110,7 @@ export const useStore = create<AppState>((set, get) => ({
         directorSongInstrumental: state.directorSongInstrumental,
         directorSongStyle: state.directorSongStyle,
         directorSongLyrics: state.directorSongLyrics,
+        directorUploadedLyrics: state.directorUploadedLyrics,
         directorSongDuration: state.directorSongDuration,
         directorMusicClipSeconds: state.directorMusicClipSeconds,
         directorVideoInferenceStepsByModel: state.directorVideoInferenceStepsByModel,

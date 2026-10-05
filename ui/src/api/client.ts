@@ -2433,10 +2433,11 @@ export async function planClipStructure(params: DirectorTimelineOptions & {
 
 export async function classifySections(params: {
   analysis: import('../types').AudioAnalysisResult
+  tagged_lyrics?: string
 }): Promise<{
   sections: import('../types').AudioSection[]
   song_structure: { label: string; display_label: string; start: number }[]
-  method: 'llm' | 'heuristic'
+  method: 'llm' | 'heuristic' | 'tagged'
 }> {
   const res = await fetch(`${BASE}/api/v1/director/classify-sections`, {
     method: 'POST',

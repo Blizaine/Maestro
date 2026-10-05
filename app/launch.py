@@ -9992,7 +9992,13 @@ async def plan_audio_structure(request: Request):
 
 @api.post("/api/v1/director/classify-sections")
 async def director_classify_sections(request: Request):
-    """Use LLM to reclassify section labels based on lyrics content."""
+    """Use LLM to reclassify section labels based on lyrics content.
+
+    When ``tagged_lyrics`` is supplied (the user's own lyrics with section
+    tags), those tags are ground truth and are used directly — no LLM is
+    loaded, so this path is fast and does not depend on the small model's
+    ability to parse freeform lyrics.
+    """
     from services import llm_service, audio_analysis
     body = await request.json()
 
@@ -10003,23 +10009,34 @@ async def director_classify_sections(request: Request):
     sections = analysis.get("sections", [])
     lyrics = analysis.get("lyrics")
     duration = analysis.get("duration", 0)
+    tagged_lyrics = (body.get("tagged_lyrics") or "").strip() or None
 
     # If no lyrics or no sections, return unchanged
     if not lyrics or not sections:
         return {"sections": sections, "method": "heuristic"}
 
     try:
-        _ensure_llm_loaded()
-        result = llm_service.classify_song_sections(
-            sections=sections,
-            lyrics=lyrics,
-            duration=duration,
-        )
+        # Tagged lyrics don't need the LLM — classify synchronously.
+        if tagged_lyrics:
+            result = llm_service.classify_song_sections(
+                sections=sections,
+                lyrics=lyrics,
+                duration=duration,
+                tagged_lyrics=tagged_lyrics,
+            )
+        else:
+            _ensure_llm_loaded()
+            result = llm_service.classify_song_sections(
+                sections=sections,
+                lyrics=lyrics,
+                duration=duration,
+            )
         song_structure = result.get("song_structure", [])
 
         if song_structure:
-            # Replace audio sections entirely with LLM structure
-            # (uses LLM boundaries/labels, interpolates energy from audio)
+            # Replace audio sections entirely with the identified structure
+            # (uses the structure's boundaries/labels, interpolates energy
+            # from audio).
             updated = audio_analysis.replace_sections_with_structure(
                 analysis, song_structure
             )
@@ -10031,7 +10048,7 @@ async def director_classify_sections(request: Request):
         return {
             "sections": updated["sections"],
             "song_structure": song_structure,
-            "method": "llm",
+            "method": "tagged" if tagged_lyrics else "llm",
         }
     except Exception as e:
         print(f"[Director] LLM section classification failed, using heuristic: {e}")

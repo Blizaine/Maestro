@@ -521,6 +521,8 @@ export function DirectorChat() {
   const setSkill = useStore(s => s.setDirectorSkill)
   const musicSource = useStore(s => s.directorMusicSource)
   const setMusicSource = useStore(s => s.setDirectorMusicSource)
+  const uploadedLyrics = useStore(s => s.directorUploadedLyrics)
+  const setUploadedLyrics = useStore(s => s.setDirectorUploadedLyrics)
   const songDescription = useStore(s => s.directorSongDescription)
   const setSongDescription = useStore(s => s.setDirectorSongDescription)
   const generateTrack = useStore(s => s.directorGenerateTrack)
@@ -927,6 +929,23 @@ export function DirectorChat() {
                       audioFile={audioFile}
                       isShortFilm={isShortFilm}
                     />
+                  )}
+                  {!isShortFilm && musicSource !== 'generate' && (
+                    <label className="block">
+                      <span className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
+                        Lyrics with sections (optional)
+                      </span>
+                      <textarea
+                        rows={5}
+                        value={uploadedLyrics}
+                        onChange={e => setUploadedLyrics(e.target.value)}
+                        placeholder={'[Verse 1]\nYour verse lyrics…\n\n[Chorus]\nYour hook…'}
+                        className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-xs text-text-primary font-mono focus:outline-none focus:border-accent-blue"
+                      />
+                      <p className="text-[10px] text-text-muted mt-1 leading-snug">
+                        Paste your lyrics with [Verse]/[Chorus]/[Bridge] tags to set exact section boundaries instead of auto-detection.
+                      </p>
+                    </label>
                   )}
                   <DirectorReferenceInputs
                     referenceImage={referenceImage}
