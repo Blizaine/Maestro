@@ -190,6 +190,12 @@ class family_handler:
         }
         for key, value in defaults.items():
             ui_defaults.setdefault(key, value)
+        # model_mode is a language code here. API requests merged onto
+        # primary_settings carry None, and a numeric mode left over from
+        # another model (e.g. YuE 2) would crash the pipeline's .lower().
+        model_mode = ui_defaults.get("model_mode")
+        if not isinstance(model_mode, str) or not model_mode.strip():
+            ui_defaults["model_mode"] = defaults["model_mode"]
 
         if settings_version < 2.44:
             ui_defaults["guidance_scale"] = 1.0

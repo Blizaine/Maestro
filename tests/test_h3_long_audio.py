@@ -110,8 +110,10 @@ setDuration(NaN); assert.equal(state.durationSeconds, 15);
         plan = plan_audio_request(" ".join([sentence] * 20), 100)
         self.assertTrue(all(part.text.endswith(".") for part in plan))
         self.assertEqual(" ".join(part.text for part in plan), " ".join([sentence] * 20))
+        # H3 voice plans at 3 w/s plus a short tail; slower plans left room
+        # for invented speech ahead of the script.
         normal = plan_audio_request(" ".join(["word"] * 56), 45)[0]
-        self.assertAlmostEqual(normal.duration_s, 56 / 2.8 + 1.4)
+        self.assertAlmostEqual(normal.duration_s, 56 / 3 + 0.6)
 
     def test_speaker_and_language_directions_are_not_spoken(self):
         plan = plan_audio_request("Speaker 1: [French, calm] Bonjour, mon ami.\n"
