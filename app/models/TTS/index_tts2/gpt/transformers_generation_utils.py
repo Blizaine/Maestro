@@ -30,9 +30,15 @@ from transformers.cache_utils import (
     DynamicCache,
     EncoderDecoderCache,
     OffloadedCache,
-    QuantizedCacheConfig,
     StaticCache,
 )
+try:
+    from transformers.cache_utils import QuantizedCacheConfig
+except ImportError:
+    # Removed by the transformers 4.56 cache refactor (Maestro pins 4.57.1).
+    # Only the cache_implementation="quantized" branch uses it, and IndexTTS2
+    # never sets cache_implementation.
+    QuantizedCacheConfig = None
 from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.integrations.fsdp import is_fsdp_managed_module
@@ -58,12 +64,17 @@ from transformers.generation.candidate_generator import (
     _prepare_attention_mask,
     _prepare_token_type_ids,
 )
-from transformers.generation.configuration_utils import (
-    NEED_SETUP_CACHE_CLASSES_MAPPING,
-    QUANT_BACKEND_CLASSES_MAPPING,
-    GenerationConfig,
-    GenerationMode,
-)
+from transformers.generation.configuration_utils import GenerationConfig, GenerationMode
+try:
+    from transformers.generation.configuration_utils import (
+        NEED_SETUP_CACHE_CLASSES_MAPPING,
+        QUANT_BACKEND_CLASSES_MAPPING,
+    )
+except ImportError:
+    # Also removed in transformers 4.56. Empty lookups keep generation on its
+    # default DynamicCache, which is all IndexTTS2 uses.
+    NEED_SETUP_CACHE_CLASSES_MAPPING = {}
+    QUANT_BACKEND_CLASSES_MAPPING = {}
 from transformers.generation.logits_process import (
     EncoderNoRepeatNGramLogitsProcessor,
     EncoderRepetitionPenaltyLogitsProcessor,
