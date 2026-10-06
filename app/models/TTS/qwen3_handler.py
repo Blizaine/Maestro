@@ -442,6 +442,14 @@ class family_handler:
             }
         for key, value in defaults.items():
             ui_defaults.setdefault(key, value)
+        # model_mode is a speaker/language string for every Qwen3 variant.
+        # API requests are merged onto primary_settings (model_mode=None),
+        # and a client switching from a numeric-mode model (YuE 2 composition
+        # planning, Krea 2) can carry an int — setdefault keeps both, so the
+        # pipeline crashed on .lower() or CustomVoice rejected the speaker.
+        model_mode = ui_defaults.get("model_mode")
+        if not isinstance(model_mode, str) or not model_mode.strip():
+            ui_defaults["model_mode"] = defaults["model_mode"]
         if base_model_type == "qwen3_tts_base":
             audio_prompt_type = str(ui_defaults.get("audio_prompt_type", "A") or "A").upper()
             if audio_prompt_type not in ("A", "AB"):

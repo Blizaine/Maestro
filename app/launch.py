@@ -664,6 +664,49 @@ def _model_weight_groups(model_type: str, owned_only: bool = False) -> list:
     return groups
 
 
+def _handler_model_files(model_type: str) -> list:
+    """Repo file sets the family handler downloads itself.
+
+    Handler-managed models (Chatterbox) declare no URLs at all;
+    wgp.load_models() reaches their weights through download_models("", ...),
+    which calls the handler's query_model_files(). Same call shape here.
+    """
+    base_model_type = wgp.get_base_model_type(model_type)
+    handler = wgp.model_types_handlers.get(base_model_type)
+    if handler is None or not hasattr(handler, "query_model_files"):
+        return []
+
+    def compute_list(filename):
+        return [] if filename is None else [filename[filename.rfind("/") + 1:]]
+
+    files = handler.query_model_files(compute_list, base_model_type, wgp.get_runtime_model_def(model_type))
+    if not files:
+        return []
+    return files if isinstance(files, list) else [files]
+
+
+def _handler_files_downloaded(file_defs: list) -> bool:
+    """True when every file set from _handler_model_files() is on disk.
+
+    Mirrors wgp.process_files_def's layout (<root>/<target>/<source>/<file>)
+    and searches every checkpoint root, linked read-only installs included.
+    """
+    for one_repo in file_defs:
+        source_folders = one_repo.get("sourceFolderList") or []
+        target_folders = one_repo.get("targetFolderList") or [None] * len(source_folders)
+        for target, source, files in zip(target_folders, source_folders, one_repo.get("fileList") or []):
+            folder_parts = [part for part in (target, source) if part]
+            if not files:
+                folder = os.path.join(*folder_parts) if folder_parts else ""
+                if wgp.fl.locate_folder(folder, error_if_none=False) is None:
+                    return False
+                continue
+            for name in files:
+                if wgp.fl.locate_file(os.path.join(*folder_parts, name), error_if_none=False) is None:
+                    return False
+    return True
+
+
 def _check_model_downloaded(model_type: str) -> bool:
     """Check if a model's checkpoint files are downloaded.
 
@@ -676,10 +719,15 @@ def _check_model_downloaded(model_type: str) -> bool:
         if model_def is None:
             return False
         groups = _model_weight_groups(model_type)
-        if not groups:
-            return False
-        if not all(_variant_group_downloaded(g, model_type=model_type) for g in groups):
-            return False
+        if groups:
+            if not all(_variant_group_downloaded(g, model_type=model_type) for g in groups):
+                return False
+        else:
+            # No URLs to check: the family handler's own file list
+            # (query_model_files) is the whole checkpoint.
+            file_defs = _handler_model_files(model_type)
+            if not file_defs or not _handler_files_downloaded(file_defs):
+                return False
         # Some edit pipelines split required conditioning weights out of the
         # main transformer/text-encoder groups. Krea 2 Edit cannot run without
         # its Qwen3-VL vision tower, so do not report it as ready until that
@@ -1284,11 +1332,18 @@ def _download_model_files(model_type: str):
             source_type_list.append(1)
             submodel_no_list.append(0)
 
+    downloaded_any = False
     for filename, source_type, submodel_no in zip(model_file_list, source_type_list, submodel_no_list):
         check_download_cancelled()
         if len(filename) == 0:
             continue
         wgp.download_models(filename, model_type, source_type, submodel_no)
+        downloaded_any = True
+    if not downloaded_any:
+        # Handler-managed models (Chatterbox) have no URLs; load_models()
+        # fetches their weights through this same empty-filename call.
+        check_download_cancelled()
+        wgp.download_models("", model_type, 0, -1)
 
     text_encoder_URLs = wgp.get_model_recursive_prop(model_type, "text_encoder_URLs", return_list=True)
     check_download_cancelled()

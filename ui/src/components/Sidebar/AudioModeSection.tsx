@@ -45,6 +45,18 @@ export function AudioModeSection() {
     setPendingCharacter(null)
   }, [pendingCharacter, modelOptionsLoading, modelOptions?.architecture, params.model_type, setTtsVoiceCharacter])
 
+  // Speech models whose model_mode is a language or preset speaker (Qwen3
+  // TTS, Chatterbox). Keep the request on a listed choice: no value, or one
+  // carried over from another model, falls back to the model's default.
+  const speechModes = modelOptions?.audio_only && modelOptions.model_type === params.model_type
+    ? modelOptions.model_modes ?? null : null
+  const speechModeValid = params.model_mode != null
+    && !!speechModes?.choices.some(([, value]) => value === params.model_mode)
+  useEffect(() => {
+    if (!speechModes || modelOptionsLoading || speechModeValid) return
+    setParam('model_mode', speechModes.default)
+  }, [speechModes, modelOptionsLoading, speechModeValid, setParam])
+
   if (!modelOptions || (!modelOptions.audio_prompt_type_sources && !modelOptions.audio_only)) return null
 
   const isAudioOnly = modelOptions.audio_only
@@ -164,6 +176,19 @@ export function AudioModeSection() {
 
   return (
     <div className="space-y-3">
+      {speechModes && speechModes.choices.length > 0 && (
+        <label className="block text-[11px] text-text-muted">{speechModes.label}
+          <select aria-label={speechModes.label}
+            value={String(speechModeValid ? params.model_mode : speechModes.default)}
+            onChange={event => {
+              const choice = speechModes.choices.find(([, value]) => String(value) === event.target.value)
+              if (choice) setParam('model_mode', choice[1])
+            }}
+            className="mt-1 w-full rounded-lg border border-border bg-bg-tertiary p-2 text-xs text-text-primary">
+            {speechModes.choices.map(([label, value]) => <option key={String(value)} value={String(value)}>{label}</option>)}
+          </select>
+        </label>
+      )}
       {isAudioOnly && <TtsCharacterLibrary
         onSelect={chooseCharacter} onCharactersChange={setCharacters}
         selectedIds={ttsVoices.slice(0, ttsVoiceCount).flatMap(voice => voice.characterId ? [voice.characterId] : [])}
