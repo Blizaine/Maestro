@@ -193,7 +193,9 @@ class IndexTTS2:
                 "Download it via the IndexTTS2 handler model files."
             )
         with _quiet_load_output(self.show_load_logs):
-            safetensors.torch.load_model(semantic_codec, semantic_code_ckpt)
+            # Not safetensors.torch.load_model(): safetensors 0.8 passes
+            # backend= to load_file, which mmgp's load_file override rejects.
+            semantic_codec.load_state_dict(safetensors.torch.load_file(semantic_code_ckpt))
         self.semantic_codec = semantic_codec.to("cpu")
         self.semantic_codec.eval()
         self._load_log('>> semantic_codec weights restored from: {}'.format(semantic_code_ckpt))
