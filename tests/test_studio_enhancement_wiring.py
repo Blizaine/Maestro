@@ -4,6 +4,7 @@ import asyncio
 from copy import deepcopy
 from functools import wraps
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -135,6 +136,36 @@ class EnhancedJobWiringTests(unittest.TestCase):
             self.run_enhancement(self.job)
         self.prepare.assert_not_awaited()
         self.assertEqual(self.archive.recover()['testjob']['enhancement']['state'], 'failed')
+        llm_service.unload_model.assert_called_once()
+
+    def test_dialogue_rejection_reason_survives_archive_and_review_api(self):
+        from services.adaptive_enhancement import draft_spoken_exchange
+
+        source = 'Nora and Kai discuss why the train is late.'
+        params = {**self.params, 'prompt': source, 'video_length': 124,
+                  'sliding_window_size': 124}
+        self.job.update(params=params, enhancement=enhancement.new_enhancement(params, {}))
+        draft = json.dumps({'turns': [{'speaker': 'Nora', 'text': 'word ' * 20}]})
+        writer = Mock(return_value=draft)
+
+        async def write(payload):
+            return {'enhanced': draft_spoken_exchange(
+                payload['prompt'], payload['duration_seconds'], writer, language='English')}
+
+        self.writer.side_effect = write
+        with self.assertRaisesRegex(ValueError, 'could not complete the requested dialogue'):
+            self.run_enhancement(self.job)
+        saved = self.archive.recover()['testjob']
+        self.assertEqual(saved['enhancement']['state'], 'failed')
+        self.assertIn('20 words', saved['enhancement']['error'])
+        self.assertIn('15', saved['enhancement']['error'])
+        self.assertEqual(writer.call_count, 2)
+        self.prepare.assert_not_awaited()
+        self.ns['_jobs'] = {'testjob': saved}
+        response = load('get_job_enhancement', self.ns)('testjob')
+        self.assertEqual(response['enhancement']['error'], saved['enhancement']['error'])
+        self.assertEqual(response['enhancement']['original_prompt'], source)
+        self.assertIsNone(response['prepared'])
         llm_service.unload_model.assert_called_once()
 
     def test_auto_continue_checkpoints_full_flagged_job_without_review_pause(self):

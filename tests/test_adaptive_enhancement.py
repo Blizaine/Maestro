@@ -366,6 +366,73 @@ class AdaptiveWritingTests(unittest.TestCase):
             draft_spoken_exchange('Mina and Theo discuss the letter.', 14, generator, language='English')
         self.assertEqual(generator.call_count, 2)
 
+    def test_over_budget_failure_surfaces_last_reason_duration_and_safe_logs(self):
+        prompt = 'Mina and Theo discuss the missing letter.'
+        private_draft = 'They discuss the old letter and explain why their reunion matters before either one leaves tonight.'
+        generator = Mock(return_value=json.dumps({'turns': [{'speaker': 'Mina', 'text': private_draft}]}))
+        with patch('builtins.print') as log:
+            with self.assertRaises(ValueError) as caught:
+                draft_spoken_exchange(prompt, 5.17, generator, language='English')
+
+        message = str(caught.exception)
+        self.assertTrue(message.startswith('The AI could not complete the requested dialogue.'))
+        self.assertIsInstance(caught.exception.__cause__, ValueError)
+        self.assertIn('Your exchange had 16 words', str(caught.exception.__cause__))
+        self.assertIn('Last validation reason: Your exchange had 16 words; use 11–15 total, aiming for 12.', message)
+        self.assertIn('Selected duration: 5.17 seconds.', message)
+        self.assertIn('increase the selected duration or shorten the dialogue', message)
+        self.assertEqual(generator.call_count, 2)
+        logged = '\n'.join(str(call.args[0]) for call in log.call_args_list)
+        self.assertEqual(log.call_count, 2)
+        self.assertIn('[Enhance dialogue] attempt 1/2 rejected: Your exchange had 16 words;', logged)
+        self.assertIn('[Enhance dialogue] attempt 2/2 rejected: Your exchange had 16 words;', logged)
+        self.assertNotIn(private_draft, logged)
+
+    def test_malformed_json_and_invalid_speaker_pair_keep_distinct_reasons(self):
+        invalid_outputs = (
+            ('not valid JSON', 'Expecting value'),
+            (json.dumps({'turns': [{'speaker': '', 'text': 'I kept the letter.'}]}),
+             'Return nonempty speaker/text pairs, without speech tags or newlines.'),
+        )
+        messages = []
+        for output, reason in invalid_outputs:
+            with self.subTest(output=output[:30]):
+                generator = Mock(return_value=output)
+                with patch('builtins.print'):
+                    with self.assertRaises(ValueError) as caught:
+                        draft_spoken_exchange(
+                            'Mina and Theo discuss the missing letter.', 5.17, generator, language='English'
+                        )
+                messages.append(str(caught.exception))
+                self.assertIn(f'Last validation reason: {reason}', messages[-1])
+                self.assertEqual(generator.call_count, 2)
+        self.assertNotEqual(messages[0], messages[1])
+
+    def test_validation_retry_can_repair_a_draft_on_second_attempt(self):
+        prompt = 'Mina and Theo discuss the missing letter.'
+        generator = Mock(side_effect=[
+            json.dumps({'turns': [{'speaker': 'Mina', 'text': 'I never mailed it.'}]}),
+            json.dumps({'turns': [{'speaker': 'Mina', 'text': 'Because I feared your answer, I kept the letter hidden for far too long.'}]}),
+        ])
+        with patch('builtins.print') as log:
+            result = draft_spoken_exchange(prompt, 5.17, generator, language='English')
+
+        self.assertIn('<d>[English] Because I feared your answer, I kept the letter hidden for far too long.</d>', result)
+        self.assertEqual(generator.call_count, 2)
+        self.assertEqual(log.call_count, 1)
+        self.assertIn('attempt 1/2 rejected:', log.call_args.args[0])
+
+    def test_generator_cancellation_and_runtime_errors_propagate_without_retry(self):
+        for error in (InterruptedError('cancelled'), RuntimeError('writer unavailable')):
+            with self.subTest(error=type(error).__name__):
+                generator = Mock(side_effect=error)
+                with self.assertRaises(type(error)) as caught:
+                    draft_spoken_exchange(
+                        'Mina and Theo discuss the missing letter.', 5.17, generator, language='English'
+                    )
+                self.assertIs(caught.exception, error)
+                generator.assert_called_once()
+
     def test_explicit_turn_count_does_not_relax_a_developed_conversation(self):
         prompt = 'Mina and Theo have a developed four-turn conversation about the missing letter.'
         short = {'turns': [

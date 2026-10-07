@@ -157,7 +157,9 @@ def draft_spoken_exchange(prompt: str, duration_seconds: float | None, generator
     if nsfw:
         system += "\n\n" + load_guide("enhance", "nsfw_shared")
     feedback = ""
-    for _attempt in range(2):
+    last_error = None
+    last_attempt_over_budget = False
+    for attempt in range(1, 3):
         raw = generator(
             prompt=(f"User brief: {prompt}\n\n"
                     f"Duration: {duration_seconds or 8:g} seconds. Language: {language}. "
@@ -170,6 +172,7 @@ def draft_spoken_exchange(prompt: str, duration_seconds: float | None, generator
             system_prompt=system, json_schema=schema, max_new_tokens=max(768, budget.maximum * 6),
             temperature=0.6, enable_thinking=False, frequency_penalty=0.0, presence_penalty=0.0,
         )
+        attempt_over_budget = False
         try:
             turns = json.loads(raw)["turns"]
             if isinstance(turns, list):
@@ -197,6 +200,7 @@ def draft_spoken_exchange(prompt: str, duration_seconds: float | None, generator
                 raise ValueError(
                     f"The user requested exactly {requested_turns} turns; your exchange had {len(turns)}."
                 )
+            attempt_over_budget = count > budget.maximum
             if not minimum_words <= count <= budget.maximum:
                 raise ValueError(f"Your exchange had {count} words; use {minimum_words}–{budget.maximum} total, aiming for {budget.target}.")
             speakers: dict[str, int] = {}
@@ -215,5 +219,18 @@ def draft_spoken_exchange(prompt: str, duration_seconds: float | None, generator
                     "Keep names as plain text, without angle brackets. Preserve every spoken word.\n"
                     + "\n".join(lines))
         except (ValueError, KeyError, TypeError) as error:
+            last_error = error
+            last_attempt_over_budget = attempt_over_budget
+            reason = str(error)
+            print(f"[Enhance dialogue] attempt {attempt}/2 rejected: {reason}")
             feedback = f"Revise this draft; do not start over: {raw}\nCorrection: {error}"
-    raise ValueError("The AI could not complete the requested dialogue. Retry enhancement.")
+    selected_duration = duration_seconds or 8
+    diagnostic = (
+        f"Last validation reason: {last_error}. "
+        f"Selected duration: {selected_duration:g} seconds."
+    )
+    if last_attempt_over_budget:
+        diagnostic += " The draft exceeded the word limit; increase the selected duration or shorten the dialogue, then retry."
+    raise ValueError(
+        "The AI could not complete the requested dialogue. Retry enhancement. " + diagnostic
+    ) from last_error
