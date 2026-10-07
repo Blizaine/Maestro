@@ -2,11 +2,13 @@ import os, sys
 os.environ["GRADIO_LANG"] = "en"
 # # os.environ.pop("TORCH_LOGS", None)  # make sure no env var is suppressing/overriding
 # os.environ["TORCH_LOGS"]= "recompiles"
-import torch._logging as tlog
-# tlog.set_logs(recompiles=True, guards=True, graph_breaks=True)    
 p = os.path.dirname(os.path.abspath(__file__))
 if p not in sys.path:
     sys.path.insert(0, p)
+from shared.cuda_memory import apply_startup_settings, write_vram_debug_report
+apply_startup_settings(sys.argv, "wgp_config.json")
+import torch._logging as tlog
+# tlog.set_logs(recompiles=True, guards=True, graph_breaks=True)
 # Ensure plugin-side `import wgp` resolves to this live module instance.
 if sys.modules.get("wgp") is not sys.modules.get(__name__):
     sys.modules["wgp"] = sys.modules[__name__]
@@ -24,7 +26,11 @@ import warnings
 warnings.filterwarnings('ignore', message='Failed to find.*', module='triton')
 from services.optional_acceleration import prepare_optional_flash_attention
 prepare_optional_flash_attention()
+import mmgp
 from mmgp import offload, safetensors2, profile_type , quant_router
+from functools import partial
+from shared.utils.default_device import call_with_default_device
+from shared.utils.power_throttling import prevent_power_throttling
 try:
     import triton
 except ImportError:
@@ -106,7 +112,7 @@ AUTOSAVE_ERROR_FILENAME = "error_queue.zip"
 AUTOSAVE_TEMPLATE_PATH = AUTOSAVE_FILENAME
 CONFIG_FILENAME = "wgp_config.json"
 PROMPT_VARS_MAX = 10
-target_mmgp_version = "3.8.2"
+target_mmgp_version = "4.0.0"
 WanGP_version = "10.9875"
 settings_version = 2.58
 max_source_video_frames = 15000  # raised to support frame injection in long sliding-window videos (e.g. 9 windows × 20s × 25fps = 4500 frames)
@@ -117,14 +123,14 @@ CUSTOM_SETTINGS_PER_ROW = 2
 CUSTOM_SETTING_TYPES = {"int", "float", "text"}
 lm_decoder_engine = ""
 enable_int8_kernels = 0
+_loaded_int8_setting = None
 # All media attachment keys for queue save/load
 ATTACHMENT_KEYS = ["image_start", "image_end", "image_refs", "image_guide", "image_mask",
                    "video_guide",  "video_mask", "video_source", "video_end", "audio_guide", "audio_guide2", "audio_guide3", "audio_guide4", "audio_guide5", "audio_guide6", "audio_conditioning_guide", "audio_source", "custom_guide"]
 
-from importlib.metadata import version
-mmgp_version = version("mmgp")
+mmgp_version = getattr(mmgp, "__version__", "unknown")
 if mmgp_version != target_mmgp_version:
-    print(f"Incorrect version of mmgp ({mmgp_version}), version {target_mmgp_version} is needed. Please upgrade with the command 'pip install -r requirements.txt'")
+    print(f"Incorrect version of mmgp ({mmgp_version}), bundled version {target_mmgp_version} is needed. Please update Maestro's source and requirements.")
     exit()
 lock = threading.Lock()
 current_task_id = None
@@ -152,7 +158,7 @@ for handler in _HANDLER_MODULES:
     quant_router.register_handler(handler)
 from shared.qtypes import gguf as gguf_handler
 quant_router.register_file_extension("gguf", gguf_handler)
-from shared.kernels.quanto_int8_inject import maybe_enable_quanto_int8_kernel, disable_quanto_int8_kernel
+from shared.kernels import int8_backend
 from shared.kernels import kernel_policy
 
 # All heavyweight runtime modules are already imported at this point. Report
@@ -165,17 +171,21 @@ except Exception as _runtime_preflight_error:
     print(f"[Runtime] Preflight skipped: {_runtime_preflight_error}")
 
 
-def apply_int8_kernel_setting(enabled: int, notify_disabled = False) -> bool:
-    global enable_int8_kernels, verbose_level
-    try:
-        enable_int8_kernels = 1 if int(enabled) == 1 else 0
-    except Exception:
-        enable_int8_kernels = 0
-    os.environ["WAN2GP_QUANTO_INT8_KERNEL"] = "1" if enable_int8_kernels == 1 else "0"
-    if enable_int8_kernels == 1:
-        return bool(maybe_enable_quanto_int8_kernel(verbose_level=verbose_level))
-    disable_quanto_int8_kernel(notify_disabled)
-    return False
+def apply_int8_kernel_setting(enabled, notify_disabled=False) -> bool:
+    global enable_int8_kernels, verbose_level, _loaded_int8_setting
+    # Classic callers still pass the legacy 0/1 toggle. Preserve its Triton
+    # selection; new settings can explicitly opt into Kitchen or Auto.
+    if isinstance(enabled, str) and enabled in ("disabled", "auto", "triton", "kitchen"):
+        selection = enabled
+    else:
+        try:
+            selection = "triton" if int(enabled) == 1 else "disabled"
+        except (TypeError, ValueError):
+            selection = "disabled"
+    enable_int8_kernels = int(selection != "disabled")
+    result = bool(int8_backend.configure(selection, verbose_level))
+    _loaded_int8_setting = selection
+    return result
 
 def set_wgp_global(variable_name: str, new_value: any) -> str:
     if variable_name not in globals():
@@ -2391,6 +2401,12 @@ def _parse_args():
         default=0,
         help="percent of RAM allocated to Reserved RAM"
     )
+    parser.add_argument("--vram-allocator", choices=["default", "vmm", "vmm_spill"], default=None,
+                        help="VRAM allocator selected before CUDA starts; overrides the saved setting")
+    parser.add_argument("--vram-debug", type=float, default=0, metavar="MIN_MB",
+                        help="Record MMGP allocator allocations of this size or larger")
+    parser.add_argument("--prevent-power-throttling", action=argparse.BooleanOptionalAction, default=True,
+                        help="Keep this process at full CPU speed on Windows while it is in the background")
 
 
 
@@ -2746,6 +2762,12 @@ else:
 server_config.setdefault("prompt_enhancer_quantization", "quanto_int8")
 from services.generation_preview import DEFAULT_PREVIEW_MODE
 server_config.setdefault("generation_preview", DEFAULT_PREVIEW_MODE)
+from services.memory_settings import apply_memory_defaults
+apply_memory_defaults(server_config)
+from shared import attention_kit
+attention_kit.configure(server_config["attention_head_split"])
+if args.prevent_power_throttling:
+    prevent_power_throttling()
 
 checkpoints_paths = server_config.get("checkpoints_paths", None)
 if checkpoints_paths is None: checkpoints_paths = server_config["checkpoints_paths"] = fl.default_checkpoints_paths
@@ -3558,7 +3580,7 @@ loaded_profile = force_profile_no = -1
 compile = server_config.get("compile", "")
 boost = server_config.get("boost", 1)
 enable_int8_kernels = server_config.get("enable_int8_kernels", 1)
-apply_int8_kernel_setting(enable_int8_kernels)
+apply_int8_kernel_setting(server_config["int8_kernels"])
 # Optional Kitchen paths follow upstream's precision policy. Keep an explicit
 # strict setting authoritative without changing the independent INT8 toggle.
 kernel_policy.configure(server_config.get("kernel_precision", "fast"))
@@ -4282,12 +4304,18 @@ def _normalize_output_type(output_type):
 def get_default_profile(output_type):
     if force_profile_no >= 0:
         return force_profile_no
+    # System settings and auto-tune update server_config while Maestro runs.
+    # The startup globals alone would keep using the old profile until restart.
+    # An explicit launcher --profile remains authoritative as at startup.
+    cli_profile = float(getattr(args, "profile", -1))
+    if cli_profile >= 0:
+        return cli_profile
     output_type = _normalize_output_type(output_type)
     if output_type == "image":
-        return default_profile_image
+        return server_config.get("image_profile", default_profile_image)
     if output_type == "audio":
-        return default_profile_audio
-    return default_profile_video
+        return server_config.get("audio_profile", default_profile_audio)
+    return server_config.get("video_profile", default_profile_video)
 
 def compute_profile(override_profile, output_type="video"):
     return override_profile if override_profile != -1 else get_default_profile(output_type)
@@ -4300,10 +4328,34 @@ def get_output_type_for_model(model_type, image_mode=0):
         return "image"
     return "video"
 
-def init_pipe(pipe, kwargs, profile):
-    preload =int(args.preload)
-    if preload == 0:
-        preload = server_config.get("preload_in_VRAM", 0)
+auto_preload_measures = {}
+
+
+def auto_preload_store(model_type):
+    # Dynamic preload measurements belong to this exact model definition.
+    # Refreshing/replacing an imported checkpoint must invalidate them.
+    definition = get_model_def(model_type)
+    # Maestro refreshes existing definition dictionaries in place, so identity
+    # alone cannot detect an edited workflow or replacement checkpoint.
+    signature = (id(definition), json.dumps(definition, sort_keys=True, default=str))
+    stored = auto_preload_measures.get(model_type)
+    if stored is None or stored[0] != signature:
+        stored = auto_preload_measures[model_type] = (signature, {})
+    return stored[1]
+
+
+def init_pipe(pipe, kwargs, profile, output_type="video"):
+    from services.memory_settings import preload_for_output, reserved_ram_fraction, per_job_memory_options
+    _, preload = preload_for_output(server_config, args, output_type)
+    kwargs["readAhead"] = server_config.get("read_ahead", False)
+    kwargs["perc_reserved_mem_max"] = reserved_ram_fraction(server_config, args)
+    job_options = per_job_memory_options(args, output_type)
+    if "read_ahead" in job_options:
+        kwargs["readAhead"] = job_options["read_ahead"]
+    if "reserved_ram_fraction" in job_options:
+        kwargs["perc_reserved_mem_max"] = job_options["reserved_ram_fraction"]
+    if server_config.get("smart_memory_pinning", True):
+        kwargs["smartPinning"] = 0
     # Per-job residency in MB. Unlike preload, this changes only the
     # transformer; VAE, encoder and catch-all streaming limits stay intact.
     transformer_budget = int(getattr(args, "transformer_budget", 0) or 0)
@@ -4315,15 +4367,23 @@ def init_pipe(pipe, kwargs, profile):
     # Skipping this normalization discarded their streaming limits entirely.
     mmgp_profile = int(profile)
     if mmgp_profile in (2, 4, 5):
-        default_transformer_budget = default_transformer2_budget= kwargs.get("budgets", 100) 
-        if isinstance(default_transformer_budget, dict):
-            default_transformer_budget = default_transformer_budget.get("transformer", 100) 
-            default_transformer2_budget = default_transformer2_budget.get("transformer2", 100) 
+        # Supplying budgets replaces MMGP's profile defaults. Keep its reviewed
+        # transformer allowance when a model does not provide its own, rather
+        # than accidentally forcing every model through a 100 MB allowance.
+        profile_budget = {2: 3000, 4: 1200, 5: 400}[mmgp_profile]
+        if isinstance(source_budgets, dict):
+            default_transformer_budget = source_budgets.get("transformer", source_budgets.get("*", profile_budget))
+            default_transformer2_budget = source_budgets.get("transformer2", source_budgets.get("*", profile_budget))
+        else:
+            default_transformer_budget = default_transformer2_budget = source_budgets
+            kwargs["budgets"] = source_budgets = {}
 
         transformer_budget_mb = default_transformer_budget if preload == 0 else preload
         if preload == 0 and transformer_budget > 0:
             transformer_budget_mb = transformer_budget
-        budgets = { "transformer" : transformer_budget_mb, "text_encoder" : 100 if preload  == 0 else preload, "*" : max(1000 if profile==5 else 3000 , preload) }
+        budgets = {"transformer": transformer_budget_mb,
+                   "text_encoder": source_budgets.get("text_encoder", 100) if preload == 0 else preload,
+                   "*": source_budgets.get("*", 1000 if profile == 5 else 3000) if preload == 0 else max(1000 if profile == 5 else 3000, preload)}
         if "transformer2" in pipe:
             budgets["transformer2"] = default_transformer2_budget if preload  == 0 else preload
         source_budgets.update(budgets)
@@ -4398,6 +4458,8 @@ def setup_prompt_enhancer(pipe, kwargs):
 
 def load_models(model_type, override_profile = -1, output_type="video", preview_mode=None, preview_gen=None, **model_kwargs):
     global transformer_type, loaded_profile
+    if server_config.get("int8_kernels", "triton") != _loaded_int8_setting:
+        apply_int8_kernel_setting(server_config.get("int8_kernels", "triton"))
     base_model_type = get_base_model_type(model_type)
     model_def = get_runtime_model_def(model_type)
     save_quantized = args.save_quantized and model_def != None
@@ -4423,7 +4485,8 @@ def load_models(model_type, override_profile = -1, output_type="video", preview_
     if quantizeTransformer or "quanto" in model_filename:
         transformer_dtype = torch.bfloat16 if "bf16" in model_filename or "BF16" in model_filename else transformer_dtype
         transformer_dtype = torch.float16 if "fp16" in model_filename or"FP16" in model_filename else transformer_dtype
-    perc_reserved_mem_max = args.perc_reserved_mem_max
+    from services.memory_settings import reserved_ram_fraction
+    perc_reserved_mem_max = reserved_ram_fraction(server_config, args)
     # A Full H3 working set is just larger than MMGP's implicit 40% reserved
     # RAM ceiling on a 128 GB workstation. That tiny shortfall forces partial
     # pinning and can make a 5090 dramatically slower than a 4090. Raise only
@@ -4554,7 +4617,7 @@ def load_models(model_type, override_profile = -1, output_type="video", preview_
     if lm_decoder_engine_obtained in ("cg", "vllm") and int(profile) not in [ 1, 3]:
         print(f"Unable to use LM Engine '{lm_decoder_engine_obtained}' as it requires a Memory Profile such as 1,3 or 3+ that loads entirely the Main Models in VRAM. Switching to Legacy LM Engine...")
         lm_decoder_engine_obtained = "legacy"
-    torch.set_default_device('cpu')    
+    torch.set_default_device(None)
     wan_model, pipe = model_type_handler.load_model(
                 local_model_file_list, model_type, base_model_type, model_def, quantizeTransformer = quantizeTransformer, text_encoder_quantization = text_encoder_quantization,
                 dtype = transformer_dtype, VAE_dtype = VAE_dtype, mixed_precision_transformer = mixed_precision_transformer, save_quantized = save_quantized, submodel_no_list   = model_submodel_no_list, text_encoder_filename = text_encoder_filename, profile=profile, lm_decoder_engine=lm_decoder_engine_obtained, **model_kwargs )
@@ -4598,7 +4661,16 @@ def load_models(model_type, override_profile = -1, output_type="video", preview_
     if preview_decoder is not None:
         pipe["tiny_vae"] = preview_decoder
         kwargs["coTenantsMap"]["tiny_vae"] = "*"
-    mmgp_profile = init_pipe(pipe, kwargs, profile)
+    mmgp_profile = init_pipe(pipe, kwargs, profile, output_type)
+    from services.memory_settings import dynamic_preload_supported, preload_for_output
+    if preload_for_output(server_config, args, output_type)[0] == "dynamic":
+        if dynamic_preload_supported(profile):
+            kwargs["autoPreload"] = auto_preload_store(model_type)
+        else:
+            print(f"[Memory] Dynamic preload cannot apply to Profile {profile}; its normal budgets apply.")
+    from services.memory_settings import per_job_memory_options
+    job_options = per_job_memory_options(args, output_type)
+    kwargs["perc_reserved_mem_max"] = job_options.get("reserved_ram_fraction", perc_reserved_mem_max)
     if server_config.get("enhancer_mode", 1) == 0:
         setup_prompt_enhancer(pipe, kwargs)
     loras_transformer = kwargs.pop("loras", [])
@@ -4606,8 +4678,6 @@ def load_models(model_type, override_profile = -1, output_type="video", preview_
         loras_transformer += ["transformer"]        
     if "transformer2" in pipe:
         loras_transformer += ["transformer2"]
-    if len(compile) > 0 and hasattr(wan_model, "custom_compile"):
-        wan_model.custom_compile(backend= "inductor", mode ="default")
     # model_def can declare compile policy with three modes:
     #   not present       → use user's global compile setting (default)
     #   "transformer" etc → REQUIRE compile, even if user has it off
@@ -4628,13 +4698,16 @@ def load_models(model_type, override_profile = -1, output_type="video", preview_
         compile_modules = compile
     else:
         compile_modules = ""
+    int8_backend.prepare_compile_cache(bool(compile_modules))
+    if len(compile) > 0 and compile_modules is not False and hasattr(wan_model, "custom_compile"):
+        wan_model.custom_compile(backend="inductor", mode="default")
     if compile_modules == False:
         print("Pytorch compilation is not supported for this Model")
     # kwargs["pinnedMemory"] = "text_encoder"
     previous_last_offload = getattr(offload, "last_offload_obj", None)
     preview_profile_failed = False
     try:
-        offloadobj = offload.profile(pipe, profile_no= mmgp_profile, compile = compile_modules, quantizeTransformer = False, loras = loras_transformer, perc_reserved_mem_max = perc_reserved_mem_max , vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)
+        offloadobj = offload.profile(pipe, profile_no= mmgp_profile, compile = compile_modules, quantizeTransformer = False, loras = loras_transformer, vram_safety_coefficient = vram_safety_coefficient , convertWeightsFloatTo = transformer_dtype, **kwargs)
     except Exception as error:
         if preview_decoder is None or isinstance(error, offload.LoadingCancelled):
             raise
@@ -4675,6 +4748,7 @@ def load_models(model_type, override_profile = -1, output_type="video", preview_
     # too: a lighter H3 job can retain more weights instead of streaming them.
     try:
         wan_model._maestro_profile_vram_coefficient = float(vram_safety_coefficient)
+        wan_model._maestro_performance_placement = getattr(args, "_maestro_performance_placement", None)
         wan_model._maestro_profile_transformer_budget_mb = kwargs["budgets"].get("transformer")
         wan_model._maestro_profile_transformer_budget_override_mb = int(
             getattr(args, "transformer_budget", 0) or 0
@@ -7836,6 +7910,9 @@ def generate_video(
     gen = get_gen_info(state)
     if gen.get("abort", False):
         return False
+    # Head splitting is a generation-boundary setting. Editing settings while
+    # a job runs must not change the attention grouping inside that job.
+    attention_kit.configure(server_config.get("attention_head_split", 0))
     from services.generation_preview import (
         configured_preview_mode,
         preview_mode as normalize_preview_mode,
@@ -9660,7 +9737,7 @@ def generate_video(
                 samples = call_with_sticky_interrupt(
                     gen,
                     wan_model,
-                    wan_model.generate,
+                    partial(call_with_default_device, model_def, model_type, wan_model.generate),
                     input_prompt = prompt,
                     alt_prompt = alt_prompt,
                     image_start = image_start_tensor,  
@@ -9906,6 +9983,10 @@ def generate_video(
                 return False
             finally:
                 callback.close_preview(cancel=gen.get("abort", False))
+                try:
+                    write_vram_debug_report(save_path, model_type)
+                except Exception as debug_error:
+                    print(f"[VRAM debug] Could not write report: {debug_error}")
             src_video = src_video2 = src_mask = src_mask2 = None
             if skip_steps_cache != None :
                 skip_steps_cache.previous_residual = None

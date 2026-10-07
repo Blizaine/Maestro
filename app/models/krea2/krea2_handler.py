@@ -33,6 +33,7 @@ class family_handler:
             ("LanPaint (15 steps): ~15x slower, very hard task", 5),
         ]
         result = {
+            "device_explicit": True,
             "image_outputs": True,
             "guidance_max_phases": 1 if base_model_type in (_RAW_MODEL_TYPE, _RAW_EDIT_MODEL_TYPE) else 0,
             "lock_guidance_scale": base_model_type in (_TURBO_MODEL_TYPE, _TURBO_EDIT_MODEL_TYPE),

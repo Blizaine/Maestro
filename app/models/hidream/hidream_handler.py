@@ -27,6 +27,7 @@ class family_handler:
         is_dev = base_model_type == "hidream_o1_dev"
         return {
             "image_outputs": True,
+            "device_explicit": True,
             # HiDream's quanto-int8 layer wrappers in mmgp don't trigger
             # dequantization correctly unless torch.compile is applied to
             # the transformer at load time. Without compile, the model

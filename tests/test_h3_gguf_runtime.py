@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import gc
 import tempfile
+import types
 import unittest
+import weakref
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "app"
@@ -349,6 +352,42 @@ class H3GGUFRuntimeTests(unittest.TestCase):
 
             del model
             gc.collect()
+
+    def test_failed_cuda_probe_does_not_retain_caller_payload(self):
+        class Payload:
+            pass
+
+        def fail_validation(_module):
+            raise RuntimeError("synthetic probe failure")
+
+        def probe_while_payload_is_live(payload):
+            gguf_handler._probe_gguf_cuda_runtime(force=True)
+
+        payload = Payload()
+        payload_ref = weakref.ref(payload)
+        fake_cuda_module = types.ModuleType("llamacpp_gguf_cuda")
+        with (
+            mock.patch.multiple(
+                gguf_handler,
+                _GGUF_CUDA_KERNELS_ENABLED_CACHE=None,
+                _GGUF_CUDA_MODULE=None,
+                _GGUF_CUDA_LOAD_ERROR=None,
+            ),
+            mock.patch.dict(sys.modules, {"llamacpp_gguf_cuda": fake_cuda_module}),
+            mock.patch.object(
+                gguf_handler,
+                "_validate_gguf_cuda_module",
+                new=fail_validation,
+            ),
+        ):
+            probe_while_payload_is_live(payload)
+            self.assertEqual(
+                gguf_handler._GGUF_CUDA_LOAD_ERROR,
+                "RuntimeError: synthetic probe failure",
+            )
+            del payload
+            gc.collect()
+            self.assertIsNone(payload_ref())
 
     def test_interleaved_fused_h3_attention_matches_independent_baseline(self):
         with tempfile.TemporaryDirectory(prefix="h3-gguf-runtime-") as temp:

@@ -410,7 +410,7 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         if not is_t2i:
             processor_kwargs["images"] = condition_pil_list
 
-        model_inputs = self.processor(**processor_kwargs).to(device)
+        model_inputs = self.processor(**processor_kwargs, device=device).to(device)
 
         forward_kwargs = {
             "input_ids": model_inputs.input_ids,
@@ -569,12 +569,12 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         else:
             image_latents = retrieve_latents(self.vae.encode(image), generator=generator, sample_mode="argmax")
         latents_mean = (
-            torch.tensor(self.vae.config.latents_mean)
+            torch.tensor(self.vae.config.latents_mean, device=image_latents.device)
             .view(1, self.latent_channels, 1, 1, 1)
             .to(image_latents.device, image_latents.dtype)
         )
         latents_std = (
-            torch.tensor(self.vae.config.latents_std)
+            torch.tensor(self.vae.config.latents_std, device=image_latents.device)
             .view(1, self.latent_channels, 1, 1, 1)
             .to(image_latents.device, image_latents.dtype)
         )
@@ -1162,12 +1162,12 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
             latents = latents.to(self.vae.dtype)
             latents_mean = (
-                torch.tensor(self.vae.config.latents_mean)
+                torch.tensor(self.vae.config.latents_mean, device=latents.device)
                 .view(1, self.vae.config.z_dim, 1, 1, 1)
                 .to(latents.device, latents.dtype)
             )
             latents_std = (
-                torch.tensor(self.vae.config.latents_std)
+                torch.tensor(self.vae.config.latents_std, device=latents.device)
                 .view(1, self.vae.config.z_dim, 1, 1, 1)
                 .to(latents.device, latents.dtype)
             )

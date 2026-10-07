@@ -9550,10 +9550,21 @@ export const useStore = create<AppState>((set, get) => ({
   },
   updateSystemConfig: async (partial) => {
     try {
-      await api.updateSystemConfig(partial)
+      const result = await api.updateSystemConfig(partial)
       set(s => ({
-        systemConfig: s.systemConfig ? { ...s.systemConfig, ...partial } : null,
+        systemConfig: s.systemConfig ? {
+          ...s.systemConfig, ...partial,
+          ...(result.vram_allocator_active !== undefined ? {
+            vram_allocator_active: result.vram_allocator_active,
+            vram_allocator_restart_required: result.vram_allocator_restart_required,
+            vram_allocator_fallback_reason: result.vram_allocator_fallback_reason,
+            vram_allocator_cli_override: result.vram_allocator_cli_override,
+          } : {}),
+        } : null,
       }))
+      // Changing an auto-managed field switches the backend to manual mode.
+      // Refresh its ownership flag so the toggle doesn't misleadingly stay on.
+      await get().loadServicesConfig()
     } catch (e) {
       console.error('Failed to update system config:', e)
       get().loadSystemConfig()

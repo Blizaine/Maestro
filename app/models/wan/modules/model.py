@@ -13,6 +13,7 @@ import numpy as np
 from typing import Union,Optional
 from mmgp import offload
 from mmgp.offload import get_cache, clear_caches
+from shared import attention_kit
 from shared.attention import pay_attention
 from torch.backends.cuda import sdp_kernel
 from ..multitalk.multitalk_utils import get_attn_map_with_target
@@ -160,6 +161,22 @@ class WanRMSNorm(nn.Module):
         Args:
             x(Tensor): Shape [B, L, C]
         """
+        if in_place and x.is_contiguous():
+            rows = x.view(-1, x.shape[-1])
+            step = max(1, (64 << 20) // (rows.shape[-1] * 4))
+            for start in range(0, rows.shape[0], step):
+                part = rows[start:start + step]
+                y = part.float()
+                if y.data_ptr() == part.data_ptr():
+                    y = y.clone()
+                y.pow_(2)
+                y = y.mean(dim=-1, keepdim=True)
+                y += self.eps
+                y.rsqrt_()
+                part *= y
+            x *= self.weight
+            return x
+
         y = x.float()
         y.pow_(2)
         y = y.mean(dim=-1, keepdim=True)
@@ -210,7 +227,7 @@ class WanLayerNorm(nn.LayerNorm):
         return x
         # return super().forward(x).type_as(x)
 
-from .posemb_layers import apply_rotary_emb
+from .posemb_layers import apply_rotary_emb, apply_rotary_emb_single
 
 class WanSelfAttention(nn.Module):
 
@@ -238,6 +255,29 @@ class WanSelfAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+
+
+    def _norm_rope_(self, query, key, group, freqs):
+        """Normalize and rotate q and/or k in place for attention_kit."""
+
+        for tensor, norm, heads, index in (
+            (query, self.norm_q, group.q, 0),
+            (key, self.norm_k, group.kv, 1),
+        ):
+            if tensor is None:
+                continue
+            rows = tensor.flatten(2)
+            if group.mean_squares is None:
+                norm(rows)
+            else:
+                scale = group.mean_squares[index].add(norm.eps).rsqrt_()
+                rows.mul_(scale)
+                rows.mul_(
+                    norm.weight[
+                        heads.start * self.head_dim:heads.stop * self.head_dim
+                    ]
+                )
+            apply_rotary_emb_single([tensor], freqs, head_first=False)
 
 
     def text_cross_attention(self, xlist, context, return_q = False):
@@ -311,6 +351,29 @@ class WanSelfAttention(nn.Module):
             grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
+        if (
+            block_mask is None
+            and ref_target_masks is None
+            and standin_phase < 1
+            and lynx_ref_buffer is None
+            and isinstance(freqs, tuple)
+            and not offload.shared_state.get("_chipmunk", False)
+            and not offload.shared_state.get("_radial", False)
+        ):
+            attended = attention_kit.qkv_attention(
+                xlist,
+                self.q,
+                self.k,
+                self.v,
+                self.num_heads,
+                self.head_dim,
+                lambda query, key, group: self._norm_rope_(
+                    query, key, group, freqs
+                ),
+                norm_spans_heads=isinstance(self.norm_q, WanRMSNorm),
+            )
+            return self.o(attended.flatten(2)), None
+
         x = xlist[0]
         xlist.clear()
 
@@ -687,11 +750,17 @@ class WanAttentionBlock(nn.Module):
 
         y_shape = y.shape
         y = y.view(-1, y_shape[-1])
-        chunk_size = int(y.shape[0]/2.7)
+        chunk_size = max(1, int(y.shape[0]/5.4))
         chunks =torch.split(y, chunk_size)
         for y_chunk  in chunks:
             mlp_chunk = ffn(y_chunk)
-            mlp_chunk = gelu(mlp_chunk)
+            gelu_rows = max(
+                1,
+                (64 << 20)
+                // (mlp_chunk.shape[-1] * mlp_chunk.element_size()),
+            )
+            for part in torch.split(mlp_chunk, gelu_rows):
+                part.copy_(gelu(part))
             y_chunk[...] = ffn2(mlp_chunk)
             del mlp_chunk 
         y = y.view(y_shape)
@@ -834,13 +903,15 @@ class Head(nn.Module):
         # modulation
         self.modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
 
-    def forward(self, x, e):
+    def forward(self, x_list, e):
         r"""
         Args:
             x(Tensor): Shape [B, L1, C]
             e(Tensor): Shape [B, C]
         """
         # assert e.dtype == torch.float32
+        x = x_list[0]
+        x_list.clear()
         dtype = x.dtype
 
         latent_frames = e.shape[0]
@@ -1894,7 +1965,8 @@ class WanModel(ModelMixin, ConfigMixin):
                 x = x.flatten(2).transpose(1, 2)
 
             # head
-            x = self.head(x, e)
+            head_input, x = [x], None
+            x = self.head(head_input, e)
 
             # unpatchify
             x = self.unpatchify(x, grid_sizes)

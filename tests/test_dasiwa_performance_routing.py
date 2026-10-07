@@ -23,7 +23,12 @@ class LiveGpuTelemetryTests(unittest.TestCase):
             nvml.nvmlDeviceGetUtilizationRates.side_effect = RuntimeError("driver unavailable")
         psutil = ModuleType("psutil")
         psutil.cpu_percent = Mock(return_value=12)
-        psutil.virtual_memory = Mock(return_value=SimpleNamespace(percent=60, used=60 * 1024**3, total=100 * 1024**3))
+        psutil.virtual_memory = Mock(return_value=SimpleNamespace(
+            percent=60,
+            used=60 * 1024**3,
+            total=100 * 1024**3,
+            available=40 * 1024**3,
+        ))
         graphics = ModuleType("services.gpu_engine_win")
         graphics.get_gpu_3d_utilization = Mock(return_value=0)
         with patch.dict(sys.modules, {"pynvml": nvml, "psutil": psutil, "services.gpu_engine_win": graphics}):
@@ -52,6 +57,7 @@ class LiveGpuTelemetryTests(unittest.TestCase):
         self.assertFalse(result["gpu"]["available"])
         self.assertEqual(result["cpu"]["percent"], 12)
         self.assertEqual(result["ram"]["total_gb"], 100)
+        self.assertEqual(result["ram"]["available_gb"], 40)
 
 
 class H3AttentionFallbackTests(unittest.TestCase):

@@ -35,6 +35,10 @@ from urllib.parse import quote
 # --- Bootstrap: CWD must be app/ and sys.argv must be patched before importing wgp ---
 _app_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(_app_dir)
+from shared.cuda_memory import apply_startup_settings
+# The allocator must precede hardware detection, model imports and profiling.
+# wgp also calls this for the classic entry point; the helper is idempotent.
+apply_startup_settings(sys.argv, os.path.join(_app_dir, "wgp_config.json"))
 
 # Preserve original argv, patch for wgp's argparse
 _original_argv = sys.argv[:]
@@ -44,6 +48,14 @@ _launch_args = sys.argv[1:]  # Save our own args
 _wgp_argv = ["wgp.py", "--multiple-images"]
 if "--compile" in _launch_args:
     _wgp_argv.append("--compile")
+for _option in ("--vram-allocator", "--vram-debug", "--config", "--gpu", "--preload", "--perc-reserved-mem-max"):
+    for _index, _argument in enumerate(_launch_args):
+        if _argument == _option and _index + 1 < len(_launch_args):
+            _wgp_argv.extend((_option, _launch_args[_index + 1]))
+        elif _argument.startswith(_option + "="):
+            _wgp_argv.append(_argument)
+if "--no-prevent-power-throttling" in _launch_args:
+    _wgp_argv.append("--no-prevent-power-throttling")
 sys.argv = _wgp_argv
 
 # Install download stall-detection BEFORE wgp imports anything that
@@ -6744,7 +6756,11 @@ _APP_VERSION = _read_app_version()
 def get_system_config():
     """Return system-level settings for the UI System tab."""
     cfg = wgp.server_config
+    from services.memory_settings import memory_settings_snapshot
+    from shared.cuda_memory import allocator_status
     return {
+        **memory_settings_snapshot(cfg),
+        **allocator_status(cfg),
         "app_version": _APP_VERSION,
         "attention_mode": cfg.get("attention_mode", "auto"),
         "transformer_quantization": cfg.get("transformer_quantization", "int8"),
@@ -6830,6 +6846,13 @@ def _apply_linked_model_folders(folders):
 async def update_system_config(request: Request):
     """Update system-level settings. Accepts partial JSON body."""
     body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Settings must be a JSON object")
+    from services.memory_settings import MEMORY_KEYS, MODEL_LOAD_KEYS, validate_memory_updates
+    try:
+        memory_updates = validate_memory_updates(body)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
     if "generation_preview" in body and (
         not isinstance(body["generation_preview"], str)
         or body["generation_preview"] not in PREVIEW_MODES
@@ -6842,7 +6865,7 @@ async def update_system_config(request: Request):
         "video_output_codec", "image_output_codec",
         "enhancer_enabled", "prompt_enhancer_quantization",
         "vram_safety_coefficient", "generation_preview",
-    }
+    } | MEMORY_KEYS
 
     updated = {}
     # Linked model folders map onto checkpoints_paths (validated + applied
@@ -6905,8 +6928,11 @@ async def update_system_config(request: Request):
         wgp.compile = updated["compile"]
     if "vram_safety_coefficient" in updated:
         wgp.args.vram_safety_coefficient = float(updated["vram_safety_coefficient"])
+    if MODEL_LOAD_KEYS & memory_updates.keys():
+        wgp.reload_needed = True
 
-    return {"status": "ok", "updated": updated}
+    from shared.cuda_memory import allocator_status
+    return {"status": "ok", "updated": updated, **allocator_status(wgp.server_config)}
 
 
 @api.post("/api/v1/notification-sound/test")
@@ -7137,6 +7163,7 @@ def get_system_detect():
         "hardware": hw,
         "recommended": rec,
         "auto_enabled": services.get("auto_performance", True),
+        "learning": _performance_learning_summary(),
     }
 
 
@@ -7161,37 +7188,61 @@ async def apply_system_detect():
     """
     from services.hardware_detect import detect_hardware
     from services.perf_recommend import apply_auto_performance, applied_keys
+    from services.memory_settings import MODEL_LOAD_KEYS
+    from shared.cuda_memory import allocator_status
 
-    hw = detect_hardware()
-    result = apply_auto_performance(wgp.server_config, hw, force=True)
-    rec = result["recommended"]
-    profile_changed = any(key.endswith("_profile") for key in result["updated"])
+    if any(job.get("status") == "running" for job in _jobs.values()):
+        raise HTTPException(status_code=409, detail="Apply Auto-tune after the current generation finishes.")
 
-    # Persist to disk
-    with open(wgp.server_config_filename, "w", encoding="utf-8") as f:
-        f.write(json.dumps(wgp.server_config, indent=4))
+    if not _gen_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Apply Auto-tune after the current generation finishes.")
+    try:
+        hw = detect_hardware()
+        result = apply_auto_performance(wgp.server_config, hw, force=True)
+        rec = result["recommended"]
+        profile_changed = any(key.endswith("_profile") for key in result["updated"])
+        settings_reload = profile_changed or bool(MODEL_LOAD_KEYS.intersection(result["updated"]))
+        if settings_reload:
+            wgp.reload_needed = True
+        global _cached_hardware
+        _cached_hardware = hw
 
-    # Apply runtime side effects where possible (matches update_system_config)
-    if "attention_mode" in rec:
-        wgp.attention_mode = rec["attention_mode"]
-    if "vae_config" in rec:
-        wgp.vae_config = rec["vae_config"]
-    if "compile" in rec:
-        wgp.compile = rec["compile"]
-    if "transformer_quantization" in rec:
-        wgp.transformer_quantization = rec["transformer_quantization"]
-    if "vram_safety_coefficient" in rec:
-        wgp.args.vram_safety_coefficient = float(rec["vram_safety_coefficient"])
+        # Persist to disk
+        with open(wgp.server_config_filename, "w", encoding="utf-8") as f:
+            f.write(json.dumps(wgp.server_config, indent=4))
 
-    return {
-        "status": "ok",
-        "hardware": hw,
-        "applied": {k: rec[k] for k in applied_keys() if k in rec},
-        "label": rec.get("_recommendation_label", ""),
-        "reason": rec.get("_recommendation_reason", ""),
-        # Tells UI to show "changes take effect on next model load" toast
-        "profile_changed": profile_changed,
-    }
+        # Apply runtime side effects where possible (matches update_system_config)
+        if "attention_mode" in rec:
+            wgp.attention_mode = rec["attention_mode"]
+        if "vae_config" in rec:
+            wgp.vae_config = rec["vae_config"]
+        if "compile" in rec:
+            wgp.compile = rec["compile"]
+        if "transformer_quantization" in rec:
+            wgp.transformer_quantization = rec["transformer_quantization"]
+        if "vram_safety_coefficient" in rec:
+            wgp.args.vram_safety_coefficient = float(rec["vram_safety_coefficient"])
+
+        return {
+            "status": "ok",
+            "hardware": hw,
+            "applied": {k: rec[k] for k in applied_keys() if k in rec},
+            "label": rec.get("_recommendation_label", ""),
+            "reason": rec.get("_recommendation_reason", ""),
+            # Tells UI to show "changes take effect on next model load" toast
+            "profile_changed": profile_changed,
+            "settings_reload": settings_reload,
+            **allocator_status(wgp.server_config),
+        }
+    finally:
+        _gen_lock.release()
+
+
+@api.post("/api/v1/system-detect/reset-learning")
+def reset_performance_learning():
+    from services.performance_tuning import hardware_key
+    _get_performance_history().reset(hardware_key(_performance_hardware()))
+    return {"status": "ok", "learning": _performance_learning_summary()}
 
 
 @api.get("/api/v1/system-stats")
@@ -23105,6 +23156,126 @@ def _apply_film_grain_to_file_impl(video_path: str, intensity: float, saturation
 # which we'd rather not call per-job.
 _cached_hardware: dict | None = None
 _generation_eta_history: GenerationEtaHistory | None = None
+_performance_history = None
+_last_performance_plan = None
+
+
+def _performance_hardware() -> dict:
+    """Scope evidence to hardware, active allocator and installed runtime files."""
+    import hashlib
+    from shared.cuda_memory import allocator_status
+    hw = dict(_get_cached_hardware())
+    hw["allocator_active"] = allocator_status(wgp.server_config).get("vram_allocator_active")
+    stamps = []
+    for relative in ("wgp.py", "services/performance_tuning.py", "services/perf_recommend.py",
+                     "mmgp/offload.py", "shared/kernels/int8_backend.py"):
+        path = os.path.join(os.path.dirname(__file__), relative)
+        with open(path, "rb") as source:
+            stamps.append(hashlib.sha256(source.read()).hexdigest())
+    hw["runtime_signature"] = hashlib.sha256("".join(stamps).encode()).hexdigest()
+    return hw
+
+
+def _get_performance_history():
+    global _performance_history
+    if _performance_history is None:
+        from services.performance_tuning import PerformanceHistory
+        _performance_history = PerformanceHistory(os.path.join(os.path.dirname(__file__), "settings", "performance_tuning.sqlite3"))
+    return _performance_history
+
+
+def _performance_learning_summary():
+    try:
+        from services.performance_tuning import hardware_key
+        return {**_get_performance_history().summary(hardware_key(_performance_hardware())),
+                "last_plan": _last_performance_plan}
+    except Exception:
+        return {"completed_renders": 0, "workloads": 0, "unavailable": True}
+
+
+def _apply_per_job_performance(job, raw_params):
+    """Apply a temporary placement plan inside the generation slot only."""
+    global _BASE_TRANSFORMER_BUDGET_MB, _last_performance_plan
+    try:
+        from services.performance_tuning import build_performance_plan, GenerationPerformanceMonitor
+        from services.live_stats import get_live_stats
+        from services.memory_settings import preload_for_output
+        params = job.get("params") or {}
+        output = wgp.get_output_type_for_model(params.get("model_type"), params.get("image_mode", 0))
+        profile = wgp.compute_profile(params.get("override_profile", -1), output)
+        original_budget = (_BASE_TRANSFORMER_BUDGET_MB if _BASE_TRANSFORMER_BUDGET_MB is not None
+                           else int(getattr(wgp.args, "transformer_budget", 0) or 0))
+        cli = {key: getattr(wgp.args, key, 0) for key in ("preload", "perc_reserved_mem_max")}
+        cli.update(profile=getattr(wgp.args, "profile", -1), transformer_budget=original_budget)
+        if getattr(wgp, "force_profile_no", -1) >= 0:
+            cli["profile"] = wgp.force_profile_no
+        stats = get_live_stats()
+        pinned = getattr(wgp.offload, "total_pinned_bytes", 0) / (1024 ** 3)
+        definition = dict(wgp.get_model_def(params.get("model_type")) or {})
+        # Local weight identity/stat is hashed by the service; paths never enter history.
+        try:
+            selected_file = wgp.get_model_filename(params.get("model_type"), wgp.transformer_quantization)
+            definition["_checkpoint_files"] = wgp.get_local_model_filename(selected_file) or selected_file
+        except Exception:
+            pass
+        plan = build_performance_plan(_performance_hardware(), wgp.server_config, definition, params,
+                                     job.get("vram_adjustment"), output_type=output, profile=profile, cli=cli,
+                                     available_ram_gb=stats.get("ram", {}).get("available_gb"),
+                                     external_vram_gb=(stats.get("gpu", {}).get("vram_used_gb", 0)
+                                                       if getattr(wgp, "wan_model", None) is None else 0),
+                                     own_pinned_gb=pinned, history=_get_performance_history())
+        if plan["applied"]:
+            if _BASE_TRANSFORMER_BUDGET_MB is None:
+                _BASE_TRANSFORMER_BUDGET_MB = original_budget
+            # Other model-specific guards retain ownership of their transformer budget.
+            if "h3_weight_budget_gb" in (job.get("vram_adjustment") or {}):
+                wgp.args.transformer_budget = plan["transformer_budget_mb"]
+            else:
+                plan["transformer_budget_mb"] = int(getattr(wgp.args, "transformer_budget", 0) or 0)
+            raw_params["override_profile"] = plan["profile"]
+            wgp.args._maestro_per_job_memory_plan = plan
+        else:
+            _, preload = preload_for_output(wgp.server_config, wgp.args, output)
+            plan["transformer_budget_mb"] = preload or int(getattr(wgp.args, "transformer_budget", 0) or 0)
+        signature = (plan["profile"], plan["transformer_budget_mb"],
+                     plan["read_ahead"], plan["reserved_ram_fraction"])
+        wgp.args._maestro_performance_placement = signature
+        if getattr(wgp, "wan_model", None) is not None:
+            if getattr(wgp.wan_model, "_maestro_performance_placement", None) != signature:
+                wgp.reload_needed = True
+        job["performance_plan"] = plan
+        _last_performance_plan = plan
+        print(f"[Auto-tune] Profile {plan['profile']:g}, transformer {plan['transformer_budget_mb']} MB ({plan['source']}). " + " ".join(plan["warnings"]))
+        return GenerationPerformanceMonitor(get_live_stats, lambda: job.get("phase", "")).start()
+    except Exception as exc:
+        # Planning/telemetry must never become a generation dependency.
+        print(f"[Auto-tune] Per-generation learning unavailable: {exc}")
+        return None
+
+
+def _finish_per_job_performance(job, monitor, completed):
+    try:
+        if monitor is not None:
+            measurement = monitor.finish()
+            job["performance_measurements"] = measurement
+            _get_performance_history().record(job.get("id"), job.get("performance_plan"), measurement,
+                                              completed=completed and not is_cancel_requested(job))
+            # Sidecars are written during output publication; add final measurements now.
+            for name in job.get("output_files", []):
+                output_dir = job.get("out_dir") or _workspace_dir(job.get("workspace"))
+                path = os.path.join(output_dir, os.path.splitext(name)[0] + ".meta.json")
+                if os.path.isfile(path):
+                    with open(path, "r", encoding="utf-8") as source:
+                        metadata = json.load(source)
+                    metadata["performance_plan"] = job.get("performance_plan")
+                    metadata["performance_measurements"] = measurement
+                    with open(path, "w", encoding="utf-8") as target:
+                        json.dump(metadata, target, indent=2)
+    except Exception as exc:
+        print(f"[Auto-tune] Could not save performance evidence: {exc}")
+    finally:
+        wgp.args._maestro_per_job_memory_plan = None
+        wgp.args._maestro_performance_placement = None
 
 
 def _get_cached_hardware() -> dict:
@@ -23559,14 +23730,16 @@ def _apply_per_job_coefficient(job: dict) -> None:
                 wgp.args.transformer_budget = longcat_residency_override_mb
                 adjustment["longcat_residency_mb"] = longcat_residency_override_mb
             if _is_h3:
+                from services.memory_settings import preload_for_output
+                h3_output_type = wgp.get_output_type_for_model(model_type, params.get("image_mode", 0))
                 profile = wgp.compute_profile(
                     params.get("override_profile", -1),
-                    wgp.get_output_type_for_model(model_type, params.get("image_mode", 0)),
+                    h3_output_type,
                 )
-                preload = int(getattr(wgp.args, "preload", 0) or 0)
-                if preload == 0:
-                    preload = int(wgp.server_config.get("preload_in_VRAM", 0) or 0)
-                if int(profile) in (2, 4, 5) and preload == 0:
+                _, preload = preload_for_output(wgp.server_config, wgp.args, h3_output_type)
+                explicit_budget = (_BASE_TRANSFORMER_BUDGET_MB if _BASE_TRANSFORMER_BUDGET_MB is not None
+                                   else int(getattr(wgp.args, "transformer_budget", 0) or 0))
+                if int(profile) in (2, 4, 5) and preload == 0 and not explicit_budget:
                     if _BASE_TRANSFORMER_BUDGET_MB is None:
                         _BASE_TRANSFORMER_BUDGET_MB = int(
                             getattr(wgp.args, "transformer_budget", 0) or 0
@@ -25456,6 +25629,8 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
     with ExitStack() as media_resources, (nullcontext(True) if _slot_owned else generation_slot(_gen_lock, job)) as acquired:
         if not acquired:
             return False
+        performance_monitor = None
+        performance_completed = False
         try:
             if _slot_owned:
                 if is_cancel_requested(job) or job.get("status") != "running":
@@ -25572,6 +25747,10 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             # base captures. Mutates wgp.args.vram_safety_coefficient
             # in place; restored in the finally block below.
             _apply_per_job_coefficient(job)
+            # Internal Viggle/Klein preparation shares the parent's identity.
+            # Only the parent video teaches history, after all preparation succeeds.
+            if not _slot_owned:
+                performance_monitor = _apply_per_job_performance(job, raw_params)
 
             # Build minimal state (same structure as CLI mode, line 11935 of wgp.py)
             state = {
@@ -26422,6 +26601,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     sidecar_params["temporal_upsampling"] = pp_media_temporal
                 sidecar = {
                     "params": sidecar_params,
+                    "performance_plan": job.get("performance_plan"),
                     "upload_filenames": upload_filenames,
                     "generation_mode": job["params"].get("generation_mode"),
                     "job_id": job_id,
@@ -27849,6 +28029,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 if not defer_output_publication:
                     _write_output_sidecars(new_files)
 
+            performance_completed = bool(success)
             if success and not finalize:
                 deferred_updates = {}
                 if defer_output_publication:
@@ -27901,6 +28082,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             if abort_state is not None:
                 unregister_abort_state(job_id, _active_gen_states, abort_state)
             _generation_previews.clear(job_id)
+            _finish_per_job_performance(job, performance_monitor, performance_completed)
             # Restore the base coefficient and transformer budget so the
             # next job starts with its own memory plan.
             _restore_base_coefficient()
@@ -28784,6 +28966,8 @@ def get_status(job_id: str):
         # Present only on failed jobs that look like CUDA OOMs. UI
         # renders the OOM recovery banner when this is non-null.
         "oom_info": j.get("oom_info"),
+        "performance_plan": j.get("performance_plan"),
+        "performance_measurements": j.get("performance_measurements"),
         # Automatic multi-window plans may be produced after submission, once
         # the queued job owns the generation slot. Publish them through normal
         # polling so the placeholder can show the exact prompts being used.
@@ -29000,6 +29184,8 @@ def list_jobs():
                 "error": j["error"],
                 "enhancement": public_enhancement(j.get("enhancement"), summary=True),
                 "oom_info": j.get("oom_info"),
+                "performance_plan": j.get("performance_plan"),
+                "performance_measurements": j.get("performance_measurements"),
                 "created_at": j.get("created_at", 0),
                 **_generation_previews.fields(j),
                 **_job_eta_response_fields(j),

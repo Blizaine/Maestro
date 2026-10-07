@@ -1877,7 +1877,8 @@ export async function scanModelFolders(): Promise<{ candidates: import('../types
 
 export async function updateSystemConfig(
   partial: Partial<import('../types').SystemConfig>
-): Promise<{ status: string; updated: Record<string, unknown> }> {
+): Promise<{ status: string; updated: Record<string, unknown> } & Pick<import('../types').SystemConfig,
+  'vram_allocator_active' | 'vram_allocator_restart_required' | 'vram_allocator_fallback_reason' | 'vram_allocator_cli_override'>> {
   const res = await fetch(`${BASE}/api/v1/system-config`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -2229,6 +2230,12 @@ export interface RemoteLoadedModel {
   instance_id: string
   model_key: string
   display_name: string
+}
+
+export async function resetPerformanceLearning(): Promise<{ status: string }> {
+  const res = await fetch(`${BASE}/api/v1/system-detect/reset-learning`, { method: 'POST' })
+  if (!res.ok) throw new Error('Could not clear local comparisons')
+  return res.json()
 }
 
 export interface RemoteLoadedModels {

@@ -206,12 +206,10 @@ class FlashVSRBridge:
         if not enabled:
             raise RuntimeError("FlashVSR spatial upsampling is disabled in Configuration > Extensions.")
         # The caller's profile is tuned for the MAIN diffusion model (often a
-        # low-VRAM profile for 20B+ models). Under profiles 2/4/5, wgp's
-        # init_pipe budgets the transformer to ~100 MB of VRAM, so mmgp
-        # shuttles FlashVSR's 2.7 GB of weights from pinned RAM to the GPU on
-        # EVERY step — observed as relentless copy-engine spikes and GPU idle
-        # gaps on a 24 GB card running this 1.3B model. The whole FlashVSR
-        # pipe is ~3.4 GB: when free VRAM comfortably fits it, promote to
+        # low-VRAM profile for 20B+ models). MMGP's streaming budgets can be
+        # smaller than FlashVSR's 2.7 GB of weights (notably profiles 4/5),
+        # requiring repeated RAM-to-GPU copies. The whole FlashVSR pipe is
+        # ~3.4 GB: when free VRAM comfortably fits it, promote to
         # profile 3 (HighVRAM, "*" budget 70%) so weights load once and stay
         # resident. Low-VRAM cards keep the caller's profile untouched.
         if profile in (2, 4, 5):

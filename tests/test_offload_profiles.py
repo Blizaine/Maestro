@@ -1,8 +1,10 @@
 """Low-memory profile variants must retain WanGP's base profile budgets."""
 import ast
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 import unittest
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 
 def init_pipe(preload=0, saved_preload=0, transformer_budget=None):
@@ -17,6 +19,29 @@ def init_pipe(preload=0, saved_preload=0, transformer_budget=None):
 
 
 class OffloadProfileTests(unittest.TestCase):
+    def test_live_profile_changes_apply_to_each_output_and_job_override_wins(self):
+        path = Path(__file__).resolve().parents[1] / "app" / "wgp.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        names = {"_normalize_output_type", "get_default_profile", "compute_profile"}
+        nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+        config = {"video_profile": 1, "image_profile": 2, "audio_profile": 3.5}
+        namespace = {"args": SimpleNamespace(profile=-1), "force_profile_no": -1,
+                     "server_config": config, "default_profile_video": 1,
+                     "default_profile_image": 2, "default_profile_audio": 3.5}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), namespace)
+        compute = namespace["compute_profile"]
+        config.update(video_profile=4, image_profile=5, audio_profile=4.5)
+        self.assertEqual(compute(-1, "video"), 4)
+        self.assertEqual(compute(-1, "image"), 5)
+        self.assertEqual(compute(-1, "audio"), 4.5)
+        self.assertEqual(compute(2, "video"), 2)
+        self.assertEqual(compute(-1, "unknown"), 4)
+        namespace["args"].profile = "3.5"
+        self.assertEqual(compute(-1, "video"), 3.5)
+        self.assertEqual(compute(2, "video"), 2)
+        namespace["force_profile_no"] = 4
+        self.assertEqual(compute(-1, "audio"), 4)
+
     def test_residency_override_changes_only_the_first_transformer(self):
         for profile in (2, 4, 4.5, 5):
             with self.subTest(profile=profile):
@@ -79,14 +104,26 @@ class OffloadProfileTests(unittest.TestCase):
             fn({"transformer": object()}, options, 4.5)
             self.assertEqual(options["budgets"], {"transformer": 640, "text_encoder": 640, "*": 3000})
 
-    def test_integer_profiles_keep_their_previous_policy(self):
+    def test_integer_profiles_keep_residency_and_mmgp_streaming_defaults(self):
         for profile in (1, 2, 3, 4, 5):
             with self.subTest(profile=profile):
                 options = {}
                 self.assertEqual(init_pipe()({"transformer": object()}, options, profile), profile)
                 expected = {} if profile == 1 else ({"*": "70%"} if profile == 3 else
-                    {"transformer": 100, "text_encoder": 100, "*": 1000 if profile == 5 else 3000})
+                    {"transformer": {2: 3000, 4: 1200, 5: 400}[profile], "text_encoder": 100, "*": 1000 if profile == 5 else 3000})
                 self.assertEqual(options["budgets"], expected)
+
+    def test_missing_second_transformer_budget_uses_profile_allowance(self):
+        options = {"budgets": {"vae": 512}}
+        init_pipe()({"transformer": object(), "transformer2": object()}, options, 4)
+        self.assertEqual(options["budgets"]["transformer"], 1200)
+        self.assertEqual(options["budgets"]["transformer2"], 1200)
+        self.assertEqual(options["budgets"]["vae"], 512)
+
+    def test_model_encoder_and_catch_all_allowances_survive_job_override(self):
+        options = {"budgets": {"text_encoder": 800, "*": 1400}}
+        init_pipe(transformer_budget=9000)({"transformer": object()}, options, 4)
+        self.assertEqual(options["budgets"], {"transformer": 9000, "text_encoder": 800, "*": 1400})
 
 
 if __name__ == "__main__":

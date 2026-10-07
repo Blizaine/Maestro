@@ -117,7 +117,9 @@ def _probe_gguf_cuda_runtime(force=False):
     except Exception as exc:
         _GGUF_CUDA_KERNELS_ENABLED_CACHE = False
         _GGUF_CUDA_MODULE = None
-        _GGUF_CUDA_LOAD_ERROR = exc
+        # Do not retain the exception itself: its traceback retains this
+        # probe's caller frames, which can own mmap-backed GGUF tensors.
+        _GGUF_CUDA_LOAD_ERROR = f"{type(exc).__name__}: {exc}"
         _gguf_log_once("gguf_cuda_probe_failed", f"[GGUF][llama.cpp CUDA] kernels unavailable, using fallback")
         return False
     _GGUF_CUDA_KERNELS_ENABLED_CACHE = True
@@ -154,8 +156,6 @@ def set_gguf_cuda_kernels_enabled(enabled=None):
         return _probe_gguf_cuda_runtime()
     return _probe_gguf_cuda_runtime(force=True)
 
-
-_probe_gguf_cuda_runtime()
 
 def get_file_metadata(file_path):
     if gguf is None:
@@ -227,6 +227,9 @@ def load_gguf_state_dict(
         raise RuntimeError("GGUF support requires the 'gguf' package.")
     if pin_to_memory:
         raise Exception("Pinning to memory while loading GGUF files is not supported")
+    # Probe once on first load, before model forwards or graph capture. Merely
+    # importing the GGUF handler should not initialize its CUDA kernels.
+    _gguf_cuda_kernels_enabled()
 
     import warnings
 

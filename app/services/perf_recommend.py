@@ -40,13 +40,13 @@ from typing import Optional
 # still see "Profile N — HighRAM_LowVRAM" in the advanced dropdown
 # (so they can grep Wan2GP forums); novices see this.
 PROFILE_DESCRIPTIONS = {
-    1:   "Optimized for fastest generation",
-    2:   "Balanced for versatility (large batches, long videos)",
-    3:   "Optimized for short videos with limited RAM",
-    3.5: "Optimized for short videos with very limited RAM",
-    4:   "Optimized for longer videos with limited VRAM",
-    4.5: "Optimized for very limited VRAM",
-    5:   "Maximum offload — slower but works on small machines",
+    1:   "Keep most model weights resident in VRAM",
+    2:   "Use host RAM to support a larger model working set",
+    3:   "Favor VRAM residency when host RAM is limited",
+    3.5: "Favor VRAM residency while limiting host RAM use",
+    4:   "Balance partial VRAM residency with host RAM use",
+    4.5: "Reduce VRAM use with additional host offload",
+    5:   "Stream model weights aggressively between host RAM and VRAM",
 }
 
 # Revision 1 was tracked only by services.auto_performance_applied.
@@ -54,7 +54,21 @@ PROFILE_DESCRIPTIONS = {
 # Revision 2 was an unpublished trial of Profile 4 on 24-31 GB hosts. It
 # OOM'd on the reported A4500; restore the conservative table pending an A/B
 # test with a smaller pinning cap. Manually selected profiles remain untouched.
-AUTO_PERFORMANCE_REVISION = 3
+AUTO_PERFORMANCE_REVISION = 4
+
+# These controls were not owned by Auto-Tune before revision 4. A missing
+# value can be initialized from the current recommendation, but an existing
+# value has unknown provenance and must remain user-owned during migration.
+_NEW_AUTO_PERFORMANCE_KEYS = frozenset({
+    "int8_kernels",
+    "vram_allocator",
+    "smart_memory_pinning",
+    "read_ahead",
+    "perc_reserved_mem_max",
+    "attention_head_split",
+    *(f"{kind}_preload_{suffix}" for kind in ("video", "image", "audio")
+      for suffix in ("mode", "in_VRAM")),
+})
 
 
 def recommend_h3_reserved_ram_fraction(
@@ -204,7 +218,11 @@ def recommend_settings(hw: dict) -> dict:
       _recommendation_label: str — for the UI card readout
       _recommendation_reason: str — for the tooltip / debug log
     """
-    if not hw.get("cuda_available", False):
+    cuda_available = bool(hw.get("cuda_available", False))
+    ram_gb = float(hw.get("ram_gb") or 0)
+    platform_name = str(hw.get("platform", ""))
+    allocator_supported = bool(hw.get("supports_mmgp_allocator", False))
+    if not cuda_available:
         # No CUDA — return conservative fallback. User probably needs
         # manual setup, but defaults shouldn't crash.
         return {
@@ -216,19 +234,36 @@ def recommend_settings(hw: dict) -> dict:
             "vram_safety_coefficient": 0.70,
             "attention_mode": "auto",
             "compile": "",
+            "int8_kernels": "disabled",
+            "vram_allocator": "default",
+            "smart_memory_pinning": True,
+            "read_ahead": False,
+            "perc_reserved_mem_max": 0,
+            "attention_head_split": 0,
+            "video_preload_mode": "default",
+            "video_preload_in_VRAM": 0,
+            "image_preload_mode": "default",
+            "image_preload_in_VRAM": 0,
+            "audio_preload_mode": "default",
+            "audio_preload_in_VRAM": 0,
             "_recommendation_label": "Auto-tune unavailable on this hardware",
             "_recommendation_reason": (
                 "No CUDA-capable GPU detected. Maestro requires NVIDIA GPU "
                 "with 6+ GB VRAM. Default conservative profile applied — "
                 "performance may be limited."
             ),
+            "_recommendation_details": [
+                "The profile favors additional host offload because no CUDA GPU was detected.",
+                "Memory controls use safe defaults; the allocator remains on the runtime default.",
+                "Preload modes stay at default/0, while smart memory pinning remains enabled and runtime limits stay automatic.",
+                "The generation-aware planner uses workload dimensions and learned VRAM peaks for temporary per-job model budgets; it does not change Sol mode or quality settings.",
+            ],
         }
 
     ram_tier = hw.get("ram_tier", "low")
     vram_tier = hw.get("vram_tier", "low")
     supports_fp8 = bool(hw.get("supports_fp8", False))
     supports_nvfp4 = bool(hw.get("supports_nvfp4", False))
-    ram_gb = float(hw.get("ram_gb") or 0)
 
     profile = _pick_profile(ram_tier, vram_tier)
     quant = _pick_quantization(vram_tier, supports_fp8, supports_nvfp4)
@@ -262,6 +297,25 @@ def recommend_settings(hw: dict) -> dict:
         f"{quant.upper()}, VAE config {vae}, coefficient {coef}"
     )
 
+    read_ahead = platform_name == "win32" and ram_gb >= 64
+    details = [
+        f"Profile {profile:g} guides model placement between the detected {vram_gb} GB VRAM and {ram_gb:g} GB system RAM.",
+        "INT8 kernels use automatic backend selection; model-loading and preload controls start at runtime defaults.",
+        "Smart memory pinning is enabled; reserved-memory and attention-head limits stay automatic at 0.",
+        "Video, image, and audio preload modes stay at default with 0 MB requested.",
+        (
+            "Read-ahead is enabled for Windows systems with at least 64 GB RAM."
+            if read_ahead else
+            "Read-ahead stays off unless Windows has at least 64 GB RAM."
+        ),
+        (
+            "The bundled MMGP allocator is available for this CUDA platform."
+            if allocator_supported else
+            "The bundled MMGP allocator is unavailable for this CUDA platform; the runtime default is retained."
+        ),
+        "The generation-aware planner uses workload dimensions and learned VRAM peaks for temporary per-job model budgets; it does not change Sol mode or quality settings.",
+    ]
+
     return {
         "video_profile": profile,
         "image_profile": profile,
@@ -271,8 +325,21 @@ def recommend_settings(hw: dict) -> dict:
         "vram_safety_coefficient": coef,
         "attention_mode": "auto",
         "compile": "",
+        "int8_kernels": "auto",
+        "vram_allocator": "vmm" if allocator_supported else "default",
+        "smart_memory_pinning": True,
+        "read_ahead": read_ahead,
+        "perc_reserved_mem_max": 0,
+        "attention_head_split": 0,
+        "video_preload_mode": "default",
+        "video_preload_in_VRAM": 0,
+        "image_preload_mode": "default",
+        "image_preload_in_VRAM": 0,
+        "audio_preload_mode": "default",
+        "audio_preload_in_VRAM": 0,
         "_recommendation_label": _profile_label(profile),
         "_recommendation_reason": reason,
+        "_recommendation_details": details,
     }
 
 
@@ -292,6 +359,18 @@ def applied_keys() -> list:
         "vram_safety_coefficient",
         "attention_mode",
         "compile",
+        "int8_kernels",
+        "vram_allocator",
+        "smart_memory_pinning",
+        "read_ahead",
+        "perc_reserved_mem_max",
+        "attention_head_split",
+        "video_preload_mode",
+        "video_preload_in_VRAM",
+        "image_preload_mode",
+        "image_preload_in_VRAM",
+        "audio_preload_mode",
+        "audio_preload_in_VRAM",
     ]
 
 
@@ -326,9 +405,10 @@ def apply_auto_performance(config: dict, hw: dict, *, force: bool = False) -> di
     rec = recommend_settings(hw)
     recommended = {key: rec[key] for key in applied_keys()}
     services = config.setdefault("services", {})
+    previous_defaults = services.get("auto_performance_defaults")
     previous = None
     if not force and services.get("auto_performance_applied"):
-        previous = services.get("auto_performance_defaults")
+        previous = previous_defaults
         if not isinstance(previous, dict):
             # Legacy installs have only the applied boolean. The restored
             # profile table matches their revision-1 coarse RAM/VRAM tiers.
@@ -338,9 +418,22 @@ def apply_auto_performance(config: dict, hw: dict, *, force: bool = False) -> di
             )
             previous.update(video_profile=legacy_profile, image_profile=legacy_profile)
 
+    # New controls may have been introduced by memory-settings initialization
+    # before this migration. Their current value's provenance is unknowable,
+    # even when it happens to equal today's recommendation. Only trust a
+    # stored defaults snapshot that explicitly contains the key.
+    untracked_new_keys = set()
+    if not force:
+        tracked = previous_defaults if isinstance(previous_defaults, dict) else {}
+        untracked_new_keys = _NEW_AUTO_PERFORMANCE_KEYS - set(tracked)
+    untracked_existing_keys = untracked_new_keys & set(config)
+
     updated = {}
     preserved = []
     for key, value in recommended.items():
+        if key in untracked_existing_keys:
+            preserved.append(key)
+            continue
         if previous is not None and key in config and (
             key not in previous or config[key] != previous[key]
         ):
@@ -355,7 +448,10 @@ def apply_auto_performance(config: dict, hw: dict, *, force: bool = False) -> di
     services["auto_performance_revision"] = (
         AUTO_PERFORMANCE_REVISION if services["auto_performance_applied"] else 0
     )
-    services["auto_performance_defaults"] = recommended
+    tracked_defaults = dict(recommended)
+    for key in untracked_existing_keys:
+        tracked_defaults.pop(key, None)
+    services["auto_performance_defaults"] = tracked_defaults
     return {"recommended": rec, "updated": updated, "preserved": preserved}
 
 

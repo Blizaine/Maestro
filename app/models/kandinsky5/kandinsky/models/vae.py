@@ -1,4 +1,3 @@
-import os
 import json
 from math import sqrt, floor, ceil
 from typing import Optional, Tuple, Union, List
@@ -18,11 +17,8 @@ from diffusers.models.autoencoders.vae import (
     DiagonalGaussianDistribution,
 )
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-os.environ["TORCHINDUCTOR_FX_GRAPH_CACHE"] = "1"
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.benchmark = True
 
 
 def prepare_causal_attention_mask(

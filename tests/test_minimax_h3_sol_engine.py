@@ -189,6 +189,60 @@ class TestSolAttentionRouting(unittest.TestCase):
         self.assertTrue(probe.called)
         self.assertEqual(tuple(output.shape), (1, 4, 8))
 
+    def test_attention_prefers_staged_sol_for_supported_split_projections(self):
+        from models.minimax_h3.transformer import MiniMaxH3Attention
+
+        torch = self.torch
+
+        class Probe:
+            def __init__(self):
+                self.staged_called = False
+                self.attention_called = False
+
+            def use_for_layer(self, tokens, attention_mask=None):
+                return tokens == 4 and attention_mask is None
+
+            def staged(self, x, projections):
+                self.staged_called = x.shape == (1, 4, 8) and len(projections) == 3
+                return self.staged_called
+
+            def attention(self, x_list, projections, norm_rope, heads, head_dim):
+                self.attention_called = True
+                x = x_list.pop()
+                query, key, value = [
+                    projection(x).view(1, 4, heads, head_dim)
+                    for projection in projections
+                ]
+                norm_rope(query, key)
+                return torch.nn.functional.scaled_dot_product_attention(
+                    query.transpose(1, 2),
+                    key.transpose(1, 2),
+                    value.transpose(1, 2),
+                ).transpose(1, 2)
+
+            def __call__(self, qkv_list, use_sol):
+                raise AssertionError("the staged path should handle this request")
+
+        probe = Probe()
+        attention = MiniMaxH3Attention(
+            8,
+            1,
+            8,
+            1e-5,
+            torch.float32,
+            sol_attention=probe,
+        ).eval()
+        del attention.qkv_proj
+        attention.q_proj = torch.nn.Linear(8, 8, bias=False)
+        attention.k_proj = torch.nn.Linear(8, 8, bias=False)
+        attention.v_proj = torch.nn.Linear(8, 8, bias=False)
+        with torch.inference_mode():
+            output = attention(torch.randn(1, 4, 8))
+
+        self.assertTrue(probe.staged_called)
+        self.assertTrue(probe.attention_called)
+        self.assertEqual(tuple(output.shape), (1, 4, 8))
+
     def test_kernel_failure_stays_on_dense_fallback_for_process(self):
         from models.minimax_h3.sol_attention import MiniMaxH3SolAttention
 

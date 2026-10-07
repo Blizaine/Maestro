@@ -120,3 +120,5 @@ app/dlss5/
 !docs/development/
 docs/development/*
 !docs/development/wan2gp-12-71-port-plan.md
+!docs/development/wan2gp-17-port.md
+!docs/development/memory-benchmark.md

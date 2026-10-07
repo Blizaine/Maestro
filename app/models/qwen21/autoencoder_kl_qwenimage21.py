@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -25,6 +26,7 @@ from diffusers.models.activations import get_activation
 from diffusers.models.modeling_outputs import AutoencoderKLOutput
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.autoencoders.vae import AutoencoderMixin, DecoderOutput, DiagonalGaussianDistribution
+from shared.utils.conv_bands import conv_bands
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -178,10 +180,26 @@ class QwenImage21CausalConv3d(nn.Conv2d):
                 "and has no temporal context to prepend, so it cannot take a feature cache."
             )
         x = x.squeeze(2)  # Remove the temporal dimension
+        if (
+            self.kernel_size == (3, 3)
+            and self.stride == (1, 1)
+            and self._padding == (1, 1, 1, 1)
+            and self.dilation == (1, 1)
+            and self.padding_mode == "zeros"
+        ):
+            # The convolution supplies zero padding itself; process large images by row bands.
+            conv = functools.partial(
+                F.conv2d,
+                weight=self.weight,
+                bias=self.bias,
+                stride=self.stride,
+                padding=(padding[2], padding[0]),
+                dilation=self.dilation,
+                groups=self.groups,
+            )
+            return conv_bands(x, conv).unsqueeze(2)
         x = F.pad(x, padding)
-        x = super().forward(x)
-        x = x.unsqueeze(2)  # Add the temporal dimension back
-        return x
+        return super().forward(x).unsqueeze(2)  # Add the temporal dimension back
 
 
 # Copied from diffusers.models.autoencoders.autoencoder_kl_wan.WanRMS_norm with Wan->QwenImage21
@@ -211,11 +229,18 @@ class QwenImage21RMS_norm(nn.Module):
         needs_fp32_normalize = x.dtype in (torch.float16, torch.bfloat16) or any(
             t in str(x.dtype) for t in ("float4_", "float8_")
         )
-        normalized = F.normalize(x.float() if needs_fp32_normalize else x, dim=(1 if self.channel_first else -1)).to(
-            x.dtype
-        )
-
-        return normalized * self.scale * self.gamma + self.bias
+        dim = 1 if self.channel_first else -1
+        if needs_fp32_normalize:
+            # Normalize in float32 but cast each row chunk immediately instead of retaining a full float32 result.
+            denom = x.float().norm(2.0, dim, keepdim=True).clamp_min_(1e-12)
+            normalized = torch.empty_like(x)
+            rows = max(1, (64 << 20) * x.shape[-2] // (x.numel() * 4))
+            for start in range(0, x.shape[-2], rows):
+                stop = min(x.shape[-2], start + rows)
+                normalized[..., start:stop, :] = x[..., start:stop, :].float() / denom[..., start:stop, :]
+        else:
+            normalized = F.normalize(x, dim=dim)
+        return normalized.mul_(self.scale).mul_(self.gamma).add_(self.bias)
 
 
 # Copied from diffusers.models.autoencoders.autoencoder_kl_wan.WanUpsample with Wan->QwenImage21
@@ -310,7 +335,11 @@ class QwenImage21Resample(nn.Module):
                     x = x.reshape(b, c, t * 2, h, w)
         t = x.shape[2]
         x = x.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
-        x = self.resample(x)
+        if self.mode in ("upsample2d", "upsample3d"):
+            # Nearest x2 upsampling and convolution by bands avoids a full-size upsampled activation.
+            x = conv_bands(x, self.resample[1], upsample=True, mode="nearest-exact")
+        else:
+            x = self.resample(x)
         x = x.view(b, t, x.size(1), x.size(2), x.size(3)).permute(0, 2, 1, 3, 4)
 
         if self.mode == "downsample3d":
@@ -1174,6 +1203,9 @@ class AutoencoderKLQwenImage21(ModelMixin, AutoencoderMixin, ConfigMixin, FromOr
             out_channels=out_channels,
             is_residual=is_residual,
         )
+        for module in self.modules():
+            if isinstance(module, nn.SiLU):
+                module.inplace = True
 
         self.spatial_compression_ratio = scale_factor_spatial
 

@@ -21,10 +21,59 @@ Design notes:
 """
 from __future__ import annotations
 
+import platform as host_platform
+import sys
+from pathlib import Path
 from typing import Optional
 
 # RAM detection — psutil is a hard dependency of the app, no fallback needed.
 import psutil
+
+_APP_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _detect_driver_version() -> str:
+    """Read the NVIDIA driver version without creating a CUDA context."""
+    try:
+        import pynvml
+        # Keep NVML initialized for the app's telemetry readers, which share
+        # this process-wide client and also leave it initialized at startup.
+        pynvml.nvmlInit()
+        value = pynvml.nvmlSystemGetDriverVersion()
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        return str(value) if value else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _supports_mmgp_allocator(
+    *,
+    cuda_available: bool,
+    nvidia_cuda: bool,
+    system: str,
+    machine: str,
+    app_root: Optional[Path] = None,
+) -> bool:
+    """Check for a bundled allocator binary on a supported NVIDIA platform.
+
+    This is a filesystem capability check only. It does not import MMGP's
+    allocator, create a CUDA context, allocate memory, or execute a kernel.
+    Runtime startup remains responsible for loading it and falling back.
+    """
+    if not cuda_available or not nvidia_cuda:
+        return False
+
+    machine = str(machine or "").lower()
+    if system == "win32" and machine in ("amd64", "x86_64"):
+        filename = "vmm_alloc_win_amd64.dll"
+    elif system == "linux" and machine in ("x86_64", "amd64"):
+        filename = "vmm_alloc_linux_x86_64.so"
+    else:
+        return False
+
+    root = app_root if app_root is not None else _APP_ROOT
+    return (Path(root) / "mmgp" / "allocator" / filename).is_file()
 
 
 def _detect_gpu() -> dict:
@@ -43,9 +92,20 @@ def _detect_gpu() -> dict:
         "gpu_vram_gb": 0.0,
         "gpu_capability": "",
         "gpu_capability_tuple": None,
+        "nvidia_cuda": False,
+        "torch_version": "unknown",
+        "runtime_version": "unknown",
     }
     try:
         import torch
+        torch_version = getattr(torch, "__version__", None)
+        version = getattr(torch, "version", None)
+        cuda_runtime = getattr(version, "cuda", None)
+        hip_runtime = getattr(version, "hip", None)
+        out["torch_version"] = str(torch_version) if torch_version else "unknown"
+        runtime_version = cuda_runtime or hip_runtime
+        out["runtime_version"] = str(runtime_version) if runtime_version else "unknown"
+        out["nvidia_cuda"] = bool(cuda_runtime and not hip_runtime)
         if not torch.cuda.is_available():
             return out
         props = torch.cuda.get_device_properties(0)
@@ -165,7 +225,12 @@ def detect_hardware() -> dict:
       gpu_vram_gb: float        — total VRAM in GB, 0.0 if no CUDA
       gpu_capability: str       — e.g. "sm89", "" if no CUDA
       ram_gb: float             — total system RAM in GB
+      ram_available_gb: float  — currently available system RAM in GB
       cpu_count: int            — logical CPU count
+      driver_version: str       — NVIDIA driver version, or "unknown"
+      torch_version: str        — PyTorch version, or "unknown"
+      runtime_version: str      — CUDA/HIP runtime version, or "unknown"
+      supports_mmgp_allocator: bool — bundled VMM allocator is present on this platform
       supports_fp8: bool        — FP8 quantization usable
       supports_nvfp4: bool      — NVFP4 quantization usable (RTX 50xx)
       supports_sage: bool       — sage attention v1 usable
@@ -178,7 +243,13 @@ def detect_hardware() -> dict:
     gpu = _detect_gpu()
     kernels = _detect_kernel_support(gpu["gpu_capability_tuple"])
 
-    ram_gb = round(psutil.virtual_memory().total / (1024 ** 3), 1)
+    try:
+        memory = psutil.virtual_memory()
+        ram_gb = round(memory.total / (1024 ** 3), 1)
+        ram_available_gb = round(memory.available / (1024 ** 3), 1)
+    except Exception:
+        ram_gb = 0.0
+        ram_available_gb = 0.0
     cpu_count = psutil.cpu_count(logical=True) or 1
 
     # Tier classification — matches Wan2GP's existing thresholds at
@@ -208,7 +279,23 @@ def detect_hardware() -> dict:
         "gpu_vram_gb": gpu["gpu_vram_gb"],
         "gpu_capability": gpu["gpu_capability"],
         "ram_gb": ram_gb,
+        "ram_available_gb": ram_available_gb,
         "cpu_count": cpu_count,
+        "platform": sys.platform,
+        "machine": host_platform.machine(),
+        "driver_version": (
+            _detect_driver_version()
+            if gpu["cuda_available"] and gpu["nvidia_cuda"]
+            else "unknown"
+        ),
+        "torch_version": gpu["torch_version"],
+        "runtime_version": gpu["runtime_version"],
+        "supports_mmgp_allocator": _supports_mmgp_allocator(
+            cuda_available=gpu["cuda_available"],
+            nvidia_cuda=gpu["nvidia_cuda"],
+            system=sys.platform,
+            machine=host_platform.machine(),
+        ),
         "ram_tier": ram_tier,
         "vram_tier": vram_tier,
         **kernels,

@@ -7,7 +7,7 @@ import triton
 import triton.language as tl
 from triton.tools.tensor_descriptor import TensorDescriptor
 
-from .preprocess import prepare
+from .preprocess import prepare, prepare_int8_kv
 
 
 def _lean_do_bench(fn, quantiles=None, **kwargs):
@@ -97,6 +97,31 @@ def _validate(q, k, v, kv_splits, thresh_type):
 
 BLOCK = 64
 GROUP = 32
+_POINTER_INLINE_Q = True
+
+
+def _use_pointer_arch(arch):
+    """Architectures supported by the explicit-stride pointer kernels."""
+
+    return tuple(arch) in ((8, 9), (12, 0))
+
+
+def inline_q_path(arch, tokens, thresh_type):
+    """Whether INT8 Sol can quantize Q and route from its resident tile."""
+
+    return (
+        _use_pointer_arch(arch)
+        and _POINTER_INLINE_Q
+        and thresh_type == "diag"
+        and int(tokens) >= 4096
+    )
+
+
+@triton.jit
+def _round_to_int8(x):
+    """Round to nearest integer without relying on optional libdevice support."""
+
+    return tl.where(x >= 0, (x + 0.5).to(tl.int32), (x - 0.5).to(tl.int32)).to(tl.int8)
 
 
 @_tuned(_TMA_CONFIGS)
@@ -512,8 +537,10 @@ def _forward_ptr(
 @_tuned(_PTR_CONFIGS)
 @triton.jit
 def _forward_int8_ptr(
-    q_ptr, v_ptr, kc_ptr, vc_ptr, qi_ptr, ki_ptr, q_scale, k_scale, threshold, o_ptr,
+    q_ptr, v_ptr, kc_ptr, vc_ptr, qi_ptr, ki_ptr, q_scale, k_scale, threshold,
+    kc_mean_ptr, kc_var_ptr, o_ptr,
     scale,
+    tau,
     sink_start,
     sink_end,
     sink_q_start,
@@ -527,6 +554,7 @@ def _forward_int8_ptr(
     BV: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
+    INLINE_Q: tl.constexpr,
 ):
     """Pointer twin of _forward_int8 for pre-TMA arches (SM89)."""
     v_tile, q_block, batch_head = (
@@ -547,12 +575,18 @@ def _forward_int8_ptr(
         mask=q_valid[:, None],
         other=0.0,
     )
-    qi = tl.load(
-        qi_ptr + ((batch * T + q_rows[:, None]) * H + head) * D + d_offsets[None, :],
-        mask=q_valid[:, None],
-        other=0,
-    )
-    qs = tl.load(q_scale + (batch * T + q_rows) * H + head, mask=q_valid, other=1.0)
+    if INLINE_Q:
+        q_fp32 = q.to(tl.float32)
+        q_amax = tl.max(tl.abs(q_fp32), axis=1)
+        qs = tl.maximum(q_amax / 127.0, 1e-8)
+        qi = _round_to_int8(q_fp32 / qs[:, None])
+    else:
+        qi = tl.load(
+            qi_ptr + ((batch * T + q_rows[:, None]) * H + head) * D + d_offsets[None, :],
+            mask=q_valid[:, None],
+            other=0,
+        )
+        qs = tl.load(q_scale + (batch * T + q_rows) * H + head, mask=q_valid, other=1.0)
     q_len = tl.minimum(BLOCK_SIZE, T - q_start).to(tl.float32)
 
     output = tl.zeros([BLOCK_SIZE, BV], dtype=tl.float32)
@@ -560,7 +594,16 @@ def _forward_int8_ptr(
     row_max = tl.full((BLOCK_SIZE,), -float("inf"), tl.float32)
     scale_log2 = scale * 1.4426950408889634
     tail_length = T - (NT - 1) * BLOCK_SIZE
-    route_threshold = tl.load(threshold + (batch * NT + q_block) * H + head)
+    if INLINE_Q:
+        centroid = tl.sum(q.to(tl.float32), axis=0) / q_len
+        mean_kc = tl.load(kc_mean_ptr + batch_head * D + d_offsets)
+        var_kc = tl.load(kc_var_ptr + batch_head * D + d_offsets)
+        threshold_scale = scale_log2
+        threshold_mean = tl.sum(centroid * mean_kc, axis=0) * threshold_scale
+        threshold_variance = tl.sum(centroid * centroid * var_kc, axis=0) * (threshold_scale * threshold_scale)
+        route_threshold = threshold_mean + tau * tl.sqrt(tl.maximum(threshold_variance, 0.0) + 1.0e-6)
+    else:
+        route_threshold = tl.load(threshold + (batch * NT + q_block) * H + head)
     q_in_sink = (q_block >= sink_q_start) & (q_block < sink_q_end)
 
     for group_start in range(0, NT, GROUP_SIZE):
@@ -680,15 +723,39 @@ def sol_attn(
     output = torch.empty(q.shape, device=q.device, dtype=q.dtype)
     sinks = (int(sink_blocks[0]), int(sink_blocks[1]), int(sink_q[0]), int(sink_q[1]))
 
-    if arch[0] < 9:
-        # SM89 pointer path: masked loads, q/k/v keep their strides.
+    if _use_pointer_arch(arch):
+        # SM89/SM120 pointer path: masked loads, q/k/v keep their strides.
         if int8_qk:
-            kc, vc, threshold, q8, q_scale, k8, k_scale = prepare(
-                q, k, v, scale=scale, tau=tau, thresh_type=thresh_type, int8_qk=True
-            )
+            inline_q = inline_q_path(arch, tokens, thresh_type)
+            if inline_q:
+                kc, vc, stat_mean, stat_var, k8, k_scale = prepare_int8_kv(k, v)
+                threshold = q8 = q_scale = q  # ignored by the inline-Q kernel
+            else:
+                kc, vc, threshold, q8, q_scale, k8, k_scale = prepare(
+                    q,
+                    k,
+                    v,
+                    scale=scale,
+                    tau=tau,
+                    thresh_type=thresh_type,
+                    int8_qk=True,
+                )
+                stat_mean = stat_var = q  # ignored by the materialized-Q kernel
             _forward_int8_ptr[(1, blocks, batch * heads)](
-                q, v, kc, vc, q8, k8, q_scale, k_scale, threshold, output,
+                q,
+                v,
+                kc,
+                vc,
+                q8,
+                k8,
+                q_scale,
+                k_scale,
+                threshold,
+                stat_mean,
+                stat_var,
+                output,
                 scale,
+                tau,
                 *sinks,
                 tokens,
                 q.stride(0), q.stride(1), q.stride(2),
@@ -699,6 +766,7 @@ def sol_attn(
                 BV=head_dim,
                 BLOCK_SIZE=BLOCK,
                 GROUP_SIZE=GROUP,
+                INLINE_Q=inline_q,
             )
             return output
         kc, vc, threshold = prepare(q, k, v, scale=scale, tau=tau, thresh_type=thresh_type)
@@ -769,4 +837,34 @@ def sol_attn(
     return output
 
 
-__all__ = ["sol_attn"]
+def sol_attn_prepared(q, v, prepared, *, scale=None, tau=1.0, sink_blocks=(0, 0), sink_q=(0, 0), out=None):
+    """Run pointer INT8 Sol from prepared K/V; ``out`` may alias Q."""
+
+    kc, vc, stat_mean, stat_var, k8, k_scale = prepared
+    arch = _validate(q, q, v, 1, "diag")
+    if not inline_q_path(arch, q.shape[1], "diag"):
+        raise RuntimeError("prepared Sol attention requires the inline-Q pointer path")
+    scale = q.shape[-1] ** -0.5 if scale is None else float(scale)
+    batch, tokens, heads, head_dim = q.shape
+    blocks = triton.cdiv(tokens, BLOCK)
+    output = torch.empty(q.shape, device=q.device, dtype=q.dtype) if out is None else out
+    _forward_int8_ptr[(1, blocks, batch * heads)](
+        q, v, kc, vc, q, k8, q, k_scale, q, stat_mean, stat_var, output,
+        scale,
+        float(tau),
+        int(sink_blocks[0]), int(sink_blocks[1]), int(sink_q[0]), int(sink_q[1]),
+        tokens,
+        q.stride(0), q.stride(1), q.stride(2),
+        v.stride(0), v.stride(1), v.stride(2),
+        H=heads,
+        D=head_dim,
+        NT=blocks,
+        BV=head_dim,
+        BLOCK_SIZE=BLOCK,
+        GROUP_SIZE=GROUP,
+        INLINE_Q=True,
+    )
+    return output
+
+
+__all__ = ["inline_q_path", "sol_attn", "sol_attn_prepared"]

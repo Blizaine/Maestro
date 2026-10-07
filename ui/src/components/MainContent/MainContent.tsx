@@ -228,6 +228,7 @@ export function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob;
   const isFailed = job.status === 'failed' || job.status === 'cancelled'
   const preview = isFailed ? null : job.preview ?? null
   const [previewPausedByUser, setPreviewPausedByUser] = useState(false)
+  const [previewInfoVisible, setPreviewInfoVisible] = useState(true)
   const isPromptPlanning = job.kind === 'prompt_enhancement'
   const errorText = job.error || job.message || (job.status === 'cancelled' ? 'Cancelled' : 'Generation failed')
   const h3PlanSignature = job.h3WindowPlan?.signature
@@ -258,6 +259,8 @@ export function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob;
       <div className="w-full aspect-video flex items-center justify-center relative">
         {preview && <GenerationPreview
           preview={preview}
+          infoVisible={previewInfoVisible}
+          onToggleInfo={() => setPreviewInfoVisible(visible => !visible)}
           initiallyPaused={previewPausedByUser}
           onPausedChange={setPreviewPausedByUser}
         />}
@@ -271,9 +274,9 @@ export function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob;
             <X size={14} />
           </button>
         )}
-        <div className={`flex flex-col items-center gap-3 w-full max-w-md px-4 text-text-muted ${preview
-          ? 'absolute inset-x-0 bottom-0 z-10 max-w-none bg-gradient-to-t from-black/95 via-black/75 to-transparent px-3 pb-2 pt-9 text-white'
-          : ''}`}>
+        <div hidden={!!preview && !previewInfoVisible} className={`flex flex-col items-center gap-3 w-full max-w-md px-4 text-text-muted ${preview
+          ? 'pointer-events-none absolute inset-x-0 bottom-0 z-10 max-w-none bg-gradient-to-t from-black/95 via-black/75 to-transparent px-3 pb-2 pt-9 text-white'
+          : ''} ${preview && !previewInfoVisible ? 'hidden' : ''}`}>
           {!preview && <Film size={40} className={isFailed ? 'text-red-400' : 'animate-pulse'} />}
 
           <div className="text-center w-full">

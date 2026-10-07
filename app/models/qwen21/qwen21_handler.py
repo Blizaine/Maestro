@@ -141,6 +141,7 @@ class family_handler:
     def query_model_def(base_model_type, model_def):
         return {
             "image_outputs": True,
+            "device_explicit": True,
             "dtype": "bf16",
             "guidance_max_phases": 1,
             "sample_solvers": [("FlowMatch Euler", "default")] + [

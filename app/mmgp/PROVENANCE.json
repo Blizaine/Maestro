@@ -1,0 +1,25 @@
+{
+  "component": "mmgp",
+  "upstream_repository": "https://github.com/deepbeepmeep/Wan2GP",
+  "upstream_version": "4.0.0",
+  "upstream_commit": "0e58385fbde7ff102d276e4a9e490845de76b4ea",
+  "snapshot_date": "2026-10-05",
+  "license": "WanGP Community License 2.0",
+  "license_file": "LICENSE.txt",
+  "integration_changes": {
+    "date": "2026-10-05",
+    "description": "Vendored MMGP under app/mmgp for deterministic local imports. Added __version__ and __source_commit__ metadata; updated license-file pointers and package metadata so the adjacent license is included. Upstream engine files and allocator implementations are otherwise preserved.",
+    "files": [
+      "__init__.py",
+      "LICENSE.md",
+      "README.md",
+      "pyproject.toml"
+    ]
+  },
+  "allocator_binaries": {
+    "allocator/oom_error_linux_x86_64.so": "sha256:BA865E1F702CA38E72DD043508BBC56D1519EE33C12F1FF1E1D5E0DF80508C08",
+    "allocator/oom_error_win_amd64.dll": "sha256:4319A64CAEB15A06ADCC3F4E1780D2104038A6EAE074F5D626DB0971A7DC592C",
+    "allocator/vmm_alloc_linux_x86_64.so": "sha256:4AD9847C2D57FDDED5BC031C7B6DA96201A0772963E5AD07AFA4FE125A297194",
+    "allocator/vmm_alloc_win_amd64.dll": "sha256:4970D26F9A855A19C2AC38E206AECB91D0B984BAA0ADC5C0A4AD7F54AC0E2AB3"
+  }
+}

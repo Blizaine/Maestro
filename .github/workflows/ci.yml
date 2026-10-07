@@ -29,9 +29,12 @@ jobs:
       - name: Python syntax check (our modules)
         # compileall only compiles (never imports), so it needs no deps.
         run: >-
-          python -m compileall -q app/services app/launch.py
-          app/models/minimax_h3 app/models/longcat app/shared/tinyvae
-          app/shared/preview_runtime.py app/shared/qtypes scripts
+          python -m compileall -q app/mmgp app/services app/launch.py
+          app/models/minimax_h3 app/models/longcat app/shared/kernels app/shared/tinyvae
+          app/shared/preview_runtime.py app/shared/qtypes app/shared/sol_attn
+          app/shared/attention.py app/shared/attention_kit.py app/shared/cuda_memory.py
+          app/shared/sage2_core.py app/shared/utils/default_device.py
+          app/shared/utils/conv_bands.py app/shared/utils/power_throttling.py scripts
       - name: Undefined Python names (our modules)
         # Syntax compilation cannot detect a missing import or a value read
         # before assignment on an infrequently exercised request path.
@@ -76,13 +79,14 @@ jobs:
       - name: Install pinned core model test dependencies
         run: >-
           python -m pip install
-          "mmgp==3.8.2"
           "diffusers==0.36.0"
           "transformers==4.57.1"
           "tokenizers==0.22.1"
           "accelerate==1.12.0"
           "einops==0.8.2"
+          "optimum-quanto==0.2.7"
           "safetensors==0.8.0"
+          "psutil==7.2.2"
           "gguf==0.17.1"
           "triton==3.3.1"
       - name: Python unit tests
@@ -103,6 +107,7 @@ jobs:
           tests/test_h3_source_camera.py
           tests/test_media_flow.py
           tests/test_tinyvae.py
+          tests/test_conv_bands.py
 
   ui-build:
     name: UI type-check + build

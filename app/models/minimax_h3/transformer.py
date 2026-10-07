@@ -247,6 +247,27 @@ def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.
     return torch.cat((rotary, passthrough), dim=-1)
 
 
+def _rms_norm_inplace(
+    norm: nn.Module,
+    tensor: torch.Tensor,
+    chunk_bytes: int = 256 << 20,
+) -> torch.Tensor:
+    """Normalize owned inference rows in place, bounding the norm temporary."""
+
+    if torch.is_grad_enabled():
+        return norm(tensor)
+    if tensor.shape[1] == 0:
+        return tensor
+    row_bytes = tensor[0, 0].numel() * tensor.element_size()
+    rows_per_chunk = max(1, chunk_bytes // max(1, row_bytes))
+    for start in range(0, tensor.shape[1], rows_per_chunk):
+        part = tensor[:, start:start + rows_per_chunk]
+        normalized = norm(part)
+        part.copy_(normalized)
+        del normalized
+    return tensor
+
+
 def _apply_rope_inplace(
     x: torch.Tensor,
     cos: torch.Tensor,
@@ -450,6 +471,7 @@ class MiniMaxH3Attention(nn.Module):
         hidden_states: torch.Tensor | list[torch.Tensor],
         rotary: tuple[torch.Tensor, torch.Tensor] | None = None,
         attention_mask: torch.Tensor | None = None,
+        input_again=None,
     ) -> torch.Tensor:
         # Internal inference callers can transfer ownership in a one-item
         # list. Popping it lets the normalized packed sequence be released as
@@ -464,23 +486,73 @@ class MiniMaxH3Attention(nn.Module):
         if self.vdn is not None:
             if batch != 1 or attention_mask is not None:
                 raise ValueError("H3 VDN requires one unpadded packed sequence")
-            shape = (batch, length, self.heads, self.head_dim)
-            if hasattr(self, "q_proj"):
-                raw = [projection(hidden_states).view(shape) for projection in (self.q_proj, self.k_proj, self.v_proj)]
-            else:
-                raw = list(
-                    _split_fused_qkv(
-                        self.qkv_proj(hidden_states),
-                        self.heads,
-                        self.head_dim,
-                        self.qkv_layout,
+            legacy_forward = getattr(self.vdn, "forward_legacy", None)
+            if torch.is_grad_enabled() or not callable(legacy_forward):
+                shape = (batch, length, self.heads, self.head_dim)
+                if hasattr(self, "q_proj"):
+                    raw = [projection(hidden_states).view(shape) for projection in (self.q_proj, self.k_proj, self.v_proj)]
+                else:
+                    raw = list(
+                        _split_fused_qkv(
+                            self.qkv_proj(hidden_states),
+                            self.heads,
+                            self.head_dim,
+                            self.qkv_layout,
+                        )
                     )
+                query, key = self.q_norm(raw[0]), self.k_norm(raw[1])
+                if rotary is not None:
+                    query, key = _apply_rope_inplace(query, *rotary), _apply_rope_inplace(key, *rotary)
+                legacy_args = (
+                    [hidden_states[0]],
+                    [part[0] for part in raw],
+                    [query, key, raw[2]],
+                    self.out_proj,
                 )
-            query, key = self.q_norm(raw[0]), self.k_norm(raw[1])
-            if rotary is not None:
-                query, key = _apply_rope_inplace(query, *rotary), _apply_rope_inplace(key, *rotary)
-            result = self.vdn([hidden_states[0]], [part[0] for part in raw],
-                              [query, key, raw[2]], self.out_proj)
+                result = (
+                    legacy_forward(*legacy_args)
+                    if callable(legacy_forward)
+                    else self.vdn(*legacy_args)
+                )
+                return result.unsqueeze(0)
+
+            if hasattr(self, "q_proj"):
+                qkv = (self.q_proj, self.k_proj, self.v_proj)
+            else:
+                fused = self.qkv_proj(hidden_states)
+                qkv = _split_fused_qkv(
+                    fused,
+                    self.heads,
+                    self.head_dim,
+                    self.qkv_layout,
+                )
+                fused = None
+
+            def norm_rope(query, key):
+                if query is not None:
+                    _rms_norm_inplace(self.q_norm, query)
+                if key is not None:
+                    _rms_norm_inplace(self.k_norm, key)
+                if rotary is not None:
+                    if query is not None:
+                        _apply_rope_inplace(query, *rotary)
+                    if key is not None:
+                        _apply_rope_inplace(key, *rotary)
+
+            recompute_input = (
+                None
+                if input_again is None
+                else lambda: input_again()[0]
+            )
+            x_handoff = [hidden_states[0]]
+            hidden_states = None
+            result = self.vdn(
+                x_handoff,
+                qkv,
+                norm_rope,
+                self.out_proj,
+                recompute_input,
+            )
             return result.unsqueeze(0)
         if attention_mask is not None:
             attention_mask = attention_mask[None, None].to(device=hidden_states.device)
@@ -504,6 +576,117 @@ class MiniMaxH3Attention(nn.Module):
                 self.k_norm,
             )
         )
+        if (
+            not torch.is_grad_enabled()
+            and use_sol
+            and attention_mask is None
+            and self.sol_attention is not None
+            and hasattr(self, "q_proj")
+            and self.sol_attention.staged(
+                hidden_states, (self.q_proj, self.k_proj, self.v_proj)
+            )
+        ):
+            def norm_rope(query, key):
+                if query is not None:
+                    _rms_norm_inplace(self.q_norm, query)
+                if key is not None:
+                    _rms_norm_inplace(self.k_norm, key)
+                if rotary is not None:
+                    if query is not None:
+                        _apply_rope_inplace(query, *rotary)
+                    if key is not None:
+                        _apply_rope_inplace(key, *rotary)
+
+            owned_input = [hidden_states]
+            hidden_states = None
+            attended = self.sol_attention.attention(
+                owned_input,
+                (self.q_proj, self.k_proj, self.v_proj),
+                norm_rope,
+                self.heads,
+                self.head_dim,
+            )
+            return self.out_proj(
+                attended.reshape(batch, length, self.heads * self.head_dim)
+            )
+        if (
+            not torch.is_grad_enabled()
+            and self.vdn is None
+            and not use_sla
+            and not use_sol
+            and attention_mask is None
+            and hasattr(self, "q_proj")
+        ):
+            try:
+                from mmgp import offload
+            except ImportError:
+                offload = None
+            projections = (self.q_proj, self.k_proj, self.v_proj)
+            supports_rows = (
+                None
+                if offload is None
+                else getattr(offload, "linear_rows_supported", None)
+            )
+            try:
+                can_project_rows = bool(
+                    supports_rows is not None
+                    and supports_rows(projections, hidden_states)
+                )
+            except (TypeError, ValueError, NotImplementedError, RuntimeError):
+                can_project_rows = False
+            if can_project_rows:
+                from shared import attention_kit
+
+                split_requested = attention_kit.head_groups(self.heads, length) > 1
+                staged_sage2 = (
+                    self.head_dim in (64, 128)
+                    and attention_kit.sage2_staged_settings(hidden_states.device)
+                    is not None
+                )
+                if not fused_rms_rope or split_requested or staged_sage2:
+                    def norm_rope(query, key, _group):
+                        if (
+                            fused_rms_rope
+                            and query is not None
+                            and key is not None
+                        ):
+                            normalized = denoiser_kernels.rms_rope(
+                                query,
+                                key,
+                                rotary,
+                                0,
+                                length,
+                                self.q_norm,
+                                self.k_norm,
+                            )
+                            if normalized is not None:
+                                query.copy_(normalized[0])
+                                key.copy_(normalized[1])
+                                return
+                        if query is not None:
+                            _rms_norm_inplace(self.q_norm, query)
+                        if key is not None:
+                            _rms_norm_inplace(self.k_norm, key)
+                        if rotary is not None:
+                            if query is not None:
+                                _apply_rope_inplace(query, *rotary)
+                            if key is not None:
+                                _apply_rope_inplace(key, *rotary)
+
+                    owned_input = [hidden_states]
+                    hidden_states = None
+                    attended = attention_kit.qkv_attention(
+                        owned_input,
+                        self.q_proj,
+                        self.k_proj,
+                        self.v_proj,
+                        self.heads,
+                        self.head_dim,
+                        norm_rope,
+                    )
+                    return self.out_proj(
+                        attended.reshape(batch, length, self.heads * self.head_dim)
+                    )
         projection_width = (
             self.heads * self.head_dim
             if hasattr(self, "q_proj")
@@ -529,7 +712,7 @@ class MiniMaxH3Attention(nn.Module):
                         batch, end - start, self.heads, self.head_dim
                     )
                     if normalization is not None:
-                        rows = normalization(rows)
+                        rows = _rms_norm_inplace(normalization, rows)
                     if rope is not None:
                         cos, sin = rope
                         rows = _apply_rope_inplace(
@@ -562,8 +745,8 @@ class MiniMaxH3Attention(nn.Module):
                         self.k_norm,
                     )
                     if normalized is None:
-                        q_rows = self.q_norm(q_rows)
-                        k_rows = self.k_norm(k_rows)
+                        q_rows = _rms_norm_inplace(self.q_norm, q_rows)
+                        k_rows = _rms_norm_inplace(self.k_norm, k_rows)
                         cos, sin = rotary
                         q_rows = _apply_rope_inplace(q_rows, cos[start:end], sin[start:end])
                         k_rows = _apply_rope_inplace(k_rows, cos[start:end], sin[start:end])
@@ -607,8 +790,8 @@ class MiniMaxH3Attention(nn.Module):
                 else:
                     query, key = normalized
             else:
-                query = self.q_norm(query)
-                key = self.k_norm(key)
+                query = _rms_norm_inplace(self.q_norm, query)
+                key = _rms_norm_inplace(self.k_norm, key)
                 if rotary is not None:
                     query = _apply_rope_inplace(query, *rotary)
                     key = _apply_rope_inplace(key, *rotary)
@@ -654,8 +837,8 @@ class MiniMaxH3Attention(nn.Module):
                     else:
                         q_chunk, k_chunk = normalized
                 else:
-                    q_chunk = self.q_norm(q_chunk)
-                    k_chunk = self.k_norm(k_chunk)
+                    q_chunk = _rms_norm_inplace(self.q_norm, q_chunk)
+                    k_chunk = _rms_norm_inplace(self.k_norm, k_chunk)
                 if rotary is not None and not fused_rms_rope:
                     cos, sin = rotary
                     q_chunk = _apply_rope_inplace(
@@ -892,8 +1075,23 @@ class MiniMaxH3Block(nn.Module):
                 adaln_runs,
             )
         ]
+        input_again = None
+        if self.attn.vdn is not None and not torch.is_grad_enabled():
+            # VDN can recompute q after its window attention, then release the
+            # large modulated input while the linear branch and output run.
+            input_again = lambda: _modulate_by_runs(
+                _rms_norm_in_chunks(self.norm1, hidden_states),
+                shift_attn,
+                scale_attn,
+                adaln_runs,
+            )
         attn_output = _scale_by_runs(
-            self.attn(attention_input, rotary, attention_mask),
+            self.attn(
+                attention_input,
+                rotary,
+                attention_mask,
+                input_again=input_again,
+            ),
             gate_attn,
             adaln_runs,
         )

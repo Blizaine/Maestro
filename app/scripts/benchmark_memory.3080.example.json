@@ -1,0 +1,35 @@
+{
+  "request": {
+    "model_type": "minimax_h3_fused_turbo",
+    "generation_mode": "video",
+    "workspace": "Memory-Benchmark-3080",
+    "prompt": "A cinematic continuous shot of a red kite flying above a grassy field in a gentle breeze, with soft wind and distant birds. No speech or music.",
+    "resolution": "864x480",
+    "video_length": 124,
+    "sliding_window_size": 124,
+    "num_inference_steps": 8,
+    "guidance_scale": 1.0,
+    "seed": 424242,
+    "repeat_generation": 1,
+    "multi_prompts_gen_type": 2,
+    "prompt_enhancer": "",
+    "activated_loras": [],
+    "override_attention": "sla"
+  },
+  "cases": [
+    {
+      "name": "profile-4.5-auto",
+      "settings": {"video_profile": 4.5, "video_preload_mode": "default", "video_preload_in_VRAM": 0, "read_ahead": false, "int8_kernels": "auto"},
+      "request": {"override_profile": 4.5},
+      "repeats": 2,
+      "reload": true
+    },
+    {
+      "name": "profile-5-auto",
+      "settings": {"video_profile": 5, "video_preload_mode": "default", "video_preload_in_VRAM": 0, "read_ahead": false, "int8_kernels": "auto"},
+      "request": {"override_profile": 5},
+      "repeats": 2,
+      "reload": true
+    }
+  ]
+}

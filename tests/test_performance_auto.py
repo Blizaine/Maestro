@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -25,7 +26,16 @@ def hardware(ram=28.0, vram=18.7):
         "ram_gb": ram,
         "ram_tier": "high" if ram >= 64 else "low" if ram >= 32 else "very_low",
         "vram_tier": "high" if vram >= 24 else "low" if vram >= 12 else "tight",
+        "platform": "win32",
+        "supports_mmgp_allocator": False,
     }
+
+
+LEGACY_APPLIED_KEYS = (
+    "video_profile", "image_profile", "audio_profile",
+    "transformer_quantization", "vae_config", "vram_safety_coefficient",
+    "attention_mode", "compile",
+)
 
 
 def legacy_config():
@@ -76,12 +86,61 @@ class TestAutomaticProfiles(unittest.TestCase):
         del hw["ram_gb"]
         self.assertEqual(perf.recommend_settings(hw)["video_profile"], 5)
 
+    def test_precise_10_and_12_gb_vram_capacities_select_adjacent_tiers(self):
+        ten_gb = hardware(32, 10)
+        twelve_gb = hardware(32, 12)
+        self.assertEqual(ten_gb["gpu_vram_gb"], 10)
+        self.assertEqual(twelve_gb["gpu_vram_gb"], 12)
+        self.assertEqual(perf.recommend_settings(ten_gb)["video_profile"], 4.5)
+        self.assertEqual(perf.recommend_settings(twelve_gb)["video_profile"], 4)
+
+    def test_new_memory_controls_and_read_ahead_threshold(self):
+        rec_32gb = perf.recommend_settings(hardware(32, 12))
+        self.assertEqual(rec_32gb["int8_kernels"], "auto")
+        self.assertEqual(rec_32gb["vram_allocator"], "default")
+        self.assertTrue(rec_32gb["smart_memory_pinning"])
+        self.assertFalse(rec_32gb["read_ahead"])
+        self.assertEqual(rec_32gb["perc_reserved_mem_max"], 0)
+        self.assertEqual(rec_32gb["attention_head_split"], 0)
+        for kind in ("video", "image", "audio"):
+            self.assertEqual(rec_32gb[f"{kind}_preload_mode"], "default")
+            self.assertEqual(rec_32gb[f"{kind}_preload_in_VRAM"], 0)
+
+        high_ram = hardware(64, 24)
+        high_ram["supports_mmgp_allocator"] = True
+        rec_high_ram = perf.recommend_settings(high_ram)
+        self.assertTrue(rec_high_ram["read_ahead"])
+        self.assertEqual(rec_high_ram["vram_allocator"], "vmm")
+        self.assertIsInstance(rec_high_ram["_recommendation_details"], list)
+        self.assertTrue(any("generation-aware" in item.casefold() for item in rec_high_ram["_recommendation_details"]))
+
+    def test_read_ahead_requires_windows_and_at_least_64_gb_ram(self):
+        linux = hardware(128, 24)
+        linux["platform"] = "linux"
+        windows_32gb = hardware(32, 24)
+        self.assertFalse(perf.recommend_settings(linux)["read_ahead"])
+        self.assertFalse(perf.recommend_settings(windows_32gb)["read_ahead"])
+
+    def test_cpu_fallback_keeps_safe_memory_defaults(self):
+        rec = perf.recommend_settings({"cuda_available": False})
+        self.assertEqual(rec["int8_kernels"], "disabled")
+        self.assertEqual(rec["vram_allocator"], "default")
+        self.assertFalse(rec["read_ahead"])
+        self.assertEqual(rec["video_preload_mode"], "default")
+        self.assertEqual(rec["video_preload_in_VRAM"], 0)
+
 
 class TestAutomaticProfileMigration(unittest.TestCase):
     def test_legacy_boolean_migrates_once_and_preserves_unrelated_config(self):
         config = legacy_config()
         result = perf.apply_auto_performance(config, hardware())
-        self.assertEqual(result["updated"], {})
+        self.assertIn("int8_kernels", result["updated"])
+        self.assertEqual(config["int8_kernels"], "auto")
+        self.assertEqual(config["video_profile"], 5)
+        self.assertEqual(
+            set(config["services"]["auto_performance_defaults"]),
+            set(perf.applied_keys()),
+        )
         self.assertEqual(config["save_path"], "my-projects")
         self.assertEqual(config["services"]["auto_performance_revision"], perf.AUTO_PERFORMANCE_REVISION)
         after = copy.deepcopy(config)
@@ -114,7 +173,7 @@ class TestAutomaticProfileMigration(unittest.TestCase):
         config = legacy_config()
         config["services"].update(
             auto_performance_revision=1,
-            auto_performance_defaults={key: config[key] for key in perf.applied_keys()},
+            auto_performance_defaults={key: config[key] for key in LEGACY_APPLIED_KEYS},
         )
         config["video_profile"] = 4.5
         perf.apply_auto_performance(config, hardware())
@@ -126,13 +185,53 @@ class TestAutomaticProfileMigration(unittest.TestCase):
         config.update(video_profile=4, image_profile=4)
         config["services"].update(
             auto_performance_revision=2,
-            auto_performance_defaults={key: config[key] for key in perf.applied_keys()},
+            auto_performance_defaults={key: config[key] for key in LEGACY_APPLIED_KEYS},
         )
         config["image_profile"] = 4.5
         result = perf.apply_auto_performance(config, hardware())
-        self.assertEqual(result["updated"], {"video_profile": 5})
+        self.assertEqual(result["updated"]["video_profile"], 5)
+        self.assertEqual(
+            set(result["updated"]) - {"video_profile"},
+            set(perf.applied_keys()) - set(LEGACY_APPLIED_KEYS),
+        )
         self.assertEqual(config["image_profile"], 4.5)
         self.assertEqual(config["services"]["auto_performance_revision"], perf.AUTO_PERFORMANCE_REVISION)
+
+    def test_revision3_migration_preserves_existing_new_controls_even_at_defaults(self):
+        config = legacy_config()
+        preserved = {
+            "vram_allocator": "default",
+            "smart_memory_pinning": True,
+            "read_ahead": False,
+            "video_preload_mode": "default",
+            "video_preload_in_VRAM": 0,
+        }
+        config.update(preserved)
+        config["services"].update(
+            auto_performance_revision=3,
+            auto_performance_defaults={key: config[key] for key in LEGACY_APPLIED_KEYS},
+        )
+        result = perf.apply_auto_performance(config, hardware(128, 24))
+        for key, value in preserved.items():
+            self.assertEqual(config[key], value)
+        self.assertTrue(config["read_ahead"] is False)
+        self.assertNotIn("vram_allocator", config["services"]["auto_performance_defaults"])
+        self.assertNotIn("video_preload_mode", config["services"]["auto_performance_defaults"])
+        self.assertIn("read_ahead", result["preserved"])
+        self.assertIn("int8_kernels", config)
+        self.assertEqual(config["int8_kernels"], "auto")
+        self.assertIn("int8_kernels", config["services"]["auto_performance_defaults"])
+        self.assertEqual(config["services"]["auto_performance_revision"], perf.AUTO_PERFORMANCE_REVISION)
+
+    def test_legacy_boolean_migration_preserves_existing_new_control_provenance(self):
+        config = legacy_config()
+        config.update(vram_allocator="default", video_preload_mode="default")
+        result = perf.apply_auto_performance(config, hardware(128, 24))
+        self.assertEqual(config["vram_allocator"], "default")
+        self.assertEqual(config["video_preload_mode"], "default")
+        self.assertIn("vram_allocator", result["preserved"])
+        self.assertIn("video_preload_mode", result["preserved"])
+        self.assertNotIn("vram_allocator", config["services"]["auto_performance_defaults"])
 
     def test_manually_selected_profile4_is_preserved(self):
         config = legacy_config()
@@ -147,9 +246,11 @@ class TestAutomaticProfileMigration(unittest.TestCase):
     def test_explicit_apply_overrides_manual_values_and_records_revision(self):
         config = legacy_config()
         config["services"]["auto_performance"] = False
-        config["video_profile"] = 4.5
+        config.update(video_profile=4.5, vram_allocator="default", video_preload_mode="manual")
         result = perf.apply_auto_performance(config, hardware(), force=True)
         self.assertEqual(config["video_profile"], 5)
+        self.assertEqual(config["vram_allocator"], "default")
+        self.assertEqual(config["video_preload_mode"], "default")
         self.assertTrue(config["services"]["auto_performance"])
         self.assertFalse(perf.auto_performance_needs_refresh(config))
         self.assertEqual(result["preserved"], [])
@@ -199,6 +300,8 @@ class TestAutomaticProfileEntryPoints(unittest.TestCase):
             "wgp": self.wgp, "json": json, "Request": object,
             "_services": self.wgp.server_config["services"],
             "_auto_perf_needs_refresh": perf.auto_performance_needs_refresh,
+            "_jobs": {},
+            "_gen_lock": threading.Lock(),
         }
 
     def _run_startup(self):
@@ -259,6 +362,10 @@ class TestAutomaticProfileEntryPoints(unittest.TestCase):
             result = asyncio.run(self._endpoint("apply_system_detect")())
         self.assertEqual(result["status"], "ok")
         self.assertTrue(result["profile_changed"])
+        self.assertTrue(result["settings_reload"])
+        self.assertTrue(self.wgp.reload_needed)
+        self.assertEqual(result["applied"]["int8_kernels"], "auto")
+        self.assertIn("vram_allocator_restart_required", result)
         self.assertEqual(result["applied"]["video_profile"], 5)
         self.assertFalse(perf.auto_performance_needs_refresh(self.wgp.server_config))
 
@@ -277,6 +384,24 @@ class TestAutomaticProfileEntryPoints(unittest.TestCase):
                 request = SimpleNamespace(json=request_json)
                 asyncio.run(self._endpoint("update_system_config")(request))
                 self.assertEqual(self.wgp.server_config["services"]["auto_performance"], expected_auto)
+
+    def test_apply_refuses_a_busy_slot_and_releases_slot_on_write_failure(self):
+        class HttpError(Exception):
+            def __init__(self, status_code, detail):
+                self.status_code = status_code
+        self.globals["HTTPException"] = HttpError
+        self.globals["_gen_lock"].acquire()
+        try:
+            with self.assertRaises(HttpError) as caught:
+                asyncio.run(self._endpoint("apply_system_detect")())
+            self.assertEqual(caught.exception.status_code, 409)
+        finally:
+            self.globals["_gen_lock"].release()
+        self.wgp.server_config_filename = "/missing-parent-dir/invalid/config.json"
+        with patch("services.hardware_detect.detect_hardware", return_value=hardware()):
+            with self.assertRaises(OSError):
+                asyncio.run(self._endpoint("apply_system_detect")())
+        self.assertFalse(self.globals["_gen_lock"].locked())
 
 
 if __name__ == "__main__":

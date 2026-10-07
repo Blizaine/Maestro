@@ -86,4 +86,82 @@ def sol_attn(q, k, v, *, scale=None, tau=1.0, thresh_type="diag", sink_tokens=0,
                            sink_tokens=sink_tokens, sink_start=sink_start, query_start=query_start, recycle_q=recycle_q)
 
 
-__all__ = ["sol_attn", "validate_runtime"]
+def staged_supported(device, tokens, thresh_type="diag"):
+    """Whether SM89/SM120 can run K/V-first inline-Q INT8 Sol attention.
+
+    The pointer path is used only for diagonal routing at 4096+ tokens; H3's
+    Sol policy adds its own longer 8192-token activation threshold.
+    """
+
+    device = torch.device(device)
+    if device.type != "cuda":
+        return False
+    from .saganaki.fwd import inline_q_path
+
+    return inline_q_path(
+        tuple(torch.cuda.get_device_capability(device)), int(tokens), thresh_type
+    )
+
+
+def prepare_kv(k, v):
+    """Prepare Sol's summaries and residual-INT8 keys without needing Q."""
+
+    from .saganaki.preprocess import prepare_int8_kv
+
+    if k.ndim != 4 or k.shape != v.shape or k.shape[-1] != 128:
+        raise ValueError("k and v must share shape [B, T, H, 128]")
+    if k.dtype != torch.bfloat16 or v.dtype != torch.bfloat16:
+        raise TypeError("k and v must use torch.bfloat16")
+    if k.device.type != "cuda" or v.device != k.device:
+        raise ValueError("k and v must be on the same CUDA device")
+    if k.stride(-1) != 1 or v.stride(-1) != 1:
+        raise ValueError("k and v must have a contiguous head dimension")
+    return prepare_int8_kv(k, v)
+
+
+def sol_attn_prepared(
+    q,
+    v,
+    prepared,
+    *,
+    scale=None,
+    tau=1.0,
+    sink_tokens=0,
+    sink_start=None,
+    out=None,
+):
+    """Run inline-Q INT8 Sol attention from ``prepare_kv(k, v)`` results.
+
+    ``out`` may alias ``q`` because each pointer-kernel program loads its query
+    tile before writing the matching output tile.
+    """
+
+    from .saganaki.fwd import sol_attn_prepared as prepared_attention
+
+    if q.ndim != 4 or q.shape != v.shape or q.shape[-1] != 128:
+        raise ValueError("q and v must share shape [B, T, H, 128]")
+    if q.dtype != torch.bfloat16 or v.dtype != torch.bfloat16:
+        raise TypeError("q and v must use torch.bfloat16")
+    if q.device.type != "cuda" or v.device != q.device:
+        raise ValueError("q and v must be on the same CUDA device")
+    if not staged_supported(q.device, q.shape[1], "diag"):
+        raise RuntimeError("prepared Sol attention is unsupported for this device or sequence")
+    sink_blocks = _sink_block_range(q.shape[1], sink_start, sink_tokens)
+    return prepared_attention(
+        q,
+        v,
+        prepared,
+        scale=scale,
+        tau=tau,
+        sink_blocks=sink_blocks,
+        out=out,
+    )
+
+
+__all__ = [
+    "prepare_kv",
+    "sol_attn",
+    "sol_attn_prepared",
+    "staged_supported",
+    "validate_runtime",
+]

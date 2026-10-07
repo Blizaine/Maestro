@@ -55,3 +55,18 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 For the full and authoritative license text, see app/LICENSE.txt.
+
+WanGP 17 / MMGP 4 port
+---------------------
+
+The MMGP 4 package and WanGP 17 source adaptations added on 2026-10-05
+come from DeepBeepMeep/Wan2GP revision
+0e58385fbde7ff102d276e4a9e490845de76b4ea. These upstream contributions
+retain the WanGP Community License 2.0, included in app/mmgp/LICENSE.txt.
+Their provenance and Maestro integration changes are documented in
+app/mmgp/PROVENANCE.json and docs/development/wan2gp-17-port.md.
+
+This component notice does not replace the existing license for the rest
+of Maestro or the separate licenses of third-party components. Original
+copyright and license notices remain in their source directories. Maestro
+is an independent adaptation; no affiliation or endorsement is implied.

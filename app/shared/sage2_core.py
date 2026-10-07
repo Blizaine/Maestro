@@ -26,6 +26,16 @@ from sageattention.triton.attn_qk_int8_block_varlen import forward as attn_false
 from sageattention.triton.attn_qk_int8_per_block_causal_varlen import forward as attn_true_varlen
 
 from sageattention.triton.quant_per_thread import per_thread_int8 as per_thread_int8_triton
+try:
+    from sageattention.triton.quant_per_thread import (
+        quant_key_per_thread_int8_kernel,
+        quant_query_per_thread_int8_kernel,
+    )
+except ImportError:
+    # Older SageAttention builds can still use the ordinary wrapper; only the
+    # staged sm89 path needs these kernels.
+    quant_key_per_thread_int8_kernel = None
+    quant_query_per_thread_int8_kernel = None
 
 try:
     from sageattention import _fused
@@ -198,6 +208,181 @@ def sageattn(
         return sageattn_qk_int8_pv_fp8_cuda(qkv_list, tensor_layout=tensor_layout, is_causal=is_causal, qk_quant_gran="per_warp", sm_scale=sm_scale, return_lse=return_lse, pv_accum_dtype= "fp32+fp16" if sg2pp else "fp32", smooth_v= not sg2pp, recycle_q = recycle_q) # sm120 has accurate fp32 accumulator for fp8 mma and triton kernel is currently not usable on sm120.
     else:
         raise ValueError(f"Unsupported CUDA architecture: {arch}")
+
+
+def _fp8_pv_settings(arch: str) -> dict[str, Any]:
+    """SageAttention's INT8 QK / FP8 PV settings for sm89 and sm120."""
+
+    if arch == "sm89":
+        return {
+            "qk_quant_gran": "per_thread",
+            "pv_accum_dtype": "fp32+fp16" if sg2pp else "fp32+fp32",
+            "smooth_v": False,
+        }
+    # Blackwell's accurate FP32 FP8 accumulator is used here; its Triton path
+    # is not currently usable by SageAttention.
+    return {
+        "qk_quant_gran": "per_warp",
+        "pv_accum_dtype": "fp32+fp16" if sg2pp else "fp32",
+        "smooth_v": not sg2pp,
+    }
+
+
+def staged_settings(device: torch.device) -> dict[str, Any] | None:
+    """Return staged settings for the implemented SM89/SM120 Sage2 kernels.
+
+    Other devices and older SageAttention builds use the ordinary attention
+    dispatcher instead of attempting these low-level quantization kernels.
+    """
+
+    arch = _get_cuda_arch(device)
+    if not SM89_ENABLED or arch not in {"sm89", "sm120"}:
+        return None
+    if arch == "sm89" and (
+        quant_key_per_thread_int8_kernel is None
+        or quant_query_per_thread_int8_kernel is None
+    ):
+        return None
+    return _fp8_pv_settings(arch)
+
+
+@torch.compiler.disable
+def staged_quantize_v(v_list, settings):
+    """FP8 value with per-channel scales; consume the handed-off value list."""
+
+    value = v_list[0]
+    v_list.clear()
+    _maybe_set_device(value.device)
+    scale_max = 2.25 if settings["pv_accum_dtype"] == "fp32+fp16" else 448.0
+    return per_channel_fp8(
+        [value],
+        tensor_layout="NHD",
+        scale_max=scale_max,
+        smooth_v=settings["smooth_v"],
+    )
+
+
+@torch.compiler.disable
+def staged_quantize_k(k_list, settings):
+    """INT8 key with SageAttention's per-block scales; release the source key."""
+
+    key = k_list[0]
+    k_list.clear()
+    _maybe_set_device(key.device)
+    batch, key_length, heads, head_dim = key.shape
+    key_mean = key.mean(dim=1, keepdim=True)
+    key_int8 = torch.empty(key.shape, dtype=torch.int8, device=key.device)
+    blocks = (key_length + 63) // 64
+    if settings["qk_quant_gran"] == "per_warp":
+        key_scale = torch.empty(
+            (batch, heads, blocks), dtype=torch.float32, device=key.device
+        )
+        _fused.quant_per_block_int8_fuse_sub_mean_cuda(
+            key, key_mean.squeeze(1), key_int8, key_scale, 64, 0
+        )
+    else:
+        key.sub_(key_mean)
+        key_scale = torch.empty(
+            (batch, heads, blocks * 4), dtype=torch.float32, device=key.device
+        )
+        quant_key_per_thread_int8_kernel[(blocks * 4, heads, batch)](
+            key,
+            key_int8,
+            key_scale,
+            key_length,
+            key.stride(0),
+            key.stride(2),
+            key.stride(1),
+            key_int8.stride(0),
+            key_int8.stride(2),
+            key_int8.stride(1),
+            key_scale.stride(0),
+            key_scale.stride(1),
+            C=head_dim,
+            BLK=64,
+        )
+    return key_int8, key_scale
+
+
+@torch.compiler.disable
+def staged_quantize_q(query, settings):
+    """INT8 query with SageAttention's per-block scales; retain query for output."""
+
+    _maybe_set_device(query.device)
+    batch, query_length, heads, head_dim = query.shape
+    query_int8 = torch.empty(query.shape, dtype=torch.int8, device=query.device)
+    warps = (query_length + 127) // 128 * 4
+    if settings["qk_quant_gran"] == "per_warp":
+        query_scale = torch.empty(
+            (batch, heads, warps), dtype=torch.float32, device=query.device
+        )
+        _fused.quant_per_warp_int8_cuda(
+            query, query_int8, query_scale, 128, 32, 0
+        )
+    else:
+        query_scale = torch.empty(
+            (batch, heads, warps * 8), dtype=torch.float32, device=query.device
+        )
+        quant_query_per_thread_int8_kernel[(warps * 8, heads, batch)](
+            query,
+            query_int8,
+            query_scale,
+            query_length,
+            query.stride(0),
+            query.stride(2),
+            query.stride(1),
+            query_int8.stride(0),
+            query_int8.stride(2),
+            query_int8.stride(1),
+            query_scale.stride(0),
+            query_scale.stride(1),
+            C=head_dim,
+            BLK=32,
+        )
+    return query_int8, query_scale
+
+
+@torch.compiler.disable
+def staged_attention(output, quantized_list, settings):
+    """Run an unmasked SageAttention kernel using staged Q/K/V quantization."""
+
+    (query_int8, query_scale), (key_int8, key_scale), (value_fp8, value_scale, value_mean) = quantized_list
+    quantized_list.clear()
+    _maybe_set_device(output.device)
+    inputs = (
+        query_int8,
+        key_int8,
+        value_fp8,
+        output,
+        query_scale,
+        key_scale,
+        value_scale,
+    )
+    options = (
+        0,
+        0,
+        3 if settings["qk_quant_gran"] == "per_thread" else 2,
+        output.size(-1) ** -0.5,
+        0,
+    )
+    if settings["pv_accum_dtype"] == "fp32+fp16":
+        _qattn_sm89.qk_int8_sv_f8_accum_f16_fuse_v_scale_attn_inst_buf(
+            *inputs, *options
+        )
+    elif settings["pv_accum_dtype"] == "fp32+fp32":
+        _qattn_sm89.qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf(
+            *inputs, *options
+        )
+    elif settings["smooth_v"]:
+        _qattn_sm89.qk_int8_sv_f8_accum_f32_fuse_v_scale_fuse_v_mean_attn(
+            *inputs, value_mean, *options
+        )
+    else:
+        _qattn_sm89.qk_int8_sv_f8_accum_f32_fuse_v_scale_attn(
+            *inputs, *options
+        )
+    return output
+
 
 @torch.compiler.disable
 def sageattn_qk_int8_pv_fp16_triton(

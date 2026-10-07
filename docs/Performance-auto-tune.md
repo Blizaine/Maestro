@@ -5,6 +5,95 @@ and system RAM. Changing a performance setting manually turns Auto off;
 the system-config API does the same. Explicitly applying Auto again replaces
 the performance settings with the current recommendations.
 
+## Generation-aware tuning and local learning
+
+Auto-tune now includes **Auto INT8 kernels**, a supported **MMGP optimized
+allocator**, **Smart Memory Pinning**, a RAM-dependent **Read Ahead** preference,
+and automatic pinning ceilings. It retains Auto attention, disabled compilation
+and disabled head splitting as the starting point. Sol and head splitting are
+workload-specific comparisons, rather than universal speed improvements.
+
+On existing installs, use **Settings → Performance → Re-detect** to explicitly
+apply these controls. Startup preserves existing controls whose ownership is
+unknown, even when they look like defaults. Changes to model loading take
+effect at the next generation. An allocator change requires a restart; the
+UI reports the active allocator and any fallback.
+
+The saved profile is the starting recommendation. Inside a generation, Auto
+can choose a temporary H3 placement and transformer allowance. With at least
+96 GB detected RAM and 20 GB VRAM, the starting H3 placement is Profile 2 with
+roughly one-third of VRAM available for transformer weights, subject to the
+existing model guard. This incorporates the 24 GB workstation comparisons;
+it does not claim to be fastest on every GPU or checkpoint. The guard accounts
+for window size, resolution, references and LoRAs. If the requested activation
+reserve cannot fit alongside the minimum weight slice, profile-default
+streaming remains in place and the plan warns about the workload.
+
+Smaller RAM machines retain conservative host placement. Read Ahead is
+recommended only on Windows with at least 64 GB RAM and is suppressed when
+available RAM is insufficient. Pinning ceilings leave room for the OS and
+media preparation and account for reusable MMGP-owned pinned model buffers.
+These ceilings do not bound total process memory. Cold-model planning also
+accounts for VRAM already occupied by other applications. Temporary choices
+are restored after completion, cancellation or failure; saved settings and
+generation content parameters remain unchanged.
+
+The card shows the last generation's plan and local learning count. Ordinary
+completed generations, including manual profile comparisons, collect sampled
+device-wide NVML peak VRAM, minimum available RAM, and denoising time. Loading
+and encoding time are excluded from speed comparisons. Polling can miss short
+memory spikes, and other GPU programs can influence measurements.
+
+Evidence is stored locally in ignored `app/settings/performance_tuning.sqlite3`
+(maximum 500 records). Hardware, driver, runtime code, active allocator,
+checkpoint/file revision, quantization, attention, preview, LoRAs, references,
+resolution, frames and repeated-generation workload are scoped by hashes.
+Prompts and local file paths are not stored in the learning database. Changes
+invalidate matching evidence. Cancelled or failed runs and missing telemetry
+do not teach a placement choice.
+
+A choice needs **at least two successful renders of each of two compatible
+candidates**, adequate RAM/VRAM headroom, and compliance with the current model
+guard. Within a 3% denoising-time difference, lower measured VRAM wins. A single
+profile's repeated runs are observations, not proof that it beats another.
+Auto does not start background searches, retry failures, or run speculative
+generations. Use controlled manual comparisons or the existing
+[memory benchmark](development/memory-benchmark.md) to supply alternatives.
+**Refresh learning** updates the readout; **Clear comparisons** discards this
+hardware/runtime's evidence without changing settings.
+
+## Testing a 32 GB RAM / RTX 3080 machine
+
+1. In Pinokio, choose **Download from URL**, enter
+   `https://github.com/Blizaine/Maestro`, and select the **dev** branch before
+   downloading. Install, start Maestro, and select **Re-detect** under
+   **Settings → Performance**. Verify actual detected
+   VRAM (10 or 12 GB), RAM and active allocator. Restart if requested.
+2. Start with a pruned/fused H3 checkpoint, 480p, one 124-frame window, eight
+   steps, no references or LoRAs, and a fixed seed. Run it twice. Inspect the
+   last plan and warnings; do not copy the 4090's 8192 MB allowance.
+3. For a bounded comparison, run
+   `app/scripts/benchmark_memory.3080.example.json` with the benchmark runner.
+   It compares Profile 4.5 and Profile 5 with Auto INT8, default preload,
+   Read Ahead off and two repetitions per candidate. The runner restores the
+   previous settings and Auto flag. Review output quality as well as speed.
+4. Return to Auto, repeat the same workload, and refresh the learning readout.
+   Then increase duration or resolution separately and add references/LoRAs
+   one at a time. Larger workloads start with a fresh matching-evidence set.
+
+The 10 GB and 12 GB cards are detected separately. Around 32 GB installed RAM,
+OS-reported usable RAM can fall below the 32 GB tier boundary, in which case
+the conservative Profile 5 starting point applies. Full H3 checkpoints may
+still exceed host memory; an allocator or placement change cannot make every
+checkpoint/window fit. RTX 3080 performance remains unverified until measured
+on the actual test machine.
+
+RTX 3080 installs use Maestro's Python 3.10 / CUDA 12.8 compatibility runtime.
+Comfy Kitchen's CUDA backend requires CUDA 13; **Auto INT8** checks backend
+availability and falls back to Triton or PyTorch when it is unavailable.
+Compare the backend reported in the terminal with the 4090 benchmark before
+expecting the same speed improvement.
+
 ## Per-job H3 transformer residency
 
 H3 and Viggle jobs reserve space for their packed video/audio sequence, then

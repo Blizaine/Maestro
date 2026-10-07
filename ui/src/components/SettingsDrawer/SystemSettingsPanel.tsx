@@ -1,19 +1,20 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { ChevronDown, ChevronRight, RotateCcw, Check, Download, Trash2, Cpu, RefreshCw, Loader2, FolderOpen, Plus, HardDrive } from 'lucide-react'
 import type { ModelFolderCandidate } from '../../types'
+import { MemorySettingsPanel } from './MemorySettingsPanel'
 import { useStore, getFamiliesForMode, getModelsForFamily } from '../../stores/useStore'
 import * as api from '../../api/client'
 import type { GenerationMode, GenerationPreviewMode, GenerationPreviewSupport } from '../../types'
 import { FAMILIES, resolveVariant, onOsThemeChange, type FamilyId, type ThemeMode } from '../../lib/theme'
 
 const profileLabels: Record<string, string> = {
-  '1': 'Profile 1: High RAM + High VRAM',
-  '2': 'Profile 2: High RAM + Low VRAM',
-  '3': 'Profile 3: Low RAM + High VRAM',
-  '3.5': 'Profile 3.5: Very Low RAM + High VRAM',
-  '4': 'Profile 4: Low RAM + Low VRAM',
-  '4.5': 'Profile 4.5: Low RAM + Low VRAM (saves ~1GB)',
-  '5': 'Profile 5: Very Low RAM + Low VRAM',
+  '1': 'Profile 1: Prefer VRAM residency',
+  '2': 'Profile 2: Pin host models, stream GPU weights',
+  '3': 'Profile 3: Prefer VRAM, pin main model',
+  '3.5': 'Profile 3.5: Prefer VRAM, limit host pinning',
+  '4': 'Profile 4: Partial residency and host pinning',
+  '4.5': 'Profile 4.5: Partial residency, serial transfers',
+  '5': 'Profile 5: Stream weights, minimal host pinning',
 }
 
 const quantizationOptions = [
@@ -816,7 +817,7 @@ function ThemeSection() {
  *   - Re-detect  → POST /api/v1/system-detect/apply (re-runs detection,
  *                  applies fresh recommendation. Only enabled when auto is on)
  */
-function AutoPerformanceCard() {
+export function AutoPerformanceCard() {
   const servicesConfig = useStore(s => s.servicesConfig)
   const updateServicesConfig = useStore(s => s.updateServicesConfig)
   const loadServicesConfig = useStore(s => s.loadServicesConfig)
@@ -838,14 +839,10 @@ function AutoPerformanceCard() {
   // another mount of the panel already loaded detect into the store,
   // skip the fetch.
   useEffect(() => {
-    if (detect) {
-      setLoading(false)
-      return
-    }
     let alive = true
     loadSystemDetect().finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
-  }, [detect, loadSystemDetect])
+  }, [loadSystemDetect])
 
   const showToast = (msg: string) => {
     setToast(msg)
@@ -859,19 +856,21 @@ function AutoPerformanceCard() {
     setApplying(true)
     try {
       const res = await api.applySystemDetect()
-      await Promise.all([loadServicesConfig(), loadSystemConfig()])
-      if (res.profile_changed) {
+      await Promise.all([loadServicesConfig(), loadSystemConfig(), loadSystemDetect()])
+      if (res.vram_allocator_restart_required) {
+        showToast('Auto-tune applied — restart Maestro to activate the memory allocator')
+      } else if (res.settings_reload || res.profile_changed) {
         showToast('Auto-tune applied — profile changes take effect on next model load')
       } else {
         showToast('Auto-tune applied')
       }
     } catch (e) {
       console.error('apply failed:', e)
-      showToast('Failed to apply auto-tune')
+      showToast(e instanceof Error ? e.message : 'Failed to apply auto-tune')
     } finally {
       setApplying(false)
     }
-  }, [loadServicesConfig, loadSystemConfig])
+  }, [loadServicesConfig, loadSystemConfig, loadSystemDetect])
 
   // Toggle OFF → just flip the flag. Preserves current settings so
   // the user has the same config they were just running, just no
@@ -899,14 +898,16 @@ function AutoPerformanceCard() {
       // services + system configs so the rest of the panel reflects
       // the newly-applied recommendation.
       await Promise.all([loadSystemDetect(), loadServicesConfig(), loadSystemConfig()])
-      if (res.profile_changed) {
+      if (res.vram_allocator_restart_required) {
+        showToast('Auto-tune applied — restart Maestro to activate the memory allocator')
+      } else if (res.settings_reload || res.profile_changed) {
         showToast('Re-detected — profile changes take effect on next model load')
       } else {
         showToast('Re-detected — no settings changed')
       }
     } catch (e) {
       console.error('re-detect failed:', e)
-      showToast('Failed to re-detect hardware')
+      showToast(e instanceof Error ? e.message : 'Failed to re-detect hardware')
     } finally {
       setApplying(false)
     }
@@ -953,6 +954,45 @@ function AutoPerformanceCard() {
             {autoOn ? '✨ ' : ''}{rec._recommendation_label}
           </div>
         )}
+
+        {rec?._recommendation_details && (
+          <details className="text-[11px] text-text-muted pl-6">
+            <summary className="cursor-pointer text-text-secondary">What Auto-tune manages</summary>
+            <ul className="list-disc pl-4 pt-1 space-y-1">
+              {rec._recommendation_details.map(detail => <li key={detail}>{detail}</li>)}
+            </ul>
+          </details>
+        )}
+
+        <div className="text-[11px] text-text-muted leading-relaxed pl-6 space-y-1">
+          <p>Profiles describe where model weights live. Each generation can use a different placement based on its checkpoint, window, resolution and references.</p>
+          <p>Local learning: {detect?.learning?.completed_renders ?? 0} completed renders across {detect?.learning?.workloads ?? 0} workloads. Choices need repeated matching comparisons with memory headroom.</p>
+          {detect?.learning?.last_plan && (
+            <details>
+              <summary className="cursor-pointer text-text-secondary">
+                Last generation: Profile {detect.learning.last_plan.profile}
+                {detect.learning.last_plan.transformer_budget_mb > 0
+                  ? ` · ${(detect.learning.last_plan.transformer_budget_mb / 1024).toFixed(1)} GB transformer allowance`
+                  : ' · model budget defaults'}
+              </summary>
+              <p>{detect.learning.last_plan.reasons.join(' ')}</p>
+              {detect.learning.last_plan.warnings.map(warning => <p className="text-indicator-warning" key={warning}>{warning}</p>)}
+              <p>This allowance covers transformer weights. Total VRAM also includes activations, references, decoding and other models.</p>
+            </details>
+          )}
+          <div className="flex gap-3">
+            <button className="hover:text-text-primary underline" onClick={() => void loadSystemDetect()}>Refresh learning</button>
+            {(detect?.learning?.completed_renders ?? 0) > 0 && (
+              <button className="hover:text-text-primary underline" onClick={async () => {
+                try {
+                  await api.resetPerformanceLearning()
+                  await loadSystemDetect()
+                  showToast('Local performance comparisons cleared for this hardware')
+                } catch { showToast('Could not clear local comparisons') }
+              }}>Clear comparisons</button>
+            )}
+          </div>
+        </div>
 
         {/* Toggle + Re-detect button row */}
         <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-border/40">
@@ -1200,6 +1240,7 @@ export function SystemSettingsPanel() {
       <AutoPerformanceCard />
 
       <GenerationPreviewSetting />
+      <MemorySettingsPanel />
 
       {/* Auto ON: collapse the advanced fields under an expander.
           The expander defaults closed — power users who want to peek

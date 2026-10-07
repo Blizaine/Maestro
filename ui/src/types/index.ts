@@ -1138,6 +1138,22 @@ export interface SystemConfig {
   prompt_enhancer_quantization: string
   attention_modes_available: string[]
   vram_safety_coefficient: number
+  vram_allocator?: 'default' | 'vmm' | 'vmm_spill'
+  int8_kernels?: 'disabled' | 'auto' | 'triton' | 'kitchen'
+  vram_allocator_active?: 'default' | 'vmm' | 'vmm_spill'
+  vram_allocator_fallback_reason?: string | null
+  vram_allocator_restart_required?: boolean
+  vram_allocator_cli_override?: string | null
+  smart_memory_pinning?: boolean
+  read_ahead?: boolean
+  perc_reserved_mem_max?: number
+  attention_head_split?: number
+  video_preload_mode?: 'default' | 'dynamic' | 'manual'
+  image_preload_mode?: 'default' | 'dynamic' | 'manual'
+  audio_preload_mode?: 'default' | 'dynamic' | 'manual'
+  video_preload_in_VRAM?: number
+  image_preload_in_VRAM?: number
+  audio_preload_in_VRAM?: number
   /** Opt-in low-resolution preview generation; older backends omit it. */
   generation_preview?: GenerationPreviewMode
   /** Plays once on the computer hosting Maestro, independent of browser
@@ -1358,6 +1374,11 @@ export interface HardwareInfo {
   supports_sage2: boolean
   supports_flash: boolean
   supports_triton: boolean
+  ram_available_gb?: number
+  driver_version?: string
+  torch_version?: string
+  runtime_version?: string
+  supports_mmgp_allocator?: boolean
 }
 
 /** Recommended settings the auto-tune engine produced for the detected
@@ -1376,6 +1397,30 @@ export interface RecommendedSettings {
   _recommendation_label: string
   /** Verbose reason string for tooltips and debug logs */
   _recommendation_reason: string
+  _recommendation_details?: string[]
+  int8_kernels?: SystemConfig['int8_kernels']
+  vram_allocator?: SystemConfig['vram_allocator']
+  read_ahead?: boolean
+  smart_memory_pinning?: boolean
+}
+
+export interface PerformancePlan {
+  applied: boolean
+  profile: number
+  transformer_budget_mb: number
+  source: 'hardware' | 'manual' | 'local_history'
+  matching_renders: number
+  reasons: string[]
+  warnings: string[]
+}
+
+export interface PerformanceLearning {
+  completed_renders: number
+  workloads: number
+  minimum_samples?: number
+  scope?: string
+  unavailable?: boolean
+  last_plan?: PerformancePlan | null
 }
 
 /** Response shape from GET /api/v1/system-detect. */
@@ -1383,6 +1428,7 @@ export interface SystemDetectResponse {
   hardware: HardwareInfo
   recommended: RecommendedSettings
   auto_enabled: boolean
+  learning?: PerformanceLearning
 }
 
 /** Response shape from POST /api/v1/system-detect/apply. */
@@ -1395,6 +1441,8 @@ export interface SystemDetectApplyResponse {
   /** True when one of the *_profile keys changed — UI should show
    *  "changes take effect on next model load" toast. */
   profile_changed: boolean
+  settings_reload?: boolean
+  vram_allocator_restart_required?: boolean
 }
 
 // CivitAI Browser types

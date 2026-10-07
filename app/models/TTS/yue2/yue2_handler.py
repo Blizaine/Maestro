@@ -95,7 +95,7 @@ class family_handler:
     @staticmethod
     def query_model_def(base_model_type, model_def):
         return {
-            "group": "music", "audio_only": True, "image_outputs": False, "sliding_window": False, "supports_early_stop": True,
+            "group": "music", "audio_only": True, "image_outputs": False, "sliding_window": False, "supports_early_stop": True, "device_explicit": True,
             "duration_is_maximum": True, "yue2_composition": True,
             "runtime_custom_settings": ["artist_id", "artist_strength", "artist_loras", "instrumental"],
             "music_caption_label": "Music style",

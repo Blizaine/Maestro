@@ -8,6 +8,7 @@ import torch
 from mmgp import offload
 from tqdm import tqdm
 
+from shared.utils.default_device import keep_default_device
 from shared.utils.offload_registry import register_offloadobj, unregister_offloadobj
 
 
@@ -78,7 +79,8 @@ def score_audio(filename, checkpoint, melody_only, callback, abort_fn):
             raise InterruptedError("SheetSage2 loading interrupted")
         model.eval().requires_grad_(False)
         model._offload_hooks = ["encode", "decode"]
-        manager = offload.profile({"text_encoder": model}, profile_no=3, budgets={"text_encoder": 0}, pinnedMemory=False, quantizeTransformer=False, convertWeightsFloatTo=None, verboseLevel=1)
+        with keep_default_device():
+            manager = offload.profile({"text_encoder": model}, profile_no=3, budgets={"text_encoder": 0}, pinnedMemory=False, quantizeTransformer=False, convertWeightsFloatTo=None, verboseLevel=1)
         register_offloadobj("yue2_scoring", manager)
         handles = [layer.register_forward_hook(layer_hook(index)) for index, layer in enumerate(model.encoder.layers)]
         handles += [layer.register_forward_hook(decoder_hook) for layer in model.decoder.layers]

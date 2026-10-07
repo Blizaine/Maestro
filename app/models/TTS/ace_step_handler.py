@@ -340,6 +340,7 @@ class family_handler:
             _is_turbo = _ace_step15_is_turbo_variant(base_model_type, model_def)
             extra_model_def = {
                 "audio_only": True,
+                "device_explicit": True,
                 "image_outputs": False,
                 "sliding_window": False,
                 "guidance_max_phases": 0 if _is_turbo else 1,
@@ -391,6 +392,7 @@ class family_handler:
             return extra_model_def
         return {
             "audio_only": True,
+            "device_explicit": True,
             "image_outputs": False,
             "sliding_window": False,
             "guidance_max_phases": 1,

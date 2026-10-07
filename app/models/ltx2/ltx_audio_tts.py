@@ -257,7 +257,7 @@ class LTXAudioTTSPipelineBase:
         waveform = waveform[:, :target_channels, :]
         if waveform.shape[1] < target_channels:
             pad_shape = (waveform.shape[0], target_channels - waveform.shape[1], waveform.shape[2])
-            waveform = torch.cat([waveform, torch.zeros(pad_shape, dtype=waveform.dtype)], dim=1)
+            waveform = torch.cat([waveform, waveform.new_zeros(pad_shape)], dim=1)
         return waveform
 
     def _encode_reference_waveform(self, waveform: torch.Tensor, sample_rate: int, max_seconds: float | None = None, normalize_peak: float | None = None):
@@ -276,6 +276,7 @@ class LTXAudioTTSPipelineBase:
             mel_bins=self.audio_encoder.mel_bins,
             mel_hop_length=self.audio_encoder.mel_hop_length,
             n_fft=self.audio_encoder.n_fft,
+            device=waveform.device,
         ).to(waveform.device)
         mel = audio_processor.waveform_to_mel(waveform, sample_rate)
         audio_device, audio_dtype = ltx_audio_tts_model_device_dtype(self.audio_encoder, self.device, self.dtype)

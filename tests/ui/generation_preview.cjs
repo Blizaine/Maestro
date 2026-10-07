@@ -139,6 +139,7 @@ const previewModels = [
           if (route.request().method() === 'PUT') savedConfig = {...savedConfig, ...route.request().postDataJSON()};
           return jsonResponse(route, savedConfig);
         }
+        if (endpoint === '/api/v1/services-config') return jsonResponse(route, {auto_performance: true});
         if (endpoint === '/api/v1/jobs') return jsonResponse(route, {jobs});
         if (endpoint.startsWith('/api/v1/status/')) {
           const id = decodeURIComponent(endpoint.slice('/api/v1/status/'.length));
@@ -363,9 +364,17 @@ const previewModels = [
     await videoCard.getByRole('button', {name: 'Play live preview'}).click();
     await videoCard.getByRole('button', {name: 'Pause live preview'}).waitFor();
     assert.equal(await video.getAttribute('data-preview-playback'), 'playing', 'the accessible Play control recovers from a policy-blocked autoplay');
-    await video.click();
+    await videoCard.getByRole('button', {name: 'Hide generation information'}).click();
+    await videoCard.getByRole('button', {name: 'Show generation information'}).waitFor();
+    assert.equal(await videoCard.getByText('Full Studio render ~50s').isVisible(), false, 'clicking the preview hides its information');
+    assert.equal(await video.getAttribute('data-preview-playback'), 'playing', 'hiding information does not pause playback');
+    await videoCard.getByRole('button', {name: 'Show generation information'}).press('Enter');
+    await videoCard.getByText('Full Studio render ~50s').waitFor();
+    await videoCard.getByRole('button', {name: 'Hide generation information'}).press('Space');
+    await videoCard.getByRole('button', {name: 'Pause live preview'}).click();
     await videoCard.getByRole('button', {name: 'Play live preview'}).waitFor();
-    assert.equal(await video.getAttribute('data-preview-playback'), 'paused', 'clicking the video pauses playback');
+    assert.equal(await video.getAttribute('data-preview-playback'), 'paused', 'the separate Pause control pauses playback');
+    assert.equal(await videoCard.getByRole('button', {name: 'Show generation information'}).count(), 1, 'Pause does not change overlay visibility');
 
     // Only video-job advances. Reconnect polling must update that job's media
     // without replacing another job's preview or undoing a user pause.
@@ -375,19 +384,20 @@ const previewModels = [
     assert.match(await video.evaluate(element => element.dataset.previewSrc), /revision=2$/, 'video source advances with the new preview revision');
     await videoCard.getByRole('button', {name: 'Play live preview'}).waitFor();
     assert.equal(await video.getAttribute('data-preview-playback'), 'paused', 'revision updates preserve the paused state');
+    assert.equal(await videoCard.getByRole('button', {name: 'Show generation information'}).count(), 1, 'revision updates preserve hidden information');
 
-    // A play() promise that resolves after a direct-video pause must not clear
+    // A play() promise that resolves after a pause must not clear
     // the paused state. The next revision also supersedes any older
     // promise still in flight.
     await jobsPage.evaluate(() => { window.__holdPreviewPlay = true; });
     await videoCard.getByRole('button', {name: 'Play live preview'}).click();
     await videoCard.getByRole('button', {name: 'Pause live preview'}).waitFor();
     assert.equal(await video.getAttribute('data-preview-playback'), 'playing', 'the accessible control resumes playback');
-    await video.click();
+    await videoCard.getByRole('button', {name: 'Pause live preview'}).click();
     await videoCard.getByRole('button', {name: 'Play live preview'}).waitFor();
     await jobsPage.evaluate(() => window.__previewPending.splice(0).forEach(pending => pending.resolve()));
     await jobsPage.waitForTimeout(25);
-    assert.equal(await videoCard.getByRole('button', {name: 'Play live preview'}).count(), 1, 'a late play resolution cannot undo a direct-video pause');
+    assert.equal(await videoCard.getByRole('button', {name: 'Play live preview'}).count(), 1, 'a late play resolution cannot undo a pause');
     assert.equal(await video.getAttribute('data-preview-playback'), 'paused');
 
     // Start another pending request, supersede it with a newer preview, then
@@ -401,7 +411,7 @@ const previewModels = [
     });
     await jobsPage.waitForFunction(() => window.store.getState().jobs.find(job => job.id === 'video-job')?.preview?.revision === 3);
     await videoCard.getByRole('button', {name: 'Pause live preview'}).waitFor();
-    await video.click();
+    await videoCard.getByRole('button', {name: 'Pause live preview'}).click();
     await videoCard.getByRole('button', {name: 'Play live preview'}).waitFor();
     await jobsPage.evaluate(() => window.__previewPending.splice(0).forEach(pending => pending.resolve()));
     await jobsPage.waitForTimeout(25);
@@ -415,6 +425,7 @@ const previewModels = [
       ? {...job, preview: null, previewNotice: null}
       : job)})));
     await videoCard.locator('video').waitFor({state: 'detached'});
+    await videoCard.getByText('Step 4/10').waitFor();
     const nextWindowPreview = preview('video-job', 'video', 4);
     nextWindowPreview.window = 3;
     polled['video-job'] = status('video-job', {preview: nextWindowPreview});
@@ -425,6 +436,7 @@ const previewModels = [
     await videoCard.getByRole('button', {name: 'Play live preview'}).waitFor();
     const resumedWindowVideo = videoCard.locator('video');
     assert.equal(await resumedWindowVideo.getAttribute('data-preview-playback'), 'paused', 'pause preference survives a null preview gap and next-window remount');
+    assert.equal(await videoCard.getByRole('button', {name: 'Show generation information'}).count(), 1, 'hidden information survives a null preview gap and next-window remount');
 
     // A separate job owns a fresh preference and starts playing normally.
     await jobsPage.evaluate(() => {
@@ -438,6 +450,7 @@ const previewModels = [
     const freshVideoCard = jobsPage.locator('[data-generation-job-id="fresh-video-job"]');
     await freshVideoCard.getByRole('button', {name: 'Pause live preview'}).waitFor();
     assert.equal(await freshVideoCard.locator('video').getAttribute('data-preview-playback'), 'playing', 'a different job starts with a fresh playback preference');
+    assert.equal(await freshVideoCard.getByRole('button', {name: 'Hide generation information'}).count(), 1, 'a different job starts with visible information');
 
     // A policy-blocked autoplay is tied to its revision, not stored as a user
     // pause. Advancing the preview retries playback without a tap.
