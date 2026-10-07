@@ -36,12 +36,29 @@ enhancement error concerns the draft returned by the writer. Maestro checks that
 it has usable speaker/text pairs, honors any explicit turn count, and fits the
 selected clip's spoken-word budget before asking for the H3 visual prompt.
 
-Rejected attempts print `[Enhance dialogue]` with the specific reason. If both
-attempts fail, the saved job error includes the last rejection and clip duration.
+Rejected attempts print `[Enhance dialogue]` with the specific reason. When a
+valid AI-written exchange exceeds the clip's word budget, the next request
+copyedits only its spoken text. Each line retains its original speaker and place
+in the exchange; the writer receives a target and a hard maximum for each line.
+If the edited exchange is still over budget, Maestro provides its measured
+word counts and asks for shorter complete utterances for the overlong lines.
+Up to two focused requests may follow the copyedit. This dialogue stage uses
+at most four writer requests, including the initial draft.
+The first copyedit uses structured text output with thinking disabled. Focused
+repairs enable low-effort reasoning with 2,048 extra tokens reserved alongside
+the 768-token answer allowance, so the writer can reconcile the measured word
+counts with complete, meaningful lines. The total response allowance is bounded;
+models that do not enforce a separate thinking limit may share it with reasoning.
+Maestro checks the edited text against the same duration budget before continuing.
+Exact user-supplied lines are never shortened by this stage.
+
+If writing and repair fail, the saved job error includes the last rejection and
+clip duration.
 For an overlong AI-written exchange, increase the duration or request a more
 concise exchange. A 124-frame H3 clip at 24 fps lasts about 5.17 seconds and permits
-at most 15 spoken words across all speakers. A longer conversation needs more
-time. Malformed speaker/text pairs or an incorrect turn count require a new draft
+at most 15 spoken words across all speakers. A 243-frame clip lasts 10.125 seconds
+and permits at most 30. A longer conversation needs more time. Malformed
+speaker/text pairs or an incorrect turn count require a new draft
 rather than a CUDA or memory-setting change.
 
 ## Linux CUDA build

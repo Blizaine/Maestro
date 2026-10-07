@@ -11,12 +11,111 @@ from services.adaptive_enhancement import adaptive_dialogue_expected, adaptive_w
 from services.dialogue_writing import dialogue_forbidden
 from services.h3_story_ledger import _canonicalize_story_ledger, _deterministic_ledger, extract_source_events, extract_h3_source_intent
 from services import llm_service
+from services.llm_sampling import caller_sampling_enabled
 
 
 CONCEPT = 'dynamic kung fu fight scene set in the mountains with power hits and cinematic action'
 
 
 class AdaptiveWritingTests(unittest.TestCase):
+    def test_overlong_valid_exchange_is_copyedited_without_changing_speakers_or_order(self):
+        prompt = (
+            "Nora, Kai, and Mina have an exactly three-turn conversation about a difficult holiday launch, "
+            "ending with Nora inviting the team back next year."
+        )
+        draft = [
+            {"speaker": "Kai", "text": "We nearly missed launch, but everyone kept moving when the schedule slipped badly twice."},
+            {"speaker": "Mina", "text": "I fixed the payment bug after Nora spotted how our holiday orders doubled overnight."},
+            {"speaker": "Nora", "text": "I want everyone back next year; let's make our launch easier from day one."},
+        ]
+        self.assertEqual(sum(len(turn["text"].split()) for turn in draft), 42)
+        edited = {
+            "L1": "We nearly missed launch, but the team kept moving.",
+            "L2": "Your catch fixed our bug before orders doubled overnight.",
+            "L3": "Come back next year; we'll plan the launch sooner.",
+        }
+        sampling_during_calls = []
+        calls = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            sampling_during_calls.append(caller_sampling_enabled())
+            if len(sampling_during_calls) == 1:
+                return json.dumps({"turns": draft})
+            return json.dumps(edited)
+
+        result = draft_spoken_exchange(prompt, 10.125, generate, language="English")
+
+        lines = llm_service._extract_h3_dialogue_blocks(result)
+        self.assertEqual(lines, list(edited.values()))
+        edited_word_count = sum(len(line.split()) for line in lines)
+        self.assertGreaterEqual(edited_word_count, 22)
+        self.assertLessEqual(edited_word_count, 30)
+        self.assertLess(result.index("Kai (S1)"), result.index("Mina (S2)"))
+        self.assertLess(result.index("Mina (S2)"), result.index("Nora (S3)"))
+        self.assertEqual(sampling_during_calls, [False, True])
+        self.assertFalse(caller_sampling_enabled())
+        self.assertEqual(len(sampling_during_calls), 2)
+        self.assertIn("Return JSON turns with speaker and text", calls[0]["system_prompt"])
+        self.assertIn("mapping each supplied L-key to revised spoken text", calls[1]["system_prompt"])
+        self.assertNotIn("Return JSON turns with speaker and text", calls[1]["system_prompt"])
+        schema = calls[1]["json_schema"]
+        self.assertEqual(schema["required"], ["L1", "L2", "L3"])
+        self.assertEqual(schema["additionalProperties"], False)
+        self.assertEqual(set(schema["properties"]), {"L1", "L2", "L3"})
+        self.assertTrue(all(value == {"type": "string"} for value in schema["properties"].values()))
+        self.assertFalse(calls[1]["enable_thinking"])
+        self.assertEqual(calls[1]["thinking_budget"], 0)
+        self.assertIsNone(calls[1]["reasoning_effort"])
+        self.assertEqual(calls[1]["max_new_tokens"], 768)
+
+    def test_overlong_exchange_copyedit_must_still_fit_hard_word_limit(self):
+        prompt = "Nora, Kai, and Mina discuss the difficult holiday launch."
+        draft = [
+            {"speaker": "Kai", "text": "We nearly missed launch, but everyone kept moving when the schedule slipped badly twice."},
+            {"speaker": "Mina", "text": "I fixed the payment bug after Nora spotted how our holiday orders doubled overnight."},
+            {"speaker": "Nora", "text": "I want everyone back next year; let's make our launch easier from day one."},
+        ]
+        too_long = {f"L{i + 1}": turn["text"] for i, turn in enumerate(draft)}
+        generator = Mock(side_effect=[
+            json.dumps({"turns": draft}),
+            json.dumps(too_long),
+            json.dumps(too_long),
+            json.dumps(too_long),
+        ])
+
+        with self.assertRaisesRegex(ValueError, "could not complete the requested dialogue") as caught:
+            draft_spoken_exchange(prompt, 10.125, generator, language="English")
+
+        self.assertIn("Your exchange had 42 words; use 22–30 total, aiming for 24.", str(caught.exception.__cause__))
+        self.assertEqual(generator.call_count, 4)
+
+    def test_copyedit_rejects_missing_line_keys_and_under_minimum_text(self):
+        prompt = "Nora, Kai, and Mina discuss the difficult holiday launch."
+        draft = [
+            {"speaker": "Kai", "text": "We nearly missed launch, but everyone kept moving when the schedule slipped badly twice."},
+            {"speaker": "Mina", "text": "I fixed the payment bug after Nora spotted how our holiday orders doubled overnight."},
+            {"speaker": "Nora", "text": "I want everyone back next year; let's make our launch easier from day one."},
+        ]
+        invalid_edits = (
+            (None, "return revised text for every L-key"),
+            ({"L1": "We kept moving."}, "return revised text for every L-key"),
+            ({"L1": "", "L2": "Orders doubled overnight.", "L3": "Come back next year."},
+             "each revised turn needs spoken text"),
+            ({"L1": "We kept <d>moving</d>.", "L2": "Orders doubled overnight.", "L3": "Come back next year."},
+             "Return nonempty speaker/text pairs, without speech tags or newlines."),
+            ({"L1": "We kept\nmoving.", "L2": "Orders doubled overnight.", "L3": "Come back next year."},
+             "Return nonempty speaker/text pairs, without speech tags or newlines."),
+            ({"L1": "Yes.", "L2": "Right.", "L3": "Sure."}, "Your exchange had 3 words; use 22–30 total, aiming for 24."),
+        )
+        for edit, reason in invalid_edits:
+            with self.subTest(edit=edit):
+                generator = Mock(side_effect=[json.dumps({"turns": draft}), json.dumps(edit)])
+                with self.assertRaisesRegex(ValueError, "could not complete the requested dialogue") as caught:
+                    draft_spoken_exchange(prompt, 10.125, generator, language="English")
+                self.assertIn(reason, str(caught.exception.__cause__))
+                self.assertEqual(generator.call_count, 2)
+
     def test_single_window_repairs_only_unambiguous_missing_speaker_ids(self):
         source = (
             'Adult sisters Lena and Priya stand beside one red suitcase. '
@@ -369,7 +468,12 @@ class AdaptiveWritingTests(unittest.TestCase):
     def test_over_budget_failure_surfaces_last_reason_duration_and_safe_logs(self):
         prompt = 'Mina and Theo discuss the missing letter.'
         private_draft = 'They discuss the old letter and explain why their reunion matters before either one leaves tonight.'
-        generator = Mock(return_value=json.dumps({'turns': [{'speaker': 'Mina', 'text': private_draft}]}))
+        generator = Mock(side_effect=[
+            json.dumps({'turns': [{'speaker': 'Mina', 'text': private_draft}]}),
+            json.dumps({'L1': private_draft}),
+            json.dumps({'L1': private_draft}),
+            json.dumps({'L1': private_draft}),
+        ])
         with patch('builtins.print') as log:
             with self.assertRaises(ValueError) as caught:
                 draft_spoken_exchange(prompt, 5.17, generator, language='English')
@@ -380,8 +484,9 @@ class AdaptiveWritingTests(unittest.TestCase):
         self.assertIn('Your exchange had 16 words', str(caught.exception.__cause__))
         self.assertIn('Last validation reason: Your exchange had 16 words; use 11–15 total, aiming for 12.', message)
         self.assertIn('Selected duration: 5.17 seconds.', message)
+        self.assertNotIn('aiming for 12..', message)
         self.assertIn('increase the selected duration or shorten the dialogue', message)
-        self.assertEqual(generator.call_count, 2)
+        self.assertEqual(generator.call_count, 4)
         logged = '\n'.join(str(call.args[0]) for call in log.call_args_list)
         self.assertEqual(log.call_count, 2)
         self.assertIn('[Enhance dialogue] attempt 1/2 rejected: Your exchange had 16 words;', logged)
@@ -423,15 +528,220 @@ class AdaptiveWritingTests(unittest.TestCase):
         self.assertIn('attempt 1/2 rejected:', log.call_args.args[0])
 
     def test_generator_cancellation_and_runtime_errors_propagate_without_retry(self):
-        for error in (InterruptedError('cancelled'), RuntimeError('writer unavailable')):
-            with self.subTest(error=type(error).__name__):
+        prompt = 'Mina and Theo discuss the missing letter.'
+        overlong = json.dumps({'turns': [{'speaker': 'Mina', 'text': 'letter ' * 100}]})
+        for error in (
+            ValueError('writer rejected request'),
+            KeyError('writer argument missing'),
+            TypeError('writer argument invalid'),
+            InterruptedError('cancelled'),
+            RuntimeError('writer unavailable'),
+        ):
+            with self.subTest(error=type(error).__name__, call='authoring'):
                 generator = Mock(side_effect=error)
                 with self.assertRaises(type(error)) as caught:
-                    draft_spoken_exchange(
-                        'Mina and Theo discuss the missing letter.', 5.17, generator, language='English'
-                    )
+                    draft_spoken_exchange(prompt, 5.17, generator, language='English')
                 self.assertIs(caught.exception, error)
                 generator.assert_called_once()
+
+            with self.subTest(error=type(error).__name__, call='copyedit'):
+                generator = Mock(side_effect=[overlong, error])
+                with self.assertRaises(type(error)) as caught:
+                    draft_spoken_exchange(prompt, 5.17, generator, language='English')
+                self.assertIs(caught.exception, error)
+                self.assertEqual(generator.call_count, 2)
+                self.assertFalse(caller_sampling_enabled())
+
+    def test_focused_copyedit_writer_errors_propagate_from_third_call(self):
+        prompt = "Nora, Kai, and Mina discuss the difficult holiday launch."
+        draft = [
+            {"speaker": "Kai", "text": "We nearly missed launch, but everyone kept moving when the schedule slipped badly twice."},
+            {"speaker": "Mina", "text": "I fixed the payment bug after Nora spotted how our holiday orders doubled overnight."},
+            {"speaker": "Nora", "text": "I want everyone back next year; let's make our launch easier from day one."},
+        ]
+        overlong_copyedit = {
+            "L1": "We nearly missed launch, but everyone kept moving when the schedule slipped badly twice.",
+            "L2": "I fixed the payment bug after Nora spotted how our holiday orders doubled overnight.",
+            "L3": "I want everyone back next year; let's make our launch easier from day one.",
+        }
+        first_draft = json.dumps({"turns": draft})
+        first_edit = json.dumps(overlong_copyedit)
+        for error in (
+            ValueError("provider rejected request"),
+            RuntimeError("provider unavailable"),
+            InterruptedError("cancelled"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                observed_sampling = []
+
+                def generate(**kwargs):
+                    observed_sampling.append(caller_sampling_enabled())
+                    if len(observed_sampling) == 1:
+                        return first_draft
+                    if len(observed_sampling) == 2:
+                        return first_edit
+                    raise error
+
+                with self.assertRaises(type(error)) as caught:
+                    draft_spoken_exchange(prompt, 10.125, generate, language="English")
+                self.assertIs(caught.exception, error)
+                self.assertEqual(observed_sampling, [False, True, True])
+                self.assertFalse(caller_sampling_enabled())
+
+    def test_overlong_three_speaker_exchange_uses_two_measured_focus_passes(self):
+        prompt = (
+            "Nora, Kai, and Mina have exactly three turns about a difficult holiday launch: "
+            "Kai explains the delay, Mina found the payment bug, and Nora invites the team back."
+        )
+        draft = [
+            {"speaker": "Kai", "text": "We nearly missed launch when our holiday schedule slipped, but the team kept moving."},
+            {"speaker": "Mina", "text": "I fixed the payment bug after Nora spotted our holiday orders doubling overnight again."},
+            {"speaker": "Nora", "text": "I want everyone back next year; let's plan sooner for a better launch together."},
+        ]
+        first_edit = {
+            "L1": "Launch nearly slipped, but the team kept moving through the delay.",
+            "L2": "I fixed payment bug after Nora spotted holiday orders doubling overnight.",
+            "L3": "Come back next year; let's plan much sooner for launch.",
+        }
+        first_focus = {
+            "L1": "Launch nearly slipped, but our whole team moved through holiday delays.",
+            "L2": "Nora caught a payment bug before holiday orders doubled overnight.",
+        }
+        final_focus = {
+            "L1": "We nearly missed launch.",
+            # Gemma may echo locked context keys; only L1 is requested here.
+            "L2": first_focus["L2"],
+            "L3": first_edit["L3"],
+        }
+        self.assertEqual(sum(len(turn["text"].split()) for turn in draft), 42)
+        self.assertEqual(sum(len(text.split()) for text in first_edit.values()), 32)
+        self.assertEqual(sum(len(text.split()) for text in first_focus.values()) + len(first_edit["L3"].split()), 31)
+        calls = []
+        sampling_states = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            sampling_states.append(caller_sampling_enabled())
+            if len(calls) == 1:
+                return json.dumps({"turns": draft})
+            if len(calls) == 2:
+                return json.dumps(first_edit)
+            if len(calls) == 3:
+                return json.dumps(first_focus)
+            if len(calls) == 4:
+                return json.dumps(final_focus)
+            raise AssertionError("dialogue repair must not make more than four writer requests")
+
+        result = draft_spoken_exchange(prompt, 10.125, generate, language="English")
+
+        expected = [final_focus["L1"], first_focus["L2"], first_edit["L3"]]
+        self.assertEqual(llm_service._extract_h3_dialogue_blocks(result), expected)
+        self.assertEqual(sum(len(text.split()) for text in expected), 24)
+        self.assertIn("Kai (S1)", result)
+        self.assertIn("Mina (S2)", result)
+        self.assertIn("Nora (S3)", result)
+        self.assertLess(result.index("Kai (S1)"), result.index("Mina (S2)"))
+        self.assertLess(result.index("Mina (S2)"), result.index("Nora (S3)"))
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(sampling_states, [False, True, True, True])
+        self.assertTrue(calls[1]["system_prompt"].startswith("Copyedit the supplied spoken exchange"))
+        self.assertIn("Return only a JSON object mapping each supplied L-key", calls[1]["system_prompt"])
+        self.assertEqual(calls[1]["json_schema"]["required"], ["L1", "L2", "L3"])
+        self.assertFalse(calls[1]["enable_thinking"])
+        self.assertEqual(calls[1]["thinking_budget"], 0)
+        self.assertIsNone(calls[1]["reasoning_effort"])
+        self.assertEqual(calls[1]["max_new_tokens"], 768)
+        first_focus_prompt = calls[2]["prompt"]
+        self.assertIn("previous_words=32", first_focus_prompt)
+        self.assertIn("needed_reduction_words=8", first_focus_prompt)
+        self.assertIn('"current_words": 11', first_focus_prompt)
+        self.assertIsNone(calls[2]["json_schema"])
+        self.assertTrue(calls[2]["enable_thinking"])
+        self.assertEqual(calls[2]["thinking_budget"], 2048)
+        self.assertEqual(calls[2]["reasoning_effort"], "low")
+        self.assertEqual(calls[2]["max_new_tokens"], 768)
+        second_focus_prompt = calls[3]["prompt"]
+        self.assertIn("previous_words=31", second_focus_prompt)
+        self.assertIn("needed_reduction_words=7", second_focus_prompt)
+        self.assertIn("target_words=24", second_focus_prompt)
+        self.assertIn('"current_words": 11', second_focus_prompt)
+        self.assertIn('"maximum_words": 10', second_focus_prompt)
+        self.assertIsNone(calls[3]["json_schema"])
+        self.assertTrue(calls[3]["enable_thinking"])
+        self.assertEqual(calls[3]["thinking_budget"], 2048)
+        self.assertEqual(calls[3]["reasoning_effort"], "low")
+        self.assertEqual(calls[3]["max_new_tokens"], 768)
+        self.assertFalse(caller_sampling_enabled())
+
+    def test_fourth_writer_call_errors_and_cancellation_propagate_and_reset_sampling(self):
+        prompt = "Nora, Kai, and Mina discuss the difficult holiday launch."
+        draft = [
+            {"speaker": "Kai", "text": "We nearly missed launch when our holiday schedule slipped, but the team kept moving."},
+            {"speaker": "Mina", "text": "I fixed the payment bug after Nora spotted our holiday orders doubling overnight again."},
+            {"speaker": "Nora", "text": "I want everyone back next year; let's plan sooner for a better launch together."},
+        ]
+        first_edit = {
+            "L1": "Launch nearly slipped, but the team kept moving through the delay.",
+            "L2": "I fixed payment bug after Nora spotted holiday orders doubling overnight.",
+            "L3": "Come back next year; let's plan much sooner for launch.",
+        }
+        first_focus = {
+            "L1": "Launch nearly slipped, but our whole team moved through holiday delays.",
+            "L2": "Nora caught a payment bug before holiday orders doubled overnight.",
+        }
+        for error in (ValueError("provider rejected request"), RuntimeError("provider unavailable"),
+                      InterruptedError("cancelled")):
+            with self.subTest(error=type(error).__name__):
+                sampling_states = []
+                calls = []
+
+                def generate(**kwargs):
+                    calls.append(kwargs)
+                    sampling_states.append(caller_sampling_enabled())
+                    if len(calls) == 1:
+                        return json.dumps({"turns": draft})
+                    if len(calls) == 2:
+                        return json.dumps(first_edit)
+                    if len(calls) == 3:
+                        return json.dumps(first_focus)
+                    raise error
+
+                with self.assertRaises(type(error)) as caught:
+                    draft_spoken_exchange(prompt, 10.125, generate, language="English")
+                self.assertIs(caught.exception, error)
+                self.assertEqual(sampling_states, [False, True, True, True])
+                self.assertEqual(len(calls), 4)
+                self.assertFalse(caller_sampling_enabled())
+
+    def test_focused_copyedit_still_rejects_invalid_text_and_under_minimum_results(self):
+        prompt = "Nora, Kai, and Mina discuss the holiday launch."
+        draft = [
+            {"speaker": "Kai", "text": "We nearly missed launch when our holiday schedule slipped, but the team kept moving."},
+            {"speaker": "Mina", "text": "I fixed the payment bug after Nora spotted our holiday orders doubling overnight again."},
+            {"speaker": "Nora", "text": "I want everyone back next year; let's plan sooner for a better launch together."},
+        ]
+        overlong_edit = {
+            "L1": "Launch nearly slipped, but the team kept moving through the delay.",
+            "L2": "I fixed payment bug after Nora spotted holiday orders doubling overnight.",
+            "L3": "Come back next year; let's plan much sooner for launch.",
+        }
+        invalid_focus_edits = (
+            {"L1": "The team stayed strong.\nThe schedule slipped.",
+             "L2": "Nora caught it before our holiday sales."},
+            {"L1": "<d>[English] We stayed together.</d>",
+             "L2": "Nora caught it before our holiday sales."},
+            {"L1": "We stayed together.", "L2": "Nora caught it before our holiday sales."},
+        )
+        for focus in invalid_focus_edits:
+            with self.subTest(focus=focus):
+                generator = Mock(side_effect=[
+                    json.dumps({"turns": draft}), json.dumps(overlong_edit), json.dumps(focus),
+                ])
+                with patch("builtins.print"):
+                    with self.assertRaisesRegex(ValueError, "could not complete the requested dialogue"):
+                        draft_spoken_exchange(prompt, 10.125, generator, language="English")
+                self.assertEqual(generator.call_count, 3)
+                self.assertFalse(caller_sampling_enabled())
 
     def test_explicit_turn_count_does_not_relax_a_developed_conversation(self):
         prompt = 'Mina and Theo have a developed four-turn conversation about the missing letter.'

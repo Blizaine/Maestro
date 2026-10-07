@@ -154,27 +154,85 @@ def draft_spoken_exchange(prompt: str, duration_seconds: float | None, generator
         "Make the last line fulfill the requested ending. This stage writes speech only; "
         "the camera, sound and action will be written separately."
     )
-    if nsfw:
-        system += "\n\n" + load_guide("enhance", "nsfw_shared")
+    nsfw_guidance = load_guide("enhance", "nsfw_shared") if nsfw else ""
+    if nsfw_guidance:
+        system += "\n\n" + nsfw_guidance
+    copyedit_system = (
+        "Copyedit the supplied spoken exchange. Return only a JSON object mapping each supplied "
+        "L-key to revised spoken text. Each key stays with its original speaker and turn position; "
+        "preserve speaker roles, intent, requested information, the exchange's progression and ending. "
+        "Write complete, natural utterances in the same language. Do not return speaker names, turns, "
+        "metadata, tags, or directions. Keep every line meaningful and concise enough to meet its word target. "
+        f"The whole exchange must contain {minimum_words}–{budget.maximum} spoken words, "
+        f"aiming for {budget.target}, including any unchanged lines."
+    )
+    if nsfw_guidance:
+        copyedit_system += "\n\n" + nsfw_guidance
     feedback = ""
     last_error = None
     last_attempt_over_budget = False
+    repair_turns: list[dict[str, str]] | None = None
     for attempt in range(1, 3):
-        raw = generator(
-            prompt=(f"User brief: {prompt}\n\n"
-                    f"Duration: {duration_seconds or 8:g} seconds. Language: {language}. "
-                    f"{'Use exactly' if requested_turns else 'Write about'} {suggested_turns} concise turns "
-                    f"and {budget.target} spoken words TOTAL "
-                    f"across all speakers (allowed {minimum_words}–{budget.maximum} words, not per turn). "
-                    "Leave time for listening reactions.\n"
-                    + (f"Reference inventory: {reference_context}\n" if re.search(r'<(?:Subject|Picture|Video|Audio) \d+>', reference_context) else "")
-                    + feedback),
-            system_prompt=system, json_schema=schema, max_new_tokens=max(768, budget.maximum * 6),
-            temperature=0.6, enable_thinking=False, frequency_penalty=0.0, presence_penalty=0.0,
-        )
-        attempt_over_budget = False
+        attempt_over_budget = repair_turns is not None
+        raw = ""
+        turns = None
+        copyedit_error = None
+        if repair_turns is not None:
+            from services.h3_dialogue_writing import _shorten_generated_dialogue
+            from services.llm_sampling import caller_sampling
+
+            writer_errors = []
+
+            def copyedit_generator(**kwargs):
+                try:
+                    return generator(**kwargs)
+                except BaseException as error:
+                    writer_errors.append(error)
+                    raise
+
+            editable_lines = [
+                {"speaker": turn["speaker"], "language": language, "text": turn["text"]}
+                for turn in repair_turns
+            ]
+            # The copyeditor receives only fixed L-keys and text fields. Its
+            # result is mapped back onto the original speakers in order.
+            try:
+                with caller_sampling(True):
+                    edited_lines = _shorten_generated_dialogue(
+                        prompt, editable_lines, target_words=budget.target,
+                        generate=copyedit_generator, system_prompt=copyedit_system,
+                        maximum_words=budget.maximum,
+                    )
+                if len(edited_lines) != len(repair_turns):
+                    raise ValueError("return revised text for every original turn")
+                turns = [
+                    {"speaker": original["speaker"], "text": edited["text"]}
+                    for original, edited in zip(repair_turns, edited_lines)
+                ]
+                raw = json.dumps({"turns": turns}, ensure_ascii=False)
+            except (ValueError, KeyError, TypeError) as error:
+                if any(error is writer_error for writer_error in writer_errors):
+                    raise
+                copyedit_error = error
+        else:
+            raw = generator(
+                prompt=(f"User brief: {prompt}\n\n"
+                        f"Duration: {duration_seconds or 8:g} seconds. Language: {language}. "
+                        f"{'Use exactly' if requested_turns else 'Write about'} {suggested_turns} concise turns "
+                        f"and {budget.target} spoken words TOTAL "
+                        f"across all speakers (allowed {minimum_words}–{budget.maximum} words, not per turn). "
+                        "Leave time for listening reactions.\n"
+                        + (f"Reference inventory: {reference_context}\n" if re.search(r'<(?:Subject|Picture|Video|Audio) \d+>', reference_context) else "")
+                        + feedback),
+                system_prompt=system, json_schema=schema, max_new_tokens=max(768, budget.maximum * 6),
+                temperature=0.6, enable_thinking=False, frequency_penalty=0.0, presence_penalty=0.0,
+            )
+
         try:
-            turns = json.loads(raw)["turns"]
+            if copyedit_error is not None:
+                raise copyedit_error
+            if turns is None:
+                turns = json.loads(raw)["turns"]
             if isinstance(turns, list):
                 # A model may encode an explicitly silent nod as an empty
                 # dialogue row beside the one requested spoken reaction.
@@ -202,7 +260,13 @@ def draft_spoken_exchange(prompt: str, duration_seconds: float | None, generator
                 )
             attempt_over_budget = count > budget.maximum
             if not minimum_words <= count <= budget.maximum:
-                raise ValueError(f"Your exchange had {count} words; use {minimum_words}–{budget.maximum} total, aiming for {budget.target}.")
+                error = ValueError(f"Your exchange had {count} words; use {minimum_words}–{budget.maximum} total, aiming for {budget.target}.")
+                if attempt == 1 and attempt_over_budget:
+                    repair_turns = [
+                        {"speaker": " ".join(turn["speaker"].split()), "text": turn["text"].strip()}
+                        for turn in turns
+                    ]
+                raise error
             speakers: dict[str, int] = {}
             lines = []
             for turn in turns:
@@ -225,8 +289,9 @@ def draft_spoken_exchange(prompt: str, duration_seconds: float | None, generator
             print(f"[Enhance dialogue] attempt {attempt}/2 rejected: {reason}")
             feedback = f"Revise this draft; do not start over: {raw}\nCorrection: {error}"
     selected_duration = duration_seconds or 8
+    last_reason = str(last_error or "").rstrip(" .")
     diagnostic = (
-        f"Last validation reason: {last_error}. "
+        f"Last validation reason: {last_reason}. "
         f"Selected duration: {selected_duration:g} seconds."
     )
     if last_attempt_over_budget:

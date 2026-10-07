@@ -3,6 +3,7 @@
 from copy import deepcopy
 import json
 import math
+import re
 from typing import Any, Callable
 
 from services.dialogue_writing import (
@@ -23,27 +24,67 @@ def _shorten_generated_dialogue(
     prompt: str, lines: list[dict[str, Any]], *, target_words: int,
     generate: Callable[..., str], system_prompt: str,
     per_line_targets: list[int] | None = None,
+    maximum_words: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Copyedit only AI-written words; speaker/event ownership stays local."""
+    """Copyedit only AI-written words; speaker/event ownership stays local.
+
+    ``maximum_words`` caps a whole exchange. It is apportioned to lines for
+    the writer, then only lines above their share are retried if the combined
+    edit still exceeds the caller's hard total.
+    """
     from services.h3_window_planner import _parse_json_object
 
     if not lines:
         return []
+
+    def allocate_words(
+        total_words: int, source_lines: list[dict[str, Any]],
+        caps: list[int] | None = None,
+    ) -> list[int]:
+        total = max(len(source_lines), int(total_words))
+        if caps is not None:
+            total = min(total, sum(caps))
+        weights = [max(1, _dialogue_word_count(line["text"])) for line in source_lines]
+        total_weight = sum(weights)
+        extra = total - len(source_lines)
+        allocation = [1 + extra * weight // total_weight for weight in weights]
+        if caps is not None:
+            allocation = [min(cap, words) for cap, words in zip(caps, allocation)]
+        remainder_order = sorted(
+            range(len(source_lines)),
+            key=lambda i: extra * weights[i] % total_weight,
+            reverse=True,
+        )
+        remainder = total - sum(allocation)
+        while remainder:
+            progressed = False
+            for i in remainder_order:
+                if caps is None or allocation[i] < caps[i]:
+                    allocation[i] += 1
+                    remainder -= 1
+                    progressed = True
+                    if not remainder:
+                        break
+            if not progressed:
+                break
+        return allocation
+
     target = max(len(lines), int(target_words))
-    weights = [max(1, _dialogue_word_count(line["text"])) for line in lines]
-    total_weight = sum(weights)
-    extra = target - len(lines)
-    targets = [1 + extra * weight // total_weight for weight in weights]
-    remainder_order = sorted(range(len(lines)), key=lambda i: extra * weights[i] % total_weight, reverse=True)
-    for i in remainder_order[:target - sum(targets)]:
-        targets[i] += 1
+    maximum_words = int(maximum_words) if maximum_words is not None else None
+    line_maxima = None
+    if maximum_words is not None and per_line_targets is None:
+        if maximum_words < len(lines):
+            raise ValueError("the whole-exchange maximum must allow at least one word per original turn")
+        line_maxima = allocate_words(maximum_words, lines)
+    targets = allocate_words(target, lines, caps=line_maxima)
     if per_line_targets is not None:
         targets = per_line_targets
         target = sum(targets)
     turns = {
         f"L{i + 1}": {"speaker": line["speaker"], "language": line["language"],
                        "text": line["text"], "target_words": targets[i],
-                       **({"maximum_words": targets[i]} if per_line_targets is not None else {})}
+                       **({"maximum_words": targets[i]} if per_line_targets is not None else
+                          {"maximum_words": line_maxima[i]} if line_maxima is not None else {})}
         for i, line in enumerate(lines)
     }
     request = (
@@ -65,52 +106,170 @@ def _shorten_generated_dialogue(
             "Prefer a complete, natural sentence a word or two below that limit. "
             "Shorten hesitation and polite filler before cutting the requested information."
         )
-    def write(text: str) -> str:
+    elif maximum_words is not None:
+        request += (
+            f"\nThe maximum_words values are HARD per-line caps that sum to the hard total limit of "
+            f"{maximum_words} words. Do not exceed any cap or the combined total. "
+            "Prefer complete, natural sentences close to the target_words allocations. "
+            "Shorten repetition and decorative phrasing before cutting requested information."
+        )
+
+    def write(
+        text: str, *, text_keys: list[str] | None = None,
+        focused_reasoning: bool = False,
+    ) -> str:
+        # The first whole-exchange copyedit stays structured and cheap. If it
+        # misses the hard total, focused passes need to reason through the
+        # measured reductions; their JSON is parsed and validated locally.
+        structured_text = text_keys is not None and not focused_reasoning
+        text_schema = None
+        if structured_text:
+            text_schema = {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(text_keys),
+                "properties": {key: {"type": "string"} for key in text_keys},
+            }
+        if focused_reasoning:
+            enable_thinking, thinking_budget, reasoning_effort = True, 2048, "low"
+        elif structured_text:
+            enable_thinking, thinking_budget, reasoning_effort = False, 0, None
+        else:
+            enable_thinking, thinking_budget, reasoning_effort = True, 512, "low"
         return generate(
             prompt=text,
             system_prompt=system_prompt, max_new_tokens=768,
-            temperature=0.3, top_p=0.88, enable_thinking=True,
-            thinking_budget=512, reasoning_effort="low",
+            temperature=0.3, top_p=0.88, enable_thinking=enable_thinking,
+            thinking_budget=thinking_budget, reasoning_effort=reasoning_effort,
             frequency_penalty=0.0, presence_penalty=0.0,
-            # llama-server's JSON grammar disables reasoning. A short editing
-            # pass needs room to choose a complete concise phrase and count it;
-            # grammar-capping words instead can cut the sentence mid-thought.
-            json_schema=None,
+            # Whole-exchange edits need exact JSON keys, but their strings stay
+            # unconstrained so the writer can make complete natural sentences.
+            # Camera/default edits retain the helper's original sampling path.
+            json_schema=text_schema,
         )
-    raw = write(request)
+    raw = write(
+        request,
+        text_keys=list(turns) if maximum_words is not None and per_line_targets is None else None,
+    )
     candidate = _parse_json_object(raw)
     if not isinstance(candidate, dict) or set(candidate) != set(turns):
         raise ValueError("return revised text for every L-key")
+    if not all(isinstance(candidate.get(key), str) and candidate[key].strip() for key in turns):
+        raise ValueError("each revised turn needs spoken text")
+
     if per_line_targets is not None:
         over = {
-            key: {"language": turn["language"], "text": candidate.get(key),
+            key: {"speaker": turn["speaker"], "language": turn["language"], "text": candidate[key],
                   "target_words": max(1, int(turn["maximum_words"] * 0.65)),
                   "maximum_words": turn["maximum_words"]}
             for key, turn in turns.items()
-            if _dialogue_word_count(candidate.get(key)) > turn["maximum_words"]
+            if _dialogue_word_count(candidate[key]) > turn["maximum_words"]
         }
         if over:
+            retry_prompt = (
+                "SHORTEN OVERLONG SPOKEN TURNS. Rewrite each listed line toward its target_words; "
+                "never exceed its maximum_words. Express its core question or answer as a NEW "
+                "complete natural utterance. Omit greetings, repetition and decorative phrasing. "
+                "Keep essential information and each turn's language. Do not truncate sentences, "
+                "join turns, or return acting directions. Return only JSON mapping the listed "
+                "L-keys to their revised spoken text.\n"
+                f"Editable turns:\n{json.dumps(over, ensure_ascii=False)}"
+            )
             try:
-                # Retry only the overlong turns together. One request per
-                # line multiplied writer latency for dialogue-heavy windows.
-                repaired = _parse_json_object(write(
-                    "SHORTEN OVERLONG SPOKEN TURNS. Rewrite each listed line toward its target_words; "
-                    "never exceed its maximum_words. Express its core question or answer as a NEW "
-                    "complete natural utterance. Omit greetings, repetition and decorative phrasing. "
-                    "Keep essential information and each turn's language. Do not truncate sentences, "
-                    "join turns, or return acting directions. Return only JSON mapping the listed "
-                    "L-keys to their revised spoken text.\n"
-                    f"Editable turns:\n{json.dumps(over, ensure_ascii=False)}"
-                ))
+                retry_raw = write(retry_prompt)
+            except InterruptedError:
+                raise
             except Exception as error:
                 print(f"[MiniMax H3] Camera dialogue copyedit retry: {error}")
-                repaired = None  # Keep a useful first edit if the retry fails.
-            if isinstance(repaired, dict):
-                for key in over:
-                    if isinstance(repaired.get(key), str) and repaired[key].strip() and (
-                        _dialogue_word_count(repaired[key]) < _dialogue_word_count(candidate.get(key))
-                    ):
-                        candidate[key] = repaired[key]
+                retry_raw = None  # Keep a useful first edit after provider failures.
+            if retry_raw is not None:
+                try:
+                    repaired = _parse_json_object(retry_raw)
+                except (TypeError, ValueError) as error:
+                    print(f"[MiniMax H3] Camera dialogue copyedit retry: {error}")
+                else:
+                    # The legacy camera path accepts whichever useful
+                    # per-line edits the provider returned; missing or
+                    # malformed keys retain their first edit, and extras are
+                    # ignored. The adaptive exchange repair has stricter
+                    # whole-exchange validation at its caller.
+                    for key in over:
+                        revised_text = repaired.get(key) if isinstance(repaired, dict) else None
+                        if (isinstance(revised_text, str) and revised_text.strip()
+                                and _dialogue_word_count(revised_text) < _dialogue_word_count(candidate[key])):
+                            candidate[key] = repaired[key].strip()
+
+    elif maximum_words is not None:
+        for focus_pass in range(1, 3):
+            total = sum(_dialogue_word_count(candidate[key]) for key in turns)
+            if total <= maximum_words:
+                break
+            over_keys = [key for key, turn in turns.items()
+                         if _dialogue_word_count(candidate[key]) > turn["maximum_words"]]
+            fixed_keys = [key for key in turns if key not in over_keys]
+            if not over_keys:
+                break
+            fixed_words = sum(_dialogue_word_count(candidate[key]) for key in fixed_keys)
+            available = maximum_words - fixed_words
+            focused_caps = [turns[key]["maximum_words"] for key in over_keys]
+            focused_target = min(
+                sum(focused_caps),
+                max(len(over_keys), min(available, int(target_words) - fixed_words)),
+            )
+            over_lines = [
+                {"speaker": turns[key]["speaker"], "language": turns[key]["language"],
+                 "text": candidate[key]}
+                for key in over_keys
+            ]
+            focused_targets = allocate_words(focused_target, over_lines, caps=focused_caps)
+            focused = {
+                key: {
+                    "speaker": turns[key]["speaker"],
+                    "language": turns[key]["language"],
+                    "original_text": turns[key]["text"],
+                    "text": candidate[key],
+                    "current_words": _dialogue_word_count(candidate[key]),
+                    "target_words": focused_targets[index],
+                    "maximum_words": turns[key]["maximum_words"],
+                }
+                for index, key in enumerate(over_keys)
+            }
+            unchanged = {key: candidate[key] for key in fixed_keys}
+            needed_reduction = max(0, total - int(target_words))
+            retry_prompt = (
+                "FOCUSED WHOLE-EXCHANGE REPAIR. Make a meaningful concise rewrite of only the listed over-cap turns; "
+                "do not make punctuation-only or near-identical substitutions. Each L-key belongs to its supplied "
+                "speaker and must remain in this exact turn position. Preserve each speaker's core intent and requested "
+                "information, the exchange's progression, and the same language. Write complete, natural utterances; "
+                "never drop a line or truncate a sentence. The unchanged lines below are locked and will stay as written. "
+                f"Measured exchange before this pass: previous_words={total}; hard_maximum_words={maximum_words}; "
+                f"target_words={target_words}; needed_reduction_words={needed_reduction}. Reduce enough to reach the target "
+                f"when possible, and never exceed {maximum_words} total words. Each editable turn includes its measured "
+                "current_words, its target_words, and a HARD maximum_words cap. Return only a JSON object mapping every "
+                "requested L-key to revised spoken text.\n"
+                f"Unchanged lines (do not rewrite):\n{json.dumps(unchanged, ensure_ascii=False)}\n"
+                f"Editable turns:\n{json.dumps(focused, ensure_ascii=False)}"
+            )
+            retry_raw = write(
+                retry_prompt, text_keys=list(focused), focused_reasoning=True,
+            )
+            try:
+                repaired = _parse_json_object(retry_raw)
+                if not isinstance(repaired, dict) or not set(focused).issubset(repaired):
+                    raise ValueError("return revised text for every focused L-key")
+                if not all(
+                    isinstance(repaired.get(key), str) and repaired[key].strip()
+                    and not re.search(r"</?d>|[\r\n]", repaired[key])
+                    for key in focused
+                ):
+                    raise ValueError("each focused turn needs plain, single-line spoken text")
+            except (TypeError, ValueError) as error:
+                print(f"[MiniMax H3] Whole-exchange dialogue copyedit pass {focus_pass}/2: {error}")
+                break  # Keep the latest structurally valid edit; do not retry malformed output.
+            # Providers may echo unchanged context keys. Apply only the
+            # requested edits, then measure the complete exchange again.
+            for key in focused:
+                candidate[key] = repaired[key].strip()
     result = deepcopy(lines)
     for i, line in enumerate(result, 1):
         text = candidate[f"L{i}"]

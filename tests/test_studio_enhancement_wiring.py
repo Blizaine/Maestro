@@ -146,7 +146,9 @@ class EnhancedJobWiringTests(unittest.TestCase):
                   'sliding_window_size': 124}
         self.job.update(params=params, enhancement=enhancement.new_enhancement(params, {}))
         draft = json.dumps({'turns': [{'speaker': 'Nora', 'text': 'word ' * 20}]})
-        writer = Mock(return_value=draft)
+        writer = Mock(side_effect=[draft, json.dumps({'L1': 'word ' * 20}),
+                                   json.dumps({'L1': 'word ' * 20}),
+                                   json.dumps({'L1': 'word ' * 20})])
 
         async def write(payload):
             return {'enhanced': draft_spoken_exchange(
@@ -159,13 +161,56 @@ class EnhancedJobWiringTests(unittest.TestCase):
         self.assertEqual(saved['enhancement']['state'], 'failed')
         self.assertIn('20 words', saved['enhancement']['error'])
         self.assertIn('15', saved['enhancement']['error'])
-        self.assertEqual(writer.call_count, 2)
+        self.assertEqual(writer.call_count, 4)
         self.prepare.assert_not_awaited()
         self.ns['_jobs'] = {'testjob': saved}
         response = load('get_job_enhancement', self.ns)('testjob')
         self.assertEqual(response['enhancement']['error'], saved['enhancement']['error'])
         self.assertEqual(response['enhancement']['original_prompt'], source)
         self.assertIsNone(response['prepared'])
+        llm_service.unload_model.assert_called_once()
+
+    def test_overlong_ai_exchange_is_copyedited_and_checkpointed_with_its_speakers(self):
+        from services.adaptive_enhancement import draft_spoken_exchange
+
+        source = 'Nora, Kai, and Mina stand talking at a company holiday party.'
+        params = {**self.params, 'prompt': source, 'video_length': 243,
+                  'sliding_window_size': 243}
+        self.job.update(params=params, enhancement=enhancement.new_enhancement(params, {}))
+        speakers = ['Nora', 'Kai', 'Mina']
+        long_lines = [
+            'Why does every office celebration somehow end with someone giving a speech about teamwork?',
+            'Because my team loves celebrations and absolutely everyone expects me to make them memorable.',
+            'I came for the food and intend to leave before anyone mentions teamwork again.',
+        ]
+        short_lines = [
+            'Does every office party need a teamwork speech?',
+            'Mine does. Everyone expects me to inspire them.',
+            'I came for food. Spare me the speech.',
+        ]
+        writer = Mock(side_effect=[
+            json.dumps({'turns': [{'speaker': speaker, 'text': text}
+                                  for speaker, text in zip(speakers, long_lines)]}),
+            json.dumps({f'L{i}': text for i, text in enumerate(short_lines, 1)}),
+        ])
+
+        async def write(payload):
+            return {'enhanced': draft_spoken_exchange(
+                payload['prompt'], payload['duration_seconds'], writer, language='English')}
+
+        self.writer.side_effect = write
+        self.assertTrue(try_start(self.job))
+        self.run_enhancement(self.job)
+        saved = self.archive.recover()['testjob']['enhancement']
+        self.assertEqual(saved['state'], 'complete')
+        self.assertEqual(saved['original_prompt'], source)
+        self.assertEqual(llm_service._extract_h3_dialogue_blocks(saved['enhanced_prompt']), short_lines)
+        self.assertEqual(self.job['params']['prompt'], saved['enhanced_prompt'])
+        for i, speaker in enumerate(speakers, 1):
+            self.assertIn(f'{speaker} (S{i}) says,', saved['enhanced_prompt'])
+        self.assertEqual(writer.call_count, 2)
+        self.assertIn('SHORTEN AI-WRITTEN LINES', writer.call_args.kwargs['prompt'])
+        self.prepare.assert_awaited_once()
         llm_service.unload_model.assert_called_once()
 
     def test_auto_continue_checkpoints_full_flagged_job_without_review_pause(self):
