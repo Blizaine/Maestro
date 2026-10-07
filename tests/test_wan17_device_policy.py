@@ -1,5 +1,6 @@
 """CPU-only device-policy and scheduler parity checks for the WanGP 17 port."""
 from pathlib import Path
+import importlib.util
 import sys
 import unittest
 
@@ -9,7 +10,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 from shared.utils.default_device import call_with_default_device, generation_default_device, keep_default_device
 from shared.utils.euler_scheduler import EulerScheduler
 from shared.utils.lcm_scheduler import LCMScheduler
-from models.wan.modules.posemb_layers import get_nd_rotary_pos_embed, get_rotary_pos_embed
+
+# Import the pure rotary helpers directly. Importing models.wan initializes
+# every generation pipeline, whose optional packages are outside CPU CI.
+_ROPE_PATH = Path(__file__).resolve().parents[1] / "app/models/wan/modules/posemb_layers.py"
+_ROPE_SPEC = importlib.util.spec_from_file_location("wan17_rope_fixture", _ROPE_PATH)
+_ROPE_MODULE = importlib.util.module_from_spec(_ROPE_SPEC)
+_ROPE_SPEC.loader.exec_module(_ROPE_MODULE)
+get_nd_rotary_pos_embed = _ROPE_MODULE.get_nd_rotary_pos_embed
+get_rotary_pos_embed = _ROPE_MODULE.get_rotary_pos_embed
 
 
 class DevicePolicyTests(unittest.TestCase):

@@ -8,7 +8,7 @@ import os
 import sys
 import unittest
 import weakref
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 
@@ -39,6 +39,74 @@ def _cpu_attention(qkv_list, **_kwargs):
     return F.scaled_dot_product_attention(
         query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2)
     ).transpose(1, 2)
+
+
+_MISSING_PACKAGE_ATTRIBUTE = object()
+
+
+def _import_saganaki_fwd_for_pointer_test():
+    """Import Sol dispatch without retaining temporary compatibility modules."""
+
+    package_attributes = []
+    for module_name, attributes in (
+        ("shared", ("sol_attn",)),
+        ("shared.sol_attn", ("saganaki",)),
+        ("shared.sol_attn.saganaki", ("fwd", "preprocess", "quant")),
+    ):
+        package = sys.modules.get(module_name)
+        if package is not None:
+            package_attributes.extend(
+                (package, attribute, package.__dict__.get(attribute, _MISSING_PACKAGE_ATTRIBUTE))
+                for attribute in attributes
+            )
+
+    try:
+        # patch.dict restores sys.modules, while the snapshots below also restore
+        # child-module attributes that importlib adds to existing package objects.
+        with mock.patch.dict(sys.modules, {}):
+            try:
+                from shared.sol_attn.saganaki import fwd
+            except ModuleNotFoundError as error:
+                if error.name != "triton.tools.tensor_descriptor":
+                    raise
+
+                descriptor_module = ModuleType("triton.tools.tensor_descriptor")
+
+                class _UnsupportedTensorDescriptor:
+                    def __new__(cls, *_args, **_kwargs):
+                        raise AssertionError(
+                            "The pointer-dispatch test must not instantiate a TMA descriptor."
+                        )
+
+                    @classmethod
+                    def from_tensor(cls, *_args, **_kwargs):
+                        raise AssertionError(
+                            "The pointer-dispatch test must not use the TMA descriptor path."
+                        )
+
+                descriptor_module.TensorDescriptor = _UnsupportedTensorDescriptor
+                import triton
+
+                autotune = triton.autotune
+
+                def _autotune_without_result_cache(*args, **kwargs):
+                    # Triton 3.3 lacks this decorator keyword; dispatch does not use it.
+                    kwargs.pop("cache_results", None)
+                    return autotune(*args, **kwargs)
+
+                sys.modules["triton.tools.tensor_descriptor"] = descriptor_module
+                with mock.patch.object(
+                    triton, "autotune", _autotune_without_result_cache
+                ):
+                    from shared.sol_attn.saganaki import fwd
+    finally:
+        for package, attribute, previous_value in package_attributes:
+            if previous_value is _MISSING_PACKAGE_ATTRIBUTE:
+                package.__dict__.pop(attribute, None)
+            else:
+                package.__dict__[attribute] = previous_value
+
+    return fwd
 
 
 class _CustomInt8LoraProjection(nn.Module):
@@ -308,6 +376,8 @@ class TestAttentionKit(unittest.TestCase):
             _ATTENTION, "get_default_attention_mode", return_value="sage2"
         ), mock.patch.object(
             _ATTENTION, "_sage2_staged_settings", return_value={"sentinel": True}
+        ), mock.patch.object(
+            _ATTENTION, "sageattn2", object()
         ):
             self.assertEqual(
                 _ATTENTION.sage2_staged_settings(torch.device("cpu"), "auto"),
@@ -644,7 +714,7 @@ class TestAttentionKit(unittest.TestCase):
         self.assertTrue(torch.allclose(actual, expected, atol=1e-5, rtol=1e-5))
 
     def test_regular_sol_uses_inline_q_for_long_pointer_attention(self):
-        from shared.sol_attn.saganaki import fwd
+        fwd = _import_saganaki_fwd_for_pointer_test()
 
         batch, tokens, heads, head_dim = 1, 4096, 2, 128
         q, k, v = [
