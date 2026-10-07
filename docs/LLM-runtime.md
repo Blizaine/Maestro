@@ -1,7 +1,36 @@
-# Local LLM runtime on Linux
+# Local LLM CUDA runtime
 
 Maestro's local writer uses a separate **llama-server** process. CUDA working in
-PyTorch does not establish that this executable supports CUDA. The upstream
+PyTorch does not establish that this executable supports CUDA.
+
+When **Settings → LLM → CUDA** is selected, device detection allows up to
+120 seconds for llama-server startup. A timeout means CUDA availability could
+not be verified. Maestro reports that timeout with the startup output it
+captured, including any driver or library messages. Only a completed check
+with actual CUDA device rows permits GPU loading; a partial device list from
+a timed-out process is not accepted. Maestro keeps the selected device and
+does not switch to CPU automatically.
+
+## Windows startup checks
+
+Windows uses the prebuilt llama.cpp CUDA executable and its bundled CUDA DLLs.
+If device detection times out, retry **Load** in Settings. If it repeats, open
+Maestro's Pinokio terminal and run these commands from the launcher folder:
+
+```powershell
+nvidia-smi
+.\app\ckpts\llm\bin\llama-server.exe --list-devices
+```
+
+The second command should finish and list a device such as `CUDA0`. Include
+both commands' output when reporting a persistent startup failure. A timeout
+in this check happens before the writer model is loaded or H3 generation
+starts; turning **Enhance prompt** off lets a Studio render proceed without
+the writer. **CPU** remains available when explicitly selected in Settings.
+
+## Linux CUDA build
+
+The upstream
 [Ubuntu llama.cpp archive](https://github.com/ggml-org/llama.cpp/releases/tag/b10964)
 is CPU-only.
 

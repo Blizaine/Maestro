@@ -14,6 +14,21 @@ import subprocess
 import tempfile
 
 
+CUDA_PROBE_TIMEOUT_SECONDS = 120
+
+
+class CudaProbeTimeoutError(RuntimeError):
+    """Device discovery did not complete; CUDA support remains unverified."""
+
+
+def _probe_output(stdout, stderr) -> str:
+    # TimeoutExpired may retain bytes even when subprocess.run used text=True.
+    def decode(value):
+        return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else (value or "")
+
+    return (decode(stdout) + "\n" + decode(stderr)).strip()
+
+
 def find_nvcc() -> str | None:
     for variable in ("CUDACXX", "CUDA_HOME", "CUDA_PATH"):
         value = os.environ.get(variable, "")
@@ -29,15 +44,27 @@ def find_nvcc() -> str | None:
 
 def probe_cuda(executable: str, environment: dict | None) -> tuple[list[str], str]:
     """Ask this executable for devices; installed Torch is not evidence of CUDA."""
+    print(f"[LLM] Checking llama-server CUDA devices (up to {CUDA_PROBE_TIMEOUT_SECONDS}s)...")
     try:
         result = subprocess.run(
             [executable, "--list-devices"], env=environment,
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=CUDA_PROBE_TIMEOUT_SECONDS,
             **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
+    except subprocess.TimeoutExpired as error:
+        output = _probe_output(error.stdout, error.stderr)[-3000:]
+        raise CudaProbeTimeoutError(
+            "CUDA device detection timed out after "
+            f"{error.timeout:g} seconds while llama-server was starting. "
+            "CUDA availability could not be verified. Retry Load in Settings; "
+            "if this repeats, run llama-server --list-devices in Maestro's Pinokio "
+            "terminal to inspect its startup output.\n"
+            f"Runtime: {executable}\n"
+            f"Runtime output:\n{output or '(no output captured)'}"
+        ) from error
+    except OSError as error:
         return [], str(error)
-    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    output = _probe_output(result.stdout, result.stderr)
     # Only actual device rows count, not "loaded CUDA backend"/driver messages.
     devices = re.findall(r"^\s*(CUDA\d+):\s+\S.*$", output, re.MULTILINE)
     return (devices if result.returncode == 0 else []), output[-3000:]

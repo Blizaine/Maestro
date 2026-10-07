@@ -29,12 +29,48 @@ class CudaProbeTests(unittest.TestCase):
                 self.assertEqual(devices, expected)
                 self.assertEqual(run.call_args.args[0], ["llama-server", "--list-devices"])
                 self.assertEqual(run.call_args.kwargs["env"], {"LD_LIBRARY_PATH": "/runtime"})
+                self.assertEqual(run.call_args.kwargs["timeout"], runtime.CUDA_PROBE_TIMEOUT_SECONDS)
 
-    def test_loader_error_or_timeout_never_claims_cuda(self):
-        for error in (OSError("libcublas missing"), subprocess.TimeoutExpired("llama-server", 30)):
-            with self.subTest(error=error), mock.patch.object(runtime.subprocess, "run", side_effect=error):
-                with self.assertRaisesRegex(RuntimeError, "cannot use a CUDA device"):
+    def test_loader_error_does_not_claim_cuda(self):
+        with mock.patch.object(runtime.subprocess, "run", side_effect=OSError("libcublas missing")):
+            with self.assertRaisesRegex(RuntimeError, "cannot use a CUDA device"):
+                runtime.require_cuda("llama-server", None)
+
+    def test_timeout_preserves_text_and_bytes_output_but_never_accepts_partial_rows(self):
+        cases = [
+            (
+                "Available devices:\n CUDA0: NVIDIA RTX 3080 Ti (12288 MiB)",
+                "initializing CUDA driver",
+            ),
+            (
+                b"Available devices:\n CUDA1: NVIDIA RTX 3080 Ti (12288 MiB)",
+                b"initializing CUDA backend",
+            ),
+        ]
+        for stdout, stderr in cases:
+            error = subprocess.TimeoutExpired(
+                ["llama-server", "--list-devices"],
+                runtime.CUDA_PROBE_TIMEOUT_SECONDS,
+                output=stdout,
+                stderr=stderr,
+            )
+            with self.subTest(output_type=type(stdout).__name__), mock.patch.object(
+                runtime.subprocess, "run", side_effect=error,
+            ) as run:
+                with self.assertRaises(runtime.CudaProbeTimeoutError) as raised:
                     runtime.require_cuda("llama-server", None)
+
+            diagnostic = str(raised.exception)
+            self.assertIn(
+                f"timed out after {runtime.CUDA_PROBE_TIMEOUT_SECONDS} seconds",
+                diagnostic,
+            )
+            self.assertIn("CUDA availability could not be verified", diagnostic)
+            self.assertIn("NVIDIA RTX 3080 Ti", diagnostic)
+            self.assertIn("initializing CUDA", diagnostic)
+            self.assertNotIn("cannot use a CUDA device", diagnostic)
+            self.assertEqual(run.call_args.kwargs["timeout"], runtime.CUDA_PROBE_TIMEOUT_SECONDS)
+            self.assertEqual(runtime.CUDA_PROBE_TIMEOUT_SECONDS, 120)
 
 
 class LinuxRuntimeSelectionTests(unittest.TestCase):
@@ -70,6 +106,20 @@ class LinuxRuntimeSelectionTests(unittest.TestCase):
         with mock.patch.object(runtime, "probe_cuda", return_value=([], "CUDA driver unavailable")), mock.patch.object(runtime, "build_cuda_runtime") as build, mock.patch("urllib.request.urlopen") as download:
             with self.assertRaisesRegex(RuntimeError, "CUDA driver unavailable"):
                 llm_service._ensure_llama_server(self.bin_dir, device="cuda")
+        build.assert_not_called()
+        download.assert_not_called()
+
+    def test_cuda_probe_timeout_does_not_rebuild_or_resolve_release(self):
+        error = subprocess.TimeoutExpired(
+            [str(self.exe), "--list-devices"], runtime.CUDA_PROBE_TIMEOUT_SECONDS,
+            output="CUDA backend loaded; driver initialization is still running",
+        )
+        with mock.patch.object(runtime.subprocess, "run", side_effect=error) as run, mock.patch.object(
+            runtime, "build_cuda_runtime",
+        ) as build, mock.patch("urllib.request.urlopen") as download:
+            with self.assertRaises(runtime.CudaProbeTimeoutError):
+                llm_service._ensure_llama_server(self.bin_dir, device="cuda")
+        self.assertEqual(run.call_args.args[0], [str(self.exe), "--list-devices"])
         build.assert_not_called()
         download.assert_not_called()
 
@@ -171,6 +221,22 @@ class LlmDeviceLoadTests(unittest.TestCase):
     def test_unavailable_cuda_fails_before_downloading_weights(self):
         with mock.patch.object(runtime, "require_cuda", side_effect=RuntimeError("No CUDA")), mock.patch.object(llm_service, "_download_gguf") as download:
             with self.assertRaisesRegex(RuntimeError, "No CUDA"):
+                llm_service.load_model(self.repo, device="cuda")
+        download.assert_not_called()
+        llm_service.subprocess.Popen.assert_not_called()
+
+    def test_cuda_probe_timeout_fails_before_downloading_weights_or_starting_server(self):
+        error = subprocess.TimeoutExpired(
+            ["llama-server", "--list-devices"], runtime.CUDA_PROBE_TIMEOUT_SECONDS,
+            output=b"CUDA backend loaded; device discovery is still running",
+            stderr=b"driver initialization pending",
+        )
+        with mock.patch.object(runtime.subprocess, "run", side_effect=error), mock.patch.object(
+            llm_service, "_download_gguf",
+        ) as download:
+            with self.assertRaisesRegex(
+                runtime.CudaProbeTimeoutError, "CUDA availability could not be verified",
+            ):
                 llm_service.load_model(self.repo, device="cuda")
         download.assert_not_called()
         llm_service.subprocess.Popen.assert_not_called()
