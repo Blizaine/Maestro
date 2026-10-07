@@ -14,7 +14,8 @@ does not switch to CPU automatically.
 ## Windows startup checks
 
 Windows uses the prebuilt llama.cpp CUDA executable and its bundled CUDA DLLs.
-If device detection times out, retry **Load** in Settings. If it repeats, open
+If device detection times out, retry the enhanced generation or Director request.
+If it repeats, open
 Maestro's Pinokio terminal and run these commands from the launcher folder:
 
 ```powershell
@@ -48,7 +49,7 @@ RTX 50-series cards use CUDA 12.8 or newer. Maestro searches `CUDACXX`,
 `CUDA_HOME`/`CUDA_PATH`, PATH, and `/usr/local/cuda/bin/nvcc`. It does not install
 system packages or change the generation environment. Follow the
 [upstream CUDA build instructions](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md#cuda)
-if these prerequisites are missing, then retry **Load** in Settings.
+if these prerequisites are missing, then retry the LLM request.
 
 To use your own compatible CUDA build, set `MAESTRO_LLAMA_BIN` to its directory
 before starting Maestro. Include its shared libraries beside the executable;

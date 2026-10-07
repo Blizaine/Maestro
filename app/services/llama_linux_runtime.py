@@ -56,7 +56,7 @@ def probe_cuda(executable: str, environment: dict | None) -> tuple[list[str], st
         raise CudaProbeTimeoutError(
             "CUDA device detection timed out after "
             f"{error.timeout:g} seconds while llama-server was starting. "
-            "CUDA availability could not be verified. Retry Load in Settings; "
+            "CUDA availability could not be verified. Retry your request; "
             "if this repeats, run llama-server --list-devices in Maestro's Pinokio "
             "terminal to inspect its startup output.\n"
             f"Runtime: {executable}\n"
