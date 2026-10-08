@@ -519,6 +519,10 @@ export interface GenerationJob {
   restoredFromHistory?: boolean
   /** Direct submissions stay visible while the backend is queued/planning. */
   showInGallery?: boolean
+  /** Owning Director pipeline when this job is one of its render children. */
+  directorPipelineId?: string | null
+  /** Detached Director repairs/reruns keep an independent progress card. */
+  directorDetachedOperation?: boolean
   kind?: 'generation' | 'editor_export' | string
   status: 'held' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress: number

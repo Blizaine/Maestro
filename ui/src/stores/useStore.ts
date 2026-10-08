@@ -1,5 +1,6 @@
 import { galleryOutput, galleryOutputIsOlder, outputIdentity } from '../lib/galleryIdentity'
 import { create } from 'zustand'
+import { isDirectorRenderChild } from '../lib/directorJobs'
 import { isKreaIdentityEdit, normalizeKreaIdentitySettings, type KreaIdentitySettings } from '../lib/kreaIdentityControls'
 import type { SavedOmniCharacter, TtsVoice } from '../types'
 import { applyTtsVoices, ttsAudioModeForCount, ttsCharacterEnhancePrompt, ttsSpeakingVoiceCount, ttsVoiceLimit, ttsVoicePaths } from '../lib/ttsVoices'
@@ -56,6 +57,7 @@ let _dashboardPipelineListLoadToken = 0
 let _directorPipelineAttachToken = 0
 let _directorPipelineReconnectAttempted = false
 let _directorPipelinePollToken = 0
+let _jobsReconnectTask: Promise<void> | null = null
 let _h3WindowOverridesHydrated = false
 let _h3WindowOverrideSaveTask: Promise<void> = Promise.resolve()
 let _studioPreferencesHydrated = false
@@ -128,6 +130,17 @@ function _previewJobFields(status: api.ApiJobStatus): Partial<GenerationJob> {
   // An older backend omits preview fields. Keep any current preview while
   // it is running, and let terminal state clear it even without the field.
   return {}
+}
+
+function _directorJobFields(status: api.ApiJobStatus): Partial<GenerationJob> {
+  return {
+    ...(status.director_pipeline_id !== undefined
+      ? {directorPipelineId: status.director_pipeline_id}
+      : {}),
+    ...(status.director_detached_operation !== undefined
+      ? {directorDetachedOperation: status.director_detached_operation}
+      : {}),
+  }
 }
 
 function _saveH3WindowOverrides(overrides: Record<string, number>) {
@@ -8650,6 +8663,17 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   reconnectJobs: async (confirmedJob) => {
+    // Pipeline polling and startup recovery can request the same snapshot at
+    // once. Serialize those reads so a child job is adopted and polled once.
+    if (!confirmedJob && _jobsReconnectTask) {
+      await _jobsReconnectTask
+      return
+    }
+    let resolveReconnectTask!: () => void
+    const reconnectTask = new Promise<void>(resolve => { resolveReconnectTask = resolve })
+    // Accepted retries have no discovery request and can be adopted at once.
+    // A slower in-flight snapshot rechecks current IDs before adding jobs.
+    if (!confirmedJob) _jobsReconnectTask = reconnectTask
     // Restore active work and saved enhancement history without replaying
     // notifications for jobs that already ended before this browser connected.
     try {
@@ -8673,6 +8697,7 @@ export const useStore = create<AppState>((set, get) => ({
             message: j.message,
             outputFiles: j.output_files,
             error: j.error,
+            ..._directorJobFields(j),
             oomInfo: (j as { oom_info?: import('../types').OomInfo | null }).oom_info ?? null,
             h3WindowPlan: j.h3_window_plan ?? null,
             enhancement: j.enhancement,
@@ -8712,6 +8737,7 @@ export const useStore = create<AppState>((set, get) => ({
                     message: status.message,
                     outputFiles: status.output_files,
                     error: status.error,
+                    ..._directorJobFields(status),
                     oomInfo: status.oom_info ?? null,
                     h3WindowPlan: status.h3_window_plan ?? j.h3WindowPlan ?? null,
               enhancement: status.enhancement ?? j.enhancement,
@@ -8752,6 +8778,9 @@ export const useStore = create<AppState>((set, get) => ({
       }
     } catch {
       // Backend might not have the endpoint yet, silently ignore
+    } finally {
+      if (_jobsReconnectTask === reconnectTask) _jobsReconnectTask = null
+      resolveReconnectTask()
     }
   },
 
@@ -14216,6 +14245,18 @@ export const useStore = create<AppState>((set, get) => ({
           pipelineStatus: status,
           directorLoadingMessage: status.progress?.message || null,
         })
+
+        // Director creates its render jobs after planning, so the initial
+        // startup restore cannot see it. Recover active jobs while rendering
+        // until a matching child appears; coalesced restores avoid duplicate
+        // polling timers if startup recovery is already in progress.
+        if (status.status === 'running' && (status.phase === 'generating_images' || status.phase === 'generating_video')) {
+          const hasActiveChild = get().jobs.some(job => isDirectorRenderChild(job, pid, status))
+          if (!hasActiveChild) {
+            await get().reconnectJobs()
+            if (pollToken !== _directorPipelinePollToken || get().pipelineId !== pid) return
+          }
+        }
 
         // Sync the backend's model-adapted plan, not just an initially empty
         // UI. H3 can split broad 20-30s music sections into additional native

@@ -73,6 +73,10 @@ export interface ApiJobStatus {
   client_submission_id?: string | null
   /** Direct submits remain visible while queued for deferred AI planning. */
   show_in_gallery?: boolean
+  /** Owning Director pipeline; null for ordinary Studio jobs. */
+  director_pipeline_id?: string | null
+  /** True for repair/rerun operations that should keep their own job card. */
+  director_detached_operation?: boolean
   kind?: 'generation' | 'editor_export' | string
   status: 'held' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress: number

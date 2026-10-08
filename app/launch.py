@@ -29059,6 +29059,20 @@ def _job_eta_response_fields(job_snapshot: dict) -> dict:
     return result
 
 
+def _director_job_response_fields(job_snapshot: dict) -> dict:
+    """Expose child ownership without leaking private generation parameters."""
+    params = job_snapshot.get("params")
+    params = params if isinstance(params, dict) else {}
+    pipeline_id = params.get("_director_pipeline_id")
+    pipeline_id = pipeline_id.strip() if isinstance(pipeline_id, str) else ""
+    return {
+        "director_pipeline_id": pipeline_id or None,
+        "director_detached_operation": bool(
+            pipeline_id and params.get("_director_detached_operation") is True
+        ),
+    }
+
+
 @api.get("/api/v1/status/{job_id}")
 def get_status(job_id: str):
     """Get generation job status."""
@@ -29092,6 +29106,7 @@ def get_status(job_id: str):
         # polling so the placeholder can show the exact prompts being used.
         "h3_window_plan": j.get("h3_window_plan") or params.get("h3_window_plan"),
         "ltx_window_plan": j.get("ltx_window_plan"),
+        **_director_job_response_fields(j),
         **_generation_previews.fields(j),
         **_job_eta_response_fields(j),
     }
@@ -29306,6 +29321,7 @@ def list_jobs():
                 "performance_plan": j.get("performance_plan"),
                 "performance_measurements": j.get("performance_measurements"),
                 "created_at": j.get("created_at", 0),
+                **_director_job_response_fields(j),
                 **_generation_previews.fields(j),
                 **_job_eta_response_fields(j),
                 # Lets a refreshed browser restore the exact H3 prompts that
