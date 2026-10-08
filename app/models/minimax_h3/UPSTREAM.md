@@ -210,3 +210,14 @@ static/fast-motion, and audio testing.
 Those model weights are downloaded at runtime and are not distributed in the
 Maestro repository. They remain governed by their respective model terms and
 any authorization or waiver required for the user's location.
+
+The October 2026 repeat-conditioning cache and bounded VAE tile batching follow
+Wan2GP v17.17 at `6479db36bdc2619a904a852bba9c2d78e1a83f82`, specifically
+`models/minimax_h3/pipeline.py` and
+`models/minimax_h3/components/video_autoencoder.py`. Maestro keeps a small,
+CPU-only plain-text embedding cache and bypasses multimodal/Viggle conditioning.
+It batches at most two VAE spatial tiles when the running CUDA device has
+sufficient memory, retaining the serial path on smaller or busy devices.
+The existing tile placement, temporal decoding and overlap blending are retained.
+See `THIRD_PARTY_NOTICES.md`, `app/LICENSES/WanGP-Community-2.0.txt` and
+`docs/development/h3-cross-app-benchmark.md` for provenance and validation scope.

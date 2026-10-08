@@ -23257,10 +23257,13 @@ def _apply_per_job_performance(job, raw_params):
         job["performance_plan"] = plan
         _last_performance_plan = plan
         print(f"[Auto-tune] Profile {plan['profile']:g}, transformer {plan['transformer_budget_mb']} MB ({plan['source']}). " + " ".join(plan["warnings"]))
+        _finalize_deferred_h3_residency_reload(job, plan["transformer_budget_mb"])
         return GenerationPerformanceMonitor(get_live_stats, lambda: job.get("phase", "")).start()
     except Exception as exc:
-        # Planning/telemetry must never become a generation dependency.
+        # Planning/telemetry must never become a generation dependency. If it
+        # fails, retain the VRAM guard's budget and still validate residency.
         print(f"[Auto-tune] Per-generation learning unavailable: {exc}")
+        _finalize_deferred_h3_residency_reload(job)
         return None
 
 
@@ -23350,7 +23353,7 @@ _BASE_TRANSFORMER_BUDGET_MB = None
 _H3_RESIDENCY_HEADROOM = 0.97
 
 
-def _apply_per_job_coefficient(job: dict) -> None:
+def _apply_per_job_coefficient(job: dict, *, defer_h3_residency_reload: bool = False) -> None:
     """Compute and apply a per-job VRAM safety coefficient.
 
     Sets the VRAM ceiling and any model-specific transformer residency
@@ -23781,10 +23784,16 @@ def _apply_per_job_coefficient(job: dict) -> None:
                         wgp.args.transformer_budget = h3_residency_mb
                         adjustment["h3_residency_mb"] = h3_residency_mb
                         adjustment["reasons"].append(
-                            f"- MMGP transformer residency requested: "
-                            f"{h3_residency_mb / 1024:.1f} GB; remaining weights stream "
-                            "within the existing workspace limits"
+                            f"- MMGP transformer residency candidate: "
+                            f"{h3_residency_mb / 1024:.1f} GB before finalized per-job placement; "
+                            "remaining weights stream within the existing workspace limits"
                         )
+            if h3_residency_override_mb is not None:
+                adjustment["h3_residency_candidate_mb"] = int(h3_residency_override_mb)
+                if defer_h3_residency_reload:
+                    job["_maestro_h3_residency_reload_pending"] = {
+                        "candidate_mb": int(h3_residency_override_mb),
+                    }
             if (
                 (_is_h3 or _is_music3 or _is_longcat_avatar)
                 and getattr(wgp, "wan_model", None) is not None
@@ -23794,25 +23803,27 @@ def _apply_per_job_coefficient(job: dict) -> None:
                     "_maestro_profile_vram_coefficient",
                     None,
                 )
-                if (
+                loaded_transformer_budget = getattr(
+                    wgp.wan_model,
+                    "_maestro_profile_transformer_budget_override_mb",
+                    None,
+                )
+                coefficient_mismatch = (
                     loaded_coefficient is None
                     or float(loaded_coefficient) > effective + 1e-6
-                    or (
-                        h3_residency_override_mb is not None
-                        and getattr(
-                            wgp.wan_model,
-                            "_maestro_profile_transformer_budget_override_mb",
-                            None,
-                        ) != h3_residency_override_mb
-                    )
-                    or (
-                        longcat_residency_override_mb is not None
-                        and getattr(
-                            wgp.wan_model,
-                            "_maestro_profile_transformer_budget_override_mb",
-                            None,
-                        ) != longcat_residency_override_mb
-                    )
+                )
+                h3_budget_mismatch = (
+                    h3_residency_override_mb is not None
+                    and loaded_transformer_budget != h3_residency_override_mb
+                )
+                longcat_budget_mismatch = (
+                    longcat_residency_override_mb is not None
+                    and loaded_transformer_budget != longcat_residency_override_mb
+                )
+                if (
+                    coefficient_mismatch
+                    or (h3_budget_mismatch and not defer_h3_residency_reload)
+                    or longcat_budget_mismatch
                 ):
                     wgp.reload_needed = True
                     if _is_music3:
@@ -23825,10 +23836,15 @@ def _apply_per_job_coefficient(job: dict) -> None:
                             "- resident LongCat Avatar will reload with the current "
                             "activation workspace and streaming budget"
                         )
+                    elif h3_budget_mismatch and not defer_h3_residency_reload:
+                        adjustment["reasons"].append(
+                            "- resident H3 profile will reload with the current "
+                            "transformer residency budget"
+                        )
                     else:
                         adjustment["reasons"].append(
-                            "- resident H3 profile will reload with packed-sequence headroom "
-                            "and the current transformer residency budget"
+                            "- resident H3 profile will reload with packed-sequence "
+                            "activation headroom"
                         )
             cap_gb = effective * total_vram_gb
             base_cap_gb = base_coef * total_vram_gb
@@ -23854,6 +23870,61 @@ def _apply_per_job_coefficient(job: dict) -> None:
     except Exception as e:
         # Never let a coefficient-adjustment bug fail the job.
         print(f"[VRAM] per-job adjustment failed: {e}")
+
+
+def _finalize_deferred_h3_residency_reload(job: dict, transformer_budget_mb=None) -> bool:
+    """Reconcile an H3 guard candidate with the budget that will reach MMGP."""
+    pending = job.pop("_maestro_h3_residency_reload_pending", None)
+    if not isinstance(pending, dict):
+        return False
+
+    adjustment = job.get("vram_adjustment")
+    candidate_mb = int(pending.get("candidate_mb", 0) or 0)
+    try:
+        requested = (
+            transformer_budget_mb
+            if transformer_budget_mb is not None
+            else getattr(wgp.args, "transformer_budget", 0)
+        )
+        final_budget_mb = int(requested or 0)
+    except (TypeError, ValueError, OverflowError):
+        final_budget_mb = candidate_mb
+
+    if isinstance(adjustment, dict):
+        adjustment["h3_residency_candidate_mb"] = candidate_mb
+        if final_budget_mb > 0:
+            adjustment["h3_residency_mb"] = final_budget_mb
+            adjustment.pop("h3_residency_policy", None)
+        else:
+            adjustment.pop("h3_residency_mb", None)
+            adjustment["h3_residency_policy"] = "profile_default"
+
+    model = getattr(wgp, "wan_model", None)
+    if model is None:
+        return False
+    loaded_budget_mb = getattr(
+        model, "_maestro_profile_transformer_budget_override_mb", None
+    )
+    if loaded_budget_mb == final_budget_mb:
+        return False
+
+    wgp.reload_needed = True
+    if final_budget_mb > 0:
+        reason = (
+            "- resident H3 profile will reload with the finalized "
+            f"{final_budget_mb} MB transformer residency budget"
+        )
+    else:
+        reason = (
+            "- resident H3 profile will reload using its profile-default "
+            "transformer residency"
+        )
+    if isinstance(adjustment, dict):
+        reasons = adjustment.setdefault("reasons", [])
+        if reason not in reasons:
+            reasons.append(reason)
+    print(f"[VRAM] {reason}")
+    return True
 
 
 def _restore_base_coefficient() -> None:
@@ -25757,11 +25828,15 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             # LoRAs and pipeline stage count beyond what the auto-tuned
             # base captures. Mutates wgp.args.vram_safety_coefficient
             # in place; restored in the finally block below.
-            _apply_per_job_coefficient(job)
+            _apply_per_job_coefficient(job, defer_h3_residency_reload=True)
             # Internal Viggle/Klein preparation shares the parent's identity.
             # Only the parent video teaches history, after all preparation succeeds.
             if not _slot_owned:
                 performance_monitor = _apply_per_job_performance(job, raw_params)
+            else:
+                # Internal slot-owned preparation skips Auto planning; use the
+                # coefficient guard's budget as the final request.
+                _finalize_deferred_h3_residency_reload(job)
 
             # Build minimal state (same structure as CLI mode, line 11935 of wgp.py)
             state = {

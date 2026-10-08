@@ -178,3 +178,15 @@ Source: https://huggingface.co/Kijai/MiniMax-H3-experimental/blob/a3e7d8da4ae7ba
 Users must review the linked model license and NOTICE before downloading or
 using this optional checkpoint; its terms and geographic scope differ from
 Maestro's application license.
+
+## Wan2GP v17.17 H3 performance patterns
+
+The bounded H3 plain-text embedding cache and two-tile VAE decode path adapt
+performance patterns from **deepbeepmeep/Wan2GP** v17.17, commit
+`6479db36bdc2619a904a852bba9c2d78e1a83f82` (8 October 2026). Maestro retains
+its model loader, reference conditioning, tiled blending and memory guards.
+The upstream WanGP Community License 2.0 is preserved in
+`app/LICENSES/WanGP-Community-2.0.txt`; older Diffusers-derived VAE components
+retain their Apache-2.0 notices.
+
+Source: https://github.com/deepbeepmeep/Wan2GP/tree/6479db36bdc2619a904a852bba9c2d78e1a83f82/models/minimax_h3

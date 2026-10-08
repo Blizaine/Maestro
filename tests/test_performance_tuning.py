@@ -334,7 +334,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
     def test_real_worker_sets_profile_budget_and_restores_temporary_options(self):
         from services import performance_tuning
         tree = ast.parse((ROOT / "app/launch.py").read_text(encoding="utf-8"))
-        names = {"_apply_per_job_performance", "_finish_per_job_performance"}
+        names = {"_apply_per_job_performance", "_finish_per_job_performance", "_finalize_deferred_h3_residency_reload"}
         nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
         hw, config = setup()
         args = SimpleNamespace(profile="-1", transformer_budget=12000, preload="0", perc_reserved_mem_max=0)

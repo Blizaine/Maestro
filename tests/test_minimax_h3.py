@@ -1636,7 +1636,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         )
         self.assertLess(
             worker.index("_apply_deferred_prompt_enhancement(job, raw_params)"),
-            worker.index("_apply_per_job_coefficient(job)"),
+            worker.index("_apply_per_job_coefficient(job, defer_h3_residency_reload=True)"),
         )
 
     def test_automatic_multi_window_planners_share_the_generation_lock(self):
@@ -1942,7 +1942,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("h3_reference_activation_gb", launch)
         self.assertIn("compute_h3_weight_budget", launch)
         self.assertIn("h3_weight_budget_gb", launch)
-        self.assertIn("resident H3 profile will reload with packed-sequence headroom", launch)
+        self.assertIn("resident H3 profile will reload with packed-sequence ", launch)
+        self.assertIn("activation headroom", launch)
         self.assertIn("_maestro_profile_vram_coefficient", wgp)
         self.assertIn("get_linear_split_map", transformer)
         self.assertIn("MINIMAX_H3_ACTIVATION_CHUNK_TOKENS", transformer)
@@ -2684,7 +2685,7 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         video_vae = _read(_VIDEO_VAE_PATH)
         self.assertIn("settings_version < 2.58", handler)
         self.assertIn("normalize_h3_overlap_frames", handler)
-        self.assertIn("Decode one tile at a time", video_vae)
+        self.assertIn("_h3_vae_decode_tile_batch_size", video_vae)
         self.assertIn("new_tails.append", video_vae)
         self.assertIn("keep_all_latents", video_vae)
 

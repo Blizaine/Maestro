@@ -59,6 +59,7 @@ from .packing import (
     unpatchify_video_tokens,
     video_latent_num_frames,
 )
+from .prompt_cache import H3PromptEncodingAborted, MiniMaxH3PromptCache
 from .ref2va import (
     MiniMaxH3PreparedReference,
     add_ref2va_continuation_context,
@@ -1230,6 +1231,7 @@ class MiniMaxH3Model:
             dtype,
             variant=self.text_encoder_variant,
         )
+        self._plain_prompt_cache = MiniMaxH3PromptCache()
         self.vae = _load_video_vae(video_vae_path)
         self.audio_vae = _load_audio_vae(audio_vae_path)
         self.scheduler = MiniMaxH3Scheduler(
@@ -2464,7 +2466,22 @@ class MiniMaxH3Model:
                     )
                 )
         else:
-            prompt_embeds, text_tags = self.conditioner(input_prompt, self.device, keyframes or None)
+            try:
+                (prompt_embeds, text_tags), cache_status = self._plain_prompt_cache.condition(
+                    input_prompt,
+                    conditioner=self.conditioner,
+                    encoder_variant=self.text_encoder_variant,
+                    dtype=self.dtype,
+                    device=self.device,
+                    keyframes=keyframes,
+                    viggle=self.viggle,
+                    interrupted=lambda: self._interrupt,
+                )
+            except H3PromptEncodingAborted:
+                prompt_embeds, text_tags = None, None
+                cache_status = None
+            if cache_status is not None:
+                print(f"[MiniMax H3 Prompt Cache] {cache_status}")
             if prompt_embeds is None or self._interrupt:
                 return None
             condition_rows, anchors = self._encode_visual_conditions(
