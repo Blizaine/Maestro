@@ -54,7 +54,10 @@ PROFILE_DESCRIPTIONS = {
 # Revision 2 was an unpublished trial of Profile 4 on 24-31 GB hosts. It
 # OOM'd on the reported A4500; restore the conservative table pending an A/B
 # test with a smaller pinning cap. Manually selected profiles remain untouched.
-AUTO_PERFORMANCE_REVISION = 4
+# Revision 5 recognizes nominal 32/64-GiB hosts whose firmware reserves a
+# small portion of RAM. The 32-GiB boundary was checked with cold/warm H3
+# runs on a 31.8-GiB host; materially smaller hosts still use Profile 5.
+AUTO_PERFORMANCE_REVISION = 5
 
 # These controls were not owned by Auto-Tune before revision 4. A missing
 # value can be initialized from the current recommendation, but an existing
@@ -297,16 +300,18 @@ def recommend_settings(hw: dict) -> dict:
         f"{quant.upper()}, VAE config {vae}, coefficient {coef}"
     )
 
-    read_ahead = platform_name == "win32" and ram_gb >= 64
+    # Use the normalized tier so nominal 64-GiB machines with a small
+    # firmware-reserved region receive consistent profile/read-ahead policy.
+    read_ahead = platform_name == "win32" and ram_tier == "high"
     details = [
         f"Profile {profile:g} guides model placement between the detected {vram_gb} GB VRAM and {ram_gb:g} GB system RAM.",
         "INT8 kernels use automatic backend selection; model-loading and preload controls start at runtime defaults.",
         "Smart memory pinning is enabled; reserved-memory and attention-head limits stay automatic at 0.",
         "Video, image, and audio preload modes stay at default with 0 MB requested.",
         (
-            "Read-ahead is enabled for Windows systems with at least 64 GB RAM."
+            "Read-ahead is enabled for Windows systems in the nominal 64 GB RAM tier."
             if read_ahead else
-            "Read-ahead stays off unless Windows has at least 64 GB RAM."
+            "Read-ahead stays off unless Windows is in the nominal 64 GB RAM tier."
         ),
         (
             "The bundled MMGP allocator is available for this CUDA platform."

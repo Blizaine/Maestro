@@ -8,7 +8,7 @@
   "license_file": "LICENSE.txt",
   "integration_changes": {
     "date": "2026-10-05",
-    "description": "Vendored MMGP under app/mmgp for deterministic local imports. Added __version__ and __source_commit__ metadata; updated license-file pointers and package metadata so the adjacent license is included. Upstream engine files and allocator implementations are otherwise preserved.",
+    "description": "Vendored MMGP under app/mmgp for deterministic local imports. Added __version__ and __source_commit__ metadata; updated license-file pointers and package metadata so the adjacent license is included. The original MMGP engine remains at this snapshot; allocator updates are tracked separately.",
     "files": [
       "__init__.py",
       "LICENSE.md",
@@ -16,10 +16,58 @@
       "pyproject.toml"
     ]
   },
+  "allocator_snapshot": {
+    "upstream_release": "WanGP 17.17 MMGP allocator",
+    "upstream_repository": "https://github.com/deepbeepmeep/Wan2GP",
+    "upstream_commit": "6479db36bdc2619a904a852bba9c2d78e1a83f82",
+    "snapshot_date": "2026-10-08",
+    "license": "WanGP Community License 2.0",
+    "license_file": "LICENSE.txt",
+    "compatibility": {
+      "python": ">=3.10",
+      "pytorch_minors": "2.6 through 2.15",
+      "platforms": [
+        "Windows amd64",
+        "Linux x86_64"
+      ],
+      "linux_requires_cxx11_abi": true
+    },
+    "files_sha256": {
+      "allocator/__init__.py": "sha256:6632B8DFA73E12CEB084C3B5476A3E1BBB78E7C1575CD815EFFA193871120A05",
+      "allocator/build.py": "sha256:8589F2968F766E675A6DECF731476D8DAEC3AF6C422B76E083AA26920D603466",
+      "allocator/debug.py": "sha256:0990DF6F1DE1203BEF72399FBD8EE5EF5595A9F34AE9DDD6578A68642D58F2AC",
+      "allocator/oom_error.cpp": "sha256:01F7393F1A3621C9E4A332CF0BC1B02ABF465EEE1CC2CCCA4B882D367FBD2653",
+      "allocator/oom_error_linux_x86_64.so": "sha256:BA865E1F702CA38E72DD043508BBC56D1519EE33C12F1FF1E1D5E0DF80508C08",
+      "allocator/oom_error_win_amd64.dll": "sha256:4319A64CAEB15A06ADCC3F4E1780D2104038A6EAE074F5D626DB0971A7DC592C",
+      "allocator/ram.py": "sha256:05BBF82E4C8CFB967D3400B46B03D5387B8EE851EC5A296833D0F6CC62E68C03",
+      "allocator/ram_alloc.cpp": "sha256:48CB0A4A5BB39F805A7554D06B13A3BDCDFC882922CEDA265EE385C1C003FA67",
+      "allocator/ram_alloc_linux_x86_64.so": "sha256:665F986412782E2E69EADD9FD68B507427B889D35121BAE20742E4BA9045EDDB",
+      "allocator/ram_alloc_win_amd64.dll": "sha256:FD3C44670742E7975D53665C42F9ECFC3D6D51CFD105476DFAC35DCE79453DBC",
+      "allocator/ram_debug.py": "sha256:3C00205B218FAE32B50059F3147709A220A426378194FB24987B3ACAB5A3BA05",
+      "allocator/vmm_alloc.cpp": "sha256:82B66023E74176EC95701369376A9305EE10143BD6710B2716C3B3651182836A",
+      "allocator/vmm_alloc_linux_x86_64.so": "sha256:66F421ADDDDE75F2F56C461517D93E566A77270A07081DDA003151AC43D87641",
+      "allocator/vmm_alloc_win_amd64.dll": "sha256:9D7128DE9F40C62238BA7355DD816D1D58C0298A81CDA9DCBC851B02D2517C27"
+    }
+  },
+  "maestro_integration": {
+    "date": "2026-10-08",
+    "files": [
+      "app/shared/cuda_memory.py",
+      "app/services/memory_settings.py",
+      "tests/test_ram_allocator.py",
+      "app/launch.py",
+      "app/wgp.py",
+      "app/services/performance_tuning.py",
+      "ui/src/components/SettingsDrawer/MemorySettingsPanel.tsx"
+    ],
+    "description": "Added the opt-in ram_allocator setting (default: default), startup fallback and active status, restart/CLI override reporting, and an inactive-safe release wrapper. Existing psutil==7.2.2 pin and MMGP package-data patterns already cover the allocator; no dependency changes were needed. Maestro releases the optional cache after model release and a complete Studio job, separates allocator performance evidence, and exposes the setting and active state in the UI."
+  },
   "allocator_binaries": {
     "allocator/oom_error_linux_x86_64.so": "sha256:BA865E1F702CA38E72DD043508BBC56D1519EE33C12F1FF1E1D5E0DF80508C08",
     "allocator/oom_error_win_amd64.dll": "sha256:4319A64CAEB15A06ADCC3F4E1780D2104038A6EAE074F5D626DB0971A7DC592C",
-    "allocator/vmm_alloc_linux_x86_64.so": "sha256:4AD9847C2D57FDDED5BC031C7B6DA96201A0772963E5AD07AFA4FE125A297194",
-    "allocator/vmm_alloc_win_amd64.dll": "sha256:4970D26F9A855A19C2AC38E206AECB91D0B984BAA0ADC5C0A4AD7F54AC0E2AB3"
+    "allocator/ram_alloc_linux_x86_64.so": "sha256:665F986412782E2E69EADD9FD68B507427B889D35121BAE20742E4BA9045EDDB",
+    "allocator/ram_alloc_win_amd64.dll": "sha256:FD3C44670742E7975D53665C42F9ECFC3D6D51CFD105476DFAC35DCE79453DBC",
+    "allocator/vmm_alloc_linux_x86_64.so": "sha256:66F421ADDDDE75F2F56C461517D93E566A77270A07081DDA003151AC43D87641",
+    "allocator/vmm_alloc_win_amd64.dll": "sha256:9D7128DE9F40C62238BA7355DD816D1D58C0298A81CDA9DCBC851B02D2517C27"
   }
 }

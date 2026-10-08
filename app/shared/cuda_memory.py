@@ -1,8 +1,10 @@
-"""Early allocator selection adapted from WanGP 17.01, before CUDA allocations.
+"""Early allocator selection adapted from WanGP, before model allocations.
 
 Upstream: 0e58385fbde7ff102d276e4a9e490845de76b4ea, WanGP Community License 2.0.
 Maestro adaptations (2026-10-05): preserve allocator defaults, idempotent launch,
 report active/fallback state to settings, and keep unsupported systems bootable.
+Optional RAM allocation and native callback parity use the WanGP 17.17 snapshot
+recorded separately in mmgp/PROVENANCE.json (2026-10-08).
 """
 from __future__ import annotations
 
@@ -13,11 +15,14 @@ import sys
 import time
 
 VRAM_ALLOCATOR_CHOICES = ("default", "vmm", "vmm_spill")
+RAM_ALLOCATOR_CHOICES = ("default", "mmgp")
 CUDA_STACK_BYTES = 256
 _startup_applied = False
 _vram_debug = False
 _startup_state = {"requested": "default", "active": "default", "fallback_reason": None}
 _allocator_cli_override = None
+_ram_startup_state = {"requested": "default", "active": "default", "fallback_reason": None}
+_ram_allocator_cli_override = None
 
 
 def _argv_value(argv, option):
@@ -45,19 +50,58 @@ def requested_vram_allocator(argv, config_filename):
     return value or "default"
 
 
+def requested_ram_allocator(argv, config_filename):
+    value = _argv_value(argv, "--ram-allocator")
+    if value is None:
+        config_dir = _argv_value(argv, "--config")
+        candidates = ([os.path.join(os.path.abspath(config_dir), os.path.basename(config_filename))] if config_dir else []) + [config_filename]
+        for path in candidates:
+            if os.path.isfile(path):
+                try:
+                    with open(path, encoding="utf-8") as reader:
+                        value = json.load(reader).get("ram_allocator")
+                except (OSError, ValueError, AttributeError) as error:
+                    print(f"[RAM] Could not read allocator preference: {error}")
+                break
+    return value or "default"
+
 def apply_startup_settings(argv, config_filename):
-    global _startup_applied, _vram_debug, _allocator_cli_override
+    global _startup_applied, _vram_debug, _allocator_cli_override, _ram_allocator_cli_override
     if _startup_applied:
         return dict(_startup_state)
     import torch
     _allocator_cli_override = _argv_value(argv, "--vram-allocator")
+    _ram_allocator_cli_override = _argv_value(argv, "--ram-allocator")
+    ram_requested = requested_ram_allocator(argv, config_filename)
     requested = requested_vram_allocator(argv, config_filename)
     _startup_state["requested"] = requested
+    _ram_startup_state["requested"] = ram_requested
     _startup_applied = True
     if requested not in VRAM_ALLOCATOR_CHOICES:
         _startup_state["fallback_reason"] = f"Unknown allocator {requested!r}"
         print(f"[VRAM] {_startup_state['fallback_reason']}; using PyTorch's allocator")
         requested = "default"
+    if ram_requested not in RAM_ALLOCATOR_CHOICES:
+        _ram_startup_state["fallback_reason"] = f"Unknown allocator {ram_requested!r}"
+        print(f"[RAM] {_ram_startup_state['fallback_reason']}; using the Torch CPU allocator")
+    elif ram_requested == "mmgp":
+        ram_allocator = None
+        try:
+            from mmgp.allocator import ram as ram_allocator
+            if not getattr(ram_allocator, "active", False):
+                ram_allocator.install()
+            if not getattr(ram_allocator, "active", False):
+                raise RuntimeError("allocator initialization returned without activating")
+        except (RuntimeError, OSError, ImportError, AttributeError, ValueError, TypeError, OverflowError, ctypes.ArgumentError) as error:
+            _ram_startup_state["fallback_reason"] = str(error)
+            if getattr(ram_allocator, "active", False):
+                _ram_startup_state["active"] = "mmgp"
+                print(f"[RAM] MMGP CPU allocator active, but initialization reported: {error}")
+            else:
+                print(f"[RAM] MMGP RAM allocator unavailable ({error}); using the Torch CPU allocator")
+        else:
+            _ram_startup_state["active"] = "mmgp"
+            print("[RAM] MMGP CPU allocator active")
     if torch.version.hip is not None or not torch.cuda.is_available():
         if requested != "default":
             _startup_state["fallback_reason"] = "MMGP's allocator requires an NVIDIA CUDA GPU"
@@ -103,8 +147,26 @@ def allocator_status(config):
         "vram_allocator_fallback_reason": _startup_state["fallback_reason"],
         "vram_allocator_restart_required": _allocator_cli_override is None and requested != _startup_state["requested"],
         "vram_allocator_cli_override": _allocator_cli_override,
+        "ram_allocator_active": _ram_startup_state["active"],
+        "ram_allocator_fallback_reason": _ram_startup_state["fallback_reason"],
+        "ram_allocator_restart_required": _ram_allocator_cli_override is None and config.get("ram_allocator", "default") != _ram_startup_state["requested"],
+        "ram_allocator_cli_override": _ram_allocator_cli_override,
     }
 
+
+def release_ram_cache():
+    """Release cached CPU blocks; inactive or unavailable RAM allocation is a no-op."""
+    if _ram_startup_state["active"] != "mmgp":
+        return False
+    try:
+        from mmgp.allocator import ram
+        if not getattr(ram, "active", False):
+            return False
+        ram.release()
+    except (OSError, ImportError, AttributeError, RuntimeError) as error:
+        print(f"[RAM] Could not release cached CPU blocks: {error}")
+        return False
+    return True
 
 def write_vram_debug_report(output_dir, label):
     if not _vram_debug:

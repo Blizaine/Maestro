@@ -62,6 +62,41 @@ class TestHardwareDetection(unittest.TestCase):
                 self.assertEqual(detected["torch_version"], "2.10.0+cu130")
                 self.assertEqual(detected["runtime_version"], "13.0")
 
+    def test_nominal_ram_tiers_allow_small_reporting_variance(self):
+        # 31.76 GiB is the measured 31.8-GiB total on the nominal 32-GiB
+        # RTX 3080 Ti test system. VRAM retains the existing exact 12-GiB tier.
+        for total_gib, expected_tier in (
+            (31.76, "low"),
+            (31.4, "very_low"),
+            (63.76, "high"),
+            (63.4, "low"),
+        ):
+            with self.subTest(total_gib=total_gib):
+                fake_torch = self._fake_torch(total_memory_gb=12)
+                memory = SimpleNamespace(
+                    total=int(total_gib * (1024 ** 3)),
+                    available=8 * (1024 ** 3),
+                )
+                with (
+                    patch.dict(sys.modules, {"torch": fake_torch}),
+                    patch.object(hardware.psutil, "virtual_memory", return_value=memory),
+                    patch.object(hardware.psutil, "cpu_count", return_value=16),
+                    patch.object(hardware, "_detect_kernel_support", return_value={}),
+                    patch.object(hardware, "_detect_driver_version", return_value="580.88"),
+                    patch.object(hardware, "_supports_mmgp_allocator", return_value=False),
+                ):
+                    detected = hardware.detect_hardware()
+
+                self.assertEqual(detected["ram_gb"], round(total_gib, 1))
+                self.assertEqual(detected["ram_tier"], expected_tier)
+                self.assertEqual(detected["gpu_vram_gb"], 12.0)
+                self.assertEqual(detected["vram_tier"], "low")
+
+        self.assertEqual(hardware.ram_tier_for_gb(31.5), "low")
+        self.assertEqual(hardware.ram_tier_for_gb(31.49), "very_low")
+        self.assertEqual(hardware.ram_tier_for_gb(63.5), "high")
+        self.assertEqual(hardware.ram_tier_for_gb(63.49), "low")
+
     def test_allocator_support_requires_cuda_supported_platform_and_bundled_binary(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

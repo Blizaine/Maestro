@@ -27,6 +27,7 @@ import csv
 import datetime as _datetime
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -83,7 +84,7 @@ def _safe_print(
 # allowlist aligned with that API prevents accidental changes to unrelated
 # settings and makes the restore snapshot exact.
 MEMORY_SETTING_KEYS = {
-    "vram_allocator", "smart_memory_pinning", "read_ahead",
+    "vram_allocator", "ram_allocator", "smart_memory_pinning", "read_ahead",
     "perc_reserved_mem_max", "attention_head_split", "int8_kernels",
     *(
         f"{kind}_{suffix}"
@@ -103,7 +104,24 @@ REQUEST_REPORT_KEYS = {
     "resolution", "width", "height", "image_mode", "override_profile",
     "override_attention", "seed", "guidance_scale", "activated_loras",
     "loras_multipliers", "minimax_h3_reference_detail",
+    "sliding_window_size", "sliding_window_overlap",
+    "sliding_window_discard_last_frames", "minimax_h3_multi_window",
+    "sliding_window_memory_override", "minimax_h3_reference_sequence",
+    "minimax_h3_text_encoder",
+    "settings_version", "workspace",
 }
+
+OUTPUT_VALIDATION_PARAM_KEYS = (
+    "video_length", "num_inference_steps", "resolution", "width", "height",
+    "sliding_window_size", "sliding_window_overlap",
+    "sliding_window_discard_last_frames", "minimax_h3_multi_window",
+    "sliding_window_memory_override", "minimax_h3_reference_sequence",
+    "minimax_h3_text_encoder",
+    "settings_version",
+)
+OUTPUT_MEDIA_INFO_KEYS = (
+    "frames", "width", "height", "fps", "duration_seconds", "format", "codec",
+)
 
 EVIDENCE_PATTERNS = {
     "h3_perf": re.compile(r"\bH3\s+Perf\b", re.IGNORECASE),
@@ -324,7 +342,7 @@ class ResultStore:
         "denoise_time_seconds", "other_phase_seconds", "peak_physical_vram_gb",
         "peak_ram_used_gb", "settings_used", "auto_performance_during_run",
         "request_parameters", "output_files", "error", "phase_durations_seconds",
-        "log_evidence",
+        "log_evidence", "benchmark_eligible", "output_validation",
     )
 
     def __init__(self, output_dir: Path, data: dict[str, Any]):
@@ -352,7 +370,7 @@ class ResultStore:
         }
         for key in (
             "settings_used", "request_parameters", "output_files",
-            "phase_durations_seconds", "log_evidence",
+            "phase_durations_seconds", "log_evidence", "output_validation",
         ):
             if row[key] != "":
                 row[key] = json.dumps(row[key], ensure_ascii=False, separators=(",", ":"))
@@ -701,6 +719,300 @@ def _request_summary(request: dict[str, Any]) -> dict[str, Any]:
     return {key: request[key] for key in sorted(REQUEST_REPORT_KEYS) if key in request}
 
 
+def _same_report_value(requested: Any, effective: Any) -> bool:
+    """Compare JSON controls without treating booleans as numeric values."""
+    if isinstance(requested, bool) or isinstance(effective, bool):
+        return type(requested) is type(effective) and requested == effective
+    if isinstance(requested, (int, float)) and isinstance(effective, (int, float)):
+        return float(requested) == float(effective)
+    return requested == effective
+
+
+def _output_metadata_summary(metadata: dict[str, Any]) -> dict[str, Any]:
+    params = metadata.get("params")
+    media_info = metadata.get("media_info")
+    timing = metadata.get("multi_window_timing")
+    if isinstance(timing, dict):
+        timing_summary = {
+            key: timing[key]
+            for key in ("window_count", "completed_windows", "scene_duration_seconds")
+            if key in timing
+        }
+    elif timing is None:
+        timing_summary = None
+    else:
+        timing_summary = {"malformed_type": type(timing).__name__}
+    return {
+        "params": _request_summary(params) if isinstance(params, dict) else {},
+        "media_info": {
+            key: media_info[key]
+            for key in OUTPUT_MEDIA_INFO_KEYS
+            if isinstance(media_info, dict) and key in media_info
+        },
+        "multi_window_timing": timing_summary,
+    }
+
+
+def _numeric_resolution(value: Any) -> tuple[int, int] | None:
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"\s*(\d+)\s*[xX]\s*(\d+)\s*", value)
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def verify_completed_outputs(
+    api: ApiClient,
+    request: dict[str, Any],
+    output_files: Any,
+) -> dict[str, Any]:
+    """Check completed media against effective generation params and metadata.
+
+    Metadata lookup failures do not change the generation's terminal status.
+    They make the measurement unverified so callers cannot treat it as a valid
+    performance observation.
+    """
+    result: dict[str, Any] = {
+        "status": "unverified",
+        "benchmark_eligible": False,
+        "requested_parameters": _request_summary(request),
+        "outputs": [],
+        "mismatches": [],
+        "warnings": [],
+    }
+    if not isinstance(output_files, list) or not output_files:
+        result["warnings"].append("Completed job returned no output files to verify.")
+        return result
+
+    workspace = request.get("workspace", "")
+    if workspace is None:
+        workspace = ""
+    if not isinstance(workspace, str):
+        result["warnings"].append(
+            "The request workspace is not a string, so output metadata could not be queried."
+        )
+        return result
+
+    metadata_seen = 0
+    metadata_unavailable = False
+    multi_window_requested = request.get("minimax_h3_multi_window") is True
+    sequence_window_count: int | None = None
+    sequence_final_verified = False
+    for item in output_files:
+        filename = item if isinstance(item, str) else None
+        if not filename:
+            metadata_unavailable = True
+            result["warnings"].append(
+                f"Output entry has an unsupported shape ({type(item).__name__}); metadata was not checked."
+            )
+            continue
+
+        metadata_path = (
+            f"/api/v1/outputs/{quote(filename, safe='')}/metadata"
+            f"?workspace={quote(workspace, safe='')}"
+        )
+        try:
+            metadata = api.get(metadata_path)
+        except Exception as error:
+            metadata_unavailable = True
+            result["warnings"].append(
+                f"Could not retrieve metadata for {filename!r}: {error}"
+            )
+            continue
+        if not isinstance(metadata, dict):
+            metadata_unavailable = True
+            result["warnings"].append(
+                f"Metadata for {filename!r} had an unexpected response shape."
+            )
+            continue
+
+        metadata_seen += 1
+        summary = _output_metadata_summary(metadata)
+        output_record = {"filename": filename, **summary}
+        result["outputs"].append(output_record)
+        params = metadata.get("params")
+        media_info = metadata.get("media_info")
+        mismatch_start = len(result["mismatches"])
+        warning_start = len(result["warnings"])
+        sequence_status = "not_applicable"
+        if multi_window_requested:
+            timing = metadata.get("multi_window_timing")
+            timing_error = None
+            if not isinstance(timing, dict):
+                timing_error = "missing" if timing is None else "malformed"
+            else:
+                window_count = timing.get("window_count")
+                completed_windows = timing.get("completed_windows")
+                if type(window_count) is not int or window_count < 1:
+                    timing_error = "malformed"
+                elif (
+                    type(completed_windows) is not int
+                    or completed_windows < 1
+                    or completed_windows > window_count
+                ):
+                    timing_error = "malformed"
+                else:
+                    duration = timing.get("scene_duration_seconds")
+                    invalid_duration = False
+                    if duration is not None:
+                        if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+                            invalid_duration = True
+                        else:
+                            try:
+                                invalid_duration = not math.isfinite(duration) or duration <= 0
+                            except OverflowError:
+                                invalid_duration = True
+                    if invalid_duration:
+                        timing_error = "malformed"
+                    elif sequence_window_count is not None and window_count != sequence_window_count:
+                        timing_error = "inconsistent"
+                    else:
+                        sequence_window_count = window_count
+                        sequence_status = (
+                            "final" if completed_windows == window_count else "intermediate"
+                        )
+            if timing_error is not None:
+                metadata_unavailable = True
+                sequence_status = "unverified"
+                result["warnings"].append(
+                    f"Metadata for {filename!r} has {timing_error} multi-window completion timing."
+                )
+        output_record["sequence_status"] = sequence_status
+        if not isinstance(params, dict) and not isinstance(media_info, dict):
+            metadata_unavailable = True
+            result["warnings"].append(
+                f"Metadata for {filename!r} contained no effective parameters or media information."
+            )
+
+        requested_dimensions = _numeric_resolution(request.get("resolution"))
+        for key in OUTPUT_VALIDATION_PARAM_KEYS:
+            if key not in request:
+                continue
+            # A symbolic setting such as auto_720p is retained in the report,
+            # but has no single expected pixel size to compare with the file.
+            if key == "resolution" and requested_dimensions is None:
+                continue
+            if key in {"video_length", "width", "height", "resolution"}:
+                if isinstance(params, dict) and key in params and not _same_report_value(
+                    request[key], params[key]
+                ):
+                    result["mismatches"].append({
+                        "field": key,
+                        "requested": request[key],
+                        "effective": params[key],
+                        "source": "metadata.params",
+                        "filename": filename,
+                    })
+                continue
+            if not isinstance(params, dict) or key not in params:
+                metadata_unavailable = True
+                result["warnings"].append(
+                    f"Metadata for {filename!r} is missing requested workload parameter {key!r}."
+                )
+                continue
+            if not _same_report_value(request[key], params[key]):
+                result["mismatches"].append({
+                    "field": key,
+                    "requested": request[key],
+                    "effective": params[key],
+                    "source": "metadata.params",
+                    "filename": filename,
+                })
+
+        expected_dimensions: dict[str, Any] = {}
+        if requested_dimensions is not None:
+            expected_dimensions.update(width=requested_dimensions[0], height=requested_dimensions[1])
+        for key in ("width", "height"):
+            if key in request:
+                expected_dimensions[key] = request[key]
+        for key, expected in expected_dimensions.items():
+            actual = media_info.get(key) if isinstance(media_info, dict) else None
+            if actual is None:
+                metadata_unavailable = True
+                result["warnings"].append(
+                    f"Metadata for {filename!r} has no actual {key}; requested geometry cannot be verified."
+                )
+            elif not _same_report_value(expected, actual):
+                result["mismatches"].append({
+                    "field": "resolution",
+                    "dimension": key,
+                    "requested": expected,
+                    "effective": actual,
+                    "source": "media_info",
+                    "filename": filename,
+                })
+
+        requested_frames = request.get("video_length")
+        output_frames = media_info.get("frames") if isinstance(media_info, dict) else None
+        effective_frames = params.get("video_length") if isinstance(params, dict) else None
+        if requested_frames is not None:
+            if output_frames is None:
+                metadata_unavailable = True
+                result["warnings"].append(
+                    f"Metadata for {filename!r} has no actual frame count; requested video length cannot be verified."
+                )
+            elif (
+                sequence_status != "intermediate"
+                and not _same_report_value(requested_frames, output_frames)
+            ):
+                result["mismatches"].append({
+                    "field": "video_length",
+                    "requested": requested_frames,
+                    "effective": output_frames,
+                    "source": "media_info.frames",
+                    "filename": filename,
+                    "frame_delta": (
+                        output_frames - requested_frames
+                        if isinstance(output_frames, (int, float))
+                        and isinstance(requested_frames, (int, float))
+                        else None
+                    ),
+                })
+        if (
+            output_frames is not None and effective_frames is not None
+            and sequence_status != "intermediate"
+            and not _same_report_value(effective_frames, output_frames)
+        ):
+            result["mismatches"].append({
+                "field": "video_length",
+                "requested": effective_frames,
+                "effective": output_frames,
+                "source": "metadata.params_vs_media_info",
+                "filename": filename,
+            })
+
+        local_mismatches = result["mismatches"][mismatch_start:]
+        local_warnings = result["warnings"][warning_start:]
+        if local_mismatches:
+            output_record["verification_status"] = "workload_mismatch"
+        elif local_warnings or sequence_status == "unverified":
+            output_record["verification_status"] = "unverified"
+        elif sequence_status == "intermediate":
+            output_record["verification_status"] = "intermediate"
+        else:
+            output_record["verification_status"] = "verified"
+        if (
+            multi_window_requested
+            and sequence_status == "final"
+            and output_record["verification_status"] == "verified"
+        ):
+            sequence_final_verified = True
+
+    if multi_window_requested and not sequence_final_verified:
+        metadata_unavailable = True
+        result["warnings"].append(
+            "No verified final output completed all saved multi-window sequence windows."
+        )
+
+    if result["mismatches"]:
+        result["status"] = "workload_mismatch"
+    elif metadata_unavailable or metadata_seen == 0:
+        result["status"] = "unverified"
+    else:
+        result["status"] = "verified"
+        result["benchmark_eligible"] = True
+    return result
+
+
 def _active_jobs(jobs_response: Any) -> list[dict[str, Any]]:
     if isinstance(jobs_response, dict):
         jobs = jobs_response.get("jobs", jobs_response.get("active", []))
@@ -859,16 +1171,17 @@ class BenchmarkRunner:
         auto_performance = services.get("auto_performance")
         if type(auto_performance) is not bool:
             raise BenchmarkError("services-config did not return a boolean auto_performance value")
-        allocator_choices = {
-            case["settings"]["vram_allocator"]
-            for case in self.matrix["cases"]
-            if "vram_allocator" in case["settings"]
-        }
-        if allocator_choices and any(value != system.get("vram_allocator") for value in allocator_choices):
-            raise BenchmarkError(
-                "This runner cannot switch vram_allocator in a live process; "
-                "select the installed allocator before starting Maestro."
-            )
+        for allocator_key in ("vram_allocator", "ram_allocator"):
+            allocator_choices = {
+                case["settings"][allocator_key]
+                for case in self.matrix["cases"]
+                if allocator_key in case["settings"]
+            }
+            if allocator_choices and any(value != system.get(allocator_key) for value in allocator_choices):
+                raise BenchmarkError(
+                    f"This runner cannot switch {allocator_key} in a live process; "
+                    "select the installed allocator before starting Maestro."
+                )
         backup = {
             "schema_version": 1,
             "base_url": self.api.base_url,
@@ -923,6 +1236,7 @@ class BenchmarkRunner:
                 "notes": [
                     "Peak memory is the highest observed telemetry sample; short spikes between polls may be missed.",
                     "Phase durations attribute intervals to the API phase/status most recently observed at the configured poll cadence.",
+                    "Only runs with output_validation.status=verified and benchmark_eligible=true are valid performance observations.",
                 ],
             },
             "log_file": str(self.log_path) if self.log_path else None,
@@ -1058,6 +1372,7 @@ class BenchmarkRunner:
             "status_transitions": [],
             "output_files": [],
             "oom": False,
+            "benchmark_eligible": False,
         }
         self.current_run = run
         cursor = LogCursor(self.log_path)
@@ -1137,6 +1452,14 @@ class BenchmarkRunner:
                 run["final_status"] = _safe_status_fields(terminal_status)
             if run["status"] != "timed_out":
                 run["status"] = run["job_terminal_status"] or "unknown"
+            if run["job_terminal_status"] == "completed":
+                output_validation = verify_completed_outputs(
+                    self.api, merged_request, run["output_files"]
+                )
+                run["output_validation"] = output_validation
+                run["benchmark_eligible"] = output_validation["benchmark_eligible"]
+                if output_validation["status"] != "verified":
+                    run["status"] = output_validation["status"]
             run["peak_physical_vram_gb"] = _peak_metric(
                 run["samples"], "gpu", "vram_used_gb"
             )
@@ -1293,8 +1616,31 @@ class BenchmarkRunner:
             failed_runs = [
                 run for run in store.data["runs"]
                 if run.get("job_terminal_status") not in (None, "completed")
-                or run.get("status") in {"error", "unknown"}
+                or run.get("status") in {
+                    "error", "unknown", "workload_mismatch", "unverified",
+                }
             ]
+            validation_counts = Counter(
+                (run.get("output_validation") or {}).get("status", "not_applicable")
+                for run in store.data["runs"]
+            )
+            if validation_counts["workload_mismatch"]:
+                validation_status = "workload_mismatch"
+            elif validation_counts["unverified"]:
+                validation_status = "unverified"
+            elif validation_counts["verified"] == len(store.data["runs"]):
+                validation_status = "verified"
+            else:
+                validation_status = "not_applicable"
+            store.data["benchmark_validation"] = {
+                "status": validation_status,
+                "eligible_runs": sum(
+                    bool(run.get("benchmark_eligible")) for run in store.data["runs"]
+                ),
+                "workload_mismatch_runs": validation_counts["workload_mismatch"],
+                "unverified_runs": validation_counts["unverified"],
+                "not_applicable_runs": validation_counts["not_applicable"],
+            }
             self._record_status("completed_with_failures" if failed_runs else "completed")
         except KeyboardInterrupt:
             fatal_error = BenchmarkError("Interrupted by operator")
@@ -1460,6 +1806,7 @@ def main(argv: list[str] | None = None) -> int:
             "status": result["status"],
             "output_dir": str(output_dir),
             "runs": len(result["runs"]),
+            "benchmark_validation": result.get("benchmark_validation"),
             "restoration": result["restoration"],
         }, indent=2), flush=True)
         return 0

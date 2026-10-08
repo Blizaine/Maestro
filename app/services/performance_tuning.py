@@ -15,7 +15,9 @@ import time
 from pathlib import Path
 from contextlib import contextmanager
 
-REVISION = 1
+# Revision 3 also separates active RAM allocators. Revision 2 scoped evidence
+# to each output family's preload policy and the MMGP AutoPreload implementation.
+REVISION = 3
 
 
 def _number(value, default=0.0):
@@ -30,6 +32,15 @@ def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
 
 
+def _auto_preload_runtime_identity():
+    """Hash MMGP's adaptive VRAM planner, which is outside launch's runtime list."""
+    path = Path(__file__).resolve().parents[1] / "mmgp" / "auto_preload.py"
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return "unavailable"
+
+
 def auto_owns(config, key):
     services = config.get("services", {})
     defaults = services.get("auto_performance_defaults", {})
@@ -40,11 +51,14 @@ def auto_owns(config, key):
 def hardware_key(hardware):
     return _digest({key: hardware.get(key) for key in (
         "gpu_name", "gpu_vram_gb", "ram_gb", "gpu_capability", "driver_version",
-        "torch_version", "runtime_version", "platform", "machine", "allocator_active", "runtime_signature",
-    )} | {"revision": REVISION})
+        "torch_version", "runtime_version", "platform", "machine", "allocator_active", "runtime_signature", "ram_allocator_active",
+    )} | {
+        "revision": REVISION,
+        "auto_preload_runtime": _auto_preload_runtime_identity(),
+    })
 
 
-def workload_key(config, model_def, params):
+def workload_key(config, model_def, params, cli=None):
     # Hash file identities/stat revisions; never persist local filenames.
     def file_stamp(value):
         if isinstance(value, (list, tuple)):
@@ -86,11 +100,44 @@ def workload_key(config, model_def, params):
         if key not in excluded and not key.startswith("_") and "prompt" not in key
     }
     workload["model"] = file_stamp(model_def)
-    workload["runtime"] = {key: config.get(key) for key in (
+    runtime = {key: config.get(key) for key in (
         "transformer_quantization", "attention_mode", "int8_kernels", "compile",
         "attention_head_split", "vae_config", "smart_memory_pinning", "read_ahead",
         "vram_safety_coefficient", "generation_preview", "generation_preview_mode",
     )}
+    # Preload settings change the way MMGP moves model weights, not just a
+    # placement candidate. Keep each output family's selected mode and amount
+    # in the workload fingerprint so manual/dynamic evidence cannot train an
+    # automatic/default plan for an otherwise identical generation.
+    try:
+        legacy_preload_mb = max(0, int(config.get("preload_in_VRAM", 0) or 0))
+    except (TypeError, ValueError, OverflowError):
+        legacy_preload_mb = 0
+    preload_settings = {}
+    for kind in ("video", "image", "audio"):
+        mode = config.get(f"{kind}_preload_mode")
+        if mode is None:
+            mode = "manual" if legacy_preload_mb else "default"
+        if mode not in ("default", "dynamic", "manual"):
+            mode = "default"
+        try:
+            requested_mb = max(
+                0,
+                int(config.get(f"{kind}_preload_in_VRAM", legacy_preload_mb) or 0),
+            )
+        except (TypeError, ValueError, OverflowError):
+            requested_mb = 0
+        preload_settings[kind] = {"mode": mode, "requested_mb": requested_mb}
+    try:
+        cli_preload_mb = max(0, int((cli or {}).get("preload", 0) or 0))
+    except (TypeError, ValueError, OverflowError):
+        cli_preload_mb = 0
+    if cli_preload_mb:
+        # The CLI amount overrides the saved mode/amount for every output.
+        for settings in preload_settings.values():
+            settings.update(mode="manual", requested_mb=cli_preload_mb)
+    runtime["preload"] = preload_settings
+    workload["runtime"] = runtime
     return _digest(workload)
 
 
@@ -113,7 +160,7 @@ def build_performance_plan(hardware, config, model_def, params, adjustment=None,
     plan = {"applied": applied, "output_type": output_type, "profile": profile,
             "transformer_budget_mb": int(cli.get("transformer_budget") or 0),
             "hardware_key": hardware_key(hardware),
-            "workload_key": workload_key(config, model_def, params),
+            "workload_key": workload_key(config, model_def, params, cli=cli),
             "reasons": [], "warnings": [], "matching_renders": 0,
             "source": "hardware" if applied else "manual",
             "override_read_ahead": False, "override_reserved_ram": False,

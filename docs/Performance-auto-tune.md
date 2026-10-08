@@ -29,8 +29,10 @@ for window size, resolution, references and LoRAs. If the requested activation
 reserve cannot fit alongside the minimum weight slice, profile-default
 streaming remains in place and the plan warns about the workload.
 
-Smaller RAM machines retain conservative host placement. Read Ahead is
-recommended only on Windows with at least 64 GB RAM and is suppressed when
+Smaller RAM machines retain conservative host placement. Nominal 32/64-GiB
+tiers allow 0.5 GiB for firmware reservations; actual usable capacity still
+governs memory budgets. Read Ahead is recommended only on Windows in the
+nominal 64-GB RAM tier and is suppressed when
 available RAM is insufficient. Pinning ceilings leave room for the OS and
 media preparation and account for reusable MMGP-owned pinned model buffers.
 These ceilings do not bound total process memory. Cold-model planning also
@@ -48,6 +50,9 @@ Evidence is stored locally in ignored `app/settings/performance_tuning.sqlite3`
 (maximum 500 records). Hardware, driver, runtime code, active allocator,
 checkpoint/file revision, quantization, attention, preview, LoRAs, references,
 resolution, frames and repeated-generation workload are scoped by hashes.
+Each output family's preload mode/amount and the bundled MMGP AutoPreload
+implementation also scope the evidence. Dynamic or manual preload comparisons
+do not train a default-preload plan.
 Prompts and local file paths are not stored in the learning database. Changes
 invalidate matching evidence. Cancelled or failed runs and missing telemetry
 do not teach a placement choice.
@@ -81,12 +86,21 @@ hardware/runtime's evidence without changing settings.
    Then increase duration or resolution separately and add references/LoRAs
    one at a time. Larger workloads start with a fresh matching-evidence set.
 
-The 10 GB and 12 GB cards are detected separately. Around 32 GB installed RAM,
-OS-reported usable RAM can fall below the 32 GB tier boundary, in which case
-the conservative Profile 5 starting point applies. Full H3 checkpoints may
-still exceed host memory; an allocator or placement change cannot make every
-checkpoint/window fit. RTX 3080 performance remains unverified until measured
-on the actual test machine.
+The 10 GB and 12 GB cards are detected separately. A nominal 32-GB machine
+reporting at least 31.5 GiB uses the 32-GB tier; materially smaller machines
+retain the conservative Profile 5 starting point. Auto-Tune revision 5
+refreshes settings it still owns while preserving manual changes.
+
+H3 recommends Q2_K when known RAM is below 47.5 GiB or known VRAM is at most
+16 GiB, including GPUs with native NVFP4 support. Explicit encoder selections
+remain in control. H3's Qwen text/vision encoder is a required generation
+component, separate from an optional prompt writer.
+
+Full H3 checkpoints may still exceed host memory; an allocator or placement
+change cannot make every
+checkpoint/window fit. Windows RTX 3080 Ti measurements compare settings in
+the current Dev build; they do not establish performance on Linux or the
+commenters' exact workloads.
 
 RTX 3080 installs use Maestro's Python 3.10 / CUDA 12.8 compatibility runtime.
 Comfy Kitchen's CUDA backend requires CUDA 13; **Auto INT8** checks backend

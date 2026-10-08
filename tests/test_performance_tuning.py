@@ -40,6 +40,12 @@ class PlannerTests(unittest.TestCase):
         return build_performance_plan(hw, config, MODEL, PARAMS, GUARD,
                                       profile=config["video_profile"], **kwargs)
 
+    def test_ram_allocator_separates_performance_evidence(self):
+        hw, _ = setup(32, 12)
+        default = hardware_key({**hw, "ram_allocator_active": "default"})
+        optimized = hardware_key({**hw, "ram_allocator_active": "mmgp"})
+        self.assertNotEqual(default, optimized)
+
     def test_large_ram_h3_uses_measured_streaming_placement(self):
         plan = self.plan(available_ram_gb=100)
         self.assertTrue(plan["applied"])
@@ -207,6 +213,76 @@ class LearningTests(unittest.TestCase):
             before = workload_key(self.config, {**MODEL, "path": str(file)}, PARAMS)
             file.write_bytes(b"two2")
             self.assertNotEqual(before, workload_key(self.config, {**MODEL, "path": str(file)}, PARAMS))
+
+    def test_preload_policy_and_amount_scope_each_output_workload(self):
+        baseline = workload_key(self.config, MODEL, PARAMS)
+        self.assertEqual(baseline, workload_key(copy.deepcopy(self.config), MODEL, PARAMS))
+
+        for kind in ("video", "image", "audio"):
+            for mode, amount in (("dynamic", 0), ("manual", 6000)):
+                config = copy.deepcopy(self.config)
+                config[f"{kind}_preload_mode"] = mode
+                config[f"{kind}_preload_in_VRAM"] = amount
+                with self.subTest(kind=kind, mode=mode):
+                    self.assertNotEqual(baseline, workload_key(config, MODEL, PARAMS))
+
+            manual = copy.deepcopy(self.config)
+            manual[f"{kind}_preload_mode"] = "manual"
+            manual[f"{kind}_preload_in_VRAM"] = 6000
+            changed_amount = copy.deepcopy(manual)
+            changed_amount[f"{kind}_preload_in_VRAM"] = 8000
+            with self.subTest(kind=kind, changed_amount=True):
+                self.assertNotEqual(
+                    workload_key(manual, MODEL, PARAMS),
+                    workload_key(changed_amount, MODEL, PARAMS),
+                )
+
+        legacy_manual = copy.deepcopy(self.config)
+        for kind in ("video", "image", "audio"):
+            legacy_manual.pop(f"{kind}_preload_mode")
+            legacy_manual.pop(f"{kind}_preload_in_VRAM")
+        legacy_manual["preload_in_VRAM"] = 6000
+        self.assertNotEqual(baseline, workload_key(legacy_manual, MODEL, PARAMS))
+        self.assertNotEqual(
+            baseline,
+            workload_key(self.config, MODEL, PARAMS, cli={"preload": 6000}),
+        )
+
+    def test_manual_dynamic_history_cannot_seed_default_static_placement(self):
+        dynamic_config = copy.deepcopy(self.config)
+        dynamic_config["video_preload_mode"] = "dynamic"
+        dynamic_plan = {
+            **self.plan,
+            "workload_key": workload_key(dynamic_config, MODEL, PARAMS),
+        }
+        for profile, budget, seconds in ((2, 8192, 101), (5, 11000, 100)):
+            for repeat in range(2):
+                self.history.record(
+                    f"manual-dynamic-{profile}-{repeat}",
+                    {**dynamic_plan, "profile": profile, "transformer_budget_mb": budget},
+                    {"samples": 10, "denoising_seconds": seconds,
+                     "peak_vram_gb": 17, "min_available_ram_gb": 50},
+                    completed=True,
+                )
+
+        self.assertIsNone(self.choose()[0])
+        winner, count = self.history.choose(
+            dynamic_plan, 24, 128, [2, 5], max_budget_mb=12000,
+        )
+        self.assertEqual(count, 4)
+        self.assertIsNotNone(winner)
+
+    def test_profile_comparisons_share_preload_fingerprint(self):
+        baseline = workload_key(self.config, MODEL, PARAMS)
+        other_profile = copy.deepcopy(self.config)
+        other_profile["video_profile"] = 5
+        self.assertEqual(baseline, workload_key(other_profile, MODEL, PARAMS))
+
+    def test_auto_preload_runtime_identity_scopes_hardware_history(self):
+        original = hardware_key(self.hw)
+        self.assertEqual(original, hardware_key(copy.deepcopy(self.hw)))
+        with patch("services.performance_tuning._auto_preload_runtime_identity", return_value="new-code"):
+            self.assertNotEqual(original, hardware_key(self.hw))
 
     def test_3080_matrix_can_teach_both_vram_variants(self):
         for capacity in (10, 12):

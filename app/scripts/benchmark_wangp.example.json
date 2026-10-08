@@ -1,0 +1,30 @@
+{
+  "name": "h3-pruned-480p-common-baseline",
+  "settings": {
+    "model_type": "minimax_h3_fl2va_pruned",
+    "config": "gguf_q2_k,int8_convrot",
+    "prompt": "A cinematic continuous shot of a red kite flying above a grassy field in a gentle breeze, with soft wind and distant birds. No speech or music.",
+    "resolution": "864x480",
+    "video_length": 124,
+    "num_inference_steps": 20,
+    "flow_shift": 7.0,
+    "seed": 424242,
+    "repeat_generation": 1,
+    "prompt_enhancer": "",
+    "activated_loras": [],
+    "image_prompt_type": "",
+    "video_prompt_type": "",
+    "audio_prompt_type": "",
+    "sliding_window_size": 124,
+    "sliding_window_overlap": 18,
+    "sliding_window_discard_last_frames": 0,
+    "override_attention": "sage2",
+    "override_profile": 4
+  },
+  "cases": [
+    {
+      "name": "h3-pruned-480p",
+      "repeats": 2
+    }
+  ]
+}

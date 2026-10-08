@@ -1302,7 +1302,14 @@ def _download_model_files(model_type: str):
             continue
         wgp.download_models(filename, model_type, source_type, submodel_no)
 
-    text_encoder_URLs = wgp.get_model_recursive_prop(model_type, "text_encoder_URLs", return_list=True)
+    # Match Studio and generation's hardware-aware H3 encoder default.
+    # The static definition names NVFP4; low-memory hosts use Q2_K instead.
+    encoder_variants = model_def.get("minimax_h3_text_encoder_variants") or {}
+    if encoder_variants:
+        encoder = _recommended_minimax_h3_encoder(model_type, model_def)
+        text_encoder_URLs = encoder_variants[encoder].get("URLs", [])
+    else:
+        text_encoder_URLs = wgp.get_model_recursive_prop(model_type, "text_encoder_URLs", return_list=True)
     check_download_cancelled()
     if text_encoder_URLs is not None:
         te_quant = (model_def.get("text_encoder_quantization", None) if model_def else None) or wgp.text_encoder_quantization
@@ -23165,10 +23172,14 @@ def _performance_hardware() -> dict:
     import hashlib
     from shared.cuda_memory import allocator_status
     hw = dict(_get_cached_hardware())
-    hw["allocator_active"] = allocator_status(wgp.server_config).get("vram_allocator_active")
+    active_allocators = allocator_status(wgp.server_config)
+    hw["allocator_active"] = active_allocators.get("vram_allocator_active")
+    hw["ram_allocator_active"] = active_allocators.get("ram_allocator_active")
     stamps = []
     for relative in ("wgp.py", "services/performance_tuning.py", "services/perf_recommend.py",
-                     "mmgp/offload.py", "shared/kernels/int8_backend.py"):
+                     "mmgp/offload.py", "shared/kernels/int8_backend.py",
+                     "shared/cuda_memory.py", "mmgp/allocator/__init__.py",
+                     "mmgp/allocator/ram.py"):
         path = os.path.join(os.path.dirname(__file__), relative)
         with open(path, "rb") as source:
             stamps.append(hashlib.sha256(source.read()).hexdigest())
@@ -28086,6 +28097,10 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             # Restore the base coefficient and transformer budget so the
             # next job starts with its own memory plan.
             _restore_base_coefficient()
+            # Return freed CPU blocks after this Studio job; live model tensors
+            # remain available for the next job. Never clear between its windows.
+            from shared.cuda_memory import release_ram_cache
+            release_ram_cache()
             # If no other jobs are running, sync save_path to the current active
             # workspace (which may have changed while this job was running).
             if not _active_gen_states:

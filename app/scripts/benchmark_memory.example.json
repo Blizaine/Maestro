@@ -7,6 +7,7 @@
     "resolution": "864x480",
     "video_length": 124,
     "sliding_window_size": 124,
+    "settings_version": 2.58,
     "num_inference_steps": 8,
     "guidance_scale": 1.0,
     "seed": 424242,

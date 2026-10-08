@@ -1138,6 +1138,11 @@ export interface SystemConfig {
   prompt_enhancer_quantization: string
   attention_modes_available: string[]
   vram_safety_coefficient: number
+  ram_allocator?: 'default' | 'mmgp'
+  ram_allocator_active?: 'default' | 'mmgp'
+  ram_allocator_fallback_reason?: string | null
+  ram_allocator_restart_required?: boolean
+  ram_allocator_cli_override?: string | null
   vram_allocator?: 'default' | 'vmm' | 'vmm_spill'
   int8_kernels?: 'disabled' | 'auto' | 'triton' | 'kitchen'
   vram_allocator_active?: 'default' | 'vmm' | 'vmm_spill'

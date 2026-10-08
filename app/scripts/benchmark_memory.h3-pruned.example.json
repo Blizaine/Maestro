@@ -1,0 +1,81 @@
+{
+  "cases": [
+    {
+      "reload": true,
+      "request": {
+        "override_profile": 4
+      },
+      "settings": {
+        "transformer_quantization": "int8",
+        "enhancer_enabled": 0,
+        "generation_preview": "off",
+        "video_profile": 4,
+        "vae_config": 0,
+        "compile": "",
+        "attention_head_split": 0,
+        "perc_reserved_mem_max": 0,
+        "smart_memory_pinning": true,
+        "int8_kernels": "auto",
+        "read_ahead": false,
+        "video_preload_mode": "default",
+        "video_preload_in_VRAM": 0
+      },
+      "repeats": 2,
+      "name": "profile4-480p"
+    },
+    {
+      "reload": true,
+      "request": {
+        "override_profile": 5
+      },
+      "settings": {
+        "transformer_quantization": "int8",
+        "enhancer_enabled": 0,
+        "generation_preview": "off",
+        "video_profile": 5,
+        "vae_config": 0,
+        "compile": "",
+        "attention_head_split": 0,
+        "perc_reserved_mem_max": 0,
+        "smart_memory_pinning": true,
+        "int8_kernels": "auto",
+        "read_ahead": false,
+        "video_preload_mode": "default",
+        "video_preload_in_VRAM": 0
+      },
+      "repeats": 2,
+      "name": "profile5-480p"
+    }
+  ],
+  "request": {
+    "settings_version": 2.58,
+    "custom_settings": {
+      "h3_long_sequence_clean_tail": false
+    },
+    "generation_mode": "video",
+    "num_inference_steps": 20,
+    "multi_prompts_gen_type": 2,
+    "audio_prompt_type": "",
+    "sliding_window_memory_override": true,
+    "model_type": "minimax_h3",
+    "repeat_generation": 1,
+    "minimax_h3_text_encoder": "gguf_q2_k",
+    "resolution": "864x480",
+    "image_prompt_type": "",
+    "prompt_enhancer": "",
+    "seed": 424242,
+    "flow_shift": 7.0,
+    "guidance_scale": 1.0,
+    "sliding_window_discard_last_frames": 0,
+    "workspace": "Test-Bench",
+    "prompt": "A cinematic continuous shot of a red kite flying above a grassy field in a gentle breeze, with soft wind and distant birds. No speech or music.",
+    "sliding_window_size": 124,
+    "video_prompt_type": "",
+    "override_attention": "sage2",
+    "video_length": 124,
+    "activated_loras": [],
+    "sliding_window_overlap": 18,
+    "minimax_h3_multi_window": false
+  },
+  "name": "h3-pruned-profile-comparison"
+}

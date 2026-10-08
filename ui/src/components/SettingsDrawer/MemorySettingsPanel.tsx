@@ -32,6 +32,19 @@ export function MemorySettingsPanel() {
         {config.vram_allocator_restart_required && <p role="status" className="text-[11px] text-indicator-warning mt-1">Restart Maestro to apply this allocator.</p>}
         {config.vram_allocator_fallback_reason && <p className="text-[10px] text-indicator-warning mt-1">Using PyTorch: {config.vram_allocator_fallback_reason}</p>}
       </div>
+      <div>
+        <label className={labelClass} htmlFor={`${id}-ram-allocator`}>RAM Allocator</label>
+        <select id={`${id}-ram-allocator`} className={selectClass} value={config.ram_allocator ?? 'default'}
+          onChange={event => void update({ ram_allocator: event.target.value as SystemConfig['ram_allocator'] })}>
+          <option value="default">PyTorch default</option>
+          <option value="mmgp">MMGP optimized</option>
+        </select>
+        <p className={helpClass}>MMGP reuses freed CPU tensor buffers and returns its cache when RAM is under pressure. This can reduce allocation overhead; live model weights still need RAM.</p>
+        <p className={helpClass}>Active: {config.ram_allocator_active === 'mmgp' ? 'MMGP optimized' : 'PyTorch default'}.</p>
+        {config.ram_allocator_cli_override && <p className={helpClass}>The launch argument overrides this saved choice. Remove --ram-allocator when restarting to use the saved setting.</p>}
+        {config.ram_allocator_restart_required && <p role="status" className="text-[11px] text-indicator-warning mt-1">Restart Maestro to apply the RAM allocator.</p>}
+        {config.ram_allocator_fallback_reason && <p className="text-[10px] text-indicator-warning mt-1">Using PyTorch: {config.ram_allocator_fallback_reason}</p>}
+      </div>
       <label className="flex gap-2 items-start text-xs text-text-secondary">
         <input type="checkbox" className="mt-0.5" checked={config.smart_memory_pinning ?? true}
           onChange={event => void update({ smart_memory_pinning: event.target.checked })} />

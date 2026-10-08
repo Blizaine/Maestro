@@ -129,6 +129,12 @@ class MemorySettingsApiTests(unittest.TestCase):
         self.assertEqual(result["vram_allocator_active"], "default")
         self.assertFalse(self.wgp.reload_needed)
 
+    def test_ram_allocator_change_requires_restart_without_live_model_reload(self):
+        result = self.save({"ram_allocator": "mmgp"})
+        self.assertTrue(result["ram_allocator_restart_required"])
+        self.assertEqual(result["ram_allocator_active"], "default")
+        self.assertFalse(self.wgp.reload_needed)
+
     def test_head_split_does_not_reprofile_models(self):
         result = self.save({"attention_head_split": 2})
         self.assertEqual(result["updated"], {"attention_head_split": 2})

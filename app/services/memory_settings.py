@@ -4,10 +4,12 @@ from __future__ import annotations
 OUTPUT_TYPES = ("video", "image", "audio")
 PRELOAD_MODES = ("default", "dynamic", "manual")
 VRAM_ALLOCATORS = ("default", "vmm", "vmm_spill")
+RAM_ALLOCATORS = ("default", "mmgp")
 INT8_BACKENDS = ("disabled", "auto", "triton", "kitchen")
 MEMORY_DEFAULTS = {
     # Keep the installed allocator policy until the user chooses the new one.
     "vram_allocator": "default",
+    "ram_allocator": "default",
     "smart_memory_pinning": True,
     "read_ahead": False,
     "perc_reserved_mem_max": 0,
@@ -17,7 +19,7 @@ MEMORY_KEYS = frozenset(MEMORY_DEFAULTS) | {"int8_kernels"} | frozenset(
     f"{kind}_{suffix}" for kind in OUTPUT_TYPES
     for suffix in ("preload_mode", "preload_in_VRAM")
 )
-MODEL_LOAD_KEYS = MEMORY_KEYS - {"vram_allocator", "attention_head_split"}
+MODEL_LOAD_KEYS = MEMORY_KEYS - {"vram_allocator", "ram_allocator", "attention_head_split"}
 
 
 def _nonnegative_int(value, default=0):
@@ -83,6 +85,8 @@ def validate_memory_updates(body):
         value = body[key]
         if key == "vram_allocator":
             valid = isinstance(value, str) and value in VRAM_ALLOCATORS
+        elif key == "ram_allocator":
+            valid = isinstance(value, str) and value in RAM_ALLOCATORS
         elif key == "int8_kernels":
             valid = isinstance(value, str) and value in INT8_BACKENDS
         elif key.endswith("_preload_mode"):

@@ -528,8 +528,36 @@ class TestMiniMaxH3Definition(unittest.TestCase):
     def test_text_encoder_recommendation_is_hardware_aware(self):
         model_def = self.handler.query_model_def("minimax_h3", {})
         recommend = self.handler.recommend_text_encoder
+        # RTX 50 native NVFP4 does not remove the host-RAM pressure of loading
+        # the encoder beside H3's transformer and VAEs.
         self.assertEqual(
-            recommend({"supports_nvfp4": True, "ram_gb": 32}, model_def),
+            recommend(
+                {"supports_nvfp4": True, "ram_gb": 31.8, "gpu_vram_gb": 24},
+                model_def,
+            ),
+            "gguf_q2_k",
+        )
+        self.assertEqual(
+            recommend(
+                {"supports_nvfp4": True, "ram_gb": 32, "gpu_vram_gb": 24},
+                model_def,
+            ),
+            "gguf_q2_k",
+        )
+        # Match the detector's half-GiB tolerance around nominal tier edges:
+        # clearly below 48 GiB is low-RAM; the tolerated edge retains NVFP4.
+        self.assertEqual(
+            recommend(
+                {"supports_nvfp4": True, "ram_gb": 47.4, "gpu_vram_gb": 24},
+                model_def,
+            ),
+            "gguf_q2_k",
+        )
+        self.assertEqual(
+            recommend(
+                {"supports_nvfp4": True, "ram_gb": 47.5, "gpu_vram_gb": 24},
+                model_def,
+            ),
             "nvfp4_awq",
         )
         self.assertEqual(
@@ -538,22 +566,71 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         )
         self.assertEqual(
             recommend(
+                {"supports_nvfp4": True, "ram_gb": 64, "gpu_vram_gb": 24},
+                model_def,
+            ),
+            "nvfp4_awq",
+        )
+        self.assertEqual(
+            recommend(
                 {
-                    "supports_nvfp4": False,
+                    "supports_nvfp4": True,
                     "ram_gb": 64,
-                    "gpu_vram_gb": 16,
+                    "gpu_vram_gb": 12,
                 },
                 model_def,
             ),
             "gguf_q2_k",
         )
         self.assertEqual(
-            recommend({"supports_nvfp4": False, "ram_gb": 32}, model_def),
-            "nvfp4_awq",
+            recommend(
+                {"supports_nvfp4": True, "ram_gb": 64, "gpu_vram_gb": 16},
+                model_def,
+            ),
+            "gguf_q2_k",
+        )
+        self.assertEqual(
+            recommend(
+                {"supports_nvfp4": False, "ram_gb": 32, "gpu_vram_gb": 24},
+                model_def,
+            ),
+            "gguf_q2_k",
         )
         self.assertEqual(
             recommend({"supports_nvfp4": False, "ram_gb": 16}, model_def),
             "gguf_q2_k",
+        )
+
+    def test_text_encoder_recommendation_handles_unknown_hardware_and_variants(self):
+        model_def = self.handler.query_model_def("minimax_h3", {})
+        recommend = self.handler.recommend_text_encoder
+
+        # Missing RAM is unknown, not zero: native support plus known 24 GiB
+        # VRAM keeps the native choice instead of triggering low-RAM Q2.
+        self.assertEqual(
+            recommend({"supports_nvfp4": True, "gpu_vram_gb": 24}, model_def),
+            "nvfp4_awq",
+        )
+        # With no probe data, use the smallest generally available fallback
+        # without treating the missing RAM measurement as a low-RAM result.
+        self.assertEqual(recommend(None, model_def), "gguf_q2_k")
+
+        # The recommendation must stay within the model's available variants.
+        reduced = {"minimax_h3_text_encoder_variants": {"gguf_q4_k_m": {}}}
+        self.assertEqual(
+            recommend(
+                {"supports_nvfp4": True, "ram_gb": 32, "gpu_vram_gb": 24},
+                reduced,
+            ),
+            "gguf_q4_k_m",
+        )
+        only_native = {"minimax_h3_text_encoder_variants": {"nvfp4_awq": {}}}
+        self.assertEqual(
+            recommend(
+                {"supports_nvfp4": True, "ram_gb": 32, "gpu_vram_gb": 24},
+                only_native,
+            ),
+            "nvfp4_awq",
         )
 
     def test_all_h3_variants_expose_native_portrait_and_auto_aspect(self):

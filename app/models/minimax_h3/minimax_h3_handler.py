@@ -449,32 +449,41 @@ def _text_encoder_variants() -> dict[str, dict]:
 
 
 def _recommend_text_encoder(hardware: dict | None, available=None) -> str:
-    """Choose a proven encoder whose format fits system RAM."""
+    """Choose an H3 encoder that leaves enough host and device memory."""
 
     choices = set(available or _text_encoder_variants())
     hardware = hardware or {}
     try:
-        ram_gb = float(hardware.get("ram_gb") or 0)
+        reported_ram_gb = float(hardware.get("ram_gb") or 0)
+        ram_gb = reported_ram_gb if reported_ram_gb > 0 else None
     except (TypeError, ValueError):
-        ram_gb = 0
+        ram_gb = None
     try:
-        vram_gb = float(hardware.get("gpu_vram_gb") or 0)
+        reported_vram_gb = float(hardware.get("gpu_vram_gb") or 0)
+        vram_gb = reported_vram_gb if reported_vram_gb > 0 else None
     except (TypeError, ValueError):
-        vram_gb = 0
-    # The Comfy NVFP4-AWQ conditioner is Maestro's known-good H3 path.  RTX
-    # 50 cards execute it natively. Older NVIDIA cards use compatibility
-    # kernels, which work but are not the lowest-memory option. On 16 GB GPUs,
-    # leave more headroom for H3's packed video/audio attention by preferring
-    # the Q2 encoder even when the machine has abundant system RAM.
+        vram_gb = None
+
+    # The H3 transformer and both VAEs share system memory with the Qwen
+    # conditioner. Prefer the smaller encoder whenever known RAM is clearly
+    # below the nominal 48-GiB tier, even on GPUs that execute NVFP4 natively.
+    # Hardware detection rounds RAM to 0.1 GiB and firmware can reserve a
+    # small amount, so mirror its 0.5-GiB tier tolerance at this boundary.
+    low_ram = ram_gb is not None and ram_gb < 48.0 - 0.5
+    low_vram = vram_gb is not None and vram_gb <= 16.0
+    if (low_ram or low_vram) and "gguf_q2_k" in choices:
+        return "gguf_q2_k"
+
+    # Unknown RAM is not zero: it does not trigger the low-RAM branch. A
+    # known low-VRAM card above still selects Q2_K before this native path.
+    # Otherwise keep the fast native choice for RTX 50 when available.
     if "nvfp4_awq" in choices and hardware.get("supports_nvfp4"):
         return "nvfp4_awq"
-    if 0 < vram_gb <= 16 and "gguf_q2_k" in choices:
-        return "gguf_q2_k"
-    if "nvfp4_awq" in choices and ram_gb >= 24:
+    if "nvfp4_awq" in choices and ram_gb is not None and ram_gb >= 24:
         return "nvfp4_awq"
-    if ram_gb >= 56 and "int8" in choices:
+    if ram_gb is not None and ram_gb >= 56 and "int8" in choices:
         return "int8"
-    if ram_gb >= 24 and "gguf_q4_k_m" in choices:
+    if ram_gb is not None and ram_gb >= 24 and "gguf_q4_k_m" in choices:
         return "gguf_q4_k_m"
     if "gguf_q2_k" in choices:
         return "gguf_q2_k"

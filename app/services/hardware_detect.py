@@ -31,6 +31,26 @@ import psutil
 
 _APP_ROOT = Path(__file__).resolve().parents[1]
 
+# RAM is reported in binary GiB, while tier names describe the nominal
+# 32/64-GB machine classes. A small allowance covers firmware-reserved RAM
+# and reporting differences without admitting a materially smaller tier.
+RAM_TIER_TOLERANCE_GB = 0.5
+
+
+def ram_tier_for_gb(ram_gb: float) -> str:
+    """Return the nominal RAM tier with a 0.5-GiB boundary tolerance.
+
+    Hardware capacities are converted from bytes to GiB and rounded to one
+    decimal place, matching the VRAM probe. The tolerance applies only to the
+    32/64-GiB RAM tier boundaries; values below 31.5 or 63.5 GiB respectively
+    remain in the smaller tier.
+    """
+    if ram_gb >= 64.0 - RAM_TIER_TOLERANCE_GB:
+        return "high"
+    if ram_gb >= 32.0 - RAM_TIER_TOLERANCE_GB:
+        return "low"
+    return "very_low"
+
 
 def _detect_driver_version() -> str:
     """Read the NVIDIA driver version without creating a CUDA context."""
@@ -237,7 +257,7 @@ def detect_hardware() -> dict:
       supports_sage2: bool      — sage attention v2 usable (sm89+)
       supports_flash: bool      — flash attention usable
       supports_triton: bool     — triton compiler available
-      ram_tier: str             — "high" (≥64GB) | "low" (32-63GB) | "very_low" (<32GB)
+      ram_tier: str             — "high" (nominal 64GB; ≥63.5GiB) | "low" (nominal 32GB; ≥31.5GiB) | "very_low"
       vram_tier: str            — "high" (≥24GB) | "low" (12-23GB) | "tight" (<12GB) | "none" (no CUDA)
     """
     gpu = _detect_gpu()
@@ -252,16 +272,11 @@ def detect_hardware() -> dict:
         ram_available_gb = 0.0
     cpu_count = psutil.cpu_count(logical=True) or 1
 
-    # Tier classification — matches Wan2GP's existing thresholds at
-    # app/wgp.py:10640-10645. perf_recommend.py reads these tiers
-    # directly, so changing them in one place flows through to the
-    # recommendation table.
-    if ram_gb >= 64:
-        ram_tier = "high"
-    elif ram_gb >= 32:
-        ram_tier = "low"
-    else:
-        ram_tier = "very_low"
+    # VRAM is converted from bytes to GiB and rounded to 0.1 above in
+    # _detect_gpu(). Apply the same units and rounding convention to RAM, but
+    # allow a 0.5-GiB tolerance at nominal 32/64-GiB tier boundaries because
+    # system firmware can reserve part of installed physical memory.
+    ram_tier = ram_tier_for_gb(ram_gb)
 
     vram_gb = gpu["gpu_vram_gb"]
     if not gpu["cuda_available"]:

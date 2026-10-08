@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app"))
-from services import perf_recommend as perf  # noqa: E402
+from services import hardware_detect, perf_recommend as perf  # noqa: E402
 
 
 def hardware(ram=28.0, vram=18.7):
@@ -24,7 +24,7 @@ def hardware(ram=28.0, vram=18.7):
         "gpu_name": "RTX A4500",
         "gpu_vram_gb": vram,
         "ram_gb": ram,
-        "ram_tier": "high" if ram >= 64 else "low" if ram >= 32 else "very_low",
+        "ram_tier": hardware_detect.ram_tier_for_gb(ram),
         "vram_tier": "high" if vram >= 24 else "low" if vram >= 12 else "tight",
         "platform": "win32",
         "supports_mmgp_allocator": False,
@@ -55,7 +55,7 @@ def legacy_config():
 
 class TestAutomaticProfiles(unittest.TestCase):
     def test_partial_pinning_remains_recommended_from_32_gb_ram(self):
-        for ram in (32, 48, 63.9):
+        for ram in (31.8, 32, 48, 63.4):
             for vram in (12, 18.7, 23.9):
                 with self.subTest(ram=ram, vram=vram):
                     rec = perf.recommend_settings(hardware(ram, vram))
@@ -66,7 +66,7 @@ class TestAutomaticProfiles(unittest.TestCase):
                     self.assertEqual(rec["transformer_quantization"], "int8")
 
     def test_reporter_and_smaller_ram_keep_unpinned_profile_pending_benchmark(self):
-        for ram in (8, 16, 23.9, 24, 28, 31.9):
+        for ram in (8, 16, 23.9, 24, 28, 31.4):
             for vram in (12, 18.7, 23.9):
                 with self.subTest(ram=ram, vram=vram):
                     rec = perf.recommend_settings(hardware(ram, vram))
@@ -76,7 +76,8 @@ class TestAutomaticProfiles(unittest.TestCase):
     def test_other_profile_tiers_are_unchanged(self):
         for ram, vram, expected in (
             (28, 8, 5), (32, 8, 4.5), (64, 8, 4),
-            (64, 19, 2), (28, 24, 3.5), (32, 24, 3), (128, 24, 1),
+            (63.8, 19, 2), (64, 19, 2),
+            (28, 24, 3.5), (32, 24, 3), (128, 24, 1),
         ):
             with self.subTest(ram=ram, vram=vram):
                 self.assertEqual(perf.recommend_settings(hardware(ram, vram))["video_profile"], expected)
@@ -118,8 +119,12 @@ class TestAutomaticProfiles(unittest.TestCase):
         linux = hardware(128, 24)
         linux["platform"] = "linux"
         windows_32gb = hardware(32, 24)
+        windows_nominal_64gb = hardware(63.8, 24)
+        windows_below_nominal_64gb = hardware(63.4, 24)
         self.assertFalse(perf.recommend_settings(linux)["read_ahead"])
         self.assertFalse(perf.recommend_settings(windows_32gb)["read_ahead"])
+        self.assertTrue(perf.recommend_settings(windows_nominal_64gb)["read_ahead"])
+        self.assertFalse(perf.recommend_settings(windows_below_nominal_64gb)["read_ahead"])
 
     def test_cpu_fallback_keeps_safe_memory_defaults(self):
         rec = perf.recommend_settings({"cuda_available": False})
@@ -222,6 +227,29 @@ class TestAutomaticProfileMigration(unittest.TestCase):
         self.assertEqual(config["int8_kernels"], "auto")
         self.assertIn("int8_kernels", config["services"]["auto_performance_defaults"])
         self.assertEqual(config["services"]["auto_performance_revision"], perf.AUTO_PERFORMANCE_REVISION)
+
+    def test_revision4_nominal32_refresh_preserves_manual_profiles_and_preload(self):
+        old_recommendation = perf.recommend_settings(hardware(31.4, 12))
+        previous = {key: old_recommendation[key] for key in perf.applied_keys()}
+        config = dict(previous)
+        config["services"] = {
+            "auto_performance": True,
+            "auto_performance_applied": True,
+            "auto_performance_revision": 4,
+            "auto_performance_defaults": dict(previous),
+        }
+        config.update(image_profile=4.5, video_preload_mode="manual", video_preload_in_VRAM=4096)
+
+        result = perf.apply_auto_performance(config, hardware(31.8, 12))
+
+        self.assertEqual(result["updated"]["video_profile"], 4)
+        self.assertEqual(config["image_profile"], 4.5)
+        self.assertEqual(config["video_preload_mode"], "manual")
+        self.assertEqual(config["video_preload_in_VRAM"], 4096)
+        self.assertEqual(config["vram_safety_coefficient"], 0.8)
+        self.assertEqual(config["services"]["auto_performance_revision"], 5)
+        self.assertFalse(perf.auto_performance_needs_refresh(config))
+        self.assertTrue({"image_profile", "video_preload_mode", "video_preload_in_VRAM"}.issubset(result["preserved"]))
 
     def test_legacy_boolean_migration_preserves_existing_new_control_provenance(self):
         config = legacy_config()

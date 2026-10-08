@@ -9560,6 +9560,12 @@ export const useStore = create<AppState>((set, get) => ({
             vram_allocator_fallback_reason: result.vram_allocator_fallback_reason,
             vram_allocator_cli_override: result.vram_allocator_cli_override,
           } : {}),
+          ...(result.ram_allocator_active !== undefined ? {
+            ram_allocator_active: result.ram_allocator_active,
+            ram_allocator_restart_required: result.ram_allocator_restart_required,
+            ram_allocator_fallback_reason: result.ram_allocator_fallback_reason,
+            ram_allocator_cli_override: result.ram_allocator_cli_override,
+          } : {}),
         } : null,
       }))
       // Changing an auto-managed field switches the backend to manual mode.

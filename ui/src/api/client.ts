@@ -1878,7 +1878,8 @@ export async function scanModelFolders(): Promise<{ candidates: import('../types
 export async function updateSystemConfig(
   partial: Partial<import('../types').SystemConfig>
 ): Promise<{ status: string; updated: Record<string, unknown> } & Pick<import('../types').SystemConfig,
-  'vram_allocator_active' | 'vram_allocator_restart_required' | 'vram_allocator_fallback_reason' | 'vram_allocator_cli_override'>> {
+  'vram_allocator_active' | 'vram_allocator_restart_required' | 'vram_allocator_fallback_reason' | 'vram_allocator_cli_override' |
+  'ram_allocator_active' | 'ram_allocator_restart_required' | 'ram_allocator_fallback_reason' | 'ram_allocator_cli_override'>> {
   const res = await fetch(`${BASE}/api/v1/system-config`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },

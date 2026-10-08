@@ -27,6 +27,26 @@ values between cases. Set `request.override_profile` explicitly to match
 default profile was cached at startup. `reload: true` releases resident models
 before the first repeat; `repeats: 2` then runs a second generation without that
 release. A model release does not flush OS file caches or compiled kernels.
+Changing the profile or preview components can trigger a model reload even
+when the case does not request one.
+
+The examples include `settings_version` so the backend interprets duration
+and window controls using the current schema. After completion, the runner
+checks saved effective parameters and actual media dimensions/frame counts.
+Only `benchmark_eligible: true` with `output_validation.status: verified`
+qualifies as a performance observation. A shortened window is reported as
+`workload_mismatch`; missing metadata is `unverified`. The original job's
+terminal status is retained separately, and settings restoration still runs.
+Symbolic resolutions are recorded without inventing an expected pixel size.
+For H3 sequences, valid saved completion timing identifies cumulative
+intermediate files. They remain in the evidence; eligibility requires a
+verified final output with every window complete and the full frame count.
+
+Inspect the actual saved window size before comparing long H3 runs: automatic
+VRAM protection can shorten a requested window. A deliberate
+`sliding_window_memory_override: true` comparison uses the manual window lock
+and can exceed the card's conservative automatic recommendation. It is not a
+way to establish a generally safe duration.
 
 Results are written incrementally to `results.json` and `results.csv`. A private
 settings backup is written before changes. The runner disables auto-tune during

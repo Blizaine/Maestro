@@ -220,6 +220,8 @@ def release_model():
         previous_offload = None
         gc.collect()
         offload.flush_torch_caches()
+        from shared.cuda_memory import release_ram_cache
+        release_ram_cache()
 
 
 def release_generation_memory():
@@ -2403,6 +2405,8 @@ def _parse_args():
     )
     parser.add_argument("--vram-allocator", choices=["default", "vmm", "vmm_spill"], default=None,
                         help="VRAM allocator selected before CUDA starts; overrides the saved setting")
+    parser.add_argument("--ram-allocator", choices=["default", "mmgp"], default=None,
+                        help="CPU tensor allocator selected at startup; overrides the saved setting")
     parser.add_argument("--vram-debug", type=float, default=0, metavar="MIN_MB",
                         help="Record MMGP allocator allocations of this size or larger")
     parser.add_argument("--prevent-power-throttling", action=argparse.BooleanOptionalAction, default=True,
@@ -2860,7 +2864,7 @@ _normalize_profile_defaults(server_config)
 _normalize_output_paths(server_config)
 lm_decoder_engine = server_config.get("lm_decoder_engine", "")
 
-from preprocessing.matanyone.utils.model_assets import migrate_matanyone_install, query_matanyone_download_def
+from preprocessing.matanyone.utils.model_assets import migrate_matanyone_install
 migration_note = migrate_matanyone_install(server_config)
 if migration_note:
     print(migration_note)
@@ -4035,7 +4039,6 @@ def download_file(url,filename):
 
 RIFE_V4_FILENAME = "rife4.26.pkl"
 RIFE_V3_FILENAME = "flownet.pkl"
-download_shared_done = False
 def download_models(model_filename = None, model_type= None, file_type = 0, submodel_no = 1, force_path = None):
     def computeList(filename):
         if filename == None:
@@ -4045,39 +4048,13 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
         return [filename]        
 
 
-    if file_type == 0:
-        shared_def = {
-            "repoId" : "DeepBeepMeep/Wan2.1",
-            "sourceFolderList" : [ "pose", "scribble", "flow", "depth", "wav2vec", "chinese-wav2vec2-base", "roformer", "pyannote", "det_align", "" ],
-            "fileList" : [ ["dw-ll_ucoco_384.onnx", "yolox_l.onnx"],["netG_A_latest.pth"],  ["raft-things.pth"], 
-                        ["depth_anything_v2_vitl.pth","depth_anything_v2_vitb.pth"],
-                        ["config.json", "feature_extractor_config.json", "model.safetensors", "preprocessor_config.json", "special_tokens_map.json", "tokenizer_config.json", "vocab.json"],
-                        ["config.json", "pytorch_model.bin", "preprocessor_config.json"],
-                        ["model_bs_roformer_ep_317_sdr_12.9755.ckpt", "model_bs_roformer_ep_317_sdr_12.9755.yaml", "download_checks.json"],
-                        ["pyannote_model_wespeaker-voxceleb-resnet34-LM.bin", "pytorch_model_segmentation-3.0.bin"], ["detface.pt"], [ RIFE_V3_FILENAME if server_config.get("rife_version", "v3") == "v3" else RIFE_V4_FILENAME  ] ]
-        }
-        process_files_def(**shared_def)
-        process_files_def(**query_matanyone_download_def(server_config))
-
-
-        enhancer_enabled = int(server_config.get("enhancer_enabled", 0) or 0)
-        if enhancer_enabled > 0:
-            from shared.prompt_enhancer import ensure_prompt_enhancer_assets
-
-            ensure_prompt_enhancer_assets(
-                process_files_def,
-                enhancer_enabled=enhancer_enabled,
-                qwen_backend=server_config.get("prompt_enhancer_quantization", "quanto_int8"),
-            )
-
-        download_mmaudio()
-        global download_shared_done
-        download_shared_done = True
-
     if model_filename is None: return
 
     base_model_type = get_base_model_type(model_type)
     model_def = get_runtime_model_def(model_type)
+
+    if file_type == 0:
+        ensure_audio_condition_assets(base_model_type)
     
     any_source = ("source2" if submodel_no ==2 else "source") in model_def
     any_module_source = ("module_source2" if submodel_no ==2 else "module_source") in model_def 
@@ -4154,6 +4131,77 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
     if not isinstance(model_files, list): model_files = [model_files]
     for one_repo in model_files:
         process_files_def(**one_repo)
+
+
+def ensure_preprocessor_assets(process_type):
+    """Fetch just the checkpoint needed by a selected video preprocessor."""
+    if process_type in ("pose", "pose_align"):
+        folder = "pose"
+        files = ["dw-ll_ucoco_384.onnx", "yolox_l.onnx"]
+    elif process_type == "depth":
+        folder = "depth"
+        variant = server_config.get("depth_anything_v2_variant", "vitl")
+        filename = "depth_anything_v2_vitl.pth" if variant == "vitl" else "depth_anything_v2_vitb.pth"
+        files = [filename]
+    elif process_type in ("canny", "scribble"):
+        folder = "scribble"
+        files = ["netG_A_latest.pth"]
+    elif process_type == "flow":
+        folder = "flow"
+        files = ["raft-things.pth"]
+    else:
+        return
+
+    process_files_def(
+        repoId="DeepBeepMeep/Wan2.1",
+        sourceFolderList=[folder],
+        fileList=[files],
+    )
+
+
+def ensure_model_preprocessor_assets(base_model_type, custom_settings=None):
+    """Fetch pose weights for model-specific preprocessors that require DWPose."""
+    settings = custom_settings if isinstance(custom_settings, dict) else {}
+    needs_pose = base_model_type in {"scail", "steadydancer"}
+    needs_pose = needs_pose or (
+        str(base_model_type).startswith("scail2_")
+        and settings.get("scail2_animate_preprocessing", "raw") == "pose"
+    )
+    if needs_pose:
+        ensure_preprocessor_assets("pose")
+
+
+def ensure_audio_condition_assets(base_model_type):
+    """Fetch audio encoders only for the model families that consume them."""
+    architecture = str(base_model_type or "").lower()
+    if architecture == "fantasy":
+        folder = "wav2vec"
+        files = [
+            "config.json",
+            "feature_extractor_config.json",
+            "model.safetensors",
+            "preprocessor_config.json",
+            "special_tokens_map.json",
+            "tokenizer_config.json",
+            "vocab.json",
+        ]
+    elif architecture in {
+        "multitalk",
+        "infinitetalk",
+        "vace_multitalk_14b",
+        "i2v_2_2_multitalk",
+    }:
+        folder = "chinese-wav2vec2-base"
+        files = ["config.json", "pytorch_model.bin", "preprocessor_config.json"]
+    else:
+        return
+
+    process_files_def(
+        repoId="DeepBeepMeep/Wan2.1",
+        sourceFolderList=[folder],
+        fileList=[files],
+    )
+
 
 offload.default_verboseLevel = verbose_level
 
@@ -5912,6 +5960,7 @@ def get_resampled_video(video_in, start_frame, max_frames, target_fps, bridge='t
 
 
 def get_preprocessor(process_type, inpaint_color, pre_video_guide=None):
+    ensure_preprocessor_assets(process_type)
     if process_type in ["pose", "pose_align"]:
         from preprocessing.dwpose.pose import PoseBodyFaceVideoAnnotator
         cfg_dict = {
@@ -7556,6 +7605,7 @@ def custom_preprocess_video_with_mask(model_handler, base_model_type, pre_video_
     if guide_frame_count == 0 or any_mask and mask_frame_count == 0:
         return None, None, None, None
 
+    ensure_model_preprocessor_assets(base_model_type, custom_settings)
     video_guide_processed, video_guide_processed2, video_mask_processed, video_mask_processed2  = model_handler.custom_preprocess(base_model_type = base_model_type, pre_video_guide = pre_video_guide, video_guide = video_guide, video_mask = video_mask, height = height, width = width, fit_canvas = fit_canvas , fit_crop = fit_crop, target_fps = target_fps,  block_size = block_size, max_workers = max_workers, expand_scale = expand_scale, video_prompt_type=video_prompt_type, model_def=model_def, custom_settings=custom_settings)
 
     return video_guide_processed, video_guide_processed2, video_mask_processed, video_mask_processed2 
