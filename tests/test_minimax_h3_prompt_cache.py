@@ -21,9 +21,10 @@ from models.minimax_h3.prompt_cache import (  # noqa: E402
 
 
 class FakeConditioner:
-    def __init__(self, value: float = 1.0, on_call=None):
+    def __init__(self, value: float = 1.0, on_call=None, output_device=None):
         self.value = value
         self.on_call = on_call
+        self.output_device = output_device
         self.calls: list[tuple[str, object]] = []
 
     def __call__(self, prompt, device, keyframes=None):
@@ -31,7 +32,8 @@ class FakeConditioner:
         if self.on_call is not None:
             self.on_call()
         value = self.value + len(prompt)
-        embeddings = torch.full((1, 4, 8), value, dtype=torch.float32, device=device)
+        output_device = self.output_device if self.output_device is not None else device
+        embeddings = torch.full((1, 4, 8), value, dtype=torch.float32, device=output_device)
         tags = torch.tensor([1, 1, 1, 1], dtype=torch.int32, device="cpu")
         return embeddings, tags
 
@@ -188,6 +190,31 @@ class TestMiniMaxH3PromptCache(unittest.TestCase):
         self.assertEqual(status, "hit")
         self.assertEqual(len(conditioner.calls), 1)
 
+    def test_cached_embeddings_and_tags_restore_requested_device(self):
+        cache = MiniMaxH3PromptCache()
+        # Mimic the CUDA-default-device path without allocating a GPU tensor.
+        conditioner = FakeConditioner(output_device="cpu")
+        statuses = []
+        for _ in range(2):
+            (embeddings, tags), status = cache.condition(
+                "device contract",
+                conditioner=conditioner,
+                encoder_variant="gguf_q2_k",
+                dtype=torch.float16,
+                device="meta",
+            )
+            statuses.append(status)
+            self.assertEqual(embeddings.device.type, "meta")
+            self.assertEqual(tags.device.type, "meta")
+            self.assertEqual(embeddings.dtype, torch.float32)
+            self.assertEqual(tags.dtype, torch.int32)
+
+        self.assertEqual(statuses, ["miss", "hit"])
+        self.assertEqual(len(conditioner.calls), 1)
+        self.assertEqual(len(cache._cache._entries), 1)
+        entry = next(iter(cache._cache._entries.values()))
+        self.assertEqual(entry.value["embeddings"].device.type, "cpu")
+        self.assertEqual(entry.value["tags"].device.type, "cpu")
     def test_cache_is_cpu_only_bounded_and_does_not_retain_prompt_text(self):
         # Each record is 4*8*float32 + 4*int32 = 144 bytes; retain only one.
         cache = MiniMaxH3PromptCache(max_size_mb=180 / (1024 * 1024))

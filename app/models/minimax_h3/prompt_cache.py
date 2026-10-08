@@ -15,6 +15,10 @@ class H3PromptEncodingAborted(RuntimeError):
     """Raised when H3 prompt conditioning is interrupted or returns no result."""
 
 
+def _not_interrupted() -> bool:
+    return False
+
+
 class MiniMaxH3PromptCache:
     """Cache repeated plain-text H3 conditioning without retaining device tensors."""
 
@@ -36,17 +40,16 @@ class MiniMaxH3PromptCache:
     ) -> tuple[tuple[torch.Tensor | None, torch.Tensor | None], str | None]:
         """Condition a plain prompt, bypassing the cache for multimodal paths.
 
-        The cache key contains a prompt digest rather than the prompt itself.
-        Cached values stay on CPU in ``TextEncoderCache``; returned embeddings keep
-        the conditioner dtype and are cloned so in-place use cannot mutate an entry.
+        The cache key uses a prompt digest rather than retaining prompt text.
+        Cached tensors stay on CPU; both outputs return on the requested device
+        with their original dtypes and are cloned to isolate entries from mutation.
         """
 
         if viggle or (keyframes is not None and len(keyframes) > 0):
             return conditioner(prompt, device, keyframes or None), None
 
         if interrupted is None:
-            def interrupted() -> bool:
-                return False
+            interrupted = _not_interrupted
         if interrupted():
             raise H3PromptEncodingAborted
 
@@ -82,7 +85,7 @@ class MiniMaxH3PromptCache:
                 raise H3PromptEncodingAborted
 
             embeddings = value["embeddings"].detach().to(device=device).clone()
-            tags = value["tags"].detach().to(device="cpu").clone()
+            tags = value["tags"].detach().to(device=device).clone()
             return (embeddings, tags), ("hit" if was_hit else "miss")
 
     @staticmethod
