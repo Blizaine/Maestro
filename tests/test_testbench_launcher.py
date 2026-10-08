@@ -42,6 +42,16 @@ launcher.menu({gpu:'nvidia',gpu_target:'sm_86',platform:'win32'},info).then(v=>p
         self.assertIn("app/env-sol/.maestro_sol_runtime_v1.installed", environment)
         self.assertIn("'env-sol' : 'env'", environment)
 
+    def test_ssh_setup_checks_a_fresh_receipt_after_elevation(self):
+        launcher = self.evaluate("require('./test_ssh_setup.js')({which:()=>null}).then(v=>process.stdout.write(JSON.stringify(v)))")
+        elevated, verification = launcher["run"]
+        self.assertTrue(elevated["params"]["sudo"])
+        self.assertFalse(verification["params"].get("sudo", False))
+        command = elevated["params"]["message"]["_"]
+        self.assertIn("{{path.resolve(cwd, 'app', 'scripts', 'setup_test_ssh.ps1')}}", command)
+        self.assertEqual(verification["params"]["message"]["_"], command + ["-VerifyOnly"])
+        self.assertIn("-RunId", command)
+
 
 if __name__ == "__main__":
     unittest.main()

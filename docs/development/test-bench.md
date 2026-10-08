@@ -118,6 +118,10 @@ without it. Windows OpenSSH setup needs one elevated session on the test PC;
 the provided `test_ssh_setup.js` invokes the fixed
 `app/scripts/setup_test_ssh.ps1` helper through Pinokio's administrative shell.
 Windows may require the person at that PC to approve UAC.
+The action verifies a fresh setup receipt after the elevated shell returns.
+If no receipt appears, check the Windows administrator prompt. A receipt with
+`status: running` means setup reached the recorded phase; wait before retrying.
+A failed receipt records the phase and Windows error.
 
 Prepare a dedicated Ed25519 key under the actual Pinokio desktop account:
 
