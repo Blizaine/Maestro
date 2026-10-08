@@ -1156,3 +1156,15 @@ status and publisher, and the CodeIntegrity event ID and policy name/ID. Full
 system logs and screenshots are not required. **Open Web UI** is available only
 after startup captures a valid server URL; the startup terminal retains the
 failure if Python cannot run.
+
+### Testing across multiple machines
+
+While Maestro is running, its Pinokio page has a **Developer tests** menu.
+Start with **Diagnostics only**, then use the prompt regression tests or H3
+cold / warm baseline. Tests run inside that PC's managed runtime, defer if
+user work is pending, and save reports in `app/outputs/Test-Bench`.
+
+The optional fleet controller runs the same suite on several reachable PCs
+and collects their diagnostic bundles. It does not update or restart Maestro.
+See [test bench setup and commands](docs/development/test-bench.md) for the
+manual workflow, API access, and optional key-based Windows SSH diagnostics.

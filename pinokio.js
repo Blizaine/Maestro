@@ -31,6 +31,32 @@ const localWebEndpoint = (local) => {
   }
 }
 
+const testBenchMenu = (endpoint, info) => [{
+  icon: "fa-solid fa-flask",
+  text: info.running("test_bench.js") ? "Developer tests (running)" : "Developer tests",
+  menu: [
+    ["smoke", "Diagnostics only"],
+    ["prompt", "Prompt regression tests"],
+    ["render", "H3 cold / warm baseline"],
+    ["nightly", "Bounded full test suite"],
+    ["compare", "Memory profile comparison"],
+  ].map(([mode, text]) => ({
+    icon: "fa-solid fa-flask",
+    text,
+    href: `test_bench.js?mode=${mode}`,
+    params: { mode, base_url: endpoint.url },
+  })).concat([{
+    icon: "fa-solid fa-toggle-on",
+    text: "Enable local prompt tests (restart when idle)",
+    href: "test_bench_enable.js",
+  }, {
+    icon: "fa-regular fa-folder-open",
+    text: "Saved test reports",
+    href: "app/outputs/Test-Bench",
+    fs: true,
+  }]),
+}]
+
 module.exports = {
   version: "8.0",
   title: "Maestro",
@@ -136,7 +162,7 @@ module.exports = {
             icon: 'fa-solid fa-terminal',
             text: "Terminal",
             href: "start.js",
-          }]
+          }, ...testBenchMenu(endpoint, info)]
         } else {
           return [{
             icon: 'fa-solid fa-terminal',
@@ -165,7 +191,7 @@ module.exports = {
             icon: 'fa-solid fa-terminal',
             text: "Sol Runtime Terminal",
             href: "start_sol.js",
-          }]
+          }, ...testBenchMenu(endpoint, info)]
         }
         return [{
           icon: 'fa-solid fa-terminal',
