@@ -1220,6 +1220,18 @@ class TestDirectorVideoExecutionProfile(unittest.TestCase):
             ],
         }
 
+    @classmethod
+    def _h3_model_with_text_encoders(cls, *, full: bool = False) -> dict:
+        model_def = cls._h3_model(full=full)
+        model_def.update({
+            "minimax_h3_text_encoder_default": "nvfp4_awq",
+            "minimax_h3_text_encoder_variants": {
+                "gguf_q2_k": {},
+                "nvfp4_awq": {},
+            },
+        })
+        return model_def
+
     def test_h3_and_ltx25_lock_director_media_strengths(self):
         for model_type, architecture in (
             ("minimax_h3", "minimax_h3"),
@@ -1441,6 +1453,160 @@ class TestDirectorVideoExecutionProfile(unittest.TestCase):
         )
         self.assertEqual(params["loras_multipliers"], "1.00")
 
+    def test_director_profile_freezes_hardware_recommended_h3_encoder(self):
+        model_def = self._h3_model_with_text_encoders()
+
+        def recommend(hardware, _model_def):
+            if (
+                float(hardware.get("ram_gb") or 0) < 47.5
+                or float(hardware.get("gpu_vram_gb") or 0) <= 16
+            ):
+                return "gguf_q2_k"
+            return "nvfp4_awq"
+
+        handler = SimpleNamespace(recommend_text_encoder=recommend)
+        registry = SimpleNamespace(
+            get_model_def=lambda _model_type: model_def,
+            get_base_model_type=lambda model_type: model_type,
+            get_model_handler=lambda _base_type: handler,
+        )
+        for hardware, expected in (
+            ({"ram_gb": 32, "gpu_vram_gb": 12}, "gguf_q2_k"),
+            ({"ram_gb": 128, "gpu_vram_gb": 24}, "nvfp4_awq"),
+        ):
+            with self.subTest(hardware=hardware):
+                params = {
+                    "video_model": "minimax_h3",
+                    "video_params": {"resolution": "1280x704"},
+                }
+                with patch.object(pipeline, "_wgp", registry):
+                    profile = pipeline._create_director_video_execution_profile(
+                        params,
+                        model_def=model_def,
+                        hardware=hardware,
+                    )
+                self.assertEqual(profile["minimax_h3_text_encoder"], expected)
+                self.assertEqual(
+                    params["video_params"]["minimax_h3_text_encoder"],
+                    expected,
+                )
+
+    def test_director_explicit_h3_encoder_is_validated_and_applied_to_child(self):
+        model_def = self._h3_model_with_text_encoders()
+        handler = SimpleNamespace(
+            recommend_text_encoder=lambda _hardware, _model_def: "gguf_q2_k"
+        )
+        registry = SimpleNamespace(
+            get_model_def=lambda _model_type: model_def,
+            get_base_model_type=lambda model_type: model_type,
+            get_model_handler=lambda _base_type: handler,
+            override_attention_modes_supported=[],
+        )
+        params = {
+            "video_model": "minimax_h3",
+            "video_params": {
+                "resolution": "1280x704",
+                "minimax_h3_text_encoder": "nvfp4_awq",
+            },
+        }
+        with patch.object(pipeline, "_wgp", registry):
+            profile = pipeline._create_director_video_execution_profile(
+                params,
+                model_def=model_def,
+                hardware={"ram_gb": 32, "gpu_vram_gb": 12},
+            )
+            child = {}
+            pipeline._apply_director_h3_optimizations(
+                child,
+                params["video_params"],
+                profile,
+            )
+            self.assertEqual(child["minimax_h3_text_encoder"], "nvfp4_awq")
+
+            invalid = {
+                "video_model": "minimax_h3",
+                "video_params": {
+                    "resolution": "1280x704",
+                    "minimax_h3_text_encoder": "unknown_encoder",
+                },
+            }
+            with self.assertRaisesRegex(
+                ValueError,
+                "Unknown MiniMax H3 text encoder 'unknown_encoder'",
+            ):
+                pipeline._create_director_video_execution_profile(
+                    invalid,
+                    model_def=model_def,
+                    hardware={"ram_gb": 32, "gpu_vram_gb": 12},
+                )
+
+    def test_saved_director_profile_keeps_encoder_and_migrates_legacy_state(self):
+        model_def = self._h3_model_with_text_encoders()
+        state = {
+            "video_model": "minimax_h3",
+            "video_params": {"minimax_h3_text_encoder": "nvfp4_awq"},
+            "_params_snapshot": {
+                "video_model": "minimax_h3",
+                "video_params": {},
+            },
+            "video_execution_profile": {
+                "is_minimax_h3": True,
+                "effective_max_frames": 243,
+                "model_type": "minimax_h3",
+                "minimax_h3_text_encoder": "gguf_q2_k",
+            },
+        }
+        with patch.object(
+            pipeline,
+            "_wgp",
+            SimpleNamespace(get_model_def=lambda _model_type: model_def),
+        ), patch.object(
+            pipeline,
+            "_director_hardware_snapshot",
+            return_value={"ram_gb": 32, "gpu_vram_gb": 12},
+        ):
+            saved = pipeline._saved_director_video_execution_profile(
+                state,
+                model_def=model_def,
+            )
+            self.assertEqual(saved["minimax_h3_text_encoder"], "gguf_q2_k")
+
+            state["video_execution_profile"].pop("minimax_h3_text_encoder")
+            migrated = pipeline._saved_director_video_execution_profile(
+                state,
+                model_def=model_def,
+            )
+        self.assertEqual(migrated["minimax_h3_text_encoder"], "nvfp4_awq")
+
+    def test_legacy_h3_profile_without_encoder_uses_hardware_default(self):
+        model_def = self._h3_model_with_text_encoders()
+        state = {
+            "video_model": "minimax_h3",
+            "_params_snapshot": {"video_model": "minimax_h3", "video_params": {}},
+            "video_execution_profile": {
+                "is_minimax_h3": True,
+                "effective_max_frames": 124,
+                "model_type": "minimax_h3",
+            },
+        }
+        registry = SimpleNamespace(
+            get_base_model_type=lambda model_type: model_type,
+            get_model_handler=lambda _: SimpleNamespace(
+                recommend_text_encoder=lambda hardware, model: "gguf_q2_k"
+            ),
+        )
+        with patch.object(pipeline, "_wgp", registry), patch.object(
+            pipeline, "_director_hardware_snapshot",
+            return_value={"ram_gb": 32, "gpu_vram_gb": 12},
+        ):
+            profile = pipeline._saved_director_video_execution_profile(
+                state, model_def=model_def,
+            )
+            child = {}
+            pipeline._apply_director_h3_optimizations(child, {}, profile)
+        self.assertEqual(profile["minimax_h3_text_encoder"], "gguf_q2_k")
+        self.assertEqual(child["minimax_h3_text_encoder"], "gguf_q2_k")
+        self.assertNotIn("minimax_h3_text_encoder", state["video_execution_profile"])
     def test_execution_profile_persists_all_h3_optimizations(self):
         profile = build_director_video_execution_profile(
             "minimax_h3",

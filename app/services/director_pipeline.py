@@ -350,6 +350,52 @@ def _normalize_director_media_strengths(
     return True
 
 
+def _resolve_director_h3_text_encoder(
+    video_model: str,
+    model_def: dict,
+    video_params: dict,
+    hardware: dict,
+    *,
+    requested: object = None,
+) -> Optional[str]:
+    """Validate an explicit H3 encoder or mirror Studio's hardware default."""
+
+    variants = model_def.get("minimax_h3_text_encoder_variants") or {}
+    if not variants:
+        return None
+
+    explicit = video_params.get("minimax_h3_text_encoder")
+    if explicit is None or not str(explicit).strip():
+        explicit = requested
+    if explicit is not None and str(explicit).strip():
+        selected = str(explicit).strip()
+        if selected not in variants:
+            raise ValueError(
+                f"Unknown MiniMax H3 text encoder '{selected}'. "
+                f"Choose one of: {', '.join(variants)}."
+            )
+        return selected
+
+    fallback = str(
+        model_def.get("minimax_h3_text_encoder_default") or "nvfp4_awq"
+    )
+    selected = None
+    try:
+        base_type = _wgp.get_base_model_type(video_model)
+        handler = _wgp.get_model_handler(base_type)
+        recommender = getattr(handler, "recommend_text_encoder", None)
+        if callable(recommender):
+            selected = recommender(hardware, model_def)
+    except Exception as error:
+        print(
+            "[Director] Hardware-aware H3 encoder recommendation failed: "
+            f"{error}"
+        )
+    if selected in variants:
+        return selected
+    return fallback if fallback in variants else next(iter(variants))
+
+
 def _create_director_video_execution_profile(
     params: dict,
     *,
@@ -378,15 +424,29 @@ def _create_director_video_execution_profile(
         **video_params,
         "activated_loras": video_loras.get("activated_loras", []) or [],
     }
+    execution_hardware = (
+        hardware if hardware is not None else _director_hardware_snapshot()
+    )
     profile = build_director_video_execution_profile(
         video_model,
         model_def,
         profile_inputs,
-        hardware if hardware is not None else _director_hardware_snapshot(),
+        execution_hardware,
         manual_max_frames=params.get("director_max_shot_frames"),
         resolution_preset=params.get("director_resolution_preset", ""),
         aspect_ratio=params.get("director_aspect_ratio", ""),
     )
+    if profile.get("is_minimax_h3"):
+        text_encoder = _resolve_director_h3_text_encoder(
+            video_model,
+            model_def,
+            video_params,
+            execution_hardware,
+            requested=params.get("minimax_h3_text_encoder"),
+        )
+        if text_encoder:
+            video_params["minimax_h3_text_encoder"] = text_encoder
+            profile["minimax_h3_text_encoder"] = text_encoder
     normalized_resolution = profile.get("normalized_resolution")
     if normalized_resolution:
         video_params["resolution"] = normalized_resolution
@@ -433,14 +493,20 @@ def _apply_director_h3_optimizations(
     """Copy Director's saved H3 optimization contract to one child job.
 
     Initial generation, Dashboard regeneration, repair, and resume all pass
-    through this helper so a saved project cannot silently lose its Turbo,
-    sparse attention, or First Block Cache settings.
+    through this helper so a saved project cannot silently lose its encoder,
+    Turbo, sparse attention, or First Block Cache settings.
     """
 
     if not execution_profile.get("is_minimax_h3"):
         return
 
     gen_params["_director_video_execution_profile"] = execution_profile
+    text_encoder = (
+        execution_profile.get("minimax_h3_text_encoder")
+        or video_params.get("minimax_h3_text_encoder")
+    )
+    if text_encoder:
+        gen_params["minimax_h3_text_encoder"] = text_encoder
     turbo_enabled = video_params.get("minimax_h3_turbo_mode") is True
     gen_params["minimax_h3_turbo_mode"] = turbo_enabled
     turbo_preset = str(
@@ -554,7 +620,33 @@ def _saved_director_video_execution_profile(
     if not isinstance(saved, dict):
         saved = snapshot.get("_director_video_execution_profile")
     if isinstance(saved, dict) and saved.get("effective_max_frames"):
-        return dict(saved)
+        profile = dict(saved)
+        if profile.get("is_minimax_h3"):
+            params = dict(snapshot)
+            video_model = (
+                params.get("video_model")
+                or state.get("video_model")
+                or profile.get("model_type")
+            )
+            if model_def is None:
+                getter = getattr(_wgp, "get_model_def", None)
+                model_def = getter(video_model) if callable(getter) else {}
+            video_params = dict(
+                state.get("video_params")
+                or params.get("video_params")
+                or {}
+            )
+            saved_choice = profile.get("minimax_h3_text_encoder")
+            text_encoder = _resolve_director_h3_text_encoder(
+                video_model,
+                dict(model_def or {}),
+                {} if saved_choice else video_params,
+                _director_hardware_snapshot(),
+                requested=(saved_choice or params.get("minimax_h3_text_encoder")),
+            )
+            if text_encoder:
+                profile["minimax_h3_text_encoder"] = text_encoder
+        return profile
 
     params = dict(snapshot)
     params.setdefault("video_model", state.get("video_model"))
