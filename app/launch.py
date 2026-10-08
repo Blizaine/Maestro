@@ -25696,6 +25696,37 @@ def _prepare_viggle_character_frame(job: dict) -> bool:
     return True
 
 
+def _split_multi_clip_prompt_text(
+    prompt_text: str,
+    per_clip_frames=None,
+    per_clip_output_frames=None,
+) -> list[str]:
+    """Parse clip prompts without treating an explicit one-clip prompt as lines.
+
+    Director uses per-clip frame metadata even for a single shot. In that case
+    the whole multiline Context-IR document is one prompt. The explicit clip
+    separator remains authoritative for multi-clip Director requests, while
+    metadata-free Studio callers retain the legacy line-by-line behavior.
+    """
+    prompt_text = str(prompt_text or "")
+    clip_separator = "\n---CLIP_BOUNDARY---\n"
+    if clip_separator in prompt_text:
+        return [part.strip() for part in prompt_text.split(clip_separator) if part.strip()]
+
+    clip_metadata = [
+        value for value in (per_clip_frames, per_clip_output_frames)
+        if value is not None
+    ]
+    explicit_single_clip = bool(clip_metadata) and all(
+        isinstance(value, list) and len(value) == 1
+        for value in clip_metadata
+    )
+    if explicit_single_clip:
+        prompt = prompt_text.strip()
+        return [prompt] if prompt else []
+
+    return [line.strip() for line in prompt_text.split("\n") if line.strip()]
+
 def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = False) -> bool:
     """Build and run a job, optionally deferring success finalization."""
     from shared.utils.thread_utils import AsyncStream, async_run
@@ -26107,13 +26138,11 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             # Multi-clip mode: split single request into per-clip tasks
             elif raw_params.get("multi_prompts_gen_type") == 3:
                 prompt_text = raw_params.get("prompt", "")
-                # Use clip boundary separator if present (Director v2 with sliding window support),
-                # otherwise fall back to newline split (Studio mode / legacy Director)
-                CLIP_SEPARATOR = "\n---CLIP_BOUNDARY---\n"
-                if CLIP_SEPARATOR in prompt_text:
-                    prompt_lines = [p.strip() for p in prompt_text.split(CLIP_SEPARATOR) if p.strip()]
-                else:
-                    prompt_lines = [l.strip() for l in prompt_text.split("\n") if l.strip()]
+                prompt_lines = _split_multi_clip_prompt_text(
+                    prompt_text,
+                    raw_params.get("per_clip_frames"),
+                    raw_params.get("per_clip_output_frames"),
+                )
                 image_starts = raw_params.get("image_start", [])
                 if not isinstance(image_starts, list):
                     image_starts = [image_starts] if image_starts else []
