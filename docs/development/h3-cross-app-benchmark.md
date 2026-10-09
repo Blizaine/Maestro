@@ -70,3 +70,27 @@ ends before the next unread input row. This avoids a second full-sequence
 output allocation; the returned view is contiguous and retains the original
 storage until its residual consumer releases it. Autograd, autocast, active
 LoRAs and incompatible storage/projection layouts retain the ordinary path.
+
+## Verified physical native follow-up
+
+On October 9, WanGP 17.17 H3 Pruned at 20 steps completed native 1920x1088,
+362 frames at 24 fps on the 12-GB / 32-GB machine in 12,893.633 seconds. Maestro
+Dev `11ce7e1` separately completed Fused References at six steps in 1,924.016
+seconds, with one image, an uploaded soundtrack and live Tiny VAE preview. Both
+saved outputs passed complete audio/video decoding. These are capability checks
+with different models, attention and conditioning, not matched speed results.
+
+To reproduce the tested Maestro placement, use Settings > System > RAM / VRAM
+Management: MMGP optimized VRAM allocator (restart if needed), PyTorch default
+RAM allocator, Smart Memory Pinning on, Read Ahead off, and Attention Head Split
+Medium. Set Video Profile 4 in the advanced Performance controls and select the
+Q2_K H3 Text Encoder in generation settings. Use SLA, six steps, no active LoRAs
+and no upsampling. Lock a single approximately 15.08-second window with Allow
+30s clips enabled. This manual override switches away from ordinary Auto limits.
+
+Peak API-sampled VRAM was 11.75 GiB. RAM was nearly exhausted and paging occurred;
+free host memory and the Windows pagefile mattered. The ordinary 14.4-second
+recommendation has not been widened. See the [validation record](../VALIDATION_V2.7.0.md)
+for exact geometry, timing boundaries, runtime, independent host metrics and
+failed controls. The earlier 12-GiB-capped component probe remains separate from
+this physical-machine saved-video proof.

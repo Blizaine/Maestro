@@ -81,6 +81,22 @@ took about 2h52m. Media validation establishes completed outputs and timing;
 visual quality, singing and lip sync still need human review. See the
 [validation record](VALIDATION_V2.7.0.md) for exact settings and limits.
 
+### Native 1080p on the 12-GB test machine
+
+A manual H3 Fused References run now completed 362 native 1920×1088 frames at
+24 fps (15.08 seconds), using six steps, SLA, Medium head splitting, Profile 4
+and the Q2_K encoder. It included an image reference, uploaded soundtrack and
+live preview, with upsampling off. Total generation took 32m04s; sampled peak
+VRAM was 11.75 GiB. Full media decoding and soundtrack checks passed, and sampled
+frames showed a coherent scene. System RAM was nearly full and paging occurred.
+
+The native test used a locked window with **Allow 30s clips · Experimental**
+enabled. The ordinary 14.4-second recommendation and Auto duration limits remain
+unchanged. This verifies one 12-GB/32-GB Windows recipe, not all checkpoints,
+LoRAs or lower-memory machines. The separate WanGP Pruned 20-step confirmation
+used different settings and is not a matched speed comparison. See the
+[validation record](VALIDATION_V2.7.0.md#native-h3-follow-up--october-9).
+
 ## Optional H3 VAE 2× video decoding
 
 Studio and Director offer a learned H3 decoder that doubles both output
@@ -100,8 +116,8 @@ workflows are excluded. See the [guide and model terms](H3-VAE-x2.md).
 ## Shared runtime compatibility
 
 The memory port includes bounded attention staging/head splitting for supported
-Sage2 and Sol routes, shorter intermediate-buffer lifetimes, automatic INT8
-backend dispatch and VAE convolution/activation changes. Sol remains approximate
+Sage2, compatible H3 SLA and Sol routes, shorter intermediate-buffer lifetimes,
+automatic INT8 backend dispatch and VAE convolution/activation changes. Sol remains approximate
 and can change generated results. Quantized FP8, NVFP4 and GGUF paths retain their
 format-specific kernels and compatible fallbacks.
 

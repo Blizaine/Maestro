@@ -123,8 +123,9 @@ bounded output path removes that allocation pattern; the follow-up 720p test
 used a different prompt with the same duration, resolution, model/steps and
 image/music reference workload. The user's queued native 1080p job separately
 failed during transformer packed-embedding assembly (2.09 GiB allocation).
-Native 1080p denoising at that duration remains unverified; x2 decoding from
-540p must not be presented as equivalent evidence.
+Native 1080p denoising was unverified in that earlier test; x2 decoding from
+540p must not be presented as equivalent evidence. See the separate native
+follow-up below.
 
 These fixed-control benchmarks temporarily disabled Auto and restored its
 original value and system settings afterward. System-RAM pressure remains:
@@ -155,6 +156,66 @@ Technical evidence is private at `.codex-tmp/v270/director-full-validation.json`
 This run predates the final Director preview follow-up; it cannot validate that
 UI fix in the running remote application. Human review of visual continuity,
 lip sync, sound and editing remains separate from metadata and decode checks.
+
+## Native H3 follow-up — October 9
+
+A separate physical-machine check confirmed upstream WanGP 17.17 can save a
+native 1920×1088, 362-frame / 24-fps video on the RTX 3080 Ti 12GB / 32GB RAM
+machine. The pinned upstream revision is
+`6479db36bdc2619a904a852bba9c2d78e1a83f82`. Its H3 Pruned run used 20 steps,
+Q2_K, Sage2, Medium head splitting, Profile 4, MMGP VRAM spill/RAM allocators,
+smart pinning and read ahead. There were no LoRAs or upsampling passes.
+
+Measured wall time was 12,893.633 seconds (3h34m54s), with 12,507.038 seconds
+in denoising. Three-second host samples reached 9.943 GiB whole-device VRAM
+and 36.547 GiB system commit; available system RAM fell to 0.219 GiB and paging
+occurred. Full FFmpeg audio/video decoding passed, and six evenly spaced
+frames showed a coherent bird and landscape. Required saved model, geometry,
+seed, steps, attention, profile and upsampling fields matched; upstream did
+not report the empty enhancement selector. This verifies one Windows recipe,
+not fast generation or universal compatibility on 12GB cards or 16GB RAM.
+
+Maestro Dev `11ce7e1` then completed its separate Fused References six-step
+case with an image reference, exact soundtrack and live Tiny VAE video preview.
+The saved video contains 362 native 1920×1088 frames at 24 fps (15.083333 seconds),
+with no spatial or temporal upsampling. Full FFmpeg audio/video decoding passed;
+six evenly spaced frames show a coherent subject and scene without noise
+collapse. Aligned source/output audio correlation was 0.99909 after AAC encoding.
+This sampled visual check does not establish every frame's creative quality.
+
+Total API wall time was 1,924.016 seconds (32m04s). Poll-attributed denoising was
+1,706.968 seconds and final decoding/save was 191.828 seconds; the generation
+console's denoising timer reported 28m39s. These timers use different phase
+boundaries. Two-second API samples peaked at 11.75 GiB whole-device VRAM and
+31.68 GiB RAM used. Independent three-second host samples peaked at 11.547 GiB
+VRAM and 38.980 GiB system commit against a 39.832-GiB commit limit; available
+RAM fell to 0.091 GiB, with paging observed. Different sampling cadences explain
+the observed VRAM peaks and can miss short spikes.
+
+The tested manual recipe used H3 Fused 4-Step — References (Experimental),
+custom six steps, SLA at 90% requested sparsity, Medium head splitting (eight
+groups), Profile 4, the Q2_K H3 encoder, active MMGP optimized VRAM allocation,
+PyTorch default RAM allocation, smart pinning on and read ahead off. The runtime
+was PyTorch 2.7.1+cu128, using ComfyKitchen CUDA INT8 ConvRot dispatch. Its
+221,791 packed rows included a 3,511-row protected media prefix. All 2,400 sparse
+calls completed, with 88.4% effective block sparsity and no dense fall-throughs.
+
+Earlier physical attempts failed at a large Q/K RMSNorm temporary and then a
+second full attention-output projection buffer. Grouped normalization now uses
+64-MiB input chunks, and compatible grouped output projections compact token
+chunks into their owned attention storage. The failed controls remain failures;
+the final saved-video run provides the end-to-end evidence for these fixes.
+[Dev CI for the implementation](https://github.com/Blizaine/Maestro/actions/runs/37941355624)
+passed 3,531 backend tests (56 skipped), 137 standalone regressions (one skipped),
+source checks and the frontend checks/build. A small real CUDA Triton projection
+check on the 24-GB workstation was bitwise equal with and without storage reuse;
+it does not establish Kitchen kernel parity or identical full generated videos.
+
+These recipes differ in model, step count, attention, conditioning and allocator
+settings. Their times must not be treated as a matched cross-app speed test.
+Native 1080p tests use a manually locked 15.083-second window above the ordinary
+14.4-second recommendation; neither Auto-tune nor default duration limits have
+been expanded on this evidence alone. No active LoRAs were tested.
 
 ## Remaining validation limits
 
