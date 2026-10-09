@@ -686,7 +686,6 @@ class MiniMaxH3Attention(nn.Module):
         if (
             not torch.is_grad_enabled()
             and self.vdn is None
-            and not use_sla
             and not use_sol
             and attention_mask is None
             and hasattr(self, "q_proj")
@@ -712,41 +711,37 @@ class MiniMaxH3Attention(nn.Module):
                 from shared import attention_kit
 
                 split_requested = attention_kit.head_groups(self.heads, length) > 1
-                staged_sage2 = (
-                    self.head_dim in (64, 128)
-                    and attention_kit.sage2_staged_settings(hidden_states.device)
-                    is not None
-                )
-                if not fused_rms_rope or split_requested or staged_sage2:
-                    def norm_rope(query, key, _group):
-                        if (
-                            fused_rms_rope
-                            and query is not None
-                            and key is not None
-                        ):
-                            normalized = denoiser_kernels.rms_rope(
-                                query,
-                                key,
-                                rotary,
-                                0,
-                                length,
-                                self.q_norm,
-                                self.k_norm,
-                            )
-                            if normalized is not None:
-                                query.copy_(normalized[0])
-                                key.copy_(normalized[1])
-                                return
-                        if query is not None:
-                            _rms_norm_inplace(self.q_norm, query)
-                        if key is not None:
-                            _rms_norm_inplace(self.k_norm, key)
-                        if rotary is not None:
-                            if query is not None:
-                                _apply_rope_inplace(query, *rotary)
-                            if key is not None:
-                                _apply_rope_inplace(key, *rotary)
 
+                def norm_rope(query, key, _group):
+                    if (
+                        fused_rms_rope
+                        and query is not None
+                        and key is not None
+                    ):
+                        normalized = denoiser_kernels.rms_rope(
+                            query,
+                            key,
+                            rotary,
+                            0,
+                            length,
+                            self.q_norm,
+                            self.k_norm,
+                        )
+                        if normalized is not None:
+                            query.copy_(normalized[0])
+                            key.copy_(normalized[1])
+                            return
+                    if query is not None:
+                        _rms_norm_inplace(self.q_norm, query)
+                    if key is not None:
+                        _rms_norm_inplace(self.k_norm, key)
+                    if rotary is not None:
+                        if query is not None:
+                            _apply_rope_inplace(query, *rotary)
+                        if key is not None:
+                            _apply_rope_inplace(key, *rotary)
+
+                if use_sla and split_requested:
                     owned_input = [hidden_states]
                     hidden_states = None
                     attended = attention_kit.qkv_attention(
@@ -757,10 +752,37 @@ class MiniMaxH3Attention(nn.Module):
                         self.heads,
                         self.head_dim,
                         norm_rope,
+                        attention_fn=lambda qkv: self.sla_attention(
+                            qkv, self.sla_attention.enabled
+                        ),
                     )
                     return self.out_proj(
                         attended.reshape(batch, length, self.heads * self.head_dim)
                     )
+
+                if not use_sla:
+                    staged_sage2 = (
+                        self.head_dim in (64, 128)
+                        and attention_kit.sage2_staged_settings(hidden_states.device)
+                        is not None
+                    )
+                    if not fused_rms_rope or split_requested or staged_sage2:
+                        owned_input = [hidden_states]
+                        hidden_states = None
+                        attended = attention_kit.qkv_attention(
+                            owned_input,
+                            self.q_proj,
+                            self.k_proj,
+                            self.v_proj,
+                            self.heads,
+                            self.head_dim,
+                            norm_rope,
+                        )
+                        return self.out_proj(
+                            attended.reshape(
+                                batch, length, self.heads * self.head_dim
+                            )
+                        )
         projection_width = (
             self.heads * self.head_dim
             if hasattr(self, "q_proj")

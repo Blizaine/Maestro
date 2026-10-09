@@ -19,6 +19,8 @@ Record API wall time, denoising phase, peak physical GPU use, system commit, ava
 
 Restore changed settings, stop only benchmark-owned jobs, and leave the machine idle after testing. Keep full configuration backups private. `benchmark_memory.py` refuses busy Maestro queues and restores the selected settings; `benchmark_wangp.py` submits and cancels only its owned jobs. WanGP process-level settings are configured while stopped and restored by the test operator.
 
+For long WanGP runs, the benchmark CLI also writes `<output>.progress.json` (or `--progress-file <path>`) atomically after submission and polling. It retains the owned job ID, case, elapsed time, cancellation state and small structured progress fields, excluding prompts, images and stream logs. If this optional sidecar cannot be written, monitoring continues and the CLI reports one warning. Reconnect monitoring to the saved job ID after a client failure; do not submit a duplicate render.
+
 ## Optional RAM allocator
 
 Settings > System > RAM / VRAM Management now includes RAM Allocator. MMGP optimized reuses freed CPU tensor blocks, with a bounded cache that is returned under RAM pressure and when a Studio job or model release finishes. It does not reduce the size of live model weights. The default remains PyTorch until hardware-specific evidence justifies a change. Changing it requires a restart; active status and a fallback reason are visible in the UI/API. `--ram-allocator` overrides the saved choice.

@@ -110,13 +110,16 @@ def qkv_attention(
     kv_heads=None,
     norm_spans_heads=False,
     split_heads=True,
+    attention_fn=None,
 ):
     """Project and attend q/k/v while handing off the input tensor.
 
     norm_rope(query, key, group) normalizes and rotates each supplied tensor
     in place. Input tensors have shape (batch, tokens, heads, head_dim). A
     norm that spans all heads receives its per-token full-head statistics in
-    group.mean_squares when the heads are split.
+    group.mean_squares when the heads are split. If attention_fn is supplied,
+    it handles each mutable Q/K/V group instead of the shared dense/Sage2
+    dispatcher; the helper clears the group list after the callback returns.
     """
 
     global _unsplit_notice, _split_notice
@@ -125,9 +128,12 @@ def qkv_attention(
     shape = tuple(x.shape[:-1]) if x.dim() > 2 else (1, x.shape[0])
     kv_heads = int(kv_heads or heads)
     groups = head_groups(kv_heads, shape[-1]) if split_heads else 1
+    # A caller-supplied attention implementation owns each Q/K/V group. In
+    # particular, sparse attention cannot consume Sage2's staged quantized
+    # tensors, so do not initialize or enter that path for custom dispatch.
     settings = (
         sage2_staged_settings(x.device)
-        if head_dim in (64, 128)
+        if attention_fn is None and head_dim in (64, 128)
         else None
     )
     projections = (q_proj, k_proj, v_proj)
@@ -203,7 +209,13 @@ def qkv_attention(
             if last:
                 linear_input = x = None
             norm_rope(qkv_group[0], qkv_group[1], group)
-            attention = pay_attention(qkv_group, recycle_q=True)
+            if attention_fn is None:
+                attention = pay_attention(qkv_group, recycle_q=True)
+            else:
+                try:
+                    attention = attention_fn(qkv_group)
+                finally:
+                    qkv_group.clear()
             if groups == 1:
                 return attention
             if output is None:
