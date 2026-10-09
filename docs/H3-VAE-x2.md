@@ -2,7 +2,7 @@
 
 For a supported H3 video model, choose **H3 VAE 2×** in Studio’s
 **Advanced → Finishing → Spatial Upsampling**, or Director’s
-**Advanced → Video Upsampling**. The option is off by default.
+**Advanced → Video → Upsampling**. The option is off by default.
 
 Denoising and references use the selected base canvas. The learned decoder
 doubles both output dimensions: 960×544 becomes 1920×1088. Live previews
@@ -26,6 +26,17 @@ Both normal and x2 H3 decoding blend temporal chunks in the native decoder
 grid and write finalized frames to CPU bytes. This avoids retaining the
 complete floating-point decoded video on the GPU. The x2 decoder still adds
 work and output memory, especially for long clips or further finishing.
+
+## Measured 12-GB Windows results
+
+On the RTX 3080 Ti with 32 GB RAM, a 14.375-second Fused References test at
+six steps, 540p, with an image and exact music produced 1920×1088 output in
+260.735 seconds. Sampled peak VRAM was 8.94 GiB; all 345 frames and the
+soundtrack passed complete media decoding. A matched short warm run added
+about 2.4 seconds compared with the normal decoder. These are individual
+measurements, not a speed or quality guarantee. RAM pressure and paging were
+still observed. See the [validation record](VALIDATION_V2.7.0.md) for settings,
+comparison limits and the separate native 1080p transformer-memory failure.
 
 ## Model terms and provenance
 

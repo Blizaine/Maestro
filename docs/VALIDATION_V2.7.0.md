@@ -1,10 +1,12 @@
 # Maestro v2.7.0 validation
 
-Release candidate prepared October 8, 2026. Public v2.6.0 Main baseline:
-`31d7396eb3b5586c1828fc69a6af5eb2a9e83bff`. The reviewed Dev implementation
-is `8831f34809f003f446167c54e47cdfb0507fc756`, comprising 14 commits since
-that baseline. This local candidate also includes bounded SSH subprocess
-error diagnostics and release metadata/documentation. Main has not been updated.
+Release candidate prepared October 8, 2026, with an H3 VAE 2× follow-up on
+October 9. Public v2.6.0 Main baseline:
+`31d7396eb3b5586c1828fc69a6af5eb2a9e83bff`. The initial reviewed memory and
+Director implementation is `8831f34809f003f446167c54e47cdfb0507fc756`.
+The H3 decoder follow-up is `76dcc51aea5fd5983674bb60f608353001c8fc2f`.
+Dev includes bounded SSH diagnostics and release metadata/documentation.
+Main has not been updated.
 
 ## Automated checks
 
@@ -31,6 +33,24 @@ Director receipt is Git-ignored. Staged diff whitespace passed, and the source
 boundary guard passed on all 2,839 tracked/staged files, including the new release
 documents. No model weights, generated media, credentials or private reports are
 included in the snapshot.
+
+### H3 VAE 2× follow-up
+
+[Dev CI run 37880485581](https://github.com/Blizaine/Maestro/actions/runs/37880485581)
+passed for `76dcc51`: clean-repo guard, Python syntax and undefined names,
+3,505 backend tests (55 skipped), standalone regressions (137 passed, one
+skipped), JSON grammar checks, frontend lint, TypeScript and production build.
+Focused local x2 tests also verify decoder-only weight replacement, native
+ConvRot metadata, absence of meta tensors after loading, exact 345-frame
+streamed decoding parity, preserved input buffers, cancellation, output
+geometry and model reloads when switching the decoder. The isolated browser
+suite checks Studio submission, active Director model capabilities and clearing
+unsupported image/audio/non-H3 selections.
+
+The optional checkpoint revision, file size and SHA-256 are pinned. Its downloaded
+2,834,844,787-byte INT8 ConvRot asset was verified on the test machine before
+loading. Both normal and x2 paths blend in the native decoder grid and convert
+finalized temporal chunks to CPU bytes. No model weights are committed.
 
 ## Measured generation evidence
 
@@ -75,6 +95,45 @@ The matched methodology and limits are in the
 [cross-app benchmark guide](development/h3-cross-app-benchmark.md).
 Private reports, prompts, music, media, hardware identifiers and SSH material
 remain excluded from source control.
+
+### H3 decoder follow-up on the 12-GB machine
+
+Six single-window GPU runs completed: a matched Fused Frames 540p / 124-frame
+six-step normal/x2 comparison with one cold and one warm run per decoder, plus
+Fused References six-step / 345-frame tests with an image and exact music.
+The four short tests used `68a88de`; the two long tests used `76dcc51`.
+All six saved videos passed complete FFmpeg audio/video decoding and actual
+frame-count/dimension checks.
+
+The matched warm normal run took 65.453 seconds and x2 took 67.891 seconds
+(3.7% more elapsed time in this one repeat). Outputs were respectively 960×544
+and 1920×1088, with 124 frames at 24 fps. API phase timing includes final file
+writing; this is not an isolated CUDA decoder measurement.
+
+The 14.375-second normal 720p reference test completed in 507.828 seconds,
+with 11.88 GiB sampled peak device memory. The 540p x2 reference test produced
+1920×1088 in 260.735 seconds with 8.94 GiB sampled peak device memory. Both
+contain 345 frames and retain the uploaded stereo soundtrack; aligned decoded
+PCM correlation with the source excerpt was 0.9991. These different base
+resolutions are not a matched quality or source-only speed comparison.
+
+Before updating, the user's older-Dev 720p job completed denoising but failed
+at whole-video float normalization while allocating another 3.47 GiB. The new
+bounded output path removes that allocation pattern; the follow-up 720p test
+used a different prompt with the same duration, resolution, model/steps and
+image/music reference workload. The user's queued native 1080p job separately
+failed during transformer packed-embedding assembly (2.09 GiB allocation).
+Native 1080p denoising at that duration remains unverified; x2 decoding from
+540p must not be presented as equivalent evidence.
+
+These fixed-control benchmarks temporarily disabled Auto and restored its
+original value and system settings afterward. System-RAM pressure remains:
+three-second host samples reached 39.53 GiB whole-system commit in the long
+720p case and 36.57 GiB in the long x2 case, with paging during checkpoint
+loading. Peaks can be missed between samples. These runs do not establish
+16-GB RAM compatibility or stability with other reference/LoRA combinations.
+Private evidence and sampled frames remain in the Test-Bench workspace and
+`.codex-tmp/h3-x2-20261008/`, excluded from source control.
 
 ### Full Director project
 
@@ -129,5 +188,6 @@ learning and test reports remain local, bounded and optional.
 Attribution, upstream license copies and native allocator provenance are in
 [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md),
 [MMGP provenance](../app/mmgp/PROVENANCE.json) and the
-[port review](development/wan2gp-17-port.md). This candidate does not claim
-that other WanGP 17 workflows, upsamplers or model packages were added.
+[port review](development/wan2gp-17-port.md). The optional H3 VAE 2× integration
+is documented separately in the [decoder guide](H3-VAE-x2.md). The LTX 2.5 detail refiner and other unlisted
+WanGP 17 workflows or model packages are not included.
