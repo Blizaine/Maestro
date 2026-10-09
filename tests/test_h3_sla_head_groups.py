@@ -178,16 +178,23 @@ class TestH3SLAHeadGroups(unittest.TestCase):
         handoff = [owned]
         del owned
         row_calls = []
+        norm_chunk_bytes = []
         real_linear_rows = self.offload.linear_rows
+        real_rms_norm = self.h3._rms_norm_inplace
 
         def record_rows(module, prepared, start, stop):
             row_calls.append((module, start, stop))
             return real_linear_rows(module, prepared, start, stop)
 
+        def record_rms_norm(norm, tensor, chunk_bytes=256 << 20):
+            norm_chunk_bytes.append(chunk_bytes)
+            return real_rms_norm(norm, tensor, chunk_bytes)
+
         with (
             self._configure_groups(),
             _stub_sla_kernels(owned_ref) as (map_calls, kernel_calls),
             mock.patch.object(self.offload, "linear_rows", new=record_rows),
+            mock.patch.object(self.h3, "_rms_norm_inplace", new=record_rms_norm),
             mock.patch.object(
                 self.attention_kit,
                 "sage2_staged_settings",
@@ -206,6 +213,7 @@ class TestH3SLAHeadGroups(unittest.TestCase):
         self.assertTrue(map_calls[-1]["input_released"])
         self.assertIsNone(owned_ref())
         self.assertEqual(len(row_calls), 24)
+        self.assertEqual(norm_chunk_bytes, [64 << 20] * 16)
         for group in range(8):
             start, stop = group * 64, (group + 1) * 64
             self.assertEqual(
@@ -218,6 +226,90 @@ class TestH3SLAHeadGroups(unittest.TestCase):
             )
         staged_settings.assert_not_called()
         torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+
+    def test_ordinary_grouped_and_unsplit_norm_chunk_budgets(self):
+        for split_level, expected_chunk in ((2, 64 << 20), (0, 256 << 20)):
+            with self.subTest(split_level=split_level):
+                attention = self._fixture()
+                attention.sla_attention.enabled = False
+                values, rotary = self._inputs()
+                expected = self._reference(attention, values, rotary)
+                norm_chunk_bytes = []
+                real_norm = self.h3._rms_norm_inplace
+
+                def record_norm(norm, tensor, chunk_bytes=256 << 20):
+                    norm_chunk_bytes.append(chunk_bytes)
+                    return real_norm(norm, tensor, chunk_bytes)
+
+                with (
+                    self._configure_groups(split_level),
+                    _stub_sla_kernels() as (map_calls, kernel_calls),
+                    mock.patch.object(
+                        self.attention, "pay_attention", side_effect=_dense_attention
+                    ),
+                    mock.patch.object(
+                        self.attention_kit,
+                        "sage2_staged_settings",
+                        return_value=None,
+                    ),
+                    mock.patch.object(self.h3, "_rms_norm_inplace", new=record_norm),
+                    torch.no_grad(),
+                ):
+                    actual = attention(values.clone(), rotary)
+
+                expected_calls = 16 if split_level else 2
+                self.assertEqual(
+                    norm_chunk_bytes,
+                    [expected_chunk] * expected_calls,
+                )
+                self.assertEqual(map_calls, [])
+                self.assertEqual(kernel_calls, [])
+                torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+
+    def test_inplace_norm_matches_native_across_dtype_layout_and_tail(self):
+        tolerances = {
+            torch.float32: (1e-6, 1e-6),
+            torch.bfloat16: (1e-2, 1e-2),
+            torch.float16: (2e-3, 2e-3),
+        }
+        for dtype, (rtol, atol) in tolerances.items():
+            for layout in ("contiguous", "strided"):
+                with self.subTest(dtype=dtype, layout=layout):
+                    generator = torch.Generator().manual_seed(303)
+                    if layout == "contiguous":
+                        source = torch.randn(
+                            (1, 10, 4, 8), generator=generator, dtype=dtype
+                        )
+                    else:
+                        source = torch.randn(
+                            (1, 4, 10, 8), generator=generator, dtype=dtype
+                        ).permute(0, 2, 1, 3)
+                    norm = nn.RMSNorm(8, eps=1e-5, dtype=dtype)
+                    actual = source.clone(memory_format=torch.preserve_format)
+                    original = actual.clone(memory_format=torch.preserve_format)
+                    row_bytes = actual[0, 0].numel() * actual.element_size()
+                    chunk_bytes = 3 * row_bytes
+                    chunk_rows = []
+                    hook = norm.register_forward_pre_hook(
+                        lambda _module, args: chunk_rows.append(args[0].shape[1])
+                    )
+                    try:
+                        with torch.inference_mode():
+                            expected = norm(source)
+                            chunk_rows.clear()
+                            returned = self.h3._rms_norm_inplace(
+                                norm, actual, chunk_bytes
+                            )
+                    finally:
+                        hook.remove()
+
+                    self.assertIs(returned, actual)
+                    self.assertEqual(chunk_rows, [3, 3, 3, 1])
+                    self.assertEqual(actual.stride(), original.stride())
+                    self.assertFalse(torch.equal(actual, original))
+                    torch.testing.assert_close(
+                        actual, expected, rtol=rtol, atol=atol
+                    )
 
     def test_sparse_failure_falls_back_for_failed_and_remaining_groups(self):
         for fail_at in (0, 3):

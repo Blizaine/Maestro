@@ -20,7 +20,9 @@ Prepared release candidate; not published. See the [full release notes](docs/REL
   attending one group at a time while retaining reference/audio prefix
   protection and dense recovery. Compatible INT8 ConvRot weights also support
   grouped Triton projections; unsupported formats and active LoRAs retain their
-  ordinary path. The default split setting is unchanged.
+  ordinary path. Grouped Q/K normalization uses smaller scratch chunks to
+  avoid a large FP32 temporary on older PyTorch CUDA runtimes. The default
+  split setting is unchanged.
 - Add optional learned H3 VAE 2x video decoding in Studio and Director. Keep
   denoising at the chosen resolution, download the verified decoder only on
   selection, and convert decoded frames to CPU bytes in bounded chunks to

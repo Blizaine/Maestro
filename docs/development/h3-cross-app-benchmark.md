@@ -54,3 +54,11 @@ paths. Preparation leaves the shared source untouched for mixed formats;
 rotation uses bounded tiles. GPU recorders must replace functions directly:
 `MagicMock` call history can retain full-size tensor arguments and invalidate
 memory measurements.
+
+Grouped H3 Q/K normalization caps each input chunk at 64 MiB rather than the
+unsplit path's 256 MiB default. PyTorch 2.7 can materialize a FP32 normalization
+temporary twice the BF16 input size; the larger chunk exhausted a physical
+12-GB card during the first native-size attention block. The smaller chunk
+preserves per-head RMSNorm and RoPE math. A complete saved-video run on the
+physical machine remains the acceptance check; CPU parity and component
+memory checks alone do not establish end-to-end compatibility.

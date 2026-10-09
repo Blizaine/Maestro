@@ -48,6 +48,9 @@ MINIMAX_H3_ACTIVATION_CHUNK_TOKENS = 8192
 MINIMAX_H3_ADAPTIVE_CHUNK_MAX_TOKENS = 32768
 MINIMAX_H3_LARGE_SEQUENCE_TOKENS = 50000
 MINIMAX_H3_RMS_NORM_NATIVE_MAX_TOKENS = 75000
+# Split Q/K/V groups still need per-token RMSNorm, but smaller chunks limit
+# PyTorch's FP32 scratch while the residual and assembled attention output live.
+MINIMAX_H3_GROUPED_RMS_NORM_CHUNK_BYTES = 64 << 20
 
 
 def _activation_chunk_tokens(
@@ -712,6 +715,15 @@ class MiniMaxH3Attention(nn.Module):
 
                 split_requested = attention_kit.head_groups(self.heads, length) > 1
 
+                def norm_rows(norm, rows):
+                    if split_requested:
+                        return _rms_norm_inplace(
+                            norm,
+                            rows,
+                            MINIMAX_H3_GROUPED_RMS_NORM_CHUNK_BYTES,
+                        )
+                    return _rms_norm_inplace(norm, rows)
+
                 def norm_rope(query, key, _group):
                     if (
                         fused_rms_rope
@@ -732,9 +744,9 @@ class MiniMaxH3Attention(nn.Module):
                             key.copy_(normalized[1])
                             return
                     if query is not None:
-                        _rms_norm_inplace(self.q_norm, query)
+                        norm_rows(self.q_norm, query)
                     if key is not None:
-                        _rms_norm_inplace(self.k_norm, key)
+                        norm_rows(self.k_norm, key)
                     if rotary is not None:
                         if query is not None:
                             _apply_rope_inplace(query, *rotary)
