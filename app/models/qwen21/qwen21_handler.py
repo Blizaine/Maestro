@@ -37,6 +37,16 @@ _VIGGLE_REPO_URL = "https://huggingface.co/Viggle/Qwen-Image-2.1-viggle-turbo/re
 for _profile in _VIGGLE_PROFILES.values():
     _profile["lora_url"] = _VIGGLE_REPO_URL + _profile["filename"]
 
+# Qwen-Image-2.1-Turbo is a separately distilled checkpoint, not an adapter. Its
+# profile carries no LoRA and is offered only on model definitions that set
+# "qwen21_turbo_checkpoint": true (the base weights were not trained for it).
+TURBO_SOLVER = "qwen21_turbo"
+_TURBO_PROFILE = {"label": "Qwen Turbo checkpoint (8 steps)", "steps": 8, "guidance": 1.0}
+
+
+def is_turbo_checkpoint(model_def):
+    return bool((model_def or {}).get("qwen21_turbo_checkpoint"))
+
 _QWEN21_2K_VALUES = {
     "auto": "auto_2k",
     "21:9": "3136x1344",
@@ -101,7 +111,7 @@ def apply_acceleration_profile(settings, *, selected_profile=None):
             raise ValueError("Choose a Viggle Turbo profile with 4, 5, or 6 steps.")
     if solver in ("", "euler"):
         solver = "default"
-    if solver not in ("default", *_VIGGLE_PROFILES):
+    if solver not in ("default", TURBO_SOLVER, *_VIGGLE_PROFILES):
         raise ValueError(f"Unsupported Qwen Image 2.1 acceleration profile: {solver!r}.")
 
     raw_loras = normalized.get("activated_loras") or []
@@ -120,10 +130,13 @@ def apply_acceleration_profile(settings, *, selected_profile=None):
         kept_multipliers.append(raw_multipliers[index])
 
     normalized["sample_solver"] = solver
-    if solver == "default":
+    if solver in ("default", TURBO_SOLVER):
         if len(kept_loras) != len(raw_loras):
             normalized["activated_loras"] = kept_loras
             normalized["loras_multipliers"] = " ".join(kept_multipliers)
+        if solver == TURBO_SOLVER:
+            normalized["num_inference_steps"] = _TURBO_PROFILE["steps"]
+            normalized["guidance_scale"] = _TURBO_PROFILE["guidance"]
         return normalized
 
     profile = _VIGGLE_PROFILES[solver]
@@ -139,24 +152,32 @@ def apply_acceleration_profile(settings, *, selected_profile=None):
 class family_handler:
     @staticmethod
     def query_model_def(base_model_type, model_def):
-        return {
-            "image_outputs": True,
-            "device_explicit": True,
-            "dtype": "bf16",
-            "guidance_max_phases": 1,
-            "sample_solvers": [("FlowMatch Euler", "default")] + [
+        if is_turbo_checkpoint(model_def):
+            solvers = [(_TURBO_PROFILE["label"], TURBO_SOLVER)]
+            profiles = {TURBO_SOLVER: dict(_TURBO_PROFILE, sample_solver=TURBO_SOLVER)}
+        else:
+            solvers = [("FlowMatch Euler", "default")] + [
                 (profile["label"], solver) for solver, profile in _VIGGLE_PROFILES.items()
-            ],
-            "qwen21_acceleration_profiles": {
+            ]
+            profiles = {
                 solver: {
                     "label": profile["label"],
+                    "sample_solver": solver,
                     "steps": profile["steps"],
                     "guidance": profile["guidance"],
                     "lora_url": profile["lora_url"],
                     "lora_weight": 1.0,
                 }
                 for solver, profile in _VIGGLE_PROFILES.items()
-            },
+            }
+        return {
+            "image_outputs": True,
+            "device_explicit": True,
+            "dtype": "bf16",
+            "guidance_max_phases": 1,
+            "sample_solvers": solvers,
+            "qwen21_acceleration_profiles": profiles,
+            "qwen21_turbo_checkpoint": is_turbo_checkpoint(model_def),
             "compile": False,
             "fit_into_canvas_image_refs": 0,
             "vae_block_size": 32,
@@ -271,6 +292,9 @@ class family_handler:
         ui_defaults.update(image_mode=1, video_prompt_type="I", batch_size=1,
                            num_inference_steps=40, guidance_scale=4.0, sample_solver="default",
                            resolution="1024x1024", remove_background_images_ref=0)
+        if is_turbo_checkpoint(model_def):
+            ui_defaults.update(num_inference_steps=_TURBO_PROFILE["steps"],
+                               guidance_scale=_TURBO_PROFILE["guidance"], sample_solver=TURBO_SOLVER)
 
     @staticmethod
     def fix_settings(base_model_type, settings_version, model_def, ui_defaults):

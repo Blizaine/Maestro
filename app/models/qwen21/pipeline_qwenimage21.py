@@ -56,12 +56,22 @@ VIGGLE_SIGMAS = {
 }
 _VIGGLE_PROFILE_STEPS = {"viggle_v01": 4, "viggle_v02": 5, "viggle_v021": 6}
 
+# Qwen-Image-2.1-Turbo ships this 8-step schedule as `sample_sigmas` in its
+# model_index.json, with a static-shift scheduler (no dynamic shifting, no
+# terminal shift). Only the Turbo checkpoint was distilled for it.
+QWEN21_TURBO_SIGMAS = (1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568)
+QWEN21_TURBO_SOLVER = "qwen21_turbo"
+
 
 def qwen21_sampling_profile(sample_solver: str, num_inference_steps: int):
     """Return scheduler overrides and sigma nodes for a named Qwen profile."""
     solver = (sample_solver or "default").lower()
     if solver in ("", "default", "euler"):
         return {}, None
+    if solver == QWEN21_TURBO_SOLVER:
+        if int(num_inference_steps) != len(QWEN21_TURBO_SIGMAS):
+            raise ValueError(f"{solver} requires exactly {len(QWEN21_TURBO_SIGMAS)} inference steps.")
+        return {"use_dynamic_shifting": False, "shift": 1.0, "shift_terminal": None}, QWEN21_TURBO_SIGMAS
     if solver in _VIGGLE_PROFILE_STEPS:
         required = _VIGGLE_PROFILE_STEPS[solver]
         if int(num_inference_steps) != required:
