@@ -13,6 +13,9 @@ Prepared release candidate; not published. See the [full release notes](docs/REL
   fallbacks and per-model memory guards.
 - Reduce H3 conditioning and VAE overhead with a bounded CPU prompt cache,
   hardware-aware tiled decoding and corrected generation-device placement.
+- Bound H3 video/audio input and output projections in token chunks, releasing
+  FP32 embedding buffers before transformer blocks instead of retaining
+  multi-gigabyte intermediates through long, high-resolution generations.
 - Add optional learned H3 VAE 2x video decoding in Studio and Director. Keep
   denoising at the chosen resolution, download the verified decoder only on
   selection, and convert decoded frames to CPU bytes in bounded chunks to

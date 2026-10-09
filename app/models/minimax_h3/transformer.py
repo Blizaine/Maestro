@@ -234,6 +234,80 @@ def _weight_dtype(module: nn.Module, fallback: torch.dtype) -> torch.dtype:
     return dtype
 
 
+def _project_token_rows_into_packed(
+    projection: nn.Module,
+    input_rows: torch.Tensor,
+    indices: torch.Tensor,
+    packed: torch.Tensor,
+) -> None:
+    """Project modality rows directly into packed storage in bounded chunks.
+
+    H3's video input projection is a FP32 precision island. Materializing its
+    full output before casting to the packed dtype can require multiple GiB
+    and keeps that full FP32 tensor alive throughout every transformer block.
+    In inference, project and copy bounded row groups so each temporary is
+    released immediately. Preserve the ordinary full projection when autograd
+    is active and for sequences that already fit in one chunk.
+    """
+
+    length = input_rows.shape[1]
+    input_dtype = _weight_dtype(projection, torch.float32)
+    chunk_size = _activation_chunk_tokens(
+        length,
+        input_rows.shape[-1],
+        projection.out_features,
+    )
+    if torch.is_grad_enabled() or length <= chunk_size:
+        embeds = projection(input_rows.to(dtype=input_dtype))
+        packed.index_copy_(1, indices, embeds.to(dtype=packed.dtype))
+        return
+
+    for start in range(0, length, chunk_size):
+        end = min(length, start + chunk_size)
+        rows = input_rows[:, start:end].to(dtype=input_dtype)
+        embeds = projection(rows)
+        packed.index_copy_(1, indices[start:end], embeds.to(dtype=packed.dtype))
+        del rows, embeds
+
+
+def _project_selected_rows(
+    projection: nn.Module,
+    packed: torch.Tensor,
+    indices: torch.Tensor,
+) -> torch.Tensor:
+    """Apply an output projection to selected packed rows without a full copy."""
+
+    length = indices.numel()
+    # The H3 output heads are FP32 precision islands; match the previous
+    # full-sequence path's explicit activation upcast.
+    input_dtype = torch.float32
+    chunk_size = _activation_chunk_tokens(
+        length,
+        projection.in_features,
+        projection.out_features,
+    )
+    if torch.is_grad_enabled() or length <= chunk_size:
+        rows = packed.index_select(1, indices).to(dtype=input_dtype)
+        return projection(rows)
+
+    first_end = min(length, chunk_size)
+    rows = packed.index_select(1, indices[:first_end]).to(dtype=input_dtype)
+    projected = projection(rows)
+    output = projected.new_empty(
+        (packed.shape[0], length, projection.out_features)
+    )
+    output[:, :first_end].copy_(projected)
+    del rows, projected
+
+    for start in range(first_end, length, chunk_size):
+        end = min(length, start + chunk_size)
+        rows = packed.index_select(1, indices[start:end]).to(dtype=input_dtype)
+        projected = projection(rows)
+        output[:, start:end].copy_(projected)
+        del rows, projected
+    return output
+
+
 def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """Apply split-half RoPE to the leading rotary channels."""
 
@@ -1408,18 +1482,25 @@ class MiniMaxH3Transformer(nn.Module):
         timestep_indices = timestep_indices.to(device=device, dtype=torch.long)
         token_tags = token_tags.to(device=device, dtype=torch.long)
 
-        video_dtype = _weight_dtype(self.video_patch_proj, torch.float32)
-        audio_dtype = _weight_dtype(self.audio_patch_proj, torch.float32)
         text_dtype = _weight_dtype(self.condition_proj, torch.bfloat16)
-        video_embeds = self.video_patch_proj(hidden_states.to(dtype=video_dtype))
-        audio_embeds = self.audio_patch_proj(audio_hidden_states.to(dtype=audio_dtype))
         text_embeds = self.condition_proj(encoder_hidden_states.to(dtype=text_dtype))
         text_embeds = self.token_refiner(text_embeds)
 
         packed = text_embeds.new_zeros((1, sequence_length, text_embeds.shape[-1]))
         packed.index_copy_(1, text_indices, text_embeds)
-        packed.index_copy_(1, video_indices, video_embeds.to(packed.dtype))
-        packed.index_copy_(1, audio_indices, audio_embeds.to(packed.dtype))
+        del text_embeds
+        _project_token_rows_into_packed(
+            self.video_patch_proj,
+            hidden_states,
+            video_indices,
+            packed,
+        )
+        _project_token_rows_into_packed(
+            self.audio_patch_proj,
+            audio_hidden_states,
+            audio_indices,
+            packed,
+        )
 
         curve = self._curve_at(timestep, device)
         adaln_indices = timestep_indices * MODALITY_COUNT + token_tags.clamp_min(0)
@@ -1523,13 +1604,19 @@ class MiniMaxH3Transformer(nn.Module):
                 )
 
         packed = self.final_layer(packed, curve, timestep_runs)
-        video_activations = packed.index_select(1, video_indices).to(torch.float32)
-        audio_activations = packed.index_select(1, audio_indices).to(torch.float32)
-        video_output = self.final_layer.video_out(video_activations)
+        video_output = _project_selected_rows(
+            self.final_layer.video_out,
+            packed,
+            video_indices,
+        )
         if target_inverse is not None:
             video_output = torch.cat((video_output[:, :condition_video_rows],
                 video_output[:, condition_video_rows:].index_select(1, target_inverse)), dim=1)
-        audio_output = self.final_layer.audio_out(audio_activations)
+        audio_output = _project_selected_rows(
+            self.final_layer.audio_out,
+            packed,
+            audio_indices,
+        )
         if not return_dict:
             return video_output, audio_output
         return MiniMaxH3TransformerOutput(video_output, audio_output)

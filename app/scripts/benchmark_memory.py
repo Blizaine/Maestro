@@ -107,6 +107,7 @@ REQUEST_REPORT_KEYS = {
     "sliding_window_size", "sliding_window_overlap",
     "sliding_window_discard_last_frames", "minimax_h3_multi_window",
     "sliding_window_memory_override", "minimax_h3_reference_sequence",
+    "minimax_h3_extended_duration",
     "minimax_h3_text_encoder", "spatial_upsampling",
     "settings_version", "workspace",
 }
@@ -116,6 +117,7 @@ OUTPUT_VALIDATION_PARAM_KEYS = (
     "sliding_window_size", "sliding_window_overlap",
     "sliding_window_discard_last_frames", "minimax_h3_multi_window",
     "sliding_window_memory_override", "minimax_h3_reference_sequence",
+    "minimax_h3_extended_duration",
     "minimax_h3_text_encoder", "spatial_upsampling",
     "settings_version",
 )
