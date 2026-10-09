@@ -324,7 +324,10 @@ def _normalized_video_to_cpu_uint8(video: torch.Tensor) -> torch.Tensor:
     output = torch.empty(source.shape, dtype=torch.uint8, device="cpu")
     for start in range(0, int(source.shape[1]), 8):
         stop = min(start + 8, int(source.shape[1]))
-        pixels = source[:, start:stop].float().clamp_(-1.0, 1.0)
+        # float() aliases CPU float32 inputs. Clone only this bounded chunk
+        # before in-place normalization so caller-owned control/frozen buffers
+        # are never modified.
+        pixels = source[:, start:stop].float().clone().clamp_(-1.0, 1.0)
         pixels.add_(1.0).mul_(127.5).clamp_(0.0, 255.0)
         output[:, start:stop].copy_(pixels.to(torch.uint8))
     return output

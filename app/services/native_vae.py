@@ -14,8 +14,8 @@ def native_vae_selection(model_def: dict, spatial: str, image_mode: int) -> str 
     if not spatial.startswith("h3_vae"):
         return None
     if spatial != H3_VAE_X2:
-        raise ValueError("H3 VAE upsampling currently supports 2× only. Choose H3 VAE 2× or None.")
+        raise ValueError("H3 VAE upsampling currently supports 2Ã— only. Choose H3 VAE 2Ã— or None.")
     modes = (model_def.get("vae_upsamplers") or {}).get("h3_vae", [])
     if model_def.get("audio_only") or image_mode not in modes:
-        raise ValueError("H3 VAE 2× is available only while generating with a supported H3 video or image model.")
+        raise ValueError("H3 VAE 2Ã— is available only while generating with a supported H3 model and generation mode.")
     return H3_VAE_X2

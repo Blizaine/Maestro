@@ -15,6 +15,7 @@ if str(APP) not in sys.path:
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 from models.minimax_h3 import vae_upsampler  # noqa: E402
+from models.minimax_h3.minimax_h3_main import _normalized_video_to_cpu_uint8  # noqa: E402
 from models.minimax_h3.video_vae import AutoencoderKLMiniMaxH3  # noqa: E402
 
 class H3X2VaeDecodeTests(unittest.TestCase):
@@ -187,6 +188,19 @@ class H3X2VaeRoutingTests(unittest.TestCase):
 
 
 class H3X2VaeHelperTests(unittest.TestCase):
+
+    def test_compact_normalization_and_same_size_resize_do_not_mutate_float_input(self):
+        source = torch.linspace(-1.0, 1.0, 3 * 1 * 2 * 2, dtype=torch.float32).reshape(3, 1, 2, 2)
+        original = source.clone()
+        expected = ((source.clamp(-1.0, 1.0) + 1.0) * 127.5).clamp(0.0, 255.0).to(torch.uint8)
+
+        compact = _normalized_video_to_cpu_uint8(source)
+        self.assertTrue(torch.equal(compact, expected))
+        self.assertTrue(torch.equal(source, original))
+
+        resized = vae_upsampler.resize_video_canvas_uint8(source, 2, 2)
+        self.assertTrue(torch.equal(resized, expected))
+        self.assertTrue(torch.equal(source, original))
 
     def test_video_canvas_resize_preserves_dtype_and_cpu_placement(self):
         source = torch.linspace(-1, 1, 3 * 9 * 4 * 6, dtype=torch.float32).reshape(3, 9, 4, 6)

@@ -71,7 +71,10 @@ def resize_video_canvas_uint8(video, target_height: int, target_width: int):
     output = torch.empty((channels, frames, target_height, target_width), dtype=torch.uint8, device="cpu")
     for start in range(0, frames, 2):
         stop = min(start + 2, frames)
-        frame_batch = video[:, start:stop].permute(1, 0, 2, 3).contiguous().to(torch.float32)
+        # With a single frame, the permuted tensor can already be considered
+        # contiguous; for float32, to() can then alias the caller's buffer.
+        # Clone this two-frame working set before any in-place conversion.
+        frame_batch = video[:, start:stop].permute(1, 0, 2, 3).contiguous().to(torch.float32).clone()
         if (height, width) != (target_height, target_width):
             frame_batch = F.interpolate(
                 frame_batch,

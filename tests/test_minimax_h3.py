@@ -81,6 +81,23 @@ def _read(path: Path) -> str:
 
 
 def _load_handler_class():
+    app_path = str(_APP)
+    added_app_path = app_path not in sys.path
+    if added_app_path:
+        sys.path.insert(0, app_path)
+    try:
+        from models.minimax_h3.vae_upsampler import (
+            X2_VAE_FILE,
+            X2_VAE_LICENSE_FILE,
+            X2_VAE_NOTICE_FILE,
+            X2_VAE_REPO,
+            X2_VAE_REVISION,
+            X2_VAE_VALUE,
+        )
+    finally:
+        if added_app_path:
+            sys.path.remove(app_path)
+
     tree = ast.parse(_read(_HANDLER_PATH), filename=str(_HANDLER_PATH))
     selected = []
     for node in tree.body:
@@ -107,6 +124,12 @@ def _load_handler_class():
     namespace = {
         "os": os,
         "torch": types.SimpleNamespace(bfloat16="bfloat16"),
+        "X2_VAE_FILE": X2_VAE_FILE,
+        "X2_VAE_LICENSE_FILE": X2_VAE_LICENSE_FILE,
+        "X2_VAE_NOTICE_FILE": X2_VAE_NOTICE_FILE,
+        "X2_VAE_REPO": X2_VAE_REPO,
+        "X2_VAE_REVISION": X2_VAE_REVISION,
+        "X2_VAE_VALUE": X2_VAE_VALUE,
     }
     module = ast.Module(body=selected, type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), str(_HANDLER_PATH), "exec"), namespace)
