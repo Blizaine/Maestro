@@ -532,6 +532,16 @@ class TestAttentionKit(unittest.TestCase):
             text_indices=torch.tensor([0]),
         )
         attention.begin_forward(layout, 3, 1, 1, (1, 1, 1))
+        # Checkpoint loading normally fills these raw Parameters. This small
+        # unit-test module has no checkpoint, so initialize them explicitly
+        # instead of letting allocator contents control the parity assertion.
+        with torch.no_grad():
+            attention.linear_attention.alpha.A_log.copy_(
+                torch.tensor([-0.25, 0.35])
+            )
+            attention.linear_attention.alpha.dt_bias.copy_(
+                torch.linspace(-0.4, 0.4, heads * head_dim)
+            )
 
         raw = [
             projection(values.unsqueeze(0)).view(
