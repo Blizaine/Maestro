@@ -62,3 +62,11 @@ temporary twice the BF16 input size; the larger chunk exhausted a physical
 preserves per-head RMSNorm and RoPE math. A complete saved-video run on the
 physical machine remains the acceptance check; CPU parity and component
 memory checks alone do not establish end-to-end compatibility.
+
+For long compatible grouped H3 routes, the output projection processes token
+chunks and compacts them into a prefix of the owned contiguous attention
+result. When output width does not exceed input width, each completed chunk
+ends before the next unread input row. This avoids a second full-sequence
+output allocation; the returned view is contiguous and retains the original
+storage until its residual consumer releases it. Autograd, autocast, active
+LoRAs and incompatible storage/projection layouts retain the ordinary path.

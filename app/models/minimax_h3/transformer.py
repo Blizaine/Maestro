@@ -311,6 +311,112 @@ def _project_selected_rows(
     return output
 
 
+def _project_attention_output_reusing_storage(
+    projection: nn.Module,
+    attended: torch.Tensor,
+    batch: int,
+    length: int,
+) -> torch.Tensor:
+    """Project long grouped-attention output into its own smaller buffer.
+
+    The grouped H3 routes already own a contiguous attention result. When an
+    inference Linear narrows its last dimension, its output can occupy a
+    prefix of that storage. Project each token chunk before copying it into
+    the prefix: for output width <= input width, a completed chunk cannot
+    overwrite any later, unread input row.
+    """
+
+    attended_width = (
+        int(attended.numel() // (batch * length))
+        if batch > 0 and length > 0
+        else int(getattr(projection, "in_features", 0) or 0)
+    )
+    input_width = int(getattr(projection, "in_features", attended_width) or 0)
+
+    def full_projection():
+        return projection(attended.reshape(batch, length, attended_width))
+
+    compiler = getattr(torch, "compiler", None)
+    is_compiling = getattr(compiler, "is_compiling", None)
+    if (
+        (callable(is_compiling) and is_compiling())
+        or torch.is_grad_enabled()
+        or getattr(projection, "training", True)
+        or not isinstance(projection, nn.Linear)
+        or input_width <= 0
+        or input_width != attended_width
+        or int(getattr(projection, "out_features", 0) or 0) <= 0
+        or attended.ndim != 4
+        or attended.shape[0] != batch
+        or attended.shape[1] != length
+        or attended.shape[2] * attended.shape[3] != input_width
+        or not attended.is_floating_point()
+        or not attended.is_contiguous()
+        or attended.requires_grad
+        or getattr(projection, "_mm_lora_data", None)
+    ):
+        return full_projection()
+
+    try:
+        autocast_enabled = torch.is_autocast_enabled(attended.device.type)
+        storage = attended.untyped_storage()
+        storage_ptr = storage.data_ptr()
+        storage_bytes = storage.nbytes()
+    except (AttributeError, RuntimeError, TypeError):
+        return full_projection()
+    if autocast_enabled or attended.storage_offset() != 0:
+        return full_projection()
+    if storage_bytes != attended.numel() * attended.element_size():
+        return full_projection()
+
+    output_width = int(projection.out_features)
+    total_rows = batch * length
+    if output_width > input_width or total_rows < MINIMAX_H3_LARGE_SEQUENCE_TOKENS:
+        return full_projection()
+    chunk_size = _activation_chunk_tokens(total_rows, input_width, output_width)
+    if chunk_size >= total_rows:
+        return full_projection()
+
+    source = attended.view(total_rows, input_width)
+    first_end = min(total_rows, chunk_size)
+    first_projected = projection(source[:first_end])
+    if (
+        not torch.is_tensor(first_projected)
+        or tuple(first_projected.shape) != (first_end, output_width)
+        or first_projected.device != attended.device
+        or first_projected.dtype != attended.dtype
+        or first_projected.untyped_storage().data_ptr() == storage_ptr
+    ):
+        del first_projected
+        return full_projection()
+
+    # Prefix elements [0, first_end * output_width) end no later than the
+    # first unread input row at first_end * input_width. The same inequality
+    # holds for every later chunk because output_width <= input_width.
+    destination = source.view(-1)[: total_rows * output_width].view(
+        total_rows, output_width
+    )
+    destination[:first_end].copy_(first_projected)
+    del first_projected
+
+    for start in range(first_end, total_rows, chunk_size):
+        stop = min(total_rows, start + chunk_size)
+        projected = projection(source[start:stop])
+        if (
+            not torch.is_tensor(projected)
+            or tuple(projected.shape) != (stop - start, output_width)
+            or projected.device != attended.device
+            or projected.dtype != attended.dtype
+        ):
+            raise RuntimeError(
+                "H3 output projection changed shape or dtype between token chunks"
+            )
+        destination[start:stop].copy_(projected)
+        del projected
+
+    return destination.view(batch, length, output_width)
+
+
 def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """Apply split-half RoPE to the leading rotary channels."""
 
@@ -768,8 +874,8 @@ class MiniMaxH3Attention(nn.Module):
                             qkv, self.sla_attention.enabled
                         ),
                     )
-                    return self.out_proj(
-                        attended.reshape(batch, length, self.heads * self.head_dim)
+                    return _project_attention_output_reusing_storage(
+                        self.out_proj, attended, batch, length
                     )
 
                 if not use_sla:
@@ -790,6 +896,10 @@ class MiniMaxH3Attention(nn.Module):
                             self.head_dim,
                             norm_rope,
                         )
+                        if split_requested:
+                            return _project_attention_output_reusing_storage(
+                                self.out_proj, attended, batch, length
+                            )
                         return self.out_proj(
                             attended.reshape(
                                 batch, length, self.heads * self.head_dim

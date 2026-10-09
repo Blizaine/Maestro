@@ -235,11 +235,21 @@ class TestH3SLAHeadGroups(unittest.TestCase):
                 values, rotary = self._inputs()
                 expected = self._reference(attention, values, rotary)
                 norm_chunk_bytes = []
+                output_projection_calls = []
                 real_norm = self.h3._rms_norm_inplace
+                real_output_projection = (
+                    self.h3._project_attention_output_reusing_storage
+                )
 
                 def record_norm(norm, tensor, chunk_bytes=256 << 20):
                     norm_chunk_bytes.append(chunk_bytes)
                     return real_norm(norm, tensor, chunk_bytes)
+
+                def record_output_projection(projection, attended, batch, length):
+                    output_projection_calls.append((batch, length))
+                    return real_output_projection(
+                        projection, attended, batch, length
+                    )
 
                 with (
                     self._configure_groups(split_level),
@@ -253,6 +263,11 @@ class TestH3SLAHeadGroups(unittest.TestCase):
                         return_value=None,
                     ),
                     mock.patch.object(self.h3, "_rms_norm_inplace", new=record_norm),
+                    mock.patch.object(
+                        self.h3,
+                        "_project_attention_output_reusing_storage",
+                        new=record_output_projection,
+                    ),
                     torch.no_grad(),
                 ):
                     actual = attention(values.clone(), rotary)
@@ -264,6 +279,10 @@ class TestH3SLAHeadGroups(unittest.TestCase):
                 )
                 self.assertEqual(map_calls, [])
                 self.assertEqual(kernel_calls, [])
+                self.assertEqual(
+                    output_projection_calls,
+                    [(1, 13)] if split_level else [],
+                )
                 torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
 
     def test_inplace_norm_matches_native_across_dtype_layout_and_tail(self):
@@ -310,6 +329,194 @@ class TestH3SLAHeadGroups(unittest.TestCase):
                     torch.testing.assert_close(
                         actual, expected, rtol=rtol, atol=atol
                     )
+
+    def test_grouped_output_projection_reuses_owned_buffer_with_tail_chunk(self):
+        torch.manual_seed(404)
+        batch, length, heads, head_dim = 2, 7, 2, 4
+        source = torch.randn(batch, length, heads, head_dim)
+        projection = nn.Linear(heads * head_dim, 5, bias=True).eval()
+        expected = F.linear(
+            source.reshape(batch, length, -1), projection.weight, projection.bias
+        )
+        calls = []
+        real_forward = projection.forward
+
+        def record_forward(rows):
+            calls.append(tuple(rows.shape))
+            return real_forward(rows)
+
+        with (
+            mock.patch.object(
+                self.h3, "MINIMAX_H3_LARGE_SEQUENCE_TOKENS", 1
+            ),
+            mock.patch.object(
+                self.h3, "MINIMAX_H3_ACTIVATION_CHUNK_TOKENS", 4
+            ),
+            mock.patch.object(projection, "forward", new=record_forward),
+            torch.inference_mode(),
+        ):
+            actual = self.h3._project_attention_output_reusing_storage(
+                projection, source, batch, length
+            )
+
+        self.assertEqual(calls, [(4, 8), (4, 8), (4, 8), (2, 8)])
+        self.assertEqual(tuple(actual.shape), (batch, length, 5))
+        self.assertTrue(actual.is_contiguous())
+        self.assertEqual(actual.untyped_storage().data_ptr(), source.untyped_storage().data_ptr())
+        self.assertEqual(
+            actual.untyped_storage().nbytes(),
+            source.numel() * source.element_size(),
+        )
+        torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
+
+    def test_grouped_sla_and_ordinary_routes_use_bounded_output_projection(self):
+        for route in ("sla", "ordinary"):
+            with self.subTest(route=route):
+                attention = self._fixture()
+                attention.out_proj = nn.Linear(512, 384, bias=True).eval()
+                if route == "ordinary":
+                    attention.sla_attention.enabled = False
+                values, rotary = self._inputs()
+                expected = self._reference(attention, values, rotary)
+                projection_storage = []
+                real_bounded_projection = (
+                    self.h3._project_attention_output_reusing_storage
+                )
+
+                def record_bounded_projection(projection, attended, batch, length):
+                    source_ptr = attended.untyped_storage().data_ptr()
+                    result = real_bounded_projection(
+                        projection, attended, batch, length
+                    )
+                    projection_storage.append(
+                        (
+                            source_ptr,
+                            result.untyped_storage().data_ptr(),
+                            tuple(result.shape),
+                            result.is_contiguous(),
+                        )
+                    )
+                    return result
+
+                context = (
+                    _stub_sla_kernels()
+                    if route == "sla"
+                    else mock.patch.object(
+                        self.attention, "pay_attention", new=_dense_attention
+                    )
+                )
+                with (
+                    self._configure_groups(),
+                    mock.patch.object(
+                        self.h3, "MINIMAX_H3_LARGE_SEQUENCE_TOKENS", 1
+                    ),
+                    mock.patch.object(
+                        self.h3, "MINIMAX_H3_ACTIVATION_CHUNK_TOKENS", 4
+                    ),
+                    mock.patch.object(
+                        self.h3,
+                        "_project_attention_output_reusing_storage",
+                        new=record_bounded_projection,
+                    ),
+                    context,
+                    mock.patch.object(
+                        self.attention_kit,
+                        "sage2_staged_settings",
+                        return_value=None,
+                    ),
+                    torch.no_grad(),
+                ):
+                    actual = attention(values.clone(), rotary)
+
+                self.assertEqual(len(projection_storage), 1)
+                source_ptr, output_ptr, shape, contiguous = projection_storage[0]
+                self.assertEqual(source_ptr, output_ptr)
+                self.assertEqual(shape, (1, 13, 384))
+                self.assertTrue(contiguous)
+                torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+
+    def test_output_projection_fallbacks_preserve_input_and_autocast_dtype(self):
+        torch.manual_seed(505)
+
+        class NonlinearProjection(nn.Module):
+            in_features = 8
+            out_features = 8
+
+            def __init__(self):
+                super().__init__()
+                self.linear = nn.Linear(8, 8)
+
+            def forward(self, value):
+                return self.linear(value).relu()
+
+        fallback_cases = (
+            ("short", torch.randn(1, 2, 2, 4), nn.Linear(8, 5)),
+            (
+                "noncontiguous",
+                torch.randn(1, 4, 7, 2).permute(0, 2, 1, 3),
+                nn.Linear(8, 5),
+            ),
+            ("expansion", torch.randn(1, 7, 2, 4), nn.Linear(8, 9)),
+            ("nonlinear", torch.randn(1, 7, 2, 4), NonlinearProjection()),
+            ("three_dimensional", torch.randn(1, 7, 8), nn.Linear(8, 5)),
+        )
+        for name, source, projection in fallback_cases:
+            with self.subTest(route=name):
+                projection.eval()
+                original = source.clone(memory_format=torch.preserve_format)
+                expected = projection(source.reshape(1, source.shape[1], -1))
+                with (
+                    mock.patch.object(
+                        self.h3,
+                        "MINIMAX_H3_LARGE_SEQUENCE_TOKENS",
+                        50_000 if name == "short" else 1,
+                    ),
+                    mock.patch.object(
+                        self.h3, "MINIMAX_H3_ACTIVATION_CHUNK_TOKENS", 4
+                    ),
+                    torch.inference_mode(),
+                ):
+                    actual = self.h3._project_attention_output_reusing_storage(
+                        projection, source, 1, source.shape[1]
+                    )
+                self.assertNotEqual(
+                    actual.untyped_storage().data_ptr(),
+                    source.untyped_storage().data_ptr(),
+                )
+                self.assertTrue(torch.equal(source, original))
+                torch.testing.assert_close(actual, expected)
+
+        source = torch.randn(1, 7, 2, 4)
+        projection = nn.Linear(8, 5).eval()
+        with (
+            mock.patch.object(
+                self.h3, "MINIMAX_H3_LARGE_SEQUENCE_TOKENS", 1
+            ),
+            mock.patch.object(
+                self.h3, "MINIMAX_H3_ACTIVATION_CHUNK_TOKENS", 4
+            ),
+            torch.autocast("cpu", dtype=torch.bfloat16),
+            torch.inference_mode(),
+        ):
+            expected = projection(source.reshape(1, 7, 8))
+            actual = self.h3._project_attention_output_reusing_storage(
+                projection, source, 1, 7
+            )
+        self.assertEqual(actual.dtype, torch.bfloat16)
+        self.assertEqual(expected.dtype, torch.bfloat16)
+        self.assertNotEqual(
+            actual.untyped_storage().data_ptr(), source.untyped_storage().data_ptr()
+        )
+        torch.testing.assert_close(actual, expected)
+
+        train_source = torch.randn(1, 7, 2, 4, requires_grad=True)
+        train_projection = nn.Linear(8, 5).eval()
+        with torch.enable_grad():
+            train_result = self.h3._project_attention_output_reusing_storage(
+                train_projection, train_source, 1, 7
+            )
+            train_result.sum().backward()
+        self.assertIsNotNone(train_source.grad)
 
     def test_sparse_failure_falls_back_for_failed_and_remaining_groups(self):
         for fail_at in (0, 3):

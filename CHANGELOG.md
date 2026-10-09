@@ -22,7 +22,9 @@ Prepared release candidate; not published. See the [full release notes](docs/REL
   grouped Triton projections; unsupported formats and active LoRAs retain their
   ordinary path. Grouped Q/K normalization uses smaller scratch chunks to
   avoid a large FP32 temporary on older PyTorch CUDA runtimes. The default
-  split setting is unchanged.
+  split setting is unchanged. Long compatible grouped-attention output
+  projections reuse owned storage in token chunks instead of allocating
+  another full-size output buffer.
 - Add optional learned H3 VAE 2x video decoding in Studio and Director. Keep
   denoising at the chosen resolution, download the verified decoder only on
   selection, and convert decoded frames to CPU bytes in bounded chunks to
