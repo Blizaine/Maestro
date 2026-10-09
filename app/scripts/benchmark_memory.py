@@ -107,7 +107,7 @@ REQUEST_REPORT_KEYS = {
     "sliding_window_size", "sliding_window_overlap",
     "sliding_window_discard_last_frames", "minimax_h3_multi_window",
     "sliding_window_memory_override", "minimax_h3_reference_sequence",
-    "minimax_h3_text_encoder",
+    "minimax_h3_text_encoder", "spatial_upsampling",
     "settings_version", "workspace",
 }
 
@@ -116,7 +116,7 @@ OUTPUT_VALIDATION_PARAM_KEYS = (
     "sliding_window_size", "sliding_window_overlap",
     "sliding_window_discard_last_frames", "minimax_h3_multi_window",
     "sliding_window_memory_override", "minimax_h3_reference_sequence",
-    "minimax_h3_text_encoder",
+    "minimax_h3_text_encoder", "spatial_upsampling",
     "settings_version",
 )
 OUTPUT_MEDIA_INFO_KEYS = (
@@ -924,6 +924,8 @@ def verify_completed_outputs(
         for key in ("width", "height"):
             if key in request:
                 expected_dimensions[key] = request[key]
+        if request.get("spatial_upsampling") == "h3_vae*2":
+            expected_dimensions = {key: int(value) * 2 for key, value in expected_dimensions.items()}
         for key, expected in expected_dimensions.items():
             actual = media_info.get(key) if isinstance(media_info, dict) else None
             if actual is None:

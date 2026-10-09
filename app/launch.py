@@ -6634,6 +6634,7 @@ def get_model_options(model_type: str):
 
         # Post-processing capabilities
         "vae_upsampler_modes": md.get("vae_upsampler", []),
+        "vae_upsamplers": md.get("vae_upsamplers", {}),
 
         # TTS-specific
         "audio_only": md.get("audio_only", False),
@@ -11040,6 +11041,12 @@ async def _prepare_generation_submission(
     except Exception:
         _base_model_type = body.get("model_type")
     _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
+    from services.native_vae import native_vae_selection
+    try:
+        native_vae_selection(_generation_model_def, body.get("spatial_upsampling", ""),
+                             1 if body.get("generation_mode") == "image" else int(body.get("image_mode", 0)))
+    except (ValueError, TypeError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     if (
         body.get("generation_mode", "video") in {"video", "avatar"}
         and _is_minimax_h3_identity(

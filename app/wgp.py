@@ -1020,7 +1020,13 @@ def validate_settings(state, model_type, single_prompt, inputs):
             return ret()
 
     if not model_def.get("motion_amplitude", False): motion_amplitude = 1.
-    if "vae" in spatial_upsampling:
+    from services.native_vae import native_vae_selection
+    try:
+        native_vae_selection(model_def, spatial_upsampling, image_mode)
+    except ValueError as error:
+        gr.Info(str(error))
+        return ret()
+    if "vae" in spatial_upsampling and not spatial_upsampling.startswith("h3_vae"):
         if image_mode not in model_def.get("vae_upsampler", []):
             gr.Info(f"VAE Spatial Upsampling is not available for {medium}")
             return ret()
@@ -4039,7 +4045,7 @@ def download_file(url,filename):
 
 RIFE_V4_FILENAME = "rife4.26.pkl"
 RIFE_V3_FILENAME = "flownet.pkl"
-def download_models(model_filename = None, model_type= None, file_type = 0, submodel_no = 1, force_path = None):
+def download_models(model_filename = None, model_type= None, file_type = 0, submodel_no = 1, force_path = None, VAE_upsampling=None):
     def computeList(filename):
         if filename == None:
             return []
@@ -4127,7 +4133,11 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
                 raise Exception(f"Lora URL '{url}' is invalid: {str(e)}'")
             
     if file_type != 0: return            
-    model_files = model_type_handler.query_model_files(computeList, base_model_type, model_def)
+    if VAE_upsampling == "h3_vae*2" and "h3_vae" in model_def.get("vae_upsamplers", {}):
+        model_files = model_type_handler.query_model_files(
+            computeList, base_model_type, model_def, VAE_upsampling=VAE_upsampling)
+    else:
+        model_files = model_type_handler.query_model_files(computeList, base_model_type, model_def)
     if not isinstance(model_files, list): model_files = [model_files]
     for one_repo in model_files:
         process_files_def(**one_repo)
@@ -4590,7 +4600,8 @@ def load_models(model_type, override_profile = -1, output_type="video", preview_
     local_model_file_list= []
     for filename, file_model_type, file_source_type, submodel_no in zip(model_file_list, model_type_list, source_type_list, model_submodel_no_list):
         if len(filename) == 0: continue 
-        download_models(filename, file_model_type, file_source_type, submodel_no)
+        download_models(filename, file_model_type, file_source_type, submodel_no,
+                        VAE_upsampling=model_kwargs.get("VAE_upsampling"))
         local_file_name = get_compatible_local_model_filename(
             filename,
             file_model_type,
@@ -4598,7 +4609,7 @@ def load_models(model_type, override_profile = -1, output_type="video", preview_
         )
         local_model_file_list.append( os.path.basename(filename) if local_file_name is None else local_file_name )
     if len(local_model_file_list) == 0:
-        download_models("", model_type, 0, -1)
+        download_models("", model_type, 0, -1, VAE_upsampling=model_kwargs.get("VAE_upsampling"))
 
     VAE_dtype = torch.float16 if server_config.get("vae_precision","16") == "16" else torch.float
     mixed_precision_transformer =  server_config.get("mixed_precision","0") == "1"
@@ -6412,12 +6423,17 @@ def perform_temporal_upsampling(sample, previous_last_frame, temporal_upsampling
 
 def perform_spatial_upsampling(sample, spatial_upsampling, seed=0, abort_callback=None, progress_callback=None,
                               options=None, still_image=False):
+    if spatial_upsampling == "h3_vae*2":
+        # The native H3 decoder already enlarged its compact RGB output.
+        return sample
     from shared.utils.utils import resize_lanczos
     if str(spatial_upsampling).startswith("dlss5*"):
         from services.media_processing import neural_render
         return neural_render(sample, spatial_upsampling, options=options, still_image=still_image,
                              abort_callback=abort_callback, progress_callback=progress_callback)
-    if spatial_upsampling == "vae2":
+    if spatial_upsampling in {"vae2", "h3_vae*2"}:
+        # Native decoders have already enlarged this tensor. Never apply a
+        # second pixel upscale to their output.
         return sample
     # FlashVSR (DiT super-resolution) dispatch — ported from upstream Wan2GP.
     # When spatial_upsampling is a "flashvsr"/"flashvsr2pass" method, route to
@@ -8084,8 +8100,13 @@ def generate_video(
                 f"{requested_ltx25_video_vae}; reloading the model profile."
             )
             reload_needed = True
-    if vae_upsampling is not None:
-        new_vae_upsampling = None if image_mode not in vae_upsampling or "vae" not in spatial_upsampling else spatial_upsampling
+    native_h3_vae_capability = "h3_vae" in model_def.get("vae_upsamplers", {})
+    if vae_upsampling is not None or native_h3_vae_capability:
+        if native_h3_vae_capability:
+            from services.native_vae import native_vae_selection
+            new_vae_upsampling = native_vae_selection(model_def, spatial_upsampling, image_mode)
+        else:
+            new_vae_upsampling = None if image_mode not in vae_upsampling or "vae" not in spatial_upsampling else spatial_upsampling
         # Read back the currently-applied setting to decide whether a reload
         # is actually needed. Models that expose wan_model.vae.upsampling_set
         # (e.g. Wan) get trusted verbatim. For models that DON'T expose it
@@ -8101,7 +8122,7 @@ def generate_video(
         else:
             old_vae_upsampling = _last_vae_upsampling
         reload_needed = reload_needed or old_vae_upsampling != new_vae_upsampling
-        if new_vae_upsampling: model_kwargs = {"VAE_upsampling": new_vae_upsampling}
+        if new_vae_upsampling: model_kwargs["VAE_upsampling"] = new_vae_upsampling
     output_type = get_output_type_for_model(model_type, image_mode)
     profile = compute_profile(override_profile, output_type)
     enhancer_mode = server_config.get("enhancer_mode", 1)
@@ -8168,7 +8189,7 @@ def generate_video(
     # Remember the VAE setting we just asked for so the next generation's
     # comparison has a real value to check against (instead of falling back
     # to None and spuriously "detecting a change" every gen on LTX-2).
-    if vae_upsampling is not None:
+    if vae_upsampling is not None or native_h3_vae_capability:
         _last_vae_upsampling = new_vae_upsampling
     if args.test:
         send_cmd("info", "Test mode: model loaded, skipping generation.")
@@ -10182,12 +10203,16 @@ def generate_video(
                             prefix_video = _video_tensor_to_uint8_chunk_inplace(prefix_video)
                         elif prefix_video.dtype == torch.uint8:
                             prefix_video = prefix_video.float().div_(127.5).sub_(1.0)
+                    if spatial_upsampling == "h3_vae*2" and prefix_video.shape[1] > 1:
+                        from models.minimax_h3.vae_upsampler import resize_video_canvas
+                        prefix_video = resize_video_canvas(prefix_video, sample.shape[-2], sample.shape[-1])
                     if prefix_video.shape[1] > 1:
                         # remove sliding window overlapped frames at the beginning of the generation
                         sample = torch.cat([ prefix_video, sample[: , source_video_overlap_frames_count:]], dim = 1)
                     else:
                         # remove source video overlapped frames at the beginning of the generation if there is only a start frame
-                        sample = torch.cat([ prefix_video[:, :-source_video_overlap_frames_count], sample], dim = 1)
+                        if prefix_video.shape[1] > source_video_overlap_frames_count:
+                            sample = torch.cat([prefix_video[:, :-source_video_overlap_frames_count], sample], dim=1)
                     prefix_video = None
                     guide_start_frame -= source_video_overlap_frames_count 
                     if generated_audio is not None:
@@ -10257,16 +10282,23 @@ def generate_video(
                     output_new_audio_data = full_generated_audio
 
 
-                if len(temporal_upsampling) > 0 or len(spatial_upsampling) > 0 and not "vae2" in spatial_upsampling:                
+                if len(temporal_upsampling) > 0 or len(spatial_upsampling) > 0 and spatial_upsampling not in {"vae2", "h3_vae*2"}:
                     send_cmd("progress", [0, get_latest_status(state,"Upsampling")])
                 
                 inline_processing = None
                 finishing_started = time.monotonic()
                 finishing_input = None
+                if sample is not None and spatial_upsampling == "h3_vae*2":
+                    # H3 preserves the latent canvas and doubles both edges
+                    # during decoding; record that geometry before temporal finishing.
+                    finishing_input = {"width": int(sample.shape[-1]) // 2,
+                                       "height": int(sample.shape[-2]) // 2}
+                    if not is_image:
+                        finishing_input["fps"] = float(fps)
                 if sample is not None and (temporal_upsampling or spatial_upsampling):
                     # VAE enlargement happens during decoding, before this tensor.
                     # Its pre-upscale size cannot be measured here.
-                    if spatial_upsampling not in {"vae1", "vae2"}:
+                    if spatial_upsampling not in {"vae1", "vae2", "h3_vae*2"}:
                         finishing_input = {"width": int(sample.shape[-1]), "height": int(sample.shape[-2])}
                         if not is_image:
                             finishing_input["fps"] = float(fps)
@@ -10313,7 +10345,7 @@ def generate_video(
                         before=finishing_input, options=custom_settings,
                         # For sliding-window output this pass is only one part
                         # of the assembled clip; don't claim a total duration.
-                        elapsed=None if sliding_window else time.monotonic() - finishing_started)
+                        elapsed=None if sliding_window or spatial_upsampling == "h3_vae*2" else time.monotonic() - finishing_started)
                 if film_grain_intensity> 0:
                     from postprocessing.film_grain import add_film_grain
                     sample = add_film_grain(sample, film_grain_intensity, film_grain_saturation) 
@@ -14440,7 +14472,8 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                                     ("Disabled", ""),
                                     ("Lanczos x1.5", "lanczos1.5"), 
                                     ("Lanczos x2.0", "lanczos2"), 
-                                ] + ([("VAE x1.0 (refined)", "vae1"),("VAE x2.0", "vae2")] if any_vae_upsampling else []) ,
+                                ] + ([("VAE x1.0 (refined)", "vae1"),("VAE x2.0", "vae2")] if any_vae_upsampling else [])
+                                  + ([("H3 VAE x2.0", "h3_vae*2")] if (1 if image_outputs else 0) in model_def.get("vae_upsamplers", {}).get("h3_vae", []) else []),
                                 value=spatial_upsampling,
                                 visible=True,
                                 scale = 1,

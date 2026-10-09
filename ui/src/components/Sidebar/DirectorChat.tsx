@@ -14,6 +14,13 @@ import { formatSeconds, recommendedWindowProfile } from './DurationSlider'
 import { DurationPresetControl } from './DurationPresetControl'
 import { LONG_FORM_MAX_SECONDS, formatDuration } from '../../lib/durationPlanning'
 import { formatEstimatedClock, formatEtaDuration } from '../../lib/format'
+import {
+  H3_VAE_UPSAMPLER,
+  H3_VAE_UPSAMPLER_LABEL,
+  h3VaeUpsamplingHelp,
+  modelOptionsForSelectedModel,
+  supportsH3VaeUpsampling,
+} from '../../lib/h3VaeUpsampling'
 import type { DirectorPipelineType, DirectorShotImageGuidance, DirectorSkill, ModelOptions, ShortFilmCharacter, ShortFilmPath } from '../../types'
 
 // AUDIO_ACCEPT lists both audio formats AND video formats. When a video
@@ -2279,6 +2286,8 @@ function DirectorAdvancedAccordion() {
   const turboPresetByModel = useStore(s => s.directorH3TurboPresetByModel)
   const savedVideoLoras = useStore(s => s.savedLoraPerMode.video)
   const [directorVideoOptions, setDirectorVideoOptions] = useState<ModelOptions | null>(null)
+  const directorResolution = useStore(s => s.directorResolution)
+  const directorAspectRatio = useStore(s => s.directorAspectRatio)
   const shotImageSupport = useStore(s => s.models.find(
     model => model.model_type === videoModel,
   )?.director?.shot_image_support)
@@ -2345,9 +2354,7 @@ function DirectorAdvancedAccordion() {
     return () => { cancelled = true }
   }, [setVideoSteps, videoModel])
 
-  const activeDirectorVideoOptions = directorVideoOptions?.model_type === videoModel
-    ? directorVideoOptions
-    : null
+  const activeDirectorVideoOptions = modelOptionsForSelectedModel(directorVideoOptions, videoModel)
   const videoStepsMin = Math.max(
     1,
     Math.round(Number(activeDirectorVideoOptions?.inference_steps_min ?? 1)),
@@ -2402,6 +2409,23 @@ function DirectorAdvancedAccordion() {
     { value: '', label: 'Off' },
     { value: 'lanczos1.5', label: 'Lanczos 1.5×' },
     { value: 'lanczos2', label: 'Lanczos 2×' },
+  ]
+  const directorVideoVaeSupported = supportsH3VaeUpsampling(activeDirectorVideoOptions, 0)
+  const directorVideoResolution = activeDirectorVideoOptions
+    ? resolveResolution(activeDirectorVideoOptions, directorResolution, directorAspectRatio)
+    : ''
+  const videoUpsamplingOptions = [
+    ...upsamplingOptions,
+    ...(directorVideoVaeSupported
+      ? [{ value: H3_VAE_UPSAMPLER, label: H3_VAE_UPSAMPLER_LABEL }]
+      : vidUpsampling === H3_VAE_UPSAMPLER
+        ? [{
+            value: H3_VAE_UPSAMPLER,
+            label: H3_VAE_UPSAMPLER_LABEL + (activeDirectorVideoOptions
+              ? ' (unavailable for this model)'
+              : ' (checking selected model…)'),
+          }]
+        : []),
   ]
 
   return (
@@ -2566,12 +2590,18 @@ function DirectorAdvancedAccordion() {
                 onChange={e => setVidUpsampling(e.target.value)}
                 className="w-full bg-bg-tertiary border border-border rounded-lg px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent-blue"
               >
-                {upsamplingOptions.map(opt => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                {videoUpsamplingOptions.map(opt => (
+                  <option key={opt.value} value={opt.value} disabled={
+                    opt.value === H3_VAE_UPSAMPLER && !directorVideoVaeSupported
+                  }>{opt.label}</option>
                 ))}
               </select>
               <p className="text-[10px] text-text-muted mt-0.5">
-                Render then upscale the video. Adds time per shot.
+                {directorVideoVaeSupported
+                  ? h3VaeUpsamplingHelp(directorVideoResolution)
+                  : vidUpsampling === H3_VAE_UPSAMPLER
+                    ? 'This saved upsampling method is unavailable for the selected video model and will not be sent.'
+                    : 'Render then upscale the video. Adds time per shot.'}
               </p>
             </div>
 

@@ -1066,6 +1066,191 @@ class AutoencoderKLMiniMaxH3(ModelMixin, ConfigMixin, AttentionMixin, Autoencode
             return (posterior,)
         return AutoencoderKLOutput(latent_dist=posterior)
 
+    def _decoded_frame_count(self, latent_frames: int) -> int:
+        """Return the exact temporal length produced by ``_decode`` without decoding pixels."""
+        latent_frames = int(latent_frames)
+        if latent_frames <= 0:
+            return 0
+        tokens_chunk_size = int(self.tokens_chunk_size)
+        token_drop = int(self.config.token_drop)
+        temporal_ratio = int(self.temporal_compression_ratio)
+        chunk_num_frames = tokens_chunk_size * temporal_ratio
+        num_tokens = latent_frames + token_drop
+        pad_tokens = (-num_tokens) % tokens_chunk_size
+        padded_latent_frames = latent_frames + pad_tokens
+        num_chunks = (num_tokens + pad_tokens) // tokens_chunk_size - int(token_drop > 0)
+        if num_chunks <= 0:
+            return 0
+
+        output_frames = 0
+        final_overlap_frames = 0
+        for index in range(num_chunks):
+            start = index * tokens_chunk_size
+            clip_tokens = min(
+                tokens_chunk_size + int(self.token_overlap),
+                padded_latent_frames - start,
+            )
+            clip_frames = max(0, clip_tokens) * temporal_ratio
+            for overlap_index in range(int(token_drop > 0) + 1):
+                frame_start = overlap_index * chunk_num_frames
+                frame_count = max(0, min(frame_start + chunk_num_frames, clip_frames) - frame_start)
+                frame_count = max(0, frame_count - int(self.frame_pre_padding))
+                if overlap_index == 0:
+                    output_frames += frame_count
+                else:
+                    final_overlap_frames = frame_count
+        output_frames += final_overlap_frames
+
+        if pad_tokens > 0:
+            intra_tail = int(self.config.clip_length) % temporal_ratio
+            output_frames -= sum(
+                intra_tail
+                if intra_tail and (latent_frames + offset) % tokens_chunk_size == 0
+                else temporal_ratio
+                for offset in range(pad_tokens)
+            )
+        return max(0, output_frames)
+
+    def _copy_decoded_chunk_to_cpu_uint8(
+        self,
+        chunk: torch.Tensor,
+        output: torch.Tensor,
+        batch_index: int,
+        frame_offset: int,
+        upsample: bool,
+    ) -> int:
+        """Normalize at most two frames at a time and append them to the CPU canvas."""
+        if chunk.ndim != 5:
+            raise ValueError(f"MiniMax H3 decoded chunks must be BCFHW, got {tuple(chunk.shape)}.")
+        batch, channels, frames, height, width = chunk.shape
+        if batch != 1:
+            raise ValueError("MiniMax H3 streaming decode expects one video per chunk.")
+        if upsample and channels != 12:
+            raise ValueError(f"MiniMax H3 x2 decoder must emit 12 packed channels, got {channels}.")
+        if not upsample and channels != 3:
+            raise ValueError(f"MiniMax H3 decoder must emit RGB, got {channels} channels.")
+
+        mean = chunk.new_tensor((0.485, 0.456, 0.406), dtype=torch.float32).view(1, 3, 1, 1, 1)
+        std = chunk.new_tensor((0.229, 0.224, 0.225), dtype=torch.float32).view(1, 3, 1, 1, 1)
+        written = 0
+        for start in range(0, frames, 2):
+            stop = min(start + 2, frames)
+            frame_chunk = chunk[:, :, start:stop]
+            frame_count = stop - start
+            if upsample:
+                packed = frame_chunk.permute(0, 2, 1, 3, 4).reshape(batch * frame_count, channels, height, width)
+                frame_chunk = F.pixel_shuffle(packed, 2)
+                frame_chunk = frame_chunk.reshape(batch, frame_count, 3, height * 2, width * 2).permute(0, 2, 1, 3, 4)
+
+            pixels = frame_chunk.float()
+            pixels.mul_(std).add_(mean).clamp_(0.0, 1.0).mul_(2.0).sub_(1.0)
+            pixels.add_(1.0).mul_(127.5).clamp_(0, 255)
+            pixels = pixels.to(torch.uint8)
+            destination_start = frame_offset + start
+            destination_stop = min(destination_start + frame_count, output.shape[2])
+            if destination_stop > destination_start:
+                output[
+                    batch_index, :, destination_start:destination_stop
+                ].copy_(pixels[0, :, : destination_stop - destination_start].to(device="cpu"))
+                written += destination_stop - destination_start
+            del pixels, frame_chunk
+        return written
+
+    def _decode_to_cpu_uint8_one(self, z: torch.Tensor) -> torch.Tensor:
+        """Decode one latent video into a compact CPU canvas, temporal chunk by chunk."""
+        latent_frames = int(z.shape[2])
+        output_frames = self._decoded_frame_count(latent_frames)
+        upsample = int(self.config.out_channels) == 12
+        scale = 2 if upsample else 1
+        output_height = int(z.shape[-2]) * int(self.spatial_compression_ratio) * scale
+        output_width = int(z.shape[-1]) * int(self.spatial_compression_ratio) * scale
+        output = torch.empty(
+            (1, 3, output_frames, output_height, output_width),
+            dtype=torch.uint8,
+            device="cpu",
+        )
+        if output_frames == 0:
+            return output
+
+        tokens_chunk_size = int(self.tokens_chunk_size)
+        token_drop = int(self.config.token_drop)
+        temporal_ratio = int(self.temporal_compression_ratio)
+        chunk_num_frames = tokens_chunk_size * temporal_ratio
+        num_tokens = latent_frames + token_drop
+        pad_tokens = (-num_tokens) % tokens_chunk_size
+        num_chunks = (num_tokens + pad_tokens) // tokens_chunk_size - int(token_drop > 0)
+        latent_video = z
+        if pad_tokens > 0:
+            latent_video = torch.cat(
+                [latent_video, latent_video[:, :, -1:].repeat(1, 1, pad_tokens, 1, 1)],
+                dim=2,
+            )
+
+        output_offset = 0
+        overlap = None
+        for index in range(num_chunks):
+            if bool(getattr(self, "_interrupt", False)):
+                raise InterruptedError("MiniMax H3 VAE decode was cancelled.")
+            start = index * tokens_chunk_size
+            clip = self._decode_clip(
+                latent_video[:, :, start : start + tokens_chunk_size + int(self.token_overlap)]
+            )
+            for overlap_index in range(int(token_drop > 0) + 1):
+                frame_start = overlap_index * chunk_num_frames
+                chunk = clip[:, :, frame_start : frame_start + chunk_num_frames]
+                chunk = chunk[:, :, int(self.frame_pre_padding) :]
+                if overlap_index == 0:
+                    if overlap is not None:
+                        chunk = self._blend(overlap, chunk, int(self.frame_overlap), dim=-3)
+                    self._copy_decoded_chunk_to_cpu_uint8(
+                        chunk, output, 0, output_offset, upsample
+                    )
+                    output_offset += int(chunk.shape[2])
+                    del chunk
+                else:
+                    # A temporal slice is a view into the full decoded clip;
+                    # clone only the overlap so that it cannot pin that clip's
+                    # much larger GPU storage while the next clip is decoded.
+                    overlap = chunk.clone()
+            del clip
+
+        if overlap is not None:
+            self._copy_decoded_chunk_to_cpu_uint8(overlap, output, 0, output_offset, upsample)
+            output_offset += int(overlap.shape[2])
+            del overlap
+
+        pad_frames = 0
+        if pad_tokens > 0:
+            intra_tail = int(self.config.clip_length) % temporal_ratio
+            pad_frames = sum(
+                intra_tail
+                if intra_tail and (latent_frames + offset) % tokens_chunk_size == 0
+                else temporal_ratio
+                for offset in range(pad_tokens)
+            )
+        if output_offset - pad_frames != output_frames:
+            raise RuntimeError(
+                "MiniMax H3 streaming VAE decode produced an unexpected frame count "
+                f"({output_offset - pad_frames}; expected {output_frames})."
+            )
+        return output
+
+    @apply_forward_hook
+    @torch.inference_mode()
+    def decode_to_cpu_uint8(self, z: torch.Tensor) -> torch.Tensor:
+        """Decode without retaining the full float video on the accelerator.
+
+        Spatial tiles and temporal overlap are blended in the native decoder
+        grid. For the learned x2 decoder, only finalized temporal chunks are
+        pixel-shuffled, normalized, and copied to a CPU uint8 output canvas.
+        """
+        if self.use_slicing and z.shape[0] > 1:
+            return torch.cat(
+                [self._decode_to_cpu_uint8_one(z_slice) for z_slice in z.split(1)],
+                dim=0,
+            )
+        return self._decode_to_cpu_uint8_one(z)
+
     @apply_forward_hook
     def decode(self, z: torch.Tensor, return_dict: bool = True) -> DecoderOutput | tuple[torch.Tensor]:
         r"""

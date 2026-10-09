@@ -13,6 +13,10 @@ Prepared release candidate; not published. See the [full release notes](docs/REL
   fallbacks and per-model memory guards.
 - Reduce H3 conditioning and VAE overhead with a bounded CPU prompt cache,
   hardware-aware tiled decoding and corrected generation-device placement.
+- Add optional learned H3 VAE 2x video decoding in Studio and Director. Keep
+  denoising at the chosen resolution, download the verified decoder only on
+  selection, and convert decoded frames to CPU bytes in bounded chunks to
+  avoid a full-video floating-point GPU allocation.
 - Defer optional preprocessing and audio-support downloads until a selected
   workflow needs them. Add a manual developer test bench, memory comparisons
   and an optional controller for multiple machines.

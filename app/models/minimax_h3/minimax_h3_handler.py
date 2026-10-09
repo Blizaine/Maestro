@@ -43,6 +43,25 @@ _TEXT_ENCODER_GGUF_Q4 = "qwen3vl-32B-MiniMax-H3-Q4_K_M.gguf"
 _VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 _VIDEO_VAE_INT8_CONVROT = "minimax_h3_video_vae_int8_convrot.safetensors"
 _AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
+try:
+    from .vae_upsampler import (
+        X2_VAE_FILE,
+        X2_VAE_LICENSE_FILE,
+        X2_VAE_NOTICE_FILE,
+        X2_VAE_REPO,
+        X2_VAE_REVISION,
+        X2_VAE_VALUE,
+    )
+except ImportError:
+    # The model-discovery and linked-asset fixtures load this file directly,
+    # outside the ``models.minimax_h3`` package. Keep that supported path
+    # independent from package-relative import state.
+    X2_VAE_FILE = "MiniMax-H3-X2-Detail-v1_int8_convrot.safetensors"
+    X2_VAE_LICENSE_FILE = "MiniMax-H3-X2-Detail-v1.LICENSE"
+    X2_VAE_NOTICE_FILE = "MiniMax-H3-X2-Detail-v1.NOTICE"
+    X2_VAE_REPO = "DeepBeepMeep/MiniMax-H3"
+    X2_VAE_REVISION = "adc81ccb71352192214d83d5fafb9487e860be39"
+    X2_VAE_VALUE = "h3_vae*2"
 _WANGP_TEXT_ENCODER_FOLDER = "Qwen3-VL-32B-Instruct"
 _WANGP_FL2VA_PRUNED_TRANSFORMER = (
     "MiniMax-H3-FL2VA-pruned_rank8_int8_convrot.safetensors"
@@ -2133,6 +2152,10 @@ class family_handler:
                 "H3 LoRAs are supported; Maestro converts Full adapters when needed."
             ),
         }
+        if not audio_only:
+            # image_mode 0 is H3's native video-generation path. This local
+            # model does not expose a single-frame image generation path.
+            result["vae_upsamplers"] = {"h3_vae": [0]}
         if omni_reference:
             sequence_memory_policy = window_memory_policy
             result.update(
@@ -2353,7 +2376,7 @@ class family_handler:
         return resolved
 
     @staticmethod
-    def query_model_files(computeList, base_model_type, model_def=None):
+    def query_model_files(computeList, base_model_type, model_def=None, VAE_upsampling=None):
         processor_files = [
             "chat_template.json",
             "merges.txt",
@@ -2417,11 +2440,26 @@ class family_handler:
         dialogue_downloads = ([{"repoId": "DeepBeepMeep/Wan2.1", "sourceFolderList": ["whisper_medium"],
                                "fileList": [["config.json", "model.safetensors"]]}]
                               if base_model_type == _TTS_MODEL_TYPE else [])
+        x2_vae_downloads = []
+        if VAE_upsampling not in (None, "", X2_VAE_VALUE):
+            raise ValueError(f"Unsupported MiniMax H3 VAE upsampling selection: {VAE_upsampling!r}.")
+        if VAE_upsampling == X2_VAE_VALUE:
+            if "h3_vae" not in (model_def or {}).get("vae_upsamplers", {}):
+                raise ValueError("The MiniMax H3 model definition does not support learned x2 VAE decoding.")
+            x2_vae_downloads.append(
+                {
+                    "repoId": X2_VAE_REPO,
+                    "revision": X2_VAE_REVISION,
+                    "sourceFolderList": ["minimax_h3"],
+                    "targetFolderList": [os.path.join(_ASSETS_ROOT, "vae")],
+                    "fileList": [[X2_VAE_FILE, X2_VAE_LICENSE_FILE, X2_VAE_NOTICE_FILE]],
+                }
+            )
         if base_model_type == "viggle_animate":
             from models.minimax_h3.viggle import REPO, REVISION, PROMPT_FILE
             return vae_downloads + [{"repoId": REPO, "revision": REVISION,
                 "sourceFolderList": ["viggle_animate"], "fileList": [[PROMPT_FILE]]}]
-        return vae_downloads + attribution_downloads + dialogue_downloads + [
+        return vae_downloads + x2_vae_downloads + attribution_downloads + dialogue_downloads + [
             {
                 "repoId": _OFFICIAL_REPO,
                 "revision": _OFFICIAL_REVISION,
@@ -2461,6 +2499,7 @@ class family_handler:
                 "minimax_h3_text_encoder",
                 (model_def or {}).get("minimax_h3_text_encoder_default", "nvfp4_awq"),
             ),
+            VAE_upsampling=kwargs.get("VAE_upsampling"),
         )
         pipe = {
             "transformer": model.transformer,

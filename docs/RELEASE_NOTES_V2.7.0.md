@@ -81,6 +81,22 @@ took about 2h52m. Media validation establishes completed outputs and timing;
 visual quality, singing and lip sync still need human review. See the
 [validation record](VALIDATION_V2.7.0.md) for exact settings and limits.
 
+## Optional H3 VAE 2× video decoding
+
+Studio and Director offer a learned H3 decoder that doubles both output
+dimensions while keeping denoising at the selected resolution. For example,
+960×544 generation produces 1920×1088 output. Its pinned INT8 ConvRot asset
+(about 2.8 GB) downloads only when selected. The existing H3 encoder and
+reference preparation are retained. Standard and x2 H3 decoding now convert
+finalized temporal chunks directly to CPU uint8 frames, reducing the peak
+GPU and host memory needed for final video normalization.
+
+This is a separate learned-decoder workflow, not native 1080p denoising at
+540p memory cost. It adds decoding work and does not establish upstream
+15-second native 1080p claims on every machine. Current Maestro support is
+for standard H3 video generation; audio-only, Viggle and frozen-source audio
+workflows are excluded. See the [guide and model terms](H3-VAE-x2.md).
+
 ## Shared runtime compatibility
 
 The memory port includes bounded attention staging/head splitting for supported
@@ -93,8 +109,9 @@ Explicit-device factories and model placement updates cover eligible Wan, H3,
 Flux, Qwen Image, Hunyuan, HiDream, Krea2, Z-Image and audio pipelines. LTX,
 LongCat and other routes that still need implicit factories retain their device
 wrapper. Kandinsky no longer replaces the selected allocator at import time.
-These are updates to existing workflows; new model families and upstream
-upsamplers are not included in this release. Optional attention imports and CPU
+These are updates to existing workflows. The optional H3 learned x2 decoder
+is included separately; new model families and the LTX detail refiner are
+not included in this release. Optional attention imports and CPU
 CI fixtures were updated to verify the retained paths.
 
 ## Director workflow

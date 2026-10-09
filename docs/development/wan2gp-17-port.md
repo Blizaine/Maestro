@@ -136,11 +136,12 @@ tensor factory sites instead of removing the default-device wrapper.
 
 ## Scope reviewed separately
 
-The v17 diff also contains new H3 VAE x2 / LTX refiner upsamplers, LTX tiled
-fusion and HDR/keyframe features, SeedVR2 changes, Deepy UI changes and new
-model packages. These are separate workflows or absent local modules and are
-not advertised as enabled by this memory port. They need their own input,
-weight, UI and quality validation. Maestro's llama-server writer is a separate
+The H3 learned VAE x2 decoder was integrated separately after the memory
+port; see [its guide](../H3-VAE-x2.md) and the model provenance in
+`app/models/minimax_h3/UPSTREAM.md`. The LTX detail refiner, LTX tiled fusion
+and HDR/keyframe features, SeedVR2 changes, Deepy UI changes and new model
+packages remain separate workflows or absent local modules. They are not
+advertised as enabled by this memory port and need their own validation. Maestro's llama-server writer is a separate
 engine; MMGP/attention gains do not imply the same speedup for that writer.
 
 Qwen3.5 GDN recurrent-state replay was reviewed separately. Maestro's shared

@@ -36,6 +36,29 @@ preparation/packing in this directory are derived from the Hugging Face
 Diffusers MiniMax H3 implementation at commit
 `abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc`.
 
+The optional learned 2x video decoder follows the MiniMax H3 X2 VAE integration
+in Wan2GP commit `6479db36bdc2619a904a852bba9c2d78e1a83f82`. Its INT8 ConvRot
+checkpoint is downloaded on demand from
+`DeepBeepMeep/MiniMax-H3@adc81ccb71352192214d83d5fafb9487e860be39`
+(`minimax_h3/MiniMax-H3-X2-Detail-v1_int8_convrot.safetensors`, 2,834,844,787
+bytes, SHA-256
+`7ca1a1ad298e06e430da5c18bf721af4e0dcdf7f4ec7283391520bd0b6df7387`). The
+loader keeps the selected standard H3 VAE's encoder, quantization projection,
+and latent conditioning path, then loads only `decoder.*` from the X2 file. It
+filters the checkpoint's `detail_b32.*` branch because that path requires
+source-image encoder features and is not available for generated H3 latents.
+The finalized packed decoder output is blended on its native grid, pixel-shuffled
+by two, normalized, and copied to CPU uint8 in short temporal chunks.
+
+The upstream X2 asset's original repository is
+`speach1sdef178/MiniMax-H3-X2-Detail-VAE@af8c92d267c6849fec5032c35a65d5766737b338`.
+The downloaded `MiniMax-H3-X2-Detail-v1.LICENSE` and
+`MiniMax-H3-X2-Detail-v1.NOTICE` are retained alongside the optional weights.
+That Community License states that its grant excludes the United States, the
+European Union, the United Kingdom, and South Korea and directs prospective
+deployers in those territories to contact MiniMax. Review the included terms
+before using or deploying the optional decoder.
+
 Those files retain their upstream Apache-2.0 copyright and license headers.
 Maestro-specific model loading, packing, memory management, and Studio
 integration are implemented separately in this directory.

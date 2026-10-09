@@ -599,6 +599,25 @@ class MemoryBenchmarkTests(unittest.TestCase):
         self.assertIn("minimax_h3_text_encoder", warning_text)
         self.assertEqual(result["benchmark_validation"]["status"], "unverified")
 
+    def test_native_h3_x2_checks_the_doubled_output_and_unchanged_workload(self):
+        request = {"generation_mode": "video", "model_type": "minimax_h3_fused_turbo",
+                   "workspace": "Memory-Benchmark", "resolution": "960x544",
+                   "video_length": 124, "num_inference_steps": 6,
+                   "spatial_upsampling": "h3_vae*2", "settings_version": 2.58}
+        matrix = one_case_matrix()
+        matrix["request"] = request
+        for output_width, expected_status in ((1920, "verified"), (960, "workload_mismatch")):
+            with self.subTest(output_width=output_width):
+                metadata = {"params": dict(request),
+                            "media_info": {"frames": 124, "width": output_width, "height": 1088}}
+                with tempfile.TemporaryDirectory() as temp:
+                    result = BenchmarkRunner(FakeApi(output_metadata=metadata), matrix,
+                        Path(temp) / "bench", 10, 0.2, None, progress=False).execute()
+                run = result["runs"][0]
+                self.assertEqual(run["output_validation"]["status"], expected_status)
+                self.assertEqual(run["benchmark_eligible"], expected_status == "verified")
+                self.assertEqual(run["request_parameters"]["spatial_upsampling"], "h3_vae*2")
+
     def test_numeric_resolution_must_match_actual_media_dimensions(self):
         request = {
             "generation_mode": "video",

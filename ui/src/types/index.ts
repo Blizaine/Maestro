@@ -1110,6 +1110,8 @@ export interface ModelOptions {
   hide_resolution_presets: boolean
   input_video_strength_label: string
   vae_upsampler_modes: number[]
+  /** Per-method image modes supported by optional VAE spatial upsamplers. */
+  vae_upsamplers?: Record<string, number[]> | null
   // TTS-specific
   audio_only: boolean
   duration_slider: { label: string; min: number; max: number; increment: number; default: number } | null

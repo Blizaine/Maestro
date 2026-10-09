@@ -28,6 +28,7 @@ from shared.utils import files_locator as fl
 
 from .audio_vae import AutoencoderKLMiniMaxH3Audio
 from .checkpoint import (
+    _rename_video_vae_key,
     preprocess_audio_vae_state_dict,
     preprocess_conditioner_state_dict,
     preprocess_native_video_vae_state_dict,
@@ -37,6 +38,12 @@ from .convrot_layout import (
     convrot_quantization_info_from_file,
     has_convrot_layout,
     restore_interleaved_h3_qkv,
+)
+from .vae_upsampler import (
+    X2_VAE_FILE,
+    X2_VAE_VALUE,
+    resize_video_canvas_uint8,
+    verify_x2_vae_checkpoint,
 )
 from .packing import (
     MINIMAX_H3_AUDIO_CHANNELS,
@@ -305,6 +312,22 @@ def _tensor_to_pil(image) -> Image.Image | None:
         pixels = tensor.float().clamp(-1, 1).add(1).mul(127.5).round().to(torch.uint8)
         pixels = pixels.permute(1, 2, 0).numpy()
     return Image.fromarray(pixels).convert("RGB")
+
+
+def _normalized_video_to_cpu_uint8(video: torch.Tensor) -> torch.Tensor:
+    """Convert normalized ``[C,F,H,W]`` video to compact CPU bytes in bounded chunks."""
+    if not torch.is_tensor(video) or video.ndim != 4:
+        raise ValueError("MiniMax H3 output video must have shape [C,F,H,W].")
+    if video.dtype == torch.uint8:
+        return video.detach().to("cpu").contiguous()
+    source = video.detach().to("cpu")
+    output = torch.empty(source.shape, dtype=torch.uint8, device="cpu")
+    for start in range(0, int(source.shape[1]), 8):
+        stop = min(start + 8, int(source.shape[1]))
+        pixels = source[:, start:stop].float().clamp_(-1.0, 1.0)
+        pixels.add_(1.0).mul_(127.5).clamp_(0.0, 255.0)
+        output[:, start:stop].copy_(pixels.to(torch.uint8))
+    return output
 
 
 def _as_video_tensor(input_video) -> torch.Tensor | None:
@@ -1065,24 +1088,122 @@ def _load_conditioner(
     return conditioner
 
 
-def _load_video_vae(filename: str) -> AutoencoderKLMiniMaxH3:
+def _filtered_native_video_vae_state_dict(
+    state_dict,
+    quantization_map=None,
+    tied_weights_map=None,
+    *,
+    namespaces,
+):
+    """Keep selected VAE modules while preserving ConvRot metadata."""
+    namespaces = tuple(namespaces)
+    selected = {
+        key: tensor
+        for key, tensor in state_dict.items()
+        if key.startswith(namespaces)
+    }
+    selected = preprocess_native_video_vae_state_dict(selected)
+
+    def remap_metadata(mapping):
+        if not isinstance(mapping, dict):
+            return mapping
+        result = {}
+        for key, value in mapping.items():
+            if not str(key).startswith(namespaces):
+                continue
+            result[_rename_video_vae_key(str(key))] = value
+        return result
+
+    return selected, remap_metadata(quantization_map), remap_metadata(tied_weights_map)
+
+
+def _preprocess_h3_encoder_vae_state_dict(state_dict, quantization_map=None, tied_weights_map=None):
+    return _filtered_native_video_vae_state_dict(
+        state_dict,
+        quantization_map,
+        tied_weights_map,
+        namespaces=("encoder.", "quant_conv.", "post_quant_conv."),
+    )
+
+
+def _preprocess_h3_x2_decoder_state_dict(state_dict, quantization_map=None, tied_weights_map=None):
+    return _filtered_native_video_vae_state_dict(
+        state_dict,
+        quantization_map,
+        tied_weights_map,
+        namespaces=("decoder.",),
+    )
+
+
+def _load_x2_video_vae_weights(vae, base_checkpoint, x2_checkpoint) -> None:
+    """Load base conditioning modules and the learned decoder without meta leftovers."""
+    encoder_modules = torch.nn.ModuleDict(
+        {
+            "encoder": vae.encoder,
+            "quant_conv": vae.quant_conv,
+            "post_quant_conv": vae.post_quant_conv,
+        }
+    )
+    offload.load_model_data(
+        encoder_modules,
+        base_checkpoint,
+        writable_tensors=False,
+        preprocess_sd=_preprocess_h3_encoder_vae_state_dict,
+        default_dtype=torch.float16,
+        ignore_missing_keys=True,
+        ignore_unused_weights=True,
+    )
+    del encoder_modules
+
+    decoder_modules = torch.nn.ModuleDict({"decoder": vae.decoder})
+    offload.load_model_data(
+        decoder_modules,
+        x2_checkpoint,
+        writable_tensors=False,
+        preprocess_sd=_preprocess_h3_x2_decoder_state_dict,
+        default_dtype=None,
+        fp32_dtype=torch.float16,
+        ignore_missing_keys=True,
+        ignore_unused_weights=True,
+    )
+    del decoder_modules
+
+
+def _load_video_vae(filename: str, x2_filename: str | None = None) -> AutoencoderKLMiniMaxH3:
     # Rotary tables are computed, non-persistent buffers and therefore are
-    # not present in the compact checkpoint.
+    # not present in the compact checkpoint. The optional learned x2 file is
+    # decoder-only: keep the selected base checkpoint's encoder/quantization
+    # path intact and overlay just its decoder modules.
+    upsampling = x2_filename is not None
+    if upsampling:
+        verify_x2_vae_checkpoint(x2_filename)
     with init_empty_weights(include_buffers=False):
         vae = AutoencoderKLMiniMaxH3(
+            out_channels=12 if upsampling else 3,
             latents_mean=VIDEO_LATENTS_MEAN,
             latents_std=VIDEO_LATENTS_STD,
             native_checkpoint_layout=True,
         )
-    offload.load_model_data(
-        vae,
-        filename,
-        writable_tensors=False,
-        preprocess_sd=preprocess_native_video_vae_state_dict,
-        default_dtype=torch.float16,
-    )
+
+    if upsampling:
+        _load_x2_video_vae_weights(vae, filename, x2_filename)
+        vae.upsampling_set = X2_VAE_VALUE
+        print(
+            "[MiniMax H3 VAE] Loaded pinned x2 decoder over the selected native "
+            "encoder; x2 weights replace decoder modules only."
+        )
+    else:
+        offload.load_model_data(
+            vae,
+            filename,
+            writable_tensors=False,
+            preprocess_sd=preprocess_native_video_vae_state_dict,
+            default_dtype=torch.float16,
+        )
+        vae.upsampling_set = None
+        print("[MiniMax H3 VAE] Native checkpoint layout; skipping decoder weight repacking in RAM.")
     vae._model_dtype = torch.float16
-    print("[MiniMax H3 VAE] Native checkpoint layout; skipping decoder weight repacking in RAM.")
+    vae._interrupt = False
     return vae.eval().requires_grad_(False)
 
 
@@ -1149,6 +1270,7 @@ class MiniMaxH3Model:
         text_encoder_filename,
         dtype: torch.dtype = torch.bfloat16,
         minimax_h3_text_encoder: str = "nvfp4_awq",
+        VAE_upsampling: str | None = None,
         **_kwargs,
     ):
         self.device = torch.device("cuda")
@@ -1157,6 +1279,11 @@ class MiniMaxH3Model:
         self.assets_root = model_def.get("minimax_h3_assets_root", "minimax_h3")
         self.audio_only = bool(model_def.get("minimax_h3_audio_only", False))
         self.viggle = bool(model_def.get("minimax_h3_viggle", False))
+        if VAE_upsampling not in (None, "", X2_VAE_VALUE):
+            raise ValueError(f"Unsupported MiniMax H3 VAE upsampling selection: {VAE_upsampling!r}.")
+        if VAE_upsampling == X2_VAE_VALUE and (self.audio_only or self.viggle):
+            raise ValueError("The MiniMax H3 learned x2 VAE is available for standard generated video only.")
+        self.VAE_upsampling = X2_VAE_VALUE if VAE_upsampling == X2_VAE_VALUE else None
         self.dialogue_whisper = None
         self.omni_reference = self.viggle or self.audio_only or bool(model_def.get("omni_reference", False))
         self.vdn = bool(model_def.get("vdn", False))
@@ -1196,15 +1323,21 @@ class MiniMaxH3Model:
         audio_vae_path = fl.locate_file(
             os.path.join(self.assets_root, "vae", "minimax_h3_audio_vae_fp32.safetensors")
         )
-
-        _log_h3_asset_sources(
-            {
-                "transformer": transformer_path,
-                "text/vision encoder": text_encoder_filename,
-                "video VAE": video_vae_path,
-                "audio VAE": audio_vae_path,
-            }
+        x2_video_vae_path = (
+            fl.locate_file(os.path.join(self.assets_root, "vae", X2_VAE_FILE))
+            if self.VAE_upsampling == X2_VAE_VALUE
+            else None
         )
+
+        asset_sources = {
+            "transformer": transformer_path,
+            "text/vision encoder": text_encoder_filename,
+            "video VAE": video_vae_path,
+            "audio VAE": audio_vae_path,
+        }
+        if x2_video_vae_path is not None:
+            asset_sources["learned x2 VAE decoder"] = x2_video_vae_path
+        _log_h3_asset_sources(asset_sources)
 
         self.text_encoder_variant = str(minimax_h3_text_encoder or "nvfp4_awq")
         qkv_layout = str(model_def.get("minimax_h3_qkv_layout") or "contiguous")
@@ -1232,7 +1365,7 @@ class MiniMaxH3Model:
             variant=self.text_encoder_variant,
         )
         self._plain_prompt_cache = MiniMaxH3PromptCache()
-        self.vae = _load_video_vae(video_vae_path)
+        self.vae = _load_video_vae(video_vae_path, x2_video_vae_path)
         self.audio_vae = _load_audio_vae(audio_vae_path)
         self.scheduler = MiniMaxH3Scheduler(
             shift=3.0 if self.viggle else float(model_def.get("minimax_h3_video_shift", 12.0)),
@@ -1385,6 +1518,8 @@ class MiniMaxH3Model:
         self.__interrupt = bool(value)
         if hasattr(self, "transformer"):
             self.transformer._interrupt = self.__interrupt
+        if hasattr(self, "vae"):
+            self.vae._interrupt = self.__interrupt
         if hasattr(self, "conditioner"):
             self.conditioner._interrupt = self.__interrupt
         if getattr(self, "dialogue_whisper", None) is not None:
@@ -1875,6 +2010,11 @@ class MiniMaxH3Model:
                 "MiniMax H3 masking strength must be between 0 and 1."
             )
         frozen_video_mode = not self.omni_reference and "2" in audio_prompt_type
+        if self.VAE_upsampling == X2_VAE_VALUE and frozen_video_mode:
+            raise ValueError(
+                "MiniMax H3 learned x2 VAE requires generated video frames; "
+                "Audio from Control Video preserves source frames without VAE decoding."
+            )
         source_audio_mode = (_face_refinement is not None and input_waveform is not None) or (
             any(flag in audio_prompt_type for flag in "AK")
             and (
@@ -2974,22 +3114,45 @@ class MiniMaxH3Model:
                 else nullcontext()
             )
             with autocast:
-                video = self.vae.decode(video_latents, return_dict=False)[0]
-            pixel_mean = torch.tensor(MINIMAX_H3_PIXEL_MEAN, device=self.device).view(1, -1, 1, 1, 1)
-            pixel_std = torch.tensor(MINIMAX_H3_PIXEL_STD, device=self.device).view(1, -1, 1, 1, 1)
-            video = (video.float() * pixel_std + pixel_mean).clamp(0, 1).mul(2).sub(1)
-            output_video = video[0, :, :target_frame_num]
+                output_video = self.vae.decode_to_cpu_uint8(video_latents)[
+                    0, :, :target_frame_num
+                ]
         elif not self.audio_only:
-            output_video = frozen_target_video[:, :target_frame_num].cpu()
+            output_video = _normalized_video_to_cpu_uint8(
+                frozen_target_video[:, :target_frame_num]
+            )
+        scale = 2 if self.VAE_upsampling == X2_VAE_VALUE else 1
         if outpaint_source_pixels is not None:
             inner_h, inner_w, top, left = outpaint_rect
-            output_video[:, :, top:top + inner_h, left:left + inner_w] = outpaint_source_pixels[
-                :, :target_frame_num, top:top + inner_h, left:left + inner_w].to(output_video)
-        if not self.audio_only and history_video is not None:
-            output_video = torch.cat(
-                [history_video.to(output_video), output_video],
-                dim=1,
+            source_pixels = outpaint_source_pixels[:, :target_frame_num]
+            if scale == 2:
+                source_pixels = resize_video_canvas_uint8(
+                    source_pixels,
+                    int(source_pixels.shape[-2]) * scale,
+                    int(source_pixels.shape[-1]) * scale,
+                )
+            else:
+                source_pixels = _normalized_video_to_cpu_uint8(source_pixels)
+            inner_h, inner_w, top, left = (
+                int(inner_h) * scale,
+                int(inner_w) * scale,
+                int(top) * scale,
+                int(left) * scale,
             )
+            output_video[:, :, top:top + inner_h, left:left + inner_w] = source_pixels[
+                :, :, top:top + inner_h, left:left + inner_w
+            ]
+        if not self.audio_only and history_video is not None:
+            history = history_video
+            if scale == 2:
+                history = resize_video_canvas_uint8(
+                    history,
+                    int(output_video.shape[-2]),
+                    int(output_video.shape[-1]),
+                )
+            else:
+                history = _normalized_video_to_cpu_uint8(history)
+            output_video = torch.cat([history, output_video], dim=1)
 
         if _face_refinement is not None:
             # Refinement keeps the original recorded soundtrack. Audio may

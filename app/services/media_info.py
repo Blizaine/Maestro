@@ -79,6 +79,9 @@ def spatial_details(method):
         label = {"dlss5*": "DLSS 5 Neural Rendering", "lanczos": "Lanczos",
                  "flashvsr": "FlashVSR", "flashvsr2pass": "FlashVSR (two passes)"}[match[1]]
         return {"method": method, "method_label": label, "multiplier": scale}
+    if method == "h3_vae*2":
+        return {"method": method, "method_label": "H3 VAE 2×", "multiplier": 2,
+                "stage": "vae_decode"}
     if method in {"vae1", "vae2"}:
         return {"method": method, "method_label": "VAE upscaling"}
     return {"method": method, "method_label": method} if method else {}

@@ -1,6 +1,10 @@
 import { galleryOutput, galleryOutputIsOlder, outputIdentity } from '../lib/galleryIdentity'
 import { create } from 'zustand'
 import { isDirectorRenderChild } from '../lib/directorJobs'
+import {
+  modelOptionsForSelectedModel,
+  sanitizeH3VaeUpsampling,
+} from '../lib/h3VaeUpsampling'
 import { isKreaIdentityEdit, normalizeKreaIdentitySettings, type KreaIdentitySettings } from '../lib/kreaIdentityControls'
 import type { SavedOmniCharacter, TtsVoice } from '../types'
 import { applyTtsVoices, ttsAudioModeForCount, ttsCharacterEnhancePrompt, ttsSpeakingVoiceCount, ttsVoiceLimit, ttsVoicePaths } from '../lib/ttsVoices'
@@ -7783,8 +7787,22 @@ export const useStore = create<AppState>((set, get) => ({
     // Post-processing settings
     if (state.generationMode !== 'video' && state.generationMode !== 'avatar') delete params.face_refiner
     if (state.generationMode !== 'video') params.temporal_upsampling = ''
-    if (state.generationMode === 'audio') params.spatial_upsampling = ''
-    else if (state.spatialUpsampling) params.spatial_upsampling = state.spatialUpsampling
+    const effectiveUpsamplingImageMode = state.generationMode === 'image'
+      ? 1
+      : state.generationMode === 'video' || state.generationMode === 'avatar'
+        ? Number(params.image_mode ?? 0)
+        : -1
+    const activeUpsamplingModelOptions = modelOptionsForSelectedModel(
+      state.modelOptions,
+      String(params.model_type || ''),
+    )
+    params.spatial_upsampling = state.generationMode === 'audio'
+      ? ''
+      : sanitizeH3VaeUpsampling(
+          state.spatialUpsampling,
+          activeUpsamplingModelOptions,
+          effectiveUpsamplingImageMode,
+        )
     if (state.filmGrainIntensity > 0) {
       params.film_grain_intensity = state.filmGrainIntensity
       params.film_grain_saturation = state.filmGrainSaturation
@@ -11181,7 +11199,11 @@ export const useStore = create<AppState>((set, get) => ({
 
     const buildImgPostProc = (): Record<string, unknown> => {
       const pp: Record<string, unknown> = {}
-      const imgSpatial = get().directorImageSpatialUpsampling
+      const imgSpatial = sanitizeH3VaeUpsampling(
+        get().directorImageSpatialUpsampling,
+        imageOptions,
+        1,
+      )
       if (imgSpatial) pp.spatial_upsampling = imgSpatial
       const imgGrainIntensity = get().directorImageFilmGrainIntensity
       if (imgGrainIntensity > 0) {
@@ -14096,7 +14118,11 @@ export const useStore = create<AppState>((set, get) => ({
             availableLoras: [],
           }
         : savedLoraPerMode.video || {},
-      video_spatial_upsampling: directorVideoSpatialUpsampling,
+      video_spatial_upsampling: sanitizeH3VaeUpsampling(
+        directorVideoSpatialUpsampling,
+        directorVideoOptions,
+        0,
+      ),
       video_film_grain_intensity: directorVideoFilmGrainIntensity,
       video_film_grain_saturation: directorVideoFilmGrainSaturation,
       video_self_refiner: directorVideoSelfRefiner,
