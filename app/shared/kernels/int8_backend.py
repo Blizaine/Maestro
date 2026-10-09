@@ -497,6 +497,193 @@ class _KitchenRowProjection:
 _KITCHEN_ROW_PROJECTION = _KitchenRowProjection()
 
 
+class _TritonConvRotRowProjection:
+    """Bounded MMGP row projections for large inference-only INT8 ConvRot inputs.
+
+    The activation is rotated into one owned, same-dtype destination in bounded
+    tiles after MMGP transfers it through ``prepare_linear_input``. Each requested output range
+    then uses the same fused dynamic-quantization Triton GEMM as the regular
+    Quanto forward, including the corresponding weight scales and bias rows.
+    """
+
+    _TOKEN_CHUNK = 8192
+    _BLOCK_K_LOCK = "WAN2GP_QUANTO_INT8_AUTOTUNE_LOCK_FUSED_BLOCK_K"
+
+    @staticmethod
+    def _native_dispatch_selected(module, x):
+        """Keep the ordinary per-shape native/Triton decision for H3 chunks."""
+        from shared.qtypes.int8_convrot import _rotate_activation
+
+        rows_total, features = x.shape
+        chunk = _TritonConvRotRowProjection._TOKEN_CHUNK
+        probes = [(0, min(chunk, rows_total))]
+        tail = rows_total % chunk
+        if tail:
+            probes.append((rows_total - tail, tail))
+        # QLinearInt8ConvRot's historical H3 caller supplies [1, rows, K]
+        # slices. Recreate those bounded shapes so its cached dispatch keys and
+        # native-vs-Triton measurements remain aligned with the unsplit path.
+        weight = module.qweight
+        seen = set()
+        for start, rows in probes:
+            if rows in seen:
+                continue
+            seen.add(rows)
+            shape = (1, rows, features)
+            stride = (rows * features, features, 1)
+            key = (x.device, x.dtype, shape, stride, tuple(weight.shape))
+            cached = triton._CONVROT_BACKENDS.get(key)
+            if cached is True:
+                return True
+            if cached is False:
+                continue
+            rotated = _rotate_activation(x[start:start + rows], module._convrot_group_size)
+            probe = rotated.reshape(*shape)
+            del rotated
+            if triton._prefer_native_convrot_path(probe, weight, module.bias):
+                return True
+            del probe
+        return False
+
+    @staticmethod
+    def supports(module, x):
+        qtype = getattr(module, "weight_qtype", None)
+        if (
+            _backend != "triton"
+            or triton._TRITON_MODULE is None
+            or triton._RUNTIME_DISABLED
+            or qtype is None
+            or getattr(qtype, "name", None) != "qint8_convrot"
+            or getattr(module, "_convrot_group_size", 0) != 256
+            or getattr(module, "_mm_lora_data", None)
+            or torch.compiler.is_compiling()
+            or torch.is_grad_enabled()
+            or getattr(module, "training", False)
+            or not torch.is_tensor(x)
+            or x.ndim != 2
+            or not x.is_cuda
+            or x.dtype not in (torch.bfloat16, torch.float16)
+            or not x.is_contiguous()
+            or x.requires_grad
+        ):
+            return False
+        try:
+            if torch.cuda.is_current_stream_capturing():
+                return False
+        except Exception:
+            return False
+
+        (m, k) = x.shape
+        weight = getattr(module, "qweight", None)
+        data = getattr(weight, "_data", None)
+        scales = getattr(weight, "_scale", None)
+        n = int(data.shape[0]) if torch.is_tensor(data) and data.ndim == 2 else 0
+        if (
+            m < 50_000  # H3 uses the bounded 8,192-row projection path here.
+            or k % 256 != 0
+            or not 256 <= k <= 16_384
+            or n < 128
+            or n % 128 != 0  # head-aligned output rows
+            or data.dtype != torch.int8
+            or not data.is_cuda
+            or data.device != x.device
+            or not data.is_contiguous()
+            or data.shape[1] != k
+            or not torch.is_tensor(scales)
+            or scales.device != x.device
+            or scales.numel() != n
+            or weight.dtype != x.dtype
+        ):
+            return False
+        bias = getattr(module, "bias", None)
+        if bias is not None and (bias.device != x.device or bias.dtype != x.dtype or bias.numel() != n):
+            return False
+
+        triton_module = triton._TRITON_MODULE
+        lock_block_k = getattr(triton_module, "_env_flag", None)
+        if lock_block_k is None or not lock_block_k(_TritonConvRotRowProjection._BLOCK_K_LOCK, "1"):
+            # The fused dynamic activation quantizer derives row scales per K
+            # block. Slicing output rows is numerically safe only if full and
+            # head-group shapes use the same locked K tile.
+            return False
+        select_static = getattr(triton_module, "_select_static_triton_int8_config", None)
+        if select_static is None:
+            return False
+        ordinary_rows = [min(_TritonConvRotRowProjection._TOKEN_CHUNK, m)]
+        tail_rows = m % _TritonConvRotRowProjection._TOKEN_CHUNK
+        if tail_rows:
+            ordinary_rows.append(tail_rows)
+        try:
+            block_k_values = {
+                select_static(row_count, k, n)[2]
+                for row_count in ordinary_rows
+            }
+            block_k_values.update(
+                select_static(m, k, row_width)[2]
+                for row_width in range(128, n + 1, 128)
+            )
+            if len(block_k_values) != 1:
+                return False
+        except Exception:
+            return False
+
+        # The injected forward can also select native Quanto by a configured
+        # M threshold before it reaches the per-shape tuner.
+        if int(getattr(triton, "_NATIVE_FALLBACK_MAX_M", 0)) >= (m % _TritonConvRotRowProjection._TOKEN_CHUNK or _TritonConvRotRowProjection._TOKEN_CHUNK):
+            return False
+        check_native = getattr(triton, "_env_flag", None)
+        check_native_name = getattr(triton, "_ENV_CONVROT_KERNEL_CHECK", None)
+        if check_native is not None and check_native_name is not None:
+            if not check_native(check_native_name, "1"):
+                # With the per-shape native probe disabled, the injected dense
+                # forward unconditionally takes Triton for supported tensors.
+                return True
+        try:
+            return not _TritonConvRotRowProjection._native_dispatch_selected(module, x)
+        except Exception:
+            # A failed optional dispatch probe must leave the original forward
+            # available; row projection is only an optimization.
+            return False
+
+    @staticmethod
+    def key(module):
+        return "triton_int8_convrot"
+
+    @staticmethod
+    def prepare(module, x):
+        from shared.qtypes.int8_convrot import _rotate_activation
+
+        rows, features = x.shape
+        row_bytes = max(1, features * x.element_size())
+        tile_rows = max(1, _SCRATCH_BYTES // row_bytes)
+        prepared = torch.empty_like(x)
+        # Bound the materialized rotation tile to the backend's 16 MiB scratch
+        # budget. Keep the handed-off source untouched because MMGP may also
+        # prepare a sibling projection in another weight format from that x.
+        for start in range(0, rows, tile_rows):
+            stop = min(rows, start + tile_rows)
+            rotated = _rotate_activation(x[start:stop], module._convrot_group_size)
+            prepared[start:stop].copy_(rotated)
+            del rotated
+        return prepared
+
+    @staticmethod
+    def rows(module, prepared, start, stop):
+        weight = module.qweight
+        data = weight._data[start:stop]
+        scale = _weight_scale(weight, weight._data.shape[0], prepared.device)[start:stop]
+        output = triton._fused_quant_scaled_mm_call(
+            prepared, data, scale, prepared.dtype
+        )
+        bias = module.bias
+        return triton._add_bias_in_place_or_fallback(
+            output, None if bias is None else bias[start:stop]
+        )
+
+
+_TRITON_ROW_PROJECTION = _TritonConvRotRowProjection()
+
+
 def configure(selection, verbose_level=0, *, resolved=None):
     global _backend, _kitchen, _kitchen_hip, _original_forward, _direct_cutlass, _sm120_cutlass, _wide_convrot_triton, revision
     global _blockwise_triton, _kitchen_dlpack_export
@@ -541,7 +728,15 @@ def configure(selection, verbose_level=0, *, resolved=None):
         qbytes.WeightQBytesLinearFunction.forward = staticmethod(_quanto_forward)
     _backend = backend
     from mmgp import offload
-    (offload.register_row_projection if backend == "kitchen" else offload.unregister_row_projection)(_KITCHEN_ROW_PROJECTION)
+    if backend == "kitchen":
+        offload.register_row_projection(_KITCHEN_ROW_PROJECTION)
+        offload.unregister_row_projection(_TRITON_ROW_PROJECTION)
+    elif backend == "triton":
+        offload.unregister_row_projection(_KITCHEN_ROW_PROJECTION)
+        offload.register_row_projection(_TRITON_ROW_PROJECTION)
+    else:
+        offload.unregister_row_projection(_KITCHEN_ROW_PROJECTION)
+        offload.unregister_row_projection(_TRITON_ROW_PROJECTION)
     if backend != previous_backend:
         revision += 1
     label = {"kitchen": "Comfy Kitchen HIP" if _kitchen_hip else "Comfy Kitchen CUDA", "triton": "Triton", "pytorch": "PyTorch"}[backend]

@@ -32,3 +32,25 @@ The allocator source and Windows/Linux binaries come from the pinned WanGP 17.17
 The controlled Maestro matrix deliberately disables Auto-tune while comparing explicit settings. Confirm automatic placement separately: apply Auto-tune while idle, keep it enabled, omit `override_profile` and manual window-memory overrides, and inspect the completed job's `performance_plan`. Record the final transformer budget, reserved RAM fraction, profile and read-ahead settings rather than inferring placement from an earlier VRAM-guard candidate log.
 
 A matching final placement can reuse a resident model. A real change in available RAM, activation allowance, profile or explicit preload may still require a reload. Model release and allocator changes also invalidate a warm comparison. Retain both first and repeat timings and explain any internal reload.
+## Native H3 attention component check
+
+`tests/test_int8_backend_rows.py` contains an opt-in CUDA integration check.
+Set `MAESTRO_TEST_INT8_ROWS_NATIVE_SLA=1` in an idle, isolated process, then run
+`python -m unittest discover -s tests -p test_int8_backend_rows.py` with the
+installed Maestro GPU runtime. Default discovery skips this CUDA case.
+
+The check uses native-size H3 geometry (219,886 packed rows), real ConvRot
+INT8 projections, RMS/RoPE and sparse attention. It retains a block residual,
+assembles the full attention output, checks all eight head groups and protects
+1,606 media-prefix rows. It verifies that the original normalized input is
+released before the first sparse call and caps the process allocator at
+12 GiB. This component check on a larger GPU does not establish a complete
+render on a physical 12-GB GPU or account for all model weights and VAE work.
+
+The Triton row provider requires inference-only compatible CUDA FP16/BF16
+ConvRot INT8 weights, group size 256, compatible locked activation-quantization
+K tiles and no active LoRA. It retains ordinary native dispatch and unsupported
+paths. Preparation leaves the shared source untouched for mixed formats;
+rotation uses bounded tiles. GPU recorders must replace functions directly:
+`MagicMock` call history can retain full-size tensor arguments and invalidate
+memory measurements.

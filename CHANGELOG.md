@@ -18,7 +18,9 @@ Prepared release candidate; not published. See the [full release notes](docs/REL
   multi-gigabyte intermediates through long, high-resolution generations.
 - Apply Attention Head Split to compatible H3 SLA inference, projecting and
   attending one group at a time while retaining reference/audio prefix
-  protection and dense recovery. The default split setting is unchanged.
+  protection and dense recovery. Compatible INT8 ConvRot weights also support
+  grouped Triton projections; unsupported formats and active LoRAs retain their
+  ordinary path. The default split setting is unchanged.
 - Add optional learned H3 VAE 2x video decoding in Studio and Director. Keep
   denoising at the chosen resolution, download the verified decoder only on
   selection, and convert decoded frames to CPU bytes in bounded chunks to
