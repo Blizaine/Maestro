@@ -1,0 +1,20 @@
+{
+    "model": {
+        "name": "Qwen Image 2.1 Turbo 7B (Draft)",
+        "architecture": "qwen_image_21_7B",
+        "description": "Draft mode for fast iteration: Qwen-Image-2.1-Turbo, a separately distilled checkpoint of the same 7B architecture, sampled with its published 8-step schedule at CFG 1. Shares the Qwen Image 2.1 text encoder, VAE and reference/edit workflows. Prepare the weights once with scripts/prepare_qwen21_turbo.py. Qwen Research License: non-commercial research/evaluation only; commercial use requires a separate license from Qwen.",
+        "URLs": [
+            "qwen_image_21_7B_turbo_bf16.safetensors"
+        ],
+        "qwen21_turbo_checkpoint": true,
+        "image_outputs": true
+    },
+    "prompt": "",
+    "resolution": "1024x1024",
+    "num_inference_steps": 8,
+    "guidance_scale": 1.0,
+    "sample_solver": "qwen21_turbo",
+    "batch_size": 1,
+    "image_mode": 1,
+    "video_prompt_type": "I"
+}
