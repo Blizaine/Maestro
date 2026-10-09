@@ -19,6 +19,27 @@ def execute(argv, timeout=30):
                           errors="replace", timeout=timeout, check=True)
 
 
+def subprocess_failure_message(error):
+    if isinstance(error, subprocess.CalledProcessError):
+        summary = f"subprocess exited with status {error.returncode}"
+    elif isinstance(error, subprocess.TimeoutExpired):
+        summary = f"subprocess timed out after {error.timeout} seconds"
+    else:
+        summary = "subprocess failed"
+
+    stderr = getattr(error, "stderr", None)
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    stderr = (stderr or "").strip()
+    if stderr:
+        if len(stderr) > 1500:
+            stderr = "..." + stderr[-1500:]
+        summary += "; stderr: " + stderr
+    else:
+        summary += " (no stderr output)"
+    return "SSH diagnostics: " + summary
+
+
 def prepare():
     if os.name != "nt":
         raise ValueError("This helper currently supports the Windows controller")
@@ -99,7 +120,10 @@ def main():
     try:
         prepare() if args.action == "prepare" else diagnose()
         return 0
-    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+    except subprocess.SubprocessError as error:
+        print(subprocess_failure_message(error), file=sys.stderr, flush=True)
+        return 2
+    except (OSError, ValueError, KeyError) as error:
         print("SSH diagnostics: " + str(error), file=sys.stderr, flush=True)
         return 2
 

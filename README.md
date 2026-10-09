@@ -116,6 +116,28 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v2.7.0 (prepared 2026-10-08)
+
+- **WanGP 17 memory engine:** bundled MMGP 4, optimized VRAM allocation, smart pinning, dynamic preload, optional RAM allocation and Windows read-ahead controls. Compatible attention, INT8 and VAE paths reduce memory overhead; saved manual preferences remain in control.
+- **Generation-aware Auto-tune:** uses the GPU, system RAM, resolution, window length and references to choose temporary H3 placement. Bounded local comparisons can teach it a faster safe placement. Includes conservative recommendations for smaller-memory machines.
+- **Faster H3 setup and repeated work:** download auxiliary tools when needed, reuse eligible plain-text conditioning, and batch compatible VAE tiles within memory limits. Director uses Studio's hardware-aware encoder recommendation, including Q2_K on constrained machines.
+- **Director live previews:** discover previews as clips start, combine progress and preview in one tile, and retain whole-project Stop and ETA. Tap/click a preview to hide or restore its information overlay; playback controls remain separate.
+- **More reliable prompt enhancement:** allow longer CUDA writer startup, distinguish device-probe timeouts, expose dialogue validation reasons, and shorten AI-written exchanges to fit the selected duration while preserving speakers and user-supplied lines.
+- **Director prompt fixes:** preserve multiline prompts in single-shot music videos and carry the selected H3 encoder through generation, regeneration, repair and resume.
+- **Optional developer test bench:** manual diagnostics, prompt/render regressions, cold/warm comparisons and multi-machine report collection, plus Windows SSH setup and bounded diagnostics. Test results remain local; no recurring schedule is installed.
+
+This is a prepared release candidate. Use **Update** in Pinokio after publication,
+restart Maestro and refresh the browser. On an existing installation, use
+**Settings → Performance → Re-detect** to explicitly apply the expanded Auto-tune
+recommendations; saved manual choices are preserved during migration. Check the
+active allocator and restart if an allocator change is pending.
+
+See the [complete changes](docs/RELEASE_NOTES_V2.7.0.md),
+[validation and remaining checks](docs/VALIDATION_V2.7.0.md), and
+[Auto-tune guide](docs/Performance-auto-tune.md). Measured improvements depend on
+the workload and hardware; 6/8/10 GB VRAM, 16 GB RAM and Linux CUDA generation
+remain unverified for this candidate.
+
 ### v2.6.0 (2026-10-04)
 
 - **Live generation previews:** looping Tiny VAE video is enabled by default in Studio, with Fast Frames, Clearer Frames and Off also available. Includes pause/resume, phone playback, selected-model support labels and still previews for supported image models. Saved preview choices are preserved. H3 previews use the predicted clean result during denoising. [Preview guide](docs/Generation-preview.md).
@@ -1093,7 +1115,7 @@ Maestro is built on top of, and indebted to, the following projects:
 
 ## License
 
-Maestro is released under the **WanGP Non-Commercial Evaluation License 1.1**, inherited from the upstream Wan2GP project. See [LICENSE](LICENSE) for the summary and [app/LICENSE.txt](app/LICENSE.txt) for the full text.
+Maestro is released under the **WanGP Non-Commercial Evaluation License 1.1**, inherited from the upstream Wan2GP project. See [LICENSE](LICENSE) for the summary and [app/LICENSE.txt](app/LICENSE.txt) for the full text. WanGP 17 / MMGP 4 contributions retain their upstream **WanGP Community License 2.0**, included in [app/mmgp/LICENSE.txt](app/mmgp/LICENSE.txt); component provenance is recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 **TL;DR**: free to use and modify for non-commercial purposes; the *outputs* you generate are yours to use commercially (with attribution); commercial use of the *software itself* (including hosted services and APIs) requires a separate commercial license from the WanGP licensor.
 

@@ -3,6 +3,33 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [2.7.0] - 2026-10-08
+
+Prepared release candidate; not published. See the [full release notes](docs/RELEASE_NOTES_V2.7.0.md).
+
+- Integrate an adapted WanGP 17 / MMGP 4 memory engine with opt-in allocator
+  choices, generation-aware auto-tuning, local workload learning, RAM pinning,
+  preload controls and compatible INT8 kernel selection. Keep conservative
+  fallbacks and per-model memory guards.
+- Reduce H3 conditioning and VAE overhead with a bounded CPU prompt cache,
+  hardware-aware tiled decoding and corrected generation-device placement.
+- Defer optional preprocessing and audio-support downloads until a selected
+  workflow needs them. Add a manual developer test bench, memory comparisons
+  and an optional controller for multiple machines.
+- Improve Director H3 encoder selection for detected hardware, preserve
+  multiline single-shot prompts and show the existing live generation preview
+  in the active Director pipeline without a browser refresh or duplicate tile.
+  Clicking or tapping Studio or Director previews toggles the information overlay;
+  Director retains whole-project Stop, ETA and clip-to-clip preview preferences.
+- Extend CUDA LLM device discovery timeouts and report actionable startup
+  diagnostics. Improve dialogue word-budget repair and surface the last
+  validation reason when enhancement cannot produce a valid exchange.
+- Bound compatible attention/VAE intermediates, pair explicit device factories
+  with scoped model placement, retain native quantization/fallback paths and
+  update optional attention imports and CPU CI fixtures.
+- Add verified Windows SSH setup receipts and bounded subprocess diagnostics
+  that report failure causes without echoing command arguments.
+
 ## [2.6.0] - 2026-10-04
 
 Live previews, community H3 checkpoint imports, more model workflows, long

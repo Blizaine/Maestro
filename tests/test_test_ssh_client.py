@@ -1,6 +1,10 @@
+import contextlib
+import io
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -59,6 +63,31 @@ class SshClientTests(unittest.TestCase):
                 self.assertNotIn("private prompt", output.call_args.args[0])
                 self.assertIn("private prompt", (client.OUTPUT / "ssh-diagnostics.json").read_text())
         self.with_record({"host": "pc", "account_name": "user", "host_public_key": "ssh-ed25519 AAAA", "remote_root": "C:\\pinokio\\api\\Maestro.git"}, check)
+
+    def test_subprocess_failure_reports_stderr_without_command_or_secret_arguments(self):
+        private_values = ("ssh.exe", "encoded-script-secret", "private-key-bytes")
+        failure = subprocess.CalledProcessError(
+            255,
+            [private_values[0], "-EncodedCommand", private_values[1], "-i", private_values[2]],
+            stderr="Connection timed out",
+        )
+        output = io.StringIO()
+        with patch.object(client, "diagnose", side_effect=failure), patch.object(
+            sys, "argv", ["test_ssh_client.py", "--action=diagnose"]
+        ), contextlib.redirect_stderr(output):
+            self.assertEqual(client.main(), 2)
+
+        diagnostic = output.getvalue()
+        self.assertIn("status 255", diagnostic)
+        self.assertIn("stderr: Connection timed out", diagnostic)
+        for value in private_values:
+            self.assertNotIn(value, diagnostic)
+
+    def test_subprocess_failure_stderr_is_bounded(self):
+        failure = subprocess.CalledProcessError(1, ["ssh"], stderr="x" * 5000)
+        diagnostic = client.subprocess_failure_message(failure)
+        self.assertLessEqual(len(diagnostic), 1600)
+        self.assertIn("...", diagnostic)
 
 
 if __name__ == "__main__":
