@@ -488,6 +488,27 @@ def _event_key(event: Any) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
 
+_LIVE_PROGRESS_FIELDS = frozenset({
+    "kind", "status", "state", "phase", "stage", "step", "current_step",
+    "total_steps", "current", "total", "frame", "frames", "percent",
+    "progress", "progress_pct", "progress_percent", "elapsed", "elapsed_seconds",
+})
+
+
+def _live_progress_fields(value: Any) -> dict[str, Any]:
+    # Keep small structured values; omit free-form event text and settings.
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for field in _LIVE_PROGRESS_FIELDS:
+        item = value.get(field)
+        if isinstance(item, str):
+            result[field] = item[:80]
+        elif isinstance(item, (int, float, bool)):
+            result[field] = item
+    return result
+
+
 def _server_time(value: Any) -> str | None:
     try:
         return dt.datetime.fromtimestamp(float(value), dt.timezone.utc).isoformat(timespec="milliseconds")
@@ -507,6 +528,7 @@ class BenchmarkRunner:
         event_limit: int = MAX_EVENTS,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ):
         if not 1 <= timeout_seconds <= 86400:
             raise BenchmarkError("job timeout must be between 1 second and 24 hours")
@@ -524,6 +546,8 @@ class BenchmarkRunner:
         self.event_limit = event_limit
         self.clock = clock
         self.sleep = sleep
+        self.progress_callback = progress_callback
+        self.progress_callback_warning: str | None = None
 
     def _queue_or_raise(self) -> dict[str, Any]:
         queue = self.client.queue_state(self.client.transport.request_timeout)
@@ -543,6 +567,65 @@ class BenchmarkRunner:
             if key not in seen:
                 seen.add(key)
                 stored.append(event)
+
+    def _emit_progress(
+        self,
+        record: dict[str, Any],
+        snapshot: dict[str, Any],
+        job_id: str,
+        started: float,
+    ) -> None:
+        if self.progress_callback is None or self.progress_callback_warning is not None:
+            return
+
+        progress: dict[str, Any] = {}
+        progress.update(_live_progress_fields(snapshot.get("progress")))
+        progress.update(_live_progress_fields(snapshot))
+        for event in reversed(record.get("progress_events", [])):
+            if isinstance(event, dict) and event.get("kind") in {
+                "started", "progress", "preview", "status", "completed", "error"
+            }:
+                progress.update(_live_progress_fields(event))
+                progress.update(_live_progress_fields(event.get("data")))
+                break
+
+        cancellation = record.get("timeout_cancel")
+        if not isinstance(cancellation, dict):
+            cancel_state = {
+                "status": "not_requested", "requested": False, "confirmed": False,
+            }
+        else:
+            requested = bool(cancellation.get("requested"))
+            confirmed = bool(cancellation.get("confirmed"))
+            state = (
+                "confirmed" if confirmed
+                else "request_failed" if cancellation.get("error")
+                else "monitoring_failed" if cancellation.get("monitor_error")
+                else "requested" if requested
+                else "not_requested"
+            )
+            cancel_state = {
+                "status": state, "requested": requested, "confirmed": confirmed,
+            }
+
+        live_snapshot = {
+            "schema_version": 1,
+            "benchmark": self.manifest["name"],
+            "case": record["name"],
+            "repeat": record["repeat"],
+            "job_id": job_id,
+            "submitted_at": record.get("submitted_at"),
+            "elapsed_seconds": round(max(0.0, self.clock() - started), 3),
+            "done": bool(snapshot.get("done")),
+            "status": record.get("status"),
+            "cancel_state": cancel_state,
+            "progress": progress,
+        }
+        try:
+            self.progress_callback(live_snapshot)
+        except Exception as error:
+            self.progress_callback_warning = f"{type(error).__name__}: {error}"
+            self.progress_callback = None
 
     def _capture_result(self, record: dict[str, Any], snapshot: dict[str, Any]) -> None:
         result = snapshot.get("result")
@@ -647,7 +730,10 @@ class BenchmarkRunner:
             return record
         job_id = job_id.strip()
         record["job_id"] = job_id
+        record["status"] = "finalizing" if snapshot.get("done") else "running"
         self._events(record, snapshot)
+        record["job_snapshot"] = snapshot
+        self._emit_progress(record, snapshot, job_id, started)
         deadline = started + self.timeout_seconds
         while not snapshot.get("done"):
             remaining = deadline - self.clock()
@@ -661,14 +747,19 @@ class BenchmarkRunner:
             except MCPError as error:
                 record.update(status="poll_error", poll_error=str(error), job_snapshot=snapshot)
                 record["elapsed_seconds"] = round(self.clock() - started, 3)
+                self._emit_progress(record, snapshot, job_id, started)
                 record.pop("_seen_events", None)
                 return record
             if snapshot.get("job_id") not in {None, job_id}:
                 record.update(status="poll_error", poll_error="WanGP returned a different job_id", job_snapshot=snapshot)
                 record["elapsed_seconds"] = round(self.clock() - started, 3)
+                self._emit_progress(record, {"done": False}, job_id, started)
                 record.pop("_seen_events", None)
                 return record
             self._events(record, snapshot)
+            record["job_snapshot"] = snapshot
+            record["status"] = "finalizing" if snapshot.get("done") else "running"
+            self._emit_progress(record, snapshot, job_id, started)
             if snapshot.get("done"):
                 break
             remaining = deadline - self.clock()
@@ -681,6 +772,7 @@ class BenchmarkRunner:
                 timeout_seconds=self.timeout_seconds,
                 timeout_cancel={"requested": False, "confirmed": False},
             )
+            self._emit_progress(record, snapshot, job_id, started)
             try:
                 snapshot = self.client.cancel_job(
                     job_id, self.event_limit, self.client.transport.request_timeout
@@ -689,8 +781,10 @@ class BenchmarkRunner:
                 self._events(record, snapshot)
                 if snapshot.get("done"):
                     record["timeout_cancel"]["confirmed"] = True
+                self._emit_progress(record, snapshot, job_id, started)
             except MCPError as error:
                 record["timeout_cancel"]["error"] = str(error)
+                self._emit_progress(record, snapshot, job_id, started)
             grace_deadline = self.clock() + self.cancel_grace
             while not snapshot.get("done") and self.clock() < grace_deadline:
                 remaining = grace_deadline - self.clock()
@@ -705,12 +799,15 @@ class BenchmarkRunner:
                 self._events(record, snapshot)
                 if snapshot.get("done"):
                     record["timeout_cancel"]["confirmed"] = True
+                self._emit_progress(record, snapshot, job_id, started)
+                if snapshot.get("done"):
                     break
                 if remaining > 0:
                     self.sleep(min(self.poll_interval, remaining))
             record["job_snapshot"] = snapshot
             record["elapsed_seconds"] = round(self.clock() - started, 3)
             record.pop("_seen_events", None)
+            self._emit_progress(record, snapshot, job_id, started)
             return record
 
         self._capture_result(record, snapshot)
@@ -726,6 +823,7 @@ class BenchmarkRunner:
         ]
         record.pop("_seen_events", None)
         self._read_output_settings(record)
+        self._emit_progress(record, snapshot, job_id, started)
         return record
 
     def run(self, manifest_sha256: str | None = None) -> dict[str, Any]:
@@ -822,6 +920,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", required=True, help="MCP origin or URL ending in /mcp")
     parser.add_argument("--manifest", required=True, help="JSON benchmark manifest")
     parser.add_argument("--output", help="Report JSON path; defaults to a timestamped filename")
+    parser.add_argument("--progress-file", help="Live progress JSON path; defaults to <output>.progress.json")
     parser.add_argument("--timeout", type=_positive_float, default=DEFAULT_TIMEOUT, help="Per-job timeout, at most 86400 seconds")
     parser.add_argument("--request-timeout", type=_positive_float, default=DEFAULT_REQUEST_TIMEOUT, help="HTTP timeout from 1 to 120 seconds")
     parser.add_argument("--poll-interval", type=_positive_float, default=DEFAULT_POLL_INTERVAL, help="Poll interval from 0.1 to 30 seconds")
@@ -830,16 +929,30 @@ def main(argv: list[str] | None = None) -> int:
     try:
         manifest, digest = load_manifest(args.manifest)
         client = WanGPClient(StreamableHTTPMCP(args.base_url, request_timeout=args.request_timeout))
-        result = BenchmarkRunner(
+        output_path = Path(args.output).expanduser() if args.output else (
+            Path.cwd() / f"wangp-benchmark-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+        )
+        progress_path = Path(args.progress_file).expanduser() if args.progress_file else (
+            output_path.with_name(output_path.name + ".progress.json")
+        )
+        if output_path.resolve() == progress_path.resolve():
+            raise BenchmarkError("--progress-file must differ from --output")
+        runner = BenchmarkRunner(
             client,
             manifest,
             timeout_seconds=args.timeout,
             poll_interval=args.poll_interval,
             cancel_grace_seconds=args.cancel_grace,
-        ).run(digest)
-        output = write_result(args.output or (
-            Path.cwd() / f"wangp-benchmark-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
-        ), result)
+            progress_callback=lambda snapshot: write_result(progress_path, snapshot),
+        )
+        result = runner.run(digest)
+        output = write_result(output_path, result)
+        if runner.progress_callback_warning is not None:
+            print(
+                "Warning: live progress snapshots could not be saved; benchmark monitoring "
+                f"continued without further snapshots ({runner.progress_callback_warning})",
+                file=sys.stderr,
+            )
     except BenchmarkError as error:
         print(f"benchmark failed: {error}", file=sys.stderr)
         return 2

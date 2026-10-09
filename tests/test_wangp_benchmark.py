@@ -1,11 +1,16 @@
 import io
 import json
+from contextlib import redirect_stderr
 from email.message import Message
+from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
 from app.scripts.benchmark_wangp import (
     BenchmarkRunner, BenchmarkError, MCPToolError, StreamableHTTPMCP, WanGPClient,
-    _sse_messages, normalize_manifest, validate_base_url,
+    _sse_messages, main as benchmark_main, normalize_manifest, validate_base_url,
+    write_result,
 )
 
 
@@ -53,10 +58,11 @@ class FakeTransport:
     origin = "http://127.0.0.1:42019"
     endpoint = origin + "/mcp"
 
-    def __init__(self, *, queues=None, never_finish=False, model_defaults=None):
+    def __init__(self, *, queues=None, never_finish=False, model_defaults=None, job_snapshots=None):
         self.calls = []
         self.queues = list(queues or [])
         self.never_finish = never_finish
+        self.job_snapshots = list(job_snapshots or [])
         self.model_defaults = model_defaults or {
             "model_type": "minimax_h3_fl2va_pruned", "prompt": "",
             "video_length": 81, "num_inference_steps": 30, "flow_shift": 12.0,
@@ -90,6 +96,8 @@ class FakeTransport:
             if action == "list_queue":
                 return self.queues.pop(0) if self.queues else {"total_count": 0}
             job_id = arguments["arguments"]["job_id"]
+            if action == "get_job" and self.job_snapshots:
+                return self.job_snapshots.pop(0)
             if action == "cancel_job":
                 self.cancelled.append(job_id)
                 return {"job_id": job_id, "done": False, "events": [{"kind": "status", "text": "cancel requested"}]}
@@ -287,6 +295,174 @@ class WangPBenchmarkTests(unittest.TestCase):
         self.assertEqual(transport.cancelled, ["owned-1"])
         self.assertTrue(result["runs"][0]["timeout_cancel"]["requested"])
         self.assertTrue(result["runs"][0]["timeout_cancel"]["confirmed"])
+
+    def test_progress_file_has_owned_id_before_first_poll(self):
+        with tempfile.TemporaryDirectory() as directory:
+            progress_path = Path(directory) / "live-progress.json"
+            test_case = self
+
+            class InspectingTransport(FakeTransport):
+                def call_tool(self, name, arguments, timeout=None):
+                    if name == "wangp_session" and arguments.get("action") == "get_job":
+                        saved = json.loads(progress_path.read_text(encoding="utf-8"))
+                        test_case.assertEqual(saved["job_id"], "owned-1")
+                        test_case.assertEqual(saved["case"], "480p")
+                    return super().call_tool(name, arguments, timeout)
+
+            transport = InspectingTransport()
+            result = BenchmarkRunner(
+                WanGPClient(transport),
+                make_manifest(),
+                timeout_seconds=5,
+                progress_callback=lambda snapshot: write_result(progress_path, snapshot),
+            ).run()
+
+            self.assertEqual(result["status"], "completed")
+            saved = json.loads(progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["job_id"], "owned-1")
+            self.assertEqual(saved["repeat"], 1)
+
+    def test_progress_snapshots_follow_polls_and_include_final_outcome(self):
+        transport = FakeTransport(job_snapshots=[
+            {
+                "job_id": "owned-1",
+                "done": False,
+                "events": [{
+                    "kind": "preview",
+                    "data": {
+                        "current_step": 6, "total_steps": 20,
+                        "phase": "inference", "status": "Denoising", "progress": 39,
+                        "image": "must not be copied into the live file",
+                        "text": "nested free-form text stays out",
+                    },
+                }],
+            },
+            {
+                "job_id": "owned-1",
+                "done": True,
+                "created_at": 100.0,
+                "updated_at": 102.0,
+                "events": [{"kind": "completed", "text": "event history stays out"}],
+                "result": {
+                    "success": True, "generated_files": ["output.mp4"], "errors": [],
+                    "gallery_items": [{"media_id": "media-1", "filename": "output.mp4"}],
+                },
+            },
+        ])
+        clock = FakeClock()
+        snapshots = []
+        result = BenchmarkRunner(
+            WanGPClient(transport),
+            make_manifest(),
+            timeout_seconds=5,
+            poll_interval=0.5,
+            clock=clock,
+            sleep=clock.sleep,
+            progress_callback=snapshots.append,
+        ).run()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(snapshots), 4)
+        self.assertEqual(snapshots[0]["job_id"], "owned-1")
+        self.assertEqual(snapshots[0]["status"], "running")
+        self.assertEqual(snapshots[1]["progress"], {
+            "kind": "preview", "current_step": 6, "total_steps": 20,
+            "phase": "inference", "status": "Denoising", "progress": 39,
+        })
+        self.assertEqual(snapshots[-1]["status"], "completed")
+        self.assertTrue(snapshots[-1]["done"])
+        serialized = json.dumps(snapshots)
+        self.assertNotIn("prompt", serialized)
+        self.assertNotIn("image", serialized)
+        self.assertNotIn("nested free-form text stays out", serialized)
+        self.assertNotIn("event history stays out", serialized)
+        self.assertNotIn("requested_settings", serialized)
+
+    def test_progress_callback_failure_does_not_retry_or_cancel_job(self):
+        transport = FakeTransport()
+        clock = FakeClock()
+        calls = []
+
+        def broken_progress_writer(snapshot):
+            calls.append(snapshot)
+            raise OSError("simulated disk full")
+
+        runner = BenchmarkRunner(
+            WanGPClient(transport),
+            make_manifest(),
+            timeout_seconds=5,
+            clock=clock,
+            sleep=clock.sleep,
+            progress_callback=broken_progress_writer,
+        )
+        result = runner.run()
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            len([call for call in transport.calls if call[0] == "wangp_generate"]), 1
+        )
+        self.assertEqual(transport.cancelled, [])
+        self.assertIn("simulated disk full", runner.progress_callback_warning)
+
+    def test_timeout_progress_snapshot_records_confirmed_cancellation(self):
+        transport = FakeTransport(never_finish=True)
+        clock = FakeClock()
+        snapshots = []
+        result = BenchmarkRunner(
+            WanGPClient(transport),
+            make_manifest(),
+            timeout_seconds=1,
+            poll_interval=0.5,
+            cancel_grace_seconds=1,
+            clock=clock,
+            sleep=clock.sleep,
+            progress_callback=snapshots.append,
+        ).run()
+
+        self.assertEqual(result["status"], "timed_out")
+        self.assertEqual(transport.cancelled, ["owned-1"])
+        self.assertTrue(snapshots[-1]["done"])
+        self.assertEqual(snapshots[-1]["status"], "timed_out")
+        self.assertEqual(snapshots[-1]["cancel_state"], {
+            "status": "confirmed", "requested": True, "confirmed": True,
+        })
+
+    def test_cli_emits_one_warning_when_progress_file_write_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report_path = Path(directory) / "report.json"
+            progress_path = Path(directory) / "live-progress.json"
+            real_write_result = write_result
+
+            def fail_only_progress(path, result):
+                if Path(path) == progress_path:
+                    raise BenchmarkError("simulated progress disk failure")
+                return real_write_result(path, result)
+
+            stderr = io.StringIO()
+            with patch(
+                "app.scripts.benchmark_wangp.load_manifest",
+                return_value=(make_manifest(), "digest"),
+            ), patch(
+                "app.scripts.benchmark_wangp.StreamableHTTPMCP",
+                return_value=FakeTransport(),
+            ), patch(
+                "app.scripts.benchmark_wangp.write_result",
+                side_effect=fail_only_progress,
+            ), redirect_stderr(stderr):
+                status = benchmark_main([
+                    "--base-url", "http://127.0.0.1:42019",
+                    "--manifest", "unused.json",
+                    "--output", str(report_path),
+                    "--progress-file", str(progress_path),
+                    "--timeout", "5",
+                ])
+
+            self.assertEqual(status, 0)
+            warning = stderr.getvalue()
+            self.assertEqual(warning.count("Warning:"), 1)
+            self.assertIn("monitoring continued", warning)
+            self.assertTrue(report_path.exists())
 
     def test_async_disabled_is_rejected_from_tool_schema(self):
         transport = FakeTransport()
