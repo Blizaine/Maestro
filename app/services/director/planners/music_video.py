@@ -8,6 +8,7 @@ Outputs: ProductionPlan with ShotPlan objects (NOT final prompts).
 """
 
 from __future__ import annotations
+import math
 import os
 import re
 from typing import Optional, Any
@@ -20,6 +21,7 @@ from ..schema import (
 from ..policies import build_character_rules_block, build_camera_style_block
 from ..vocal_activity import classify_vocal_intervals
 from ..music_performance import MUSIC_PERFORMANCE_RULES, PERFORMANCE_ROLES
+from ..prompt_timing import music_video_visual_timing_issue
 from .base import BasePlanner
 
 
@@ -63,6 +65,79 @@ def _compact_lyrics_for_context(
     if truncated:
         text = f"{text} [transcript excerpt truncated]".strip()
     return text
+
+
+def _music_clip_duration_seconds(clip: dict) -> Optional[float]:
+    """Resolve a clip's actual local duration without using its song offset."""
+
+    def finite_number(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if math.isfinite(number) else None
+
+    start = finite_number(clip.get("start"))
+    end = finite_number(clip.get("end"))
+    if start is not None and end is not None and end > start:
+        return end - start
+
+    for key in ("duration_sec", "duration_seconds", "local_duration_sec"):
+        duration = finite_number(clip.get(key))
+        if duration is not None and duration > 0:
+            return duration
+
+    frames = finite_number(clip.get("duration_frames"))
+    fps = finite_number(clip.get("fps") or clip.get("frame_rate"))
+    if frames is not None and frames > 0 and fps is not None and fps > 0:
+        return frames / fps
+    return None
+
+
+def _has_meaningful_cast_identity(subject: dict) -> bool:
+    """Check that a visible cast member has a stable identity field."""
+
+    generic_values = {
+        "a character",
+        "a person",
+        "character",
+        "none",
+        "n a",
+        "na",
+        "nobody",
+        "person",
+        "performer",
+        "speaker",
+        "singer",
+        "subject",
+        "the character",
+        "the person",
+        "the performer",
+        "the singer",
+        "the speaker",
+        "the subject",
+        "unknown",
+        "unknown person",
+        "unknown speaker",
+        "vocalist",
+    }
+
+    def usable(value: Any) -> bool:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        normalized = re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
+        normalized = re.sub(r"^(?:the|a|an)\s+", "", normalized)
+        numeric_slot_id = re.fullmatch(
+            r"(?:char|character|subject|speaker)\s*\d+",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        return bool(
+            normalized
+            and normalized not in generic_values
+            and numeric_slot_id is None
+        )
+
+    return usable(subject.get("character_id")) or usable(subject.get("speaker_name"))
 
 
 # ── Section-based visual strategy ────────────────────────────────────
@@ -160,12 +235,25 @@ _MUSIC_SHOT_PROPERTIES = {
 }
 
 
-def _music_shot_schema(count: int, *, include_image_fields: bool) -> dict:
+def _music_shot_schema(
+    count: int, *, include_image_fields: bool, require_cast_identity: bool = False,
+) -> dict:
     properties = {
         key: value
         for key, value in _MUSIC_SHOT_PROPERTIES.items()
         if include_image_fields or key not in _MUSIC_IMAGE_FIELDS
     }
+    if require_cast_identity:
+        # Grammar-constrain the structural identity fields up front rather
+        # than spending a semantic repair solely to request missing keys.
+        cast = properties["subjects_on_screen"]
+        properties["subjects_on_screen"] = {
+            **cast,
+            "items": {
+                **cast["items"],
+                "required": [*cast["items"]["required"], "character_id", "speaker_name"],
+            },
+        }
     required = [
         "scene_goal",
         "scene_type",
@@ -322,7 +410,7 @@ class MusicVideoPlanner(BasePlanner):
             kwargs,
             kind="music_video",
             fingerprint_payload={
-                "planner_revision": 6,
+                "planner_revision": 7,
                 "scene_description": scene_description,
                 "clips": clips,
                 "lyrics": lyrics or [],
@@ -593,6 +681,7 @@ class MusicVideoPlanner(BasePlanner):
             beat_count = clip.get("beat_count", 8)
             start_sec = clip.get("start", 0)
             end_sec = clip.get("end", start_sec + 5)
+            local_duration = _music_clip_duration_seconds(clip)
 
             # Gather overlapping lyrics
             lyrics_snippet = ""
@@ -659,10 +748,28 @@ class MusicVideoPlanner(BasePlanner):
                 )
 
             ctx = f"Clip {i + 1}: {section}, {beat_count} beats, {vocal_info}.{performer_hint}"
+            if local_duration is not None:
+                end_timecode = (
+                    f"{int(local_duration // 60):02d}:"
+                    f"{local_duration % 60:06.3f}"
+                )
+                ctx += (
+                    f" Local visual duration: {local_duration:.3f}s "
+                    f"(clip-local timeline 00:00.000 through {end_timecode}); "
+                    "visual cut timecodes in video_prompt reset to 00:00.000 "
+                    "for this clip and must stay within this duration. "
+                    "Source-song lyric and cue offsets remain audio timing, "
+                    "not visual cut timecodes."
+                )
+            else:
+                ctx += (
+                    " Local visual timecodes, if used, start at 00:00.000; "
+                    "do not substitute source-song offsets for shot-local time."
+                )
             from services.director.music_cues import format_music_cues
             cue_context = format_music_cues(clip)
             if cue_context:
-                ctx += f" Music timing: {cue_context}"
+                ctx += f" Source-song music timing: {cue_context}"
             contexts.append(ctx)
 
         return contexts
@@ -675,6 +782,9 @@ class MusicVideoPlanner(BasePlanner):
         *,
         scene_description: str,
         include_image_fields: bool,
+        duration_seconds: Optional[float] = None,
+        validate_visual_timing: bool = False,
+        require_stable_cast_identity: bool = False,
     ) -> Optional[str]:
         """Return why a music-video row is incomplete or not shot-specific."""
 
@@ -696,6 +806,16 @@ class MusicVideoPlanner(BasePlanner):
 
         if not isinstance(row.get("subjects_on_screen"), list):
             return f"clip {index + 1} has no subjects_on_screen list"
+        if require_stable_cast_identity:
+            for subject_index, subject in enumerate(row["subjects_on_screen"]):
+                if (
+                    not isinstance(subject, dict)
+                    or not _has_meaningful_cast_identity(subject)
+                ):
+                    return (
+                        f"clip {index + 1} subject {subject_index + 1} needs a "
+                        "stable, meaningful character_id or speaker_name"
+                    )
         if not isinstance(row.get("action_beats"), list) or not any(
             isinstance(beat, str) and beat.strip()
             for beat in row.get("action_beats", [])
@@ -726,6 +846,12 @@ class MusicVideoPlanner(BasePlanner):
                 return (
                     f"clip {index + 1} repeats a completed clip's video_prompt"
                 )
+        if validate_visual_timing:
+            timing_issue = music_video_visual_timing_issue(
+                row.get("video_prompt"), duration_seconds
+            )
+            if timing_issue:
+                return f"clip {index + 1} {timing_issue}"
         return None
 
     # ── LLM Planning Call ────────────────────────────────────────────
@@ -746,6 +872,9 @@ class MusicVideoPlanner(BasePlanner):
         """Call LLM to generate structured shot plans."""
         from ..nsfw_guidance import inject_nsfw_if_enabled
 
+        is_minimax_h3 = str(kwargs.get("video_model") or "").lower().startswith(
+            "minimax_h3"
+        )
         if not kwargs.get("_bounded_music_batch"):
             forwarded_kwargs = {
                 key: value for key, value in kwargs.items()
@@ -874,6 +1003,12 @@ class MusicVideoPlanner(BasePlanner):
                         previous_rows,
                         scene_description=scene_description,
                         include_image_fields=uses_generated_images,
+                        duration_seconds=(
+                            _music_clip_duration_seconds(clips[index])
+                            if 0 <= index < len(clips) else None
+                        ),
+                        validate_visual_timing=is_minimax_h3,
+                        require_stable_cast_identity=is_minimax_h3,
                     )
                 ),
                 repair_batch_size=max(1, self._LONG_FORM_BATCH_SIZE // 2),
@@ -973,6 +1108,11 @@ Character references define identity and location references define the setting.
             scene_anchoring_rules = """SCENE-ANCHORING (avoid off-topic content):
 No visual reference was provided. Follow the Scene Concept, which may be narrative, dance, environment, or performance-focused. Do not add people or objects solely because the soundtrack contains vocals. Keep the identity and role of any requested or explicitly assigned person consistent across clips."""
 
+        subject_identity_field = (
+            '"character_id": "lead_performer", "speaker_name": "Ari", '
+            if is_minimax_h3 else ""
+        )
+
         system_prompt = f"""You are a music video director. Plan each clip AND write its prompts. Output ONLY the JSON array.
 
 {f"You are given a REFERENCE PHOTO. Use it to identify appearance, clothing, and setting." if has_reference else ""}
@@ -997,12 +1137,14 @@ MUSIC VIDEO RULES:
 {image_prompt_rules}
 
 
+For MiniMax H3, the Ari/lead_performer values in the schema example are illustrative only: preserve supplied cast names exactly, and never invent a real name. Emit both identity keys. For unnamed cast, use a stable semantic character_id such as lead_performer and an empty speaker_name; do not invent a name.
+
 OUTPUT — respond with ONLY a JSON array:
 [
   {{
     "scene_goal": "What this clip achieves",
     "scene_type": "performance|narrative|atmospheric",
-    "subjects_on_screen": [{{"visual_description": "a visible person", "position_or_relation": "center frame", "performance_role": "non_vocal"}}],
+    "subjects_on_screen": [{{{subject_identity_field}"visual_description": "a visible person", "position_or_relation": "center frame", "performance_role": "non_vocal"}}],
     "environment": "Setting details",
     "visual_style": "Style",
     "lighting": "Lighting",
@@ -1081,6 +1223,7 @@ Write {len(clips)} structured shot plans. Go:"""
             json_schema=_music_shot_schema(
                 len(clips),
                 include_image_fields=uses_generated_images,
+                require_cast_identity=is_minimax_h3,
             ),
         )
         if not uses_generated_images:

@@ -88,6 +88,17 @@ class TestDirectorProjectRevisionsAndQueue(unittest.TestCase):
         self.assertEqual(reloaded["clips"][1]["window_prompts"], ["reviewed one", "reviewed two"])
         self.assertEqual(reloaded["clips"][1]["video_prompt"], "reviewed one\nreviewed two")
 
+    def test_prompt_edit_keeps_render_provenance_and_marks_media_stale(self):
+        pid, _path = self._saved_pipeline([{
+            "video_prompt": "rendered prompt", "video_filename": "existing.mp4",
+        }])
+        pipeline.update_clip_prompt(self.temp_dir.name, pid, 0, {"video_prompt": "first edit"})
+        pipeline.update_clip_prompt(self.temp_dir.name, pid, 0, {"video_prompt": "second edit"})
+        clip = pipeline.load_pipeline_state(self.temp_dir.name, pid)["clips"][0]
+        self.assertEqual(clip["video_filename"], "existing.mp4")
+        self.assertEqual(clip["_director_rendered_prompt"], "rendered prompt")
+        self.assertTrue(clip["video_stale"])
+
     def test_reviewed_clip_prompt_rejects_ambiguous_invalid_and_busy_updates(self):
         pid, _path = self._saved_pipeline([
             {"video_prompt": "one\ntwo", "window_prompts": ["one", "two"]},

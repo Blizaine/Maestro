@@ -21,6 +21,19 @@ SELF-CONTAINED SHOT RULES:
 - References are guidance. Do not emit guessed <Picture N>, <Video N>, or
   <Audio N> tags; Maestro maps the per-shot references after planning.
 
+STABLE CAST IDENTITY:
+- Every visible person or creature in `subjects_on_screen` must have a
+  meaningful `character_id` or `speaker_name`. Reuse the same `character_id`
+  for that identity across clips; do not use a changing pose, wardrobe detail,
+  or generic role such as "the singer" as its identity.
+- Preserve a user-supplied name exactly in `speaker_name`. If no name was
+  supplied, use a stable semantic ID such as `lead_performer` and keep it
+  consistent. Emit both identity keys; an unnamed cast member uses an empty
+  `speaker_name` with its meaningful semantic ID. A numeric slot ID such as `character_1` requires a meaningful
+  `speaker_name` as well.
+- Keep stable identity fields separate from `visual_description`, which may
+  describe the target shot's current wardrobe, pose, and appearance.
+
 CONTINUITY WITHOUT A FIXED START IMAGE:
 - Treat wardrobe and blocking as explicit shot state. For every visible person,
   repeat the complete head-to-toe clothing and exact first-frame position:
@@ -33,12 +46,35 @@ CONTINUITY WITHOUT A FIXED START IMAGE:
   continuation that should inherit the preceding generated final frame. Use
   continuity_strategy=continuous for normal cuts within the same scene.
 
+PHYSICAL ACTION AND CAMERA CONTINUITY:
+- Keep body anatomy and contact physically readable: preserve plausible limb
+  placement, joint direction, and hand or paw contact through each action.
+  Maintain believable rider-to-mount and person-to-object scale, support, and
+  contact points throughout the shot.
+- Make each transition explicit and chronological. Establish the action that
+  leads into a new composition; do not teleport a subject, change its pose
+  without a visible action, or create a duplicate of an existing subject.
+- Keep the camera's point of view consistent within each described shot. Do
+  not mix a first-person view with an external view unless an explicit cut
+  clearly changes the camera position.
+- The target action owns the pose. Continue from the described current state,
+  then show the next action once; do not repeat an action that already
+  happened or let earlier state notes override the target pose.
+- When fire or another hazardous effect is present, aim it away from visible
+  people and animals unless the user's source explicitly requests contact.
+  Do not invent a hit, burn, or engulfing contact.
+
 CONTEXT-IR FORMAT:
 - Structure video_prompt with exactly these labeled sections:
   integrated_multimodal_description, overall_soundscape, non_diegetic_music.
 - Begin integrated_multimodal_description with [Shot 1] and no timestamp, then
   narrate visible action, camera, dialogue, and synchronized sound in
   chronological order. Later cuts begin [Shot N] At MM:SS.mmm.
+- Visual cut timecodes use this clip's local timeline: start at 00:00.000, use
+  the local duration stated with the clip, and keep every visual cut within
+  that duration. Never substitute an absolute source-song offset for a visual
+  cut time. Labeled lyric, source-audio, and music-cue times keep their source
+  timing and are not visual cut markers.
 - Give each speaking person a stable ID such as (S1) or (S2).
 - When already numbered people speak or sing together, use a compound ID such
   as (S1,S2). Characters who never vocalize receive no speaker ID.

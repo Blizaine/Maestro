@@ -87,18 +87,18 @@ _H3_CUSTOM_SECTION_RE = re.compile(
 _H3_SOUND_PROSE_RE = re.compile(
     r"\b(?:the\s+)?soundscape\s+(?:is\s+dominated\s+by|includes|contains|is)\s+"
     r"(.+?)(?=\s+(?:non-diegetic\s+music|the\s+final\s+beat|"
-    r"closing\s+blocking|opening\s+continuity|final\s+blocking)\b|$)",
+    r"closing\s+blocking|opening\s+continuity|final\s+blocking)\b|\s*\[Shot\s+\d+\]|$)",
     re.IGNORECASE | re.DOTALL,
 )
 _H3_MUSIC_PROSE_RE = re.compile(
     r"\bnon-diegetic\s+music\s+is\s+(.+?)"
     r"(?=\s+(?:the\s+final\s+beat|closing\s+blocking|"
-    r"opening\s+continuity|final\s+blocking)\b|$)",
+    r"opening\s+continuity|final\s+blocking)\b|\s*\[Shot\s+\d+\]|$)",
     re.IGNORECASE | re.DOTALL,
 )
 _H3_AUXILIARY_SECTION_BOUNDARY_RE = re.compile(
     r"\b(?:integrated_multimodal_description|detailed_description|"
-    r"overall_soundscape|non_diegetic_music|dialogue\s+beats?)\s*:",
+    r"overall_soundscape|non_diegetic_music|dialogue\s+beats?)\s*:|\[Shot\s+\d+\]",
     re.IGNORECASE,
 )
 _H3_META_SENTENCE_RE = re.compile(
@@ -1852,6 +1852,118 @@ def _has_nested_dialogue_open(prompt: str) -> bool:
     return False
 
 
+def _ref2va_identity_aliases(subject: Any) -> list[str]:
+    """Read explicit names or a conservative leading identity noun phrase.
+
+    Older music plans have only visual_description ("the Kitten, ...").
+    Match word boundaries and require a unique subject; shared traits never
+    justify picking the first member of an ensemble.
+    """
+    aliases = [
+        _normalized_space(_field(subject, key, ""))
+        for key in ("speaker_name", "character_id")
+    ]
+    for name in list(aliases):
+        if re.fullmatch(r"[A-Z][A-Za-z'’-]+(?: [A-Z][A-Za-z'’-]+){1,2}", name):
+            aliases.extend(part for part in name.split() if part.casefold() not in {"the", "a", "an"})
+    description = _normalized_space(_field(subject, "visual_description", ""))
+    opening = re.split(
+        r"[,(:;]|\s+(?:from|with|wearing|whose|in|is|stands?|sits?|holds?|"
+        r"approach(?:es|ing)?|standing|sitting|holding|posing|looking|walking|running|clad)\b", description, maxsplit=1, flags=re.I,
+    )[0].strip(" .")
+    opening = re.sub(r"^(?:(?:the|a|an|same|single)\s+)+", "", opening, flags=re.I)
+    if opening and len(opening.split()) <= 6:
+        aliases.append(opening)
+        # A descriptor such as "single warrior kitten" may be called simply
+        # "kitten" in the reference label. Generic human nouns are excluded.
+        noun = opening.split()[-1]
+        if noun.casefold() not in {
+            "person", "man", "woman", "child", "boy", "girl", "performer",
+            "singer", "subject", "character", "figure", "people",
+        }:
+            aliases.append(noun)
+    return list(dict.fromkeys(value for value in aliases if len(value) >= 2))
+
+
+def _mapped_ref2va_subject(role: str, subjects: Sequence[Any]) -> int | None:
+    scored: list[tuple[tuple[int, int], int]] = []
+    for index, subject in enumerate(subjects):
+        explicit = _ref2va_identity_aliases({
+            key: _field(subject, key, "") for key in ("speaker_name", "character_id")
+        })
+        def match_length(aliases: Sequence[str]) -> int:
+            return max((len(alias) for alias in aliases if re.search(
+                rf"(?<![\w]){re.escape(alias)}(?![\w])", role, re.I,
+            )), default=0)
+        explicit_length = match_length(explicit)
+        inferred_length = match_length(_ref2va_identity_aliases(subject))
+        scored.append(((2, explicit_length) if explicit_length else (1, inferred_length), index))
+    best = max((score for score, _index in scored), default=(0, 0))
+    matches = [index for score, index in scored if best[1] and score == best]
+    if len(matches) > 1:
+        raise H3DialogueContractError(
+            f"Reference identity '{role}' matches multiple visible subjects; "
+            "use a distinct character name in the reference and cast list."
+        )
+    return matches[0] if matches else None
+
+
+def _ref2va_cast_from_source(
+    prompt: str, subjects: Sequence[Any],
+) -> tuple[list[Any], dict[int, str]]:
+    """Recover reviewed cast definitions when structured cast metadata is absent.
+
+    Explicit Context-IR edits are authoritative. Retaining their numbered
+    definitions also retains non-reference actors (e.g. a mounted creature).
+    Existing structured cast stays authoritative for legacy compiled copies.
+    """
+    field = _extract_h3_fields(prompt).get("subject_definitions", "")
+    matches = list(re.finditer(r"<Subject\s+(\d+)>\s*(?:\(S\d+\)\s*)?is\s+", field, re.I))
+    if not matches:
+        return list(subjects), {}
+    numbers = [int(match[1]) for match in matches]
+    if numbers != list(range(1, len(matches) + 1)):
+        raise H3DialogueContractError("Reviewed subject definitions must have unique consecutive subject numbers.")
+    recovered: list[Any] = []
+    definitions: dict[int, str] = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(field)
+        # Other reference definitions follow the final cast member in a
+        # compiled six-field prompt. Rebuild those from the current manifest,
+        # rather than swallowing them into that last character definition.
+        reference_definition = re.search(
+            r"(?:^|(?<=[.!?])\s+|\n)\s*<(?:Picture|Video|Audio)\s+\d+>"
+            r"\s+(?:is|provides|supplies)\b", field[match.end():end], re.I,
+        )
+        if reference_definition:
+            end = match.end() + reference_definition.start()
+        definition = field[match.start():end].strip()
+        description = field[match.end():end].strip()
+        subject = {"visual_description": description}
+        aliases = _ref2va_identity_aliases(subject)
+        # Keep descriptions out of display names; full reviewed prose below
+        # remains the authority for identity, wardrobe, and reference binding.
+        if aliases:
+            subject["speaker_name"] = _leading_h3_identity(description) or aliases[-1]
+        recovered.append(subject)
+        definitions[index + 1] = definition
+    if subjects:
+        if len(subjects) > len(recovered):
+            raise H3DialogueContractError("Reviewed subject definitions omit a visible cast member.")
+        for index, subject in enumerate(subjects):
+            aliases = _ref2va_identity_aliases(subject)
+            if aliases and not any(re.search(
+                rf"(?<![\w]){re.escape(alias)}(?![\w])",
+                str(recovered[index]["visual_description"]), re.I,
+            ) for alias in aliases):
+                raise H3DialogueContractError(
+                    f"Reviewed <Subject {index + 1}> contradicts the saved cast; "
+                    "update the cast identity together with the prompt."
+                )
+            recovered[index] = subject
+    return recovered, definitions
+
+
 def _reference_relationships(
     references: Sequence[Mapping[str, Any]] | None,
     subjects: Sequence[Any] | None = None,
@@ -1883,25 +1995,17 @@ def _reference_relationships(
     registry = registry if isinstance(registry, Mapping) else {}
 
     def mapped_subject(role: str) -> tuple[int, str, str] | None:
-        folded_role = role.casefold()
-        for subject_index, subject in enumerate(subjects or [], start=1):
-            character_id = _normalized_space(_field(subject, "character_id", ""))
-            subject_name = _normalized_space(
-                _field(subject, "speaker_name", "") or character_id
-            )
-            candidates = [
-                value for value in (subject_name, character_id)
-                if len(value) >= 2
-            ]
-            if not any(value.casefold() in folded_role for value in candidates):
-                continue
-            entry = _speaker_registry_entry(
-                registry,
-                character_id or subject_name,
-            )
-            stable_id = entry[0] if entry else ""
-            return subject_index, subject_name or character_id, stable_id
-        return None
+        matched_index = _mapped_ref2va_subject(role, subjects or [])
+        if matched_index is None:
+            return None
+        subject = (subjects or [])[matched_index]
+        character_id = _normalized_space(_field(subject, "character_id", ""))
+        aliases = _ref2va_identity_aliases(subject)
+        subject_name = _normalized_space(_field(subject, "speaker_name", "")) or (
+            aliases[0] if aliases else character_id
+        )
+        entry = _speaker_registry_entry(registry, character_id or subject_name)
+        return matched_index + 1, subject_name, entry[0] if entry else ""
 
     def add_task_type(value: str) -> None:
         if value not in task_types:
@@ -1910,7 +2014,11 @@ def _reference_relationships(
     for reference in references or []:
         kind = str(reference.get("type") or "").strip().lower()
         role = _trim_sentence(reference.get("role", "")) or f"the supplied {kind} reference"
-        subject_match = mapped_subject(role)
+        subject_match = (
+            mapped_subject(role)
+            if kind != "image" or str(reference.get("image_intent") or "identity").lower() == "identity"
+            else None
+        )
         mapped_role = (
             f"<Subject {subject_match[0]}> ({subject_match[1]})"
             if subject_match else role
@@ -1946,12 +2054,15 @@ def _reference_relationships(
                 )
                 continue
 
+            if intent in {"scene", "style"}:
+                subject_match = None
             if subject_match:
                 subject_no, subject_name, _ = subject_match
             else:
                 subject_no = next_subject_no
                 next_subject_no += 1
-                subject_name = role
+                aliases = _ref2va_identity_aliases({"visual_description": role})
+                subject_name = aliases[0] if intent == "identity" and aliases else role
 
             if intent == "scene":
                 source_clause = f"environment and location identity come from {label}"
@@ -2115,7 +2226,8 @@ def _ref2va_subject_definitions(
     for index, subject in enumerate(subjects or [], start=1):
         character_id = _normalized_space(_field(subject, "character_id", ""))
         name = _normalized_space(
-            _field(subject, "speaker_name", "") or character_id or f"subject {index}"
+            _field(subject, "speaker_name", "") or character_id
+            or next(iter(_ref2va_identity_aliases(subject)), f"subject {index}")
         )
         entry = _speaker_registry_entry(registry, character_id or name)
         speaker = f" {entry[0]}" if entry and entry[0] else ""
@@ -2150,6 +2262,19 @@ def _label_ref2va_subjects_in_body(
             _field(subject, "speaker_name", "")
             or _field(subject, "character_id", "")
         )
+        if not _normalized_space(_field(subject, "speaker_name", "")):
+            # Semantic IDs such as lead_performer need not occur in natural
+            # visual prose. Bind a unique visible identity alias instead.
+            for alias in _ref2va_identity_aliases(subject):
+                if not re.search(rf"(?<![\w>]){re.escape(alias)}(?![\w<])", result, re.I):
+                    continue
+                try:
+                    matched = _mapped_ref2va_subject(alias, subjects)
+                except H3DialogueContractError:
+                    continue
+                if matched == index - 1:
+                    name = alias
+                    break
         if not name:
             continue
         pattern = re.compile(rf"(?<![\w>]){re.escape(name)}(?![\w<])", re.IGNORECASE)
@@ -2246,6 +2371,9 @@ def compile_h3_official_prompt(
     if mode not in {"t2va", "i2va", "fl2va", "l2va", "ref2va"}:
         raise H3DialogueContractError(f"Unknown MiniMax H3 prompt mode: {mode}")
     registry = speaker_registry if isinstance(speaker_registry, Mapping) else {}
+    reviewed_definitions: dict[int, str] = {}
+    if mode == "ref2va":
+        subjects, reviewed_definitions = _ref2va_cast_from_source(prompt, subjects or [])
     (
         reference_definitions,
         retention,
@@ -2295,6 +2423,10 @@ def compile_h3_official_prompt(
     )
     if mode == "ref2va":
         style_opening, body = _split_ref2va_style_opening(body)
+        # Bind visual prose before inserting compiler-owned vocal directions.
+        # Otherwise the inserted labels alter those exact canonical sentences
+        # and a second preflight can no longer remove/rebuild them once.
+        body = _label_ref2va_subjects_in_body(body, subjects or [])
         body, vocal_contract = _compile_official_dialogue(
             body,
             subjects or [],
@@ -2314,13 +2446,20 @@ def compile_h3_official_prompt(
             registry,
             subject_sources,
         )
+        for index, reviewed in reviewed_definitions.items():
+            missing_sources = [
+                clause for clause in subject_sources.get(index, ())
+                if any(label not in reviewed for label in re.findall(r"<Picture \d+>", clause))
+            ]
+            subject_definitions[index - 1] = reviewed.rstrip(" .") + (
+                "; " + "; ".join(missing_sources) if missing_sources else ""
+            ) + "."
         definitions = "\n".join([*subject_definitions, *reference_definitions])
         if not definitions:
             definitions = "Use the explicitly described subjects and target scene."
         retention_text = "\n".join(retention) or (
             "Preserve the explicitly described identities, wardrobe, setting, action, and audio roles."
         )
-        body = _label_ref2va_subjects_in_body(body, subjects or [])
         summary_body = re.sub(r"^\[Shot\s+1\]\s*", "", body, flags=re.IGNORECASE)
         summary_body = _H3_STRICT_DIALOGUE_RE.sub(
             "scripted dialogue",
@@ -2336,8 +2475,11 @@ def compile_h3_official_prompt(
         if detail_bindings:
             body = re.sub(r"^\[Shot\s+1\]\s*", "", body, flags=re.IGNORECASE)
             body = f"[Shot 1] {' '.join(detail_bindings)} {body}".strip()
-        body = _ensure_h3_context_anchors(body, context_anchors or [])
+        # The style opening may already contain the world anchor inserted
+        # during source recovery. Check the complete visual field so moving
+        # that opening does not cause a second copy to be added before it.
         body = f"{style_opening} {body}".strip()
+        body = _ensure_h3_context_anchors(body, context_anchors or [])
         if has_driving_audio and music == "N/A":
             music = "Use the mapped driving audio according to retention_analysis."
         compiled = (
@@ -2408,6 +2550,7 @@ def validate_h3_prompt_contract(
     references: Sequence[Mapping[str, Any]] | None = None,
     subjects: Sequence[Any] | None = None,
     context_anchors: Sequence[str] | None = None,
+    duration_seconds: float = 0.0,
 ) -> list[str]:
     """Validate the official field order plus Maestro's exact dialogue data."""
 
@@ -2433,6 +2576,29 @@ def validate_h3_prompt_contract(
     extracted_fields = _extract_h3_fields(text)
     visual_field = "detailed_description" if mode == "ref2va" else "integrated_multimodal_description"
     visual = extracted_fields.get(visual_field, "")
+    # Reference bindings mention an existing shot (for example, "throughout
+    # [Shot 1]"); those mentions do not introduce a camera cut. Legacy inline
+    # Context-IR can also repeat the current marker before more action prose.
+    # Collapse that continuation, while rejecting skipped/global shot indices
+    # or a return to an earlier shot after a later cut.
+    shot_numbers: list[int] = []
+    for marker in re.finditer(r"\[Shot\s+(\d+)\]", visual, re.I):
+        preceding = visual[max(0, marker.start() - 45):marker.start()]
+        if re.search(r"\b(?:throughout|during|within|from|appears\s+in)\s*$", preceding, re.I):
+            continue
+        number = int(marker.group(1))
+        if not shot_numbers or number != shot_numbers[-1]:
+            shot_numbers.append(number)
+    if shot_numbers and shot_numbers != list(range(1, len(shot_numbers) + 1)):
+        errors.append("visual shot numbers must be consecutive within this clip, starting at [Shot 1]")
+    if duration_seconds > 0:
+        from .prompt_timing import music_video_visual_timing_issue
+        timing_issue = music_video_visual_timing_issue(visual, duration_seconds)
+        if timing_issue:
+            errors.append(timing_issue)
+    for field in ("overall_soundscape", "non_diegetic_music"):
+        if re.search(r"\[Shot\s+\d+\]", extracted_fields.get(field, ""), re.I):
+            errors.append(f"{field} contains visual shot instructions")
     if mode == "ref2va":
         shot = re.search(r"\[Shot\s+1\]", visual, flags=re.IGNORECASE)
         if not shot:
@@ -2495,6 +2661,43 @@ def validate_h3_prompt_contract(
             flags=re.IGNORECASE,
         ):
             errors.append("Ref2VA summary is missing its official task-type prefix")
+
+        definitions_text = extracted_fields.get("subject_definitions", "")
+        definitions = list(re.finditer(r"<Subject\s+(\d+)>\s*(?:\(S\d+\)\s*)?is\s+", definitions_text, re.I))
+        numbers = [int(match[1]) for match in definitions]
+        if len(numbers) != len(set(numbers)):
+            errors.append("Ref2VA defines the same subject number more than once")
+        undefined = set(int(value) for value in re.findall(r"<Subject\s+(\d+)>", visual, re.I)) - set(numbers)
+        if undefined:
+            errors.append("Ref2VA visual action uses undefined subjects: " + ", ".join(str(number) for number in sorted(undefined)))
+        definition_bodies = {
+            int(match[1]): definitions_text[match.end():
+                definitions[index + 1].start() if index + 1 < len(definitions) else len(definitions_text)]
+            for index, match in enumerate(definitions)
+        }
+        picture_no = 0
+        for reference in references or []:
+            if str(reference.get("type") or "").lower() != "image":
+                continue
+            picture_no += 1
+            if str(reference.get("image_intent") or "identity").lower() != "identity":
+                continue
+            try:
+                mapped = _mapped_ref2va_subject(str(reference.get("role") or ""), subjects or [])
+            except H3DialogueContractError as exc:
+                errors.append(str(exc))
+                continue
+            label = f"<Picture {picture_no}>"
+            owners = [number for number, body in definition_bodies.items() if label in body]
+            if mapped is None:
+                if len(owners) != 1:
+                    errors.append(f"Identity reference {label} must have exactly one subject binding; found {owners}")
+                continue
+            if owners != [mapped + 1]:
+                errors.append(
+                    f"Identity reference {label} must bind only to <Subject {mapped + 1}>; "
+                    f"found subject bindings {owners}"
+                )
 
         if references:
             expected_labels: list[str] = []
@@ -2572,6 +2775,27 @@ def compile_h3_clip_plans(
             or has_driving_audio_reference
         )
 
+    for plan in clip_plans:
+        if plan.get("_director_prompt_user_edited"):
+            source = str(plan.get("_director_h3_source_prompt") or plan.get("video_prompt") or "")
+            if _extract_h3_fields(source).get("subject_definitions"):
+                recovered, _definitions = _ref2va_cast_from_source(source, [])
+                if recovered:
+                    previous_subjects = plan.get("_director_subjects_on_screen") or []
+                    for subject in recovered:
+                        try:
+                            previous = _mapped_ref2va_subject(subject.get("speaker_name", ""), previous_subjects)
+                        except H3DialogueContractError:
+                            previous = None
+                        if previous is not None:
+                            role = _field(previous_subjects[previous], "performance_role", "")
+                            if role:
+                                subject["performance_role"] = role
+                    plan["_director_subjects_on_screen"] = recovered
+                    plan["_director_opening_blocking"] = ""
+                    plan["_director_closing_blocking"] = ""
+                    plan.pop("_director_speaker_registry", None)
+
     _repair_h3_phantom_dialogue_subjects(clip_plans)
     _canonicalize_h3_project_subject_names(clip_plans)
     registry = _build_stable_speaker_registry(clip_plans)
@@ -2637,6 +2861,7 @@ def compile_h3_clip_plans(
             references=references,
             subjects=plan.get("_director_subjects_on_screen") or [],
             context_anchors=context_anchors,
+            duration_seconds=duration,
         )
         if errors:
             raise H3DialogueContractError(

@@ -24,9 +24,14 @@ def subject(description, role):
 class MusicPerformanceTests(unittest.TestCase):
     def test_planner_keeps_roles_in_saved_plans_and_instructs_cutaways(self):
         captures = []
-        cast = [subject('the blond lead singer', 'vocalist'),
-                subject('the dark-haired guitarist', 'instrumentalist'),
-                subject('the long-haired drummer', 'instrumentalist')]
+        cast = [
+            {**subject('the blond lead singer', 'vocalist'),
+             'character_id': 'lead_singer', 'speaker_name': 'the blond lead singer'},
+            {**subject('the dark-haired guitarist', 'instrumentalist'),
+             'character_id': 'rhythm_guitarist', 'speaker_name': 'the dark-haired guitarist'},
+            {**subject('the long-haired drummer', 'instrumentalist'),
+             'character_id': 'drummer', 'speaker_name': 'the long-haired drummer'},
+        ]
 
         def generate(**kwargs):
             captures.append(kwargs)

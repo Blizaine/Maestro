@@ -2003,6 +2003,7 @@ def update_clip_prompt(out_dir: str, pid: str, clip_index: int, update: dict) ->
                 raise ValueError(
                     "This clip has multiple window prompts; save window_prompts instead"
                 )
+            previous_prompt = clip.get("video_prompt", "")
             clip.update(supplied)
             if "window_prompts" in supplied:
                 clip["video_prompt"] = "\n".join(supplied["window_prompts"])
@@ -2016,6 +2017,9 @@ def update_clip_prompt(out_dir: str, pid: str, clip_index: int, update: dict) ->
                 clip["_director_prompt_user_edited"] = True
                 clip["_director_h3_compiled_prompt"] = ""
                 clip["_director_dialogue_beats"] = []
+                if clip.get("video_filename") and clip["video_prompt"] != previous_prompt:
+                    clip.setdefault("_director_rendered_prompt", previous_prompt)
+                    clip["video_stale"] = True
 
         with _pipeline_file_lock:
             return _update_saved_pipeline_locked(out_dir, pid, apply_update) is not None
@@ -3317,6 +3321,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         s["clips"][clip_index]["video_filename"] = new_filename
         s["clips"][clip_index]["video_stale"] = False
         s["clips"][clip_index]["video_prompt"] = prompt
+        s["clips"][clip_index]["_director_rendered_prompt"] = prompt
         s["clips"][clip_index]["_director_vocal_contract"] = (
             prompt_plan.get("_director_vocal_contract")
         )

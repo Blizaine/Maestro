@@ -280,6 +280,38 @@ shared roots, missing/corrupt files, and verified alternate copies. Pinned size
 and SHA checks remain required before loading. Fused label cleanup does not
 change the bundled checkpoint files or their recipes.
 
+## Director prompt-contract follow-up — October 10
+
+The final focused gates pass 292 Director tests and 80 H3 dialogue tests.
+New cases cover anonymous visual cast/reference matching, ambiguous identities,
+name boundaries, reviewed cast recovery, duplicate picture ownership, undefined
+subjects, clip-local shot numbering and timestamps, exact performance-direction/world-anchor
+recompilation, and preserving rendered-prompt provenance when editing a saved
+clip. H3 planning's JSON schema now requires identity keys; its semantic check
+requires a meaningful name or stable semantic ID. Only affected planning rows
+enter the existing bounded repair path. The planner checkpoint revision was
+advanced so an older cached plan cannot bypass these checks.
+
+The final full backend gate passes **3,660 tests, with 13 skipped**, on the
+Windows CPU test runtime. Python AST/control-character and undefined-name checks pass for
+all changed Python files; JSON-grammar regressions pass. No frontend code or
+launcher scripts changed in this follow-up; the preceding frontend gates apply
+to their unchanged source snapshot.
+
+All 23 reviewed prompts in the saved Director project pass the final compiler
+contract with their actual clip durations. Corrections preserve the existing
+media filenames, source-song timing and waveform, and backup prompts. The
+remote update verified that all 30 existing media files retained their sizes
+and modification times, started zero renders, and marked the 23 changed clips
+as requiring regeneration. Private backups, per-shot prompts and the review
+report remain excluded from Git.
+
+These checks validate prompt construction and saved-project integrity. They
+are model-free: no new writer call or video generation was run for this
+follow-up, and the existing videos do not demonstrate the corrected prompts.
+Human review after regeneration remains necessary for anatomy, scene
+continuity, point of view and identity retention.
+
 ## Remaining validation limits
 
 - 6/8/10 GB VRAM and 16 GB RAM recommendations are conservative extrapolations,

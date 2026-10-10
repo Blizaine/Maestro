@@ -180,6 +180,8 @@ class TestDirectorModelAssessment(unittest.TestCase):
                 "scene_goal": "Introduce the performer",
                 "scene_type": "performance",
                 "subjects_on_screen": [{
+                    "character_id": "office_performer",
+                    "speaker_name": "Dwight",
                     "visual_description": "Dwight from The Office in a mustard shirt",
                     "position_or_relation": "center frame",
                 }],

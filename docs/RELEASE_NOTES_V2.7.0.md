@@ -191,6 +191,19 @@ reference images as identity/design guidance rather than silently copying them
 into opening frames. These checks reduce the observed repeated-action and
 reference-still problems; generated stories still benefit from human review.
 
+H3 music planning now supplies each clip's local duration and requests stable
+cast identities. Malformed or out-of-range visual timecodes enter bounded
+planning repair, with a final check before generation. Reference pictures bind
+to the existing visible subject when its identity is unambiguous; ambiguous
+matches require a distinct cast/reference name. Reviewed numbered cast
+clauses survive recompilation, including characters without their own picture.
+Audio fields exclude visual shot markers, and compiler-owned performance
+instructions and world anchors are rebuilt once instead of accumulating
+through preflight.
+Planner guidance also covers rider scale, anatomy, viewpoint and physical
+transitions. Saving a changed prompt preserves its rendered-prompt provenance
+and marks an existing clip as needing regeneration.
+
 ## Simpler model selection
 
 **Manage models** remains available from every model picker, including References.

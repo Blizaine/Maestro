@@ -62,6 +62,18 @@ def strip_legacy_music_performance_direction(
 ):
     """Remove exact old role boilerplate while preserving surrounding prose."""
     text = str(prompt or "")
+    # The current compiler can be called at planning, preflight and final
+    # reference assembly. Remove only exact compiler-owned per-subject lines
+    # for every activity variant, then emit the current role once. This also
+    # cleans saved plans whose current activity differs from their old one.
+    for activity in (vocal_activity, None, "active", "silent", "unknown"):
+        for subject in subjects or ():
+            for context in (project_context, ""):
+                emitted = music_performance_direction(
+                    [subject], activity, project_context=context,
+                )
+                if emitted:
+                    text = text.replace(emitted, "")
     for emitted in (_LEGACY_GLOBAL_DIRECTION, *_LEGACY_ACTIVITY_DIRECTIONS):
         text = text.replace(emitted, "")
 

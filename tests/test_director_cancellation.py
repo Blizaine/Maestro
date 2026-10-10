@@ -804,6 +804,7 @@ class TestDirectorCancellation(unittest.TestCase):
 
         saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
         self.assertEqual(saved["clips"][0]["video_filename"], "new-video.mp4")
+        self.assertEqual(saved["clips"][0]["_director_rendered_prompt"], saved["clips"][0]["video_prompt"])
         self.assertFalse(saved["clips"][0]["video_stale"])
         self.assertEqual(
             saved["output_files"],
