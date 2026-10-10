@@ -247,9 +247,26 @@ class TestAutomaticProfileMigration(unittest.TestCase):
         self.assertEqual(config["video_preload_mode"], "manual")
         self.assertEqual(config["video_preload_in_VRAM"], 4096)
         self.assertEqual(config["vram_safety_coefficient"], 0.8)
-        self.assertEqual(config["services"]["auto_performance_revision"], 5)
+        self.assertEqual(config["services"]["auto_performance_revision"], perf.AUTO_PERFORMANCE_REVISION)
         self.assertFalse(perf.auto_performance_needs_refresh(config))
         self.assertTrue({"image_profile", "video_preload_mode", "video_preload_in_VRAM"}.issubset(result["preserved"]))
+
+    def test_revision6_keeps_a_manual_attention_head_split(self):
+        config = legacy_config()
+        config["attention_head_split"] = 2
+        result = perf.apply_auto_performance(config, hardware())
+        self.assertEqual(config["attention_head_split"], 2)
+        self.assertIn("attention_head_split", result["preserved"])
+        self.assertNotIn("attention_head_split", config["services"]["auto_performance_defaults"])
+        self.assertEqual(
+            config["services"]["auto_performance_revision"],
+            perf.AUTO_PERFORMANCE_REVISION,
+        )
+
+    def test_recommendation_details_describe_per_job_h3_split(self):
+        rec = perf.recommend_settings(hardware(31.76, 12.0))
+        self.assertTrue(any("head splitting can change per job" in item
+                            for item in rec["_recommendation_details"]))
 
     def test_legacy_boolean_migration_preserves_existing_new_control_provenance(self):
         config = legacy_config()

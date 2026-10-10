@@ -40,9 +40,9 @@ from .convrot_layout import (
     restore_interleaved_h3_qkv,
 )
 from .vae_upsampler import (
-    X2_VAE_FILE,
     X2_VAE_VALUE,
     resize_video_canvas_uint8,
+    resolve_x2_vae_checkpoint,
     verify_x2_vae_checkpoint,
 )
 from .packing import (
@@ -1172,13 +1172,18 @@ def _load_x2_video_vae_weights(vae, base_checkpoint, x2_checkpoint) -> None:
     del decoder_modules
 
 
-def _load_video_vae(filename: str, x2_filename: str | None = None) -> AutoencoderKLMiniMaxH3:
+def _load_video_vae(
+    filename: str,
+    x2_filename: str | None = None,
+    *,
+    x2_verified: bool = False,
+) -> AutoencoderKLMiniMaxH3:
     # Rotary tables are computed, non-persistent buffers and therefore are
     # not present in the compact checkpoint. The optional learned x2 file is
     # decoder-only: keep the selected base checkpoint's encoder/quantization
     # path intact and overlay just its decoder modules.
     upsampling = x2_filename is not None
-    if upsampling:
+    if upsampling and not x2_verified:
         verify_x2_vae_checkpoint(x2_filename)
     with init_empty_weights(include_buffers=False):
         vae = AutoencoderKLMiniMaxH3(
@@ -1327,7 +1332,10 @@ class MiniMaxH3Model:
             os.path.join(self.assets_root, "vae", "minimax_h3_audio_vae_fp32.safetensors")
         )
         x2_video_vae_path = (
-            fl.locate_file(os.path.join(self.assets_root, "vae", X2_VAE_FILE))
+            resolve_x2_vae_checkpoint(
+                self.assets_root,
+                fl.get_checkpoints_paths(),
+            )
             if self.VAE_upsampling == X2_VAE_VALUE
             else None
         )
@@ -1368,7 +1376,11 @@ class MiniMaxH3Model:
             variant=self.text_encoder_variant,
         )
         self._plain_prompt_cache = MiniMaxH3PromptCache()
-        self.vae = _load_video_vae(video_vae_path, x2_video_vae_path)
+        self.vae = _load_video_vae(
+            video_vae_path,
+            x2_video_vae_path,
+            x2_verified=x2_video_vae_path is not None,
+        )
         self.audio_vae = _load_audio_vae(audio_vae_path)
         self.scheduler = MiniMaxH3Scheduler(
             shift=3.0 if self.viggle else float(model_def.get("minimax_h3_video_shift", 12.0)),

@@ -55,9 +55,9 @@ PROFILE_DESCRIPTIONS = {
 # OOM'd on the reported A4500; restore the conservative table pending an A/B
 # test with a smaller pinning cap. Manually selected profiles remain untouched.
 # Revision 5 recognizes nominal 32/64-GiB hosts whose firmware reserves a
-# small portion of RAM. The 32-GiB boundary was checked with cold/warm H3
-# runs on a 31.8-GiB host; materially smaller hosts still use Profile 5.
-AUTO_PERFORMANCE_REVISION = 5
+# small portion of RAM. Revision 6 adds workload-aware H3 head-split advice;
+# per-job overrides do not change saved settings or take ownership from users.
+AUTO_PERFORMANCE_REVISION = 6
 
 # These controls were not owned by Auto-Tune before revision 4. A missing
 # value can be initialized from the current recommendation, but an existing
@@ -319,6 +319,7 @@ def recommend_settings(hw: dict) -> dict:
             "The bundled MMGP allocator is unavailable for this CUDA platform; the runtime default is retained."
         ),
         "The generation-aware planner uses workload dimensions and learned VRAM peaks for temporary per-job model budgets; it does not change Sol mode or quality settings.",
+        "On eligible H3 video jobs, Auto-owned head splitting can change per job from the requested workload; the saved setting remains unchanged.",
     ]
 
     return {

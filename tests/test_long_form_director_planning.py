@@ -47,6 +47,48 @@ from services.director.schema import AudioPlan, CameraPlan, ShotPlan  # noqa: E4
 from services.h3_story_ledger import plan_h3_story_segments  # noqa: E402
 
 
+def _music_video_row(index: int, tag: str = "planned") -> dict:
+    label = tag.title()
+    return {
+        "scene_goal": f"{label} clip {index} advances a distinct musical beat",
+        "scene_type": "performance",
+        "subjects_on_screen": [],
+        "environment": f"{label} setting for clip {index}",
+        "visual_style": "Cinematic concert photography",
+        "lighting": f"Amber side light for clip {index}",
+        "mood": "Energetic and focused",
+        "action_beats": [
+            f"The performer crosses the frame during clip {index}."
+        ],
+        "camera_plan": {"framing": "medium shot", "movement": "slow orbit"},
+        "ending_beat": (
+            f"{label} clip {index} ends as the performer faces the next light cue."
+        ),
+        "video_prompt": (
+            f"{label} clip {index}: the performer crosses the setting as "
+            "the camera circles them."
+        ),
+        "window_prompts": [],
+    }
+
+
+def _music_video_fallback_row(scene_description: str) -> dict:
+    return {
+        "scene_goal": "Continue the verse section",
+        "scene_type": "performance",
+        "subjects_on_screen": [],
+        "environment": "",
+        "visual_style": "",
+        "lighting": "",
+        "mood": "",
+        "action_beats": [],
+        "camera_plan": {"framing": "medium shot"},
+        "ending_beat": "The performance continues into the next clip",
+        "video_prompt": scene_description,
+        "window_prompts": [],
+    }
+
+
 def _shot(duration: float = 10.0) -> ShotPlan:
     return ShotPlan(
         shot_id="local",
@@ -1187,32 +1229,27 @@ class LongFormDirectorPlanningTests(unittest.TestCase):
             [],
         )
 
-    def test_music_video_plans_long_timeline_in_twelve_clip_batches(self):
+    def test_music_video_plans_long_timeline_in_six_clip_batches(self):
         calls: list[int] = []
 
         def generate(**kwargs):
+            prompt = str(kwargs.get("prompt") or "")
             match = re.search(
                 r"Write\s+(\d+)\s+structured shot plans",
-                str(kwargs.get("prompt") or ""),
+                prompt,
                 re.IGNORECASE,
             )
             count = int(match.group(1))
             calls.append(count)
+            clip_numbers = [
+                int(value)
+                for value in re.findall(r"Clip\s+(\d+):", prompt)
+            ]
             return json.dumps([
-                {
-                    "scene_goal": f"Clip {index + 1}",
-                    "scene_type": "performance",
-                    "subjects_on_screen": [],
-                    "environment": "stage",
-                    "visual_style": "cinematic",
-                    "lighting": "concert lighting",
-                    "mood": "energetic",
-                    "action_beats": ["performer continues"],
-                    "camera_plan": {"framing": "medium shot"},
-                    "ending_beat": f"ending {index + 1}",
-                    "video_prompt": "The performance continues.",
-                    "window_prompts": [],
-                }
+                _music_video_row(
+                    clip_numbers[index]
+                    if index < len(clip_numbers) else index + 1
+                )
                 for index in range(count)
             ])
 
@@ -1230,9 +1267,258 @@ class LongFormDirectorPlanningTests(unittest.TestCase):
             _planning_checkpoint_callback=lambda value: checkpoints.append(value),
         )
 
-        self.assertEqual(calls, [12, 12, 1])
+        self.assertEqual(calls, [6, 6, 6, 6, 1])
         self.assertEqual(len(result.shots), 25)
         self.assertTrue(checkpoints[-1]["complete"])
+
+    def test_music_video_repairs_partial_tail_with_global_context_and_state(self):
+        requests: list[dict] = []
+
+        def generate(**kwargs):
+            prompt = str(kwargs.get("prompt") or "")
+            match = re.search(
+                r"Write\s+(\d+)\s+structured shot plans",
+                prompt,
+                re.IGNORECASE,
+            )
+            count = int(match.group(1))
+            clip_numbers = [
+                int(value)
+                for value in re.findall(r"Clip\s+(\d+):", prompt)
+            ]
+            requests.append({"count": count, "clips": clip_numbers, "prompt": prompt})
+            if "TAIL REPAIR" in prompt:
+                return json.dumps([
+                    _music_video_row(number, "repaired")
+                    for number in clip_numbers
+                ])
+            if clip_numbers and clip_numbers[0] == 1:
+                rows = [
+                    _music_video_row(number, "original")
+                    for number in clip_numbers
+                ]
+                rows[3] = {
+                    "scene_goal": "A partial fourth clip",
+                    "scene_type": "performance",
+                }
+                return json.dumps(rows)
+            return json.dumps([
+                _music_video_row(number, "planned")
+                for number in clip_numbers
+            ])
+
+        clips = [
+            {"start": index * 8, "end": (index + 1) * 8, "label": "verse"}
+            for index in range(7)
+        ]
+        checkpoints: list[dict] = []
+        result = MusicVideoPlanner(llm_generate=generate).plan(
+            clips=clips,
+            scene_description="A continuous concert performance under amber lights",
+            video_model="minimax_h3_ref2va",
+            shot_image_policy="direct_references",
+            _planning_checkpoint_callback=lambda value: checkpoints.append(value),
+        )
+
+        self.assertEqual([request["count"] for request in requests], [6, 3, 1])
+        self.assertEqual(requests[1]["clips"], [4, 5, 6])
+        self.assertIn("global clips 4-6 of 7", requests[1]["prompt"])
+        self.assertIn("Clip 4: verse", requests[1]["prompt"])
+        self.assertIn("Clip 6: verse", requests[1]["prompt"])
+        self.assertIn("goal: Original clip 3", requests[1]["prompt"])
+        self.assertIn("setting: Original setting for clip 3", requests[1]["prompt"])
+        self.assertIn("ending: Original clip 3 ends", requests[1]["prompt"])
+        self.assertEqual(
+            [shot.scene_goal.split()[0] for shot in result.shots],
+            ["Original"] * 3 + ["Repaired"] * 3 + ["Planned"],
+        )
+        self.assertTrue(checkpoints[-1]["complete"])
+
+    def test_music_video_repairs_short_form_incomplete_rows_before_conversion(self):
+        prompts: list[str] = []
+
+        def generate(**kwargs):
+            prompt = str(kwargs.get("prompt") or "")
+            prompts.append(prompt)
+            if "TAIL REPAIR" in prompt:
+                return json.dumps([_music_video_row(1, "repaired")])
+            return json.dumps([{
+                "scene_goal": "A partial music-video shot",
+                "scene_type": "performance",
+            }])
+
+        result = MusicVideoPlanner(llm_generate=generate).plan(
+            clips=[{"start": 0, "end": 8, "label": "verse"}],
+            scene_description="A singer performs on a rooftop at dusk",
+            video_model="minimax_h3_ref2va",
+            shot_image_policy="direct_references",
+        )
+
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("TAIL REPAIR", prompts[1])
+        self.assertEqual(result.shots[0].scene_goal, "Repaired clip 1 advances a distinct musical beat")
+        self.assertIn("Repaired clip 1:", result.shots[0].video_prompt)
+
+    def test_music_video_revalidates_resumed_padded_rows(self):
+        scene_description = "A singer performs on a rooftop at dusk"
+        clips = [{"start": 0, "end": 8, "label": "verse"}]
+        fingerprint_planner = MusicVideoPlanner()
+        fingerprint_planner._configure_planning_runtime(
+            {},
+            kind="music_video",
+            fingerprint_payload={
+                "planner_revision": 6,
+                "scene_description": scene_description,
+                "clips": clips,
+                "lyrics": [],
+                "bpm": 120.0,
+                "reference_image_path": None,
+                "speaker_mappings": {},
+                "characters": [],
+                "video_model": "",
+                "image_model": "",
+                "shot_image_policy": "direct_references",
+                "vocal_activity": [],
+                "character_ref_labels": [],
+                "location_ref_labels": [],
+            },
+        )
+        checkpoint = {
+            "version": 2,
+            "kind": "music_video",
+            "fingerprint": fingerprint_planner._planning_checkpoint_fingerprint,
+            "complete": True,
+            "music_video_batches": {
+                "0": {
+                    "count": 1,
+                    "rows": [_music_video_fallback_row(scene_description)],
+                },
+            },
+        }
+        prompts: list[str] = []
+
+        def generate(**kwargs):
+            prompts.append(str(kwargs.get("prompt") or ""))
+            return json.dumps([_music_video_row(1, "repaired")])
+
+        result = MusicVideoPlanner(llm_generate=generate).plan(
+            clips=clips,
+            scene_description=scene_description,
+            shot_image_policy="direct_references",
+            _planning_checkpoint=checkpoint,
+        )
+
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("TAIL REPAIR", prompts[0])
+        self.assertEqual(result.shots[0].scene_goal, "Repaired clip 1 advances a distinct musical beat")
+
+    def test_music_video_rejects_legacy_fingerprint_checkpoint(self):
+        clips = [{"start": 0, "end": 8, "label": "verse"}]
+        scene_description = "A singer performs on a rooftop at dusk"
+        prompts: list[str] = []
+
+        def generate(**kwargs):
+            prompts.append(str(kwargs.get("prompt") or ""))
+            return json.dumps([_music_video_row(1, "fresh")])
+
+        result = MusicVideoPlanner(llm_generate=generate).plan(
+            clips=clips,
+            scene_description=scene_description,
+            shot_image_policy="direct_references",
+            _planning_checkpoint={
+                "version": 2,
+                "kind": "music_video",
+                "fingerprint": "planner-revision-5-fingerprint",
+                "complete": True,
+                "music_video_batches": {
+                    "0": {
+                        "count": 1,
+                        "rows": [_music_video_fallback_row(scene_description)],
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(len(prompts), 1)
+        self.assertNotIn("TAIL REPAIR", prompts[0])
+        self.assertEqual(result.shots[0].scene_goal, "Fresh clip 1 advances a distinct musical beat")
+
+    def test_music_video_failed_repair_raises_and_checkpoints_only_valid_prefix(self):
+        checkpoints: list[dict] = []
+        call_count = 0
+
+        def generate(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            prompt = str(kwargs.get("prompt") or "")
+            clip_numbers = [
+                int(value)
+                for value in re.findall(r"Clip\s+(\d+):", prompt)
+            ]
+            if "TAIL REPAIR" in prompt:
+                return json.dumps([{
+                    "scene_goal": "Still partial",
+                    "scene_type": "performance",
+                }])
+            return json.dumps([
+                _music_video_row(1, "accepted"),
+                {"scene_goal": "Partial clip two", "scene_type": "performance"},
+            ])
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"global clips 2-2.*shorter or simpler scene description",
+        ):
+            MusicVideoPlanner(llm_generate=generate).plan(
+                clips=[
+                    {"start": 0, "end": 8, "label": "verse"},
+                    {"start": 8, "end": 16, "label": "chorus"},
+                ],
+                scene_description="A singer performs on a rooftop at dusk",
+                shot_image_policy="direct_references",
+                _planning_checkpoint_callback=lambda value: checkpoints.append(value),
+            )
+
+        self.assertEqual(call_count, 3)
+        saved = checkpoints[-1]
+        self.assertFalse(saved["complete"])
+        self.assertEqual(saved["music_video_batches"]["0"]["count"], 1)
+        self.assertEqual(
+            [row["scene_goal"] for row in saved["music_video_batches"]["0"]["rows"]],
+            ["Accepted clip 1 advances a distinct musical beat"],
+        )
+
+    def test_cancelled_music_video_repair_preserves_only_valid_prefix(self):
+        checkpoints: list[dict] = []
+
+        def generate(**kwargs):
+            prompt = str(kwargs.get("prompt") or "")
+            if "TAIL REPAIR" in prompt:
+                raise InterruptedError("stop during music-video repair")
+            return json.dumps([
+                _music_video_row(1, "accepted"),
+                {"scene_goal": "Partial clip two", "scene_type": "performance"},
+            ])
+
+        with self.assertRaisesRegex(InterruptedError, "stop during music-video repair"):
+            MusicVideoPlanner(llm_generate=generate).plan(
+                clips=[
+                    {"start": 0, "end": 8, "label": "verse"},
+                    {"start": 8, "end": 16, "label": "chorus"},
+                ],
+                scene_description="A singer performs on a rooftop at dusk",
+                shot_image_policy="direct_references",
+                _planning_checkpoint_callback=lambda value: checkpoints.append(value),
+            )
+
+        self.assertTrue(checkpoints)
+        saved = checkpoints[-1]
+        self.assertFalse(saved["complete"])
+        self.assertEqual(saved["music_video_batches"]["0"]["count"], 1)
+        self.assertEqual(
+            [row["scene_goal"] for row in saved["music_video_batches"]["0"]["rows"]],
+            ["Accepted clip 1 advances a distinct musical beat"],
+        )
 
     def test_podcast_plans_long_timeline_in_twelve_clip_batches(self):
         calls: list[int] = []

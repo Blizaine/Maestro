@@ -14,11 +14,69 @@ X2_VAE_METHOD = "h3_vae"
 X2_VAE_VALUE = "h3_vae*2"
 X2_VAE_REPO = "DeepBeepMeep/MiniMax-H3"
 X2_VAE_REVISION = "adc81ccb71352192214d83d5fafb9487e860be39"
+X2_VAE_REPO_SUBFOLDER = "minimax_h3"
 X2_VAE_FILE = "MiniMax-H3-X2-Detail-v1_int8_convrot.safetensors"
 X2_VAE_LICENSE_FILE = "MiniMax-H3-X2-Detail-v1.LICENSE"
 X2_VAE_NOTICE_FILE = "MiniMax-H3-X2-Detail-v1.NOTICE"
 X2_VAE_SIZE = 2_834_844_787
 X2_VAE_SHA256 = "7ca1a1ad298e06e430da5c18bf721af4e0dcdf7f4ec7283391520bd0b6df7387"
+
+
+def x2_vae_asset_candidates(
+    assets_root: str,
+    checkpoint_roots,
+    asset_filename: str = X2_VAE_FILE,
+) -> tuple[str, ...]:
+    """Return canonical and Hugging Face local-dir paths across model roots.
+
+    hf_hub_download with local_dir and subfolder preserves the repository
+    subfolder below local_dir. Keep that first-download layout alongside the
+    older flattened location used by earlier builds.
+    """
+
+    relative_paths = (
+        os.path.join(assets_root, "vae", asset_filename),
+        os.path.join(assets_root, "vae", X2_VAE_REPO_SUBFOLDER, asset_filename),
+    )
+    candidates = []
+    seen = set()
+    for root in checkpoint_roots or ():
+        for relative_path in relative_paths:
+            path = os.path.abspath(os.path.join(os.fspath(root), relative_path))
+            if path not in seen:
+                seen.add(path)
+                candidates.append(path)
+    return tuple(candidates)
+
+
+def resolve_x2_vae_checkpoint(
+    assets_root: str,
+    checkpoint_roots,
+) -> str:
+    """Find an installed x2 checkpoint and return it only after pinned validation."""
+
+    candidates = x2_vae_asset_candidates(assets_root, checkpoint_roots)
+    invalid = []
+    for candidate in candidates:
+        if not os.path.isfile(candidate):
+            continue
+        try:
+            verify_x2_vae_checkpoint(candidate)
+        except (OSError, ValueError) as error:
+            invalid.append((candidate, error))
+            continue
+        return candidate
+
+    if invalid:
+        details = "; ".join(f"{path}: {error}" for path, error in invalid)
+        raise ValueError(
+            "Found MiniMax H3 x2 VAE checkpoint files, but none passed the "
+            f"pinned size/SHA-256 check: {details}"
+        ) from invalid[0][1]
+    raise FileNotFoundError(
+        "Unable to locate MiniMax H3 x2 VAE checkpoint; tried "
+        f"{list(candidates)}. Select the VAE x2 option again to download it."
+    )
 
 
 def verify_x2_vae_checkpoint(filename: str) -> None:
@@ -144,11 +202,14 @@ __all__ = [
     "X2_VAE_METHOD",
     "X2_VAE_NOTICE_FILE",
     "X2_VAE_REPO",
+    "X2_VAE_REPO_SUBFOLDER",
     "X2_VAE_REVISION",
     "X2_VAE_SHA256",
     "X2_VAE_SIZE",
     "X2_VAE_VALUE",
     "resize_video_canvas",
     "resize_video_canvas_uint8",
+    "resolve_x2_vae_checkpoint",
     "verify_x2_vae_checkpoint",
+    "x2_vae_asset_candidates",
 ]

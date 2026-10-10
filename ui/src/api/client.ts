@@ -126,6 +126,7 @@ export async function fetchModels(): Promise<{ families: ApiFamily[]; models: Ap
 export interface ModelVisibilitySettings {
   configured: boolean
   enabled_models: string[]
+  mode_overrides?: import('../lib/modelVisibility').ModelVisibilityOverrides
   initialized_mature_models: string[]
   defaults_version: number
 }
@@ -138,6 +139,7 @@ export async function fetchModelVisibility(): Promise<ModelVisibilitySettings> {
 
 export async function updateModelVisibility(params: {
   enabled_models: string[]
+  mode_overrides?: import('../lib/modelVisibility').ModelVisibilityOverrides
   initialized_mature_models: string[]
   defaults_version: number
 }): Promise<ModelVisibilitySettings> {
@@ -2420,7 +2422,7 @@ export async function planClipPrompts(params: {
 
 export async function planClipStructure(params: DirectorTimelineOptions & {
   analysis: import('../types').AudioAnalysisResult
-  energy_bias?: number
+  energy_bias?: number | null
   fps?: number
   frames_steps?: number
   frames_minimum?: number

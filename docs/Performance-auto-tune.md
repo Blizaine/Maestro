@@ -10,8 +10,10 @@ the performance settings with the current recommendations.
 Auto-tune now includes **Auto INT8 kernels**, a supported **MMGP optimized
 allocator**, **Smart Memory Pinning**, a RAM-dependent **Read Ahead** preference,
 and automatic pinning ceilings. It retains Auto attention, disabled compilation
-and disabled head splitting as the starting point. Sol and head splitting are
-workload-specific comparisons, rather than universal speed improvements.
+and disabled head splitting as the saved starting point. On a nominal 12-GB
+GPU with at least 30 GiB usable RAM, Auto can temporarily select Off, Low or
+Medium head splitting for each H3 video. Sol and head splitting remain
+workload-specific choices, rather than universal speed improvements.
 
 On existing installs, use **Settings → Performance → Re-detect** to explicitly
 apply these controls. Startup preserves existing controls whose ownership is
@@ -67,6 +69,43 @@ generations. Use controlled manual comparisons or the existing
 **Refresh learning** updates the readout; **Clear comparisons** discards this
 hardware/runtime's evidence without changing settings.
 
+## H3 window guidance on 12-GB GPUs
+
+Auto chooses head splitting at the generation boundary, independently of
+placement. It leaves the saved selector unchanged and releases the override
+on completion, failure or cancellation. An explicit per-job memory profile
+can coexist with Auto-owned head splitting. Manual head splitting and Auto-off
+remain in control. Settings shows the effective choice in **Last generation**;
+the duration panel shows the suggested grouping and workload cautions.
+
+The starting bands were checked on an RTX 3080 Ti with 12 GiB VRAM and
+31.76 GiB usable RAM, using Profile 4, MMGP Optimized, Smart Memory Pinning,
+Read Ahead off, an INT8 ConvRot H3 checkpoint and Q2_K encoder:
+
+| Target workload | Starting split | Observed outcome |
+| --- | --- | --- |
+| 720p through 15.08s | Off | Pruned 20-step cases completed |
+| 1080p at 5.17s | Off | Completed |
+| 1080p at 10.125s | Low | Fused/SLA/6-step completed in about 18 minutes; Pruned/Sage2/20-step took about 116 minutes |
+| 1080p at 15.08s | Medium | Fused/SLA/6-step completed in about 32 minutes; Pruned projected hours and was stopped |
+
+The Pruned 1080p/10.1s output was valid but too slow for the test's practical
+speed budget. A cancelled 15s test is not proof of fit. These are individual
+observations, not guaranteed ETAs or a matched Fused-versus-Pruned speed test.
+The duration panel flags long 20-step Pruned workloads and recommends shorter
+720p windows for speed. It does not silently change the model, steps, attention,
+resolution or requested duration, and does not automatically cancel jobs.
+
+Grouping uses the largest generated pass, not the entire song or sequence.
+The shared backend/UI bands use target video/audio load; they are separate
+from the 75,000 packed-row RMSNorm cutoff. References, history and LoRAs can
+add memory pressure. Large or numerous references, long 1080p LoRA jobs,
+other checkpoint/attention recipes and requests beyond the tested 15.08s
+1080p envelope remain unverified. Full H3, other VRAM tiers and systems below
+30 GiB usable RAM retain their existing policy. Other nominal 12-GB GPUs
+receive a conservative starting choice, with a caution that hardware differs.
+Head-split changes do not require a restart or a model reload by themselves.
+
 ## Testing a 32 GB RAM / RTX 3080 machine
 
 1. In Pinokio, choose **Download from URL**, enter
@@ -88,7 +127,7 @@ hardware/runtime's evidence without changing settings.
 
 The 10 GB and 12 GB cards are detected separately. A nominal 32-GB machine
 reporting at least 31.5 GiB uses the 32-GB tier; materially smaller machines
-retain the conservative Profile 5 starting point. Auto-Tune revision 5
+retain the conservative Profile 5 starting point. Auto-Tune revision 6
 refreshes settings it still owns while preserving manual changes.
 
 H3 recommends Q2_K when known RAM is below 47.5 GiB or known VRAM is at most
@@ -107,6 +146,35 @@ Comfy Kitchen's CUDA backend requires CUDA 13; **Auto INT8** checks backend
 availability and falls back to Triton or PyTorch when it is unavailable.
 Compare the backend reported in the terminal with the 4090 benchmark before
 expecting the same speed improvement.
+
+## Automatic clip and window durations
+
+Studio's Auto duration/window and Director's Auto clip maximum share a
+versioned resource policy. It uses total usable system RAM, VRAM, resolution
+and checkpoint family, independently of the performance profile number.
+
+| Tested resources | H3 workflow | Automatic maximum per pass |
+| --- | --- | --- |
+| 12 GB VRAM, at least 30 GiB RAM, up to 1280×704 | Fused Frames or Fused References | 345 frames, about 14.4 s |
+| 12 GB VRAM, at least 30 GiB RAM, 720p | Pruned Frames | 243 frames, about 10.1 s |
+| Same resources and resolution | Pruned References | 226 frames, about 9.4 s, including its reference margin |
+| 12 GB VRAM, at least 30 GiB RAM, native 1080p | Fused or Pruned | 124 frames, about 5.2 s |
+| 24 GB VRAM, at least 63 GiB RAM, up to 1280×704 | Fused References | 345 frames, about 14.4 s |
+
+These are recommendations from the tested Windows configurations, not a
+promise that every reference/LoRA workload will fit or finish equally quickly.
+Longer native 1080p passes remain manual because some tested combinations
+became impractically slow. Full, imported, alternate and audio-only H3 models
+retain their existing recommendations. Unknown RAM, other VRAM tiers and
+unmeasured canvas sizes retain the established conservative table. The native
+14.4-second recommendation does not enable the experimental 30-second mode.
+
+New Director music projects use **Auto cut speed**, which favors fewer, longer
+H3 clips while preserving the full song and its timing. The slider still offers
+explicit pacing choices; other model families retain neutral Auto pacing.
+Existing projects keep their saved pacing and clip limits. Studio keeps manually
+selected total times and locked window lengths; resource detection updates only
+automatic recommendations. Switching back to Auto adopts the current policy.
 
 ## Per-job H3 transformer residency
 

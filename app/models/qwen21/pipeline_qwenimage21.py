@@ -55,11 +55,32 @@ VIGGLE_SIGMAS = {
     6: (1.0, 0.9375, 0.875, 0.75, 0.5, 0.25),
 }
 _VIGGLE_PROFILE_STEPS = {"viggle_v01": 4, "viggle_v02": 5, "viggle_v021": 6}
+QWEN21_TURBO_SIGMAS = (1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568)
+QWEN21_TURBO_PROFILE = "qwen21_turbo"
 
 
-def qwen21_sampling_profile(sample_solver: str, num_inference_steps: int):
+def qwen21_sampling_profile(
+    sample_solver: str,
+    num_inference_steps: int,
+    *,
+    qwen21_turbo_checkpoint: bool | None = None,
+):
     """Return scheduler overrides and sigma nodes for a named Qwen profile."""
-    solver = (sample_solver or "default").lower()
+    solver = (sample_solver or "default").strip().lower()
+    if solver in ("", "euler"):
+        solver = "default"
+    if qwen21_turbo_checkpoint is True and solver != QWEN21_TURBO_PROFILE:
+        raise ValueError("The official Qwen Image 2.1 Turbo checkpoint requires its named sampling profile.")
+    if qwen21_turbo_checkpoint is False and solver == QWEN21_TURBO_PROFILE:
+        raise ValueError("The Qwen Image 2.1 Turbo schedule requires the official Turbo checkpoint.")
+    if solver == QWEN21_TURBO_PROFILE:
+        if int(num_inference_steps) != len(QWEN21_TURBO_SIGMAS):
+            raise ValueError("qwen21_turbo requires exactly 8 inference steps.")
+        return {
+            "shift": 1.0,
+            "use_dynamic_shifting": False,
+            "shift_terminal": None,
+        }, QWEN21_TURBO_SIGMAS
     if solver in ("", "default", "euler"):
         return {}, None
     if solver in _VIGGLE_PROFILE_STEPS:
@@ -666,6 +687,7 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         output_resolution: int = 1024,
         use_kv_cache: bool = True,
         sample_solver: str = "default",
+        qwen21_turbo_checkpoint: bool | None = None,
         mask_image: Any | None = None,
         inpaint_image: PipelineImageInput | None = None,
         denoising_strength: float = 1.0,
@@ -734,8 +756,11 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                 difference at the first block is then amplified by 32 blocks and every sampler step, so the two
                 settings give equally valid but visibly distinct samples. Fix a sample by fixing this flag.
             sample_solver (`str`, *optional*):
-                WanGP's `default` schedule or one of the named Viggle Turbo profiles. Each adapter uses its matching
-                trained sigma nodes.
+                The base Qwen schedule, the official Qwen Turbo schedule, or a named Viggle Turbo profile. Each
+                accelerated profile uses its trained sigma nodes.
+            qwen21_turbo_checkpoint (`bool`, *optional*):
+                Set true when the loaded checkpoint is the official Qwen Image 2.1 Turbo variant. This validates that
+                the eight-step schedule matches the loaded checkpoint.
             mask_image (`PIL.Image`, `torch.Tensor`, or `numpy.ndarray`, *optional*):
                 White pixels mark the image area to regenerate for masked editing.
             inpaint_image (`PIL.Image`, `torch.Tensor`, or `numpy.ndarray`, *optional*):
@@ -965,7 +990,11 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         ] * batch_size
 
         # 4. Prepare timesteps
-        scheduler_overrides, profile_sigmas = qwen21_sampling_profile(sample_solver, num_inference_steps)
+        scheduler_overrides, profile_sigmas = qwen21_sampling_profile(
+            sample_solver,
+            num_inference_steps,
+            qwen21_turbo_checkpoint=qwen21_turbo_checkpoint,
+        )
         if profile_sigmas is not None and sigmas is not None:
             raise ValueError("A Qwen acceleration profile supplies its own sigma schedule.")
         scheduler = FlowMatchEulerDiscreteScheduler.from_config(self.scheduler.config, **scheduler_overrides)

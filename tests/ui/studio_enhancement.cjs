@@ -128,8 +128,12 @@ async function assertExplicitEnhancement(page, sidebar, requests, llmRequests) {
     await review.locator('textarea[title]').first().fill('My exact first window revision.');
     await review.getByRole('button', {name: 'Done', exact: true}).click();
     const afterEnhance = llmRequests.length;
+    let submittedRequests = requests.length;
     for (const action of ['queue', 'now']) {
       await page.evaluate(action => window.store.getState().startGeneration(action), action);
+      assert.equal(requests.length, submittedRequests + 1,
+        `${id} ${action} submits the reviewed H3 plan; ${await page.evaluate(() => window.store.getState().promptEnhanceError || 'no Studio error')}`);
+      submittedRequests++;
       assert.equal(requests.at(-1)._h3_window_plan_reviewed, true);
       assert.equal(requests.at(-1).h3_window_prompts[0], 'My exact first window revision.');
       assert.equal(requests.at(-1).minimax_h3_sequence_prompt_mode, 'adaptive');
@@ -154,7 +158,7 @@ async function assertExplicitEnhancement(page, sidebar, requests, llmRequests) {
   await reset('minimax_h3_fused_turbo', 'video', 'frames');
   await page.evaluate(() => {
     const s = window.store.getState();
-    window.store.setState({durationSeconds: 14, slidingWindowSeconds: 124 / 24, slidingWindowOverlap: 17,
+    window.store.setState({durationSeconds: 14, slidingWindowSeconds: 124 / 24, slidingWindowOverlap: 17, slidingWindowLocked: true,
       startImage: null, endImage: null,
       params: {...s.params, prompt: 'A brief story told in three connected scenes.', image_mode: 0,
         image_start: undefined, image_end: undefined, video_length: 336, sliding_window_size: 124,
@@ -164,7 +168,15 @@ async function assertExplicitEnhancement(page, sidebar, requests, llmRequests) {
   const timingPlanCalls = llmRequests.length;
   await enhance();
   const timingRequest = llmRequests.at(-1);
-  assert.equal(timingRequest.endpoint, '/api/v1/llm/plan-h3-windows');
+  const timingState = await page.evaluate(() => {
+    const s = window.store.getState();
+    return {generationMode: s.generationMode, workflow: s.studioVideoWorkflow, model: s.params.model_type,
+      pacing: s.modelOptions?.sliding_window_auto_prompt_pacing, multi: s.params.minimax_h3_multi_window,
+      storyboard: s.params.minimax_h3_window_storyboard, imageMode: s.params.image_mode,
+      totalFrames: s.params.video_length, windowFrames: s.params.sliding_window_size,
+      overlap: s.params.sliding_window_overlap};
+  });
+  assert.equal(timingRequest.endpoint, '/api/v1/llm/plan-h3-windows', JSON.stringify(timingState));
   assert.deepEqual({total: timingRequest.total_frames, window: timingRequest.window_frames,
     overlap: timingRequest.overlap_frames, discard: timingRequest.discard_frames,
     multi: timingRequest.minimax_h3_multi_window, custom: timingRequest.custom_settings},
@@ -210,31 +222,32 @@ async function assertExplicitEnhancement(page, sidebar, requests, llmRequests) {
 
   // An enabled multi-window toggle is not enough by itself: a single selected
   // pass still uses the native 345-frame length repair.
-  await page.evaluate(() => {
+  const beforeSinglePass = requests.length;
+  await page.evaluate(async () => {
     const s = window.store.getState();
-    window.store.setState({jobs: [], isGenerating: false, h3WindowPlan: null,
+    window.store.setState({jobs: [], isGenerating: false, h3WindowPlan: null, slidingWindowLocked: false,
       durationSeconds: 14, slidingWindowSeconds: 345 / 24, slidingWindowOverlap: 18,
       params: {...s.params, prompt: 'One native pass.', video_length: 336, sliding_window_size: 345,
         sliding_window_overlap: 18, minimax_h3_multi_window: true, minimax_h3_window_storyboard: true,
-        image_mode: 0}});
+        image_mode: 0, _duration_planning_mode: 'duration'}});
+    await window.store.getState().startGeneration('queue');
   });
-  const beforeSinglePass = requests.length;
-  await page.evaluate(() => window.store.getState().startGeneration('queue'));
   assert.equal(requests.length, beforeSinglePass + 1);
   assert.equal(requests.at(-1).video_length, 345, 'A single native pass still rounds 336 to 345');
 
   // A real rolling request one frame above the native ceiling must bypass both
   // the max+1 clamp and lattice snap. Manual prompts keep this path LLM-free.
-  await page.evaluate(() => {
+  const beforeLongRollingSubmit = requests.length;
+  await page.evaluate(async () => {
     const s = window.store.getState();
-    window.store.setState({jobs: [], isGenerating: false, h3WindowPlan: null,
+    window.store.setState({jobs: [], isGenerating: false, h3WindowPlan: null, slidingWindowLocked: true,
       durationSeconds: 346 / 24, slidingWindowSeconds: 124 / 24, slidingWindowOverlap: 18,
       params: {...s.params, prompt: 'Window one.\nWindow two.\nWindow three.\nWindow four.',
         video_length: 346, sliding_window_size: 124, sliding_window_overlap: 18,
-        minimax_h3_multi_window: true, minimax_h3_window_storyboard: false, image_mode: 0}});
+        minimax_h3_multi_window: true, minimax_h3_window_storyboard: false, image_mode: 0,
+        _duration_planning_mode: 'duration'}});
+    await window.store.getState().startGeneration('queue');
   });
-  const beforeLongRollingSubmit = requests.length;
-  await page.evaluate(() => window.store.getState().startGeneration('queue'));
   assert.equal(requests.length, beforeLongRollingSubmit + 1);
   assert.equal(requests.at(-1).video_length, 346, 'A true 346-frame rolling timeline is not clamped to 345');
 

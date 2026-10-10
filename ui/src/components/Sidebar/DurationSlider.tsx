@@ -69,6 +69,7 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
   const ltxMultiWindow = useStore(s => s.params.ltx_multi_window === true)
   const h3WindowOverrides = useStore(s => s.h3WindowOverrides)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
+  const totalRamGb = useStore(s => s.systemStats?.ram?.total_gb ?? 0)
   const fps = modelOptions?.fps ?? 16
   const swDefaults = (modelOptions as Record<string, unknown> | null)?.sliding_window_defaults as Record<string, number> | undefined
   const supportsSlidingWindows = modelOptions?.sliding_window === true
@@ -112,8 +113,9 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
         minimumFrames,
         modelOptions?.frames_maximum ?? maximumFrames,
         frameStep,
+        totalRamGb,
       )
-    : recommendedWindowProfile(memoryPolicy, resolution, totalVramGb)
+    : recommendedWindowProfile(memoryPolicy, resolution, totalVramGb, totalRamGb)
   const safeWindowFrames = windowRecommendation?.frames ?? null
   const automaticCapFrames = Math.max(minimumFrames, Math.min(
     extendedDuration && supportsH3ExtendedDuration(modelOptions) ? maximumFrames : swDefaults?.window_max ?? maximumFrames,
@@ -164,6 +166,7 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
     policy: modelOptions?.omni_sequence_memory_policy,
     resolution,
     totalVramGb,
+    totalRamGb,
     minimumFrames,
     maximumFrames,
     frameStep,
@@ -197,7 +200,7 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
     // A child Auto effect may already have changed the timeline this commit.
     // Reconcile that current value instead of restoring this render's stale one.
     setDuration(useStore.getState().durationSeconds)
-  }, [duration, durationPlanningMode, windowSize, resolution, modelType, totalVramGb, savedOverrideFrames, locked, overlap,
+  }, [duration, durationPlanningMode, windowSize, resolution, modelType, totalVramGb, totalRamGb, savedOverrideFrames, locked, overlap,
     modelOptions, setDuration, overrideKey, setLocked, setWindowSize, fps, extendedDuration])
 
   const imageMode = useStore(s => s.params.image_mode)
@@ -348,6 +351,7 @@ export function WindowSettings() {
   const studioVideoWorkflow = useStore(s => s.studioVideoWorkflow)
   const resolution = useStore(s => s.params.resolution)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
+  const totalRamGb = useStore(s => s.systemStats?.ram?.total_gb ?? 0)
   const isOutpaint = generationMode === 'avatar' && editSubMode === 'outpaint'
   const trimmedOutpaintDuration = outpaintTrimEnd > outpaintTrimStart
     ? outpaintTrimEnd - outpaintTrimStart
@@ -421,8 +425,9 @@ export function WindowSettings() {
         minimumFrames,
         modelOptions?.frames_maximum ?? maximumFrames,
         frameStep,
+        totalRamGb,
       )
-    : recommendedWindowProfile(memoryPolicy, resolution, totalVramGb)
+    : recommendedWindowProfile(memoryPolicy, resolution, totalVramGb, totalRamGb)
   const safeWindowFrames = windowRecommendation?.frames ?? null
   const safeWindowSeconds = safeWindowFrames != null
     ? safeWindowFrames / fps

@@ -4,6 +4,15 @@ import copy
 import math
 
 
+def resolve_music_pacing_bias(requested_bias, model_def=None):
+    """Auto favors fewer native H3 passes; explicit editorial pace wins."""
+    if requested_bias is not None:
+        return max(-2, min(2, int(requested_bias)))
+    model = model_def or {}
+    is_h3 = str(model.get('architecture') or '').startswith('minimax_h3')
+    return -2 if is_h3 and not model.get('audio_only') else 0
+
+
 def resolve_clip_limits(model_def, requested_seconds=None, execution_profile=None):
     profile = execution_profile or {}
     fps = float(model_def.get('fps') or profile.get('fps') or 24)

@@ -49,6 +49,7 @@ export type H3DurationGuidanceInput = {
   resolution: string
   frames: number
   totalVramGb: number
+  totalRamGb?: number
   references?: MiniMaxH3Reference[]
   referenceDetail?: 'match' | 'max'
   /** Already-conditioned history frames, excluding the regenerated boundary frame. */
@@ -615,8 +616,9 @@ export function estimateH3DurationGuidance(
       minimumFrames,
       H3_MAX_NATIVE_FRAMES,
       H3_FRAME_CHUNK,
+      input.totalRamGb,
     )
-    : recommendedH3PassProfile(policy, input.resolution, input.totalVramGb)
+    : recommendedH3PassProfile(policy, input.resolution, input.totalVramGb, input.totalRamGb)
   const recommendationFrames = memoryProfile?.supported && memoryProfile.frames != null
     ? normalizeH3NativeFrames(
       memoryProfile.frames,

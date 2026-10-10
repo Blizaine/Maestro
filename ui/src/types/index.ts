@@ -893,7 +893,20 @@ export interface ChoiceConfig {
 }
 
 export interface SlidingWindowMemoryPolicy {
-  checkpoint?: 'full' | 'pruned'
+  checkpoint?: 'full' | 'pruned' | 'fused_4step' | 'fused_4step_references'
+  /** Measured RAM/VRAM/canvas recommendations shared with the backend. */
+  resource_recommendations?: {
+    version: string | number
+    tiers: Array<{
+      checkpoint: string
+      min_vram_gb: number
+      max_vram_gb: number
+      min_ram_gb: number
+      min_pixels?: number
+      max_pixels: number
+      frames: number
+    }>
+  }
   manual_override?: boolean
   /** Legal H3 frame steps reserved for Ref2VA reference-context headroom. */
   reference_margin_steps?: number
@@ -949,6 +962,7 @@ export interface ModelOptions {
     protect_audio: boolean
   } | null
   minimax_h3_fused_turbo?: boolean
+  minimax_h3_full_checkpoint?: boolean
   minimax_h3_baked_turbo?: boolean
   loras_disabled?: boolean
   skip_steps_multiplier_choices?: [string, number][] | null
@@ -1072,6 +1086,7 @@ export interface ModelOptions {
     steps: number
     guidance: number
   }> | null
+  qwen21_turbo_checkpoint?: boolean
   image_ref_inpaint?: boolean
   model_modes?: {
     choices: [string, number][]
@@ -1416,6 +1431,8 @@ export interface RecommendedSettings {
 }
 
 export interface PerformancePlan {
+  attention_head_split?: number
+  override_attention_head_split?: boolean
   applied: boolean
   profile: number
   transformer_budget_mb: number

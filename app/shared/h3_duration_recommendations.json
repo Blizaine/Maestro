@@ -1,0 +1,26 @@
+{
+  "version": "2026-10-10",
+  "evidence": [
+    {
+      "id": "rtx3080ti-12gb-31_76gib-profile4-pruned",
+      "summary": "RTX 3080 Ti 12 GB, 31.76 GiB system RAM, MMGP Profile 4, optimized Q2 encoder: 720p Pruned passes completed at 124, 243, and 362 frames; 1080p base 124 completed while longer Pruned runs were impractical or stopped."
+    },
+    {
+      "id": "rtx3080ti-12gb-31_76gib-profile4-fused-references",
+      "summary": "The same system completed a 243-frame 720p Fused References run with image and song guidance; longer 720p runs around 14.4–15 seconds also succeeded."
+    },
+    {
+      "id": "h3-24gb-high-ram-reference-music-envelope",
+      "summary": "Reference and music conditioning supports promoting the tested 24 GB class only at 63 GiB or more system RAM and canvases no larger than 1280x704."
+    }
+  ],
+  "tiers": [
+    {"checkpoint": "fused_4step", "min_vram_gb": 11, "max_vram_gb": 12.5, "min_ram_gb": 30, "max_pixels": 901120, "frames": 345, "evidence": ["rtx3080ti-12gb-31_76gib-profile4-fused-references"]},
+    {"checkpoint": "fused_4step_references", "min_vram_gb": 11, "max_vram_gb": 12.5, "min_ram_gb": 30, "max_pixels": 901120, "frames": 345, "evidence": ["rtx3080ti-12gb-31_76gib-profile4-fused-references"]},
+    {"checkpoint": "pruned", "min_vram_gb": 11, "max_vram_gb": 12.5, "min_ram_gb": 30, "min_pixels": 800000, "max_pixels": 901120, "frames": 243, "evidence": ["rtx3080ti-12gb-31_76gib-profile4-pruned"]},
+    {"checkpoint": "fused_4step", "min_vram_gb": 11, "max_vram_gb": 12.5, "min_ram_gb": 30, "min_pixels": 1800000, "max_pixels": 2088960, "frames": 124, "evidence": ["rtx3080ti-12gb-31_76gib-profile4-pruned"]},
+    {"checkpoint": "fused_4step_references", "min_vram_gb": 11, "max_vram_gb": 12.5, "min_ram_gb": 30, "min_pixels": 1800000, "max_pixels": 2088960, "frames": 124, "evidence": ["rtx3080ti-12gb-31_76gib-profile4-pruned"]},
+    {"checkpoint": "pruned", "min_vram_gb": 11, "max_vram_gb": 12.5, "min_ram_gb": 30, "min_pixels": 1800000, "max_pixels": 2088960, "frames": 124, "evidence": ["rtx3080ti-12gb-31_76gib-profile4-pruned"]},
+    {"checkpoint": "fused_4step_references", "min_vram_gb": 23.5, "max_vram_gb": 24.5, "min_ram_gb": 63, "max_pixels": 901120, "frames": 345, "evidence": ["h3-24gb-high-ram-reference-music-envelope"]}
+  ]
+}

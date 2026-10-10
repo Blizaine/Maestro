@@ -3,7 +3,7 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## [2.7.0] - 2026-10-08
+## [2.7.0] - 2026-10-10
 
 Prepared release candidate; not published. See the [full release notes](docs/RELEASE_NOTES_V2.7.0.md).
 
@@ -21,8 +21,8 @@ Prepared release candidate; not published. See the [full release notes](docs/REL
   protection and dense recovery. Compatible INT8 ConvRot weights also support
   grouped Triton projections; unsupported formats and active LoRAs retain their
   ordinary path. Grouped Q/K normalization uses smaller scratch chunks to
-  avoid a large FP32 temporary on older PyTorch CUDA runtimes. The default
-  split setting is unchanged. Long compatible grouped-attention output
+  avoid a large FP32 temporary on older PyTorch CUDA runtimes. Long compatible
+  grouped-attention output
   projections reuse owned storage in token chunks instead of allocating
   another full-size output buffer.
 - Add optional learned H3 VAE 2x video decoding in Studio and Director. Keep
@@ -45,6 +45,25 @@ Prepared release candidate; not published. See the [full release notes](docs/REL
   update optional attention imports and CPU CI fixtures.
 - Add verified Windows SSH setup receipts and bounded subprocess diagnostics
   that report failure causes without echoing command arguments.
+- Apply measured H3 head-split advice per generation on eligible 12-GB / 32-GB
+  machines while Auto owns that control. Share RAM/VRAM/resolution-aware window
+  recommendations between Studio and Director, preserve manual choices and warn
+  about very costly long native-1080p Pruned jobs.
+- Improve long music-video planning with validated, resumable batches and focused
+  repairs for repeated or incomplete shots. Keep native H3 reference images as
+  identity/design guidance instead of silently making them opening stills.
+- Default new Director projects to H3 Fused 4-Step References when available,
+  favor longer H3 clips with Auto cut speed, and return to reference/character
+  setup after uploaded audio analysis.
+- Organize enabled models under Video, Image and Audio with per-workflow groups,
+  compact download icons, contextual names and an always-available Manage models
+  action. Curate simpler video defaults and add a current-workflow Reset that
+  preserves downloaded files.
+- Remove Experimental from H3 Fused checkpoint labels and resolve the verified
+  H3 VAE x2 asset in both Hugging Face download layouts and shared model roots.
+- Add official Qwen Image 2.1 Turbo 7B as a separate image option with on-demand
+  BF16/INT8 checkpoints, the published eight-step / CFG 1 recipe, reference
+  editing and accurate output settings. Retain Qwen's model-license notice.
 
 ## [2.6.0] - 2026-10-04
 

@@ -4,6 +4,14 @@ from __future__ import annotations
 
 import os
 
+from shared.utils import files_locator as fl
+from services.h3_duration_recommendations import (
+    attach_h3_duration_recommendations,
+    h3_duration_recommendations_enabled,
+    load_h3_duration_recommendations,
+    match_h3_duration_recommendation,
+)
+
 _MODEL_TYPE = "minimax_h3"
 _REF2VA_MODEL_TYPE = "minimax_h3_ref2va"
 _FULL_MODEL_TYPE = "minimax_h3_full"
@@ -49,19 +57,23 @@ try:
         X2_VAE_LICENSE_FILE,
         X2_VAE_NOTICE_FILE,
         X2_VAE_REPO,
+        X2_VAE_REPO_SUBFOLDER,
         X2_VAE_REVISION,
         X2_VAE_VALUE,
+        x2_vae_asset_candidates,
     )
 except ImportError:
-    # The model-discovery and linked-asset fixtures load this file directly,
-    # outside the ``models.minimax_h3`` package. Keep that supported path
-    # independent from package-relative import state.
-    X2_VAE_FILE = "MiniMax-H3-X2-Detail-v1_int8_convrot.safetensors"
-    X2_VAE_LICENSE_FILE = "MiniMax-H3-X2-Detail-v1.LICENSE"
-    X2_VAE_NOTICE_FILE = "MiniMax-H3-X2-Detail-v1.NOTICE"
-    X2_VAE_REPO = "DeepBeepMeep/MiniMax-H3"
-    X2_VAE_REVISION = "adc81ccb71352192214d83d5fafb9487e860be39"
-    X2_VAE_VALUE = "h3_vae*2"
+    # Model-discovery fixtures may load this file directly outside its package.
+    from models.minimax_h3.vae_upsampler import (
+        X2_VAE_FILE,
+        X2_VAE_LICENSE_FILE,
+        X2_VAE_NOTICE_FILE,
+        X2_VAE_REPO,
+        X2_VAE_REPO_SUBFOLDER,
+        X2_VAE_REVISION,
+        X2_VAE_VALUE,
+        x2_vae_asset_candidates,
+    )
 _WANGP_TEXT_ENCODER_FOLDER = "Qwen3-VL-32B-Instruct"
 _WANGP_FL2VA_PRUNED_TRANSFORMER = (
     "MiniMax-H3-FL2VA-pruned_rank8_int8_convrot.safetensors"
@@ -1026,6 +1038,7 @@ def recommended_h3_window_profile(
     total_vram_gb,
     resolution,
     model_def: dict | None = None,
+    total_ram_gb=None,
 ) -> dict:
     """Return the checkpoint-aware native H3 pass profile for this GPU/canvas.
 
@@ -1070,12 +1083,43 @@ def recommended_h3_window_profile(
         total_vram_gb = float(total_vram_gb)
     except (TypeError, ValueError):
         total_vram_gb = 0.0
+    try:
+        total_ram_gb = float(total_ram_gb)
+        if total_ram_gb <= 0:
+            total_ram_gb = None
+    except (TypeError, ValueError, OverflowError):
+        total_ram_gb = None
     normalized_resolution = _normalize_h3_resolution(resolution)
     effective_resolution = _H3_AUTO_RESOLUTION_FALLBACKS.get(
         normalized_resolution,
         normalized_resolution,
     )
     pixels = _h3_resolution_pixels(normalized_resolution)
+    resource_policy = next(
+        (
+            model_def.get(key)
+            for key in (
+                "omni_sequence_memory_policy",
+                "sliding_window_memory_policy",
+                "director_memory_policy",
+            )
+            if isinstance(model_def.get(key), dict)
+        ),
+        {},
+    )
+    resource_recommendations = (
+        resource_policy.get("resource_recommendations")
+        or load_h3_duration_recommendations()
+    )
+    resource_tier = None
+    if h3_duration_recommendations_enabled(model_def):
+        resource_tier = match_h3_duration_recommendation(
+            resource_recommendations,
+            checkpoint=checkpoint,
+            total_vram_gb=total_vram_gb,
+            total_ram_gb=total_ram_gb,
+            pixels=pixels,
+        )
     if total_vram_gb <= 0:
         return {
             "supported": True,
@@ -1090,6 +1134,37 @@ def recommended_h3_window_profile(
             "pixels": pixels,
             "checkpoint": checkpoint,
         }
+
+    if resource_tier is not None:
+        try:
+            recommended_frames = int(resource_tier.get("frames"))
+            minimum = max(1, int(model_def.get("frames_minimum") or _H3_MIN_FRAMES))
+            maximum = min(
+                _H3_MAX_FRAMES,
+                max(minimum, int(model_def.get("frames_maximum") or _H3_MAX_FRAMES)),
+            )
+            step = max(1, int(model_def.get("frames_steps") or _H3_FRAME_STEP))
+            recommended_frames = min(maximum, max(minimum, recommended_frames))
+            recommended_frames = minimum + (
+                (recommended_frames - minimum) // step
+            ) * step
+        except (TypeError, ValueError, OverflowError):
+            recommended_frames = None
+        if recommended_frames is not None:
+            return {
+                "supported": True,
+                "frames": recommended_frames,
+                "fallback_resolution": None,
+                "gpu_vram_gb": total_vram_gb,
+                "resolution": effective_resolution,
+                "pixels": pixels,
+                "checkpoint": checkpoint,
+                "system_ram_gb": total_ram_gb,
+                "resource_recommendation": resource_tier,
+                "resource_recommendation_version": resource_recommendations.get(
+                    "version"
+                ),
+            }
 
     for band in policy["resolution_bands"]:
         if pixels < int(band.get("min_pixels", 0)):
@@ -1128,6 +1203,7 @@ def recommended_h3_window_frames(
     total_vram_gb,
     resolution,
     model_def: dict | None = None,
+    total_ram_gb=None,
 ) -> int:
     """Return the automatic H3 pass size, or zero when none is safe."""
 
@@ -1135,6 +1211,7 @@ def recommended_h3_window_frames(
         total_vram_gb,
         resolution,
         model_def,
+        total_ram_gb,
     )
     return int(profile.get("frames") or 0)
 
@@ -1143,6 +1220,7 @@ def recommended_h3_omni_sequence_profile(
     total_vram_gb,
     resolution,
     model_def: dict | None = None,
+    total_ram_gb=None,
 ) -> dict:
     """Return the safe native Ref2VA pass size for an Omni sequence.
 
@@ -1158,6 +1236,7 @@ def recommended_h3_omni_sequence_profile(
             total_vram_gb,
             resolution,
             model_def,
+            total_ram_gb,
         )
     )
     profile["base_frames"] = profile.get("frames")
@@ -1233,6 +1312,7 @@ def apply_h3_omni_sequence_memory_policy(
         total_vram_gb,
         resolution,
         model_def,
+        hardware.get("ram_gb"),
     )
     if not manual_override and not profile.get("supported"):
         fallback = profile.get("fallback_resolution") or "a lower resolution"
@@ -1355,6 +1435,7 @@ def apply_h3_native_omni_memory_policy(
         total_vram_gb,
         resolution,
         model_def,
+        hardware.get("ram_gb"),
     )
     if not profile["supported"]:
         fallback = profile.get("fallback_resolution") or "a lower resolution"
@@ -1500,6 +1581,7 @@ def apply_h3_window_memory_policy(
         total_vram_gb,
         resolution,
         model_def,
+        hardware.get("ram_gb"),
     )
     if not profile["supported"]:
         fallback = profile.get("fallback_resolution") or "a lower resolution"
@@ -1759,7 +1841,14 @@ class family_handler:
     def query_model_def(base_model_type, model_def):
         if base_model_type == "viggle_animate":
             from models.minimax_h3.viggle import model_definition
-            return model_definition(family_handler.query_model_def(_REF2VA_MODEL_TYPE, model_def))
+            viggle_model_def = dict(model_def or {})
+            viggle_model_def["minimax_h3_viggle"] = True
+            return model_definition(
+                family_handler.query_model_def(
+                    _REF2VA_MODEL_TYPE,
+                    viggle_model_def,
+                )
+            )
         audio_only = base_model_type == _TTS_MODEL_TYPE
         if audio_only:
             base_model_type = _REF2VA_MODEL_TYPE
@@ -1820,6 +1909,22 @@ class family_handler:
                 if full_checkpoint
                 else _H3_PRUNED_WINDOW_MEMORY_POLICY
             )
+        )
+        window_memory_policy = attach_h3_duration_recommendations(
+            window_memory_policy,
+            {
+                "architecture": base_model_type,
+                "minimax_h3_full_checkpoint": full_checkpoint,
+                "audio_only": audio_only,
+                "minimax_h3_viggle": bool(
+                    (model_def or {}).get("minimax_h3_viggle")
+                ),
+                "minimax_h3_singularity": singularity,
+                "minimax_h3_dasiwa": dasiwa,
+                "minimax_h3_baked_turbo": baked_turbo,
+                "minimax_h3_import_profile": import_profile,
+                "vdn": bool((model_def or {}).get("vdn")),
+            },
         )
         sliding_window_defaults = dict(_H3_SLIDING_WINDOW_DEFAULTS)
         if fused_turbo:
@@ -2446,15 +2551,33 @@ class family_handler:
         if VAE_upsampling == X2_VAE_VALUE:
             if "h3_vae" not in (model_def or {}).get("vae_upsamplers", {}):
                 raise ValueError("The MiniMax H3 model definition does not support learned x2 VAE decoding.")
-            x2_vae_downloads.append(
-                {
-                    "repoId": X2_VAE_REPO,
-                    "revision": X2_VAE_REVISION,
-                    "sourceFolderList": ["minimax_h3"],
-                    "targetFolderList": [os.path.join(_ASSETS_ROOT, "vae")],
-                    "fileList": [[X2_VAE_FILE, X2_VAE_LICENSE_FILE, X2_VAE_NOTICE_FILE]],
-                }
+            x2_assets = (
+                X2_VAE_FILE,
+                X2_VAE_LICENSE_FILE,
+                X2_VAE_NOTICE_FILE,
             )
+            missing_x2_assets = [
+                asset
+                for asset in x2_assets
+                if not any(
+                    os.path.isfile(candidate)
+                    for candidate in x2_vae_asset_candidates(
+                        _ASSETS_ROOT,
+                        fl.get_checkpoints_paths(),
+                        asset,
+                    )
+                )
+            ]
+            if missing_x2_assets:
+                x2_vae_downloads.append(
+                    {
+                        "repoId": X2_VAE_REPO,
+                        "revision": X2_VAE_REVISION,
+                        "sourceFolderList": [X2_VAE_REPO_SUBFOLDER],
+                        "targetFolderList": [os.path.join(_ASSETS_ROOT, "vae")],
+                        "fileList": [missing_x2_assets],
+                    }
+                )
         if base_model_type == "viggle_animate":
             from models.minimax_h3.viggle import REPO, REVISION, PROMPT_FILE
             return vae_downloads + [{"repoId": REPO, "revision": REVISION,
@@ -3066,10 +3189,16 @@ class family_handler:
             )
         except Exception:
             detected_vram_gb = 0.0
+        try:
+            import psutil
+
+            detected_ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+        except Exception:
+            detected_ram_gb = None
         adjustment = apply_h3_window_memory_policy(
             inputs,
             model_def or {"omni_reference": omni_reference},
-            {"gpu_vram_gb": detected_vram_gb},
+            {"gpu_vram_gb": detected_vram_gb, "ram_gb": detected_ram_gb},
         )
         if adjustment:
             if adjustment.get("unsupported"):

@@ -1,6 +1,6 @@
 # H3 Fused 4-Step model notice
 
-Maestro's experimental **H3 Fused 4-Step — Frames** and **References** model
+Maestro's **H3 Fused 4-Step — Frames** and **References** model
 entries share one optional checkpoint downloaded directly from:
 
 https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot

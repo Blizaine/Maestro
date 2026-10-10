@@ -1,6 +1,6 @@
 # Cross-app H3 Pruned comparison
 
-Use an idle machine and run one application at a time. The reference machine is AI-WRKST-02: RTX 3080 Ti 12GB, 32GB RAM. Pin each application commit and record Python, Torch, driver and allocator versions; the installed apps have different Torch versions, so this measures their supported installations, not just isolated source changes.
+Use an idle machine and run one application at a time. The reference machine has an RTX 3080 Ti with 12GB VRAM and 32GB RAM. Pin each application commit and record Python, Torch, driver and allocator versions; the installed apps have different Torch versions, so this measures their supported installations, not just isolated source changes.
 
 ## Shared workload
 

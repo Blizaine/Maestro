@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { Crop, ImagePlus, Scan, Sparkles } from 'lucide-react'
 import { modelSupportsImageWorkflow, useStore } from '../../stores/useStore'
+import { getModelVisibilityScope, isModelEnabledInScope } from '../../lib/modelVisibility'
 import type { StudioImageWorkflow } from '../../types'
 import {
   StudioWorkflowSelect,
@@ -39,6 +40,8 @@ export function ImageWorkflowSelector() {
   const setWorkflow = useStore(state => state.setStudioImageWorkflow)
   const models = useStore(state => state.models)
   const enabledModels = useStore(state => state.enabledModels)
+  const overrides = useStore(state => state.modelVisibilityOverrides)
+  const visibilityScope = getModelVisibilityScope({ generationMode: 'image', studioImageWorkflow: workflow })
   const currentModelType = useStore(state => state.params.model_type)
   const hasReferenceImages = useStore(state => state.imageRefs.length > 0)
   const selectModel = useStore(state => state.selectModel)
@@ -50,14 +53,15 @@ export function ImageWorkflowSelector() {
   useEffect(() => {
     if (workflow === 'upscale' || models.length === 0) return
     const current = models.find(model => model.model_type === currentModelType)
-    if (modelSupportsImageWorkflow(current, workflow, hasReferenceImages)) return
+    if (modelSupportsImageWorkflow(current, workflow, hasReferenceImages)
+      && isModelEnabledInScope(currentModelType, enabledModels, overrides, visibilityScope)) return
     const fallback = models.find(model => (
-      enabledModels.has(model.model_type)
+      isModelEnabledInScope(model.model_type, enabledModels, overrides, visibilityScope)
       && (!model.nsfw_only || nsfwMode)
       && modelSupportsImageWorkflow(model, workflow, hasReferenceImages)
     ))
     if (fallback) selectModel(fallback.model_type)
-  }, [currentModelType, enabledModels, hasReferenceImages, models, nsfwMode, selectModel, workflow])
+  }, [currentModelType, enabledModels, overrides, visibilityScope, hasReferenceImages, models, nsfwMode, selectModel, workflow])
 
   return (
     <StudioWorkflowSelect<StudioImageWorkflow>

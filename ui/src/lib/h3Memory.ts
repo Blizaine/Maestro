@@ -30,6 +30,7 @@ export function recommendedH3PassProfile(
   policy: SlidingWindowMemoryPolicy | null | undefined,
   resolution: string,
   totalVramGb: number,
+  totalRamGb?: number,
 ): H3MemoryRecommendation | null {
   if (!policy || !Number.isFinite(totalVramGb) || totalVramGb <= 0) return null
   const normalizedResolution = String(resolution || '').trim().toLowerCase()
@@ -39,6 +40,16 @@ export function recommendedH3PassProfile(
     if (match) pixels = Number(match[1]) * Number(match[2])
   }
   if (!pixels) return null
+  // Only measured resource combinations replace the established VRAM table.
+  // Unknown RAM must never qualify for a larger automatic pass.
+  const measured = Number.isFinite(totalRamGb) && Number(totalRamGb) > 0
+    ? policy.resource_recommendations?.tiers.find(tier => (
+        tier.checkpoint === policy.checkpoint
+        && totalVramGb >= tier.min_vram_gb && totalVramGb <= tier.max_vram_gb
+        && Number(totalRamGb) >= tier.min_ram_gb
+        && pixels! >= (tier.min_pixels ?? 0) && pixels! <= tier.max_pixels
+      )) : undefined
+  if (measured) return { supported: true, frames: measured.frames }
   const band = policy.resolution_bands.find(item => pixels! >= item.min_pixels)
   const tier = band?.vram_tiers.find(item => (
     item.max_vram_gb == null || totalVramGb <= item.max_vram_gb
@@ -128,8 +139,9 @@ export function recommendedH3OmniSequenceProfile(
   minimumFrames: number,
   maximumFrames: number,
   frameStep: number,
+  totalRamGb?: number,
 ): H3MemoryRecommendation | null {
-  const profile = recommendedH3PassProfile(policy, resolution, totalVramGb)
+  const profile = recommendedH3PassProfile(policy, resolution, totalVramGb, totalRamGb)
   if (!profile || !profile.supported || profile.frames == null) return profile
   const baseFrames = normalizeH3NativeFrames(
     profile.frames,
@@ -156,6 +168,7 @@ export function effectiveH3OmniSequenceFrames({
   policy,
   resolution,
   totalVramGb,
+  totalRamGb,
   minimumFrames,
   maximumFrames,
   frameStep,
@@ -165,6 +178,7 @@ export function effectiveH3OmniSequenceFrames({
   policy: SlidingWindowMemoryPolicy | null | undefined
   resolution: string
   totalVramGb: number
+  totalRamGb?: number
   minimumFrames: number
   maximumFrames: number
   frameStep: number
@@ -184,6 +198,7 @@ export function effectiveH3OmniSequenceFrames({
     minimumFrames,
     maximumFrames,
     frameStep,
+    totalRamGb,
   )
   return {
     frames: manualOverride || recommendation?.frames == null

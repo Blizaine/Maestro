@@ -1,6 +1,6 @@
 import { useStore } from '../../stores/useStore'
 
-/** The profile owns both the sampling recipe and its automatically loaded adapter. */
+/** Acceleration profiles own their recipe; base-model Viggle profiles also load an adapter. */
 export function Qwen21Controls() {
   const options = useStore(s => s.modelOptions)
   const params = useStore(s => s.params)
@@ -9,7 +9,8 @@ export function Qwen21Controls() {
   if (options?.architecture !== 'qwen_image_21_7B') return null
 
   const profiles = options.qwen21_acceleration_profiles || {}
-  const solver = String(params.sample_solver || 'default')
+  const turboCheckpoint = !!options.qwen21_turbo_checkpoint
+  const solver = turboCheckpoint ? 'qwen21_turbo' : String(params.sample_solver || 'default')
   const accelerated = !!profiles[solver]
   const steps = profiles[solver]?.steps ?? 40
   const guidance = profiles[solver]?.guidance ?? 4
@@ -29,20 +30,23 @@ export function Qwen21Controls() {
           }}
           className="w-full rounded-md border border-border bg-bg-tertiary px-2 py-2 text-xs text-text-primary"
         >
-          <option value="default">Base model · 40 steps</option>
+          {!turboCheckpoint && <option value="default">Base model · 40 steps</option>}
           {Object.entries(profiles).map(([value, profile]) => (
             <option key={value} value={value}>{profile.label}</option>
           ))}
         </select>
       </label>
       <p className="text-[10px] leading-relaxed text-text-muted">
-        {accelerated
+        {turboCheckpoint
+          ? 'Official Turbo checkpoint: 8 steps, CFG 1 and its own sampling schedule. No acceleration LoRA is needed. Use the separate Qwen Image 2.1 model for the base or Viggle profiles.'
+          : accelerated
           ? 'Applies the matching Turbo LoRA at strength 1, its step schedule and CFG 1. The adapter downloads on first generation. Complex edits may work better with the base model; Turbo has limited validation with masks, 2K and many references.'
           : 'Uses the base model without a Turbo adapter. Recommended starting point: 40 steps and CFG 4.'}
       </p>
-      {(params.num_inference_steps !== steps || params.guidance_scale !== guidance) && (
+      {(params.num_inference_steps !== steps || params.guidance_scale !== guidance || (turboCheckpoint && params.sample_solver !== solver)) && (
         <button type="button" className="text-[11px] text-accent-blue hover:underline"
           onClick={() => {
+            setParam('sample_solver', solver)
             setParam('num_inference_steps', steps)
             setParam('guidance_scale', guidance)
           }}>

@@ -1040,6 +1040,46 @@ def _normalize_model_visibility_ids(values):
     return normalized
 
 
+
+def _normalize_model_visibility_overrides(values):
+    """Validate per-workflow choices while retaining the legacy global baseline."""
+    if values is None:
+        return {}
+    if not isinstance(values, dict):
+        raise ValueError("Mode visibility overrides must be an object.")
+    scopes = {
+        "video:frames", "video:references", "video:avatar", "video:extend",
+        "video:blend", "video:animate", "video:retake", "video:prompt_edit",
+        "video:outpaint", "video:repaint", "video:recast", "video:inpaint",
+        "image:generate", "image:inpaint", "image:outpaint",
+        "audio:speech", "audio:music", "audio:sfx",
+    }
+    normalized = {}
+    total = 0
+    for scope, choices in values.items():
+        if scope not in scopes or not isinstance(choices, dict):
+            raise ValueError("An unknown mode or invalid model visibility group was supplied.")
+        ids = _normalize_model_visibility_ids(list(choices))
+        group = {}
+        trimmed_choices = {}
+        for key, value in choices.items():
+            trimmed_choices.setdefault(key.strip(), value)
+        for model_type in ids:
+            if model_type in {"__proto__", "constructor", "prototype"}:
+                raise ValueError("An invalid model identifier was supplied.")
+            # Match the trimmed identifier back to its supplied choice.
+            raw_choice = trimmed_choices[model_type]
+            if not isinstance(raw_choice, bool):
+                raise ValueError("Mode visibility choices must be true or false.")
+            group[model_type] = raw_choice
+        total += len(group)
+        if total > 5000:
+            raise ValueError("Too many mode visibility entries.")
+        if group:
+            normalized[scope] = group
+    return normalized
+
+
 def _model_visibility_response():
     raw = wgp.server_config.get(_MODEL_VISIBILITY_CONFIG_KEY)
     configured = isinstance(raw, dict) and isinstance(
@@ -1049,6 +1089,7 @@ def _model_visibility_response():
         return {
             "configured": False,
             "enabled_models": [],
+            "mode_overrides": {},
             "initialized_mature_models": [],
             "defaults_version": 0,
         }
@@ -1063,6 +1104,7 @@ def _model_visibility_response():
         return {
             "configured": False,
             "enabled_models": [],
+            "mode_overrides": {},
             "initialized_mature_models": [],
             "defaults_version": 0,
         }
@@ -1070,9 +1112,14 @@ def _model_visibility_response():
         defaults_version = max(0, int(raw.get("defaults_version", 0)))
     except (TypeError, ValueError):
         defaults_version = 0
+    try:
+        mode_overrides = _normalize_model_visibility_overrides(raw.get("mode_overrides"))
+    except ValueError:
+        mode_overrides = {}
     return {
         "configured": True,
         "enabled_models": enabled_models,
+        "mode_overrides": mode_overrides,
         "initialized_mature_models": initialized_mature_models,
         "defaults_version": defaults_version,
     }
@@ -1116,6 +1163,11 @@ async def update_model_visibility(request: Request):
         enabled_models = _normalize_model_visibility_ids(
             body.get("enabled_models"),
         )
+        previous = wgp.server_config.get(_MODEL_VISIBILITY_CONFIG_KEY)
+        previous = previous if isinstance(previous, dict) else {}
+        mode_overrides = _normalize_model_visibility_overrides(
+            body.get("mode_overrides", previous.get("mode_overrides")),
+        )
         initialized_mature_models = _normalize_model_visibility_ids(
             body.get("initialized_mature_models", []),
         )
@@ -1132,6 +1184,7 @@ async def update_model_visibility(request: Request):
     with _MODEL_VISIBILITY_WRITE_LOCK:
         wgp.server_config[_MODEL_VISIBILITY_CONFIG_KEY] = {
             "enabled_models": enabled_models,
+            "mode_overrides": mode_overrides,
             "initialized_mature_models": initialized_mature_models,
             "defaults_version": defaults_version,
         }
@@ -6557,6 +6610,7 @@ def get_model_options(model_type: str):
             "minimax_h3_fused_turbo", False
         ),
         "minimax_h3_baked_turbo": md.get("minimax_h3_baked_turbo", False),
+        "minimax_h3_full_checkpoint": md.get("minimax_h3_full_checkpoint", False),
         "loras_disabled": md.get("loras_disabled", False),
         "minimax_h3_runtime_advisory": _minimax_h3_runtime_advisory(md),
         "minimax_h3_media_sources": md.get(
@@ -6581,6 +6635,7 @@ def get_model_options(model_type: str):
         "max_image_refs": md.get("max_image_refs"),
         "sample_solvers": solvers,
         "qwen21_acceleration_profiles": md.get("qwen21_acceleration_profiles"),
+        "qwen21_turbo_checkpoint": bool(md.get("qwen21_turbo_checkpoint")),
         "image_ref_inpaint": md.get("image_ref_inpaint", False),
         "model_modes": md.get("model_modes"),
 
@@ -10014,6 +10069,7 @@ async def plan_audio_structure(request: Request):
     frames_steps = body.get("frames_steps", 4)
     frames_minimum = body.get("frames_minimum", 5)
     video_model = body.get("video_model")
+    md = {}
     if video_model:
         try:
             md = wgp.get_model_def(video_model) or {}
@@ -10027,9 +10083,11 @@ async def plan_audio_structure(request: Request):
     try:
         from services.director_pipeline import director_music_clip_limits
         limits = director_music_clip_limits(body) if "director_music_clip_seconds" in body else None
+        from services.director_music_timing import resolve_music_pacing_bias
+        pacing_bias = resolve_music_pacing_bias(body.get("energy_bias", 0), md)
         clips = audio_analysis.plan_clip_structure(
             analysis=analysis,
-            energy_bias=body.get("energy_bias", 0),
+            energy_bias=pacing_bias,
             fps=fps,
             frames_steps=frames_steps,
             frames_minimum=frames_minimum,
@@ -11041,6 +11099,13 @@ async def _prepare_generation_submission(
     except Exception:
         _base_model_type = body.get("model_type")
     _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
+    # Apply atomic checkpoint recipes before preparation captures the request
+    # for enhancement, queue retries and restorable output metadata.
+    if not is_sfx:
+        try:
+            body.update(wgp.apply_model_acceleration_profile(body["model_type"], body))
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
     from services.native_vae import native_vae_selection
     try:
         native_vae_selection(_generation_model_def, body.get("spatial_upsampling", ""),
@@ -23184,6 +23249,7 @@ def _performance_hardware() -> dict:
     hw["ram_allocator_active"] = active_allocators.get("ram_allocator_active")
     stamps = []
     for relative in ("wgp.py", "services/performance_tuning.py", "services/perf_recommend.py",
+                     "services/h3_performance_policy.py", "shared/h3_performance_policy.json",
                      "mmgp/offload.py", "shared/kernels/int8_backend.py",
                      "shared/cuda_memory.py", "mmgp/allocator/__init__.py",
                      "mmgp/allocator/ram.py"):
@@ -23251,10 +23317,14 @@ def _apply_per_job_performance(job, raw_params):
             else:
                 plan["transformer_budget_mb"] = int(getattr(wgp.args, "transformer_budget", 0) or 0)
             raw_params["override_profile"] = plan["profile"]
-            wgp.args._maestro_per_job_memory_plan = plan
         else:
             _, preload = preload_for_output(wgp.server_config, wgp.args, output)
             plan["transformer_budget_mb"] = preload or int(getattr(wgp.args, "transformer_budget", 0) or 0)
+        # Attention grouping is independent of model placement. An explicit
+        # profile may coexist with Auto-owned head splitting for this job.
+        wgp.args._maestro_per_job_memory_plan = (
+            plan if plan["applied"] or plan.get("override_attention_head_split") else None
+        )
         signature = (plan["profile"], plan["transformer_budget_mb"],
                      plan["read_ahead"], plan["reserved_ram_fraction"])
         wgp.args._maestro_performance_placement = signature
@@ -23263,7 +23333,9 @@ def _apply_per_job_performance(job, raw_params):
                 wgp.reload_needed = True
         job["performance_plan"] = plan
         _last_performance_plan = plan
-        print(f"[Auto-tune] Profile {plan['profile']:g}, transformer {plan['transformer_budget_mb']} MB ({plan['source']}). " + " ".join(plan["warnings"]))
+        split_label = {0: "Off", 1: "Low", 2: "Medium", 3: "High"}.get(plan.get("attention_head_split"), "unchanged")
+        split_source = "Auto" if plan.get("override_attention_head_split") else "saved"
+        print(f"[Auto-tune] Profile {plan['profile']:g}, transformer {plan['transformer_budget_mb']} MB ({plan['source']}), head splitting {split_label} ({split_source}). " + " ".join(plan["warnings"]))
         _finalize_deferred_h3_residency_reload(job, plan["transformer_budget_mb"])
         return GenerationPerformanceMonitor(get_live_stats, lambda: job.get("phase", "")).start()
     except Exception as exc:

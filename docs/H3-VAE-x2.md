@@ -15,6 +15,12 @@ selection. It is separate from transformer checkpoints and LoRAs. Saved
 outputs retain the selected method and actual final dimensions. Switching the
 decoder reloads the model profile while preserving the selected text encoder.
 
+Maestro recognizes both the direct VAE folder and the nested folder retained
+by Hugging Face downloads. Existing files, including those in linked model
+folders, are reused in place and verified against the pinned SHA-256 before
+loading. A completed download does not need to be deleted or downloaded
+again; missing license or notice files are fetched separately.
+
 Current support covers standard H3 video generation, including Frames and
 References, in Studio and Director. It excludes image mode, audio-only,
 Viggle, and Audio from Control Video, which preserves the source frames.

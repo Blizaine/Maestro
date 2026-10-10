@@ -91,6 +91,15 @@ class MusicMouthCueTests(unittest.TestCase):
         def generate(**kwargs):
             self.assertIn("do not add anyone to represent the soundtrack", kwargs["prompt"])
             return json.dumps([{
+                "scene_goal": "Mara prepares for the instrumental opening without singing.",
+                "scene_type": "performance",
+                "environment": "A concert stage with a microphone stand",
+                "visual_style": "Cinematic concert photography",
+                "lighting": "Warm stage lights",
+                "mood": "Anticipation",
+                "camera_plan": {"framing": "Medium shot pushing toward Mara"},
+                "image_source": "original",
+                "visual_changes": ["Camera moves closer to Mara's hands"],
                 "subjects_on_screen": [SINGER],
                 "audio_plan": {"vocal_activity": "active"},  # The LLM cannot override analysis.
                 "video_prompt": "Mara bellows into the microphone. Camera pushes in.",

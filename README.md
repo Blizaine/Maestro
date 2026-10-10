@@ -6,12 +6,16 @@ A one-click local AI **creative studio, director, and video editor** for creator
 
 ## What it does
 
-- **Qwen Image 2.1 7B:** unified image generation and editing with up to ten
-  references, dedicated prompt enhancement and transparent PNG output.
+- **Qwen Image 2.1 7B and official Turbo:** unified image generation and editing
+  with up to ten references, dedicated prompt enhancement and transparent PNG
+  output. Turbo uses its published eight-step recipe, with BF16 or INT8 downloads.
   Research/evaluation license; commercial use requires a separate Qwen license.
   [Usage and model details](docs/Qwen-Image-2.1.md).
 
 ### 🎬 Director Mode — automatic music videos and short films
+
+New Director projects start with **H3 Fused 4-Step — References** when enabled and compatible. Existing drafts and saved projects retain their selected model. When audio analysis finishes, Director brings reference and character setup back into view before you continue.
+
 The flagship feature. Drop in an audio track or write a story; a local LLM plans every shot, writes screenplays/lyrics, generates start frames & keyframes with character consistency, polishes prompts per model & LoRA-specific prompting guides, and runs the full multi-clip generation. Two skills:
 
 - **Music Video** — beat-aware shot planning aligned to your audio. The LLM analyzes BPM, sections (verse/chorus/bridge), and energy, then writes shots that hit the downbeats. Speaker transcription & diarization lets you name and target different voices or singers. **Clip length** offers Auto or a model-aligned maximum, including shorter clips for smaller GPUs, while preserving the full song. [Director controls](docs/Director-controls.md).
@@ -24,14 +28,16 @@ The flagship feature. Drop in an audio track or write a story; a local LLM plans
 Detects your GPU, VRAM, and RAM on first launch and picks the right profile, quantization, VAE tiling, and VRAM safety coefficient. No more "Profile 1 vs 2 vs 4.5" guesswork. Power users still have full manual control under "Show advanced settings."
 
 - **Recommendations stay current:** while Auto is enabled, revised recommendations apply once at startup. Manual mode and customized values are preserved. See [Performance Auto-Tune](docs/Performance-auto-tune.md) for memory profiles and controlled performance comparisons.
-- **Generation-aware memory:** Auto-tune manages compatible INT8/allocator controls, sizes H3 weight residency within model workspace guards, and learns from repeated matching local comparisons. The performance card explains its last choice. Smaller RAM/VRAM systems retain conservative placement; [RTX 3080 test steps](docs/Performance-auto-tune.md#testing-a-32-gb-ram--rtx-3080-machine) include a bounded comparison matrix.
+- **Generation-aware memory:** Auto-tune manages compatible INT8/allocator controls, sizes H3 weight residency within model workspace guards, and learns from repeated matching local comparisons. On nominal 12-GB GPUs with at least 30 GiB usable RAM, it also chooses H3 head splitting for each generation; duration guidance flags costly Pruned workloads. The performance card explains its last choice. Smaller RAM/VRAM systems retain conservative placement; [RTX 3080 test steps](docs/Performance-auto-tune.md#testing-a-32-gb-ram--rtx-3080-machine) include a bounded comparison matrix.
+- **Resource-aware duration defaults:** Studio and Director Auto use the same RAM, VRAM and resolution recommendations. The tested 12-GB / 32-GB configuration starts at about 14.4 seconds for 720p H3 Fused, with shorter recommendations for Pruned and native 1080p. Director music videos also start with Auto cut speed favoring fewer, longer H3 clips. Saved manual choices remain in control. [Duration recommendations](docs/Performance-auto-tune.md#automatic-clip-and-window-durations).
 - **WanGP 17 memory engine:** bundled MMGP 4 adds faster weight streaming and shared RAM pinning. **Settings → System → RAM / VRAM Management** provides optional MMGP allocators, dynamic preload, Windows read ahead, attention head splitting and INT8 backend selection. Saved manual settings are preserved; changing the allocator requires a restart. Gains depend on the model, checkpoint format, attention backend and hardware. See the [port review and testing guide](docs/development/wan2gp-17-port.md).
   The [serial memory test bench](docs/development/memory-benchmark.md) compares fixed generations, records timings and physical VRAM, and restores the tested settings afterward.
 - **OOM recovery banner** auto-suggests lowering the VRAM headroom when a generation runs out, with one-click apply.
 - **LM Studio memory:** explicitly unload a selected external writer instance from Settings → Integrations before image or video generation. Requires LM Studio 0.4 or newer; release is verified against its loaded-model list. [Memory controls and API](docs/LM-Studio-memory.md).
 - **Live download status** during model setup ("Downloading transcription model (first use downloads ~300MB)..." instead of a vague spinner).
 - **Cancel model downloads:** use **Cancel** beside an active download in **Settings → Performance → Enabled Models**, the model browser, or the download banner. Download actions are separate from the enable checkbox. **Cancelling** stays visible until the transfer stops; completed files stay installed and the download can be retried. Hugging Face may retain incomplete cache data for a resumable retry. [Download controls and API](docs/Download-controls.md).
-- **Generation previews:** Settings → Performance → Generation Preview defaults to looping Live Video in Studio's generating card, with Fast Frames, Clearer Frames and Off also available. Saved choices are preserved. Previews add work and show approximate motion in the current window. Click the video to pause/resume playback. [Preview controls and API](docs/Generation-preview.md).
+- **Models by workflow:** **Manage models** is always available in the model picker. Settings → Performance → Enabled Models groups choices under Video, Image and Audio, with Studio workflows (Frames, References, Avatar, Extend and others) nested underneath. Compact download icons keep model rows evenly spaced. Fresh installs show H3 Pruned, H3 Fused 4-Step and LTX-2.5 Distilled in Frames; H3 Pruned and H3 Fused 4-Step in References; both LongCat models in Avatar; and the Frames/References H3 pairs plus LTX-2.5 Distilled in Extend and Blend. **Reset** beside **Enable more models** restores only the current workflow’s defaults; model files remain installed and hidden models can be re-enabled. Existing saved choices are preserved on update. Enabling or hiding a model in one group affects only that workflow; existing choices remain the baseline and downloaded files are shared. Picker names omit redundant Frames/References wording while keeping checkpoint variants, sizes, steps and quantization.
+- **Generation previews:** Settings → Performance → Generation Preview defaults to looping Live Video in Studio and Director generation cards, with Fast Frames, Clearer Frames and Off also available. Saved choices are preserved. Previews add work and show approximate motion in the current window. Click or tap the preview to hide/show its information overlay; the separate pause/play button controls playback. [Preview controls and API](docs/Generation-preview.md).
 
 ### 🎨 Studio Mode — full manual control
 Direct access to every model and every knob:
@@ -116,22 +122,27 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
-### v2.7.0 (prepared 2026-10-08)
+### v2.7.0 (prepared 2026-10-10)
 
 - **WanGP 17 memory engine:** bundled MMGP 4, optimized VRAM allocation, smart pinning, dynamic preload, optional RAM allocation and Windows read-ahead controls. Compatible attention, INT8 and VAE paths reduce memory overhead; saved manual preferences remain in control.
 - **Generation-aware Auto-tune:** uses the GPU, system RAM, resolution, window length and references to choose temporary H3 placement. Bounded local comparisons can teach it a faster safe placement. Includes conservative recommendations for smaller-memory machines.
+- **Hardware-aware clip defaults:** Studio and Director share measured H3 duration recommendations. Fused models can use longer 720p windows on tested 12-GB cards; native 1080p remains conservative. Saved manual durations stay in control.
+- **Simpler model selection:** grouped Video, Image and Audio settings, workflow-specific model visibility, concise names, compact download controls and a reset that preserves downloaded files. New Director projects default to H3 Fused 4-Step References, and song analysis returns users to reference setup.
+- **Qwen Image 2.1 Turbo:** optional native eight-step image generation and editing with the official Turbo schedule, compatible LoRAs and verified BF16/INT8 assets. [Qwen guide](docs/Qwen-Image-2.1.md).
+- **Fused checkpoint labels:** Frames and References now appear as **H3 Fused 4-Step**, without the Experimental suffix. Both continue to share the same verified upstream weights.
 - **H3 VAE 2×:** optional learned video decoding doubles both output dimensions while denoising at the selected resolution. Available in Studio and Director; its verified 2.8-GB decoder downloads on first use. [H3 VAE guide](docs/H3-VAE-x2.md).
 - **Faster H3 setup and repeated work:** download auxiliary tools when needed, reuse eligible plain-text conditioning, and batch compatible VAE tiles within memory limits. Director uses Studio's hardware-aware encoder recommendation, including Q2_K on constrained machines.
 - **Director live previews:** discover previews as clips start, combine progress and preview in one tile, and retain whole-project Stop and ETA. Tap/click a preview to hide or restore its information overlay; playback controls remain separate.
 - **More reliable prompt enhancement:** allow longer CUDA writer startup, distinguish device-probe timeouts, expose dialogue validation reasons, and shorten AI-written exchanges to fit the selected duration while preserving speakers and user-supplied lines.
-- **Director prompt fixes:** preserve multiline prompts in single-shot music videos and carry the selected H3 encoder through generation, regeneration, repair and resume.
+- **Director prompt fixes:** preserve multiline prompts in single-shot music videos and carry the selected H3 encoder through generation, regeneration, repair and resume. Music-video planning preserves completed shots and repairs incomplete batches in smaller requests; unrecoverable plans stop before rendering instead of repeating the overall story.
 - **Optional developer test bench:** manual diagnostics, prompt/render regressions, cold/warm comparisons and multi-machine report collection, plus Windows SSH setup and bounded diagnostics. Test results remain local; no recurring schedule is installed.
 
 This is a prepared release candidate. Use **Update** in Pinokio after publication,
-restart Maestro and refresh the browser. On an existing installation, use
-**Settings → Performance → Re-detect** to explicitly apply the expanded Auto-tune
-recommendations; saved manual choices are preserved during migration. Check the
-active allocator and restart if an allocator change is pending.
+restart Maestro and refresh the browser. Existing installations with Auto-tune
+enabled receive the revised recommendations once at startup; saved manual choices
+are preserved. **Settings → Performance → Re-detect** can explicitly reapply
+recommendations. Check the active allocator and restart if an allocator change
+is pending.
 
 See the [complete changes](docs/RELEASE_NOTES_V2.7.0.md),
 [validation and remaining checks](docs/VALIDATION_V2.7.0.md), and

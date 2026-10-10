@@ -811,7 +811,7 @@ def apply_model_acceleration_profile(model_type, settings):
     """Apply an atomic model recipe before validation and adapter loading."""
     handler = get_model_handler(model_type)
     apply_profile = getattr(handler, "apply_acceleration_profile", None)
-    return apply_profile(dict(settings)) if apply_profile else settings
+    return apply_profile(dict(settings), model_def=get_model_def(model_type)) if apply_profile else settings
 
 def validate_settings(state, model_type, single_prompt, inputs):
     def ret():
@@ -7978,7 +7978,8 @@ def generate_video(
         return False
     # Head splitting is a generation-boundary setting. Editing settings while
     # a job runs must not change the attention grouping inside that job.
-    attention_kit.configure(server_config.get("attention_head_split", 0))
+    from services.memory_settings import per_job_attention_head_split
+    attention_kit.configure(per_job_attention_head_split(server_config, args))
     from services.generation_preview import (
         configured_preview_mode,
         preview_mode as normalize_preview_mode,

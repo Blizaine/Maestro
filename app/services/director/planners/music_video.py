@@ -256,7 +256,7 @@ def _parse_performer_map(scene_description: str) -> dict[str, str]:
 class MusicVideoPlanner(BasePlanner):
     skill_type = "music_video"
 
-    _LONG_FORM_BATCH_SIZE = 12
+    _LONG_FORM_BATCH_SIZE = 6
 
     def plan(
         self,
@@ -322,7 +322,7 @@ class MusicVideoPlanner(BasePlanner):
             kwargs,
             kind="music_video",
             fingerprint_payload={
-                "planner_revision": 5,
+                "planner_revision": 6,
                 "scene_description": scene_description,
                 "clips": clips,
                 "lyrics": lyrics or [],
@@ -667,6 +667,67 @@ class MusicVideoPlanner(BasePlanner):
 
         return contexts
 
+    @staticmethod
+    def _music_video_row_issue(
+        index: int,
+        row: dict,
+        previous_rows: list[dict],
+        *,
+        scene_description: str,
+        include_image_fields: bool,
+    ) -> Optional[str]:
+        """Return why a music-video row is incomplete or not shot-specific."""
+
+        required_text = [
+            "scene_goal",
+            "scene_type",
+            "environment",
+            "visual_style",
+            "lighting",
+            "mood",
+            "ending_beat",
+            "video_prompt",
+        ]
+        if include_image_fields:
+            required_text.extend(("image_source", "image_prompt"))
+        for field in required_text:
+            if not isinstance(row.get(field), str) or not row[field].strip():
+                return f"clip {index + 1} is missing a usable {field}"
+
+        if not isinstance(row.get("subjects_on_screen"), list):
+            return f"clip {index + 1} has no subjects_on_screen list"
+        if not isinstance(row.get("action_beats"), list) or not any(
+            isinstance(beat, str) and beat.strip()
+            for beat in row.get("action_beats", [])
+        ):
+            return f"clip {index + 1} has no meaningful action_beats"
+        camera = row.get("camera_plan")
+        if not isinstance(camera, dict) or not str(
+            camera.get("framing") or ""
+        ).strip():
+            return f"clip {index + 1} has no usable camera framing"
+        if not isinstance(row.get("window_prompts"), list):
+            return f"clip {index + 1} has no window_prompts list"
+        if include_image_fields and not isinstance(row.get("visual_changes"), list):
+            return f"clip {index + 1} has no visual_changes list"
+
+        def normalized(text: Any) -> str:
+            return re.sub(r"[^a-z0-9]+", " ", str(text or "").casefold()).strip()
+
+        prompt = normalized(row.get("video_prompt"))
+        concept = normalized(scene_description)
+        if concept and prompt == concept:
+            return (
+                f"clip {index + 1} repeats the global scene description instead "
+                "of providing a shot-specific video_prompt"
+            )
+        for previous in previous_rows:
+            if prompt and prompt == normalized(previous.get("video_prompt")):
+                return (
+                    f"clip {index + 1} repeats a completed clip's video_prompt"
+                )
+        return None
+
     # ── LLM Planning Call ────────────────────────────────────────────
 
     def _plan_with_llm(
@@ -685,14 +746,12 @@ class MusicVideoPlanner(BasePlanner):
         """Call LLM to generate structured shot plans."""
         from ..nsfw_guidance import inject_nsfw_if_enabled
 
-        if (
-            len(clips) > self._LONG_FORM_BATCH_SIZE
-            and not kwargs.get("_bounded_music_batch")
-        ):
+        if not kwargs.get("_bounded_music_batch"):
             forwarded_kwargs = {
                 key: value for key, value in kwargs.items()
                 if key not in {
                     "_bounded_music_batch",
+                    "_preserve_short_music_reasoning",
                     "_planning_progress_callback",
                     "_planning_checkpoint_callback",
                     "_planning_cancelled_callback",
@@ -700,28 +759,58 @@ class MusicVideoPlanner(BasePlanner):
                 }
             }
 
-            def call_batch(
+            def plan_batch(
                 batch_number: int,
                 start: int,
                 batch_clips: list[dict],
                 previous: Optional[dict],
+                *,
+                repair: bool,
             ) -> list[dict]:
                 end = start + len(batch_clips)
-                previous_ending = (
-                    str((previous or {}).get("ending_beat") or "").strip()
-                    or "No prior clip; establish the opening cleanly."
-                )
+                previous_state = "No prior completed clip; establish the opening cleanly."
+                if previous:
+                    state_parts = []
+                    for label, value in (
+                        ("goal", previous.get("scene_goal")),
+                        ("setting", previous.get("environment")),
+                        ("ending", previous.get("ending_beat")),
+                    ):
+                        text = str(value or "").strip()
+                        if text:
+                            state_parts.append(f"{label}: {text}")
+                    subjects = previous.get("subjects_on_screen")
+                    if isinstance(subjects, list):
+                        names = [
+                            str(item.get("visual_description") or "").strip()
+                            for item in subjects
+                            if isinstance(item, dict)
+                            and item.get("visual_description")
+                        ]
+                        if names:
+                            state_parts.append("visible subjects: " + ", ".join(names))
+                    if state_parts:
+                        previous_state = "; ".join(state_parts)
                 batch_concept = (
                     f"{scene_description}\n\n"
                     "LONG-FORM TIMELINE CONTRACT:\n"
                     f"This is planning batch {batch_number}, covering global "
                     f"clips {start + 1}-{end} of {len(clips)}. Continue the "
-                    "same music video; do not restart its visual premise or "
-                    "repeat completed clip ideas. Preserve performer identity, "
-                    "wardrobe, world, and established visual grammar unless "
-                    "the song section motivates a visible change.\n"
-                    f"Previous planned ending: {previous_ending}"
+                    "same music video; preserve performer identity, wardrobe, "
+                    "world, and visual grammar unless the song section motivates "
+                    "a visible change. Give every requested clip its own "
+                    "section-specific action, environment, and ending.\n"
+                    f"Previous completed ending/state: {previous_state}. "
+                    "Carry that visible state into the next clip without "
+                    "repeating the previous shot."
                 )
+                if repair:
+                    batch_concept += (
+                        "\n\nTAIL REPAIR: Earlier clips are already complete. "
+                        "Return plans only for the listed missing global clips. "
+                        "Keep their original clip numbers and musical contexts; "
+                        "do not restart the video or repeat the global scene brief."
+                    )
                 return self._plan_with_llm(
                     clips=batch_clips,
                     clip_contexts=clip_contexts[start:end],
@@ -733,9 +822,43 @@ class MusicVideoPlanner(BasePlanner):
                     performer_map=performer_map,
                     nsfw=nsfw,
                     _bounded_music_batch=True,
+                    _preserve_short_music_reasoning=(
+                        not repair and len(clips) <= self._LONG_FORM_BATCH_SIZE
+                    ),
                     **forwarded_kwargs,
                 )
 
+            def call_batch(
+                batch_number: int,
+                start: int,
+                batch_clips: list[dict],
+                previous: Optional[dict],
+            ) -> list[dict]:
+                return plan_batch(
+                    batch_number,
+                    start,
+                    batch_clips,
+                    previous,
+                    repair=False,
+                )
+
+            def repair_batch(
+                batch_number: int,
+                start: int,
+                batch_clips: list[dict],
+                previous: Optional[dict],
+            ) -> list[dict]:
+                return plan_batch(
+                    batch_number,
+                    start,
+                    batch_clips,
+                    previous,
+                    repair=True,
+                )
+
+            uses_generated_images = bool(
+                getattr(self, "_uses_generated_shot_images", True)
+            )
             return self._run_checkpointed_json_batches(
                 items=clips,
                 batch_size=self._LONG_FORM_BATCH_SIZE,
@@ -743,27 +866,18 @@ class MusicVideoPlanner(BasePlanner):
                 stage="music_video_batch",
                 progress_label="music-video",
                 call_batch=call_batch,
-                fallback_factory=lambda index, clip: {
-                    "scene_goal": (
-                        f"Continue the {str(clip.get('label') or 'music')} "
-                        f"section at global clip {index + 1}"
-                    ),
-                    "scene_type": (
-                        "atmospheric"
-                        if str(clip.get("label") or "").lower()
-                        == "instrumental" else "performance"
-                    ),
-                    "subjects_on_screen": [],
-                    "environment": "",
-                    "visual_style": "",
-                    "lighting": "",
-                    "mood": "",
-                    "action_beats": [],
-                    "camera_plan": {"framing": "medium shot"},
-                    "ending_beat": "The performance continues into the next clip",
-                    "video_prompt": scene_description,
-                    "window_prompts": [],
-                },
+                repair_batch=repair_batch,
+                row_validator=lambda index, row, previous_rows: (
+                    self._music_video_row_issue(
+                        index,
+                        row,
+                        previous_rows,
+                        scene_description=scene_description,
+                        include_image_fields=uses_generated_images,
+                    )
+                ),
+                repair_batch_size=max(1, self._LONG_FORM_BATCH_SIZE // 2),
+                repair_attempts=2,
             )
 
         num_character_refs = len(kwargs.get("character_ref_paths", []) or [])
@@ -951,7 +1065,7 @@ Write {len(clips)} structured shot plans. Go:"""
                 image_paths.append(lp)
         if not image_paths:
             image_paths = None
-        per_clip_tokens = 700 if uses_generated_images else 520
+        per_clip_tokens = 700 if uses_generated_images else 900
         max_tokens = max(4096, len(clips) * per_clip_tokens + 1024)
         shot_dicts = self._call_llm_json(
             user_prompt=user_prompt,
@@ -961,7 +1075,7 @@ Write {len(clips)} structured shot plans. Go:"""
             # batch. Keep that structured transformation grammar-constrained
             # and spend reasoning only on the historical short-form path.
             thinking_budget=(
-                0 if kwargs.get("_bounded_music_batch") else 4096
+                4096 if kwargs.get("_preserve_short_music_reasoning") else 0
             ),
             image_paths=image_paths,
             json_schema=_music_shot_schema(

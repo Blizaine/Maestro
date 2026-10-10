@@ -1,5 +1,10 @@
 import { galleryOutput, galleryOutputIsOlder, outputIdentity } from '../lib/galleryIdentity'
 import { create } from 'zustand'
+import {
+  defaultVisibilityForScope, defaultVisibilityOverrides,
+  enabledModelsInScope, getModelVisibilityScope, isModelEnabledInScope,
+  normalizeModelVisibilityOverrides, type ModelVisibilityOverrides, type ModelVisibilityScope,
+} from '../lib/modelVisibility'
 import { isDirectorRenderChild } from '../lib/directorJobs'
 import {
   modelOptionsForSelectedModel,
@@ -995,16 +1000,15 @@ const DEFAULT_ENABLED_MODELS = new Set([
   // Other image models remain opt-in through Model Visibility.
   'flux2_klein_9b',
   'qwen_image_21_7B',
+  'qwen_image_21_7B_turbo',
   'krea2_raw',
   'krea2_turbo',
   'krea2_raw_edit',
   'krea2_turbo_edit',
   // Video
-  // Default to just the LTX-2.3 Distilled 1.1 22B checkpoint (newer /
-  // better quality). The FP8 build and every other video model
-  // (Wan 2.2 t2v/i2v, GGUF quants, dev variants) stay available via
-  // Settings → System → Model Visibility but off by default so the
-  // first-launch picker isn't overwhelming.
+  // LTX-2.3 remains available for Retake, Prompt Edit and Outpaint.
+  // Frames, References, Avatar, Extend and Blend use the narrower
+  // workflow defaults defined in modelVisibility.ts.
   'ltx2_22B_distilled_1_1',
   // LTX-2.5's official split Distilled workflow. The large gated component
   // pack downloads only when selected for the first time.
@@ -1017,21 +1021,15 @@ const DEFAULT_ENABLED_MODELS = new Set([
   // MiniMax H3 Base: text, first/last-frame video, and native stereo audio.
   'minimax_h3',
   'minimax_h3_full',
-  'minimax_h3_vdn',
-  'minimax_h3_vdn_full',
   'minimax_h3_voice_audio',
-  // Frames-side workflow ID paired with the Singularity Ref2VA entry below.
-  'minimax_h3_singularity',
   'viggle_animate',
-  // Experimental fused four-step Frames checkpoint. It is visible by
-  // default, but the ordinary H3/LTX selections below remain the active
-  // workflow defaults until a user explicitly chooses it.
+  // Fused four-step H3 and dedicated LongCat Avatar workflows.
   'minimax_h3_fused_turbo',
+  'longcat_avatar',
+  'longcat_avatar_multi',
   // MiniMax H3 Ref2VA: ordered image, video, and audio references.
   'minimax_h3_ref2va',
-  'minimax_h3_ref2va_full',
   'minimax_h3_ref2va_fused_turbo',
-  'minimax_h3_ref2va_singularity',
   // Audio — Speech
   'kugelaudio_0_open',
   'qwen3_tts_base',
@@ -1058,7 +1056,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 19
+const DEFAULTS_VERSION = 21
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -1091,9 +1089,15 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // Reserved: DaSiWa checkpoints are user imports, without curated additions.
   // Keep the version so earlier local visibility preferences remain valid.
   19: [],
+  // Scoped defaults apply to fresh installs and explicit resets. Do not
+  // replace existing installations' saved visibility choices on update.
+  20: [],
+  // Official eight-step Qwen checkpoint; expose once without selecting it.
+  21: ['qwen_image_21_7B_turbo'],
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 
+export const DEFAULT_DIRECTOR_VIDEO_MODEL = 'minimax_h3_ref2va_fused_turbo'
 const DEFAULT_MUSIC_MODEL = 'yue2'
 // Separate from model visibility: enabling a model and selecting a default
 // are different preferences. Persist the migration so later choices survive
@@ -1103,17 +1107,28 @@ const MUSIC_DEFAULTS_KEY = 'maestro_music_defaults_version'
 let _musicDefaultsVersion = 0
 
 const ENABLED_MODELS_KEY = 'maestro_enabled_models'
+const MODEL_VISIBILITY_OVERRIDES_KEY = 'maestro_model_visibility_overrides_v1'
+function _loadModelVisibilityOverrides(): ModelVisibilityOverrides {
+  try { return normalizeModelVisibilityOverrides(JSON.parse(localStorage.getItem(MODEL_VISIBILITY_OVERRIDES_KEY) || '{}')) }
+  catch { return {} }
+}
+let _modelVisibilityOverrides = _loadEnabledModels()
+  ? _loadModelVisibilityOverrides()
+  : defaultVisibilityOverrides(DEFAULT_ENABLED_MODELS, DEFAULT_ENABLED_MODELS)
 let _initializedMatureModels = new Set<string>()
 let _modelVisibilityHydrated = false
 let _modelVisibilityDefaultsVersion = 1
 let _modelVisibilitySaveTask: Promise<void> = Promise.resolve()
 
-function _saveEnabledModels(models: Set<string>) {
+function _saveEnabledModels(models: Set<string>, overrides = _modelVisibilityOverrides) {
+  _modelVisibilityOverrides = overrides
   try {
     localStorage.setItem(ENABLED_MODELS_KEY, JSON.stringify([...models]))
+    localStorage.setItem(MODEL_VISIBILITY_OVERRIDES_KEY, JSON.stringify(overrides))
   } catch { /* quota exceeded */ }
   const payload = {
     enabled_models: [...models],
+    mode_overrides: overrides,
     initialized_mature_models: [..._initializedMatureModels],
     defaults_version: _modelVisibilityDefaultsVersion,
   }
@@ -1173,7 +1188,7 @@ function _enableUninitializedMatureModels(
 // Default model_type per generation mode
 const modeDefaultModel: Record<GenerationMode, string> = {
   image: 'flux2_klein_9b',
-  video: 'ltx2_22B_distilled_1_1',
+  video: 'ltx2_25',
   audio: 'kugelaudio_0_open',
   // Edit initially opens in Retake, whose curated compatible model is LTX-2.3.
   // An empty preference fell back to the first legacy LTX family entry even
@@ -1362,6 +1377,53 @@ function getDefaultModelForMode(
     if (firstModel) return firstModel.model_type
   }
   return ''
+}
+
+
+export function enabledModelsForContext(
+  state: Pick<AppState, 'enabledModels' | 'modelVisibilityOverrides' | 'generationMode' | 'studioVideoWorkflow' | 'studioImageWorkflow' | 'audioSubMode' | 'editSubMode'>,
+  scope = getModelVisibilityScope(state),
+): Set<string> {
+  return enabledModelsInScope(state.enabledModels, state.modelVisibilityOverrides, scope)
+}
+
+export function getModelGroupsForVisibilityScope(
+  scope: ModelVisibilityScope, families: ModelFamily[], models: ModelDef[],
+): { family: ModelFamily; models: ModelDef[] }[] {
+  const [media, workflow] = scope.split(':')
+  const edits: Record<string, import('../types').EditSubMode> = {
+    retake: 'retake', prompt_edit: 'edit_anything', outpaint: 'outpaint',
+    repaint: 'restyle', recast: 'recast', inpaint: 'inpaint',
+  }
+  const edit = media === 'video' ? edits[workflow] : undefined
+  const mode: GenerationMode = edit ? 'avatar' : media as GenerationMode
+  return getFamiliesForMode(mode, families, edit, media === 'audio' ? workflow : undefined)
+    .map(family => ({ family, models: getModelsForFamily(family.id, models, mode, edit).filter(model => {
+      if (media === 'image') return modelSupportsImageWorkflow(model, workflow as StudioImageWorkflow)
+      if (media !== 'video' || edit) return true
+      if (workflow === 'animate') return model.model_type === 'viggle_animate'
+      if (model.model_type === 'viggle_animate') return false
+      if (['frames', 'references', 'avatar'].includes(workflow)) {
+        return modelSupportsStudioVideoMediaIntent(model, {
+          workflow: workflow as StudioVideoMediaIntent['workflow'], hasFrameGuidance: false,
+          hasOmniReferences: false, hasAudioDrive: false,
+        })
+      }
+      return !isLongCatAvatarModel(model)
+    }) }))
+    .filter(group => group.models.length > 0)
+}
+
+function reconcileModelVisibilitySelection(state: AppState) {
+  if (state.generationMode === 'video' && ['frames', 'references', 'avatar'].includes(state.studioVideoWorkflow)) {
+    state.reconcileStudioVideoCreateRoute('Enabled models changed')
+    return
+  }
+  const scope = getModelVisibilityScope(state)
+  const choices = getModelGroupsForVisibilityScope(scope, state.families, state.models)
+    .flatMap(group => group.models).filter(model => isModelEnabledInScope(model.model_type, state.enabledModels, state.modelVisibilityOverrides, scope)
+      && (!model.nsfw_only || state.servicesConfig?.nsfw_mode))
+  if (!choices.some(model => model.model_type === state.params.model_type) && choices[0]) state.selectModel(choices[0].model_type)
 }
 
 interface AppState {
@@ -1744,14 +1806,15 @@ interface AppState {
 
   // Model visibility (favorites)
   enabledModels: Set<string>
-  toggleModelEnabled: (modelType: string) => void
-  resetEnabledModels: () => void
+  modelVisibilityOverrides: ModelVisibilityOverrides
+  toggleModelEnabled: (modelType: string, scope?: ModelVisibilityScope) => void
+  resetEnabledModels: (scope?: ModelVisibilityScope) => void
   setAllModelsEnabled: (enabled: boolean) => void
   /** Bulk-toggle a list of models (family-level enable/disable, issue #14). */
-  setModelsEnabled: (modelTypes: string[], enabled: boolean) => void
+  setModelsEnabled: (modelTypes: string[], enabled: boolean, scope?: ModelVisibilityScope) => void
   // ModelSelector "+N more" hint → open Settings and expand Enabled Models.
-  modelVisibilityFocus: GenerationMode | null
-  openModelVisibility: (mode: GenerationMode) => void
+  modelVisibilityFocus: ModelVisibilityScope | null
+  openModelVisibility: (mode: ModelVisibilityScope) => void
   clearModelVisibilityFocus: () => void
 
   // Resolution helpers
@@ -2072,7 +2135,7 @@ interface AppState {
   directorPlannedClips: PlannedClip[]
   directorMusicClipSeconds: number | null
   setDirectorMusicClipSeconds: (seconds: number | null) => void
-  directorEnergyBias: number
+  directorEnergyBias: number | null
   directorClipPlans: ClipPlan[]
   directorSceneDescription: string
   directorLoading: boolean
@@ -2185,7 +2248,7 @@ interface AppState {
   directorWriteSong: () => Promise<void>
   directorGenerateTrack: (mode?: 'now' | 'queue') => Promise<void>
   directorAnalyzeAndPlan: (audioPath: string, opts?: { transcribe?: boolean; lyricsHint?: string }) => Promise<void>
-  directorSetEnergyBias: (bias: number) => Promise<void>
+  directorSetEnergyBias: (bias: number | null) => Promise<void>
   directorConfirmStructure: () => void
   directorSetSceneDescription: (prompt: string) => void
   directorSetReferenceImage: (file: File | null) => void
@@ -2216,7 +2279,7 @@ interface AppState {
   shortFilmSetTargetDuration: (duration: number) => void
   shortFilmSetNarrative: (v: boolean) => void
   shortFilmUploadAndAnalyze: (file: File) => Promise<void>
-  shortFilmSetPacingBias: (bias: number) => Promise<void>
+  shortFilmSetPacingBias: (bias: number | null) => Promise<void>
   shortFilmPlanPrompts: () => Promise<void>
   shortFilmPlanVideoPrompts: () => Promise<void>
   shortFilmPlanFromStory: () => Promise<void>
@@ -2496,7 +2559,7 @@ async function _buildDirectorRestorePatch(
     directorAnalysis: analysis,
     directorPlannedClips: plannedClips,
     directorMusicClipSeconds: typeof params.director_music_clip_seconds === "number" ? params.director_music_clip_seconds : null,
-    directorEnergyBias: Number(ui.directorEnergyBias || 0),
+    directorEnergyBias: typeof ui.directorEnergyBias === "number" ? ui.directorEnergyBias : null,
     directorClipPlans: clipPlans,
     directorClipImages: clipImages,
     directorReferenceImage: referenceFile,
@@ -2801,7 +2864,7 @@ function computeFilteredOutputs(outputs: OutputFile[], mediaFilter: MediaFilter)
 
 /** Use the selected video model even when Studio last loaded an audio model. */
 async function _directorTimelineOptions(state: AppState): Promise<api.DirectorTimelineOptions> {
-  const videoModel = state.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+  const videoModel = state.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL
   const options = await api.fetchModelOptions(videoModel)
   return {
     video_model: videoModel,
@@ -2820,7 +2883,7 @@ async function _directorTimelineOptions(state: AppState): Promise<api.DirectorTi
  *  images. This mirrors services/director_video_strategy.py so the manual
  *  browser flow and the durable server pipeline take the same branch. */
 function _directorUsesGeneratedShotImages(state: AppState): boolean {
-  const videoModel = state.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+  const videoModel = state.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL
   const selectedModel = state.models.find(
     model => model.model_type === videoModel,
   )
@@ -2991,15 +3054,18 @@ function _resolveStudioCreateModel(
   inputState: StudioVideoMediaIntent & { desired: StudioVideoEffectiveCreateRoute },
 ): string {
   const route = inputState.desired
+  const enabledModels = enabledModelsForContext(state, `video:${inputState.workflow}`)
+  const isAvailable = (model: ModelDef | undefined) => Boolean(model
+    && enabledModels.has(model.model_type) && (!model.nsfw_only || state.servicesConfig?.nsfw_mode))
   const currentType = String(state.params.model_type || state.selectedModelPerMode.video || '')
   const current = state.models.find(model => model.model_type === currentType)
-  if (modelSupportsStudioVideoMediaIntent(current, inputState)) return currentType
+  if (isAvailable(current) && modelSupportsStudioVideoMediaIntent(current, inputState)) return currentType
 
   const rememberedType = state.studioVideoModelPerCreateRoute[route]
   const remembered = state.models.find(model => model.model_type === rememberedType)
   if (
     rememberedType
-    && state.enabledModels.has(rememberedType)
+    && isAvailable(remembered)
     && modelSupportsStudioVideoMediaIntent(remembered, inputState)
   ) return rememberedType
 
@@ -3007,12 +3073,12 @@ function _resolveStudioCreateModel(
   const paired = state.models.find(model => model.model_type === pairedType)
   if (
     pairedType
-    && state.enabledModels.has(pairedType)
+    && isAvailable(paired)
     && modelSupportsStudioVideoMediaIntent(paired, inputState)
   ) return pairedType
 
   const candidates = state.models.filter(model => (
-    state.enabledModels.has(model.model_type)
+    isAvailable(model)
     && modelSupportsStudioVideoMediaIntent(model, inputState)
   ))
   if (route === 'omni') {
@@ -3296,7 +3362,6 @@ export const useStore = create<AppState>((set, get) => ({
 
     if (workflow === 'animate') {
       if (get().generationMode !== 'video') get().setGenerationMode('video')
-      if (!get().enabledModels.has('viggle_animate')) get().toggleModelEnabled('viggle_animate')
       if (get().params.model_type !== 'viggle_animate') _preViggleVideoModel = get().params.model_type
       set(state => ({studioVideoWorkflow: workflow, params: {...state.params,
         image_mode: 0, _studio_video_workflow: workflow,
@@ -3321,7 +3386,8 @@ export const useStore = create<AppState>((set, get) => ({
       if (get().params.model_type === 'viggle_animate') {
         const restore = [_preViggleVideoModel, get().studioVideoModelPerCreateRoute.omni,
           'minimax_h3_ref2va_fused_turbo', 'minimax_h3_ref2va'].find(type =>
-          type && type !== 'viggle_animate' && get().models.some(model => model.model_type === type))
+          type && type !== 'viggle_animate' && enabledModelsForContext(get(), `video:${workflow}`).has(type)
+          && get().models.some(model => model.model_type === type))
         if (restore) get().selectModel(restore)
       }
       const imageMode = workflow === 'extend' ? 3 : workflow === 'blend' ? 4 : 0
@@ -3337,6 +3403,13 @@ export const useStore = create<AppState>((set, get) => ({
       }))
       if (workflow === 'frames' || workflow === 'references' || workflow === 'avatar') {
         get().reconcileStudioVideoCreateRoute(`${workflow === 'references' ? 'References' : workflow === 'avatar' ? 'Avatar' : 'Frames'} workflow opened`)
+      }
+      if (workflow === 'extend' || workflow === 'blend') {
+        const s = get()
+        const choices = getModelGroupsForVisibilityScope(`video:${workflow}`, s.families, s.models)
+          .flatMap(group => group.models).filter(model => enabledModelsForContext(s, `video:${workflow}`).has(model.model_type)
+            && (!model.nsfw_only || s.servicesConfig?.nsfw_mode))
+        if (!choices.some(model => model.model_type === s.params.model_type) && choices[0]) get().selectModel(choices[0].model_type)
       }
       persist()
       return
@@ -3411,16 +3484,16 @@ export const useStore = create<AppState>((set, get) => ({
   setEditSubMode: (mode: import('../types').EditSubMode) => {
     const s = get()
     const prev = s.editSubMode
+    const enabled = enabledModelsForContext(s, getModelVisibilityScope({ ...s, editSubMode: mode }))
     set({ editSubMode: mode })
     if (s.generationMode !== 'avatar') return
     if (mode === 'outpaint') {
       // Entering the edit workspace can restore its last Repaint/Recast model.
       // Reconcile against the same choices shown by the Outpaint selector.
       const compatible = getFamiliesForMode('avatar', s.families, mode).flatMap(family =>
-        getModelsForFamily(family.id, s.models, 'avatar', mode))
+        getModelsForFamily(family.id, s.models, 'avatar', mode)).filter(model => enabled.has(model.model_type) && (!model.nsfw_only || s.servicesConfig?.nsfw_mode))
       if (!compatible.some(model => model.model_type === s.params.model_type)) {
         const preferred = compatible.find(model => model.model_type === _preScail2AvatarModel)
-          || compatible.find(model => s.enabledModels.has(model.model_type))
           || compatible[0]
         if (preferred) get().selectModel(preferred.model_type)
       }
@@ -3435,9 +3508,9 @@ export const useStore = create<AppState>((set, get) => ({
     const enteringScail2Edit = mode === 'recast' || mode === 'restyle'
     const leavingScail2Edit = prev === 'recast' || prev === 'restyle'
     if (enteringScail2Edit) {
-      const valid = mode === 'recast'
+      const valid = enabled.has(current) && (mode === 'recast'
         ? current === 'scail2_14B_recast_fast' || current === 'scail2_14B'
-        : current === 'scail2_14B_fast' || current === 'scail2_14B'
+        : current === 'scail2_14B_fast' || current === 'scail2_14B')
       if (!valid) {
         if (!leavingScail2Edit && !isScail2(current)) {
           _preScail2AvatarModel = current
@@ -3445,17 +3518,17 @@ export const useStore = create<AppState>((set, get) => ({
         const preferred = mode === 'recast'
           ? 'scail2_14B_recast_fast'
           : 'scail2_14B_fast'
-        const target = s.models.some(m => m.model_type === preferred)
+        const target = enabled.has(preferred) && s.models.some(m => m.model_type === preferred)
           ? preferred
-          : s.models.some(m => m.model_type === 'scail2_14B')
+          : enabled.has('scail2_14B') && s.models.some(m => m.model_type === 'scail2_14B')
             ? 'scail2_14B'
             : undefined
         if (target) get().selectModel(target)
       }
     } else if (leavingScail2Edit && isScail2(current)) {
-      const restore = _preScail2AvatarModel && s.models.some(m => m.model_type === _preScail2AvatarModel)
+      const restore = _preScail2AvatarModel && enabled.has(_preScail2AvatarModel) && s.models.some(m => m.model_type === _preScail2AvatarModel)
         ? _preScail2AvatarModel
-        : getDefaultModelForMode('avatar', s.families, s.models, s.enabledModels)
+        : getDefaultModelForMode('avatar', s.families, s.models, enabledModelsForContext(s, getModelVisibilityScope({ ...s, editSubMode: mode })))
       if (restore) get().selectModel(restore)
     }
   },
@@ -3865,9 +3938,12 @@ export const useStore = create<AppState>((set, get) => ({
       revoice: '',  // Revoice is a SeedVC post-processing tool
     }
     const saved = savedModels[subMode]
-    const targetModel = (saved && get().enabledModels.has(saved) && models.some(m => m.model_type === saved))
-      ? saved
-      : audioSubModeDefaults[subMode]
+    const scope = getModelVisibilityScope({ ...get(), generationMode: 'audio', audioSubMode: subMode })
+    const choices = getModelGroupsForVisibilityScope(scope, get().families, models).flatMap(group => group.models)
+      .filter(model => enabledModelsForContext(get(), scope).has(model.model_type) && (!model.nsfw_only || get().servicesConfig?.nsfw_mode))
+    const targetModel = subMode === 'mixer' || subMode === 'revoice' ? ''
+      : [saved, audioSubModeDefaults[subMode], ...choices.map(model => model.model_type)]
+        .find(type => choices.some(model => model.model_type === type))
     set({ audioSubMode: subMode, selectedModelPerAudioSubMode: savedModels })
     if (targetModel && models.some(m => m.model_type === targetModel)) {
       get().selectModel(targetModel)
@@ -3912,7 +3988,7 @@ export const useStore = create<AppState>((set, get) => ({
       _persistStickyStudioPreferences(get())
       return
     }
-    const { families, models, enabledModels, generationMode: prevMode, params, selectedModelPerMode, savedLoraPerMode, savedParamsPerMode, loraWeights, availableLoras, savedPromptPerMode } = get()
+    const { families, models, generationMode: prevMode, params, selectedModelPerMode, savedLoraPerMode, savedParamsPerMode, loraWeights, availableLoras, savedPromptPerMode } = get()
     // Save prompt for the mode we're leaving
     const savedPrompts = { ...savedPromptPerMode, [prevMode]: params.prompt }
     // Save current model + LoRA + params state for the mode we're leaving
@@ -3951,11 +4027,12 @@ export const useStore = create<AppState>((set, get) => ({
     }
     // Restore saved model for target mode, or fall back to default
     const savedModel = savedModels[mode]
+    const targetEnabledModels = enabledModelsForContext(get(), getModelVisibilityScope({ ...get(), generationMode: mode }))
     const restoredModel = savedModel
-      && enabledModels.has(savedModel)
+      && targetEnabledModels.has(savedModel)
       && models.some(m => m.model_type === savedModel)
       ? savedModel
-      : getDefaultModelForMode(mode, families, models, enabledModels)
+      : getDefaultModelForMode(mode, families, models, targetEnabledModels)
     const newModelType = restoredModel || params.model_type
     // Restore saved LoRA state for target mode (if same model)
     const restoredLora = savedLoras[mode]
@@ -5175,7 +5252,13 @@ export const useStore = create<AppState>((set, get) => ({
   models: [],
   modelsLoaded: false,
   enabledModels: _loadEnabledModels() ?? new Set(DEFAULT_ENABLED_MODELS),
-  toggleModelEnabled: (modelType) => {
+  modelVisibilityOverrides: _modelVisibilityOverrides,
+  toggleModelEnabled: (modelType, scope) => {
+    if (scope) {
+      const state = get()
+      state.setModelsEnabled([modelType], !isModelEnabledInScope(modelType, state.enabledModels, state.modelVisibilityOverrides, scope), scope)
+      return
+    }
     _markMatureModelsInitialized(get().models, [modelType])
     set(s => {
       const next = new Set(s.enabledModels)
@@ -5185,26 +5268,51 @@ export const useStore = create<AppState>((set, get) => ({
       return { enabledModels: next }
     })
   },
-  resetEnabledModels: () => {
-    _markMatureModelsInitialized(get().models)
-    const next = new Set(DEFAULT_ENABLED_MODELS)
-    _saveEnabledModels(next)
-    set({ enabledModels: next })
+  resetEnabledModels: (scope) => {
+    const state = get()
+    const ids = state.models.map(model => model.model_type)
+    if (scope) {
+      const modelIds = getModelGroupsForVisibilityScope(scope, state.families, state.models)
+        .flatMap(group => group.models.map(model => model.model_type))
+      _markMatureModelsInitialized(state.models, modelIds)
+      const overrides = { ...state.modelVisibilityOverrides,
+        [scope]: defaultVisibilityForScope(scope, ids, DEFAULT_ENABLED_MODELS) }
+      _saveEnabledModels(state.enabledModels, overrides)
+      set({ modelVisibilityOverrides: overrides })
+    } else {
+      _markMatureModelsInitialized(state.models)
+      const next = new Set(DEFAULT_ENABLED_MODELS)
+      const overrides = defaultVisibilityOverrides(ids, DEFAULT_ENABLED_MODELS)
+      _saveEnabledModels(next, overrides)
+      set({ enabledModels: next, modelVisibilityOverrides: overrides })
+    }
+    if (!scope || scope === getModelVisibilityScope(get())) reconcileModelVisibilitySelection(get())
   },
   setAllModelsEnabled: (enabled) => {
     _markMatureModelsInitialized(get().models)
     if (enabled) {
       const all = new Set(get().models.map(m => m.model_type))
-      _saveEnabledModels(all)
-      set({ enabledModels: all })
+      _saveEnabledModels(all, {})
+      set({ enabledModels: all, modelVisibilityOverrides: {} })
     } else {
       const empty = new Set<string>()
-      _saveEnabledModels(empty)
-      set({ enabledModels: empty })
+      _saveEnabledModels(empty, {})
+      set({ enabledModels: empty, modelVisibilityOverrides: {} })
     }
   },
-  setModelsEnabled: (modelTypes, enabled) => {
+  setModelsEnabled: (modelTypes, enabled, scope) => {
     _markMatureModelsInitialized(get().models, modelTypes)
+    if (scope) {
+      set(state => {
+        const overrides = { ...state.modelVisibilityOverrides,
+          [scope]: { ...state.modelVisibilityOverrides[scope], ...Object.fromEntries(modelTypes.map(id => [id, enabled])) } }
+        _saveEnabledModels(state.enabledModels, overrides)
+        return { modelVisibilityOverrides: overrides }
+      })
+      const state = get()
+      if (scope === getModelVisibilityScope(state)) reconcileModelVisibilitySelection(state)
+      return
+    }
     set(s => {
       const next = new Set(s.enabledModels)
       for (const mt of modelTypes) {
@@ -5287,7 +5395,9 @@ export const useStore = create<AppState>((set, get) => ({
       // migration/cache layer.
       if (shouldHydrateVisibility && visibility) {
         let restoredModels: Set<string>
+        let restoredOverrides: ModelVisibilityOverrides
         if (visibility.configured) {
+          restoredOverrides = normalizeModelVisibilityOverrides(visibility.mode_overrides)
           restoredModels = new Set(visibility.enabled_models)
           _initializedMatureModels = new Set(
             visibility.initialized_mature_models,
@@ -5298,6 +5408,8 @@ export const useStore = create<AppState>((set, get) => ({
         } else {
           const legacyModels = _loadEnabledModels()
           restoredModels = legacyModels ?? new Set(DEFAULT_ENABLED_MODELS)
+          restoredOverrides = legacyModels ? _modelVisibilityOverrides
+            : defaultVisibilityOverrides(models.map(model => model.model_type), DEFAULT_ENABLED_MODELS)
           const legacyDefaultsVersion = parseInt(
             localStorage.getItem(DEFAULTS_VERSION_KEY) || '',
             10,
@@ -5317,7 +5429,8 @@ export const useStore = create<AppState>((set, get) => ({
             : new Set()
         }
         _modelVisibilityHydrated = true
-        set({ enabledModels: restoredModels })
+        _modelVisibilityOverrides = restoredOverrides
+        set({ enabledModels: restoredModels, modelVisibilityOverrides: _modelVisibilityOverrides })
         if (!visibility.configured) _saveEnabledModels(restoredModels)
       }
 
@@ -5472,11 +5585,15 @@ export const useStore = create<AppState>((set, get) => ({
         const savedModel = mode === 'audio'
           ? selectedModelPerAudioSubMode[restoredAudioSubMode] || selectedModelPerMode.audio
           : selectedModelPerMode[mode]
+        const bootEnabled = enabledModelsForContext(get(), getModelVisibilityScope({ ...get(), generationMode: mode,
+          studioVideoWorkflow: _normalizeStudioVideoWorkflow(requestedVideoWorkflow, models.find(model => model.model_type === savedModel)) ?? get().studioVideoWorkflow,
+          studioImageWorkflow: restoredImageWorkflow, audioSubMode: restoredAudioSubMode,
+        }))
         initialModelType = savedModel
-          && get().enabledModels.has(savedModel)
+          && bootEnabled.has(savedModel)
           && models.some(m => m.model_type === savedModel)
           ? savedModel
-          : getDefaultModelForMode(mode, families, models, get().enabledModels)
+          : getDefaultModelForMode(mode, families, models, bootEnabled)
         const bootedIntoRecast = mode === 'avatar'
           && (initialModelType === 'scail2_14B_recast_fast' || initialModelType === 'scail2_14B')
         const bootedIntoRepaint = mode === 'avatar'
@@ -5544,6 +5661,19 @@ export const useStore = create<AppState>((set, get) => ({
             ...(mode === 'image' ? { image_mode: 1 } : {}),
           },
         }))
+      }
+
+      // A remembered model must still be visible in the restored workflow.
+      // Scoped additions may be absent from the legacy global whitelist.
+      const bootState = get()
+      const bootScope = getModelVisibilityScope(bootState)
+      const bootChoices = getModelGroupsForVisibilityScope(bootScope, families, models).flatMap(group => group.models)
+        .filter(model => isModelEnabledInScope(model.model_type, bootState.enabledModels, bootState.modelVisibilityOverrides, bootScope)
+          && (!model.nsfw_only || bootState.servicesConfig?.nsfw_mode))
+      if (!bootChoices.some(model => model.model_type === initialModelType) && bootChoices[0]) {
+        initialModelType = bootChoices[0].model_type
+        set(state => ({ params: { ...state.params, model_type: initialModelType },
+          selectedModelPerMode: { ...state.selectedModelPerMode, [mode]: initialModelType } }))
       }
 
       // Load LoRAs, model options, and tuned defaults for the initial
@@ -5664,8 +5794,9 @@ export const useStore = create<AppState>((set, get) => ({
     // used to toggle itself forever when Extend consumed source-tail context.
     const recommendation = options?.omni_reference
       ? recommendedH3OmniSequenceProfile(policy, state.params.resolution,
-          state.systemStats?.gpu.vram_total_gb ?? 0, minimumFrames, maximumFrames, step)
-      : recommendedH3PassProfile(policy, state.params.resolution, state.systemStats?.gpu.vram_total_gb ?? 0)
+          state.systemStats?.gpu.vram_total_gb ?? 0, minimumFrames, maximumFrames, step,
+          state.systemStats?.ram?.total_gb ?? 0)
+      : recommendedH3PassProfile(policy, state.params.resolution, state.systemStats?.gpu.vram_total_gb ?? 0, state.systemStats?.ram?.total_gb ?? 0)
     const windowMin = sw?.window_min ?? minimumFrames
     const windowMax = state.params.minimax_h3_extended_duration && supportsH3ExtendedDuration(options)
       ? maximumFrames : sw?.window_max ?? maximumFrames
@@ -6486,6 +6617,15 @@ export const useStore = create<AppState>((set, get) => ({
     if (primaryStudioCreate) {
       state.reconcileStudioVideoCreateRoute('Inputs changed')
       state = get()
+    }
+
+    const usesModel = state.generationMode !== 'tools'
+      && !(state.generationMode === 'audio' && ['mixer', 'revoice'].includes(state.audioSubMode))
+    const selectedMatureModel = state.models.find(model => model.model_type === state.params.model_type)?.nsfw_only
+    if (usesModel && ((!state.servicesConfig?.nsfw_mode && selectedMatureModel)
+      || !isModelEnabledInScope(state.params.model_type, state.enabledModels, state.modelVisibilityOverrides, getModelVisibilityScope(state)))) {
+      set({ promptEnhanceError: 'Enable or select a model for this mode using Manage models.' })
+      return
     }
 
     // Auto routing changes model_type synchronously, while its model-options
@@ -7342,6 +7482,7 @@ export const useStore = create<AppState>((set, get) => ({
           policy: state.modelOptions?.omni_sequence_memory_policy,
           resolution: String(params.resolution || ''),
           totalVramGb: state.systemStats?.gpu.vram_total_gb ?? 0,
+          totalRamGb: state.systemStats?.ram?.total_gb ?? 0,
           minimumFrames,
           maximumFrames,
           frameStep: state.modelOptions?.frames_steps ?? 17,
@@ -7462,6 +7603,7 @@ export const useStore = create<AppState>((set, get) => ({
                 state.modelOptions?.omni_sequence_memory_policy,
                 String(params.resolution || ''),
                 state.systemStats?.gpu.vram_total_gb ?? 0,
+                state.systemStats?.ram?.total_gb ?? 0,
               )
             : null
           const directOmniDurationOverride = h3DirectOmniPass && (
@@ -9368,13 +9510,15 @@ export const useStore = create<AppState>((set, get) => ({
               options.frames_minimum ?? 124,
               options.frames_maximum ?? 345,
               options.frames_steps ?? 17,
+              activeState.systemStats?.ram?.total_gb ?? 0,
             )
           : recommendedH3PassProfile(
               memoryPolicy,
               selectedResolution,
               activeState.systemStats?.gpu.vram_total_gb ?? 0,
+              activeState.systemStats?.ram?.total_gb ?? 0,
             )
-        const selectedFrames = sameH3FramesRefresh || extendedDuration
+        const selectedFrames = (sameH3FramesRefresh && activeState.slidingWindowLocked) || extendedDuration
           ? Math.round(slidingWindowSeconds * fps) : savedOverride ?? recommendation?.frames
         if (selectedFrames != null) {
           nextWindowFrames = normalizeH3NativeFrames(
@@ -10036,6 +10180,7 @@ export const useStore = create<AppState>((set, get) => ({
           policy: state.modelOptions?.omni_sequence_memory_policy,
           resolution: String(params.resolution || ''),
           totalVramGb: state.systemStats?.gpu.vram_total_gb ?? 0,
+          totalRamGb: state.systemStats?.ram?.total_gb ?? 0,
           minimumFrames: state.modelOptions?.frames_minimum ?? 124,
           maximumFrames: h3NativeMaximumFrames,
           frameStep: state.modelOptions?.frames_steps ?? 17,
@@ -10269,7 +10414,7 @@ export const useStore = create<AppState>((set, get) => ({
     set({directorMusicClipSeconds: seconds})
     _persistStickyStudioPreferences(get())
   },
-  directorEnergyBias: 0,
+  directorEnergyBias: null,
   directorClipPlans: [],
   directorSceneDescription: '',
   directorLoading: false,
@@ -10393,9 +10538,26 @@ export const useStore = create<AppState>((set, get) => ({
     return { directorLlmLog: [...s.directorLlmLog, { stage, text: t }] }
   }),
   setDirectorSkill: (skill) => {
+    const previous = get()
+    const newProject = previous.directorSkill === null
+      && previous.directorStep === 'upload'
+      && !previous.directorAudioFile && !previous.directorAudioPath
+      && !previous.directorProjectId && !previous.directorSourcePipelineId
+      && !previous.directorQueueEditingEntryId && previous.directorClipPlans.length === 0
     set({ directorSkill: skill })
+    // Studio's last video choice is not a Director default. Initialize only
+    // a new project; returning to a draft or opening a saved project keeps
+    // its selected model, and explicitly hidden models remain hidden.
+    const preferred = previous.models.find(model => model.model_type === DEFAULT_DIRECTOR_VIDEO_MODEL)
+    if (newProject && preferred
+      && isModelEnabledInScope(preferred.model_type, previous.enabledModels, previous.modelVisibilityOverrides, 'video:references')
+      && (!preferred.nsfw_only || previous.servicesConfig?.nsfw_mode)
+      && preferred.director?.video[skill === 'music_video' ? 'music_video' : 'short_film_story'].compatible
+      && (!previous.directorSeamless || preferred.director?.video.seamless.compatible)) {
+      get().selectDirectorVideoModel(preferred.model_type)
+    }
     const state = get()
-    const selectedVideoModel = state.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    const selectedVideoModel = state.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL
     const selectedVideoDefinition = state.models.find(
       model => model.model_type === selectedVideoModel,
     )
@@ -10911,7 +11073,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   directorSetEnergyBias: async (bias) => {
     const { directorAnalysis } = get()
-    if (!directorAnalysis) return
+    if (!directorAnalysis) { set({ directorEnergyBias: bias }); return }
     const requestToken = ++_directorStructureRequestToken
     set({ directorLoading: true, directorEnergyBias: bias })
     try {
@@ -11345,7 +11507,7 @@ export const useStore = create<AppState>((set, get) => ({
     if (!directorClipPlans.length) return
 
     // Use saved video-mode settings if available
-    const videoModel = selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    const videoModel = selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL
     const videoParams = savedParamsPerMode.video
       ? { ...savedParamsPerMode.video }
       : {}
@@ -11447,7 +11609,7 @@ export const useStore = create<AppState>((set, get) => ({
       directorAudioPath: null,
       directorAnalysis: null,
       directorPlannedClips: [],
-      directorEnergyBias: 0,
+      directorEnergyBias: null,
       directorClipPlans: [],
       directorSceneDescription: '',
       directorLoading: false,
@@ -11565,7 +11727,7 @@ export const useStore = create<AppState>((set, get) => ({
       set({ directorLoadingMessage: 'Planning scenes...' })
       const structure = await api.planDialogueScenes({
         analysis,
-        pacing_bias: get().directorEnergyBias,
+        pacing_bias: get().directorEnergyBias ?? 0,
         fps: get().modelOptions?.fps ?? 16,
         frames_steps: get().modelOptions?.frames_steps ?? 4,
         frames_minimum: get().modelOptions?.frames_minimum ?? 5,
@@ -11592,7 +11754,7 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       const structure = await api.planDialogueScenes({
         analysis: directorAnalysis,
-        pacing_bias: bias,
+        pacing_bias: bias ?? 0,
         fps: get().modelOptions?.fps ?? 16,
         frames_steps: get().modelOptions?.frames_steps ?? 4,
         frames_minimum: get().modelOptions?.frames_minimum ?? 5,
@@ -13756,7 +13918,7 @@ export const useStore = create<AppState>((set, get) => ({
             shortFilmNarrative } = state
 
     const selectedImageModel = selectedModelPerMode.image || 'flux2_klein_9b'
-    const selectedVideoModel = selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    const selectedVideoModel = selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL
     const selectedVideoDefinition = state.models.find(
       model => model.model_type === selectedVideoModel,
     )

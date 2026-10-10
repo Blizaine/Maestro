@@ -31,6 +31,14 @@ class MusicPerformanceTests(unittest.TestCase):
         def generate(**kwargs):
             captures.append(kwargs)
             return json.dumps([{
+                'scene_goal': f"Feature {person['visual_description']}",
+                'scene_type': 'performance',
+                'environment': 'A concert stage',
+                'visual_style': 'Live concert photography',
+                'lighting': 'Stage lights',
+                'mood': 'Energetic',
+                'action_beats': [f"{person['visual_description']} performs their assigned part"],
+                'ending_beat': f"{person['visual_description']} holds their stage position",
                 'subjects_on_screen': [person],
                 'video_prompt': f"Medium shot of {person['visual_description']} performing on stage.",
                 'camera_plan': {'framing': 'medium shot'},
@@ -215,6 +223,14 @@ class MusicPerformanceTests(unittest.TestCase):
         def generate(**kwargs):
             captures.append(kwargs)
             return json.dumps([{
+                'scene_goal': 'Reveal the moonlit desert',
+                'scene_type': 'atmospheric',
+                'environment': 'Moonlit desert dunes',
+                'visual_style': 'Cinematic landscape',
+                'lighting': 'Moonlight',
+                'mood': 'Serene',
+                'action_beats': ['Wind moves sand across the dunes'],
+                'ending_beat': 'The aerial camera reveals the distant dunes',
                 'subjects_on_screen': [],
                 'video_prompt': 'A moonlit desert landscape, wind-blown sand, wide aerial view.',
                 'camera_plan': {'framing': 'wide aerial'},

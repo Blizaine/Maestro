@@ -24,6 +24,24 @@ the new architecture separate from the older Qwen Image/Edit 20B models.
 - **LoRAs:** only adapters for the new 2.1 7B architecture are compatible. Put
   those in `app/loras/qwen21`; old Qwen 20B adapters remain in their own directory.
 
+**Official Qwen Image 2.1 Turbo 7B:** choose this separate image model for
+Qwen's accelerated checkpoint. It downloads through Maestro normally, using
+BF16 or INT8 ConvRot according to your precision setting. It reuses the base
+model's processor, Qwen3-VL encoder and VAE; those components are not duplicated.
+The checkpoint uses **8 steps and CFG 1**, with Qwen's exact published sigma
+schedule and dynamic shifting disabled. Maestro enforces that recipe on queued,
+restored and API jobs. Viggle acceleration profiles remain available on the base
+model only. Ordinary compatible 2.1 LoRAs are preserved, but their quality with
+this distilled checkpoint depends on the adapter. The shared architecture exposes
+the same reference, control, inpaint, outpaint, transparency and 2K tools.
+Start at 1024px; higher resolutions and references need more memory.
+
+This option is enabled once on update without replacing your current model;
+you can hide it in the model picker. Weights download only when requested.
+Use `model_type: "qwen_image_21_7B_turbo"`, `sample_solver: "qwen21_turbo"`,
+`num_inference_steps: 8` and `guidance_scale: 1` through the generation API.
+See the [official Turbo model card](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo).
+
 **Control images:** under Advanced, choose a control-image process and supply an
 image for pose, depth, edges, grayscale or raw-image transfer. Reference images
 can accompany the control image. The source/control image occupies the first

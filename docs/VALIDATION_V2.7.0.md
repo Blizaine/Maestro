@@ -1,12 +1,13 @@
 # Maestro v2.7.0 validation
 
-Release candidate prepared October 8, 2026, with an H3 VAE 2× follow-up on
-October 9. Public v2.6.0 Main baseline:
+Release candidate prepared October 8, 2026, with H3 follow-ups on October 9
+and final local preparation on October 10. Public v2.6.0 Main baseline:
 `31d7396eb3b5586c1828fc69a6af5eb2a9e83bff`. The initial reviewed memory and
 Director implementation is `8831f34809f003f446167c54e47cdfb0507fc756`.
 The H3 decoder follow-up is `76dcc51aea5fd5983674bb60f608353001c8fc2f`.
-Dev includes bounded SSH diagnostics and release metadata/documentation.
-Main has not been updated.
+The October 10 candidate also includes the accumulated local Auto, Director,
+model-picker, H3 decoder resolver and Qwen Turbo changes. Main has not been
+updated; no push, tag or release publication is part of this preparation.
 
 ## Automated checks
 
@@ -214,8 +215,70 @@ it does not establish Kitchen kernel parity or identical full generated videos.
 These recipes differ in model, step count, attention, conditioning and allocator
 settings. Their times must not be treated as a matched cross-app speed test.
 Native 1080p tests use a manually locked 15.083-second window above the ordinary
-14.4-second recommendation; neither Auto-tune nor default duration limits have
-been expanded on this evidence alone. No active LoRAs were tested.
+14.4-second recommendation. This does not make native 15-second 1080p an Auto
+default. The later October 10 duration policy starts native 1080p shorter and
+promotes only the separately measured hardware/resolution tiers. No active
+LoRAs were tested in these native follow-ups.
+
+## October 10 local candidate validation
+
+The final local preparation starts from public Dev
+`d870fe6a4f5af3d50ddb53be5cf008016396d30b`, which is 27 commits ahead of the
+v2.6.0 Main baseline, and includes the intended local source and regressions.
+The exact final commit and source ZIP checksum are recorded in the local release
+manifest. This is local verification; it is not a new GitHub CI result.
+
+The backend rerun explicitly sets `CUDA_VISIBLE_DEVICES=-1` on Windows and uses
+isolated pytest tooling. An initial run without the test dependency and with an
+empty CUDA setting was invalid for the intended CPU gate. Two stale fixtures
+were also corrected: the quote-admission engine stub now exposes atomic recipe
+preparation, and the H3 defaults assertion reflects the curated References
+selection while still checking existing-install migrations. CI now uses the
+explicit disabled-device value and includes Qwen 2.1 in syntax/undefined-name
+checks. Product behavior was not relaxed to satisfy those fixtures.
+
+The final Windows CPU backend discovery gate passes **3,630 tests, with 13
+skipped**, using Python 3.10.20 and PyTorch 2.7.1+cu128 with CUDA explicitly
+disabled. The final local frontend lint, TypeScript build and production Vite build pass.
+The full responsive sidebar browser suite and eleven focused UI runners pass,
+covering Auto advice, clip defaults, model visibility, Director setup, Qwen image
+workflows and H3 x2. The standalone preview/source-camera/media gate passes all
+138 tests with CUDA explicitly disabled. JSON grammar, Python compilation and
+undefined-name checks pass. The final source boundary guard, metadata/link check
+and archive verification are recorded in the local release manifest. All 146
+local links across nine release/feature documents resolve, all five changed JSON
+assets parse, and the source boundary guard passes on 2,873 tracked files. The
+14 bundled MMGP allocator/provenance files match their recorded SHA-256 values.
+
+The resource policy is shared as versioned JSON between the backend and React
+UI. Tests cover RAM/VRAM/resolution bounds, excluded checkpoints, reference
+margins, late hardware detection, manual ownership, effective head splitting
+and workload fingerprints. Director and Studio use the same measured tiers;
+manual clip durations and cut speed remain in control. Long native-1080p Pruned
+runs that take hours are treated as impractical evidence, not successful speed
+benchmarks. LoRAs and additional reference rows retain uncertainty warnings.
+
+Browser regressions cover contextual model names, nested workflow groups,
+independent visibility, persistent manual hiding, reset without deleting models,
+new Director defaults, scroll behavior after audio analysis, duration defaults
+and the Qwen Turbo recipe. They use isolated fixtures rather than submitting
+real jobs to the running application. The full sidebar suite also checks that a
+reviewed H3 plan uses first-window and later-window spans consistent with the
+backend overlap/discard contract before submission.
+
+Qwen Turbo used real INT8 text-to-image and single-reference-edit runs on the
+24-GB workstation at 1024×1024. The downloaded checkpoint's SHA-256 matched
+`2f70ddf24247932852b8477744fce33af505a4aa462acb77b5dfe903c6f22069`.
+Both saved outputs use eight steps, CFG 1 and the Turbo solver. The edit changed
+the requested object's color while retaining the scene and sign in the sampled
+review. The first run included its checkpoint download; elapsed times are not
+advertised as a matched benchmark. BF16, 2K, mask/outpaint and stress tests with
+many references or lower VRAM remain unverified for this Turbo integration.
+
+The H3 x2 resolver regressions cover flattened and nested Hugging Face layouts,
+shared roots, missing/corrupt files, and verified alternate copies. Pinned size
+and SHA checks remain required before loading. Fused label cleanup does not
+change the bundled checkpoint files or their recipes.
 
 ## Remaining validation limits
 
@@ -228,9 +291,10 @@ been expanded on this evidence alone. No active LoRAs were tested.
   or end-to-end generation. A Linux CUDA smoke remains recommended.
 - Allocator startup/release probes did not force an actual system-RAM spill;
   RAM-spill performance and recovery under genuine overflow remain unverified.
-- Representative non-H3 end-to-end video/image/audio generations, a fresh
-  installation and a normal public-v2.6.0-to-candidate Update/restart check
-  remain recommended before promotion to Main.
+- The real Qwen Turbo image checks above extend non-H3 coverage, but do not
+  verify every shared pipeline. Representative non-H3 video/audio generations,
+  a fresh installation and a normal public-v2.6.0-to-candidate Update/restart
+  check remain recommended before promotion to Main.
 - Physical iPhone testing of Director preview appearance without refreshing
   remains pending after updating/restarting the idle test machine.
 
@@ -242,8 +306,9 @@ independent and remain unchanged. The backend reads VERSION at startup.
 
 The application loads reviewed MMGP 4 from `app/mmgp`; requirements explicitly
 pin its runtime dependencies instead of fetching MMGP 3.8.2 again. Existing
-saved manual controls retain ownership. Re-detect explicitly applies Auto-tune
-recommendations; memory allocator changes require a process restart. Performance
+saved manual controls retain ownership. With Auto enabled, revised owned
+recommendations apply once at startup; Re-detect can explicitly reapply them.
+Memory allocator changes require a process restart. Performance
 learning and test reports remain local, bounded and optional.
 
 Attribution, upstream license copies and native allocator provenance are in

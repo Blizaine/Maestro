@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Gauge, Layers, Zap } from 'lucide-react'
 import { fetchModelOptions } from '../../api/client'
-import { useStore } from '../../stores/useStore'
+import { DEFAULT_DIRECTOR_VIDEO_MODEL, useStore } from '../../stores/useStore'
 import type { ModelOptions } from '../../types'
 import { InfoTooltip } from './InfoTooltip'
 
@@ -13,7 +13,7 @@ import { InfoTooltip } from './InfoTooltip'
  * repair, and regeneration without silently changing Studio's active model.
  */
 export function DirectorH3Optimizations() {
-  const videoModel = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
+  const videoModel = useStore(s => s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL)
   const videoStepsByModel = useStore(s => s.directorVideoInferenceStepsByModel)
   const setVideoSteps = useStore(s => s.setDirectorVideoInferenceSteps)
   const turboModeByModel = useStore(s => s.directorH3TurboModeByModel)

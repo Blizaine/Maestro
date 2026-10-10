@@ -1,6 +1,7 @@
 import { AlertTriangle, Gauge } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { estimateH3DurationGuidance } from '../../lib/h3DurationGuidance'
+import { h3PerformanceAdvice } from '../../lib/h3PerformanceAdvice'
 
 const secondsLabel = (frames: number, fps: number) => `${(frames / fps).toFixed(1)}s`
 const rowsLabel = (rows: number) => Math.round(rows / 100) * 100
@@ -19,11 +20,14 @@ export function H3DurationGuidance({
   const params = useStore(s => s.params)
   const generationMode = useStore(s => s.generationMode)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
+  const totalRamGb = useStore(s => s.systemStats?.ram?.total_gb ?? 0)
+  const autoEnabled = useStore(s => s.servicesConfig?.auto_performance)
   const guidance = estimateH3DurationGuidance({
     options,
     resolution: params.resolution,
     frames,
     totalVramGb,
+    totalRamGb,
     references: options?.omni_reference ? params.minimax_h3_references : undefined,
     referenceDetail: params.minimax_h3_reference_detail,
     continuationFrames,
@@ -33,6 +37,13 @@ export function H3DurationGuidance({
     videoGuide: Boolean(params.video_guide || (!options?.omni_reference && params.image_refs?.length)),
     audioGuide: Boolean(params.audio_guide),
     prompt: params.prompt,
+  })
+  const advice = h3PerformanceAdvice({
+    options, resolution: params.resolution, frames, totalVramGb, totalRamGb,
+    steps: params.num_inference_steps, attention: params.override_attention ?? 'auto',
+    loraCount: params.activated_loras?.length ?? 0,
+    referenceCount: params.minimax_h3_references?.length ?? 0,
+    videoGuide: Boolean(params.video_guide), continuationFrames,
   })
   if (generationMode !== 'video' || !guidance.supported) return null
 
@@ -89,6 +100,14 @@ export function H3DurationGuidance({
         {riskLabel}{totalVramGb > 0 ? ` · ${totalVramGb.toFixed(0)} GB GPU` : ''}
         {guidance.recommendationFrames != null ? ` · up to ${secondsLabel(guidance.recommendationFrames, fps)}` : ''}
       </div>
+      {advice && <div className="space-y-1 text-text-secondary" data-testid="h3-head-split-guidance"
+        data-recommended-split={advice.split ?? 'unknown'} data-speed-caution={advice.slow}>
+        <p>Suggested head splitting: <strong className="font-medium">{advice.label}</strong>.
+          {' '}{autoEnabled === false ? 'Auto-tune is off; your saved setting stays in control.'
+            : 'Auto-tune applies this when it manages head splitting.'}</p>
+        {advice.slow && <p className="text-amber-400">Very slow workload: shorter 720p windows are recommended.</p>}
+        {advice.experimental && <p className="text-amber-400">This combination needs testing; memory fit is unverified.</p>}
+      </div>}
       {extendedLimit && <p className="text-amber-400" data-testid="h3-extended-warning">
         {guidance.beyondRecommended ? 'This pass exceeds' : 'The selected window limit exceeds'} H3’s {secondsLabel(nativeFrames, fps)} recommended duration.
         {' '}{guidance.beyondRecommended ? 'It' : 'A pass using that extra length'} may be much slower or run out of memory. Shorter windows are recommended.
@@ -99,6 +118,7 @@ export function H3DurationGuidance({
           <p>{rangeLabel}. Up to 75,000 rows uses the faster normalization path; larger sequences use memory-bounded chunks. This describes one part of generation, and does not guarantee the fastest render.</p>
           <p>Resolution, reference media and carried history affect the workload. The GPU recommendation uses this checkpoint’s VRAM profile; it is an estimate, not a guarantee that the job will fit.</p>
           {guidance.notes.map((note, index) => <p key={index}>{note}</p>)}
+          {advice?.notes.map((note, index) => <p key={`performance-${index}`}>{note}</p>)}
           <p>Step count, attention choice and checkpoint offloading also affect render time. Speed estimates assume the default chunk settings. The generation log reports the actual packed rows. Extended-window slowdown has not been calibrated across GPUs.</p>
         </div>
       </details>

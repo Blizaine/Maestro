@@ -15,9 +15,10 @@ import time
 from pathlib import Path
 from contextlib import contextmanager
 
-# Revision 3 also separates active RAM allocators. Revision 2 scoped evidence
-# to each output family's preload policy and the MMGP AutoPreload implementation.
-REVISION = 3
+from services.h3_performance_policy import h3_performance_advice
+
+# Revision 4 fingerprints the effective per-job H3 attention head split.
+REVISION = 4
 
 
 def _number(value, default=0.0):
@@ -58,7 +59,7 @@ def hardware_key(hardware):
     })
 
 
-def workload_key(config, model_def, params, cli=None):
+def workload_key(config, model_def, params, cli=None, *, effective_attention_head_split=None):
     # Hash file identities/stat revisions; never persist local filenames.
     def file_stamp(value):
         if isinstance(value, (list, tuple)):
@@ -105,6 +106,8 @@ def workload_key(config, model_def, params, cli=None):
         "attention_head_split", "vae_config", "smart_memory_pinning", "read_ahead",
         "vram_safety_coefficient", "generation_preview", "generation_preview_mode",
     )}
+    if effective_attention_head_split is not None:
+        runtime["attention_head_split"] = effective_attention_head_split
     # Preload settings change the way MMGP moves model weights, not just a
     # placement candidate. Keep each output family's selected mode and amount
     # in the workload fingerprint so manual/dynamic evidence cannot train an
@@ -147,6 +150,26 @@ def build_performance_plan(hardware, config, model_def, params, adjustment=None,
     """Plan temporary settings without altering saved config or job quality."""
     adjustment = adjustment or {}
     cli = cli or {}
+    advice_params = dict(params or {})
+    advice_params["_performance_output_type"] = output_type
+    h3_advice = h3_performance_advice(hardware, config, model_def, advice_params)
+    saved_head_split = _number(config.get("attention_head_split"), 0)
+    # Preserve supported manual levels, including High (3), outside the
+    # bounded Off/Low/Medium per-job advice policy.
+    saved_head_split = (
+        int(saved_head_split)
+        if saved_head_split is not None and saved_head_split >= 0 and saved_head_split.is_integer()
+        else 0
+    )
+    override_head_split = bool(
+        hardware.get("cuda_available")
+        and h3_advice is not None
+        and h3_advice.get("attention_head_split") in (0, 1, 2)
+        and auto_owns(config, "attention_head_split")
+    )
+    effective_head_split = (
+        int(h3_advice["attention_head_split"]) if override_head_split else saved_head_split
+    )
     vram = _number(hardware.get("gpu_vram_gb"))
     ram = _number(hardware.get("ram_gb"))
     default_ram_fraction = .4 if hardware.get("platform") == "win32" else .5
@@ -160,17 +183,43 @@ def build_performance_plan(hardware, config, model_def, params, adjustment=None,
     plan = {"applied": applied, "output_type": output_type, "profile": profile,
             "transformer_budget_mb": int(cli.get("transformer_budget") or 0),
             "hardware_key": hardware_key(hardware),
-            "workload_key": workload_key(config, model_def, params, cli=cli),
+            "workload_key": workload_key(
+                config, model_def, params, cli=cli,
+                effective_attention_head_split=effective_head_split,
+            ),
             "reasons": [], "warnings": [], "matching_renders": 0,
+            "attention_head_split": effective_head_split,
+            "override_attention_head_split": override_head_split,
+            "h3_workload_advice": h3_advice,
             "source": "hardware" if applied else "manual",
             "override_read_ahead": False, "override_reserved_ram": False,
             "read_ahead": bool(config.get("read_ahead", False)),
             "reserved_ram_fraction": _number(cli.get("perc_reserved_mem_max")) or _number(config.get("perc_reserved_mem_max")) / 100 or default_ram_fraction}
+    if h3_advice is not None:
+        plan["reasons"].extend(h3_advice.get("reasons") or ())
+        plan["warnings"].extend(h3_advice.get("warnings") or ())
+        if h3_advice.get("attention_head_split") is None:
+            plan["reasons"].append(
+                f"H3 head-split advice is unavailable for this geometry; the saved level {saved_head_split} remains in effect."
+            )
+        elif override_head_split:
+            plan["reasons"].append(
+                f"Auto applies the recommended {h3_advice.get('split_label')} head-split level for this job; saved settings remain unchanged."
+            )
+        else:
+            plan["reasons"].append(
+                f"Advice only: H3 recommends {h3_advice.get('split_label')} head splitting; saved level {saved_head_split} remains in effect."
+            )
     if (model_def.get("minimax_h3_full_checkpoint") and ram >= 96
             and _number(cli.get("perc_reserved_mem_max")) <= 0 and not config.get("perc_reserved_mem_max")):
         plan["reserved_ram_fraction"] = round(min(.65, max(.50, 60 / ram)), 3)
     if not applied:
-        plan["reasons"].append("Saved settings or explicit overrides remain in control.")
+        if explicit_profile and override_head_split:
+            plan["reasons"].append(
+                "The explicit profile keeps placement in manual control; Auto still applies its H3 head-split advice per job."
+            )
+        elif h3_advice is None:
+            plan["reasons"].append("Saved settings or explicit overrides remain in control.")
         return plan
     is_h3 = str(model_def.get("architecture", "")).startswith("minimax_h3") or "h3_weight_budget_gb" in adjustment
     clamped = adjustment.get("h3_activation_reserve_clamped", False)

@@ -80,6 +80,27 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _duration_recommendations_namespace():
+    app_path = str(_APP)
+    added_app_path = app_path not in sys.path
+    if added_app_path:
+        sys.path.insert(0, app_path)
+    try:
+        from services import h3_duration_recommendations
+        return {
+            name: getattr(h3_duration_recommendations, name)
+            for name in (
+                "attach_h3_duration_recommendations",
+                "h3_duration_recommendations_enabled",
+                "load_h3_duration_recommendations",
+                "match_h3_duration_recommendation",
+            )
+        }
+    finally:
+        if added_app_path:
+            sys.path.remove(app_path)
+
+
 def _load_handler_class():
     app_path = str(_APP)
     added_app_path = app_path not in sys.path
@@ -91,9 +112,12 @@ def _load_handler_class():
             X2_VAE_LICENSE_FILE,
             X2_VAE_NOTICE_FILE,
             X2_VAE_REPO,
+            X2_VAE_REPO_SUBFOLDER,
             X2_VAE_REVISION,
             X2_VAE_VALUE,
+            x2_vae_asset_candidates,
         )
+        from shared.utils import files_locator as fl
     finally:
         if added_app_path:
             sys.path.remove(app_path)
@@ -128,8 +152,12 @@ def _load_handler_class():
         "X2_VAE_LICENSE_FILE": X2_VAE_LICENSE_FILE,
         "X2_VAE_NOTICE_FILE": X2_VAE_NOTICE_FILE,
         "X2_VAE_REPO": X2_VAE_REPO,
+        "X2_VAE_REPO_SUBFOLDER": X2_VAE_REPO_SUBFOLDER,
         "X2_VAE_REVISION": X2_VAE_REVISION,
         "X2_VAE_VALUE": X2_VAE_VALUE,
+        "x2_vae_asset_candidates": x2_vae_asset_candidates,
+        "fl": fl,
+        **_duration_recommendations_namespace(),
     }
     module = ast.Module(body=selected, type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), str(_HANDLER_PATH), "exec"), namespace)
@@ -188,7 +216,7 @@ def _load_h3_memory_helpers():
                 selected.append(node)
         elif isinstance(node, ast.FunctionDef) and node.name in names:
             selected.append(node)
-    namespace = {}
+    namespace = _duration_recommendations_namespace()
     module = ast.Module(body=selected, type_ignores=[])
     exec(
         compile(ast.fix_missing_locations(module), str(_HANDLER_PATH), "exec"),
@@ -2042,13 +2070,14 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             launch,
         )
 
-    def test_h3_is_enabled_for_existing_and_fresh_installs(self):
+    def test_h3_defaults_and_existing_install_migrations(self):
         store = _read(_STORE_PATH)
         default_block = store.split("const DEFAULT_ENABLED_MODELS = new Set([", 1)[1].split("])\n", 1)[0]
         self.assertIn("'minimax_h3'", default_block)
         self.assertIn("'minimax_h3_full'", default_block)
         self.assertIn("'minimax_h3_ref2va'", default_block)
-        self.assertIn("'minimax_h3_ref2va_full'", default_block)
+        self.assertIn("'minimax_h3_ref2va_fused_turbo'", default_block)
+        self.assertNotIn("'minimax_h3_ref2va_full'", default_block)
         defaults_version = int(
             store.split("const DEFAULTS_VERSION = ", 1)[1].splitlines()[0]
         )

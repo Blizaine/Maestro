@@ -78,6 +78,16 @@ def per_job_memory_options(args, output_type="video"):
     return {}
 
 
+def per_job_attention_head_split(config, args):
+    """Resolve a temporary Auto choice without modifying the saved setting."""
+    plan = getattr(args, "_maestro_per_job_memory_plan", None) or {}
+    if plan.get("override_attention_head_split") and plan.get("output_type") == "video":
+        value = plan.get("attention_head_split")
+        if type(value) is int and 0 <= value <= 3:
+            return value
+    return config.get("attention_head_split", 0)
+
+
 def validate_memory_updates(body):
     """Validate all memory fields before an API request changes any state."""
     updated = {}

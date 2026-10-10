@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
-import { useStore, resolveResolution } from '../../stores/useStore'
+import { DEFAULT_DIRECTOR_VIDEO_MODEL, useStore, resolveResolution } from '../../stores/useStore'
 import { fetchDirectorMusicClipLimits, fetchModelOptions, type DirectorMusicClipLimits } from '../../api/client'
 import { formatSeconds } from './DurationSlider'
 
 export function DirectorMusicClipLength({disabled = false}: {disabled?: boolean}) {
-  const model = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
+  const model = useStore(s => s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL)
   const resolution = useStore(s => s.directorResolution)
   const aspect = useStore(s => s.directorAspectRatio)
   const manualFrames = useStore(s => s.directorVideoMaxShotFramesByModel[model])
@@ -61,7 +61,7 @@ export function DirectorMusicClipLength({disabled = false}: {disabled?: boolean}
             {!automatic && limits && <> Recommended {formatSeconds(limits.recommended_seconds)}.</>}</>
           : error || 'Reading model limits…'}
       </p>
-      {!seamless && <p className="text-[10px] leading-relaxed text-text-muted">Shorter clips can reduce peak memory but need more preparation.</p>}
+      {!seamless && <p className="text-[10px] leading-relaxed text-text-muted">Auto uses system RAM, GPU memory and resolution. H3 Auto cut speed favors fewer, longer clips; manual choices are kept.</p>}
       {analysis && seconds !== appliedSeconds && !disabled && !seamless && (
         <button type="button" disabled={loading}
           className="text-[11px] text-accent-blue hover:underline disabled:opacity-50"

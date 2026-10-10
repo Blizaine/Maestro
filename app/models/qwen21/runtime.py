@@ -65,6 +65,7 @@ class model_factory:
     def __init__(self, model_filename, text_encoder_filename, model_def=None,
                  VAE_dtype=None, save_quantized=False, model_type=None):
         self._abort = False
+        self.model_def = dict(model_def or {})
         self.device = torch.device("cuda")
         filename = model_filename[0] if isinstance(model_filename, (list, tuple)) else model_filename
         # Keep non-persistent RoPE buffers real, on CPU. They are not present
@@ -122,6 +123,16 @@ class model_factory:
                  sample_solver="default", denoising_strength=1.0, masking_strength=1.0,
                  model_mode=0, outpainting_dims=None, custom_settings=None,
                  callback=None, set_progress_status=None, **kwargs):
+        # Guard the checkpoint recipe here as well as at queue validation:
+        # direct runtime callers and restored jobs must use the matching schedule.
+        from .qwen21_handler import apply_acceleration_profile
+        recipe = apply_acceleration_profile({
+            "sample_solver": sample_solver, "num_inference_steps": sampling_steps,
+            "guidance_scale": guide_scale,
+        }, model_def=getattr(self, "model_def", {}))
+        sample_solver = recipe["sample_solver"]
+        sampling_steps = recipe["num_inference_steps"]
+        guide_scale = recipe["guidance_scale"]
         selector = str(video_prompt_type or "")
         image_mode = kwargs.get("image_mode", 1)
         if isinstance(image_mode, str):
@@ -220,7 +231,9 @@ class model_factory:
                 num_inference_steps=int(sampling_steps), num_images_per_prompt=max(1, int(batch_size)),
                 generator=torch.Generator(device=self.device).manual_seed(chosen_seed),
                 callback_on_step_end=step_end, callback_on_step_end_tensor_inputs=[],
-                sample_solver=sample_solver, mask_image=input_masks,
+                sample_solver=sample_solver,
+                qwen21_turbo_checkpoint=bool(getattr(self, "model_def", {}).get("qwen21_turbo_checkpoint")),
+                mask_image=input_masks,
                 inpaint_image=(references[0] if input_masks is not None and references else None),
                 denoising_strength=denoising_strength, masking_strength=masking_strength,
                 model_mode=model_mode, outpainting_dims=outpainting_dims,

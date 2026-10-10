@@ -1,6 +1,6 @@
 # Maestro v2.7.0
 
-October 8, 2026. Prepared release candidate; not published. Changes since the
+October 10, 2026. Prepared release candidate; not published. Changes since the
 public v2.6.0 Main release.
 
 ## Memory management and performance
@@ -9,8 +9,7 @@ Maestro now includes an adaptation of WanGP 17 and MMGP 4 for its existing
 generation pipelines. It adds optional VRAM and RAM allocator choices, smarter
 memory pinning, Windows checkpoint read-ahead, per-output dynamic or manual
 weight preloading, compatible attention options and automatic INT8 kernel
-selection. The base allocator default remains PyTorch; explicitly applying
-Auto-tune recommends MMGP optimized where supported. Unsupported devices
+selection. The base allocator default remains PyTorch; Auto-tune recommends MMGP optimized where supported. Unsupported devices
 and model layouts retain their compatible path, and saved allocator changes
 that require a restart are reported in Settings.
 
@@ -91,11 +90,35 @@ VRAM was 11.75 GiB. Full media decoding and soundtrack checks passed, and sample
 frames showed a coherent scene. System RAM was nearly full and paging occurred.
 
 The native test used a locked window with **Allow 30s clips · Experimental**
-enabled. The ordinary 14.4-second recommendation and Auto duration limits remain
-unchanged. This verifies one 12-GB/32-GB Windows recipe, not all checkpoints,
+enabled. This does not promote 15-second native 1080p to an Auto duration default.
+Auto starts shorter at this resolution, as described below. This verifies one
+12-GB/32-GB Windows recipe, not all checkpoints,
 LoRAs or lower-memory machines. The separate WanGP Pruned 20-step confirmation
 used different settings and is not a matched speed comparison. See the
 [validation record](VALIDATION_V2.7.0.md#native-h3-follow-up--october-9).
+
+## Automatic H3 windows and head splitting
+
+Studio and Director now share measured duration recommendations based on usable
+VRAM, system RAM, resolution and checkpoint. On the tested nominal 12-GB GPU /
+32-GB RAM tier, Auto recommends approximately **14.4 seconds for 720p Fused**,
+**10.1 seconds for 720p Pruned** and **5.2 seconds for native 1080p**. Reference
+and rolling-window policies can subtract a safety margin or include history in
+the actual pass. On the tested 24-GB / high-RAM tier, Fused References also uses
+the longer 720p recommendation. Unsupported combinations retain conservative
+limits. Manual durations remain available, including the separately enabled
+experimental range; a recommendation is not an OOM guarantee.
+
+For eligible H3 video jobs on the 12-GB / at-least-30-GiB-usable-RAM tier, Auto
+chooses Off, Low or Medium head splitting from the actual generation workload.
+Short 1080p and ordinary 720p jobs can retain the faster unsplit route; longer
+1080p jobs use more splitting. This applies only while Auto owns that control
+and does not rewrite the saved setting. Manual values remain in effect. The
+performance card and duration guidance explain the recommendation and flag
+unmeasured references/LoRAs and costly long Pruned jobs. One 10.1-second native
+1080p Pruned test took about 116 minutes; fitting in VRAM does not ensure an
+acceptable render time. These observations do not establish comparable limits
+on 6/8/10-GB cards or 16-GB RAM systems.
 
 ## Optional H3 VAE 2× video decoding
 
@@ -111,7 +134,9 @@ This is a separate learned-decoder workflow, not native 1080p denoising at
 540p memory cost. It adds decoding work and does not establish upstream
 15-second native 1080p claims on every machine. Current Maestro support is
 for standard H3 video generation; audio-only, Viggle and frozen-source audio
-workflows are excluded. See the [guide and model terms](H3-VAE-x2.md).
+workflows are excluded. The resolver also handles Hugging Face’s nested first-
+download layout and shared model roots, verifying size and SHA-256 before loading
+the decoder. See the [guide and model terms](H3-VAE-x2.md).
 
 ## Shared runtime compatibility
 
@@ -126,8 +151,8 @@ Flux, Qwen Image, Hunyuan, HiDream, Krea2, Z-Image and audio pipelines. LTX,
 LongCat and other routes that still need implicit factories retain their device
 wrapper. Kandinsky no longer replaces the selected allocator at import time.
 These are updates to existing workflows. The optional H3 learned x2 decoder
-is included separately; new model families and the LTX detail refiner are
-not included in this release. Optional attention imports and CPU
+is included separately, along with the official Turbo checkpoint for the existing
+Qwen Image 2.1 pipeline. The LTX detail refiner is not included in this release. Optional attention imports and CPU
 CI fixtures were updated to verify the retained paths.
 
 ## Director workflow
@@ -151,6 +176,60 @@ checkpoint or workload fits in memory.
 Single-shot Director music videos preserve multiline Context-IR prompts as
 one complete shot. Explicit clip boundaries still split actual multi-clip
 plans, and legacy Studio prompts retain their paragraph-based behavior.
+
+New Director projects prefer **H3 Fused 4-Step References** when enabled and
+compatible. Existing drafts retain their model. Auto cut speed favors fewer,
+longer H3 clips, and Auto maximum clip length follows the same resource policy
+as Studio. Explicit cut speed and maximum-duration choices remain in control.
+After uploaded audio analysis, Director brings character/reference setup back
+into view so it is easier to complete before planning.
+
+Long music-video planning now validates each batch, preserves valid checkpoints
+and repairs the invalid tail in smaller batches. Continuity and action-diversity
+checks reduce repeated scene descriptions. Native H3 reference workflows keep
+reference images as identity/design guidance rather than silently copying them
+into opening frames. These checks reduce the observed repeated-action and
+reference-still problems; generated stories still benefit from human review.
+
+## Simpler model selection
+
+**Manage models** remains available from every model picker, including References.
+Settings groups models under **Video**, **Image** and **Audio**, with expandable
+workflow groups such as Frames, References, Avatar, Extend and Blend. Enabling a
+model in one workflow does not force it into every other workflow; downloaded
+weights remain shared. Small download icons keep rows the same height, and
+contextual model names omit redundant mode labels while retaining variants,
+steps, model size and quantization. H3 Fused labels no longer say Experimental.
+
+Fresh-install video defaults are:
+
+- **Frames:** H3 Pruned, H3 Fused 4-Step and LTX-2.5 Distilled.
+- **References:** H3 Pruned and H3 Fused 4-Step.
+- **Avatar:** both LongCat Avatar models.
+- **Extend and Blend:** Frames and References variants of H3 Pruned and H3 Fused
+  4-Step, plus LTX-2.5 Distilled.
+
+**Reset**, beside **Enable more models**, restores the current workflow's default
+visibility after explaining that no model files are deleted. Hidden models can
+be enabled again. Existing saved choices are preserved on update.
+
+## Qwen Image 2.1 Turbo
+
+Official **Qwen Image 2.1 Turbo 7B** is a separate image generation/editing option,
+adapted from [PR #175](https://github.com/Blizaine/Maestro/pull/175). It uses the
+published eight-step schedule with CFG 1, shares the existing 2.1 text encoder
+and VAE, and offers BF16 or INT8 ConvRot checkpoints through normal on-demand
+downloads. The setting and saved output metadata enforce the Turbo recipe,
+including when older queued parameters requested another step count. Ordinary
+compatible style LoRAs remain available; incompatible managed acceleration
+recipes are kept separate.
+
+The option is enabled once on update without selecting it or downloading its
+weights. A user's later decision to hide it persists. Real INT8 text-to-image
+and reference-edit checks passed on the 24-GB workstation. This does not verify
+every image size, BF16, mask workflow or lower-memory machine. Qwen's research
+and evaluation model license applies; commercial use requires a separate
+license. See the [Qwen guide and terms](Qwen-Image-2.1.md).
 
 ## Prompt writing and local LLM startup
 
@@ -198,9 +277,10 @@ paths before sharing them.
 ## Update and limitations
 
 When v2.7.0 is released, use **Update** in Pinokio while idle, restart Maestro
-to load the new backend, and refresh the browser. On an existing installation,
-use **Settings → Performance → Re-detect** to explicitly apply the expanded
-Auto-tune recommendations. Migration preserves existing manual choices. Check
+to load the new backend, and refresh the browser. When Performance Auto is
+enabled, revised recommendations apply once at startup while preserving manual
+customizations. **Settings → Performance → Re-detect** remains available to
+explicitly reapply Auto recommendations. Check
 the active allocator and restart if another allocator change is pending. Some
 optional assets download on first use.
 The new memory paths have fallbacks, but their behavior and performance depend on

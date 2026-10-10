@@ -7,7 +7,7 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '../..');
 const esbuild = require(path.join(root, 'ui/node_modules/esbuild'));
 const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT ||
-  'C:/Users/bliza/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+  'playwright');
 
 function loadTypeScript(filePath, dependencies = {}) {
   const transformed = esbuild.transformSync(fs.readFileSync(filePath, 'utf8'), {
