@@ -206,6 +206,13 @@ global numbering on timed visual cuts before H3 preflight. Actual scene action,
 cut timestamps and exact dialogue remain intact; malformed substantive prompts
 still fail validation.
 
+When native frame fitting changes a planned clip's length, Director retains the
+authored duration and adjusts local visual cues to the fitted clip. The timing
+provenance survives save, resume and regeneration. Manually edited prompts keep
+strict timing validation instead of receiving an inferred duration exemption.
+Short-film opening states prefer explicit spatial setup over pose-bearing
+identity descriptions.
+
 Planner guidance also covers rider scale, anatomy, viewpoint and physical
 transitions. Saving a changed prompt preserves its rendered-prompt provenance
 and marks an existing clip as needing regeneration.
@@ -269,6 +276,13 @@ cannot be completed, the error identifies the last validation reason and, for
 an over-budget draft, suggests increasing the duration or shortening the
 dialogue.
 
+Speaker attribution also handles possessive listener references, bounded
+response cues and parenthesized voice IDs more carefully. Source fallbacks
+avoid duplicate voice markers. Continuity instructions do not become cast
+names, and an adjective such as an open palm is distinguished from an opening
+action. Fresh exact-dialogue checks with both local writers completed without
+fallback; creative dialogue still has recorded failures and repair overhead.
+
 ## Developer diagnostics and benchmarks
 
 The manual **Developer tests** bench combines diagnostics, optional prompt
@@ -310,5 +324,16 @@ Compare complete generated media as well as runtime and memory measurements.
 The upstream WanGP release's speed claims are not Maestro measurements. The
 current evidence covers selected candidate-build comparisons on the documented
 machines; it is not a universal speed, OOM or output-quality guarantee.
+
+The October 10–11 overnight review is not an unconditional release clearance.
+Selected installed video, image, audio and x2-decoder smokes passed, and the
+final backend suite passed 3,813 tests with 12 skipped. Fresh Director prompts still
+inserted dialogue and music instructions into a silent brief and omitted required
+prop state; rendered clips showed contradictory boarding/landing boundaries.
+No perceptual audio review was performed. Creative enhancement also
+retained an incomplete-exchange failure and a repeated-fallback case. These
+findings remain open before promotion to Main; full decoding alone does not
+establish story fidelity. See the validation record for source snapshots,
+measurements and the remaining installation/device checks.
 
 [Validation and limitations](VALIDATION_V2.7.0.md) · [Changelog](../CHANGELOG.md)

@@ -331,6 +331,151 @@ in one saved clip was reproduced on the preceding build and recorded separately.
 No new LLM calls or video renders were run; these checks do not establish
 rendered motion quality.
 
+## Overnight workstation review — October 10–11
+
+This manual batch used the RTX 4090 workstation with 24 GB VRAM and 128 GB RAM.
+The active Director run on the 12-GB workstation was left untouched. No public
+branch, tag or release was written. Raw writer attempts, failed controls,
+rendered diagnostics and local reports remain excluded from Git.
+
+The baseline source was frozen at `6de3eff` until its GPU tests ended. Reviewed
+speaker, source-language, opening-state and native-timing fixes were integrated
+at `0687a1e`; a further bounded speaker-parser fix was integrated at `609e1ad`.
+The final full backend CPU gate at **`609e1ad` passed 3,813 tests, with 12
+skipped**, across 312 test files. It used the managed Python 3.11.13 / PyTorch
+2.10 CUDA-13.0 runtime with `CUDA_VISIBLE_DEVICES=-1`; CUDA/training-specific
+skips are not generation-validation evidence. Source hashes and a clean
+checkout were checked before and after the run. Frontend and launcher source
+were unchanged by these overnight fixes; their earlier checks retain their
+original source attribution. Subsequent documentation-only commits do not
+represent another backend run.
+
+The fixes preserve authored Director duration before native frame fitting,
+retime local visual cues, and retain strict manual-edit validation through
+save/resume/regeneration. Speaker regressions include real failed outputs,
+possessive listener names, response cues, parenthesized voice IDs, ambiguous
+speakers and wrong-owner negatives. Other checks distinguish an open-palm
+adjective from an opening action and keep continuation instructions out of
+cast names. Explicit spatial setup now takes precedence over identity/pose
+descriptions for short-film opening states. These are bounded corrections,
+not a complete semantic story validator.
+
+### Local writer results
+
+Five prepare-only cases covered exact dialogue, creative dialogue, two-window
+prop/knowledge continuity, rider/reference continuity and Director planning,
+using installed Qwen3.8 27B and Gemma E4B writers. Every captured response and
+final native prompt was reviewed. The original ten attempts had nine completed
+and one failed; eight completed attempts used fallback. The matched ten-case
+retest at `0687a1e` completed all ten, with seven using fallback in at least one
+window. Completion did not remove causal-order, silence or prop-state defects.
+
+Four fresh follow-up attempts at `609e1ad` produced:
+
+| Case | Writer | Result | Calls | Fallback | Elapsed |
+| --- | --- | --- | ---: | --- | ---: |
+| Exact supplied dialogue | Qwen3.8 27B | Completed, correct owners/words | 1 | No | 16.2 s |
+| Exact supplied dialogue | Gemma E4B | Completed, correct owners/words | 1 | No | 8.7 s |
+| Creative group exchange | Qwen3.8 27B | Failed; five-word Ron-only draft | 2 | No final prompt | 11.7 s |
+| Creative group exchange | Gemma E4B | Completed through source fallback | 7 | Yes | 23.2 s |
+
+The exact-dialogue improvements agree with replay of previously rejected raw
+outputs. These are single attempts across different source snapshots, not a
+statistical latency or general writer-quality claim. Gemma's creative dialogue
+JSON had correct owners; its frame drafts first omitted dialogue tags, then
+disagreed with the deterministic owner resolver. Qwen's focused repair addressed
+word count without restoring the missing speakers. An additional clean-reference-
+caption diagnostic still used fallback and invented music. None of these
+prepare-only checks establishes voice, lip-sync or generated-motion quality.
+
+### Speed and installed-model checks
+
+The controlled baseline used `6de3eff`, seed 424242, explicit settings with Auto
+temporarily disabled, and sequential cold/warm pairs. Cold means model-unloaded,
+with filesystem and compiled-kernel caches retained. The isolated INT8 comparison
+kept Profile 1, default preload and head split Off; Auto resolved to Comfy Kitchen
+CUDA. Warm results for the same 1280×704, 243-frame workloads were:
+
+| Model/workload | INT8 policy | Wall | Denoising | Peak VRAM |
+| --- | --- | ---: | ---: | ---: |
+| Pruned, 20 steps | Triton | 648.9 s | 599.1 s | 21.77 GiB |
+| Pruned, 20 steps | Auto | 483.3 s | 442.5 s | 21.43 GiB |
+| Fused, 6 steps | Triton | 185.6 s | 135.9 s | 19.12 GiB |
+| Fused, 6 steps | Auto | 131.2 s | 92.8 s | 19.11 GiB |
+
+Measured denoising was approximately 26% shorter for Pruned and 32% shorter for
+Fused. One pair per setting, cache/order/restart effects and variable cold loading
+limit inference; Fused's Auto cold wall time was slightly longer. All compared
+files passed full decoding and sampled-frame review, which does not establish
+pixel-identical output or gains on other hardware.
+
+A separate Profile-2/dynamic-preload/INT8-Auto Pruned diagnostic stopped advancing
+after five denoising steps and was cancelled after about ten minutes. Those three
+changes were bundled, so its cause remains unisolated. It is a failed performance
+test, not an OOM or a successful benchmark. API cancellation preceded actual
+engine teardown; a main-workstation-only restart restored an idle runtime.
+
+A corrected native-1080p Fused test explicitly locked **345 frames / 14.375 s at
+1920×1088**, six steps, Profile 2, fixed 8192-MB preload, Low head split and INT8
+Auto. It passed full video/audio decoding in **609.7 s**, with **15.28 GiB** sampled
+peak VRAM. This is an advanced 24-GB capacity test above Auto's recommendation,
+not a 12-GB result or a validated-safe default.
+
+Installed compatibility smokes also passed full decoding: LTX-2.5 Distilled video
+with audio, Flux JPEG generation, Qwen Image 2.1 Turbo PNG generation, ACE-Step
+12-second stereo audio, and learned H3 x2 decoding from 960×544 to 1920×1088.
+The x2 decoder's pinned size and SHA checks passed. The first Flux request omitted
+image mode and produced a single-frame MP4; the corrected image request is
+separate. LTX returned the requested 49-frame output but normalized its internal
+window to 58, so it is compatibility evidence rather than an exact-workload timing
+pass. An initial ACE cold-load polling timeout was retained before its successful
+retry. Flux fetched a small preview decoder; this batch did not download another
+large compatibility checkpoint.
+
+### Director media and unresolved quality findings
+
+A fresh baseline short film (four clips, 40.5 s) and a 30.17-second diagnostic
+segment of a fresh 23-clip full-song plan were rendered. All clips and joins passed
+full video/audio decoding. All 23 song prompts were reviewed; unique wording still
+allowed repeated frontal-flight motifs. Sampled music-segment frames showed the
+Kitten in front of the Dragon without the requested mounted support. Source-song
+alignment had zero best offset and 0.995 PCM correlation in the checked segment;
+this does not establish lip-sync or perceptual audio quality. The LLM→video→LLM
+handoff completed without a device failure, while its writer still used fallback.
+
+A fresh five-clip diagnostic at `609e1ad` rendered in 834.2 s. Its native schedule
+rounded the requested 972 frames / 40.5 s to **977 frames / 40.708 s**. The strict
+exact-request check rejected that difference. A separately acknowledged diagnostic
+check verified all five clips and the join against the actual native schedule;
+it did not relabel the result as an exact-duration pass. All 12 reviewed source
+hashes and the clean checkout remained frozen through rendering and verification.
+
+Review of every native prompt, one-second samples and all exact first/last frames
+found material defects despite successful generation:
+
+- Compression invented `KITTEN (Implied)` in an action-only screenplay. Planning
+  propagated it into empty-text dialogue beats and literal speech tags; compilation
+  preserved `<d>[English] Implied</d>` despite the empty dialogue manifest. Music
+  instructions also survived the explicit no-music brief, sometimes inside visual
+  prose while the official music field said N/A. These are prompt findings; no
+  perceptual audio review was performed.
+- Canonical opening states coexisted with contradictory model prose. The continuity
+  helper overwrote a flight clip's ending with the next grounded opening using a
+  generic movement instruction, without establishing a landing action. Exact output
+  boundaries showed a hanging-to-seated boarding jump and a grounded-to-airborne
+  reset around a repeated landing. Dismount samples preceded folded wings.
+- The authored sheathed-sword/left-hip state disappeared during compression and
+  remained absent from all five final prompts. Strap and snout contact were present,
+  and supported riding was visible in this sample; that does not resolve the
+  separate music-video relation-state failure or guarantee all motion/identity.
+
+These failures remain open. The overnight assessment recommends holding Main
+promotion for authoritative silence/music handling, source-event/prop retention,
+and causal clip-boundary validation. A passing CPU suite and decodable media do
+not establish that those story contracts are satisfied. Saved performance settings
+were restored, Auto remained enabled, resident models were released, and the main
+application was left running and idle.
+
 ## Remaining validation limits
 
 - 6/8/10 GB VRAM and 16 GB RAM recommendations are conservative extrapolations,
@@ -342,10 +487,10 @@ rendered motion quality.
   or end-to-end generation. A Linux CUDA smoke remains recommended.
 - Allocator startup/release probes did not force an actual system-RAM spill;
   RAM-spill performance and recovery under genuine overflow remain unverified.
-- The real Qwen Turbo image checks above extend non-H3 coverage, but do not
-  verify every shared pipeline. Representative non-H3 video/audio generations,
-  a fresh installation and a normal public-v2.6.0-to-candidate Update/restart
-  check remain recommended before promotion to Main.
+- Selected installed LTX, Flux, Qwen Turbo and ACE-Step smokes extend non-H3
+  video/image/audio coverage, but do not verify every shared pipeline. A fresh
+  installation and a normal public-v2.6.0-to-candidate Update/restart check
+  remain recommended before promotion to Main.
 - Physical iPhone testing of Director preview appearance without refreshing
   remains pending after updating/restarting the idle test machine.
 

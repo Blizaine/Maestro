@@ -54,6 +54,15 @@ Prepared release candidate; not published. See the [full release notes](docs/REL
   identity/design guidance instead of silently making them opening stills.
 - Repair empty H3 scene-transition tags and clip-local numbering of timed cuts
   before Director preflight, preserving scene action, timestamps and dialogue.
+- Retain Director's authored duration when fitting clips to native frame counts,
+  retime local visual cues to the fitted clip, and preserve strict validation for
+  manually edited prompts across save, resume and regeneration.
+- Improve H3 speaker attribution for possessive listener references, bounded
+  response cues and parenthesized voice IDs. Keep ambiguous speakers rejected
+  and avoid duplicating voice markers in source fallbacks.
+- Keep continuity instructions out of inferred cast names and distinguish an
+  open palm from an action that opens an object. Prefer explicit spatial setup
+  over identity descriptions when constructing short-film opening states.
 - Default new Director projects to H3 Fused 4-Step References when available,
   favor longer H3 clips with Auto cut speed, and return to reference/character
   setup after uploaded audio analysis.
@@ -66,6 +75,11 @@ Prepared release candidate; not published. See the [full release notes](docs/REL
 - Add official Qwen Image 2.1 Turbo 7B as a separate image option with on-demand
   BF16/INT8 checkpoints, the published eight-step / CFG 1 recipe, reference
   editing and accurate output settings. Retain Qwen's model-license notice.
+
+The October 10–11 overnight review passed the final backend gate and selected
+real model smokes, but found unresolved Director silent-brief prompt-contract,
+action-order and clip-boundary failures. Main promotion remains pending that
+quality review; see the [validation record](docs/VALIDATION_V2.7.0.md).
 
 ## [2.6.0] - 2026-10-04
 
