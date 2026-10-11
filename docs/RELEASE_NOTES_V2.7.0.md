@@ -200,6 +200,12 @@ clauses survive recompilation, including characters without their own picture.
 Audio fields exclude visual shot markers, and compiler-owned performance
 instructions and world anchors are rebuilt once instead of accumulating
 through preflight.
+
+Director compilation also removes empty scene-transition shells and repairs
+global numbering on timed visual cuts before H3 preflight. Actual scene action,
+cut timestamps and exact dialogue remain intact; malformed substantive prompts
+still fail validation.
+
 Planner guidance also covers rider scale, anatomy, viewpoint and physical
 transitions. Saving a changed prompt preserves its rendered-prompt provenance
 and marks an existing clip as needing regeneration.

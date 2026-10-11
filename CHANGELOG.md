@@ -52,6 +52,8 @@ Prepared release candidate; not published. See the [full release notes](docs/REL
 - Improve long music-video planning with validated, resumable batches and focused
   repairs for repeated or incomplete shots. Keep native H3 reference images as
   identity/design guidance instead of silently making them opening stills.
+- Repair empty H3 scene-transition tags and clip-local numbering of timed cuts
+  before Director preflight, preserving scene action, timestamps and dialogue.
 - Default new Director projects to H3 Fused 4-Step References when available,
   favor longer H3 clips with Auto cut speed, and return to reference/character
   setup after uploaded audio analysis.

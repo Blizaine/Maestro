@@ -70,6 +70,11 @@ CONTEXT-IR FORMAT:
 - Begin integrated_multimodal_description with [Shot 1] and no timestamp, then
   narrate visible action, camera, dialogue, and synchronized sound in
   chronological order. Later cuts begin [Shot N] At MM:SS.mmm.
+- Restart shot numbering inside every JSON item's video_prompt: [Shot 1],
+  then [Shot 2], [Shot 3] only for actual cuts within that clip. The clip's
+  position in the music video never determines these shot numbers. Put each
+  marker before the visual action it introduces; omit empty transition tags
+  and trailing shot markers with no action.
 - Visual cut timecodes use this clip's local timeline: start at 00:00.000, use
   the local duration stated with the clip, and keep every visual cut within
   that duration. Never substitute an absolute source-song offset for a visual

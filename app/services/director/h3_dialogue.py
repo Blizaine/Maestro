@@ -96,6 +96,25 @@ _H3_MUSIC_PROSE_RE = re.compile(
     r"opening\s+continuity|final\s+blocking)\b|\s*\[Shot\s+\d+\]|$)",
     re.IGNORECASE | re.DOTALL,
 )
+_H3_SCENE_TIMESTAMP_PATTERN = r"\d{2,}:[0-5]\d(?:\.\d{1,3})?"
+_H3_EMPTY_SCENE_TRANSITION_RE = re.compile(
+    r"<scenetrans>\s*\[Shot\s+\d+\]\s+At\s+"
+    + _H3_SCENE_TIMESTAMP_PATTERN
+    + r"\s*</scenetrans>",
+    re.IGNORECASE,
+)
+_H3_TIMED_SHOT_MARKER_RE = re.compile(
+    r"\[Shot\s+(?P<number>\d+)\](?=\s+At\s+(?P<timestamp>"
+    + _H3_SCENE_TIMESTAMP_PATTERN
+    + r")"
+    + r"\b)",
+    re.IGNORECASE,
+)
+_H3_SHOT_MARKER_RE = re.compile(r"\[Shot\s+(?P<number>\d+)\]", re.IGNORECASE)
+_H3_SHOT_REFERENCE_PREFIX_RE = re.compile(
+    r"\b(?:throughout|during|within|from|appears\s+in)\s*$",
+    re.IGNORECASE,
+)
 _H3_AUXILIARY_SECTION_BOUNDARY_RE = re.compile(
     r"\b(?:integrated_multimodal_description|detailed_description|"
     r"overall_soundscape|non_diegetic_music|dialogue\s+beats?)\s*:|\[Shot\s+\d+\]",
@@ -170,6 +189,27 @@ def _dialogue_spans(prompt: str) -> tuple[list[tuple[int, int]], bool]:
     if depth:
         malformed = True
     return spans, malformed
+
+
+def _h3_visual_shot_markers(visual: str) -> list[re.Match[str]]:
+    """Return cut labels outside dialogue and explicit reference phrases."""
+
+    spans, _ = _dialogue_spans(visual)
+    span_index = 0
+    markers: list[re.Match[str]] = []
+    for marker in _H3_SHOT_MARKER_RE.finditer(visual or ""):
+        while span_index < len(spans) and marker.start() >= spans[span_index][1]:
+            span_index += 1
+        if (
+            span_index < len(spans)
+            and spans[span_index][0] <= marker.start() < spans[span_index][1]
+        ):
+            continue
+        preceding = visual[max(0, marker.start() - 45):marker.start()]
+        if _H3_SHOT_REFERENCE_PREFIX_RE.search(preceding):
+            continue
+        markers.append(marker)
+    return markers
 
 
 def _replace_spans(
@@ -294,6 +334,122 @@ def _rewrite_outside_dialogue(prompt: str, rewrite) -> str:
         parts.append(prompt[start:end])
         cursor = end
     parts.append(rewrite(prompt[cursor:]))
+    return "".join(parts)
+
+
+def _strip_empty_h3_scene_transitions(prompt: str) -> str:
+    """Remove marker-only transition shells while protecting dialogue text."""
+
+    text = str(prompt or "")
+    pieces: list[str] = []
+    cursor = 0
+    protected_start = -1
+    depth = 0
+    for token in _H3_DIALOGUE_TOKEN_RE.finditer(text):
+        if not token.group(1):
+            if depth == 0:
+                pieces.append(
+                    _H3_EMPTY_SCENE_TRANSITION_RE.sub("", text[cursor:token.start()])
+                )
+                protected_start = token.start()
+            depth += 1
+            continue
+
+        if depth == 0:
+            continue
+        depth -= 1
+        if depth == 0 and protected_start >= 0:
+            pieces.append(text[protected_start:token.end()])
+            cursor = token.end()
+            protected_start = -1
+
+    if depth and protected_start >= 0:
+        # Leave an unterminated speech block for the dialogue compiler's
+        # existing repair/rejection path.
+        pieces.append(text[protected_start:])
+    else:
+        pieces.append(_H3_EMPTY_SCENE_TRANSITION_RE.sub("", text[cursor:]))
+    return "".join(pieces)
+
+
+def _normalize_h3_compiled_visual_shots(visual: str) -> str:
+    """Remove empty transition shells and localize timed shot labels.
+
+    Director planners can number a prompt's internal cuts across the full
+    sequence. H3 receives one clip at a time, so only timestamped cut labels
+    are rebased to that clip's local sequence. Untimed markers stay intact for
+    the strict contract validator to judge. Tagged dialogue is kept verbatim.
+    """
+
+    text = _strip_empty_h3_scene_transitions(str(visual or ""))
+    spans, malformed = _dialogue_spans(text)
+    if malformed:
+        raise H3DialogueContractError(
+            "MiniMax H3 dialogue tags are unbalanced after compilation."
+        )
+
+    prose_segments: list[str] = []
+    dialogue_segments: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        prose_segments.append(text[cursor:start])
+        dialogue_segments.append(text[start:end])
+        cursor = end
+    prose_segments.append(text[cursor:])
+
+    timed_markers: list[re.Match[str]] = []
+    for segment in prose_segments:
+        for marker in _H3_TIMED_SHOT_MARKER_RE.finditer(segment):
+            preceding = segment[max(0, marker.start() - 45):marker.start()]
+            if not _H3_SHOT_REFERENCE_PREFIX_RE.search(preceding):
+                timed_markers.append(marker)
+
+    # A monotonic sequence starting beyond Shot 1 can be a planner-wide
+    # sequence label, so translate it by one constant offset. Preserve every
+    # gap between source labels: compressing [Shot 1], [Shot 3] into [Shot 1],
+    # [Shot 2] would hide a malformed local sequence from strict validation.
+    # A decrease is also left intact so validation still rejects cut reversal.
+    source_numbers = [int(marker.group("number")) for marker in timed_markers]
+    can_rebase = bool(source_numbers and source_numbers[0] > 1) and all(
+        current >= previous
+        for previous, current in zip(source_numbers, source_numbers[1:])
+    )
+    first_local_number = 2
+    if timed_markers:
+        first = timed_markers[0]
+        first_timestamp = first.group("timestamp")
+        clock, _, fraction = first_timestamp.partition(".")
+        minutes, seconds = (int(part) for part in clock.split(":"))
+        begins_at_zero = minutes == 0 and seconds == 0 and not int(fraction or "0")
+        if begins_at_zero:
+            # A source's first frame is this clip's Shot 1, even when the
+            # planner assigned it a sequence-wide number.
+            first_local_number = 1
+
+    source_to_local_offset = (
+        first_local_number - source_numbers[0]
+        if can_rebase
+        else 0
+    )
+
+    def localize_segment(segment: str) -> str:
+        def localize(match: re.Match[str]) -> str:
+            if not can_rebase:
+                return match.group(0)
+            preceding = segment[max(0, match.start() - 45):match.start()]
+            if _H3_SHOT_REFERENCE_PREFIX_RE.search(preceding):
+                return match.group(0)
+
+            source_number = int(match.group("number"))
+            return f"[Shot {source_number + source_to_local_offset}]"
+
+        return _H3_TIMED_SHOT_MARKER_RE.sub(localize, segment)
+
+    parts: list[str] = []
+    for index, segment in enumerate(prose_segments):
+        parts.append(localize_segment(segment))
+        if index < len(dialogue_segments):
+            parts.append(dialogue_segments[index])
     return "".join(parts)
 
 
@@ -745,6 +901,11 @@ def _source_prompt_parts(
         body = body[marker.end():]
     body = _H3_META_SENTENCE_RE.sub("", body)
     body = _strip_h3_custom_sections(body)
+    # A planner may serialize a transition with no action after its timed
+    # marker. Remove that empty shell while the body is still source text so
+    # Ref2VA's style-opening split cannot mistake the trailing marker for the
+    # boundary between its opening and visual timeline.
+    body = _strip_empty_h3_scene_transitions(body)
     body = re.sub(
         r"^\s*(?:integrated_multimodal_description|detailed_description)\s*:\s*",
         "",
@@ -2298,11 +2459,17 @@ def _split_ref2va_style_opening(body: str) -> tuple[str, str]:
 
     text = _normalized_space(body)
     shot = re.search(r"\[Shot\s+1\]", text, flags=re.IGNORECASE)
+    timed_first_shot = bool(
+        shot and _H3_TIMED_SHOT_MARKER_RE.match(text[shot.start():])
+    )
     if shot and text[:shot.start()].strip():
         opening = _normalized_space(text[:shot.start()])
-        timeline = text[shot.end():].strip()
+        # Keep a real timestamped first marker in the timeline. It may be
+        # needed to distinguish a malformed [Shot 1], [Shot 3] sequence from
+        # a valid local sequence after the compiler adds its own Shot 1.
+        timeline = text[shot.start() if timed_first_shot else shot.end():].strip()
         return opening.rstrip(" .") + ".", timeline
-    if shot:
+    if shot and not timed_first_shot:
         text = text[shot.end():].strip()
 
     lighting = _h3_labeled_value(text, "Lighting")
@@ -2439,7 +2606,8 @@ def compile_h3_official_prompt(
             vocal_activity=_field(audio_plan or {}, "vocal_activity", None),
             project_context=project_context,
         )
-        body = re.sub(r"^\s*\[Shot\s+1\]\s*", "", body, flags=re.IGNORECASE)
+        if not _H3_TIMED_SHOT_MARKER_RE.match(body.lstrip()):
+            body = re.sub(r"^\s*\[Shot\s+1\]\s*", "", body, flags=re.IGNORECASE)
         body = f"[Shot 1] {body}".strip()
         subject_definitions = _ref2va_subject_definitions(
             subjects or [],
@@ -2480,6 +2648,7 @@ def compile_h3_official_prompt(
         # that opening does not cause a second copy to be added before it.
         body = f"{style_opening} {body}".strip()
         body = _ensure_h3_context_anchors(body, context_anchors or [])
+        body = _normalize_h3_compiled_visual_shots(body)
         if has_driving_audio and music == "N/A":
             music = "Use the mapped driving audio according to retention_analysis."
         compiled = (
@@ -2502,11 +2671,19 @@ def compile_h3_official_prompt(
             vocal_activity=_field(audio_plan or {}, "vocal_activity", None),
             project_context=project_context,
         )
-        compiled_body = re.sub(r"^\s*\[Shot\s+1\]\s*", "", compiled_body, flags=re.IGNORECASE)
+        if not _H3_TIMED_SHOT_MARKER_RE.match(compiled_body.lstrip()):
+            compiled_body = re.sub(
+                r"^\s*\[Shot\s+1\]\s*",
+                "",
+                compiled_body,
+                flags=re.IGNORECASE,
+            )
         compiled_body = f"[Shot 1] {compiled_body}".strip()
-        shot_numbers = [int(value) for value in re.findall(
-            r"\[Shot\s+(\d+)\]", compiled_body, flags=re.IGNORECASE,
-        )]
+        compiled_body = _normalize_h3_compiled_visual_shots(compiled_body)
+        shot_numbers = [
+            int(marker.group("number"))
+            for marker in _h3_visual_shot_markers(compiled_body)
+        ]
         header = _alignment_header(mode, duration_seconds, max(shot_numbers) if shot_numbers else 1)
         compiled = (
             f"integrated_multimodal_description: {compiled_body}\n\n"
@@ -2582,11 +2759,9 @@ def validate_h3_prompt_contract(
     # Collapse that continuation, while rejecting skipped/global shot indices
     # or a return to an earlier shot after a later cut.
     shot_numbers: list[int] = []
-    for marker in re.finditer(r"\[Shot\s+(\d+)\]", visual, re.I):
-        preceding = visual[max(0, marker.start() - 45):marker.start()]
-        if re.search(r"\b(?:throughout|during|within|from|appears\s+in)\s*$", preceding, re.I):
-            continue
-        number = int(marker.group(1))
+    visual_markers = _h3_visual_shot_markers(visual)
+    for marker in visual_markers:
+        number = int(marker.group("number"))
         if not shot_numbers or number != shot_numbers[-1]:
             shot_numbers.append(number)
     if shot_numbers and shot_numbers != list(range(1, len(shot_numbers) + 1)):
@@ -2600,10 +2775,9 @@ def validate_h3_prompt_contract(
         if re.search(r"\[Shot\s+\d+\]", extracted_fields.get(field, ""), re.I):
             errors.append(f"{field} contains visual shot instructions")
     if mode == "ref2va":
-        shot = re.search(r"\[Shot\s+1\]", visual, flags=re.IGNORECASE)
-        if not shot:
+        if not shot_numbers or shot_numbers[0] != 1:
             errors.append("detailed_description is missing [Shot 1]")
-        elif not visual[:shot.start()].strip():
+        elif not visual[:visual_markers[0].start()].strip():
             errors.append(
                 "detailed_description is missing the visual-style opening before [Shot 1]"
             )

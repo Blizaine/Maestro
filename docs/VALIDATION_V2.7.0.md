@@ -312,6 +312,25 @@ follow-up, and the existing videos do not demonstrate the corrected prompts.
 Human review after regeneration remains necessary for anatomy, scene
 continuity, point of view and identity retention.
 
+## Director transition-numbering regression — October 10
+
+A new Gemma E4B music-video plan failed H3 preflight on clip 3. Its first six
+planner rows ended in empty `<scenetrans>` shells tagged with global clip
+numbers. Replaying the saved 23-clip plan reproduced numbering errors in clips
+3–6; clip 2 also contained an unintended empty second cut. The compiler now
+removes empty shells and localizes supported timed visual cut labels while
+preserving exact dialogue and cut action/timestamps. The planner guide states
+that numbering restarts inside every clip. Direct malformed payloads still
+undergo the substantive timing and shot-order checks.
+
+All 23 saved clips pass strict compilation, including reference images and
+driving-audio mappings. Source prompts and visual shot labels remain stable
+through recompilation. The 292 Director tests, 147 H3 dialogue tests and 7 new
+numbering regressions pass. A pre-existing second-pass cast-alias normalization
+in one saved clip was reproduced on the preceding build and recorded separately.
+No new LLM calls or video renders were run; these checks do not establish
+rendered motion quality.
+
 ## Remaining validation limits
 
 - 6/8/10 GB VRAM and 16 GB RAM recommendations are conservative extrapolations,
