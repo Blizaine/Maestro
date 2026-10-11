@@ -261,6 +261,201 @@ class AdaptiveWritingTests(unittest.TestCase):
                     )
                 )
 
+    def test_responding_gerund_preserves_dialogue_owner_and_rejects_unsafe_binding(self):
+        source = (
+            'Ana says, <d>[English] You kept the blue ticket.</d> '
+            'Bea answers, <d>[English] I kept both of them.</d>'
+        )
+        for possessive in ("Ana's", "Ana’s"):
+            with self.subTest(possessive=possessive):
+                cue = (
+                    'Bea lowers her gaze to the suitcase handle, then meets '
+                    f'{possessive} eyes, responding with a calm, steady voice:'
+                )
+                draft = (
+                    'integrated_multimodal_description: [Shot 1] '
+                    'Ana turns to Bea and says: '
+                    '<d>[English] You kept the blue ticket.</d> '
+                    f'{cue} <d>[English] I kept both of them.</d>\n'
+                    'overall_soundscape: Quiet room tone.\n'
+                    'non_diegetic_music: N/A'
+                )
+                entries = llm_service._unambiguous_h3_context_dialogue_entries(draft)
+                self.assertIsNotNone(entries)
+                self.assertEqual([entry["speaker"] for entry in entries], ["Ana", "Bea"])
+                repaired = llm_service._repair_unambiguous_h3_context_speaker_ids(
+                    source, draft,
+                )
+                self.assertIn('(S1) <d>[English] You kept the blue ticket.</d>', repaired)
+                self.assertIn('(S2) <d>[English] I kept both of them.</d>', repaired)
+                self.assertTrue(
+                    llm_service._h3_context_dialogue_binding_contract_satisfied(
+                        source, repaired,
+                    )
+                )
+
+                switched = draft.replace(
+                    cue,
+                    'Bea lowers her gaze to the suitcase handle while Ana answers:',
+                )
+                self.assertEqual(
+                    llm_service._repair_unambiguous_h3_context_speaker_ids(source, switched),
+                    switched,
+                )
+                self.assertFalse(
+                    llm_service._h3_context_dialogue_binding_contract_satisfied(
+                        source, switched,
+                    )
+                )
+
+                ambiguous = draft.replace(
+                    cue,
+                    'Bea and Ana lower their gazes to the suitcase, '
+                    'responding with a calm, steady voice:',
+                )
+                self.assertEqual(
+                    llm_service._repair_unambiguous_h3_context_speaker_ids(
+                        source, ambiguous,
+                    ),
+                    ambiguous,
+                )
+                self.assertFalse(
+                    llm_service._h3_context_dialogue_binding_contract_satisfied(
+                        source, ambiguous,
+                    )
+                )
+
+    def test_parenthesized_h3_voice_markers_are_not_natural_speaker_names(self):
+        source = (
+            'Ana (S1) says, <d>[English] You kept the blue ticket.</d> '
+            'Bea (S2) replies, <d>[English] I kept both of them.</d>'
+        )
+        draft = (
+            'integrated_multimodal_description: [Shot 1] '
+            'Ana (S1) gestures toward Bea and speaks: '
+            '<d>[English] You kept the blue ticket.</d> '
+            'Bea(S2) lowers her gaze to the suitcase handle and responds: '
+            '<d>[English] I kept both of them.</d>\n'
+            'overall_soundscape: Quiet room tone.\n'
+            'non_diegetic_music: N/A'
+        )
+        entries = llm_service._unambiguous_h3_context_dialogue_entries(draft)
+        self.assertIsNotNone(entries)
+        self.assertEqual([entry["speaker"] for entry in entries], ["Ana", "Bea"])
+        repaired = llm_service._repair_unambiguous_h3_context_speaker_ids(
+            source, draft,
+        )
+        self.assertIn('(S1) <d>[English] You kept the blue ticket.</d>', repaired)
+        self.assertIn('(S2) <d>[English] I kept both of them.</d>', repaired)
+        self.assertTrue(
+            llm_service._h3_context_dialogue_binding_contract_satisfied(
+                source, repaired,
+            )
+        )
+
+        wrong_owner = draft.replace(
+            'Ana (S1) gestures toward Bea and speaks:',
+            'Bea (S2) gestures toward Ana and speaks:',
+        ).replace(
+            'Bea(S2) lowers her gaze to the suitcase handle and responds:',
+            'Ana(S1) lowers her gaze to the suitcase handle and responds:',
+        )
+        self.assertFalse(
+            llm_service._h3_context_dialogue_binding_contract_satisfied(
+                source, wrong_owner,
+            )
+        )
+
+        ambiguous = draft.replace(
+            'Bea(S2) lowers her gaze to the suitcase handle and responds:',
+            'Bea (S2) and Ana (S1) lower their gazes, '
+            'responding with a calm, steady voice:',
+        )
+        self.assertFalse(
+            llm_service._h3_context_dialogue_binding_contract_satisfied(
+                source, ambiguous,
+            )
+        )
+
+    def test_exact_raw_qwen_and_gemma_four_turn_plans_bind_named_speakers(self):
+        source = (
+            'At a quiet railway platform before dawn, adult sisters Ana and Bea wait beside one suitcase. '
+            'Preserve these words exactly and assign them to the named speaker. '
+            'Ana says, "You kept the blue ticket." Bea answers, "I kept both of them." '
+            'Ana asks, "Then why are you still here?" Bea replies, "Because you are." '
+            'Allow enough natural time for every line, reaction, and pause. '
+            'Do not add, remove, paraphrase, split, or reorder dialogue.'
+        )
+        raw_plans = (
+            (
+                'qwen-last-planning-call',
+                'integrated_multimodal_description: [Shot 1] A quiet railway platform before dawn, '
+                'bathed in cool blue twilight and faint amber lamp light. Adult sisters Ana (dark wool coat) '
+                'and Bea (grey trench coat) stand beside a worn leather suitcase. The camera holds a static '
+                'medium two-shot from the waist up. At 0.00 seconds, Ana shifts her weight and speaks with a '
+                'quiet, accusatory tone: <d>[English] You kept the blue ticket.</d> Bea lowers her gaze to '
+                'the suitcase handle, responding with a calm, steady voice: '
+                '<d>[English] I kept both of them.</d> Ana’s eyes narrow as she steps closer, her voice '
+                'rising in confusion: <d>[English] Then why are you still here?</d> Bea looks up, meeting '
+                'Ana’s gaze with a soft, resolute expression, and replies: '
+                '<d>[English] Because you are.</d> Both sisters remain silent with their mouths closed. '
+                'Ana holds her breath, staring at Bea, while Bea maintains eye contact. The camera holds on '
+                'their frozen standoff as a distant train whistle approaches.\n'
+                'overall_soundscape: Low ambient wind on the open platform, the subtle creak of the suitcase '
+                'handle, and a distant, low-frequency train whistle fading in near the end.\n'
+                'non_diegetic_music: N/A'
+            ),
+            (
+                'gemma-last-planning-call',
+                'integrated_multimodal_description: [Shot 1] Live-action drama, a medium two-shot holds '
+                'on two adult sisters, Ana and Bea, standing closely beside one worn leather suitcase on a '
+                'deserted, damp railway platform just before dawn. The lighting is cool, deep blue, transitioning '
+                'to faint orange streaks on the horizon behind them. Ana (S1), in a muted grey knit sweater and '
+                'dark jeans, stands slightly forward, gazing intently at Bea. Bea (S2), in a deep burgundy '
+                'cardigan and black slacks, stands beside her, gripping the suitcase handle. At 0:00.00 seconds, '
+                'Ana (S1) gestures subtly toward the suitcase while her mouth is closed, then opens to speak: '
+                '<d>[English] You kept the blue ticket.</d> Bea (S2) slowly looks down at the suitcase, then '
+                'raises her eyes back to Ana, and responds with a soft, steady voice: '
+                '<d>[English] I kept both of them.</d> Ana (S1) tilts her head, a questioning frown creasing '
+                'her brow, and speaks: <d>[English] Then why are you still here?</d> Bea (S2) offers a small, '
+                'meaningful smile, her posture relaxing slightly as she answers: '
+                '<d>[English] Because you are.</d> They hold this intimate gaze; Bea leans slightly into Ana, '
+                'and the first orange light catches the dampness of the platform tiles as the scene holds through '
+                'the final moment.\n'
+                'overall_soundscape: Profound silence pervades the platform, punctuated by the gentle, rhythmic '
+                'drip of condensation from the station awning and the occasional faint, distant whistle sighing '
+                'in the cooling morning air.\n'
+                'non_diegetic_music: A very low, sustained, warm cello note swells subtly beneath the dialogue, '
+                'evoking anticipation and melancholy.'
+            ),
+        )
+        for label, draft in raw_plans:
+            with self.subTest(writer=label):
+                entries = llm_service._unambiguous_h3_context_dialogue_entries(draft)
+                self.assertIsNotNone(entries)
+                self.assertEqual(
+                    [entry.get('speaker') for entry in entries],
+                    ['Ana', 'Bea', 'Ana', 'Bea'],
+                )
+                repaired = llm_service._repair_unambiguous_h3_context_speaker_ids(
+                    source, draft,
+                )
+                self.assertTrue(
+                    llm_service._h3_context_dialogue_binding_contract_satisfied(
+                        source, repaired,
+                    ),
+                    msg=f'{label}: strict speaker binding rejected the repaired raw plan.',
+                )
+                for speaker_id, words in (
+                    (1, 'You kept the blue ticket.'),
+                    (2, 'I kept both of them.'),
+                    (1, 'Then why are you still here?'),
+                    (2, 'Because you are.'),
+                ):
+                    self.assertIn(
+                        f'(S{speaker_id}) <d>[English] {words}</d>', repaired,
+                    )
+
     def test_adaptive_script_markers_repair_frame_writer_ids_without_rewrite(self):
         source = (
             'A concise four-turn repair conversation.\n\n'
