@@ -18,13 +18,22 @@ _SPEECH_VERB_RE = re.compile(
     r"sings?|singing|sang|raps?|rapping|narrat(?:es?|ed|ing))\b",
     re.IGNORECASE,
 )
+_POSSESSIVE_SPEECH_LABEL_RE = re.compile(
+    r"['’]s\s+(?:voice|reply|whisper|answer|response)\s*[:,\-–—]\s*$",
+    re.IGNORECASE,
+)
+_POSSESSIVE_BODY_SPEECH_RE = re.compile(
+    rf"['’]s\s+(?:mouth\s+opens?|lips?\s+move)\s+(?:as|while)\s+"
+    rf"(?:he|she|they)\s+(?:\w+ly\s+)?{_SPEECH_VERB_RE.pattern}\s*[:\-–—]\s*$",
+    re.IGNORECASE,
+)
 _DIALOGUE_OWNER_NAME_RE = re.compile(
     r"(?<!\w)([A-Z][A-Za-z0-9_'’-]*(?:\s+[A-Z][A-Za-z0-9_'’-]*){0,3})(?!\w)"
 )
 _DIALOGUE_OWNER_LEADING_WORDS = {
     "a", "after", "an", "and", "as", "at", "both", "during", "from",
     "he", "her", "his", "immediately", "in", "inside", "it", "later",
-    "next", "only", "outside", "she", "the", "their", "then", "they",
+    "next", "now", "only", "outside", "she", "the", "their", "then", "they",
     "this", "while", "with",
 }
 
@@ -234,6 +243,28 @@ def _ref2va_alias_values(item: dict, fallback_role: str = "") -> list[str]:
     return values
 
 
+def _is_ref2va_possessive_speech_attribution(
+    value: str,
+    name_start: int,
+    name_end: int,
+) -> bool:
+    """Accept only bounded, explicit possessive speech ownership cues.
+
+    A speech noun followed by a screenplay delimiter is an explicit label
+    ("Ana's response:"). A body-part cue is accepted only when the named
+    character leads the clause and the same clause ends with that character's
+    pronoun plus a speech verb ("Ana's mouth opens as she says:"). This keeps
+    object mentions such as "Bea looks at Ana's mouth and says" with Bea.
+    """
+    tail = value[name_end:]
+    if _POSSESSIVE_SPEECH_LABEL_RE.fullmatch(tail):
+        return True
+    prefix = value[:name_start]
+    if not re.fullmatch(r"\s*(?:(?:then|now)\s+)?", prefix, re.IGNORECASE):
+        return False
+    return bool(_POSSESSIVE_BODY_SPEECH_RE.fullmatch(tail))
+
+
 def _ref2va_alias_occurrences(source: str, aliases: dict[str, int]):
     occurrences: list[tuple[int, int, str, int]] = []
     for alias, subject in aliases.items():
@@ -243,6 +274,15 @@ def _ref2va_alias_occurrences(source: str, aliases: dict[str, int]):
             source,
             re.IGNORECASE,
         ):
+            following = source[match.end():]
+            if re.match(r"['’]s\b", following, re.IGNORECASE) and not (
+                _is_ref2va_possessive_speech_attribution(
+                    source, match.start(), match.end(),
+                )
+            ):
+                # A possessive is an owner cue only for explicitly labeled
+                # speech or a bounded direct body-part speech construction.
+                continue
             occurrences.append((match.start(), match.end(), alias, subject))
     return sorted(occurrences, key=lambda row: (row[0], -(row[1] - row[0])))
 
@@ -285,18 +325,35 @@ def _resolve_ref2va_dialogue_owner_name(
     clause = before[clause_start:]
 
     def occurrences(value: str):
-        return [
-            (match.start(), match.end(), _clean_ref2va_dialogue_owner_name(match.group(1)))
-            for match in _DIALOGUE_OWNER_NAME_RE.finditer(value)
-            if _clean_ref2va_dialogue_owner_name(match.group(1))
-        ]
+        found = []
+        for match in _DIALOGUE_OWNER_NAME_RE.finditer(value):
+            raw_name = match.group(1)
+            end = match.end()
+            if re.search(r"['’]s$", raw_name, re.IGNORECASE):
+                base_end = end - 2
+                if not _is_ref2va_possessive_speech_attribution(
+                    value, match.start(), base_end,
+                ):
+                    continue
+                # Retain explicit possessive ownership while returning the
+                # character name without its grammatical suffix.
+                raw_name = raw_name[:-2]
+                end = base_end
+            name = _clean_ref2va_dialogue_owner_name(raw_name)
+            if name:
+                found.append((match.start(), end, name))
+        return found
 
     # Direct screenplay syntax: ``Rachel: <d>...</d>``.
     for start, end, name in reversed(occurrences(clause)):
         tail = clause[end:]
         leading = clause[:start]
         if (
-            re.fullmatch(r"\s*(?:'s\s+voice\s*)?[:,\-–—]\s*", tail, re.IGNORECASE)
+            re.fullmatch(
+                r"\s*(?:['’]s\s+(?:voice|reply|whisper|answer|response)\s*)?[:,\-–—]\s*",
+                tail,
+                re.IGNORECASE,
+            )
             and not _SPEECH_VERB_RE.search(leading)
         ):
             return name
@@ -398,7 +455,11 @@ def _resolve_ref2va_dialogue_speaker(
         tail = clause[end:]
         leading = clause[:start]
         if (
-            re.fullmatch(r"\s*(?:'s\s+voice\s*)?[:,\-–—]\s*", tail, re.IGNORECASE)
+            re.fullmatch(
+                r"\s*(?:['’]s\s+(?:voice|reply|whisper|answer|response)\s*)?[:,\-–—]\s*",
+                tail,
+                re.IGNORECASE,
+            )
             and not _SPEECH_VERB_RE.search(leading)
         ):
             return subject

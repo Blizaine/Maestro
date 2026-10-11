@@ -2905,6 +2905,87 @@ def validate_h3_prompt_contract(
     return list(dict.fromkeys(errors))
 
 
+def _retime_h3_visual_timecodes(
+    prompt: str,
+    authored_duration: Any,
+    native_duration: Any,
+) -> str:
+    """Scale visual-local timecodes when native fitting changes clip length.
+
+    The planner's cue is first validated against its authored duration. Only
+    eligible visual ``At MM:SS`` cues are then scaled; dialogue and explicitly
+    labeled source-audio timing stay byte-for-byte intact.
+    """
+
+    from . import prompt_timing
+
+    try:
+        authored_seconds = float(authored_duration)
+        native_seconds = float(native_duration)
+    except (TypeError, ValueError, OverflowError):
+        return prompt
+    if (
+        not math.isfinite(authored_seconds)
+        or authored_seconds <= 0
+        or not math.isfinite(native_seconds)
+        or native_seconds <= 0
+    ):
+        return prompt
+
+    authored_issue = prompt_timing.music_video_visual_timing_issue(
+        prompt, authored_seconds
+    )
+    if authored_issue:
+        raise H3DialogueContractError(
+            f"authored visual timing is invalid: {authored_issue}"
+        )
+    if math.isclose(authored_seconds, native_seconds, rel_tol=0.0, abs_tol=1e-9):
+        return prompt
+
+    masked_prompt = prompt_timing._mask_dialogue_tags(prompt)
+    ratio = native_seconds / authored_seconds
+    replacements: list[tuple[int, int, str]] = []
+    for match in prompt_timing._AT_TIME_RE.finditer(masked_prompt):
+        if prompt_timing._is_source_timing_reference(
+            masked_prompt, match.start()
+        ):
+            continue
+        token = match.group("value")
+        timecode = token.strip("([{<").rstrip(".,:)]}>")
+        if not prompt_timing._TIME_LIKE_RE.match(timecode):
+            continue
+        parsed = prompt_timing._LOCAL_TIMECODE_RE.fullmatch(timecode)
+        # The authored-duration validator above rejects malformed candidates.
+        if not parsed:
+            continue
+        seconds_field = int(parsed.group("seconds"))
+        fraction = parsed.group("fraction") or ""
+        visual_seconds = (
+            int(parsed.group("minutes")) * 60
+            + seconds_field
+            + (
+                int(fraction) / (10 ** len(fraction))
+                if fraction else 0.0
+            )
+        )
+        prefix_length = len(token) - len(token.lstrip("([{<"))
+        suffix_length = len(token) - len(token.rstrip(".,:)]}>"))
+        suffix = token[len(token) - suffix_length:] if suffix_length else ""
+        replacement = (
+            token[:prefix_length]
+            + prompt_timing._format_local_timecode(visual_seconds * ratio)
+            + suffix
+        )
+        replacements.append((*match.span("value"), replacement))
+
+    if not replacements:
+        return prompt
+    retimed = prompt
+    for start, end, replacement in reversed(replacements):
+        retimed = retimed[:start] + replacement + retimed[end:]
+    return retimed
+
+
 def compile_h3_clip_plans(
     clip_plans: Sequence[MutableMapping[str, Any]],
     *,
@@ -3005,12 +3086,30 @@ def compile_h3_clip_plans(
             if durations is not None and index < len(durations)
             else plan.get("_director_duration_sec") or 0.0
         )
+        authored_duration = plan.get("_director_authored_duration_sec")
+        if plan.get("_director_prompt_user_edited"):
+            # Edited prompt text is authored against the current native clip
+            # duration, so it must remain strict instead of inheriting the
+            # planner's pre-fit timing scale.
+            authored_duration = duration
+        try:
+            compile_source_prompt = (
+                _retime_h3_visual_timecodes(
+                    str(source_prompt), authored_duration, duration
+                )
+                if authored_duration is not None
+                else str(source_prompt)
+            )
+        except H3DialogueContractError as error:
+            raise H3DialogueContractError(
+                f"Shot {index + 1}: {error}"
+            ) from error
         references = references_by_plan[index]
         speech_beats = [] if transcript_only[index] else beats
         context_anchors = _h3_plan_context_anchors(plan)
         plan["_director_required_context_anchors"] = context_anchors
         prompt, contract = compile_h3_official_prompt(
-            source_prompt,
+            compile_source_prompt,
             plan.get("_director_subjects_on_screen") or [],
             speech_beats,
             mode=mode,

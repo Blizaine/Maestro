@@ -7,6 +7,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 from models.minimax_h3.ref2va import ensure_ref2va_prompt_relationships
+from models.minimax_h3.speakers import _resolve_ref2va_dialogue_owner_name
 from services import llm_service
 
 
@@ -79,6 +80,106 @@ class RefModSpeakerTests(unittest.TestCase):
         compiled = ensure_ref2va_prompt_relationships(self.prompt, refs)
         self.assertIn('<Subject 2> (S1) in the voice referenced from <Audio 2>, <d>', compiled)
         self.assertIn('<Subject 1> (S2) in the voice referenced from <Audio 1>, <d>', compiled)
+
+    def test_possessive_speech_attributions_are_kept_and_listener_objects_are_ignored(self):
+        context = inventory(["Ana", "Bea"])
+        entries = llm_service._extract_h3_source_dialogue_entries(
+            "Ana and Bea stand together. Bea meets Ana’s eyes and answers: "
+            "<d>[English] I kept both of them.</d>",
+            context,
+        )
+        self.assertEqual([(entry.get("subject_id"), entry["speaker_id"]) for entry in entries], [(2, 1)])
+
+        accepted = (
+            "Ana's voice", "Ana’s reply", "Ana's whisper",
+            "Ana's answer", "Ana’s response",
+            "Ana's mouth opens as she says", "Ana’s mouth opens as she says",
+            "Ana's lips move as she whispers", "Ana’s lips move as she whispers",
+        )
+        for attribution in accepted:
+            with self.subTest(accepted_attribution=attribution):
+                source = f"{attribution}: <d>[English] Hello.</d>"
+                dialogue = re.search(r"<d\b.*?</d>", source)
+                self.assertEqual(
+                    _resolve_ref2va_dialogue_owner_name(source, *dialogue.span()), "Ana",
+                )
+                voice = llm_service._extract_h3_source_dialogue_entries(source, context)
+                self.assertEqual(
+                    [(entry.get("subject_id"), entry["speaker_id"]) for entry in voice],
+                    [(1, 1)],
+                )
+
+        for attribution in (
+            "Ana's voice", "Ana’s reply", "Ana's whisper",
+            "Ana's answer", "Ana’s response",
+        ):
+            with self.subTest(comma_label=attribution):
+                source = f"{attribution}, <d>[English] Hello.</d>"
+                dialogue = re.search(r"<d\b.*?</d>", source)
+                self.assertEqual(
+                    _resolve_ref2va_dialogue_owner_name(source, *dialogue.span()), "Ana",
+                )
+                entries = llm_service._extract_h3_source_dialogue_entries(source, context)
+                self.assertEqual(
+                    [(entry.get("subject_id"), entry["speaker_id"]) for entry in entries],
+                    [(1, 1)],
+                )
+
+        body_cues = (
+            "Ana turns away. Ana's mouth opens as she says: <d>[English] Hello.</d>",
+            "Ana turns away. Ana’s mouth opens as she says: <d>[English] Hello.</d>",
+            "Then Ana's mouth opens as she says: <d>[English] Hello.</d>",
+            "Then Ana’s mouth opens as she says: <d>[English] Hello.</d>",
+            "Now Ana's lips move as she whispers: <d>[English] Hello.</d>",
+            "Now Ana’s lips move as she whispers: <d>[English] Hello.</d>",
+        )
+        for source in body_cues:
+            with self.subTest(body_cue=source):
+                dialogue = re.search(r"<d\b.*?</d>", source)
+                self.assertEqual(
+                    _resolve_ref2va_dialogue_owner_name(source, *dialogue.span()), "Ana",
+                )
+                entries = llm_service._extract_h3_source_dialogue_entries(source, context)
+                self.assertEqual(
+                    [(entry.get("subject_id"), entry["speaker_id"]) for entry in entries],
+                    [(1, 1)],
+                )
+
+        rejected_as_Ana = (
+            "Bea watches Ana's lips and answers",
+            "Bea watches Ana’s lips and answers",
+            "Bea looks at Ana's mouth and says",
+            "Bea looks at Ana’s mouth and says",
+        )
+        for attribution in rejected_as_Ana:
+            with self.subTest(listener_attribution=attribution):
+                source = f"{attribution}: <d>[English] I kept both of them.</d>"
+                dialogue = re.search(r"<d\b.*?</d>", source)
+                self.assertEqual(
+                    _resolve_ref2va_dialogue_owner_name(source, *dialogue.span()), "Bea",
+                )
+                listener = llm_service._extract_h3_source_dialogue_entries(
+                    source, context,
+                )
+                self.assertEqual(
+                    [(entry.get("subject_id"), entry["speaker_id"]) for entry in listener],
+                    [(2, 1)],
+                )
+
+    def test_postposed_speech_attribution_keeps_owner_and_source_entry(self):
+        context = inventory(["Ana", "Bea"])
+        for suffix in (", Ana says.", ", replies Ana."):
+            with self.subTest(suffix=suffix):
+                source = f"<d>[English] Hello.</d>{suffix}"
+                dialogue = re.search(r"<d\b.*?</d>", source)
+                self.assertEqual(
+                    _resolve_ref2va_dialogue_owner_name(source, *dialogue.span()), "Ana",
+                )
+                entries = llm_service._extract_h3_source_dialogue_entries(source, context)
+                self.assertEqual(
+                    [(entry.get("subject_id"), entry["speaker_id"]) for entry in entries],
+                    [(1, 1)],
+                )
 
     def test_enhance_keeps_named_guests_separate_from_saved_refmods(self):
         entries = llm_service._extract_h3_source_dialogue_entries(

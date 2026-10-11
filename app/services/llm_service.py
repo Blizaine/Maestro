@@ -4778,10 +4778,31 @@ def _h3_context_speaker_binding_plan(
     expected_words = [str(entry["words"]).strip() for entry in source_entries]
     if [str(entry["words"]).strip() for entry in result_entries] != expected_words:
         return None
+
+    def owner_matches(expected_owner: str, actual_owner: str) -> bool:
+        expected_key = expected_owner.casefold()
+        actual_key = actual_owner.casefold()
+        if expected_key == actual_key:
+            return True
+        # Writers often shorten an explicitly scripted full name to its first
+        # name in the visual prose. Accept that only when exactly one source
+        # speaker has that prefix; shared first names remain unresolved.
+        candidates = {
+            str(entry.get("speaker") or "").strip().casefold()
+            for entry in source_entries
+            if (
+                str(entry.get("speaker") or "").strip().casefold() == actual_key
+                or str(entry.get("speaker") or "").strip().casefold().startswith(
+                    actual_key + " "
+                )
+            )
+        }
+        return candidates == {expected_key}
+
     for expected, actual in zip(source_entries, result_entries):
         expected_owner = str(expected.get("speaker") or "").strip()
         actual_owner = str(actual.get("speaker") or "").strip()
-        if actual_owner.casefold() == expected_owner.casefold():
+        if owner_matches(expected_owner, actual_owner):
             continue
         if not _h3_pronoun_turn_keeps_previous_named_owner(
             result,
@@ -5647,6 +5668,26 @@ def _compile_h3_explicit_dialogue(
         # immediately preceding an already-tagged source line.
         prefix = result[max(0, start - 60):start]
         import re
+        attributed = re.search(
+            r"(?:<Subject\s+(?P<subject>\d+)>\s*)?\(S(?P<speaker>\d+)\)"
+            r"\s*(?P<verb>(?i:say|says|said|speak|speaks|reply|replies|answer|"
+            r"answers|ask|asks|exclaim|exclaims)\s*[:,]?\s*)$",
+            prefix,
+            flags=re.IGNORECASE,
+        )
+        if (
+            attributed
+            and int(attributed.group("speaker")) == speaker_id
+            and (
+                attributed.group("subject") is None
+                if subject_id is None
+                else attributed.group("subject") == str(subject_id)
+            )
+        ):
+            # Adaptive enhancement already authored ``Name (Sx) says, <d>``.
+            # Normalize the tag contents without appending the same ID again.
+            result = result[:start] + f"<d>[{entry['language']}] {entry['words']}</d>" + result[end:]
+            continue
         existing = re.search(r"(?:<Subject\s+\d+>\s*)?\(S\d+\)\s*$", prefix, flags=re.IGNORECASE)
         if existing:
             absolute = max(0, start - 60) + existing.start()

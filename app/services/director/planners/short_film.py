@@ -4643,6 +4643,9 @@ def _prepare_h3_prompt_only_continuity(shot_dicts: list[dict]) -> list[dict]:
         raw["continuity_strategy"] = requested
 
         subjects = raw.get("subjects_on_screen") or []
+        spatial_setup = re.sub(
+            r"\s+", " ", str(raw.get("spatial_setup") or "")
+        ).strip()
         opening_subjects: list[str] = []
         for subject_index, subject in enumerate(subjects):
             if not isinstance(subject, dict):
@@ -4657,37 +4660,30 @@ def _prepare_h3_prompt_only_continuity(shot_dicts: list[dict]) -> list[dict]:
             if wardrobe:
                 subject["wardrobe"] = wardrobe
                 wardrobe_by_scene_subject.setdefault(canonical_key, wardrobe)
+
+            # spatial_setup is the canonical frame-zero blocking. Only build
+            # a subject-level fallback when that authority is absent, and keep
+            # it to identity, wardrobe, and the static first-frame position.
+            if spatial_setup:
+                continue
             name = str(
                 subject.get("speaker_name")
                 or subject.get("character_id")
-                or subject.get("visual_description")
                 or f"subject {subject_index + 1}"
             ).strip()
             position = re.sub(
                 r"\s+",
                 " ",
-                str(subject.get("position_or_relation") or "unspecified position"),
-            ).strip()
-            description = re.sub(
-                r"\s+", " ", str(subject.get("visual_description") or "")
+                str(subject.get("position_or_relation") or ""),
             ).strip()
             subject_bits = [name]
-            if description:
-                subject_bits.append(description)
             if wardrobe:
                 subject_bits.append(f"wearing {wardrobe}")
-            subject_bits.append(f"positioned {position}")
+            if position:
+                subject_bits.append(f"positioned {position}")
             opening_subjects.append(", ".join(subject_bits))
 
-        spatial_setup = re.sub(
-            r"\s+", " ", str(raw.get("spatial_setup") or "")
-        ).strip()
-        opening_detail = "; ".join(opening_subjects)
-        if spatial_setup:
-            opening_detail = (
-                f"{spatial_setup}. {opening_detail}"
-                if opening_detail else spatial_setup
-            )
+        opening_detail = spatial_setup or "; ".join(opening_subjects)
         raw["video_prompt"] = _insert_h3_visual_detail(
             raw.get("video_prompt", ""),
             "OPENING CONTINUITY",
@@ -8333,11 +8329,11 @@ SCREENPLAY TO REPAIR:
             if uses_generated_images else ""
         )
         video_only_subject_note = (
-            """- subjects_on_screen[i].visual_description: describe how the character looks IN THIS SHOT, including current wardrobe and story state. Keep each mapped identity name/label and useful visible traits consistent across shots."""
+            """- subjects_on_screen[i].visual_description contains identity, stable physical design, and the costume for this shot only. Keep mapped identity names and visible traits consistent across shots. Do not put pose, position, contact, action, movement, or a state reached later in the shot in this field; use spatial_setup for frame zero and action_beats/ending_beat for later changes."""
             if not uses_generated_images else ""
         )
         subject_appearance_notes = (
-            """- subjects_on_screen[i].visual_description: describe how the character LOOKS IN THIS SHOT per the screenplay, not merely the user's reference-photo clothing. The reference establishes identity, while this field carries the current costume and story state. For example, a reference subject in a black shirt can be a knight in silver armor in one shot and wear a linen tunic later; describe each on-screen state accurately."""
+            """- subjects_on_screen[i].visual_description contains identity, stable physical design, and the costume for this shot only, not the user's reference-photo clothing alone. The reference establishes identity. Do not put pose, position, contact, action, movement, or a state reached later in the shot in this field; use spatial_setup for frame zero and action_beats/ending_beat for later changes."""
             if uses_generated_images else video_only_subject_note
         )
         image_workflow_notes = (
@@ -9940,7 +9936,8 @@ H3 NATIVE SHOT CONTRACT — NON-NEGOTIABLE:
 - Use video_prompt for every item and set window_prompts to []. Never write 20-second windows, timeline ranges, or prompt instructions referring to a previous/preceding shot. The structured continuity_strategy and continuity_group fields are required planning metadata, while every video_prompt must remain self-contained.
 - Every video_prompt must stand alone, but it must also be economical: normally 180-450 words and never more than 650 words. State the exact physical setting, visible people, essential appearance/wardrobe, chronological action, camera, lighting, dialogue, ambience, effects, and music once each. Do not paste the screenplay, story bible, production contract, or continuity metadata into the prompt; translate them into concrete visible/audible instructions. Never restate the same opening, action, speaker, or ending in multiple differently worded paragraphs.
 - WARDROBE IS STATE: on every appearance, subjects_on_screen must give each person a complete head-to-toe wardrobe (colors, materials, layers, accessories, and visible footwear). Repeat the same wardrobe wording in every shot within a continuity_group unless the screenplay explicitly changes it, and show that change visibly before using the new wardrobe.
-- BLOCKING IS STATE: spatial_setup and each subject's position_or_relation describe the FIRST FRAME precisely: screen-left/center/right, foreground/midground/background, standing/seated/leaning, facing direction, and nearby furniture or props. Repeat that opening blocking in video_prompt.
+- OPENING BLOCKING HAS ONE AUTHORITY: when spatial_setup is present, it must give the complete canonical static state at frame zero, before any action, for every visible subject and important prop. position_or_relation must echo and agree with that same frame-zero state; it must not fill omissions in a nonempty spatial_setup. Only when spatial_setup is absent may position_or_relation provide a subject-level first-frame position. Neither field may describe movement, progress, or a pose reached later in the shot. Repeat the complete frame-zero state in video_prompt.
+- SUBJECT DESCRIPTION IS NOT BLOCKING: subjects_on_screen[].visual_description contains identity, stable physical design, and costume only. Do not put screen position, posture, contact, action, movement, or a later story state there. Put first-frame pose in spatial_setup and later transitions in action_beats, ending_beat, or closing_blocking.
 - closing_blocking describes the final positions at the end of the shot. When the next shot in the same continuity_group opens with different blocking, the current shot must visibly show the person walking, sitting, standing, turning, or otherwise moving into that next arrangement before the cut.
 - continuity_strategy is "independent" for a new place/time, "continuous" for a normal editorial cut within the same scene, or "extend_previous" ONLY when the next generation should start from the literal final frame with the same camera axis/composition and no intended cut. Use extend_previous sparingly.
 - continuity_group is a short stable ID such as kitchen_morning_1. Reuse it only while place and story time remain uninterrupted; change it for any location or time jump.
@@ -10123,6 +10120,10 @@ SCREENPLAY:
             for raw in items:
                 if not isinstance(raw, dict):
                     continue
+                # This field is internal provenance, never model-authored
+                # input. The native scheduler records the original duration
+                # before replacing it with the fitted frame duration.
+                raw.pop("_director_authored_duration_sec", None)
                 try:
                     raw["story_scene_number"] = max(
                         1,
@@ -10169,6 +10170,17 @@ SCREENPLAY:
             raw_durations = []
             dialogue_frame_floors: list[int] = []
             for raw in items:
+                if "_director_authored_duration_sec" not in raw:
+                    try:
+                        authored_duration = float(raw.get("duration_sec"))
+                    except (TypeError, ValueError, OverflowError):
+                        authored_duration = math.nan
+                    raw["_director_authored_duration_sec"] = (
+                        authored_duration
+                        if math.isfinite(authored_duration)
+                        and authored_duration > 0
+                        else None
+                    )
                 try:
                     raw_durations.append(float(raw.get("duration_sec") or 10))
                 except (TypeError, ValueError):
@@ -10901,6 +10913,9 @@ repeating that prose across every metadata field."""
                 metadata={
                     "title": raw.get("title", ""),
                     "duration_frames": snapped,
+                    "_director_authored_duration_sec": raw.get(
+                        "_director_authored_duration_sec"
+                    ),
                     "continuity_group": raw.get("continuity_group", ""),
                     "story_scene_number": raw.get("story_scene_number"),
                     "causal_handoff": raw.get("causal_handoff", ""),

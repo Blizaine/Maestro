@@ -364,6 +364,39 @@ class H3SourceLanguageBoundaryTests(unittest.TestCase):
             with self.subTest(description=description):
                 self.assertEqual(_h3_preview_action_frames(description, None), [])
 
+    def test_owned_open_body_part_state_is_not_a_future_opening_preview(self):
+        source = (
+            "Nia places the brass key into Omar's open right palm. "
+            "Omar closes his hand before Tess enters. Continue into a second beat: "
+            "Tess turns to inspect the shipping ledger, Omar quietly opens his right hand "
+            "behind the ledger."
+        )
+        for possessive in ("Omar's", "Omar’s"):
+            visible_state = (
+                f"Nia places the brass key directly into {possessive} open right palm."
+            )
+            with self.subTest(possessive=possessive):
+                frames = _h3_preview_action_frames(
+                    visible_state, re.compile(r"\b(?:Nia|Omar|Tess)\b", re.IGNORECASE),
+                )
+                self.assertNotIn("open", {frame[0] for frame in frames}, frames)
+                state_errors = _preview_errors(source, visible_state)
+                self.assertFalse(
+                    any("previews later source event" in error for error in state_errors),
+                    state_errors,
+                )
+
+        for visible_action in (
+            "Omar quietly opens his right hand behind the ledger.",
+            "Open Omar's right hand behind the ledger.",
+        ):
+            with self.subTest(visible_action=visible_action):
+                errors = _preview_errors(source, visible_action)
+                self.assertTrue(
+                    any("previews later source event" in error for error in errors),
+                    errors,
+                )
+
     def test_lock_and_hand_nouns_do_not_become_physical_verb_frames(self):
         frames = _h3_preview_action_frames(
             "Nora glances at the brass lock on the door; her right hand rests on the latch.",

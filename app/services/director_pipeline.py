@@ -1399,6 +1399,12 @@ def _save_pipeline_state_locked(pid: str) -> bool:
                 plan.get("_director_subjects_on_screen", []) or []
             ),
             "_director_duration_sec": plan.get("_director_duration_sec"),
+            "_director_authored_duration_sec": plan.get(
+                "_director_authored_duration_sec"
+            ),
+            "_director_prompt_user_edited": bool(
+                plan.get("_director_prompt_user_edited")
+            ),
             "_director_vocal_contract": plan.get("_director_vocal_contract"),
             "_director_h3_source_prompt": plan.get("_director_h3_source_prompt"),
             "_director_h3_compiled_prompt": plan.get("_director_h3_compiled_prompt"),
@@ -2828,6 +2834,9 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             clip.get("_director_subjects_on_screen", []) or []
         ),
         "_director_duration_sec": clip.get("_director_duration_sec"),
+        "_director_authored_duration_sec": clip.get(
+            "_director_authored_duration_sec"
+        ),
         "_director_h3_prompt_mode": clip.get("_director_h3_prompt_mode"),
         "_director_h3_model_family": clip.get("_director_h3_model_family"),
         "_director_speaker_registry": clip.get("_director_speaker_registry") or {},
@@ -5332,6 +5341,12 @@ def _resume_pipeline_reserved(pid: str, out_dir: str) -> tuple[bool, str]:
             c.get("_director_subjects_on_screen", []) or []
         ),
         "_director_duration_sec": c.get("_director_duration_sec"),
+        "_director_authored_duration_sec": c.get(
+            "_director_authored_duration_sec"
+        ),
+        "_director_prompt_user_edited": bool(
+            c.get("_director_prompt_user_edited")
+        ),
         "_director_vocal_contract": c.get("_director_vocal_contract"),
         "_director_h3_source_prompt": c.get("_director_h3_source_prompt"),
         "_director_h3_compiled_prompt": c.get("_director_h3_compiled_prompt"),
@@ -6199,6 +6214,18 @@ def _run_planning(pid: str, params: dict, pipeline_type: str):
         return _run_planning_legacy(pid, params, pipeline_type)
 
 
+def _director_shot_timing_fields(shot) -> dict:
+    """Keep authored and fitted shot durations distinct in pipeline state."""
+    metadata = getattr(shot, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return {
+        "_director_duration_sec": getattr(shot, "duration_sec", None),
+        "_director_authored_duration_sec": metadata.get(
+            "_director_authored_duration_sec"
+        ),
+    }
+
+
 def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
     """New architecture: DirectorOrchestrator with planners + renderers."""
     from services import llm_service
@@ -6593,7 +6620,7 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
                     getattr(shot, "subjects_on_screen", None) or []
                 )
             ],
-            "_director_duration_sec": getattr(shot, "duration_sec", None),
+            **_director_shot_timing_fields(shot),
         }
         if is_h3_model:
             audio_plan = getattr(shot, "audio_plan", None)

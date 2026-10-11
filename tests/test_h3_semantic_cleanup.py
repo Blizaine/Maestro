@@ -29,6 +29,27 @@ ROOM = (
 
 
 class SemanticCleanupTests(unittest.TestCase):
+    def test_second_beat_writing_cue_does_not_become_a_character_or_event(self):
+        source = (
+            'Adult evidence clerk Nia holds one sealed pouch. Omar closes his hand '
+            'before adult security officer Tess enters, so Tess has not seen the key. '
+            'Continue into a second beat: Tess turns to inspect the shipping ledger, '
+            'Omar quietly opens his right hand behind the ledger, and Nia recognizes '
+            'an engraved crescent on the key.'
+        )
+        intent = extract_h3_source_intent(source)
+        self.assertEqual(intent["cast_names"], ["Nia", "Omar", "Tess"])
+        events = extract_source_events(source)
+        self.assertFalse(any(event["text"].startswith("Continue into") for event in events))
+        self.assertTrue(any(event["text"].startswith("Tess turns to inspect") for event in events))
+        self.assertTrue(any("Omar quietly opens his right hand" in event["text"] for event in events))
+
+        # Capitalization alone is not enough to discard an unusual real name.
+        unusual = extract_h3_source_intent(
+            'Continue enters the archive and gives Mara the ledger.'
+        )
+        self.assertIn("Continue", unusual["cast_names"])
+
     def test_temporal_split_keeps_the_subject_of_an_invitation(self):
         for source in (
             "Michael then invites her into his office.",

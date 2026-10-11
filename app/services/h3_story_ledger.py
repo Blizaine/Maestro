@@ -1683,6 +1683,22 @@ def _h3_without_production_note_spans(source: str) -> str:
     return _h3_strip_inline_context_labels(masked)
 
 
+_H3_CONTINUE_BEAT_DIRECTIVE_RE = re.compile(
+    r"(?im)(^|(?<=[.!?;])\s+|[\r\n]+)"
+    r"Continue(?:\s+naturally)?\s+into\s+"
+    r"(?:a|an|the)\s+(?:second|next|following|new)\s+beat"
+    r"(?:\s+in\s+[^:;.!?\r\n]{1,100})?\s*:\s*"
+)
+
+
+def _strip_h3_continue_beat_directive(value: Any) -> str:
+    """Remove an authoring cue while retaining the visible beat that follows."""
+
+    return _H3_CONTINUE_BEAT_DIRECTIVE_RE.sub(
+        lambda match: match.group(1), str(value or ""),
+    )
+
+
 def _is_h3_imperative_name_occurrence(source: str, start: int, end: int, name: str) -> bool:
     """Reject a clause-leading direction verb without blacklisting a person's name."""
 
@@ -1692,6 +1708,13 @@ def _is_h3_imperative_name_occurrence(source: str, start: int, end: int, name: s
     after = source[end:end + 100]
     if name.casefold() == "continue" and re.match(
         r"\s+from\s+(?:the\s+)?opening\s+(?:frame|pose|shot)\b",
+        after,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if name.casefold() == "continue" and re.match(
+        r"\s+(?:naturally\s+)?into\s+(?:a|an|the)\s+"
+        r"(?:second|next|following|new)\s+beat\b",
         after,
         flags=re.IGNORECASE,
     ):
@@ -3272,6 +3295,7 @@ def _story_fragments(prompt: str) -> list[str]:
     for start, end, _text in reversed(_h3_persistent_instruction_spans(raw_source)):
         raw_source = raw_source[:start] + ". " + raw_source[end:]
     raw_source = _h3_strip_inline_context_labels(raw_source)
+    raw_source = _strip_h3_continue_beat_directive(raw_source)
     source = sanitize_h3_prompt_text(
         re.sub(
             r"(?:\r?\n)+",
@@ -3558,6 +3582,7 @@ def extract_source_events(prompt: str) -> list[dict[str, Any]]:
             )
             if pose_prefix:
                 text = text[pose_prefix.end():]
+            text = _strip_h3_continue_beat_directive(text)
             # Authored time ranges keep their physical paragraph atomic, but
             # an inline global style requirement still belongs to context.
             for start, end, _style in reversed(_h3_inline_style_direction_spans(text)):
@@ -4772,6 +4797,25 @@ def _h3_preview_action_frames(
             ):
                 continue
             if token_stems & _h3_contract_token_stems(verb) and previous in base_form_leads:
+                continue
+            if (
+                token == "open"
+                and re.search(
+                    r"\b(?:[A-Za-z][\w'’-]*['’]s?|my|our|your|his|her|their|its)\s*$",
+                    clause[:match.start()],
+                    flags=re.IGNORECASE,
+                )
+                and re.match(
+                    r"\s+(?:(?:both|left|right|raised|outstretched|extended)\s+)*"
+                    r"(?:hands?|palms?)\b",
+                    clause[match.end():],
+                    flags=re.IGNORECASE,
+                )
+            ):
+                # In an owned body-part noun phrase such as "Omar's open
+                # right palm", open is a state adjective, not an early
+                # opening action. Finite "opens" and imperative "open" forms
+                # do not have this possessive-adjective shape and stay active.
                 continue
             if token in {"closed", "shut", "open", "locked", "sealed"} and re.search(
                 r"\b(?:a|an|the|this|that|his|her|their|its)\s+"

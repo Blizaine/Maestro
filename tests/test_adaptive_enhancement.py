@@ -202,6 +202,65 @@ class AdaptiveWritingTests(unittest.TestCase):
                     unsafe_draft,
                 )
 
+    def test_exact_dialogue_owner_ignores_a_possessive_listener_name(self):
+        source = (
+            'Ana says, <d>[English] You kept the blue ticket.</d> '
+            'Bea replies, <d>[English] I kept both of them.</d>'
+        )
+        for possessive in ("Ana's", "Ana’s"):
+            with self.subTest(possessive=possessive):
+                draft = (
+                    'integrated_multimodal_description: [Shot 1] '
+                    'Ana turns to Bea and says: '
+                    '<d>[English] You kept the blue ticket.</d> '
+                    'Bea looks down at the suitcase, then meets '
+                    f'{possessive} eyes and answers: '
+                    '<d>[English] I kept both of them.</d>\n'
+                    'overall_soundscape: Quiet room tone.\n'
+                    'non_diegetic_music: N/A'
+                )
+                entries = llm_service._unambiguous_h3_context_dialogue_entries(draft)
+                self.assertIsNotNone(entries)
+                self.assertEqual([entry["speaker"] for entry in entries], ["Ana", "Bea"])
+                repaired = llm_service._repair_unambiguous_h3_context_speaker_ids(
+                    source, draft,
+                )
+                self.assertIn('(S1) <d>[English] You kept the blue ticket.</d>', repaired)
+                self.assertIn('(S2) <d>[English] I kept both of them.</d>', repaired)
+                self.assertTrue(
+                    llm_service._h3_context_dialogue_binding_contract_satisfied(
+                        source, repaired,
+                    )
+                )
+
+                switched = draft.replace(
+                    f'Bea looks down at the suitcase, then meets {possessive} eyes and answers:',
+                    'Bea looks down at the suitcase while Ana answers:',
+                )
+                self.assertEqual(
+                    llm_service._repair_unambiguous_h3_context_speaker_ids(source, switched),
+                    switched,
+                )
+                self.assertFalse(
+                    llm_service._h3_context_dialogue_binding_contract_satisfied(
+                        source, switched,
+                    )
+                )
+
+                ambiguous = draft.replace(
+                    f'Bea looks down at the suitcase, then meets {possessive} eyes and answers:',
+                    'Bea and Ana look down at the suitcase and answer:',
+                )
+                self.assertEqual(
+                    llm_service._repair_unambiguous_h3_context_speaker_ids(source, ambiguous),
+                    ambiguous,
+                )
+                self.assertFalse(
+                    llm_service._h3_context_dialogue_binding_contract_satisfied(
+                        source, ambiguous,
+                    )
+                )
+
     def test_adaptive_script_markers_repair_frame_writer_ids_without_rewrite(self):
         source = (
             'A concise four-turn repair conversation.\n\n'
@@ -233,6 +292,112 @@ class AdaptiveWritingTests(unittest.TestCase):
         self.assertIn('center the caliper, spin the wheel, and hear the rubbing stop', repaired)
         self.assertTrue(llm_service._h3_dialogue_contract_satisfied(source, repaired))
         self.assertTrue(llm_service._h3_context_dialogue_binding_contract_satisfied(source, repaired))
+
+    def test_real_adaptive_exchange_keeps_jerry_michael_ron_speaker_ids(self):
+        prompt = (
+            'Jerry Seinfeld, Michael Scott from The Office, and Ron Swanson from Parks and Rec '
+            'are standing and talking to each other at a company holiday party. Write one brief, '
+            'natural exchange appropriate to their distinct personalities.'
+        )
+        turns = [
+            {'speaker': 'Michael Scott', 'text': 'Ron, are you a fan of the office?'},
+            {'speaker': 'Ron Swanson', 'text': 'I am a fan of the meat.'},
+            {'speaker': 'Jerry Seinfeld', 'text': 'Wait, which meat?'},
+        ]
+        visual_draft = (
+            'integrated_multimodal_description: [Shot 1] Jerry Seinfeld, Michael Scott, and '
+            'Ron Swanson stand together at the company holiday party. Michael gestures expansively '
+            'and speaks: <d>[English] Ron, are you a fan of the office?</d> Ron remains stoic and '
+            'replies: <d>[English] I am a fan of the meat.</d> Jerry raises an eyebrow and asks: '
+            '<d>[English] Wait, which meat?</d>\n'
+            'overall_soundscape: Distant party chatter and faint instrumental holiday music.\n'
+            'non_diegetic_music: N/A'
+        )
+        with patch.object(llm_service, 'generate', side_effect=[
+            json.dumps({'turns': turns}), visual_draft,
+        ]) as generate, patch(
+            'services.enhance_guides.get_enhance_guide', return_value='H3 guide',
+        ):
+            enhanced = llm_service.enhance_prompt(
+                prompt=prompt,
+                mode='video',
+                model_type='minimax_h3_fused_turbo',
+                duration_seconds=10.125,
+                planning_style='adaptive',
+                max_new_tokens=1280,
+            )
+
+        self.assertEqual(generate.call_count, 2)
+        authored_request = generate.call_args_list[1].kwargs['prompt']
+        script_start = authored_request.index('Spoken script for this adaptation.')
+        authored_script = authored_request[script_start:]
+        script_entries = llm_service._unambiguous_h3_context_dialogue_entries(authored_script)
+        self.assertIsNotNone(script_entries)
+        self.assertEqual(
+            [(entry.get('speaker'), entry['speaker_id']) for entry in script_entries],
+            [('Michael Scott', 1), ('Ron Swanson', 2), ('Jerry Seinfeld', 3)],
+        )
+        compiled_script = llm_service._compile_h3_explicit_dialogue(authored_script)
+        for name, speaker_id, words in (
+            ('Michael Scott', 1, 'Ron, are you a fan of the office?'),
+            ('Ron Swanson', 2, 'I am a fan of the meat.'),
+            ('Jerry Seinfeld', 3, 'Wait, which meat?'),
+        ):
+            self.assertIn(
+                f'{name} (S{speaker_id}) says, <d>[English] {words}</d>',
+                compiled_script,
+            )
+        self.assertIn('(S1) <d>[English] Ron, are you a fan of the office?</d>', enhanced)
+        self.assertIn('(S2) <d>[English] I am a fan of the meat.</d>', enhanced)
+        self.assertIn('(S3) <d>[English] Wait, which meat?</d>', enhanced)
+        self.assertTrue(
+            llm_service._h3_context_dialogue_binding_contract_satisfied(
+                authored_script, enhanced,
+            )
+        )
+
+    def test_short_speaker_names_are_rejected_when_source_names_are_ambiguous(self):
+        source = (
+            'Michael Scott (S1) says, <d>[English] That was thoughtful.</d> '
+            'Michael Jordan (S2) replies, <d>[English] I appreciate it.</d>'
+        )
+        draft = (
+            'integrated_multimodal_description: [Shot 1] Michael says: '
+            '<d>[English] That was thoughtful.</d> Michael replies: '
+            '<d>[English] I appreciate it.</d>\n'
+            'overall_soundscape: Quiet room tone.\n'
+            'non_diegetic_music: N/A'
+        )
+        self.assertEqual(
+            llm_service._repair_unambiguous_h3_context_speaker_ids(source, draft),
+            draft,
+        )
+        self.assertFalse(
+            llm_service._h3_context_dialogue_binding_contract_satisfied(source, draft)
+        )
+
+        full_and_short = (
+            'Michael (S1) says, <d>[English] That was thoughtful.</d> '
+            'Michael Scott (S2) replies, <d>[English] I appreciate it.</d>'
+        )
+        shortened = (
+            'integrated_multimodal_description: [Shot 1] Michael says: '
+            '<d>[English] That was thoughtful.</d> Michael says: '
+            '<d>[English] I appreciate it.</d>\n'
+            'overall_soundscape: Quiet room tone.\n'
+            'non_diegetic_music: N/A'
+        )
+        self.assertEqual(
+            llm_service._repair_unambiguous_h3_context_speaker_ids(
+                full_and_short, shortened,
+            ),
+            shortened,
+        )
+        self.assertFalse(
+            llm_service._h3_context_dialogue_binding_contract_satisfied(
+                full_and_short, shortened,
+            )
+        )
 
     def test_pronoun_continuation_repairs_only_proven_previous_owner(self):
         source = 'Theo (S1) says, <d>[English] Thanks, you saved it.</d>'
@@ -286,7 +451,8 @@ class AdaptiveWritingTests(unittest.TestCase):
         self.assertIn('after every action that causes or motivates it', fallback)
         self.assertIn('Preserve requested nonverbal reactions such as a laugh', fallback)
         self.assertIn('gives one relieved laugh', fallback)
-        self.assertIn('(S1) <d>[English] Thanks.</d>', fallback)
+        self.assertIn('Theo (S1) says, <d>[English] Thanks.</d>', fallback)
+        self.assertEqual(fallback.count('(S1)'), 1)
         self.assertNotIn('all mouths remain closed before and after it', fallback)
         self.assertNotIn('no human voices, whispers, grunts', fallback)
 
