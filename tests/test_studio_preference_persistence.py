@@ -136,6 +136,11 @@ class TestStudioPreferencePersistence(unittest.TestCase):
         self.assertEqual(result["selected_model_per_audio_sub_mode"]["music"], "minimax_music3")
         self.assertEqual(result["h3_optimizations"]["override_attention"], "sol")
         self.assertNotIn("prompt", result)
+        for attention in ("", "sol", "sla", "veda", "sdpa"):
+            with self.subTest(attention=attention):
+                saved = normalize({"h3_optimizations": {"override_attention": attention}}, current=result)
+                restored = normalize(json.loads(json.dumps(saved)))
+                self.assertEqual(restored["h3_optimizations"]["override_attention"], attention)
 
     def test_backend_rejects_invalid_preference_values(self):
         normalize = _load_normalizers()["_normalize_studio_preferences"]
@@ -186,7 +191,6 @@ class TestStudioPreferencePersistence(unittest.TestCase):
         self.assertIn("studioVideoWorkflow: restoredVideoWorkflow", store)
         self.assertIn("audioSubMode: restoredAudioSubMode", store)
         self.assertIn("selectedModelPerAudioSubMode", store)
-        self.assertIn("const restoredH3Attention: '' | 'sol' | 'sla' | 'sdpa'", store)
         self.assertIn("override_attention: restoredH3Attention", store)
         self.assertIn("skip_steps_cache_type: h3Preferences?.skip_steps_cache_type", store)
         self.assertIn("_persistStickyStudioPreferences(get())", store)
