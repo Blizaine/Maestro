@@ -2494,6 +2494,47 @@ def _has_nested_dialogue_open(prompt: str) -> bool:
     return False
 
 
+def _ref2va_inferred_visible_identity(subject: Any) -> str:
+    """Infer a short visible label only when a cast member has no usable name.
+
+    Semantic planner IDs such as ``lead_performer`` are stable keys, not names
+    that appear in visual prose. A capitalized identity at the start of the
+    subject's description can supply the visible label, but generic role words
+    such as ``performer`` are not identities.
+    """
+
+    if _h3_identity_label(_field(subject, "speaker_name", "")):
+        return ""
+    description = _normalized_space(_field(subject, "visual_description", ""))
+    opening = re.split(
+        r"[,;:(]|\s+(?:from|with|wearing|whose|in|is|stands?|sits?|holds?|"
+        r"approach(?:es|ing)?|standing|sitting|holding|posing|looking|walking|"
+        r"running|clad)\b",
+        description,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip(" .,:;—–-")
+    opening = re.sub(
+        r"^(?:(?:the|a|an|same|single)\s+)+", "", opening, flags=re.IGNORECASE,
+    )
+    if not opening or not re.fullmatch(
+        r"[A-Z][A-Za-z0-9'’–-]*(?:\s+[A-Z][A-Za-z0-9'’–-]*){0,2}",
+        opening,
+    ):
+        return ""
+    label_key = _h3_anchor_key(opening)
+    generic_labels = _H3_GENERIC_IDENTITY_LABELS | {
+        "actor", "actress", "dancer", "musician", "performer", "singer",
+    }
+    if (
+        label_key in {_h3_anchor_key(label) for label in generic_labels}
+        or _H3_LOCAL_CAST_SLOT_RE.fullmatch(opening)
+        or _h3_is_placeholder_identity(opening)
+    ):
+        return ""
+    return opening
+
+
 def _ref2va_identity_aliases(subject: Any) -> list[str]:
     """Read explicit names or a conservative leading identity noun phrase.
 
@@ -2505,6 +2546,9 @@ def _ref2va_identity_aliases(subject: Any) -> list[str]:
         _h3_identity_label(_field(subject, key, ""))
         for key in ("speaker_name", "character_id")
     ]
+    inferred = _ref2va_inferred_visible_identity(subject)
+    if inferred:
+        aliases.append(inferred)
     for name in list(aliases):
         # Planner names and reference roles commonly differ only by a leading
         # article ("the Kitten" vs "Kitten"). Keep the original alias and add
@@ -2667,6 +2711,7 @@ def _reference_relationships(
         aliases = _ref2va_identity_aliases(subject)
         subject_name = (
             _h3_identity_label(_field(subject, "speaker_name", ""))
+            or _ref2va_inferred_visible_identity(subject)
             or _h3_identity_label(character_id)
             or (aliases[0] if aliases else f"visible subject {matched_index + 1}")
         )
@@ -2894,6 +2939,7 @@ def _ref2va_subject_definitions(
         aliases = _ref2va_identity_aliases(subject)
         name = (
             _h3_identity_label(_field(subject, "speaker_name", ""))
+            or _ref2va_inferred_visible_identity(subject)
             or _h3_identity_label(character_id)
             or next(iter(aliases), f"visible subject {index}")
         )
@@ -2928,9 +2974,13 @@ def _label_ref2va_subjects_in_body(
             continue
         name = (
             _h3_identity_label(_field(subject, "speaker_name", ""))
+            or _ref2va_inferred_visible_identity(subject)
             or _h3_identity_label(_field(subject, "character_id", ""))
         )
-        if not _h3_identity_label(_field(subject, "speaker_name", "")):
+        if (
+            not _h3_identity_label(_field(subject, "speaker_name", ""))
+            and not _ref2va_inferred_visible_identity(subject)
+        ):
             # Semantic IDs such as lead_performer need not occur in natural
             # visual prose. Bind a unique visible identity alias instead.
             for alias in _ref2va_identity_aliases(subject):
