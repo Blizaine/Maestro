@@ -16,6 +16,13 @@ tags remain unchanged. The planning and media limitations below still apply.
 
 ## Automated checks
 
+The October 12 Dev preflight identified an avoidable recurrence-parser hot path
+in the one-hour Studio planning fixture. Checking recurrence eligibility before
+parsing connective prose reduced that fixture from a timed-out run to 2.935
+seconds on the local machine. All 37 long-form planning tests and 19 recurrence
+tests passed after the change. These are CPU planning fixtures, not video-render
+timings.
+
 [Dev CI run 37861066113](https://github.com/Blizaine/Maestro/actions/runs/37861066113)
 passed for `8831f34`: clean-repo guard, Python syntax and undefined-name checks,
 full backend unittest discovery (3,490 tests, 55 skipped), JSON grammar and

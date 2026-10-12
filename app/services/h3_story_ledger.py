@@ -6668,14 +6668,17 @@ def _camera_phase_beats(
     for scheduled in full_schedule_beats or []:
         if scheduled.get("source_event_ids") or scheduled.get("dialogue_ids"):
             continue
-        description = sanitize_h3_prompt_text(scheduled.get("description"))
-        later_action = later_occasion_action_text(description)
-        if not later_action:
-            continue
         preceding_id, _ = schedule_anchors.get(str(scheduled.get("beat_id") or "").upper(), ("", ""))
         if preceding_id not in recurring_ids:
             continue
         if int(scheduled.get("segment") or 0) <= source_schedule_segments.get(preceding_id, 0):
+            continue
+        # Later-occasion parsing is relevant only to an explicitly recurring
+        # source action. Avoid rescanning unrelated connective beats for every
+        # window in a long story.
+        description = sanitize_h3_prompt_text(scheduled.get("description"))
+        later_action = later_occasion_action_text(description)
+        if not later_action:
             continue
         source_text = event_text.get(preceding_id, "")
         source_frames = _h3_preview_action_frames(source_text, None)

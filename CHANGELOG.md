@@ -18,6 +18,8 @@ Public Dev testing candidate; not promoted to Main. See the [full release notes]
   validate final picture ownership before rendering. Keep camera directions
   such as “wide shot” out of physical story-action obligations, and keep
   placeholder names from merging distinct performers.
+- Skip irrelevant repeated-event scans during long-form Studio planning when
+  the preceding source action does not explicitly request recurrence.
 - Integrate an adapted WanGP 17 / MMGP 4 memory engine with opt-in allocator
   choices, generation-aware auto-tuning, local workload learning, RAM pinning,
   preload controls and compatible INT8 kernel selection. Keep conservative
