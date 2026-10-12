@@ -64,10 +64,13 @@ export function h3PerformanceAdvice(input: H3PerformanceAdviceInput): H3Performa
   const attention = input.attention === 'auto' || !input.attention
     ? options.sla_attention_default ? 'sla' : 'auto' : input.attention
   const slow = !fused && input.steps >= 20 && frames >= 243 && area >= 1920 * 1088
-  const unverifiedRecipe = fused ? input.steps !== policy.benchmark.variants.fused_turbo.steps || attention !== 'sla' : attention === 'sla'
+  const vedaAttention = attention === 'veda'
+  const unverifiedRecipe = fused
+    ? input.steps !== policy.benchmark.variants.fused_turbo.steps || attention !== 'sla'
+    : attention === 'sla' || vedaAttention
   const hasExtraMedia = (input.referenceCount ?? 0) > 0 || input.videoGuide || (input.continuationFrames ?? 0) > 0
   const hasLoras = (input.loraCount ?? 0) > 0
-  const experimental = beyondEvidence || (hasLoras && split > 0)
+  const experimental = beyondEvidence || (hasLoras && split > 0) || vedaAttention
   if (slow) notes.push('Pruned at 20 steps took about 116 minutes at 1080p / 10.1s on the 12 GB test machine; the 15s test projected hours. Shorter 720p windows are recommended for speed.')
   else if (fused && split > 0 && !unverifiedRecipe && !hasLoras && !beyondEvidence) {
     notes.push('Fused at 6 steps with SLA completed 1080p / 10.1s in about 18 minutes with Low, and 15.1s in about 32 minutes with Medium. These are individual test results, not an ETA.')

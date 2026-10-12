@@ -451,6 +451,7 @@ def build_director_video_execution_profile(
         ),
         "sol_attention": video_params.get("override_attention") == "sol",
         "sla_attention": video_params.get("override_attention") == "sla",
+        "veda_attention": video_params.get("override_attention") == "veda",
         "fused_turbo": bool(model_def.get("minimax_h3_fused_turbo")),
         "first_block_cache": (
             video_params.get("skip_steps_cache_type") == "first_block"

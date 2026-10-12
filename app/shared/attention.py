@@ -394,6 +394,27 @@ def get_sla_attention_status():
     }
 
 
+def get_veda_attention_status():
+    """Check eligibility without importing sparse kernels or probing the GPU."""
+    capability = _cuda_capability()
+    installed = bool(triton_installed and _triton_version_tuple() >= (3, 0))
+    if not installed:
+        reason = "H3 Veda requires Triton 3.0 or newer."
+    elif getattr(torch.version, "hip", None):
+        reason = "H3 Veda currently requires an NVIDIA CUDA GPU."
+    elif capability < (8, 0):
+        reason = "H3 Veda requires BF16 on an NVIDIA Ampere-or-newer GPU (SM80+)."
+    else:
+        reason = None
+    return {
+        "installed": installed, "supported": installed and reason is None,
+        "reason": reason, "capability": f"SM{capability[0]}{capability[1]}",
+        "triton_version": str(getattr(triton, "__version__", "")) if triton_installed else None,
+        "minimum_triton": "3.0", "first_run_compiles_kernels": True,
+        "safe_dense_fallback": False,
+    }
+
+
 def get_override_attention_modes():
     """Generation overrides include model-specific backends such as Sol."""
 
@@ -402,6 +423,8 @@ def get_override_attention_modes():
         modes.append("sol")
     if get_sla_attention_status()["installed"]:
         modes.append("sla")
+    if get_veda_attention_status()["installed"]:
+        modes.append("veda")
     return modes
 
 
@@ -411,6 +434,8 @@ def get_supported_override_attention_modes():
         modes.append("sol")
     if get_sla_attention_status()["supported"]:
         modes.append("sla")
+    if get_veda_attention_status()["supported"]:
+        modes.append("veda")
     return modes
 
 
@@ -431,7 +456,7 @@ def sage2_staged_settings(device, force_attention=None):
         if force_attention is not None
         else offload.shared_state.get("_attention")
     )
-    if attention_mode in {"sol", "sla", "auto"}:
+    if attention_mode in {"sol", "sla", "veda", "auto"}:
         attention_mode = get_default_attention_mode()
     if attention_mode not in {"sage2", "radial"}:
         return None
@@ -446,6 +471,7 @@ __all__ = [
     'get_supported_override_attention_modes',
     'get_sol_attention_status',
     'get_sla_attention_status',
+    'get_veda_attention_status',
     'get_default_attention_mode',
     'sage2_staged_settings',
 ]
@@ -489,7 +515,7 @@ def pay_attention(
     # Sol is a MiniMax-H3 main-DiT override, not a general attention mode.
     # H3's short token-refiner calls and any fail-safe recovery come through
     # this shared function and should use the fastest supported dense backend.
-    if attn in {"sol", "sla", "auto"}:
+    if attn in {"sol", "sla", "veda", "auto"}:
         attn = get_default_attention_mode()
 
     q,k,v = qkv_list

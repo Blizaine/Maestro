@@ -935,6 +935,7 @@ def _load_transformer(
     singularity: bool = False,
     dasiwa: bool = False,
     import_profile: dict | None = None,
+    veda_filename: str | None = None,
 ) -> MiniMaxH3Transformer:
     checkpoint = probe_h3_checkpoint(_first_path(filename))
     qkv_layout = str(qkv_layout or "contiguous").strip().lower()
@@ -967,6 +968,10 @@ def _load_transformer(
         ) or qkv_layout != verified["qkv_layout"]:
             raise ValueError("The imported H3 checkpoint no longer matches its verified loader profile. Re-import the file in the model browser.")
         checkpoint.update(verified)
+    veda_policy = None
+    if veda_filename is not None:
+        from .veda.attention import VedaAttention, VedaPolicy, read_metadata
+        veda_policy = VedaPolicy(read_metadata(veda_filename))
     with init_empty_weights(include_buffers=True):
         transformer = MiniMaxH3Transformer(
             curve_grid=checkpoint["adaln_curve_grid"],
@@ -975,6 +980,10 @@ def _load_transformer(
             sla_config=sla_config,
             vdn=vdn,
         )
+        if veda_policy is not None:
+            transformer.veda_attention = veda_policy
+            for layer, block in enumerate(transformer.blocks):
+                block.attn.veda = VedaAttention(veda_policy, layer, device="meta")
     inner_size = 56 * 128
     # Comfy's scaled-FP8 pruned checkpoint already stores grouped [Q, K, V]
     # weights in the exact fused layout used by this runtime. MMGP 3.7.6's
@@ -1000,7 +1009,7 @@ def _load_transformer(
         offload.split_linear_modules(transformer, split_map)
     offload.load_model_data(
         transformer,
-        filename,
+        [*filenames, veda_filename] if veda_filename is not None else filename,
         writable_tensors=False,
         default_dtype=dtype,
         preprocess_sd=partial(
@@ -1279,11 +1288,15 @@ class MiniMaxH3Model:
         dtype: torch.dtype = torch.bfloat16,
         minimax_h3_text_encoder: str = "nvfp4_awq",
         VAE_upsampling: str | None = None,
+        minimax_h3_veda: bool = False,
         **_kwargs,
     ):
         self.device = torch.device("cuda")
         self.dtype = dtype
         self.model_def = model_def
+        self.veda = bool(minimax_h3_veda)
+        if self.veda and (not model_def.get("veda_attention") or dtype != torch.bfloat16):
+            raise ValueError("Experimental H3 Veda requires ordinary Full/Pruned H3 with BF16 activations.")
         self.assets_root = model_def.get("minimax_h3_assets_root", "minimax_h3")
         self.audio_only = bool(model_def.get("minimax_h3_audio_only", False))
         self.viggle = bool(model_def.get("minimax_h3_viggle", False))
@@ -1358,6 +1371,13 @@ class MiniMaxH3Model:
                 qkv_layout,
             )
         )
+        veda_filename = None
+        if self.veda:
+            from .veda_assets import ensure_predictor
+            veda_filename = ensure_predictor(
+                self.omni_reference, bool(probe_h3_checkpoint(transformer_path).get("convrot"))
+            )
+            print(f"[MiniMax H3 Veda] Verified learned predictor: {veda_filename}")
         self.transformer = _load_transformer(
             model_filename if self.vdn else transformer_path,
             dtype,
@@ -1367,6 +1387,7 @@ class MiniMaxH3Model:
             singularity=self.singularity,
             dasiwa=self.dasiwa,
             import_profile=model_def.get("minimax_h3_import_profile"),
+            veda_filename=veda_filename,
         )
         from .viggle import load_conditioner
         self.conditioner = load_conditioner() if self.viggle else _load_conditioner(
@@ -2803,13 +2824,22 @@ class MiniMaxH3Model:
         if editable_mask_rows is not None and mask_mode == "grouped_rows":
             if self.vdn:
                 raise ValueError("H3 grouped-mask editing uses ordinary H3 attention; select the First / Last model without VDN")
-            if offload.shared_state.get("_attention") in ("sol", "sla"):
+            if offload.shared_state.get("_attention") in ("sol", "sla", "veda"):
                 raise ValueError("H3 Grouped Rows requires dense attention; select SDPA or SageAttention")
             group_order, group_inverse, fixed_rows = grouped_rows(editable_mask_rows)
         position_ids = layout.position_ids.to(self.device)
         video_indices = layout.video_indices.to(self.device)
         audio_indices = layout.audio_indices.to(self.device)
         text_indices = layout.text_indices.to(self.device)
+
+        veda_payload = None
+        if getattr(self, "veda", False):
+            from .veda_assets import geometry_payload
+            veda_grid, veda_payload = geometry_payload(
+                layout, (num_latent_frames, latent_height, latent_width), self.patch_size,
+                anchors, references if self.omni_reference else (),
+            )
+            veda_payload["target_grid"] = veda_grid
 
         target_starts = []
         if audio_indices.numel() > layout.num_condition_audio_rows:
@@ -2974,6 +3004,7 @@ class MiniMaxH3Model:
                         target_video_order=group_order,
                         target_video_inverse_order=group_inverse,
                         condition_video_rows=layout.num_condition_video_rows,
+                        veda_payload=veda_payload,
                     )
                     if prediction is None or self._interrupt:
                         return None
@@ -3081,6 +3112,8 @@ class MiniMaxH3Model:
                         del preview, preview_denoised_rows
                     progress.update()
         finally:
+            if getattr(self.transformer, "veda_attention", None) is not None:
+                self.transformer.veda_attention.reset()
             if first_block_cache is not None:
                 first_block_cache.reset()
             if res_multistep and offload.shared_state.get("_attention") == "sla":

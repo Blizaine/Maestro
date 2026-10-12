@@ -941,7 +941,7 @@ def _normalize_studio_preferences(values, current=None):
             raise ValueError("h3_optimizations must be an object.")
         override_attention = raw_h3.get("override_attention", "")
         cache_type = raw_h3.get("skip_steps_cache_type", "")
-        if override_attention not in ("", "sol", "sla", "sdpa"):
+        if override_attention not in ("", "sol", "sla", "veda", "sdpa"):
             raise ValueError("override_attention is invalid.")
         if cache_type not in ("", "first_block"):
             raise ValueError("skip_steps_cache_type is invalid.")
@@ -6515,6 +6515,19 @@ def get_model_options(model_type: str):
                 "safe_dense_fallback": True,
             }
 
+    _veda_attention_status = None
+    if md.get("veda_attention", False):
+        try:
+            from shared.attention import get_veda_attention_status
+
+            _veda_attention_status = get_veda_attention_status()
+        except Exception as error:
+            _veda_attention_status = {
+                "installed": False,
+                "supported": False,
+                "reason": f"H3 Veda runtime detection failed: {error}",
+            }
+
     return {
         "model_type": model_type,
         "architecture": md.get("architecture", model_type),
@@ -6537,6 +6550,9 @@ def get_model_options(model_type: str):
         ),
         "sla_attention_status": _sla_attention_status,
         "sla_attention_config": md.get("sla_attention_config"),
+        "veda_attention": md.get("veda_attention", False),
+        "veda_attention_experimental": md.get("veda_attention_experimental", False),
+        "veda_attention_status": _veda_attention_status,
         "skip_steps_multiplier_choices": [
             [str(choice[0]), float(choice[1])]
             for choice in md.get("skip_steps_multiplier_choices", [])

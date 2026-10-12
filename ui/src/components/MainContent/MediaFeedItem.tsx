@@ -315,6 +315,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const firstBlockEnabled = params?.skip_steps_cache_type === 'first_block'
   const solEnabled = String(params?.override_attention || '').toLowerCase() === 'sol'
   const slaEnabled = String(params?.override_attention || '').toLowerCase() === 'sla'
+  const vedaEnabled = String(params?.override_attention || '').toLowerCase() === 'veda'
   const fusedFourStep = modelType.includes('fused_turbo')
   const h3Workflow = modelType.includes('minimax_h3')
     ? (modelType.includes('ref2va') ? 'Omni / Ref2VA' : 'First / Last / FL2VA')
@@ -325,6 +326,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     ...(pddEnabled ? ['PDD'] : []),
     ...(solEnabled ? ['Sol Engine'] : []),
     ...(slaEnabled ? ['SLA'] : []),
+    ...(vedaEnabled ? ['Veda'] : []),
     ...(firstBlockEnabled ? ['First Block Cache'] : []),
   ]
 

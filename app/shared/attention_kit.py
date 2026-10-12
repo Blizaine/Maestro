@@ -111,6 +111,7 @@ def qkv_attention(
     norm_spans_heads=False,
     split_heads=True,
     attention_fn=None,
+    attention_group_fn=None,
 ):
     """Project and attend q/k/v while handing off the input tensor.
 
@@ -120,6 +121,8 @@ def qkv_attention(
     group.mean_squares when the heads are split. If attention_fn is supplied,
     it handles each mutable Q/K/V group instead of the shared dense/Sage2
     dispatcher; the helper clears the group list after the callback returns.
+    attention_group_fn additionally receives the absolute HeadGroup so
+    learned per-head predictors retain their identity when heads are split.
     """
 
     global _unsplit_notice, _split_notice
@@ -133,7 +136,7 @@ def qkv_attention(
     # tensors, so do not initialize or enter that path for custom dispatch.
     settings = (
         sage2_staged_settings(x.device)
-        if attention_fn is None and head_dim in (64, 128)
+        if attention_fn is None and attention_group_fn is None and head_dim in (64, 128)
         else None
     )
     projections = (q_proj, k_proj, v_proj)
@@ -209,11 +212,12 @@ def qkv_attention(
             if last:
                 linear_input = x = None
             norm_rope(qkv_group[0], qkv_group[1], group)
-            if attention_fn is None:
+            if attention_fn is None and attention_group_fn is None:
                 attention = pay_attention(qkv_group, recycle_q=True)
             else:
                 try:
-                    attention = attention_fn(qkv_group)
+                    attention = (attention_group_fn(qkv_group, group)
+                                 if attention_group_fn is not None else attention_fn(qkv_group))
                 finally:
                     qkv_group.clear()
             if groups == 1:

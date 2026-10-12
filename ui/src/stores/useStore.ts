@@ -6,7 +6,7 @@ import {
   normalizeModelVisibilityOverrides, type ModelVisibilityOverrides, type ModelVisibilityScope,
 } from '../lib/modelVisibility'
 import { isDirectorRenderChild } from '../lib/directorJobs'
-import { directorH3SlaEnabled, normalizeH3Attention } from '../lib/h3Attention'
+import { directorH3SlaEnabled, directorH3VedaEnabled, normalizeH3Attention } from '../lib/h3Attention'
 import {
   modelOptionsForSelectedModel,
   sanitizeH3VaeUpsampling,
@@ -473,7 +473,7 @@ interface PersistedModeSettings {
   kreaIdentitySettingsPerModel?: Record<string, KreaIdentitySettings>
   enhanceOnGenerationDefault?: boolean
   h3OptimizationPreferences?: {
-    override_attention?: '' | 'sol' | 'sla' | 'sdpa'
+    override_attention?: '' | 'sol' | 'sla' | 'veda' | 'sdpa'
     skip_steps_cache_type?: '' | 'first_block'
     skip_steps_multiplier?: number
     skip_steps_start_step_perc?: number
@@ -1694,7 +1694,7 @@ interface AppState {
   /** H3 accelerations live outside per-mode params so visiting Audio/Image
    *  cannot erase the user's Video optimization choices. */
   h3OptimizationPreferences: {
-    override_attention: '' | 'sol' | 'sla' | 'sdpa'
+    override_attention: '' | 'sol' | 'sla' | 'veda' | 'sdpa'
     skip_steps_cache_type: '' | 'first_block'
     skip_steps_multiplier?: number
     skip_steps_start_step_perc?: number
@@ -2209,6 +2209,8 @@ interface AppState {
   directorH3SolModeByModel: Record<string, boolean>
   /** SLA is independent of Sol and defaults off for ordinary Full/Pruned H3. */
   directorH3SlaModeByModel: Record<string, boolean>
+  /** Director-owned experimental Veda choices, independent of Studio. */
+  directorH3VedaModeByModel: Record<string, boolean>
   /** Director-owned H3 First Block Cache choices and tuning. */
   directorH3FirstBlockCacheByModel: Record<string, boolean>
   directorH3FirstBlockCacheMultiplierByModel: Record<string, number>
@@ -2226,6 +2228,7 @@ interface AppState {
   initializeDirectorH3Turbo: (modelType: string, options: ModelOptions) => void
   setDirectorH3SolMode: (modelType: string, enabled: boolean) => void
   setDirectorH3SlaMode: (modelType: string, enabled: boolean) => void
+  setDirectorH3VedaMode: (modelType: string, enabled: boolean) => void
   setDirectorH3FirstBlockCache: (modelType: string, enabled: boolean) => void
   setDirectorH3FirstBlockCacheMultiplier: (modelType: string, value: number) => void
   setDirectorH3FirstBlockCacheWarmup: (modelType: string, value: number) => void
@@ -2609,6 +2612,7 @@ async function _buildDirectorRestorePatch(
     directorH3TurboPresetByModel: _record(ui.directorH3TurboPresetByModel) as Record<string, string>,
     directorH3SolModeByModel: _record(ui.directorH3SolModeByModel) as Record<string, boolean>,
     directorH3SlaModeByModel: _record(ui.directorH3SlaModeByModel) as Record<string, boolean>,
+    directorH3VedaModeByModel: _record(ui.directorH3VedaModeByModel) as Record<string, boolean>,
     directorH3FirstBlockCacheByModel: _record(ui.directorH3FirstBlockCacheByModel) as Record<string, boolean>,
     directorH3FirstBlockCacheMultiplierByModel: _record(ui.directorH3FirstBlockCacheMultiplierByModel) as Record<string, number>,
     directorH3FirstBlockCacheWarmupByModel: _record(ui.directorH3FirstBlockCacheWarmupByModel) as Record<string, number>,
@@ -4344,10 +4348,10 @@ export const useStore = create<AppState>((set, get) => ({
           ...s.h3OptimizationPreferences,
           ...(key === 'override_attention' ? {
             override_attention: (
-              value === 'sol' || value === 'sla' || value === 'sdpa'
+              value === 'sol' || value === 'sla' || value === 'veda' || value === 'sdpa'
                 ? value
                 : ''
-            ) as '' | 'sol' | 'sla' | 'sdpa',
+            ) as '' | 'sol' | 'sla' | 'veda' | 'sdpa',
           } : {}),
           ...(key === 'skip_steps_cache_type' ? {
             skip_steps_cache_type: value === 'first_block' ? 'first_block' as const : '' as const,
@@ -5550,9 +5554,10 @@ export const useStore = create<AppState>((set, get) => ({
       const h3Preferences = durableConfigured
         ? studioPreferences.h3_optimizations
         : saved?.h3OptimizationPreferences
-      const restoredH3Attention: '' | 'sol' | 'sla' | 'sdpa' = (
+      const restoredH3Attention: '' | 'sol' | 'sla' | 'veda' | 'sdpa' = (
         h3Preferences?.override_attention === 'sol'
         || h3Preferences?.override_attention === 'sla'
+        || h3Preferences?.override_attention === 'veda'
         || h3Preferences?.override_attention === 'sdpa'
       ) ? h3Preferences.override_attention : ''
       const restoredH3OptimizationPreferences = {
@@ -7776,7 +7781,7 @@ export const useStore = create<AppState>((set, get) => ({
     } else {
       delete params.ltx25_video_vae
     }
-    if (state.modelOptions?.sla_attention || state.modelOptions?.sol_attention) {
+    if (state.modelOptions?.sla_attention || state.modelOptions?.sol_attention || state.modelOptions?.veda_attention) {
       params.override_attention = normalizeH3Attention(state.modelOptions, params.override_attention)
     } else {
       delete params.override_attention
@@ -9596,7 +9601,9 @@ export const useStore = create<AppState>((set, get) => ({
       // Fused's SLA/default-off SDPA choices must not opt a different
       // Full/Pruned checkpoint into sparse attention or force slower SDPA.
       // Restored output params are applied after options and still win.
-      const inheritedFusedAttention = (requestedAttention === 'sla' || requestedAttention === 'sdpa')
+      const inheritedFusedAttention = (
+        requestedAttention === 'sla' || requestedAttention === 'sdpa' || requestedAttention === 'veda'
+      )
         && activeState.modelOptions?.minimax_h3_fused_turbo === true
         && activeState.modelOptions.model_type !== modelType
         && options.sla_attention_experimental === true
@@ -10530,6 +10537,7 @@ export const useStore = create<AppState>((set, get) => ({
   directorH3TurboPresetByModel: {},
   directorH3SolModeByModel: {},
   directorH3SlaModeByModel: {},
+  directorH3VedaModeByModel: {},
   directorH3FirstBlockCacheByModel: {},
   directorH3FirstBlockCacheMultiplierByModel: {},
   directorH3FirstBlockCacheWarmupByModel: {},
@@ -10676,14 +10684,30 @@ export const useStore = create<AppState>((set, get) => ({
       ...s.directorH3SolModeByModel,
       [modelType]: enabled,
     },
-    ...(enabled ? { directorH3SlaModeByModel: { ...s.directorH3SlaModeByModel, [modelType]: false } } : {}),
+    ...(enabled ? {
+      directorH3SlaModeByModel: { ...s.directorH3SlaModeByModel, [modelType]: false },
+      directorH3VedaModeByModel: { ...s.directorH3VedaModeByModel, [modelType]: false },
+    } : {}),
   })),
   setDirectorH3SlaMode: (modelType, enabled) => set(s => ({
     directorH3SlaModeByModel: {
       ...s.directorH3SlaModeByModel,
       [modelType]: enabled,
     },
-    ...(enabled ? { directorH3SolModeByModel: { ...s.directorH3SolModeByModel, [modelType]: false } } : {}),
+    ...(enabled ? {
+      directorH3SolModeByModel: { ...s.directorH3SolModeByModel, [modelType]: false },
+      directorH3VedaModeByModel: { ...s.directorH3VedaModeByModel, [modelType]: false },
+    } : {}),
+  })),
+  setDirectorH3VedaMode: (modelType, enabled) => set(s => ({
+    directorH3VedaModeByModel: {
+      ...s.directorH3VedaModeByModel,
+      [modelType]: enabled,
+    },
+    ...(enabled ? {
+      directorH3SolModeByModel: { ...s.directorH3SolModeByModel, [modelType]: false },
+      directorH3SlaModeByModel: { ...s.directorH3SlaModeByModel, [modelType]: false },
+    } : {}),
   })),
   setDirectorH3FirstBlockCache: (modelType, enabled) => set(s => ({
     directorH3FirstBlockCacheByModel: {
@@ -12859,11 +12883,13 @@ export const useStore = create<AppState>((set, get) => ({
     (newParams as Record<string, unknown>).audio_guidance_scale = (p.audio_guidance_scale as number) ?? undefined
     // H3 optimization controls are a cohesive saved recipe. Explicit off
     // values matter: undefined would retain the clip selected before this one.
-    newParams.override_attention = (
-      p.override_attention === 'sol'
-      || p.override_attention === 'sla'
-      || p.override_attention === 'sdpa'
-    ) ? p.override_attention : ''
+    newParams.override_attention = restoredModelOptions && restoredIsH3
+      ? normalizeH3Attention(restoredModelOptions, p.override_attention) ?? ''
+      : (
+          p.override_attention === 'sol'
+          || p.override_attention === 'sla'
+          || p.override_attention === 'sdpa'
+        ) ? p.override_attention : ''
     newParams.skip_steps_cache_type = (
       p.skip_steps_cache_type === 'first_block' ? 'first_block' : ''
     )
@@ -13946,6 +13972,7 @@ export const useStore = create<AppState>((set, get) => ({
             directorResolution, directorAspectRatio,
             directorVideoMaxShotFramesByModel, directorH3TurboModeByModel,
             directorH3TurboPresetByModel, directorH3SolModeByModel, directorH3SlaModeByModel,
+            directorH3VedaModeByModel,
             directorH3FirstBlockCacheByModel,
             directorH3FirstBlockCacheMultiplierByModel,
             directorH3FirstBlockCacheWarmupByModel,
@@ -14093,12 +14120,16 @@ export const useStore = create<AppState>((set, get) => ({
       ))
     )
     if (directorTurboEnabled) directorVideoSteps = directorTurboPreset!.steps
+    const directorVedaEnabled = directorH3VedaEnabled(
+      directorVideoOptions, selectedVideoModel, directorH3VedaModeByModel,
+    )
     const directorSolEnabled = Boolean(
       directorVideoOptions?.sol_attention
       && directorVideoOptions.sol_attention_status?.supported
       && directorH3SolModeByModel[selectedVideoModel] === true
+      && !directorVedaEnabled
     )
-    const directorSlaEnabled = directorH3SlaEnabled(
+    const directorSlaEnabled = !directorVedaEnabled && directorH3SlaEnabled(
       directorVideoOptions, selectedVideoModel, directorH3SlaModeByModel, directorH3SolModeByModel,
     )
     const directorFirstBlockCacheEnabled = Boolean(
@@ -14297,7 +14328,9 @@ export const useStore = create<AppState>((set, get) => ({
         resolution: directorVideoResolution,
         minimax_h3_turbo_mode: directorTurboEnabled,
         minimax_h3_turbo_preset: directorTurboPreset?.id,
-        override_attention: directorSlaEnabled
+        override_attention: directorVedaEnabled
+          ? 'veda'
+          : directorSlaEnabled
           ? 'sla'
           : directorSolEnabled
             ? 'sol'
@@ -14379,6 +14412,7 @@ export const useStore = create<AppState>((set, get) => ({
         directorH3TurboPresetByModel: state.directorH3TurboPresetByModel,
         directorH3SolModeByModel: state.directorH3SolModeByModel,
         directorH3SlaModeByModel: state.directorH3SlaModeByModel,
+        directorH3VedaModeByModel: state.directorH3VedaModeByModel,
         directorH3FirstBlockCacheByModel: state.directorH3FirstBlockCacheByModel,
         directorH3FirstBlockCacheMultiplierByModel: state.directorH3FirstBlockCacheMultiplierByModel,
         directorH3FirstBlockCacheWarmupByModel: state.directorH3FirstBlockCacheWarmupByModel,

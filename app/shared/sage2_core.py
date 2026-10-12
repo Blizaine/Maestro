@@ -25,6 +25,18 @@ from sageattention.triton.attn_qk_int8_per_block_causal import forward as attn_t
 from sageattention.triton.attn_qk_int8_block_varlen import forward as attn_false_varlen
 from sageattention.triton.attn_qk_int8_per_block_causal_varlen import forward as attn_true_varlen
 
+try:
+    from sageattention.triton.quant_per_block import (
+        quant_per_block_int8_kernel as _quant_per_block_int8_kernel,
+    )
+except ImportError:
+    _quant_per_block_int8_kernel = None
+
+try:
+    import sageattention.triton.attn_qk_int8_per_block as _attn_qk_int8_per_block
+except ImportError:
+    _attn_qk_int8_per_block = None
+
 from sageattention.triton.quant_per_thread import per_thread_int8 as per_thread_int8_triton
 try:
     from sageattention.triton.quant_per_thread import (
@@ -228,14 +240,36 @@ def _fp8_pv_settings(arch: str) -> dict[str, Any]:
     }
 
 
-def staged_settings(device: torch.device) -> dict[str, Any] | None:
-    """Return staged settings for the implemented SM89/SM120 Sage2 kernels.
+# The staged SM86 path is adapted from WanGP's sage2_core.py at
+# https://github.com/deepbeepmeep/WanGP/commit/af2ed29a83dbccc7f1c0571a73005648436b392e
+# (Copyright 2025-2026 DeepBeepMeep; WanGP Community License 2.0).
+_PER_BLOCK_SETTINGS = {"qk_quant_gran": "per_block", "block_m": 128, "launch": None}
+_TRITON_MASK_ARGUMENT = bool(
+    _attn_qk_int8_per_block is not None
+    and "mask"
+    in getattr(getattr(_attn_qk_int8_per_block, "_attn_fwd", None), "arg_names", ())
+)
 
-    Other devices and older SageAttention builds use the ordinary attention
-    dispatcher instead of attempting these low-level quantization kernels.
+
+def staged_settings(device: torch.device) -> dict[str, Any] | None:
+    """Return staged settings for the supported Sage2 kernels on this device.
+
+    SM86 uses per-block INT8 Q/K quantization and FP16 V with SageAttention's
+    Triton kernel. SM89/SM120 keep their existing FP8 CUDA kernels. Other
+    devices and unavailable optional kernels use the ordinary dispatcher.
     """
 
+    if device.type != "cuda":
+        return None
     arch = _get_cuda_arch(device)
+    if arch == "sm86":
+        if (
+            _quant_per_block_int8_kernel is None
+            or _attn_qk_int8_per_block is None
+            or getattr(_attn_qk_int8_per_block, "_attn_fwd", None) is None
+        ):
+            return None
+        return _PER_BLOCK_SETTINGS
     if not SM89_ENABLED or arch not in {"sm89", "sm120"}:
         return None
     if arch == "sm89" and (
@@ -246,13 +280,45 @@ def staged_settings(device: torch.device) -> dict[str, Any] | None:
     return _fp8_pv_settings(arch)
 
 
+def _quant_per_block(x, x_int8, block: int, sm_scale: float):
+    """Quantize one NHD tensor with SageAttention's per-block Triton kernel."""
+
+    if _quant_per_block_int8_kernel is None:
+        raise RuntimeError("SageAttention per-block Triton quantization is unavailable")
+    batch, token_count, heads, head_dim = x.shape
+    blocks = (token_count + block - 1) // block
+    scale = torch.empty(
+        (batch, heads, blocks), dtype=torch.float32, device=x.device
+    )
+    _quant_per_block_int8_kernel[(blocks, heads, batch)](
+        x,
+        x_int8,
+        scale,
+        token_count,
+        x.stride(0),
+        x.stride(2),
+        x.stride(1),
+        x_int8.stride(0),
+        x_int8.stride(2),
+        x_int8.stride(1),
+        scale.stride(0),
+        scale.stride(1),
+        sm_scale=sm_scale,
+        C=head_dim,
+        BLK=block,
+    )
+    return scale
+
+
 @torch.compiler.disable
 def staged_quantize_v(v_list, settings):
-    """FP8 value with per-channel scales; consume the handed-off value list."""
+    """Stage FP8 V, or retain FP16 V for the SM86 Triton path."""
 
     value = v_list[0]
     v_list.clear()
     _maybe_set_device(value.device)
+    if settings["qk_quant_gran"] == "per_block":
+        return value.to(torch.float16), None, None
     scale_max = 2.25 if settings["pv_accum_dtype"] == "fp32+fp16" else 448.0
     return per_channel_fp8(
         [value],
@@ -280,6 +346,9 @@ def staged_quantize_k(k_list, settings):
         _fused.quant_per_block_int8_fuse_sub_mean_cuda(
             key, key_mean.squeeze(1), key_int8, key_scale, 64, 0
         )
+    elif settings["qk_quant_gran"] == "per_block":
+        key.sub_(key_mean)
+        key_scale = _quant_per_block(key, key_int8, 64, 1.0)
     else:
         key.sub_(key_mean)
         key_scale = torch.empty(
@@ -311,6 +380,14 @@ def staged_quantize_q(query, settings):
     _maybe_set_device(query.device)
     batch, query_length, heads, head_dim = query.shape
     query_int8 = torch.empty(query.shape, dtype=torch.int8, device=query.device)
+    if settings["qk_quant_gran"] == "per_block":
+        query_scale = _quant_per_block(
+            query,
+            query_int8,
+            settings["block_m"],
+            head_dim**-0.5 * 1.44269504,
+        )
+        return query_int8, query_scale
     warps = (query_length + 127) // 128 * 4
     if settings["qk_quant_gran"] == "per_warp":
         query_scale = torch.empty(
@@ -344,11 +421,69 @@ def staged_quantize_q(query, settings):
 
 @torch.compiler.disable
 def staged_attention(output, quantized_list, settings):
-    """Run an unmasked SageAttention kernel using staged Q/K/V quantization."""
+    """Run SageAttention from staged Q/K/V quantization into ``output``."""
 
     (query_int8, query_scale), (key_int8, key_scale), (value_fp8, value_scale, value_mean) = quantized_list
     quantized_list.clear()
     _maybe_set_device(output.device)
+    if settings["qk_quant_gran"] == "per_block":
+        attention_kernel = (
+            getattr(_attn_qk_int8_per_block, "_attn_fwd", None)
+            if _attn_qk_int8_per_block is not None
+            else None
+        )
+        if attention_kernel is None:
+            raise RuntimeError("SageAttention per-block Triton attention is unavailable")
+
+        batch, query_length, heads, head_dim = query_int8.shape
+        key_length = key_int8.shape[1]
+        mask_args = (None,) if _TRITON_MASK_ARGUMENT else ()
+        mask_strides = (0, 0, 0, 0) if _TRITON_MASK_ARGUMENT else ()
+        num_warps, num_stages = (4, 3) if head_dim == 64 else (8, 4)
+        lse = torch.empty([0], dtype=torch.float32, device="cpu")
+        attention_kernel[
+            (
+                (query_length + settings["block_m"] - 1)
+                // settings["block_m"],
+                heads,
+                batch,
+            )
+        ](
+            query_int8,
+            key_int8,
+            value_fp8,
+            query_scale,
+            key_scale,
+            output,
+            *mask_args,
+            lse,
+            query_int8.stride(0),
+            query_int8.stride(2),
+            query_int8.stride(1),
+            key_int8.stride(0),
+            key_int8.stride(2),
+            key_int8.stride(1),
+            value_fp8.stride(0),
+            value_fp8.stride(2),
+            value_fp8.stride(1),
+            output.stride(0),
+            output.stride(2),
+            output.stride(1),
+            *mask_strides,
+            query_length,
+            key_length,
+            heads,
+            heads // key_int8.shape[2],
+            BLOCK_M=settings["block_m"],
+            BLOCK_N=64,
+            HEAD_DIM=head_dim,
+            STAGE=1,
+            RETURN_LSE=False,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+        return output
+
     inputs = (
         query_int8,
         key_int8,

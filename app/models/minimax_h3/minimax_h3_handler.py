@@ -2087,6 +2087,8 @@ class family_handler:
             "sla_attention": sla_attention,
             "sla_attention_default": fused_turbo,
             "sla_attention_experimental": sla_attention and not fused_turbo,
+            "veda_attention": sla_attention and not fused_turbo,
+            "veda_attention_experimental": sla_attention and not fused_turbo,
             "sla_attention_config": {
                 "sparsity_ratio": 0.90,
                 "block_size": 64,
@@ -2649,6 +2651,7 @@ class family_handler:
                 (model_def or {}).get("minimax_h3_text_encoder_default", "nvfp4_awq"),
             ),
             VAE_upsampling=kwargs.get("VAE_upsampling"),
+            minimax_h3_veda=kwargs.get("minimax_h3_veda", False),
         )
         pipe = {
             "transformer": model.transformer,

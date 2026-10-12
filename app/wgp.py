@@ -8058,7 +8058,24 @@ def generate_video(
             time.sleep(1)
     vae_upsampling = model_def.get("vae_upsampler", None)
     model_kwargs = {}
+    overridden_attention = override_attention if len(override_attention) else get_overridden_attention(model_type)
+    requested_h3_veda = (
+        overridden_attention if overridden_attention is not None else attention_mode
+    ) == "veda"
+    if requested_h3_veda:
+        from shared.attention import get_veda_attention_status
+        veda_status = get_veda_attention_status()
+        if not model_def.get("veda_attention") or not veda_status["supported"]:
+            reason = (veda_status.get("reason") if model_def.get("veda_attention") else
+                      "Veda is available only for ordinary Full and Pruned H3 Frames/References models.")
+            send_cmd("info", f"H3 Veda cannot run: {reason}")
+            send_cmd("exit")
+            return True
     if str(model_def.get("architecture") or "").startswith("minimax_h3"):
+        model_kwargs["minimax_h3_veda"] = requested_h3_veda
+        if wan_model is not None and bool(getattr(wan_model, "veda", False)) != requested_h3_veda:
+            print("[MiniMax H3 Veda] Acceleration selection changed; reloading the model profile.")
+            reload_needed = True
         requested_h3_text_encoder = str(
             minimax_h3_text_encoder
             or model_def.get("minimax_h3_text_encoder_default", "nvfp4_awq")
@@ -8195,7 +8212,6 @@ def generate_video(
     if args.test:
         send_cmd("info", "Test mode: model loaded, skipping generation.")
         return True
-    overridden_attention = override_attention if len(override_attention) else get_overridden_attention(model_type)
     # if overridden_attention is not None and overridden_attention !=  attention_mode: print(f"Attention mode has been overriden to {overridden_attention} for model type '{model_type}'")
     attn = overridden_attention if overridden_attention is not None else attention_mode
     if attn == "auto":
@@ -8212,6 +8228,10 @@ def generate_video(
             "info",
             "H3 SLA is available only for compatible MiniMax H3 models.",
         )
+        send_cmd("exit")
+        return True
+    elif attn == "veda" and not model_def.get("veda_attention", False):
+        send_cmd("info", "Veda is available only for ordinary Full and Pruned H3 Frames/References models.")
         send_cmd("exit")
         return True
     elif attn == "sol" and attn not in override_attention_modes_supported:

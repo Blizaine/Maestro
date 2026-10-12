@@ -117,8 +117,8 @@ export interface GenerateParams {
   skip_steps_multiplier?: number
   /** Percentage of denoising steps to run before caching may begin. */
   skip_steps_start_step_perc?: number
-  /** Per-generation attention override. Sol is H3-only and experimental. */
-  override_attention?: '' | 'sol' | 'sla' | 'sdpa'
+  /** Per-generation attention override. Sol and Veda are H3-only experiments. */
+  override_attention?: '' | 'sol' | 'sla' | 'veda' | 'sdpa'
   guidance_phases?: number
   video_prompt_type?: string
   audio_prompt_type?: string
@@ -941,6 +941,17 @@ export interface ModelOptions {
     triton_version?: string | null
     minimum_triton?: string
     first_run_compiles_kernels?: boolean
+  } | null
+  veda_attention?: boolean
+  veda_attention_experimental?: boolean
+  veda_attention_status?: {
+    installed: boolean
+    supported: boolean
+    reason?: string | null
+    capability?: string
+    triton_version?: string | null
+    first_run_compiles_kernels?: boolean
+    safe_dense_fallback?: boolean
   } | null
   sla_attention?: boolean
   sla_attention_default?: boolean

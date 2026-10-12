@@ -40,6 +40,21 @@ placeholder names such as “Unnamed” from merging distinct performers.
 
 ## Memory management and performance
 
+The October 12 Dev follow-up adds staged SageAttention for SM86 GPUs such as
+the RTX 3080 Ti, releasing temporary Q/K/V allocations earlier while retaining
+the ordinary dispatcher when optional kernels are unavailable. Existing
+SM89/SM120 staging and manual attention choices are preserved.
+
+Full and Pruned H3 in Frames and References now offer **Veda Sparse Attention
+— Experimental** in Studio and Director. It is off by default and mutually
+exclusive with Sol and SLA. Its learned predictor is downloaded on first use,
+verified against pinned size and SHA-256 values, and managed with transformer
+weights by MMGP. Standard ConvRot models use an approximately 281-MB predictor;
+other eligible weights use the approximately 551-MB BF16 predictor. Fused and
+specialty checkpoints are excluded. CPU regressions cover dispatch, reference
+geometry, selection and asset handling; hardware speed and output quality
+remain to be measured. [Integration and comparison guide](development/h3-veda-port.md).
+
 Maestro now includes an adaptation of WanGP 17 and MMGP 4 for its existing
 generation pipelines. It adds optional VRAM and RAM allocator choices, smarter
 memory pinning, Windows checkpoint read-ahead, per-output dynamic or manual

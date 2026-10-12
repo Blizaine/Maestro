@@ -739,12 +739,17 @@ class MiniMaxH3Attention(nn.Module):
             return result.unsqueeze(0)
         if attention_mask is not None:
             attention_mask = attention_mask[None, None].to(device=hidden_states.device)
+        use_veda = bool(getattr(self, "veda", None) is not None and self.veda.policy.enabled)
+        if use_veda and attention_mask is not None:
+            raise ValueError("H3 Veda does not support padded attention documents.")
         use_sla = (
-            self.sla_attention is not None
+            not use_veda
+            and self.sla_attention is not None
             and self.sla_attention.use_for_layer(length, attention_mask)
         )
         use_sol = (
-            not use_sla
+            not use_veda
+            and not use_sla
             and self.sol_attention is not None
             and self.sol_attention.use_for_layer(length, attention_mask)
         )
@@ -858,6 +863,18 @@ class MiniMaxH3Attention(nn.Module):
                             _apply_rope_inplace(query, *rotary)
                         if key is not None:
                             _apply_rope_inplace(key, *rotary)
+
+                if use_veda:
+                    owned_input = [hidden_states]
+                    hidden_states = None
+                    attended = attention_kit.qkv_attention(
+                        owned_input, self.q_proj, self.k_proj, self.v_proj,
+                        self.heads, self.head_dim, norm_rope,
+                        attention_group_fn=self.veda,
+                    )
+                    return _project_attention_output_reusing_storage(
+                        self.out_proj, attended, batch, length
+                    )
 
                 if use_sla and split_requested:
                     owned_input = [hidden_states]
@@ -1084,7 +1101,10 @@ class MiniMaxH3Attention(nn.Module):
         hidden_states = None
         if attention_mask is not None and attention_mask.device != query.device:
             attention_mask = attention_mask.to(device=query.device)
-        if use_sla:
+        if use_veda:
+            from shared.attention_kit import HeadGroup
+            attended = self.veda([query, key, value], HeadGroup(range(self.heads), range(self.heads), None))
+        elif use_sla:
             attended = self.sla_attention([query, key, value], True)
         elif use_sol:
             attended = self.sol_attention([query, key, value], True)
@@ -1675,6 +1695,12 @@ class MiniMaxH3Transformer(nn.Module):
             device,
             packed.dtype,
         )
+        if getattr(self, "veda_attention", None) is not None:
+            layout = _kwargs.get("packed_layout")
+            payload = _kwargs.get("veda_payload")
+            if layout is None or payload is None:
+                raise ValueError("H3 Veda requires packed reference and target geometry.")
+            self.veda_attention.begin_forward(layout, payload["target_grid"], payload, device, packed.dtype)
         if self.blocks[0].attn.vdn is not None:
             layout = _kwargs.get("packed_layout")
             latent_shape = _kwargs.get("latent_shape")

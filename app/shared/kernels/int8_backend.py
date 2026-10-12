@@ -1,6 +1,7 @@
 """Optional INT8 backends shared by Quanto and ConvRot linear layers."""
 from __future__ import annotations
 
+import functools
 import importlib
 import os
 from fnmatch import fnmatchcase
@@ -238,6 +239,27 @@ def linear_multi(modules, x):
 
 
 def kitchen_linear_prequantized(weight, bias, q, scales, out):
+    data = getattr(weight, "_data", None)
+    weight_scales = getattr(weight, "_scale", None)
+    if (not torch.is_tensor(data) or data.ndim != 2 or not data.is_cuda
+            or not torch.is_tensor(weight_scales) or not weight_scales.is_cuda):
+        raise TypeError("Prequantized Kitchen linear requires a Quanto INT8 weight")
+    if (not torch.is_tensor(q) or q.ndim != 2 or q.dtype != torch.int8
+            or not q.is_contiguous() or q.shape[1] != data.shape[1]
+            or q.device != data.device):
+        raise ValueError("Prequantized Kitchen input must be an INT8 matrix matching the weight")
+    if (not torch.is_tensor(scales) or scales.shape != (q.shape[0], 1)
+            or scales.dtype != torch.float32 or not scales.is_contiguous()
+            or scales.device != q.device):
+        raise ValueError("Prequantized Kitchen input scales do not match the input rows")
+    if (not torch.is_tensor(out) or out.ndim != 2
+            or out.shape != (q.shape[0], data.shape[0])
+            or out.device != data.device
+            or out.dtype not in (torch.float16, torch.bfloat16, torch.float32)
+            or not out.is_contiguous()):
+        raise ValueError("Prequantized Kitchen output must be contiguous and match the projection")
+    if _backend != "kitchen" or _kitchen is None:
+        raise RuntimeError("Prequantized Kitchen linear requires the Kitchen INT8 backend")
     scale = _weight_scale(weight, weight._data.shape[0], out.device)
     bias_arg = (_kitchen._gemm_vector_arg(bias, out.device, out.dtype) if bias is not None
                 else _kitchen._empty_cuda_tensor(out.device, out.dtype))
@@ -248,6 +270,114 @@ def kitchen_linear_prequantized(weight, bias, q, scales, out):
     if not used:
         raise RuntimeError("Comfy Kitchen rejected the shared-input INT8 output tile")
     return out
+
+
+def _grouped_linear_forward_is_native(module, qlinear_type):
+    """Accept the native qtype route or MMGP's known delegating wrappers."""
+    forward = getattr(module, "forward", None)
+    if getattr(forward, "__func__", None) is qlinear_type.forward:
+        return True
+
+    # MMGP stores the original bound method in _mm_forward, then installs one
+    # of these partial wrappers. Module calls still pass through that wrapper,
+    # so preloading behavior and the qtype's temporary-input consumer remain
+    # active. Reject arbitrary partials and wrappers around LoRA forwards.
+    if (not isinstance(forward, functools.partial)
+            or not forward.args or forward.args[0] is not module
+            or getattr(module, "_mm_manager", None) is None):
+        return False
+    native = getattr(module, "_mm_forward", None)
+    if (getattr(native, "__self__", None) is not module
+            or getattr(native, "__func__", None) is not qlinear_type.forward):
+        return False
+    wrapper_name = getattr(getattr(forward, "func", None), "__name__", "")
+    expected = (
+        f"_mm_wrap_{qlinear_type.__module__.replace('.', '_')}_"
+        f"{qlinear_type.__name__}"
+    )
+    return wrapper_name in (expected, "check_load_into_GPU_needed_linear")
+
+
+def _linear_grouped_supported(modules, x):
+    """Whether group-64 INT8 inputs can be shared without bypassing hooks."""
+    from shared.kernels import kernel_policy
+
+    if (not modules or not kernel_policy.allow_approximate() or not kitchen_enabled()
+            or not _direct_cutlass or not torch.is_inference_mode_enabled()
+            or torch.compiler.is_compiling() or triton._is_fake_tensor(x)
+            or not x.is_cuda or x.dtype != torch.bfloat16 or x.ndim != 3
+            or not x.is_contiguous() or len(modules) != x.shape[0]
+            or x.shape[1] <= 2 or x.shape[2] % 64
+            or x.numel() * 4 > _SCRATCH_BYTES):
+        return False
+    try:
+        from shared.qtypes.int8_convrot import QLinearInt8ConvRot
+    except Exception:
+        return False
+    output_features = getattr(modules[0], "out_features", None)
+    if not isinstance(output_features, int) or output_features % 8:
+        return False
+    for module in modules:
+        if (not isinstance(module, QLinearInt8ConvRot)
+                or getattr(module, "_convrot_group_size", 0) != 64
+                or getattr(getattr(module, "weight_qtype", None), "name", None) != "qint8_convrot"
+                or getattr(module, "in_features", None) != x.shape[-1]
+                or getattr(module, "out_features", None) != output_features
+                or getattr(module, "_forward_hooks", None)
+                or getattr(module, "_forward_pre_hooks", None)
+                or getattr(module, "_mm_lora_old_forward", None) is not None
+                or getattr(module, "_mm_lora_data", None)
+                or getattr(module, "_mm_convrot_native_forward", None) is not None
+                or getattr(module, "_wangp_linear_fusion", None) is not None
+                or getattr(module, "_wangp_prequantized_input", None) is not None
+                or getattr(module, "_maestro_kitchen_prequantized_input", None) is not None
+                or not _grouped_linear_forward_is_native(module, QLinearInt8ConvRot)):
+            return False
+    return True
+
+
+def linear_grouped(modules, x):
+    """Ported from pinned WanGP INT8 backend; share eligible input preparation.
+
+    Every projection still enters through ``module(part)`` so ordinary module
+    forwards, MMGP hooks and LoRA wrappers remain active. The shared-input path
+    is limited to the unwrapped Maestro ConvRot qtype; all other cases use the
+    normal module calls directly. Source: deepbeepmeep/WanGP at
+    af2ed29a83dbccc7f1c0571a73005648436b392e, shared/kernels/int8_backend.py.
+    """
+    modules = tuple(modules)
+    if not modules:
+        raise ValueError("Grouped linear requires at least one projection")
+    if not torch.is_tensor(x) or x.ndim != 3 or len(modules) != x.shape[0]:
+        raise ValueError("Grouped linear input must have shape [modules, rows, features]")
+    if not _linear_grouped_supported(modules, x):
+        return torch.stack([module(part) for module, part in zip(modules, x.unbind(0))])
+
+    from shared.qtypes.int8_convrot import _rotate_activation
+    rotated = _rotate_activation(x, 64).reshape(-1, x.shape[-1])
+    q, scales = _kitchen.quantize_int8_rowwise(rotated)
+    del rotated
+    q = q.reshape_as(x)
+    scales = scales.reshape(x.shape[0], x.shape[1], -1)
+    output = x.new_empty((x.shape[0], x.shape[1], modules[0].out_features))
+    missing = object()
+    for module, part, quantized, scale, out in zip(
+        modules, x.unbind(0), q.unbind(0), scales.unbind(0), output.unbind(0)
+    ):
+        previous = getattr(module, "_wangp_prequantized_input", missing)
+        module._wangp_prequantized_input = (quantized, scale, out)
+        try:
+            result = module(part)
+            if result.shape != out.shape or result.dtype != out.dtype:
+                raise RuntimeError("Grouped INT8 projection returned an incompatible output")
+            if result.data_ptr() != out.data_ptr():
+                out.copy_(result)
+        finally:
+            if previous is missing:
+                del module._wangp_prequantized_input
+            else:
+                module._wangp_prequantized_input = previous
+    return output
 
 
 def kitchen_linear_fused(input, weight, bias, input_act, act_weight, act_eps, residual, residual_scale, out=None):

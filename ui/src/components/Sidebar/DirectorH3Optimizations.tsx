@@ -4,7 +4,7 @@ import { fetchModelOptions } from '../../api/client'
 import { DEFAULT_DIRECTOR_VIDEO_MODEL, useStore } from '../../stores/useStore'
 import type { ModelOptions } from '../../types'
 import { InfoTooltip } from './InfoTooltip'
-import { directorH3SlaEnabled } from '../../lib/h3Attention'
+import { directorH3SlaEnabled, directorH3VedaEnabled } from '../../lib/h3Attention'
 
 /**
  * Director-owned MiniMax H3 optimization controls.
@@ -25,6 +25,8 @@ export function DirectorH3Optimizations() {
   const setSolMode = useStore(s => s.setDirectorH3SolMode)
   const slaModeByModel = useStore(s => s.directorH3SlaModeByModel)
   const setSlaMode = useStore(s => s.setDirectorH3SlaMode)
+  const vedaModeByModel = useStore(s => s.directorH3VedaModeByModel)
+  const setVedaMode = useStore(s => s.setDirectorH3VedaMode)
   const firstBlockCacheByModel = useStore(s => s.directorH3FirstBlockCacheByModel)
   const setFirstBlockCache = useStore(s => s.setDirectorH3FirstBlockCache)
   const cacheMultiplierByModel = useStore(s => s.directorH3FirstBlockCacheMultiplierByModel)
@@ -57,6 +59,14 @@ export function DirectorH3Optimizations() {
       })
     return () => { cancelled = true }
   }, [setVideoSteps, videoModel])
+
+  useEffect(() => {
+    if (loadedOptions.model !== videoModel || vedaModeByModel[videoModel] !== true) return
+    const options = loadedOptions.options
+    if (options?.veda_attention !== true || options.veda_attention_status?.supported !== true) {
+      setVedaMode(videoModel, false)
+    }
+  }, [loadedOptions, setVedaMode, vedaModeByModel, videoModel])
 
   const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
   if (!isH3) return null
@@ -95,19 +105,23 @@ export function DirectorH3Optimizations() {
     && savedVideoLoras?.activated_loras?.includes(selectedTurboPreset.filename)
   )
   const solStatus = modelOptions?.sol_attention_status
-  const slaSelected = directorH3SlaEnabled(modelOptions, videoModel, slaModeByModel, solModeByModel)
+  const vedaSelected = directorH3VedaEnabled(modelOptions, videoModel, vedaModeByModel)
+  const slaSelected = !vedaSelected && directorH3SlaEnabled(modelOptions, videoModel, slaModeByModel, solModeByModel)
   const slaExperimental = modelOptions?.sla_attention_experimental === true
   const solSelected = Boolean(
     modelOptions?.sol_attention
     && solStatus?.supported
     && solModeByModel[videoModel] === true
     && !slaSelected
+    && !vedaSelected
   )
   const cacheSelected = Boolean(
     modelOptions?.first_block_cache
     && firstBlockCacheByModel[videoModel] === true
   )
   const slaStatus = modelOptions?.sla_attention_status
+  const vedaStatus = modelOptions?.veda_attention_status
+  const vedaExperimental = modelOptions?.veda_attention_experimental === true
   const cacheMultiplierChoices = modelOptions?.skip_steps_multiplier_choices || []
   const cacheMultiplier = (
     cacheMultiplierByModel[videoModel]
@@ -120,7 +134,7 @@ export function DirectorH3Optimizations() {
     ?? 25
   )
   const fusedTurbo = modelOptions?.minimax_h3_fused_turbo === true
-  const activeCount = [turboSelected, solSelected, slaSelected, cacheSelected].filter(Boolean).length
+  const activeCount = [turboSelected, solSelected, slaSelected, vedaSelected, cacheSelected].filter(Boolean).length
   const defaultSteps = modelOptions?.minimax_h3_turbo?.unaccelerated_steps
     ?? modelOptions?.default_num_inference_steps
   const currentSteps = videoStepsByModel[videoModel] ?? defaultSteps
@@ -337,6 +351,46 @@ export function DirectorH3Optimizations() {
                   ? 'Uses 90% block-sparse attention for newly generated Full or Pruned H3 shots. Off by default; compare motion, reference fidelity and audio quality. The first use compiles Triton kernels; reference and audio prefix rows stay protected.'
                   : 'Runs the fused checkpoint with its published 90% block-sparse SLA recipe. The first use compiles and caches Triton kernels.'
                 : `${slaStatus?.reason || 'SLA is unavailable in this runtime.'} Maestro will use dense attention without failing the generation.`}
+            />
+          </label>
+        </div>
+      )}
+
+      {modelOptions?.veda_attention === true && (
+        <div className={`rounded-lg border px-3 py-2.5 ${
+          vedaSelected
+            ? 'border-accent-blue/50 bg-accent-blue/10'
+            : 'border-border bg-bg-tertiary/50'
+        }`}>
+          <label className={`flex items-center gap-2.5 ${
+            vedaStatus?.supported ? 'cursor-pointer' : 'cursor-not-allowed opacity-70'
+          }`}>
+            <input
+              type="checkbox"
+              checked={vedaSelected}
+              disabled={!vedaStatus?.supported}
+              onChange={event => setVedaMode(videoModel, event.target.checked)}
+              className="accent-accent-blue"
+            />
+            <Gauge size={13} className={vedaSelected ? 'text-accent-blue' : 'text-text-muted'} />
+            <span className="min-w-0 flex-1">
+              <span className="block text-[11px] font-medium text-text-primary">
+                Veda Sparse Attention{vedaExperimental ? ' — Experimental' : ''}
+              </span>
+              <span className="block text-[9px] text-text-muted">
+                {vedaStatus?.supported
+                  ? 'First use downloads a predictor; compare quality'
+                  : vedaStatus?.reason || 'Unavailable in this runtime'}
+              </span>
+            </span>
+            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[8px] font-medium uppercase tracking-wider text-indicator-warning">
+              Experimental
+            </span>
+            <InfoTooltip
+              label="About Director H3 Veda Sparse Attention"
+              text={vedaStatus?.supported
+                ? 'Uses the existing H3 model with a Veda predictor downloaded on first use (about 281 MB for INT8 ConvRot or 551 MB for BF16). Compare motion, reference fidelity, and audio quality on new Director shots.'
+                : `${vedaStatus?.reason || 'Veda is unavailable in this runtime.'} The toggle is disabled on unsupported hardware.`}
             />
           </label>
         </div>

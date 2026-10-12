@@ -519,14 +519,14 @@ def _apply_director_h3_optimizations(
     requested_attention = str(
         video_params.get("override_attention") or ""
     ).strip().lower()
-    if requested_attention in {"sol", "sla", "sdpa"}:
+    if requested_attention in {"sol", "sla", "veda", "sdpa"}:
         supported_modes = getattr(
             _wgp, "override_attention_modes_supported", None
         )
-        # SLA deliberately survives an unsupported runtime: WGP reports the
-        # capability issue and performs its guaranteed dense fallback.
+        # Keep explicit sparse intent: WGP reports SLA's dense fallback or
+        # rejects unsupported Veda before loading weights.
         if (
-            requested_attention in {"sla", "sdpa"}
+            requested_attention in {"sla", "veda", "sdpa"}
             or supported_modes is None
             or requested_attention in supported_modes
         ):
