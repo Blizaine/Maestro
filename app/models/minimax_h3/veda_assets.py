@@ -80,15 +80,53 @@ def ensure_predictor(reference_mode: bool, convrot: bool, progress=None) -> str:
 
 def geometry_payload(layout, latent_shape, patch_size, anchors=(), references=()) -> tuple[tuple, dict]:
     """Translate Maestro's packed keyframe/reference geometry into Veda's contract."""
-    frames, height, width = (int(value) for value in latent_shape)
-    patch_h, patch_w = patch_size
-    grid = (frames, height // patch_h, width // patch_w)
-    keyframes = [{"latent_frame_count": int(anchor[1])} for anchor in anchors]
-    refs = [
-        {"kind": ref.kind, "latent_t": int(ref.num_latent_frames),
-         "latent_h": int(ref.latent_height), "latent_w": int(ref.latent_width)}
-        for ref in references if ref.kind != "audio"
-    ]
+    try:
+        patch_size = tuple(int(value) for value in patch_size)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("H3 Veda expects a three-dimensional (t, h, w) patch size.") from error
+    if len(patch_size) != 3:
+        raise ValueError("H3 Veda expects a three-dimensional (t, h, w) patch size.")
+    patch_t, patch_h, patch_w = patch_size
+    if patch_t != 1:
+        raise ValueError("H3 Veda does not support temporal patching; transformer patch_t must be 1.")
+    if (patch_h, patch_w) != (2, 2):
+        raise ValueError("H3 Veda currently supports only the native 2x2 spatial patch size.")
+
+    try:
+        latent_shape = tuple(int(value) for value in latent_shape)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("H3 Veda latent geometry must be a three-dimensional (t, h, w) shape.") from error
+    if len(latent_shape) != 3:
+        raise ValueError("H3 Veda latent geometry must be a three-dimensional (t, h, w) shape.")
+    frames, height, width = latent_shape
+    if min(frames, height, width) <= 0:
+        raise ValueError(f"H3 Veda latent dimensions must be positive, got {latent_shape}.")
+    if height % patch_h or width % patch_w:
+        raise ValueError(f"H3 Veda latent geometry {latent_shape} is not divisible by patch size {patch_size}.")
+
+    grid = (frames // patch_t, height // patch_h, width // patch_w)
+    keyframes = []
+    for anchor in anchors:
+        try:
+            frame_count = int(anchor[1])
+        except (IndexError, KeyError, TypeError, ValueError, OverflowError) as error:
+            raise ValueError("H3 Veda keyframe anchors must include a latent frame count.") from error
+        if frame_count <= 0:
+            raise ValueError(f"H3 Veda keyframe frame counts must be positive, got {frame_count}.")
+        keyframes.append({"latent_frame_count": frame_count})
+
+    refs = []
+    for ref in references:
+        if ref.kind == "audio":
+            continue
+        ref_shape = (int(ref.num_latent_frames), int(ref.latent_height), int(ref.latent_width))
+        ref_t, ref_h, ref_w = ref_shape
+        if min(ref_shape) <= 0:
+            raise ValueError(f"H3 Veda reference dimensions must be positive, got {ref_shape}.")
+        if ref_h % patch_h or ref_w % patch_w:
+            raise ValueError(f"H3 Veda reference geometry {ref_shape} is not divisible by patch size {patch_size}.")
+        refs.append({"kind": ref.kind, "latent_t": ref_t, "latent_h": ref_h, "latent_w": ref_w})
+
     condition_rows = sum(item["latent_frame_count"] * grid[1] * grid[2] for item in keyframes)
     condition_rows += sum(item["latent_t"] * (item["latent_h"] // patch_h) * (item["latent_w"] // patch_w) for item in refs)
     if condition_rows != layout.num_condition_video_rows:
