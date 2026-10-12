@@ -2133,6 +2133,9 @@ interface AppState {
   directorAudioPath: string | null
   directorAnalysis: AudioAnalysisResult | null
   directorPlannedClips: PlannedClip[]
+  /** Whether lyric meaning may influence visual scenes and story. Timing and lip-sync still use lyrics when this is off. */
+  directorUseLyricsContext: boolean
+  setDirectorUseLyricsContext: (enabled: boolean) => void
   directorMusicClipSeconds: number | null
   setDirectorMusicClipSeconds: (seconds: number | null) => void
   directorEnergyBias: number | null
@@ -2326,7 +2329,10 @@ async function _buildDirectorRestorePatch(
   paramsOverride?: Record<string, unknown>,
 ): Promise<Partial<AppState>> {
   const params = paramsOverride || _record(pipeline._params_snapshot)
-  const ui = _record(pipeline.director_ui_snapshot || params.director_ui_snapshot)
+  const ui = {
+    ..._record(params.director_ui_snapshot),
+    ..._record(pipeline.director_ui_snapshot),
+  }
   const manifest = _record(pipeline.asset_manifest || params._director_asset_manifest)
 
   const plannedClips = (
@@ -2552,6 +2558,11 @@ async function _buildDirectorRestorePatch(
     directorSourcePipelineId: pipeline.pipeline_id,
     directorProjectId: pipeline.project_id || pipeline.pipeline_id,
     directorSkill: skill,
+    directorUseLyricsContext: typeof ui.directorUseLyricsContext === 'boolean'
+      ? ui.directorUseLyricsContext
+      : typeof params.use_lyrics_context === 'boolean'
+        ? params.use_lyrics_context
+        : pipeline.use_lyrics_context === true,
     shortFilmPath,
     directorSceneDescription: String(ui.directorSceneDescription || pipeline.scene_description || ''),
     directorAudioPath: audioPath,
@@ -10407,6 +10418,7 @@ export const useStore = create<AppState>((set, get) => ({
   directorAudioPath: null,
   directorAnalysis: null,
   directorPlannedClips: [],
+  directorUseLyricsContext: false,
   directorMusicClipSeconds: null,
   setDirectorMusicClipSeconds: (seconds) => {
     if (seconds !== null && (!Number.isFinite(seconds) || seconds <= 0)) return
@@ -10481,6 +10493,24 @@ export const useStore = create<AppState>((set, get) => ({
   directorSongDuration: 120,
   directorTrackGenerating: false,
   setDirectorMusicSource: (s) => set({ directorMusicSource: s }),
+  setDirectorUseLyricsContext: (enabled) => set(s => {
+    if (s.directorUseLyricsContext === enabled) return {}
+    const promptPlanningStarted = ['plan', 'review', 'generate_images', 'plan_video', 'review_video']
+      .includes(s.directorStep)
+    return {
+      directorUseLyricsContext: enabled,
+      ...(s.directorSkill === 'music_video' ? {
+        // These prompts were generated under the previous setting. Keep the
+        // audio analysis and beat-aligned timeline so the user can re-plan
+        // visuals without re-uploading or re-analyzing the song.
+        directorClipPlans: [],
+        directorClipImages: [],
+        directorImageGenProgress: null,
+        directorError: null,
+        ...(promptPlanningStarted ? { directorStep: 'style' as const } : {}),
+      } : {}),
+    }
+  }),
   setDirectorMusicModel: (modelType) => {
     set({
       directorMusicModel: modelType,
@@ -11224,6 +11254,7 @@ export const useStore = create<AppState>((set, get) => ({
           clips: directorPlannedClips,
           scene_description: directorSceneDescription,
           lyrics: directorAnalysis?.lyrics ?? undefined,
+          use_lyrics_context: get().directorUseLyricsContext,
           bpm: directorAnalysis?.bpm ?? 120,
           reference_image_path: refImagePath ?? undefined,
           ...extraRefs,
@@ -11239,6 +11270,7 @@ export const useStore = create<AppState>((set, get) => ({
           ...timelineOptions,
           scene_description: directorSceneDescription,
           lyrics: directorAnalysis?.lyrics ?? undefined,
+          use_lyrics_context: get().directorUseLyricsContext,
           bpm: directorAnalysis?.bpm ?? 120,
           reference_image_path: refImagePath,
           ...extraRefs,
@@ -11293,6 +11325,7 @@ export const useStore = create<AppState>((set, get) => ({
         clips: directorPlannedClips,
         scene_description: directorSceneDescription,
         lyrics: directorAnalysis?.lyrics ?? undefined,
+        use_lyrics_context: get().directorUseLyricsContext,
         bpm: directorAnalysis?.bpm ?? 120,
         reference_image_path: directorReferenceImagePath,
         ...(crp.length > 0 ? { character_ref_paths: crp } : {}),
@@ -11609,6 +11642,7 @@ export const useStore = create<AppState>((set, get) => ({
       directorAudioPath: null,
       directorAnalysis: null,
       directorPlannedClips: [],
+      directorUseLyricsContext: false,
       directorEnergyBias: null,
       directorClipPlans: [],
       directorSceneDescription: '',
@@ -14181,6 +14215,7 @@ export const useStore = create<AppState>((set, get) => ({
 
     const pipelineParams: Record<string, unknown> = {
       pipeline_type: pipelineType,
+      use_lyrics_context: pipelineType === 'music_video' && state.directorUseLyricsContext,
       ...(pipelineType === 'music_video' && !state.directorSeamless
         ? {director_music_clip_seconds: state.directorMusicClipSeconds} : {}),
       // Held work and reviewed revisions cannot pause for browser review.
@@ -14305,6 +14340,8 @@ export const useStore = create<AppState>((set, get) => ({
       director_ui_snapshot: {
         snapshot_version: 1,
         directorSkill: state.directorSkill,
+        directorUseLyricsContext: pipelineType === 'music_video'
+          && state.directorUseLyricsContext,
         directorStep: state.directorStep,
         directorSceneDescription: state.directorSceneDescription,
         directorAudioName: exactDriveReference?.filename

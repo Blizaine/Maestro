@@ -9,6 +9,11 @@ The October 10 candidate also includes the accumulated local Auto, Director,
 model-picker, H3 decoder resolver and Qwen Turbo changes. Main has not been
 updated; no push, tag or release publication is part of this preparation.
 
+The October 12 follow-up is prepared for public Dev testing so existing Dev
+installations can receive the local Director and dialogue changes through the
+normal Pinokio Update action. This promotion targets Dev only; Main and release
+tags remain unchanged. The planning and media limitations below still apply.
+
 ## Automated checks
 
 [Dev CI run 37861066113](https://github.com/Blizaine/Maestro/actions/runs/37861066113)
@@ -475,6 +480,348 @@ and causal clip-boundary validation. A passing CPU suite and decodable media do
 not establish that those story contracts are satisfied. Saved performance settings
 were restored, Auto remained enabled, resident models were released, and the main
 application was left running and idle.
+
+## October 11 remediation follow-up (local, not published)
+
+The candidate now carries original speech/music permissions and source events
+outside screenplay compression, preserves explicit prop details and authored
+endings, and validates source allocation and declared physical continuity before
+queuing video. Save/resume and clip regeneration preserve those contracts.
+Source-owned action prose cannot append a model-invented transition action.
+The silent H3 repair now requests one initial fact set and ordered state changes;
+Maestro derives carried openings, transition from-values and closings in code.
+Shot count, timing, camera choices and other authored fields stay fixed during
+that repair. Source and physical validators still run afterward.
+
+The v12 candidate recorded **3,978 passing CPU tests and 12 skips**, with unchanged
+source throughout the 495.39-second run. Its source digest is
+`6f92449ac574f4718172cbf424ce2636fbf3b05005d70f09695292ce342d8a02`.
+Earlier failing runs remain retained. The two v11 speaker fixtures exposed a
+real canonical-marker insertion defect; v12 corrects that defect while retaining
+the ownership checks. Local name and pronoun cues must prove the source speaker
+before Maestro inserts an adjacent canonical ID. Unknown names, a preceding name
+used only as an object, competing owners, and changed dialogue still fail.
+Captured-output replays establish parser behavior, not semantic acceptance.
+
+The subsequent v13 source-owner guard passed **157 focused regressions** across
+physical/source contracts, compact repairs, native serialization, music state
+proposals and long-form planning. Explicit named support/contact relations bind
+to their source actor and target; reversed support and unrelated actors do not
+satisfy them. Single-event boarding requires its matching transition. Multiple
+events require the actor/target in that actor's declared trajectory without
+guessing which event owns a clip endpoint. Ambiguous actors and pronoun targets
+remain outside this lexical check; it is not a general semantic proof. The full
+CPU count above belongs to v12; v13 received these focused checks and lint, with
+no new live writer or Director attempt. The restarted local runtime exactly
+matches frozen v13 digest
+`866786bf506758856a2c244fde53d867cf0f25079ebc4ba45b45ae437664d95c`.
+
+Automatic duration-derived dialogue minima are writing targets for otherwise
+complete exchanges; explicit spoken-word minima, speaker/topic/quote checks and
+hard duration maxima remain enforced. An incomplete one-speaker exchange now
+reports its missing speakers before the automatic word-count target.
+
+All ten v11 writer attempts were reviewed, including their 44 effective calls,
+five source fallbacks and one failed anonymous exchange. Missing spoken tags,
+wrong speaker order and weak endings remain genuine quality findings. Two fresh
+v12 creative-group attempts completed without fallback: Qwen3.8 27B used two
+calls in 24.203 seconds; Gemma E4B used three in 11.515 seconds. Both final native
+prompts preserve all three generated locked lines in order with correct adjacent
+owners. These are single stochastic attempts, not a matched performance study;
+the terse creative writing and speech timing still need rendered review. No
+motion, voice, identity or lip-sync acceptance is claimed.
+
+The 40.5-second v8 silent Director plan passed mechanical validation, but primary
+text review rejected it before rendering: the typed states contained reciprocal
+support, a misplaced lowering action and stale seated/airborne facts after
+landing and dismounting. Earlier failed plans and this rejected plan remain
+retained. Mechanical state consistency alone does not establish source fidelity.
+The v8 full-song music plan failed before rendering because two independently
+generated continuity markers disagreed. New compact H3 proposals now derive
+physical continuity from their single cut strategy; legacy ledgers still undergo
+strict validation. The v10 Director repair exposed a separate representation
+gap: a sparse opening could not introduce a source-supported support/contact
+relation at a later event. Its patch was rejected atomically, so the final stale
+rows' missing-event error is not evidence that the repair omitted that event.
+The next representation supports source-proven establishment of absent
+support/contact/grounded facts at their exact event. It cannot overwrite a known
+fact or guess an unknown starting value. Native serialization and JSON
+round-trip checks retain that event provenance and do not print null states.
+The music next-batch context now supplies only authoritative closing facts,
+rather than replaying the preceding clip's old opening/actions; continuous clips
+inherit those carried facts in code.
+
+Fresh planning still failed before GPU submission. Gemma's v11 short-film
+repair exceeded the eight-transition limit in its final clip. Qwen's v12 repair
+included all source events but attempted a posture change without a known
+starting state, so its patch was rejected atomically. The v11 full-song music
+plan checkpointed two of 23 rows, then failed because a prop transition had no
+declared current fact. All completed LLM passes and errors were retained. No
+fresh Director or music plan was approved for rendering; **Main promotion remains
+held for planning reliability and subsequent semantic/media review**. Passing
+CPU checks and short enhancement attempts do not clear that gate.
+
+Three matched six-step H3 Pruned diagnostics on the 24-GB workstation completed
+full decoding. Profile 1/default, Profile 2/default and Profile 2/dynamic preload
+took respectively 267.328, 205.125 and 261.687 seconds overall, with denoising
+times of 139.265, 139.281 and 191.656 seconds. Dynamic preload was about 38%
+slower during denoising and reached 23.50 GiB sampled device memory. There was
+one cold reload per setting; cache/loading effects confound wall-time comparisons.
+The earlier 20-step stall was not reproduced by these six-step diagnostics.
+These observations do not justify new defaults or broad speed claims.
+
+Private source snapshots, complete writer calls, failed Director passes and receipts are under
+`.codex-tmp/director-remediation-20261011/` and the local Test-Bench report.
+No changes have been committed or pushed by this follow-up. AI-WRKST-02 was
+checked read-only: its clean `dev` branch already tracks `origin/dev`; normal
+Pinokio Update will retrieve these fixes after they are published to Dev. All
+39 original system-setting keys and 31 service-setting keys matched the pre-test
+snapshot at the final comparison; the test writer was unloaded and the local
+application was confirmed idle.
+
+## October 11 native H3 music-clip planning follow-up
+
+A fresh run on the 12-GB test machine failed before GPU submission because
+the music planner supplied rolling-window prompts inside already segmented
+native H3 clips. Joining those windows replaced each authored clip prompt with
+several timelines that restarted shot numbering and local clocks. Captured
+outputs reproduced the exact consecutive-shot-number validation failure.
+
+H3 planning now constrains `window_prompts` to an empty array and rejects
+nonempty arrays during bounded row repair. All local cuts belong in the single
+`video_prompt`. The strict final timing/numbering checks remain unchanged, and
+the planner revision invalidates obsolete planning checkpoints. Non-H3 window
+support is retained.
+
+The focused music planning, native timing, long-form recovery and shot-number
+suite passed **91 tests**. Offline replay of the captured first clip verified
+bounded repair with a mocked provider response and strict compilation, retaining
+the authored cuts and action. All 23 original standalone clip prompts also
+compiled in the diagnostic replay. These are CPU/replay checks, not a fresh
+writer attempt or a rendered music-video acceptance test.
+
+A narrow backport was installed on the idle 12-GB test machine and Maestro
+was restarted through Pinokio. The installed file hash and healthy, idle API
+were verified; original outputs and the failed pipeline were retained. This is
+one private source-file modification against the older public Dev checkout;
+public Dev and Main were not pushed. Reconcile that backport when installing
+the eventual published update. The broader release validation holds above
+remain in effect.
+
+### Ordered music-video story actions — October 11
+
+Inspection of the next kitten/dragon run found no climb in any of its 23 actual
+clip prompts. The overall brief contained the climb, while clip 2 opened with
+the kitten already perched on the dragon. Independent cuts bypassed the local
+state handoff, and music planning did not allocate the requested source actions.
+
+Music planning now extracts a conservative, finite set of concrete action
+clauses from the original brief and allocates them to ordered global clips in
+one bounded, checkpointed writer pass. Rows must preserve their assigned IDs
+and concrete action clauses; a pending climb cannot be skipped by an independent
+cut or baked into an identity definition. Final H3 compilation checks only the
+actual detailed visual action for coverage. Scene summaries and global context
+cannot satisfy it. The metadata persists across save, resume and regeneration.
+Performance-only briefs do not require the extra allocation call.
+
+The latest focused results cover **138 distinct passing tests**, including
+music performance, timeline/timing, bounded planning, checkpoint recovery and
+native H3 numbering. Nine integration/failure-recovery checks also passed against the exact
+three-file private backport for the test machine's older Dev checkout. A CPU
+replay rejected the captured mounted opening; four corrected milestone rows
+survived actual H3 compilation. These are prompt checks, not proof that a video
+model renders the requested motion. The separate one-hour Studio stress test
+was stopped at an existing CPU hotspot in `h3_recurrence.py`; it is excluded
+from this focused result.
+
+Preliminary live writer attempts were rejected before media generation.
+They exposed over-literal wording checks, including an abstract “teams up”
+milestone and a physically described but paraphrased climb. Abstract social
+verbs are no longer milestones. Bounded climb/flight/swoop/fire inflections now
+accept the captured climb wording while checking the actor, boarding target,
+sentence-local negation and action order. Wrong-actor and wrong-target tests
+remain rejected. Failed planning calls are retained for diagnosis and their
+streaming flag is cleared.
+
+A further captured draft exposed partial native formatting: a freeform visual
+prompt with only soundscape/music sections at the end was treated as a full
+Context-IR prompt without a detailed description. The validator now retains
+that visual prefix. Four real writer rows passed before and after H3
+compilation, including a climb expressed through direct target contact and
+upward body movement. Mounted-only and floating-only prompts still fail.
+
+The old run was cancelled with its nine completed clips retained. The idle
+test machine received a hash-verified, backed-up private update and restarted
+through Pinokio. A fresh plan uses the same song, kitten reference, 23-clip
+timeline, 720p resolution and eight-step Fused References settings. Public Dev
+and Main remain unchanged. Finite verb extraction and actor/pronoun aliases remain
+heuristic. Fresh run `ff9971bc` planned all 23 clips in eight batches without
+repairs and passed native H3 preflight. Review confirmed the climb in clip 1,
+flight in clip 2 and a consistent two-subject mapping in the reviewed draft.
+The full eight-step render completed on AI-WRKST-02. The October 12 audit
+below supersedes that draft-only identity finding and the pending join status.
+
+### Music-video creative regression and final-input audit — October 12
+
+Completed run `ff9971bc` produced
+`2026-10-12-03h10m00s_seed281641005_multiclip.mp4`: 23 clips, 228.5 seconds,
+1280x704, eight steps. All final clip prompts and sampled frames across this
+render, the October 8 original and its October 10 repaired join were reviewed.
+This was not a continuous playback or a controlled model-quality comparison:
+the original used six steps and a slightly different brief.
+
+The action allocator assigned all four source milestones to clips 1-4:
+boarding, flight, swoop and fire attack. The allocator asks for enabling actions
+early but has no whole-song pacing or creative-arc acceptance check. This
+exhausted the major requested progression in approximately 40 seconds, while
+the original's first five clips developed solo performance and movement before
+mounting in clip 6. Later new prompts mostly vary the same mounted state,
+battlefield and attack imagery. Ordered action coverage therefore passed while
+the user's creative acceptance failed. This run does not establish that the
+new planner improves general music-video quality.
+
+The final generation metadata also defines the kitten as both Subject 1 and
+Subject 3 in all 23 clips, although the reviewed draft had two subjects. The
+final prompt compilation/reference mapping path still needs reconciliation
+with the local identity fixes and validation at the actual render boundary.
+Do not report this duplicate-identity issue as resolved on the test machine.
+
+The original generation metadata retains its original prompts, whereas its
+saved pipeline now contains later repairs. Original clips 11-12 and 21-23 put
+the global concept into detailed visual instructions instead of a distinct
+local action, reintroducing the climb/flight/fire sequence. That explains a
+separate mechanism for the original's repeated scenes; the new run's loss of
+variety is a planning regression rather than evidence that this original
+mechanism was the only cause of repetition.
+
+General remediation should plan section-aware progression across the complete
+song before detailed batches, distinguish persistent physical facts from
+creative staging, review semantic action/camera/environment diversity, and
+validate the final H3 inputs. Preserve good existing shots during targeted
+repairs. Evaluate narrative, performance-only and abstract concepts without
+hardcoding this cast or requiring every music video to follow one story arc.
+No further generation or public branch update was started for this audit.
+
+### Whole-song direction and lyric control — October 12
+
+The local candidate now saves an opt-in **Use lyrics to guide visuals** choice,
+off for new music-video projects. Both planning API paths and saved project
+restoration carry it. With it off, transcript words are excluded from creative
+writer requests while vocal activity, performer mapping, musical timing and
+the supplied soundtrack remain available. Changing it invalidates local visual
+plans without discarding audio analysis or the timeline. A browser regression
+exercises the real UI/store/request/restore paths with all requests intercepted;
+it passed, as did the production frontend build.
+
+Four-or-more-clip music plans now receive a bounded whole-song outline before
+detailed writing. Narrative actions are distributed through that outline;
+performance and abstract concepts can develop without an imposed story.
+Physical continuity permits cutaways without replaying the transition that
+established a state. Creative review inspects actual visual bodies and records
+subjective or ungrounded judgments as diagnostics. Proven repetitions receive
+focused repairs; unchanged neighbors are retained and their boundaries are
+revalidated. Checkpoints preserve accepted repairs and revisioned review state.
+Final H3 compilation checks picture ownership, reconciles article variants,
+and filters shared placeholder names while preserving stable subject IDs.
+An explicit user prompt edit retains its override of the literal-brief guard.
+
+The final integrated CPU regression passed **230 tests**, excluding the previously
+identified one-hour Studio CPU hotspot. This includes native-timing and
+unattached-alignment checks. The captured 23-clip kitten/dragon final-input
+replay retained two subjects and compiled idempotently after alias repair.
+This is local compiler evidence; the remote machine's completed video is not
+retroactively changed.
+
+Bounded live tests used the installed local
+`Abhiray/gemma-4-E4B-it-heretic-GGUF` and
+`JonathanColetti/Qwen3.8-27B-Uncensored-GGUF`, without video renders, cloud calls,
+saved-project writes or preference changes. Every attempt, request, response,
+source hash and failure is retained privately under
+`.codex-tmp/music-direction-20261012`. Sources stayed frozen during each run,
+and the harness checked for user jobs before each call and unloaded its writer.
+
+The initial pilot completed 23-clip narrative and eight-clip abstract outlines;
+a fixed-stage outline exposed camera vocabulary being misread as a physical
+action. The first full-plan run completed the fixed-stage case, but rejected
+abstract and journey plans. These failures exposed missing validation feedback,
+an action clause swallowing later actions, and invented event-ID variants.
+The repair prompts now receive the actual error, source clauses are separated,
+and the outline grammar limits event IDs to the source contract. Placeholder
+performer labels found during final compilation were also corrected.
+
+A second full-plan run completed four-clip fixed-stage and abstract plans in
+84.8 and 62.0 seconds. Final native prompts kept three distinct band members,
+a locked wide camera, and changing performance energy. The abstract plan added
+no people and developed ink threads into clouds and still translucent layers.
+An unrelated synthetic lyric line was absent from all writer requests with the
+control off. The journey case failed because a valid shoreline walk contained
+intervening descriptive words, exposing an overly literal action matcher. A
+third attempt passed the walk but rejected a stop performed by the stable cast
+ID `lead_performer` instead of the source label "singer." The validator now
+accepts bounded same-verb inflections and adverbs with actor, object/place,
+spatial-relation and negation checks. A singer-role bridge requires exactly one
+explicitly declared vocalist ID; ambiguous casts remain strict. Both captured
+stop drafts pass replay. These failures are retained rather than omitted from
+the results.
+
+A fresh journey retest then completed all four clips and final native
+compilation in **77.4 seconds / nine writer calls**. The accepted plan moves
+from a shoreline walk through the lighthouse stop to the sun disappearing,
+retaining one singer. Disabled lyric text stayed out of the writer requests.
+
+The captured fixed-stage opening also exposed a conflicting whole-cast
+closed-mouth adjunct alongside the assigned vocalist's lip-sync direction.
+Performance normalization now removes that bounded collective closure when
+vocals are active and a vocalist is explicit, while retaining individual
+instrumentalist directions, silent gaps and explicitly requested silence.
+The captured opening passes final native validation and idempotent compilation
+after the fix; the original defect remains recorded in the private evidence.
+
+The full-length, 23-clip candidate attempts remain recorded,
+including failures. They exposed duplicate source-event assignments, an overly
+literal outline/action matcher, and detailed repairs losing accepted actions
+while fixing physical state. Source events now use a keyed assignment map;
+each required event has exactly one clip index. Malformed maps are repaired
+without crashing. Repairs receive the rejected draft in place, and stale
+action errors are cleared once fixed. A captured battlefield-running draft
+passes replay with its terrain established in the visual body; wrong actors,
+terrain, negations and directed transitions remain checked. Outline shorthand
+such as "takes flight" produces diagnostic notes when literal matching is
+inconclusive. Detailed source-action validation remains authoritative at the
+generation handoff.
+
+Long-plan failures also exposed an overly broad contact check: camera holds
+and a performer holding a pose were interpreted as physical contact because
+the global concept mentioned riding later. The check now distinguishes those
+phrases from actual prop holding or support/contact actions. Complete shots
+with compact-state materialization errors can receive metadata-only repairs;
+incomplete shot rows still use full-row repair. The metadata path retains
+visible prose and action beats and uses the same downstream validators and
+attempt limit. Both captured Qwen state repairs passed in one call each
+(5.25 and 5.64 seconds), with visible fields unchanged. Gemma's corresponding
+bounded state-repair attempts remained unsuccessful; those failures are kept.
+
+A subsequent fresh Qwen 23-clip run caught a repeated outline beat, accepted
+five detailed clips, then stopped at clip six after two repairs. Its final
+boarding draft used a pronoun in a compound action, which the actor check
+rejected. The run took 293.8 seconds including model setup, with six writer
+calls. It is recorded as failed, rather than counting the accepted outline or
+prefix as a completed long plan. A narrow actor-binding fix now accepts that
+unchanged boarding draft while retaining ordinary pronoun behavior and checks
+against wrong or ambiguous actors and negated actions. Its six-clip prefix
+passes final native compilation and subject-binding checks. Both recorded
+metadata responses also pass the final repair eligibility guard and full-row
+validators without further writer calls or visible text changes. These captured
+replays do not establish a successful fresh full-length plan. All 17 live
+attempts and 90 writer calls, including failures, remain in the private evidence.
+
+Gemma 4B's subjective critic was frequently inconclusive about exact evidence;
+those outputs are diagnostics, not proof of creative acceptance. Deterministic
+literal-repeat/full-brief checks and contract validation remain active. Some
+writer prose is still verbose or awkward. Structural completion is not full
+creative acceptance. Text checks cannot establish rendered motion, identity,
+lip-sync, or whether a full-length video is interesting; a matched media review
+remains necessary before making those claims.
 
 ## Remaining validation limits
 

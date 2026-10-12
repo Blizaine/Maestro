@@ -120,8 +120,14 @@ def draft_spoken_exchange(prompt: str, duration_seconds: float | None, generator
     callers keep the original user prompt in their review/queue snapshot.
     """
     from services.dialogue_writing import (
-        compact_dialogue_brief, creative_dialogue_budget,
-        requested_dialogue_turns, spoken_word_count,
+        canonical_requested_dialogue_speaker,
+        compact_dialogue_brief,
+        creative_dialogue_budget,
+        creative_dialogue_violations,
+        dialogue_minimum_satisfied,
+        requested_dialogue_speakers,
+        requested_dialogue_turns,
+        spoken_word_count,
     )
     from services.h3_story_ledger import extract_locked_dialogue
 
@@ -138,7 +144,13 @@ def draft_spoken_exchange(prompt: str, duration_seconds: float | None, generator
     # retaining the duration-derived hard maximum.
     minimum_words = (
         min(budget.minimum, requested_turns * 2)
-        if requested_turns and compact_dialogue_brief(prompt) else budget.minimum
+        if budget.minimum_is_automatic and requested_turns and compact_dialogue_brief(prompt)
+        else budget.minimum
+    )
+    minimum_guidance = (
+        f"The duration-derived minimum {minimum_words} is a target once all exchange requirements are complete"
+        if budget.minimum_is_automatic
+        else f"The user-requested minimum {minimum_words} spoken words is strict"
     )
     schema = {"type": "object", "additionalProperties": False, "required": ["turns"],
               "properties": {"turns": {"type": "array", "minItems": 1,
@@ -162,13 +174,14 @@ def draft_spoken_exchange(prompt: str, duration_seconds: float | None, generator
         "L-key to revised spoken text. Each key stays with its original speaker and turn position; "
         "preserve speaker roles, intent, requested information, the exchange's progression and ending. "
         "Write complete, natural utterances in the same language. Do not return speaker names, turns, "
-        "metadata, tags, or directions. Keep every line meaningful and concise enough to meet its word target. "
-        f"The whole exchange must contain {minimum_words}–{budget.maximum} spoken words, "
-        f"aiming for {budget.target}, including any unchanged lines."
+        "metadata, tags, or directions. Keep every line meaningful and concise. "
+        f"Aim for {budget.target} spoken words total and never exceed the hard maximum of {budget.maximum}. "
+        f"{minimum_guidance}; include unchanged lines in the count."
     )
     if nsfw_guidance:
         copyedit_system += "\n\n" + nsfw_guidance
     feedback = ""
+    retry_guidance = ""
     last_error = None
     last_attempt_over_budget = False
     repair_turns: list[dict[str, str]] | None = None
@@ -176,6 +189,7 @@ def draft_spoken_exchange(prompt: str, duration_seconds: float | None, generator
         attempt_over_budget = repair_turns is not None
         raw = ""
         turns = None
+        count: int | None = None
         copyedit_error = None
         if repair_turns is not None:
             from services.h3_dialogue_writing import _shorten_generated_dialogue
@@ -219,12 +233,13 @@ def draft_spoken_exchange(prompt: str, duration_seconds: float | None, generator
                 prompt=(f"User brief: {prompt}\n\n"
                         f"Duration: {duration_seconds or 8:g} seconds. Language: {language}. "
                         f"{'Use exactly' if requested_turns else 'Write about'} {suggested_turns} concise turns "
-                        f"and {budget.target} spoken words TOTAL "
-                        f"across all speakers (allowed {minimum_words}–{budget.maximum} words, not per turn). "
+                        f"and aim for {budget.target} spoken words TOTAL across all speakers, not per turn. "
+                        f"{minimum_guidance}; the hard maximum is {budget.maximum}. "
                         "Leave time for listening reactions.\n"
                         + (f"Reference inventory: {reference_context}\n" if re.search(r'<(?:Subject|Picture|Video|Audio) \d+>', reference_context) else "")
                         + feedback),
-                system_prompt=system, json_schema=schema, max_new_tokens=max(768, budget.maximum * 6),
+                system_prompt=system + ("\n\nREPAIR GUIDANCE: " + retry_guidance if retry_guidance else ""),
+                json_schema=schema, max_new_tokens=max(768, budget.maximum * 6),
                 temperature=0.6, enable_thinking=False, frequency_penalty=0.0, presence_penalty=0.0,
             )
 
@@ -259,18 +274,48 @@ def draft_spoken_exchange(prompt: str, duration_seconds: float | None, generator
                     f"The user requested exactly {requested_turns} turns; your exchange had {len(turns)}."
                 )
             attempt_over_budget = count > budget.maximum
-            if not minimum_words <= count <= budget.maximum:
-                error = ValueError(f"Your exchange had {count} words; use {minimum_words}–{budget.maximum} total, aiming for {budget.target}.")
+            structural_violations = creative_dialogue_violations(
+                prompt,
+                turns,
+                maximum_words=budget.maximum,
+            )
+            minimum_ok = dialogue_minimum_satisfied(
+                count,
+                minimum_words,
+                automatic=budget.minimum_is_automatic,
+                exchange_complete=not structural_violations,
+            )
+            if count > budget.maximum:
+                error = ValueError(
+                    f"Your exchange had {count} words; at most {budget.maximum} allowed "
+                    f"(aim for {budget.target})."
+                )
+                if attempt == 1:
+                    repair_turns = [
+                        {"speaker": " ".join(turn["speaker"].split()), "text": turn["text"].strip()}
+                        for turn in turns
+                    ]
+                raise error
+            if structural_violations:
+                raise ValueError("The exchange still violates its dialogue contract: " + "; ".join(structural_violations))
+            if not minimum_ok:
+                error = ValueError(
+                    f"Your exchange had {count} words; use at least {minimum_words} total "
+                    f"and never exceed {budget.maximum}."
+                )
                 if attempt == 1 and attempt_over_budget:
                     repair_turns = [
                         {"speaker": " ".join(turn["speaker"].split()), "text": turn["text"].strip()}
                         for turn in turns
                     ]
                 raise error
+            expected_speakers = requested_dialogue_speakers(prompt)
             speakers: dict[str, int] = {}
             lines = []
             for turn in turns:
-                speaker = " ".join(turn["speaker"].split())
+                speaker = canonical_requested_dialogue_speaker(
+                    turn["speaker"], expected_speakers,
+                )
                 speaker_id = speakers.setdefault(speaker.casefold(), len(speakers) + 1)
                 lines.append(f'{speaker} (S{speaker_id}) says, '
                              f'<d>[{language}] {turn["text"].strip()}</d>')
@@ -287,7 +332,33 @@ def draft_spoken_exchange(prompt: str, duration_seconds: float | None, generator
             last_attempt_over_budget = attempt_over_budget
             reason = str(error)
             print(f"[Enhance dialogue] attempt {attempt}/2 rejected: {reason}")
+            if isinstance(turns, list) and count is not None and not attempt_over_budget:
+                nonbudget_issues = creative_dialogue_violations(
+                    prompt, turns, maximum_words=budget.maximum,
+                )
+                missing_participants = any(
+                    issue.startswith("missing requested speaking participants:")
+                    for issue in nonbudget_issues
+                )
+                missing_topics = any(
+                    issue.startswith("missing spoken talking points:")
+                    for issue in nonbudget_issues
+                )
+                if missing_participants:
+                    retry_guidance = (
+                        "Keep every existing valid speaker and spoken line exactly in its current order. "
+                        "Add a natural turn for each missing requested speaker and satisfy the full brief."
+                    )
+                elif count < minimum_words or missing_topics:
+                    retry_guidance = (
+                        "These are generated draft lines, not locked user quotations. You may revise their "
+                        "wording to approach the duration-based target or cover missing spoken topics while preserving each speaker identity, "
+                        "the existing turn order, character intent, topic coverage, and ending. Do not "
+                        "exchange speaker roles or invent an extra speaker."
+                    )
             feedback = f"Revise this draft; do not start over: {raw}\nCorrection: {error}"
+            if retry_guidance:
+                feedback += "\n" + retry_guidance
     selected_duration = duration_seconds or 8
     last_reason = str(last_error or "").rstrip(" .")
     diagnostic = (

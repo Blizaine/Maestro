@@ -10008,6 +10008,7 @@ async def director_plan_prompts(request: Request):
             style_prompt=style_prompt,
             lyrics=body.get("lyrics"),
             bpm=body.get("bpm", 120.0),
+            use_lyrics_context=body.get("use_lyrics_context") is True,
         )
         return {"prompts": prompts}
     except Exception as e:
@@ -10185,6 +10186,7 @@ async def director_plan_prompts_and_images(request: Request):
             speaker_mappings=body.get("speaker_mappings"),
             prompt_type=body.get("prompt_type", "both"),
             existing_image_prompts=body.get("existing_image_prompts"),
+            use_lyrics_context=body.get("use_lyrics_context") is True,
         )
         return {"clip_plans": clip_plans, "planned_clips": clips}
     except Exception as e:
@@ -10746,7 +10748,7 @@ async def director_v2_plan(request: Request):
 
         # Build planner kwargs from request body
         planner_kwargs = {}
-        for key in ["clips", "scene_description", "story_description", "lyrics", "bpm",
+        for key in ["clips", "scene_description", "story_description", "lyrics", "bpm", "use_lyrics_context",
                      "reference_image_path", "speaker_mappings", "characters",
                      "audio_path", "target_duration", "target_scenes", "narrative_mode",
                      "fps", "frames_steps", "frames_minimum",

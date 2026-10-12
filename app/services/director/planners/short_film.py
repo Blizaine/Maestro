@@ -45,6 +45,17 @@ from ..long_form_story import (
     resolve_locked_dialogue_speakers,
     sanitize_long_form_shot_dicts,
 )
+from ..source_contract import (
+    build_source_contract, format_source_contract, source_contract_issues,
+    apply_source_contract, director_audio_policy,
+)
+from ..physical_continuity import (
+    PHYSICAL_STATE_JSON_SCHEMA, normalize_physical_state,
+    validate_physical_state_sequence, format_physical_state_for_prompt,
+    physical_transition_actions_missing_from_prompt,
+    physical_state_contract_instructions,
+    identity_only_description,
+)
 from .base import BasePlanner
 from services.text_integrity import repair_text
 from services.dialogue_timing import (
@@ -154,6 +165,8 @@ _SHOT_PROPERTIES = {
     "story_scene_number": {"type": "integer"},
     "causal_handoff": {"type": "string"},
     "persistent_story_state": {"type": "string"},
+    "source_event_ids": {"type": "array", "items": {"type": "string"}},
+    "physical_state": PHYSICAL_STATE_JSON_SCHEMA,
     "subjects_on_screen": {"type": "array", "items": _SUBJECT_SCHEMA},
     "spatial_setup": {"type": "string"},
     "environment": {"type": "string"},
@@ -2737,6 +2750,11 @@ def _h3_speaker_is_visible(raw: dict, speaker_key: str) -> bool:
     return False
 
 
+def _h3_identity_only_description(description: str) -> str:
+    """Keep appearance while a typed ledger owns temporary poses and actions."""
+    return identity_only_description(description)
+
+
 def _h3_rebuilt_visual_prompt(raw: dict) -> str:
     """Rebuild dialogue-free visual prose from the repair's structured data."""
 
@@ -2747,13 +2765,23 @@ def _h3_rebuilt_visual_prompt(raw: dict) -> str:
         return re.sub(r"\s+", " ", text).strip(" .")
 
     parts: list[str] = []
+    source_owned_actions = bool(raw.get("_director_source_contract") and raw.get("source_event_ids"))
     causal_handoff = clean(raw.get("causal_handoff"))
-    if causal_handoff:
+    if causal_handoff and not source_owned_actions:
         parts.append("Story handoff: " + causal_handoff)
     persistent_state = clean(raw.get("persistent_story_state"))
-    if persistent_state:
+    if persistent_state and not source_owned_actions:
         parts.append("Continuity state: " + persistent_state)
-    for field in ("scene_goal", "environment", "spatial_setup"):
+    physical_state = normalize_physical_state(raw.get("physical_state"))
+    if physical_state and not any(physical_state.get(key) for key in ("opening", "transitions", "closing")):
+        physical_state = None
+    # A typed ledger owns opening poses. Do not reintroduce conflicting old
+    # blocking through model metadata after a focused state patch. Source-owned
+    # actions and carried prop details retain the authored temporal information.
+    fields = ["environment"] if source_owned_actions else ["scene_goal", "environment"]
+    if not physical_state:
+        fields.append("spatial_setup")
+    for field in fields:
         value = clean(raw.get(field))
         if value and value.casefold() not in {item.casefold() for item in parts}:
             parts.append(value)
@@ -2768,6 +2796,8 @@ def _h3_rebuilt_visual_prompt(raw: dict) -> str:
             or subject.get("visual_description")
         )
         description = clean(subject.get("visual_description"))
+        if physical_state:
+            description = _h3_identity_only_description(description)
         wardrobe = clean(subject.get("wardrobe"))
         position = clean(subject.get("position_or_relation"))
         bits = [name]
@@ -2775,12 +2805,20 @@ def _h3_rebuilt_visual_prompt(raw: dict) -> str:
             bits.append(description)
         if wardrobe:
             bits.append(f"wearing {wardrobe}")
-        if position:
+        if position and not physical_state and not raw.get("spatial_setup"):
             bits.append(f"positioned {position}")
         if any(bits):
             subject_details.append(", ".join(bit for bit in bits if bit))
     if subject_details:
         parts.append("Visible cast: " + "; ".join(subject_details))
+
+    if physical_state:
+        parts.append(format_physical_state_for_prompt(
+            {**physical_state, "closing": []}, include_transitions=False,
+        ))
+    details = raw.get("_director_carried_source_details") or []
+    if details:
+        parts.append("Unchanged source prop details: " + "; ".join(details))
 
     camera = raw.get("camera_plan") or {}
     camera_bits = [
@@ -2795,8 +2833,17 @@ def _h3_rebuilt_visual_prompt(raw: dict) -> str:
         parts.append("Camera: " + ", ".join(camera_bits))
     actions = [clean(value) for value in raw.get("action_beats") or []]
     actions = [value for value in actions if value]
+    if physical_state and not raw.get("source_event_ids"):
+        actions.extend(physical_transition_actions_missing_from_prompt(
+            physical_state, " ".join(actions)
+        ))
     if actions:
         parts.append("Action: " + " Then ".join(actions))
+    if physical_state:
+        parts.append(format_physical_state_for_prompt(
+            {**physical_state, "opening": [], "continuity": "continuous"},
+            include_transitions=False,
+        ))
     for label, field in (("Lighting", "lighting"), ("Mood", "mood")):
         value = clean(raw.get(field))
         if value:
@@ -2818,7 +2865,7 @@ def _h3_rebuilt_visual_prompt(raw: dict) -> str:
         old_prompt,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    if music_match:
+    if music_match and (raw.get("_director_audio_policy") or {}).get("generated_music_allowed") is not False:
         candidate = clean(music_match.group(1))
         if candidate and len(candidate) <= 500:
             music = candidate
@@ -4182,11 +4229,18 @@ def _prepare_h3_story_continuity(
                 state_bits.append(f"Active objective: {active_objective}")
             if inherited_state:
                 state_bits.append(f"Inherited state: {inherited_state}")
-            if state_after:
-                state_bits.append(f"State carried forward: {state_after}")
+            # The scene's resulting state belongs after its actions. Injecting
+            # it into every opening made boarding/landing happen twice.
             raw["persistent_story_state"] = ". ".join(state_bits)
 
         add_visible_action(last_shot, outgoing, first=False)
+        if state_after:
+            prior_ending = str(last_shot.get("ending_beat") or "").strip()
+            if state_after.casefold() not in prior_ending.casefold():
+                last_shot["ending_beat"] = (
+                    f"{prior_ending}. Resulting story state: {state_after}"
+                    if prior_ending else f"Resulting story state: {state_after}"
+                )
         ending = re.sub(
             r"\s+", " ", str(last_shot.get("ending_beat") or "")
         ).strip()
@@ -4620,7 +4674,6 @@ def _prepare_h3_prompt_only_continuity(shot_dicts: list[dict]) -> list[dict]:
     prior_group = ""
     wardrobe_by_scene_subject: dict[tuple[str, str], str] = {}
     opening_blocking: list[str] = []
-    final_instructions: dict[int, str] = {}
     for shot_index, raw in enumerate(shot_dicts):
         group = re.sub(
             r"[^a-z0-9_-]+",
@@ -4635,11 +4688,6 @@ def _prepare_h3_prompt_only_continuity(shot_dicts: list[dict]) -> list[dict]:
             requested = "continuous" if group == prior_group else "independent"
         if shot_index == 0 or group != prior_group:
             requested = "independent"
-        elif requested != "extend_previous":
-            # A shared group already means uninterrupted place and story time.
-            # Treat an inconsistent "independent" label as an ordinary edit so
-            # the preceding shot still earns this shot's opening blocking.
-            requested = "continuous"
         raw["continuity_strategy"] = requested
 
         subjects = raw.get("subjects_on_screen") or []
@@ -4683,7 +4731,13 @@ def _prepare_h3_prompt_only_continuity(shot_dicts: list[dict]) -> list[dict]:
                 subject_bits.append(f"positioned {position}")
             opening_subjects.append(", ".join(subject_bits))
 
-        opening_detail = spatial_setup or "; ".join(opening_subjects)
+        physical_state = normalize_physical_state(raw.get("physical_state"))
+        if physical_state and physical_state["opening"]:
+            opening_detail = format_physical_state_for_prompt(
+                {**physical_state, "closing": []}, include_transitions=False,
+            )
+        else:
+            opening_detail = spatial_setup or "; ".join(opening_subjects)
         raw["video_prompt"] = _insert_h3_visual_detail(
             raw.get("video_prompt", ""),
             "OPENING CONTINUITY",
@@ -4692,33 +4746,11 @@ def _prepare_h3_prompt_only_continuity(shot_dicts: list[dict]) -> list[dict]:
         opening_blocking.append(opening_detail)
         prior_group = group
 
-    # If the next shot remains in the same uninterrupted place/time, make any
-    # blocking change occur visibly before the edit. This turns a next-shot
-    # state such as "Joey is seated" into an action in the preceding clip.
-    for index in range(1, len(shot_dicts)):
-        previous = shot_dicts[index - 1]
-        current = shot_dicts[index]
-        if (
-            current.get("continuity_strategy")
-            not in {"continuous", "extend_previous"}
-            or current.get("continuity_group")
-            != previous.get("continuity_group")
-        ):
-            continue
-        next_opening = opening_blocking[index]
-        if not next_opening:
-            continue
-        previous["closing_blocking"] = next_opening
-        transition = (
-            "During the final beat, the visible characters naturally move "
-            f"into this exact blocking before the shot ends: {next_opening}"
-        )
-        action_beats = list(previous.get("action_beats") or [])
-        if transition not in action_beats:
-            action_beats.append(transition)
-        previous["action_beats"] = action_beats
-        previous["ending_beat"] = transition
-        final_instructions[index - 1] = transition
+    # Closing state is authored and validated, never overwritten with the next
+    # opening. A state change needs a concrete transition in the physical ledger.
+    issues = validate_physical_state_sequence(shot_dicts)
+    if issues:
+        raise ValueError("H3 physical continuity: " + "; ".join(issues))
 
     for index, raw in enumerate(shot_dicts):
         closing = re.sub(
@@ -4730,7 +4762,7 @@ def _prepare_h3_prompt_only_continuity(shot_dicts: list[dict]) -> list[dict]:
         raw["video_prompt"] = _insert_h3_visual_detail(
             raw.get("video_prompt", ""),
             "FINAL BLOCKING",
-            final_instructions.get(index, closing),
+            closing,
         )
     return shot_dicts
 
@@ -7320,6 +7352,8 @@ Shots to plan:
         is_h3_native = str(
             getattr(self, "_video_model", "") or ""
         ).lower().startswith("minimax_h3")
+        source_contract = build_source_contract(story_description) if is_h3_native else {}
+        source_contract_block = format_source_contract(source_contract) if is_h3_native else ""
         h3_maximum_line_words = max(
             1,
             int(math.floor(
@@ -7642,7 +7676,9 @@ LONG-FORM SILENT-SEQUENCE CONTRACT:
 {screenplay_rules}
 {h3_character_block}
 {long_form_dialogue_block}
-{length_budget_block}"""
+{length_budget_block}
+
+{source_contract_block}"""
 
         if polish_block:
             pass1_system = f"{pass1_system}\n\n{polish_block}"
@@ -7833,6 +7869,8 @@ Compress the supplied screenplay so it can be performed in exactly {target_durat
 
 BINDING STORY BLUEPRINT:
 {story_blueprint_text}
+
+{source_contract_block}
 
 SCREENPLAY TO COMPRESS:
 {source_screenplay}"""
@@ -8176,8 +8214,9 @@ SCREENPLAY TO REPAIR:
         # windows. Plan directly on its native duration lattice so legacy
         # Window 1/2 prose never reaches the later compatibility adapter.
         if is_h3_native:
-            screenplay_dialogue_manifest = _extract_h3_screenplay_dialogue(
-                screenplay
+            screenplay_dialogue_manifest = (
+                [] if source_contract["audio_policy"].get("generated_speech_allowed") is False
+                else _extract_h3_screenplay_dialogue(screenplay)
             )
             if screenplay_dialogue_manifest:
                 print(
@@ -8207,6 +8246,10 @@ SCREENPLAY TO REPAIR:
                 screenplay_dialogue_manifest=screenplay_dialogue_manifest,
                 character_voice_bible=h3_voice_bible,
                 story_continuity_blueprint=story_continuity_blueprint,
+                require_source_contract=(
+                    source_contract["audio_policy"].get("generated_speech_allowed") is False
+                    and len(source_contract.get("events") or []) >= 2
+                ),
                 reference_image_path=reference_image_path,
                 char_profiles=char_profiles,
                 has_reference=has_reference,
@@ -8585,7 +8628,6 @@ Go:"""
 
         if polish_block:
             pass2_system = f"{pass2_system}\n\n{polish_block}"
-
         # `effective_nsfw` was computed above; reuse it for the
         # inject_nsfw_if_enabled call. The injected guides are
         # self-gating (apply only when a scene is actually sexual).
@@ -9804,6 +9846,7 @@ SCREENPLAY:
         screenplay_dialogue_manifest: Optional[list[dict[str, Any]]] = None,
         character_voice_bible: Optional[list[dict[str, str]]] = None,
         story_continuity_blueprint: Optional[list[dict[str, Any]]] = None,
+        require_source_contract: bool = False,
         nsfw: bool = False,
         polish_block: str = "",
     ) -> tuple[list[ShotPlan], Optional[str]]:
@@ -9814,6 +9857,7 @@ SCREENPLAY:
             assert_no_minor_content_in_pass2,
         )
 
+        source_contract = build_source_contract(story_description)
         uses_generated_images = bool(
             getattr(self, "_uses_generated_shot_images", True)
         )
@@ -9894,13 +9938,16 @@ SCREENPLAY:
             ]
 
         if screenplay_dialogue_manifest is None:
-            screenplay_dialogue_manifest = _extract_h3_screenplay_dialogue(
-                screenplay
+            screenplay_dialogue_manifest = (
+                [] if source_contract["audio_policy"].get("generated_speech_allowed") is False
+                else _extract_h3_screenplay_dialogue(screenplay)
             )
         else:
             screenplay_dialogue_manifest = copy.deepcopy(
                 screenplay_dialogue_manifest
             )
+        if source_contract["audio_policy"].get("generated_speech_allowed") is False:
+            screenplay_dialogue_manifest = []
         character_voice_bible = copy.deepcopy(character_voice_bible or [])
         story_continuity_blueprint = copy.deepcopy(
             story_continuity_blueprint or []
@@ -9935,10 +9982,11 @@ H3 NATIVE SHOT CONTRACT — NON-NEGOTIABLE:
 - Every array item is ONE bounded H3 generation lasting {minimum_seconds:.2f}-{maximum_seconds:.2f} seconds.
 - Use video_prompt for every item and set window_prompts to []. Never write 20-second windows, timeline ranges, or prompt instructions referring to a previous/preceding shot. The structured continuity_strategy and continuity_group fields are required planning metadata, while every video_prompt must remain self-contained.
 - Every video_prompt must stand alone, but it must also be economical: normally 180-450 words and never more than 650 words. State the exact physical setting, visible people, essential appearance/wardrobe, chronological action, camera, lighting, dialogue, ambience, effects, and music once each. Do not paste the screenplay, story bible, production contract, or continuity metadata into the prompt; translate them into concrete visible/audible instructions. Never restate the same opening, action, speaker, or ending in multiple differently worded paragraphs.
+- physical_state is the single authority for first/last physical poses. Use opening/closing facts with stable subjects_on_screen character IDs, and ordered transitions with concrete visible actions. Include support/contact when one subject rides, carries, touches, or stands on another. A grounded/airborne or mounted/unmounted change requires a transition, never an unexplained new opening. Independent/time_jump boundaries may deliberately change state; continuous boundaries must agree. position_or_relation and spatial_setup must agree with opening facts.
 - WARDROBE IS STATE: on every appearance, subjects_on_screen must give each person a complete head-to-toe wardrobe (colors, materials, layers, accessories, and visible footwear). Repeat the same wardrobe wording in every shot within a continuity_group unless the screenplay explicitly changes it, and show that change visibly before using the new wardrobe.
 - OPENING BLOCKING HAS ONE AUTHORITY: when spatial_setup is present, it must give the complete canonical static state at frame zero, before any action, for every visible subject and important prop. position_or_relation must echo and agree with that same frame-zero state; it must not fill omissions in a nonempty spatial_setup. Only when spatial_setup is absent may position_or_relation provide a subject-level first-frame position. Neither field may describe movement, progress, or a pose reached later in the shot. Repeat the complete frame-zero state in video_prompt.
 - SUBJECT DESCRIPTION IS NOT BLOCKING: subjects_on_screen[].visual_description contains identity, stable physical design, and costume only. Do not put screen position, posture, contact, action, movement, or a later story state there. Put first-frame pose in spatial_setup and later transitions in action_beats, ending_beat, or closing_blocking.
-- closing_blocking describes the final positions at the end of the shot. When the next shot in the same continuity_group opens with different blocking, the current shot must visibly show the person walking, sitting, standing, turning, or otherwise moving into that next arrangement before the cut.
+- closing_blocking describes the final positions after this shot's assigned actions. Never perform a future source event early merely to match the next shot's opening. A continuous next shot opens on this closing state and performs its own assigned transition visibly; a deliberate time jump must be explicitly planned.
 - continuity_strategy is "independent" for a new place/time, "continuous" for a normal editorial cut within the same scene, or "extend_previous" ONLY when the next generation should start from the literal final frame with the same camera axis/composition and no intended cut. Use extend_previous sparingly.
 - continuity_group is a short stable ID such as kitchen_morning_1. Reuse it only while place and story time remain uninterrupted; change it for any location or time jump.
 - "independent" means the video generation does not inherit a literal prior frame; it NEVER means narratively unrelated. Every shot remains part of one causal film.
@@ -9987,6 +10035,8 @@ OUTPUT — one closed object per native shot:
     "story_scene_number": 1,
     "causal_handoff": "Concrete prior cause and visible opening result for this shot",
     "persistent_story_state": "Current objective, knowledge, relationship, damage, wardrobe, props, and unresolved danger",
+    "source_event_ids": ["E1"],
+    "physical_state": {{"opening": [{{"subject_id": "char_0", "predicate": "grounded", "value": "grounded"}}], "transitions": [], "closing": [{{"subject_id": "char_0", "predicate": "grounded", "value": "grounded"}}]}},
     "subjects_on_screen": [{{"visual_description": "Stable identity and physical appearance", "character_id": "char_0", "speaker_name": "Exact supplied name", "position_or_relation": "screen-left foreground, standing beside the counter and facing screen-right", "wardrobe": "mustard-yellow cotton shirt, brown tie, dark slacks, black belt, black shoes"}}],
     "spatial_setup": "Exact first-frame screen blocking for every visible person and important prop",
     "environment": "Exact world/franchise and complete physical location",
@@ -10006,6 +10056,28 @@ OUTPUT — one closed object per native shot:
 ]"""
         if polish_block:
             pass2_system = f"{pass2_system}\n\n{polish_block}"
+        compact_source_state = bool(
+            require_source_contract
+            and source_contract["audio_policy"].get("generated_speech_allowed") is False
+        )
+        if compact_source_state:
+            pass2_system += (
+                "\nPHYSICAL STATE STAGING: In this visual-planning pass, physical_state "
+                "must be {\"opening\":[],\"transitions\":[],\"closing\":[]}. "
+                "Maestro requests a separate compact state-change proposal when the "
+                "source requires support/contact transitions. Concentrate on the "
+                "source action allocation, segmentation, camera and pacing here."
+            )
+        else:
+            pass2_system += "\n\n" + physical_state_contract_instructions()
+        if source_contract["audio_policy"].get("generated_speech_allowed") is False:
+            pass2_system += (
+                "\nSTRUCTURED SILENT COMPILATION: Maestro compiles the final native prompt "
+                "from your structured fields and immutable assigned source actions. "
+                "Set video_prompt to an empty string and dialogue_beats to []. "
+                "Do not write a second prose version of the scene. Keep camera_plan, "
+                "spatial_setup, physical_state and action_beats concrete and concise."
+            )
         pass2_system = inject_nsfw_if_enabled(
             pass2_system,
             nsfw,
@@ -10017,6 +10089,8 @@ OUTPUT — one closed object per native shot:
 TASK: Convert this {target_duration}-second screenplay into {shot_count_low}-{shot_count_high} self-contained native H3 shots.
 
 Total duration should remain approximately {target_duration} seconds. Each duration_sec must be between {minimum_seconds:.2f} and {maximum_seconds:.2f} seconds; prefer these valid native durations when pacing permits: {preferred_duration_text}. Do not output a duration above {maximum_seconds:.2f} seconds.
+
+{format_source_contract(source_contract)}
 
 PROJECT WORLD SOURCE OF TRUTH:
 {story_description}
@@ -10043,7 +10117,7 @@ Repeat the relevant show/movie/franchise and exact physical location from that s
 Continuity audit before responding:
 1. Assign one stable full wardrobe to each character for each continuity_group and repeat it in every appearance.
 2. Compare every shot's closing_blocking with the next shot's spatial_setup.
-3. If the same-scene positions differ, put the required movement in the earlier shot's action_beats and video_prompt so the next opening is earned on screen.
+3. A continuous shot must open on the preceding closing state. Perform its own assigned transitions visibly in this shot; never pull a future source action into the earlier shot to match an invented opening.
 4. Use extend_previous only for a literal seamless continuation with unchanged camera composition. Use continuous for ordinary same-scene cuts.
 5. Cross-check every dialogue_beats entry against video_prompt. Copy each spoken_text verbatim into one <d>[language] ...</d> tag using that beat's actual spoken language. Never translate a line. For a silent shot, forbid invented speech and gibberish explicitly.
 6. At every continuity_group change, verify that the prior ending visibly motivates the new location/time and that the new opening shows the resulting arrival or consequence. "Independent" is a render boundary, not a story reset.
@@ -10072,7 +10146,7 @@ SCREENPLAY:
         schema_required = [
             *required[:7],
             "story_scene_number", "causal_handoff",
-            "persistent_story_state",
+            "persistent_story_state", "source_event_ids", "physical_state",
             *required[7:],
         ]
 
@@ -10103,6 +10177,14 @@ SCREENPLAY:
                 "type": "array",
                 "items": dialogue_schema,
             }
+            if source_contract["audio_policy"].get("generated_speech_allowed") is False:
+                configured["items"]["properties"]["dialogue_beats"]["maxItems"] = 0
+                configured["items"]["properties"]["video_prompt"] = {"type": "string", "enum": [""]}
+            if compact_source_state:
+                state_schema = copy.deepcopy(PHYSICAL_STATE_JSON_SCHEMA)
+                for field in ("opening", "transitions", "closing"):
+                    state_schema["properties"][field]["maxItems"] = 0
+                configured["items"]["properties"]["physical_state"] = state_schema
             return configured
 
         schema = _shot_list_schema(
@@ -10113,17 +10195,22 @@ SCREENPLAY:
         )
         schema = _strengthen_native_schema(schema)
 
-        def _normalize_native_shots(items: list[dict]) -> list[dict]:
+        def _normalize_native_shots(items: list[dict], *, preserve_authored_duration: bool = False) -> list[dict]:
             normalized: list[dict] = []
             if not uses_generated_images:
                 _discard_unused_image_fields(items)
             for raw in items:
                 if not isinstance(raw, dict):
                     continue
+                # State establishment needs the immutable event text during
+                # sequence validation, including before final compilation.
+                # Always overwrite any model-supplied internal provenance.
+                raw["_director_source_contract"] = copy.deepcopy(source_contract)
                 # This field is internal provenance, never model-authored
                 # input. The native scheduler records the original duration
                 # before replacing it with the fitted frame duration.
-                raw.pop("_director_authored_duration_sec", None)
+                if not preserve_authored_duration:
+                    raw.pop("_director_authored_duration_sec", None)
                 try:
                     raw["story_scene_number"] = max(
                         1,
@@ -10157,6 +10244,12 @@ SCREENPLAY:
                     for item in windows
                 )
                 raw["video_prompt"] = _sanitize_h3_independent_prompt(prompt)
+                if source_contract["audio_policy"].get("generated_speech_allowed") is False:
+                    # Original production permissions outrank screenplay/shot
+                    # hallucinations before any dialogue/motion validation.
+                    raw["dialogue_beats"] = []
+                    if require_source_contract or "source_event_ids" in raw:
+                        raw["video_prompt"] = ""
                 raw["window_prompts"] = []
                 raw["multishot"] = False
                 normalized.append(raw)
@@ -10410,7 +10503,10 @@ SCREENPLAY:
             user_prompt=pass2_user,
             system_prompt=pass2_system,
             max_tokens=planner_token_budget,
-            thinking_budget=None,
+            thinking_budget=(
+                0 if require_source_contract and source_contract["audio_policy"].get("generated_speech_allowed") is False
+                else None
+            ),
             temperature=0.4,
             image_paths=image_paths,
             json_schema=schema,
@@ -10423,6 +10519,8 @@ SCREENPLAY:
         )
         shot_dicts = _normalize_native_shots(raw_shot_dicts)
         schedule = _apply_native_schedule(shot_dicts)
+        semantic_issues = source_contract_issues(shot_dicts, source_contract, require_ids=require_source_contract)
+        semantic_issues.extend(validate_physical_state_sequence(shot_dicts))
 
         dialogue_integrity_error: Optional[str] = None
         try:
@@ -10456,12 +10554,13 @@ SCREENPLAY:
                     "[ShortFilmPlanner] Deterministic H3 dialogue compiler "
                     f"{repair_mode}; skipped the whole-plan LLM repair."
                 )
-        if structure_issues or dialogue_integrity_error or dialogue_violations:
+        if structure_issues or semantic_issues or dialogue_integrity_error or dialogue_violations:
             original_shot_dicts = copy.deepcopy(shot_dicts)
             issue_messages = [
                 f"- Incomplete structured output: {issue}"
                 for issue in structure_issues
             ]
+            issue_messages.extend("- Story/physical contract: " + issue for issue in semantic_issues)
             if dialogue_integrity_error:
                 issue_messages.append(
                     "- Dialogue integrity: " + dialogue_integrity_error
@@ -10489,23 +10588,80 @@ nest <d> tags, or exceed {DIALOGUE_MAX_WORDS_PER_SECOND:g} spoken words per seco
 Aim for {DIALOGUE_DEFAULT_WORDS_PER_SECOND:g} words per second during speech when timing permits.
 
 Keep structured metadata concise so the complete array fits: one short
-sentence per descriptive metadata field and at most three action beats. Put
-the complete standalone generation description in video_prompt instead of
-repeating that prose across every metadata field."""
+sentence per descriptive metadata field and at most three action beats.
+Keep source_event_ids complete and in source order. Use compact physical
+state atoms, copied exactly across transitions and continuous boundaries;
+put motion descriptions in transition.action, never in state values.
+For a silent source, video_prompt must be empty: Maestro compiles it from
+structured fields and immutable actions. Otherwise put the complete native
+description with the locked dialogue in video_prompt."""
+            used_contract_patch = bool(
+                not structure_issues and semantic_issues and require_source_contract
+                and source_contract["audio_policy"].get("generated_speech_allowed") is False
+            )
             print(
-                "[ShortFilmPlanner] H3 plan failed completeness, dialogue, "
-                "or pacing validation; requesting one whole-plan repair "
-                "before generation."
+                "[ShortFilmPlanner] Requesting a bounded compact source/physical patch with fixed shots."
+                if used_contract_patch else
+                "[ShortFilmPlanner] Requesting one whole-plan completeness/dialogue/pacing repair."
             )
-            repaired_raw = self._call_llm_json(
-                user_prompt=repair_user,
-                system_prompt=pass2_system,
-                max_tokens=planner_token_budget,
-                thinking_budget=0,
-                temperature=0.3,
-                image_paths=image_paths,
-                json_schema=_configure_native_schema(repair_max_items),
-            )
+            if used_contract_patch:
+                from ..contract_repair import (
+                    build_compact_source_physical_repair_request,
+                    apply_compact_source_physical_patch,
+                )
+                patch_issues = list(semantic_issues)
+                # A malformed state atom must receive its actual validator
+                # feedback. Keep both attempts confined to the same immutable
+                # shots; never replace the film or silently accept a bad patch.
+                for patch_attempt in range(2):
+                    patch_system, patch_user, patch_schema = build_compact_source_physical_repair_request(
+                        original_shot_dicts, source_contract, patch_issues,
+                    )
+                    patches = self._call_llm_json(
+                        user_prompt=patch_user,
+                        system_prompt=patch_system,
+                        max_tokens=planner_token_budget,
+                        thinking_budget=0,
+                        temperature=0.3,
+                        image_paths=[],
+                        json_schema=patch_schema,
+                    )
+                    try:
+                        proposal = patches[0] if isinstance(patches, list) and len(patches) == 1 else patches
+                        repaired_raw = apply_compact_source_physical_patch(original_shot_dicts, proposal)
+                    except ValueError as error:
+                        # The patch is atomic. These are still the original
+                        # rows' issues, not findings about the rejected proposal.
+                        patch_issues = [
+                            "Compact patch was not applied: " + str(error),
+                            *[
+                                "Unrepaired original-plan issue: " + issue
+                                for issue in semantic_issues
+                            ],
+                        ]
+                    else:
+                        patch_issues = source_contract_issues(
+                            repaired_raw, source_contract, require_ids=True,
+                        )
+                        patch_issues.extend(validate_physical_state_sequence(repaired_raw))
+                    if not patch_issues:
+                        break
+                    if patch_attempt == 1:
+                        raise RuntimeError(
+                            "MiniMax H3 could not repair the source/physical contract: "
+                            + "; ".join(patch_issues) + ". No video jobs were queued."
+                        )
+                    print("[ShortFilmPlanner] Retrying the fixed-shot contract patch with validator feedback.")
+            else:
+                repaired_raw = self._call_llm_json(
+                    user_prompt=repair_user,
+                    system_prompt=pass2_system,
+                    max_tokens=planner_token_budget,
+                    thinking_budget=0,
+                    temperature=0.3,
+                    image_paths=image_paths,
+                    json_schema=_configure_native_schema(repair_max_items),
+                )
             recovered_tail_fields = _complete_h3_truncated_tail(
                 repaired_raw,
                 required,
@@ -10529,7 +10685,9 @@ repeating that prose across every metadata field."""
                     + "; ".join(repair_structure_issues)
                     + "). No video jobs were queued."
                 )
-            shot_dicts = _normalize_native_shots(repaired_raw)
+            shot_dicts = _normalize_native_shots(
+                repaired_raw, preserve_authored_duration=used_contract_patch,
+            )
             if not shot_dicts:
                 raise RuntimeError(
                     "MiniMax H3 whole-plan repair returned no usable "
@@ -10680,7 +10838,8 @@ repeating that prose across every metadata field."""
                         "were queued."
                     )
 
-        if not uses_generated_images and len(shot_dicts) > shot_count_low:
+        if (not uses_generated_images and len(shot_dicts) > shot_count_low
+                and not any("source_event_ids" in row for row in shot_dicts)):
             original_shot_dicts = copy.deepcopy(shot_dicts)
             try:
                 compacted_shots, merged_pairs = _coalesce_h3_dialogue_shots(
@@ -10756,10 +10915,27 @@ repeating that prose across every metadata field."""
                     shot_dict["long_form_quality_warnings"] = list(
                         quality_warnings
                     )
+        semantic_issues = source_contract_issues(shot_dicts, source_contract, require_ids=require_source_contract)
+        semantic_issues.extend(validate_physical_state_sequence(shot_dicts))
+        if semantic_issues:
+            raise RuntimeError("H3 story/physical plan did not validate after its bounded repair: "
+                               + "; ".join(semantic_issues) + ". No video jobs were queued.")
         shot_dicts = _prepare_h3_story_continuity(
             shot_dicts,
             story_continuity_blueprint,
         )
+        shot_dicts = apply_source_contract(shot_dicts, source_contract)
+        for raw in shot_dicts:
+            if source_contract["audio_policy"].get("generated_speech_allowed") is False:
+                raw["dialogue_beats"] = []
+                raw["audio_plan"] = {**(raw.get("audio_plan") or {}),
+                                     "mode": "ambient_only", "timing_anchor": "video",
+                                     "lip_sync_critical": False}
+            if "source_event_ids" in raw and not any(
+                str(beat.get("spoken_text") or "").strip()
+                for beat in raw.get("dialogue_beats") or [] if isinstance(beat, dict)
+            ):
+                raw["video_prompt"] = _h3_rebuilt_visual_prompt(raw)
         shot_dicts = _enforce_h3_speaker_visual_contract(
             shot_dicts,
             character_voice_bible,
@@ -10835,7 +11011,8 @@ repeating that prose across every metadata field."""
             )
 
             audio_raw = raw.get("audio_plan", {})
-            has_dialogue = bool(raw.get("dialogue_beats"))
+            has_dialogue = any(str(beat.get("spoken_text") or "").strip()
+                               for beat in raw.get("dialogue_beats") or [] if isinstance(beat, dict))
             audio = AudioPlan(
                 mode=audio_raw.get("mode", "dialogue_driven" if has_dialogue else "ambient_only"),
                 ambience=audio_raw.get("ambience"),
@@ -10925,6 +11102,11 @@ repeating that prose across every metadata field."""
                     "closing_blocking": raw.get(
                         "closing_blocking", raw.get("ending_beat", "")
                     ),
+                    "_director_audio_policy": raw.get("_director_audio_policy"),
+                    "_director_dialogue_manifest_authoritative": True,
+                    "_director_source_contract": raw.get("_director_source_contract"),
+                    "source_event_ids": raw.get("source_event_ids"),
+                    "physical_state": raw.get("physical_state"),
                     "vocal_contract": vocal_contract,
                     "long_form_quality_warnings": raw.get(
                         "long_form_quality_warnings", []

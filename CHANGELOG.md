@@ -5,8 +5,19 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [2.7.0] - 2026-10-10
 
-Prepared release candidate; not published. See the [full release notes](docs/RELEASE_NOTES_V2.7.0.md).
+Public Dev testing candidate; not promoted to Main. See the [full release notes](docs/RELEASE_NOTES_V2.7.0.md).
 
+- Add a saved, opt-in **Use lyrics to guide visuals** control for Director
+  music videos. Keep transcription, musical timing, soundtrack and assigned
+  lip-sync independent of lyric meaning.
+- Plan whole-song visual progression before detailed music-video clips, with
+  bounded outlines, intentional reprises and focused repairs that retain good
+  shots. Carry physical facts through cutaways without forcing the same action
+  into every frame; check visual bodies separately from identity boilerplate.
+- Fix H3 reference identity aliases such as “the Kitten” versus “Kitten” and
+  validate final picture ownership before rendering. Keep camera directions
+  such as “wide shot” out of physical story-action obligations, and keep
+  placeholder names from merging distinct performers.
 - Integrate an adapted WanGP 17 / MMGP 4 memory engine with opt-in allocator
   choices, generation-aware auto-tuning, local workload learning, RAM pinning,
   preload controls and compatible INT8 kernel selection. Keep conservative
@@ -54,6 +65,13 @@ Prepared release candidate; not published. See the [full release notes](docs/REL
   identity/design guidance instead of silently making them opening stills.
 - Repair empty H3 scene-transition tags and clip-local numbering of timed cuts
   before Director preflight, preserving scene action, timestamps and dialogue.
+- Keep H3 music-video planning to one prompt per native clip. Reject unwanted
+  sliding-window prompts during bounded planning repair, before their repeated
+  shot numbers and restarted clocks can fail generation preflight.
+- Assign requested music-video story actions to ordered clips before writing
+  the shot prompts. Preserve the assigned actions through H3 compilation and
+  reject a mounted opening before the requested climb, including independent
+  cuts; retain these checks across checkpoints and clip regeneration.
 - Retain Director's authored duration when fitting clips to native frame counts,
   retime local visual cues to the fitted clip, and preserve strict validation for
   manually edited prompts across save, resume and regeneration.
@@ -63,6 +81,15 @@ Prepared release candidate; not published. See the [full release notes](docs/REL
 - Keep continuity instructions out of inferred cast names and distinguish an
   open palm from an action that opens an object. Prefer explicit spatial setup
   over identity descriptions when constructing short-film opening states.
+- Preserve explicit Director speech/music prohibitions and original source
+  actions independently of screenplay shortening. Keep authored clip endings,
+  validate declared physical support/contact and transitions, and retain those
+  contracts across save, resume and clip regeneration.
+- Repair creative dialogue participant coverage and duration together. Compile
+  missing native speaker markers locally only when wording and ownership are
+  proven; keep unrelated duration labels out of the dialogue parser.
+- Clear Director's streaming indicator when planning fails so a rejected plan
+  cannot leave a completed writer looking busy indefinitely.
 - Default new Director projects to H3 Fused 4-Step References when available,
   favor longer H3 clips with Auto cut speed, and return to reference/character
   setup after uploaded audio analysis.

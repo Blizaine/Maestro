@@ -69,6 +69,11 @@ def _music_video_row(index: int, tag: str = "planned") -> dict:
             "the camera circles them."
         ),
         "window_prompts": [],
+        "continuity_strategy": "continuous",
+        "physical_state": {
+            "opening": [], "transitions": [], "closing": [],
+            "continuity": "continuous",
+        },
     }
 
 
@@ -87,6 +92,71 @@ def _music_video_fallback_row(scene_description: str) -> dict:
         "video_prompt": scene_description,
         "window_prompts": [],
     }
+
+
+_MUSIC_ARC_TEST_BEATS = [
+    "The vocalist steadies the microphone as the verse opens.",
+    "The drummer raises one stick before the downbeat.",
+    "A cymbal catches a sharp flash while its note rings.",
+    "The keyboardist bends toward a low chord.",
+    "The bassist steps into a pool of amber light.",
+    "The guitarist sweeps a pick across the strings.",
+    "The vocalist turns toward the empty balcony.",
+    "The singer traces a circle over the stage floor.",
+    "The crowd lifts a constellation of phone screens.",
+    "A spotlight widens across the drum riser.",
+    "The drummer rolls into a restrained fill.",
+    "The backing singers exchange a quick glance.",
+    "The guitarist lets one note sustain above the beat.",
+    "The vocalist lowers the microphone for an instrumental break.",
+    "The bassist shifts weight with the syncopated line.",
+    "A red beam cuts through haze over the piano.",
+    "The keyboardist answers the melody with a bright run.",
+    "A hand reaches from the front row toward the stage.",
+    "The singer leans back into the final refrain.",
+    "The drumsticks land together on a measured accent.",
+    "The crowd sways as the guitars drop away.",
+    "The vocalist steps downstage for the last line.",
+    "A single spotlight finds the empty microphone stand.",
+    "The band holds the final chord in unison.",
+    "The lights fade around the departing audience.",
+]
+
+
+def _music_planning_phase_response(kwargs) -> str | None:
+    """Stub the whole-song outline and review phases in music planner tests."""
+
+    schema = kwargs.get("json_schema") or {}
+    item_schema = schema.get("items") or {}
+    properties = item_schema.get("properties") or {}
+    if "visual_beat" in properties:
+        prompt = str(kwargs.get("user_prompt") or kwargs.get("prompt") or "")
+        marker = "Song timeline:"
+        if marker not in prompt:
+            raise AssertionError("Music arc request did not include its timeline")
+        timeline_text = prompt.split(marker, 1)[1].strip()
+        timeline_text = timeline_text.split("\nOptional thematic lyric context:", 1)[0].strip()
+        timeline = json.loads(timeline_text)
+        return json.dumps([
+            {
+                "clip_index": index,
+                "visual_beat": (
+                    _MUSIC_ARC_TEST_BEATS[index]
+                    if index < len(_MUSIC_ARC_TEST_BEATS)
+                    else f"A new performer gesture transforms the stage image in section {index + 1}."
+                ),
+                "purpose": f"develop stage section {index + 1}",
+                "environment": "one concert stage with amber lights",
+                "camera": "steady frontal medium-wide camera",
+                "source_event_ids": [],
+                "intentional_reprise": False,
+                "reprise_reason": "",
+            }
+            for index, _group in enumerate(timeline)
+        ])
+    if "category" in properties and "evidence" in properties:
+        return "[]"
+    return None
 
 
 def _shot(duration: float = 10.0) -> ShotPlan:
@@ -1229,10 +1299,13 @@ class LongFormDirectorPlanningTests(unittest.TestCase):
             [],
         )
 
-    def test_music_video_plans_long_timeline_in_six_clip_batches(self):
+    def test_h3_music_video_plans_long_timeline_in_three_clip_batches(self):
         calls: list[int] = []
 
         def generate(**kwargs):
+            phase_response = _music_planning_phase_response(kwargs)
+            if phase_response is not None:
+                return phase_response
             prompt = str(kwargs.get("prompt") or "")
             match = re.search(
                 r"Write\s+(\d+)\s+structured shot plans",
@@ -1267,7 +1340,7 @@ class LongFormDirectorPlanningTests(unittest.TestCase):
             _planning_checkpoint_callback=lambda value: checkpoints.append(value),
         )
 
-        self.assertEqual(calls, [6, 6, 6, 6, 1])
+        self.assertEqual(calls, [3] * 8 + [1])
         self.assertEqual(len(result.shots), 25)
         self.assertTrue(checkpoints[-1]["complete"])
 
@@ -1275,6 +1348,9 @@ class LongFormDirectorPlanningTests(unittest.TestCase):
         requests: list[dict] = []
 
         def generate(**kwargs):
+            phase_response = _music_planning_phase_response(kwargs)
+            if phase_response is not None:
+                return phase_response
             prompt = str(kwargs.get("prompt") or "")
             match = re.search(
                 r"Write\s+(\d+)\s+structured shot plans",
@@ -1297,8 +1373,8 @@ class LongFormDirectorPlanningTests(unittest.TestCase):
                     _music_video_row(number, "original")
                     for number in clip_numbers
                 ]
-                rows[3] = {
-                    "scene_goal": "A partial fourth clip",
+                rows[2] = {
+                    "scene_goal": "A partial third clip",
                     "scene_type": "performance",
                 }
                 return json.dumps(rows)
@@ -1320,17 +1396,16 @@ class LongFormDirectorPlanningTests(unittest.TestCase):
             _planning_checkpoint_callback=lambda value: checkpoints.append(value),
         )
 
-        self.assertEqual([request["count"] for request in requests], [6, 3, 1])
-        self.assertEqual(requests[1]["clips"], [4, 5, 6])
-        self.assertIn("global clips 4-6 of 7", requests[1]["prompt"])
-        self.assertIn("Clip 4: verse", requests[1]["prompt"])
-        self.assertIn("Clip 6: verse", requests[1]["prompt"])
-        self.assertIn("goal: Original clip 3", requests[1]["prompt"])
-        self.assertIn("setting: Original setting for clip 3", requests[1]["prompt"])
-        self.assertIn("ending: Original clip 3 ends", requests[1]["prompt"])
+        self.assertEqual([request["count"] for request in requests], [3, 1, 3, 1])
+        self.assertEqual(requests[1]["clips"], [3])
+        self.assertIn("global clips 3-3 of 7", requests[1]["prompt"])
+        self.assertIn("Clip 3: verse", requests[1]["prompt"])
+        self.assertIn("goal: Original clip 2", requests[1]["prompt"])
+        self.assertIn("setting: Original setting for clip 2", requests[1]["prompt"])
+        self.assertIn("ending: Original clip 2 ends", requests[1]["prompt"])
         self.assertEqual(
             [shot.scene_goal.split()[0] for shot in result.shots],
-            ["Original"] * 3 + ["Repaired"] * 3 + ["Planned"],
+            ["Original"] * 2 + ["Repaired"] + ["Planned"] * 4,
         )
         self.assertTrue(checkpoints[-1]["complete"])
 
@@ -1367,7 +1442,8 @@ class LongFormDirectorPlanningTests(unittest.TestCase):
             {},
             kind="music_video",
             fingerprint_payload={
-                "planner_revision": 7,
+                "planner_revision": 23,
+                "use_lyrics_context": False,
                 "scene_description": scene_description,
                 "clips": clips,
                 "lyrics": [],

@@ -7,7 +7,11 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'app'))
-from services.director.h3_dialogue import compile_h3_official_prompt, validate_h3_prompt_contract
+from services.director.h3_dialogue import (
+    compile_h3_clip_plans,
+    compile_h3_official_prompt,
+    validate_h3_prompt_contract,
+)
 from services.director.music_performance import (
     constrain_music_performance,
     music_performance_direction,
@@ -21,7 +25,144 @@ def subject(description, role):
     return {'visual_description': description, 'performance_role': role}
 
 
+def fixed_stage_band():
+    return [
+        {
+            **subject('Mara the lead vocalist in red', 'vocalist'),
+            'character_id': 'lead_vocalist',
+            'speaker_name': 'Mara',
+        },
+        {
+            **subject('Cal the drummer in black', 'instrumentalist'),
+            'character_id': 'band_drummer',
+            'speaker_name': 'Cal',
+        },
+        {
+            **subject('Rae the guitarist in green', 'instrumentalist'),
+            'character_id': 'band_guitarist',
+            'speaker_name': 'Rae',
+        },
+    ]
+
+
 class MusicPerformanceTests(unittest.TestCase):
+    def test_active_vocal_removes_only_cast_wide_closed_mouth_adjunct(self):
+        cast = fixed_stage_band()
+        source = (
+            'Wide shot of the full band. All three subjects maintain intense '
+            'focus on their performance, their mouths closed and attentive. '
+            'Mara cheers in celebration between phrases. The drummer keeps '
+            'the groove and the guitarist sustains the chord.'
+        )
+        compiled, _ = compile_h3_official_prompt(
+            source,
+            cast,
+            [],
+            mode='ref2va',
+            project_context='Mara cheers in celebration between phrases.',
+            audio_plan={'mode': 'music_driven', 'vocal_activity': 'active'},
+        )
+
+        self.assertIn('All three subjects maintain intense focus on their performance.', compiled)
+        self.assertNotIn('their mouths closed and attentive', compiled)
+        self.assertIn('cheers in celebration between phrases', compiled)
+        self.assertIn('relaxed closed lips during instrumental gaps', compiled)
+        self.assertIn('Cal the drummer in black plays with relaxed closed lips', compiled)
+        self.assertIn('Rae the guitarist in green plays with relaxed closed lips', compiled)
+
+    def test_collective_closure_and_explicit_source_silence_are_preserved(self):
+        cast = fixed_stage_band()
+        source = (
+            'All three subjects maintain intense focus on the performance, '
+            'their mouths closed and attentive.'
+        )
+        for activity in ('silent', 'unknown'):
+            with self.subTest(activity=activity):
+                self.assertEqual(
+                    constrain_music_performance(source, cast, activity),
+                    source,
+                )
+
+        for project_context in (
+            'Mara should keep her lips closed and not sing.',
+            'No singing or lip-sync in this scene.',
+        ):
+            with self.subTest(project_context=project_context):
+                self.assertEqual(
+                    constrain_music_performance(
+                        source,
+                        cast,
+                        'active',
+                        project_context=project_context,
+                    ),
+                    source,
+                )
+
+    def test_collective_closure_is_unchanged_without_an_assigned_vocalist(self):
+        cast = [
+            subject('Cal the drummer in black', 'instrumentalist'),
+            subject('Rae the guitarist in green', 'instrumentalist'),
+            subject('Jo the bassist in blue', 'instrumentalist'),
+        ]
+        source = (
+            'All three subjects maintain intense focus on their performance, '
+            'their mouths closed and attentive.'
+        )
+
+        self.assertEqual(
+            constrain_music_performance(source, cast, 'active'),
+            source,
+        )
+
+    def test_both_scope_does_not_cover_a_three_subject_cast(self):
+        source = (
+            'Both musicians maintain intense focus on the performance, '
+            'their mouths closed and attentive.'
+        )
+        three_subject_cast = fixed_stage_band()
+
+        self.assertEqual(
+            constrain_music_performance(source, three_subject_cast, 'active'),
+            source,
+        )
+
+        two_subject_cast = [three_subject_cast[0], three_subject_cast[1]]
+        self.assertEqual(
+            constrain_music_performance(source, two_subject_cast, 'active'),
+            'Both musicians maintain intense focus on the performance.',
+        )
+
+    def test_collective_closure_cleanup_and_h3_compile_are_idempotent(self):
+        cast = fixed_stage_band()
+        source = (
+            'All three subjects maintain intense focus on their performance, '
+            'their mouths closed and attentive.'
+        )
+        cleaned = constrain_music_performance(source, cast, 'active')
+        self.assertEqual(
+            constrain_music_performance(cleaned, cast, 'active'),
+            cleaned,
+        )
+        plan = {
+            'video_prompt': source,
+            '_director_h3_source_prompt': source,
+            '_director_h3_model_family': 'ref2va',
+            '_director_h3_prompt_mode': 'ref2va',
+            '_director_duration_sec': 6,
+            '_director_subjects_on_screen': cast,
+            '_director_audio_plan': {
+                'mode': 'music_driven',
+                'vocal_activity': 'active',
+            },
+        }
+        compile_h3_clip_plans([plan])
+        first = plan['video_prompt']
+        compile_h3_clip_plans([plan])
+
+        self.assertEqual(plan['video_prompt'], first)
+        self.assertNotIn('their mouths closed and attentive', first)
+        self.assertEqual(first.count('relaxed closed lips during instrumental gaps'), 1)
+
     def test_planner_keeps_roles_in_saved_plans_and_instructs_cutaways(self):
         captures = []
         cast = [
@@ -35,20 +176,33 @@ class MusicPerformanceTests(unittest.TestCase):
 
         def generate(**kwargs):
             captures.append(kwargs)
-            return json.dumps([{
-                'scene_goal': f"Feature {person['visual_description']}",
-                'scene_type': 'performance',
-                'environment': 'A concert stage',
-                'visual_style': 'Live concert photography',
-                'lighting': 'Stage lights',
-                'mood': 'Energetic',
-                'action_beats': [f"{person['visual_description']} performs their assigned part"],
-                'ending_beat': f"{person['visual_description']} holds their stage position",
-                'subjects_on_screen': [person],
-                'video_prompt': f"Medium shot of {person['visual_description']} performing on stage.",
-                'camera_plan': {'framing': 'medium shot'},
-                'window_prompts': [],
-            } for person in cast])
+            rows = []
+            for person in cast:
+                row = {
+                    'scene_goal': f"Feature {person['visual_description']}",
+                    'scene_type': 'performance',
+                    'environment': 'A concert stage',
+                    'visual_style': 'Live concert photography',
+                    'lighting': 'Stage lights',
+                    'mood': 'Energetic',
+                    'action_beats': [f"{person['visual_description']} performs their assigned part"],
+                    'ending_beat': f"{person['visual_description']} holds their stage position",
+                    'subjects_on_screen': [person],
+                    'video_prompt': f"Medium shot of {person['visual_description']} performing on stage.",
+                    'camera_plan': {'framing': 'medium shot'},
+                    'window_prompts': [],
+                }
+                if str(model).startswith('minimax_h3'):
+                    row.update({
+                        'continuity_strategy': 'continuous',
+                        'physical_state': {
+                            'opening': [],
+                            'transitions': [],
+                            'continuity': 'continuous',
+                        },
+                    })
+                rows.append(row)
+            return json.dumps(rows)
 
         for model in ('minimax_h3_ref2va_fused_turbo', 'ltx2_25_22B_distilled'):
             with self.subTest(model=model), patch(

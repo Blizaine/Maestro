@@ -71,6 +71,12 @@ class TestDirectorReferenceInputs(unittest.TestCase):
             return json.dumps([{
                 "scene_goal": "A solo view of the drummer from the band photo",
                 "scene_type": "performance",
+                "continuity_strategy": "continuous",
+                "physical_state": {
+                    "opening": [],
+                    "transitions": [],
+                    "continuity": "continuous",
+                },
                 "subjects_on_screen": [{"character_id": "drummer", "speaker_name": "Drummer",
                     "visual_description": "The long-haired drummer from the reference image",
                     "location_in_frame": "center", "facing_direction": "front"}],

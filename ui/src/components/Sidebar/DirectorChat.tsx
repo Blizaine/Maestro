@@ -1027,6 +1027,7 @@ export function DirectorChat() {
               setShowDetails={setShowAnalysisDetails}
               speakerMappings={speakerMappings}
               isShortFilm={isShortFilm}
+              isMusicVideo={skill === 'music_video'}
             />
             {/* Allow adding/changing reference photo after analysis */}
             {!pastStep('style') && (
@@ -2030,14 +2031,18 @@ function AdditionalRefsSection({ disabled = false }: { disabled?: boolean }) {
 }
 
 function AnalysisSummary({
-  analysis, showDetails, setShowDetails, isShortFilm,
+  analysis, showDetails, setShowDetails, isShortFilm, isMusicVideo,
 }: {
   analysis: NonNullable<ReturnType<typeof useStore.getState>['directorAnalysis']>
   showDetails: boolean
   setShowDetails: (v: boolean | ((p: boolean) => boolean)) => void
   speakerMappings: ReturnType<typeof useStore.getState>['directorSpeakerMappings']
   isShortFilm?: boolean
+  isMusicVideo?: boolean
 }) {
+  const useLyricsContext = useStore(s => s.directorUseLyricsContext)
+  const setUseLyricsContext = useStore(s => s.setDirectorUseLyricsContext)
+  const planning = useStore(s => s.directorLoading)
   // Count unique speakers
   const speakerCount = new Set(
     (analysis.lyrics || []).map(l => l.speaker).filter(Boolean)
@@ -2059,6 +2064,29 @@ function AnalysisSummary({
         {!isShortFilm && <span>{analysis.sections.length} sections</span>}
         {analysis.lyrics && <span>{analysis.lyrics.length} {isShortFilm ? 'dialogue lines' : 'lyric segments'}</span>}
       </button>
+
+      {isMusicVideo && analysis.lyrics && analysis.lyrics.length > 0 && (
+        <div className="mt-2 flex items-start gap-2" data-testid="director-lyrics-context">
+          <input
+            id="director-use-lyrics-context"
+            type="checkbox"
+            checked={useLyricsContext}
+            disabled={planning}
+            onChange={event => setUseLyricsContext(event.target.checked)}
+            aria-label="Use lyrics to guide visuals"
+            aria-describedby="director-use-lyrics-context-help"
+            className="mt-0.5"
+          />
+          <div className="space-y-0.5">
+            <label htmlFor="director-use-lyrics-context" className="text-[11px] text-text-secondary">
+              Use lyrics to guide visuals
+            </label>
+            <p id="director-use-lyrics-context-help" className="text-[10px] text-text-muted">
+              Let the lyrics influence scenes and story. Beat timing and lip-sync remain enabled either way.
+            </p>
+          </div>
+        </div>
+      )}
 
       {showDetails && (
         // No inner scroll — chat panel handles scrolling.

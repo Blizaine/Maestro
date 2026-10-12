@@ -52,6 +52,7 @@ from services.director_video_strategy import (
     video_strategy,
 )
 from services.h3_window_planner import compute_h3_window_boundaries
+from services.director.source_contract import director_audio_policy
 from services.text_integrity import repair_payload
 from models.minimax_h3.reference_manifest import (
     split_exact_drive_audio_reference,
@@ -1416,6 +1417,13 @@ def _save_pipeline_state_locked(pid: str) -> bool:
             "_director_opening_blocking": plan.get("_director_opening_blocking"),
             "_director_closing_blocking": plan.get("_director_closing_blocking"),
             "_director_audio_plan": plan.get("_director_audio_plan"),
+            "_director_audio_policy": plan.get("_director_audio_policy"),
+            "_director_dialogue_manifest_authoritative": plan.get("_director_dialogue_manifest_authoritative"),
+            "_director_source_contract": plan.get("_director_source_contract"),
+            "_director_music_narrative": plan.get("_director_music_narrative"),
+            "_director_music_arc": plan.get("_director_music_arc"),
+            "_director_source_event_ids": plan.get("_director_source_event_ids"),
+            "_director_physical_state": plan.get("_director_physical_state"),
             "image_prompt_pre_polish": pre_polish[i].get("image_prompt", "") if i < len(pre_polish) else None,
             "video_prompt_pre_polish": pre_polish[i].get("video_prompt", "") if i < len(pre_polish) else None,
             # Per-window and per-keyframe pre-polish snapshots so the
@@ -2849,6 +2857,13 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         "_director_opening_blocking": clip.get("_director_opening_blocking", ""),
         "_director_closing_blocking": clip.get("_director_closing_blocking", ""),
         "_director_audio_plan": clip.get("_director_audio_plan") or {},
+        "_director_audio_policy": clip.get("_director_audio_policy"),
+        "_director_dialogue_manifest_authoritative": clip.get("_director_dialogue_manifest_authoritative"),
+        "_director_source_contract": clip.get("_director_source_contract"),
+        "_director_music_narrative": clip.get("_director_music_narrative"),
+        "_director_music_arc": clip.get("_director_music_arc"),
+        "_director_source_event_ids": clip.get("_director_source_event_ids"),
+        "_director_physical_state": clip.get("_director_physical_state"),
     }
     _apply_h3_music_audio_contract(
         video_model, [prompt_plan],
@@ -3344,6 +3359,13 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             "_director_opening_blocking",
             "_director_closing_blocking",
             "_director_audio_plan",
+            "_director_audio_policy",
+            "_director_dialogue_manifest_authoritative",
+            "_director_source_contract",
+            "_director_music_narrative",
+            "_director_music_arc",
+            "_director_source_event_ids",
+            "_director_physical_state",
         ):
             if prompt_plan.get(key) is not None:
                 s["clips"][clip_index][key] = prompt_plan.get(key)
@@ -5358,6 +5380,13 @@ def _resume_pipeline_reserved(pid: str, out_dir: str) -> tuple[bool, str]:
         "_director_opening_blocking": c.get("_director_opening_blocking"),
         "_director_closing_blocking": c.get("_director_closing_blocking"),
         "_director_audio_plan": c.get("_director_audio_plan"),
+        "_director_audio_policy": c.get("_director_audio_policy"),
+        "_director_dialogue_manifest_authoritative": c.get("_director_dialogue_manifest_authoritative"),
+        "_director_source_contract": c.get("_director_source_contract"),
+        "_director_music_narrative": c.get("_director_music_narrative"),
+        "_director_music_arc": c.get("_director_music_arc"),
+        "_director_source_event_ids": c.get("_director_source_event_ids"),
+        "_director_physical_state": c.get("_director_physical_state"),
     } for c in saved_clips]
     planned_clips = [c.get("planned_clip") for c in saved_clips]
     clip_images = [c.get("start_image_filename") for c in saved_clips]
@@ -6052,10 +6081,37 @@ def _run_pipeline(pid: str, resume: bool = False):
         )
         _save_pipeline_state(pid)  # Save on failure too
     finally:
+        captured_error_log = False
         with _pipeline_lock:
+            record = _pipelines.get(pid)
+            finished_stream = bool(record and record.get("llm_streaming"))
+            if record:
+                # The synchronous planning call has exited, including on a
+                # contract failure. A stale True made failed runs appear busy
+                # indefinitely and prevented clean test/queue recovery.
+                record["llm_streaming"] = False
+                passes = record.get("_llm_passes") or []
+                if passes and not record.get("_llm_log"):
+                    # A failed planner never reaches the normal log capture.
+                    # Retain completed calls so its repairs remain inspectable.
+                    last = passes[-1]
+                    record_params = record.get("params") or {}
+                    record["_llm_log"] = {
+                        "provider": record_params.get("llm_provider", "local"),
+                        "model_id": record_params.get("llm_model_id", ""),
+                        "passes": copy.deepcopy(passes),
+                        "system_prompt": last.get("system_prompt", ""),
+                        "response_text": last.get("response_text", ""),
+                        "thinking_text": last.get("thinking_text"),
+                        "generation_metrics": copy.deepcopy(last.get("generation_metrics", {})),
+                        "incomplete": True,
+                    }
+                    captured_error_log = True
             current = _pipeline_threads.get(pid)
             if current is threading.current_thread():
                 _pipeline_threads.pop(pid, None)
+        if finished_stream or captured_error_log:
+            _save_pipeline_state(pid)
 
 
 def _wait_for_resume(pid: str, poll_interval: float = 1.0):
@@ -6464,6 +6520,7 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
             "lyrics": params.get("lyrics"),
             "bpm": params.get("bpm", 120),
             "audio_vocals_path": params.get("audio_vocals_path"),
+            "use_lyrics_context": params.get("use_lyrics_context") is True,
         })
 
     # Inject LoRA guides + model dialect guides into the planner only for
@@ -6621,6 +6678,7 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
                 )
             ],
             **_director_shot_timing_fields(shot),
+            "_director_music_arc": metadata.get("_director_music_arc"),
         }
         if is_h3_model:
             audio_plan = getattr(shot, "audio_plan", None)
@@ -6636,6 +6694,12 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
                 "_director_h3_model_family": h3_model_family,
                 "_director_project_context": scene_description,
                 "_director_environment": getattr(shot, "environment", ""),
+                "_director_audio_policy": metadata.get("_director_audio_policy") or director_audio_policy(scene_description),
+                "_director_dialogue_manifest_authoritative": True,
+                "_director_source_contract": metadata.get("_director_source_contract"),
+                "_director_music_narrative": metadata.get("_director_music_narrative"),
+                "_director_source_event_ids": metadata.get("source_event_ids"),
+                "_director_physical_state": metadata.get("physical_state"),
                 "_director_audio_plan": (
                     audio_plan.to_dict()
                     if callable(getattr(audio_plan, "to_dict", None))
@@ -7221,6 +7285,30 @@ def _preflight_h3_director_prompts(
         durations=durations,
         reference_manifests=reference_manifests,
     )
+    from services.director.music_narrative import music_narrative_row_issue
+    from services.director.music_review import music_visual_reset_issue
+    from services.director.h3_dialogue import validate_final_h3_subject_bindings
+    for plan in clip_plans:
+        binding_issues = validate_final_h3_subject_bindings(plan.get("video_prompt", ""))
+        if binding_issues:
+            raise ValueError("Final H3 identity preflight failed: " + "; ".join(binding_issues))
+        arc = plan.get("_director_music_arc")
+        if isinstance(arc, dict) and not plan.get("_director_prompt_user_edited"):
+            reset_issue = music_visual_reset_issue(plan.get("video_prompt"), arc.get("source_brief"))
+            if reset_issue:
+                raise ValueError("Music-video visual preflight failed: " + reset_issue)
+        narrative = plan.get("_director_music_narrative")
+        if not isinstance(narrative, dict) or not narrative.get("contract"):
+            continue
+        issue = music_narrative_row_issue(
+            {"video_prompt": plan.get("video_prompt", ""),
+             "source_event_ids": narrative.get("source_event_ids", [])},
+            contract=narrative["contract"],
+            allocation=narrative.get("allocation", []),
+            index=narrative["index"],
+        )
+        if issue:
+            raise ValueError(f"Music-video story-action preflight failed: {issue}")
     label = f"[Pipeline {pid}]" if pid else "[Pipeline]"
     dialogue_count = sum(
         str(plan.get("video_prompt") or "").lower().count("<d>")

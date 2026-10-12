@@ -11,7 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 from services.dialogue_writing import (
     conversation_brief, creative_dialogue_budget, creative_dialogue_expected,
-    dialogue_forbidden, requested_dialogue_turns, spoken_word_count,
+    dialogue_forbidden, explicit_dialogue_minimum_words,
+    requested_dialogue_turns, spoken_word_count,
 )
 from services.h3_story_ledger import (
     _canonicalize_story_ledger, _complete_creative_dialogue, _deterministic_ledger,
@@ -63,6 +64,33 @@ class CreativeDialogueWritingTests(unittest.TestCase):
         budget = creative_dialogue_budget(prompt, 14.375)
         self.assertEqual(requested_dialogue_turns(prompt), 4)
         self.assertEqual((budget.minimum, budget.target, budget.maximum), (11, 14, 43))
+
+    def test_explicit_spoken_word_minimum_is_strict_and_visual_or_quoted_counts_are_ignored(self):
+        for prompt, expected in (
+            ("Maya and Leo discuss the plan. Include at least 24 spoken words.", 24),
+            ("Maya and Leo discuss the plan. The dialogue must contain no fewer than 28 words.", 28),
+            ("Maya and Leo discuss the plan. Use a minimum of 30 words of dialogue.", 30),
+            ("Maya and Leo discuss the plan. Include at least 26 words in the dialogue.", 26),
+        ):
+            with self.subTest(prompt=prompt):
+                budget = creative_dialogue_budget(prompt, 14.4)
+                self.assertIsNotNone(budget)
+                self.assertEqual(budget.minimum, expected)
+                self.assertFalse(budget.minimum_is_automatic)
+                self.assertIn("is strict", budget.instruction())
+
+        self.assertIsNone(explicit_dialogue_minimum_words(
+            "A poster in the background must contain at least 50 words. Maya and Leo discuss it."
+        ))
+        self.assertIsNone(explicit_dialogue_minimum_words(
+            "A caption should have a minimum of 80 words. Two mechanics discuss the repair."
+        ))
+        self.assertIsNone(explicit_dialogue_minimum_words(
+            "Dialogue occurs beneath a poster with at least 50 words of printed text."
+        ))
+        self.assertIsNone(explicit_dialogue_minimum_words(
+            'Maya says, "At least 75 words." Leo listens quietly.'
+        ))
 
     def test_tutorial_and_ordinary_character_names_imply_dialogue(self):
         for prompt in (
@@ -145,6 +173,50 @@ class CreativeDialogueWritingTests(unittest.TestCase):
             generator=generator, max_new_tokens=1200, temperature=0.6,
         )
         self.assertIn(LINE_A, result)
+
+    def test_generic_creative_floor_is_soft_only_for_a_complete_exchange(self):
+        prompt = (
+            "At a holiday party, Jerry Seinfeld, Michael Scott, and Ron Swanson all "
+            "stand and talk to each other."
+        )
+        turns = [
+            ("Jerry Seinfeld", "Why is this fruit salad so sad?"),
+            ("Michael Scott", "It's got potential, Jerry."),
+            ("Ron Swanson", "Give me a steak."),
+        ]
+        body = " ".join(
+            f"{speaker} (S{index}) says: <d>[English] {text}</d>"
+            for index, (speaker, text) in enumerate(turns, start=1)
+        )
+        complete_short_script = (
+            f"integrated_multimodal_description: [Shot 1] {body}\n"
+            "overall_soundscape: Quiet party room tone.\nnon_diegetic_music: N/A"
+        )
+        budget = creative_dialogue_budget(prompt, 10.125)
+        self.assertLess(
+            sum(spoken_word_count(text) for _speaker, text in turns), budget.minimum,
+        )
+        no_retry = Mock(side_effect=AssertionError("A complete exchange needs no padding"))
+
+        result = llm_service._complete_creative_enhancement(
+            prompt, complete_short_script, duration_seconds=10.125,
+            structured=True, ref2va=False, system_prompt="H3", user_prompt=prompt,
+            generator=no_retry, max_new_tokens=1280, temperature=0.6,
+        )
+
+        self.assertEqual(result, complete_short_script)
+        no_retry.assert_not_called()
+
+        explicit_prompt = prompt + " Include at least 24 spoken words."
+        strict_retry = Mock(return_value=complete_short_script)
+        result = llm_service._complete_creative_enhancement(
+            explicit_prompt, complete_short_script, duration_seconds=10.125,
+            structured=True, ref2va=False, system_prompt="H3", user_prompt=explicit_prompt,
+            generator=strict_retry, max_new_tokens=1280, temperature=0.6,
+        )
+
+        self.assertEqual(result, complete_short_script)
+        strict_retry.assert_called_once()
 
     def test_valid_script_and_no_dialogue_do_not_trigger_retry(self):
         generator = Mock(side_effect=AssertionError("Must not call the LLM"))

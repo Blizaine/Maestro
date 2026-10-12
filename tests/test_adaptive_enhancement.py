@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'app'))
 from services.adaptive_enhancement import adaptive_dialogue_expected, adaptive_writing_guide, draft_spoken_exchange
-from services.dialogue_writing import dialogue_forbidden
+from services.dialogue_writing import dialogue_forbidden, spoken_word_count
 from services.h3_story_ledger import _canonicalize_story_ledger, _deterministic_ledger, extract_source_events, extract_h3_source_intent
 from services import llm_service
 from services.llm_sampling import caller_sampling_enabled
@@ -87,11 +87,11 @@ class AdaptiveWritingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "could not complete the requested dialogue") as caught:
             draft_spoken_exchange(prompt, 10.125, generator, language="English")
 
-        self.assertIn("Your exchange had 42 words; use 22–30 total, aiming for 24.", str(caught.exception.__cause__))
+        self.assertIn("Your exchange had 42 words; at most 30 allowed (aim for 24).", str(caught.exception.__cause__))
         self.assertEqual(generator.call_count, 4)
 
     def test_copyedit_rejects_missing_line_keys_and_under_minimum_text(self):
-        prompt = "Nora, Kai, and Mina discuss the difficult holiday launch."
+        prompt = "Nora, Kai, and Mina discuss the difficult holiday launch. Include at least 22 spoken words."
         draft = [
             {"speaker": "Kai", "text": "We nearly missed launch, but everyone kept moving when the schedule slipped badly twice."},
             {"speaker": "Mina", "text": "I fixed the payment bug after Nora spotted how our holiday orders doubled overnight."},
@@ -106,7 +106,8 @@ class AdaptiveWritingTests(unittest.TestCase):
              "Return nonempty speaker/text pairs, without speech tags or newlines."),
             ({"L1": "We kept\nmoving.", "L2": "Orders doubled overnight.", "L3": "Come back next year."},
              "Return nonempty speaker/text pairs, without speech tags or newlines."),
-            ({"L1": "Yes.", "L2": "Right.", "L3": "Sure."}, "Your exchange had 3 words; use 22–30 total, aiming for 24."),
+            ({"L1": "Yes.", "L2": "Right.", "L3": "Sure."},
+             "Your exchange had 3 words; use at least 22 total"),
         )
         for edit, reason in invalid_edits:
             with self.subTest(edit=edit):
@@ -377,6 +378,47 @@ class AdaptiveWritingTests(unittest.TestCase):
             )
         )
 
+    def test_from_timestamp_named_speech_cues_bind_only_unambiguous_subjects(self):
+        source = (
+            'Ana (S1) says, <d>[English] Hold the door.</d> '
+            'Bea (S2) replies, <d>[English] I have it.</d>'
+        )
+        draft = (
+            'integrated_multimodal_description: [Shot 1] '
+            'From 2.50 to 4.50 seconds, Ana steadies the lantern as she says: '
+            '<d>[English] Hold the door.</d> The door swings gently shut. '
+            'From 6.50 to 9.50 seconds, Bea checks the doorway before replying: '
+            '<d>[English] I have it.</d>\n'
+            'overall_soundscape: Quiet room tone.\n'
+            'non_diegetic_music: N/A'
+        )
+        repaired = llm_service._repair_unambiguous_h3_context_speaker_ids(
+            source, draft,
+        )
+        self.assertIn('(S1) <d>[English] Hold the door.</d>', repaired)
+        self.assertIn('(S2) <d>[English] I have it.</d>', repaired)
+        self.assertTrue(
+            llm_service._h3_context_dialogue_binding_contract_satisfied(
+                source, repaired,
+            )
+        )
+
+        ambiguous = draft.replace(
+            'Bea checks the doorway before replying:',
+            'Ana turns toward Bea, then she replies:',
+        )
+        self.assertEqual(
+            llm_service._repair_unambiguous_h3_context_speaker_ids(
+                source, ambiguous,
+            ),
+            ambiguous,
+        )
+        self.assertFalse(
+            llm_service._h3_context_dialogue_binding_contract_satisfied(
+                source, ambiguous,
+            )
+        )
+
     def test_exact_raw_qwen_and_gemma_four_turn_plans_bind_named_speakers(self):
         source = (
             'At a quiet railway platform before dawn, adult sisters Ana and Bea wait beside one suitcase. '
@@ -542,9 +584,9 @@ class AdaptiveWritingTests(unittest.TestCase):
                 f'{name} (S{speaker_id}) says, <d>[English] {words}</d>',
                 compiled_script,
             )
-        self.assertIn('(S1) <d>[English] Ron, are you a fan of the office?</d>', enhanced)
-        self.assertIn('(S2) <d>[English] I am a fan of the meat.</d>', enhanced)
-        self.assertIn('(S3) <d>[English] Wait, which meat?</d>', enhanced)
+        self.assertIn('Michael gestures expansively and speaks: (S1) <d>[English] Ron, are you a fan of the office?</d>', enhanced)
+        self.assertIn('Ron remains stoic and replies: (S2) <d>[English] I am a fan of the meat.</d>', enhanced)
+        self.assertIn('Jerry raises an eyebrow and asks: (S3) <d>[English] Wait, which meat?</d>', enhanced)
         self.assertTrue(
             llm_service._h3_context_dialogue_binding_contract_satisfied(
                 authored_script, enhanced,
@@ -779,6 +821,44 @@ class AdaptiveWritingTests(unittest.TestCase):
         self.assertTrue(llm_service._h3_dialogue_contract_satisfied(result, result))
         generator.assert_called_once()
 
+    def test_unique_speaker_shortening_uses_the_requested_full_name_for_stable_ids(self):
+        prompt = (
+            "At a quiet station, Ana Smith, Bea Jones, and Cal Reed talk to each other "
+            "about the train delay."
+        )
+        turns = [
+            {"speaker": "Ana", "text": "The train is delayed."},
+            {"speaker": "Ana Smith", "text": "We can wait inside."},
+            {"speaker": "Bea Jones", "text": "I'll check the board."},
+            {"speaker": "Cal Reed", "text": "I'll bring the bags."},
+        ]
+        generator = Mock(return_value=json.dumps({"turns": turns}))
+
+        result = draft_spoken_exchange(prompt, 10.125, generator, language="English")
+
+        self.assertEqual(result.count("Ana Smith (S1)"), 2)
+        self.assertNotIn("Ana (S", result)
+        self.assertIn("Bea Jones (S2)", result)
+        self.assertIn("Cal Reed (S3)", result)
+        generator.assert_called_once()
+
+    def test_ambiguous_first_name_is_not_merged_into_a_requested_actor(self):
+        prompt = (
+            "At a quiet station, Ana Smith, Ana Jones, and Bea Lee talk to each other "
+            "about the train delay."
+        )
+        turns = [
+            {"speaker": "Ana", "text": "The train is delayed."},
+            {"speaker": "Ana Jones", "text": "We can wait inside."},
+            {"speaker": "Bea Lee", "text": "I'll check the board."},
+        ]
+        generator = Mock(return_value=json.dumps({"turns": turns}))
+
+        with self.assertRaisesRegex(ValueError, "could not complete the requested dialogue"):
+            draft_spoken_exchange(prompt, 10.125, generator, language="English")
+
+        self.assertEqual(generator.call_count, 2)
+
     def test_concise_four_turn_exchange_is_not_rejected_for_missing_filler(self):
         prompt = (
             "Adult mechanics Nia and Omar have a concise natural four-turn conversation: "
@@ -797,8 +877,39 @@ class AdaptiveWritingTests(unittest.TestCase):
             turn['text'] for turn in turns
         ])
         request = generator.call_args.kwargs['prompt']
-        self.assertIn('Use exactly 4 concise turns and 14 spoken words', request)
-        self.assertIn('allowed 8–43 words', request)
+        self.assertIn('Use exactly 4 concise turns and aim for 14 spoken words', request)
+        self.assertIn('duration-derived minimum 8 is a target', request)
+
+    def test_complete_group_exchange_below_duration_minimum_is_accepted_as_natural(self):
+        prompt = (
+            "At a holiday party, Jerry Seinfeld, Michael Scott, and Ron Swanson all "
+            "stand and talk to each other."
+        )
+        turns = [
+            {"speaker": "Jerry Seinfeld", "text": "That turkey disappeared before our holiday party started."},
+            {"speaker": "Michael Scott", "text": "I brought it home because the office oven broke."},
+            {"speaker": "Ron Swanson", "text": "It was delicious."},
+        ]
+        self.assertEqual(sum(spoken_word_count(turn["text"]) for turn in turns), 20)
+        generator = Mock(return_value=json.dumps({"turns": turns}))
+        result = draft_spoken_exchange(prompt, 10.125, generator, language="English")
+
+        self.assertEqual(llm_service._extract_h3_dialogue_blocks(result), [
+            turn["text"] for turn in turns
+        ])
+        self.assertIn("duration-derived minimum 22 is a target", generator.call_args.kwargs["prompt"])
+        generator.assert_called_once()
+
+    def test_short_incomplete_conversation_reports_missing_speaker_before_word_target(self):
+        prompt = "Write a short conversation between two strangers waiting for a delayed train."
+        generator = Mock(return_value=json.dumps({"turns": [
+            {"speaker": "Anxious Passenger", "text": "Miss dinner? Let's walk together."},
+        ]}))
+        with self.assertRaises(ValueError) as caught:
+            draft_spoken_exchange(prompt, 10.125, generator, language="English")
+        self.assertIn("needs at least two distinct speakers", str(caught.exception))
+        self.assertNotIn("use at least", str(caught.exception))
+        self.assertEqual(generator.call_count, 2)
 
     def test_empty_silent_action_row_is_not_treated_as_failed_speech(self):
         prompt = (
@@ -842,8 +953,8 @@ class AdaptiveWritingTests(unittest.TestCase):
         message = str(caught.exception)
         self.assertTrue(message.startswith('The AI could not complete the requested dialogue.'))
         self.assertIsInstance(caught.exception.__cause__, ValueError)
-        self.assertIn('Your exchange had 16 words', str(caught.exception.__cause__))
-        self.assertIn('Last validation reason: Your exchange had 16 words; use 11–15 total, aiming for 12.', message)
+        self.assertIn('Your exchange had 16 words; at most 15 allowed (aim for 12).', str(caught.exception.__cause__))
+        self.assertIn('Last validation reason: Your exchange had 16 words; at most 15 allowed (aim for 12).', message)
         self.assertIn('Selected duration: 5.17 seconds.', message)
         self.assertNotIn('aiming for 12..', message)
         self.assertIn('increase the selected duration or shorten the dialogue', message)
@@ -875,7 +986,7 @@ class AdaptiveWritingTests(unittest.TestCase):
         self.assertNotEqual(messages[0], messages[1])
 
     def test_validation_retry_can_repair_a_draft_on_second_attempt(self):
-        prompt = 'Mina and Theo discuss the missing letter.'
+        prompt = 'Mina and Theo discuss the missing letter. Use at least 11 spoken words.'
         generator = Mock(side_effect=[
             json.dumps({'turns': [{'speaker': 'Mina', 'text': 'I never mailed it.'}]}),
             json.dumps({'turns': [{'speaker': 'Mina', 'text': 'Because I feared your answer, I kept the letter hidden for far too long.'}]}),
@@ -1075,7 +1186,7 @@ class AdaptiveWritingTests(unittest.TestCase):
                 self.assertFalse(caller_sampling_enabled())
 
     def test_focused_copyedit_still_rejects_invalid_text_and_under_minimum_results(self):
-        prompt = "Nora, Kai, and Mina discuss the holiday launch."
+        prompt = "Nora, Kai, and Mina discuss the holiday launch. Include at least 22 spoken words."
         draft = [
             {"speaker": "Kai", "text": "We nearly missed launch when our holiday schedule slipped, but the team kept moving."},
             {"speaker": "Mina", "text": "I fixed the payment bug after Nora spotted our holiday orders doubling overnight again."},
@@ -1091,7 +1202,7 @@ class AdaptiveWritingTests(unittest.TestCase):
              "L2": "Nora caught it before our holiday sales."},
             {"L1": "<d>[English] We stayed together.</d>",
              "L2": "Nora caught it before our holiday sales."},
-            {"L1": "We stayed together.", "L2": "Nora caught it before our holiday sales."},
+            {"L1": "We stayed together.", "L2": "Nora caught it before holiday sales."},
         )
         for focus in invalid_focus_edits:
             with self.subTest(focus=focus):
@@ -1105,7 +1216,10 @@ class AdaptiveWritingTests(unittest.TestCase):
                 self.assertFalse(caller_sampling_enabled())
 
     def test_explicit_turn_count_does_not_relax_a_developed_conversation(self):
-        prompt = 'Mina and Theo have a developed four-turn conversation about the missing letter.'
+        prompt = (
+            'Mina and Theo have a developed four-turn conversation about the missing letter. '
+            'Include at least 31 spoken words.'
+        )
         short = {'turns': [
             {'speaker': 'Mina', 'text': 'Where is it?'},
             {'speaker': 'Theo', 'text': 'I looked.'},
@@ -1116,7 +1230,7 @@ class AdaptiveWritingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'could not complete the requested dialogue'):
             draft_spoken_exchange(prompt, 14.375, generator, language='English')
         self.assertEqual(generator.call_count, 2)
-        self.assertIn('allowed 31–43 words', generator.call_args.kwargs['prompt'])
+        self.assertIn('user-requested minimum 31 spoken words is strict', generator.call_args.kwargs['prompt'])
 
     def test_visual_interaction_and_camera_instructions_do_not_request_speech(self):
         examples = [CONCEPT,

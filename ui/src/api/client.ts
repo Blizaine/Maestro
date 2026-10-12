@@ -1289,6 +1289,8 @@ export async function fetchDirectorMusicClipLimits(params: DirectorTimelineOptio
 
 export interface DirectorV2PlanRequest extends DirectorTimelineOptions {
   skill_type: string
+  /** Let lyrics influence music-video scenes and story; timing/lip-sync are separate. */
+  use_lyrics_context?: boolean
   scene_description?: string
   story_description?: string
   clips?: unknown[]
@@ -2406,6 +2408,7 @@ export async function planClipPrompts(params: {
   clips: import('../types').SuggestedClip[]
   style_prompt: string
   lyrics?: import('../types').LyricSegment[]
+  use_lyrics_context?: boolean
   bpm: number
 }): Promise<{ prompts: string[] }> {
   const res = await fetch(`${BASE}/api/v1/director/plan-prompts`, {
@@ -2468,6 +2471,7 @@ export async function planClipPromptsAndImages(params: DirectorTimelineOptions &
   clips: import('../types').PlannedClip[]
   scene_description: string
   lyrics?: import('../types').LyricSegment[]
+  use_lyrics_context?: boolean
   bpm: number
   reference_image_path?: string | null
   speaker_mappings?: Record<string, { name: string; role: string }>

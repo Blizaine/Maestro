@@ -87,12 +87,18 @@ class MusicMouthCueTests(unittest.TestCase):
         negative = "Cal does not sing or lip-sync. His mouth stays closed."
         self.assertEqual(constrain_music_performance(negative, [DRUMMER], "active"), negative)
 
-    def test_new_plan_carries_analysis_through_images_windows_endings_and_serialization(self):
+    def test_new_plan_carries_analysis_through_images_native_clip_endings_and_serialization(self):
         def generate(**kwargs):
             self.assertIn("do not add anyone to represent the soundtrack", kwargs["prompt"])
             return json.dumps([{
                 "scene_goal": "Mara prepares for the instrumental opening without singing.",
                 "scene_type": "performance",
+                "continuity_strategy": "continuous",
+                "physical_state": {
+                    "opening": [],
+                    "transitions": [],
+                    "continuity": "continuous",
+                },
                 "environment": "A concert stage with a microphone stand",
                 "visual_style": "Cinematic concert photography",
                 "lighting": "Warm stage lights",
@@ -100,11 +106,11 @@ class MusicMouthCueTests(unittest.TestCase):
                 "camera_plan": {"framing": "Medium shot pushing toward Mara"},
                 "image_source": "original",
                 "visual_changes": ["Camera moves closer to Mara's hands"],
-                "subjects_on_screen": [SINGER],
+                "subjects_on_screen": [{**SINGER, "character_id": "lead"}],
                 "audio_plan": {"vocal_activity": "active"},  # The LLM cannot override analysis.
                 "video_prompt": "Mara bellows into the microphone. Camera pushes in.",
                 "image_prompt": "Mara opens her mouth wide mid-vocalization.",
-                "window_prompts": ["Mara sings the riff. Camera pans to her hands."],
+                "window_prompts": [],
                 "ending_beat": "Mara opens her mouth wide mid-vocalization.",
                 "action_beats": ["Mara shouts loudly."],
             }])
@@ -117,7 +123,7 @@ class MusicMouthCueTests(unittest.TestCase):
             )
         shot = ProductionPlan.from_dict(json.loads(json.dumps(plan.to_dict()))).shots[0]
         self.assertEqual(shot.audio_plan.vocal_activity, "unknown")
-        for text in (shot.video_prompt, shot.image_prompt, shot.ending_beat, *shot.window_prompts, *shot.action_beats):
+        for text in (shot.video_prompt, shot.image_prompt, shot.ending_beat, *(shot.window_prompts or []), *shot.action_beats):
             self.assertNotIn("bellows", text)
             self.assertNotIn("mid-vocalization", text)
             self.assertNotIn("sings the riff", text)

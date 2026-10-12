@@ -13,16 +13,26 @@ APP = ROOT / "app"
 if str(APP) not in sys.path:
     sys.path.insert(0, str(APP))
 
-from services.director.planners.music_video import MusicVideoPlanner, _music_shot_schema  # noqa: E402
+from services.director.planners.music_video import (  # noqa: E402
+    MusicVideoPlanner,
+    _MUSIC_SHOT_PROPERTIES,
+    _music_shot_schema,
+)
 from services.director.prompt_timing import (  # noqa: E402
     music_video_visual_timing_issue,
 )
 from services.director.h3_dialogue import (  # noqa: E402
+    compile_h3_clip_plans,
     validate_h3_prompt_contract,
 )
 
 
-def _row(*, prompt: str, identity: bool = True) -> dict:
+def _row(
+    *,
+    prompt: str,
+    identity: bool = True,
+    window_prompts: list[str] | None = None,
+) -> dict:
     subject = {
         "visual_description": "a singer in a blue jacket",
         "performance_role": "vocalist",
@@ -33,6 +43,13 @@ def _row(*, prompt: str, identity: bool = True) -> dict:
     return {
         "scene_goal": "The singer advances the chorus",
         "scene_type": "performance",
+        "continuity_strategy": "continuous",
+        "physical_state": {
+            "opening": [],
+            "transitions": [],
+            "closing": [],
+            "continuity": "continuous",
+        },
         "subjects_on_screen": [subject],
         "environment": "A rooftop stage at dusk",
         "visual_style": "Cinematic concert photography",
@@ -42,11 +59,48 @@ def _row(*, prompt: str, identity: bool = True) -> dict:
         "camera_plan": {"framing": "medium shot", "movement": "slow push-in"},
         "ending_beat": "The singer holds the final pose",
         "video_prompt": prompt,
-        "window_prompts": [],
+        "window_prompts": list(window_prompts or []),
     }
 
 
 class MusicVideoPromptTimingTests(unittest.TestCase):
+    def test_native_h3_windows_are_disallowed_without_mutating_other_schemas(self):
+        original_window_schema = dict(_MUSIC_SHOT_PROPERTIES["window_prompts"])
+        h3 = _music_shot_schema(
+            1,
+            include_image_fields=False,
+            require_native_single_clip=True,
+        )
+        other = _music_shot_schema(1, include_image_fields=False)
+
+        h3_windows = h3["items"]["properties"]["window_prompts"]
+        other_windows = other["items"]["properties"]["window_prompts"]
+        self.assertEqual(h3_windows["maxItems"], 0)
+        self.assertEqual(other_windows, original_window_schema)
+        self.assertNotIn("maxItems", _MUSIC_SHOT_PROPERTIES["window_prompts"])
+
+    def test_non_h3_music_row_can_keep_window_prompts(self):
+        row = _row(
+            prompt=(
+                "[Shot 1] Ari faces the camera. "
+                "[Shot 2] At 00:05.000: Ari turns toward the stage."
+            ),
+            window_prompts=[
+                "At 00:00.000, Ari faces the camera.",
+                "At 00:00.000, Ari turns toward the stage.",
+            ],
+        )
+
+        issue = MusicVideoPlanner._music_video_row_issue(
+            0,
+            row,
+            [],
+            scene_description="Ari performs on a rooftop",
+            include_image_fields=False,
+        )
+
+        self.assertIsNone(issue)
+
     def test_h3_identity_keys_are_grammar_constrained_without_mutating_other_models(self):
         h3 = _music_shot_schema(1, include_image_fields=False, require_cast_identity=True)
         other = _music_shot_schema(1, include_image_fields=False)
@@ -240,6 +294,97 @@ class MusicVideoPromptTimingTests(unittest.TestCase):
         self.assertEqual(len(requests), 2)
         self.assertIn("TAIL REPAIR", requests[1])
         self.assertIn("00:09.500", plan.shots[0].video_prompt or "")
+
+    def test_native_h3_window_row_repairs_without_losing_valid_clip_cuts(self):
+        requests: list[str] = []
+        valid_cuts = (
+            "[Shot 1] Ari stands under amber lights. "
+            "[Shot 2] At 00:09.500: Ari turns toward the camera."
+        )
+
+        def generate(**kwargs):
+            prompt = str(kwargs.get("prompt") or "")
+            requests.append(prompt)
+            windows = (
+                []
+                if "TAIL REPAIR" in prompt
+                else [
+                    "At 00:00.000, [Shot 1] Ari starts the movement. "
+                    "[Shot 2] At 00:04.000: Ari turns.",
+                    "At 00:00.000, [Shot 1] Ari continues the movement. "
+                    "[Shot 2] At 00:04.000: the camera closes in.",
+                ]
+            )
+            return json.dumps([_row(
+                prompt=valid_cuts,
+                window_prompts=windows,
+            )])
+
+        plan = MusicVideoPlanner(llm_generate=generate).plan(
+            clips=[{"start": 120.0, "end": 130.125, "label": "chorus"}],
+            scene_description="Ari performs on a rooftop at dusk",
+            video_model="minimax_h3_ref2va",
+            shot_image_policy="direct_references",
+        )
+
+        self.assertEqual(len(requests), 2)
+        self.assertIn("TAIL REPAIR", requests[1])
+        shot = plan.shots[0]
+        self.assertEqual(shot.window_prompts, [])
+        self.assertIn("[Shot 1]", shot.video_prompt or "")
+        self.assertIn("[Shot 2] At 00:09.500", shot.video_prompt or "")
+
+        compiled_plan = {
+            "video_prompt": shot.video_prompt,
+            "_director_h3_prompt_mode": "ref2va",
+            "_director_h3_model_family": "ref2va",
+            "_director_subjects_on_screen": shot.subjects_on_screen,
+            "_director_dialogue_beats": [],
+            "_director_duration_sec": shot.duration_sec,
+            "_director_h3_reference_manifest": [],
+            "_director_audio_plan": {"mode": "music_driven"},
+            "_director_project_context": "Ari performs on a rooftop at dusk",
+        }
+        compile_h3_clip_plans([compiled_plan])
+        self.assertEqual(
+            validate_h3_prompt_contract(
+                compiled_plan["video_prompt"],
+                mode="ref2va",
+                subjects=shot.subjects_on_screen,
+                duration_seconds=shot.duration_sec,
+            ),
+            [],
+        )
+        self.assertIn("[Shot 2] At 00:09.500", compiled_plan["video_prompt"])
+
+    def test_persistently_invalid_native_h3_windows_fail_after_bounded_repairs(self):
+        calls = 0
+
+        def generate(**kwargs):
+            nonlocal calls
+            calls += 1
+            return json.dumps([_row(
+                prompt=(
+                    "[Shot 1] Ari stands under amber lights. "
+                    "[Shot 2] At 00:09.500: Ari turns toward the camera."
+                ),
+                window_prompts=[
+                    "At 00:00.000, [Shot 1] Ari starts the movement.",
+                ],
+            )])
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "2 failed repair attempts.*window_prompts must be empty",
+        ):
+            MusicVideoPlanner(llm_generate=generate).plan(
+                clips=[{"start": 120.0, "end": 130.125, "label": "chorus"}],
+                scene_description="Ari performs on a rooftop at dusk",
+                video_model="minimax_h3_ref2va",
+                shot_image_policy="direct_references",
+            )
+
+        self.assertEqual(calls, 3)
 
     def test_unrepaired_invalid_h3_visual_timing_is_rejected(self):
         calls = 0

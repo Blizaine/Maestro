@@ -1,7 +1,42 @@
 # Maestro v2.7.0
 
-October 10, 2026. Prepared release candidate; not published. Changes since the
-public v2.6.0 Main release.
+October 10, 2026, with follow-ups through October 12. Public Dev testing
+candidate; not promoted to Main. Changes since the public v2.6.0 Main release.
+
+The October 11 follow-up remains under validation in this Dev candidate. Director
+now keeps explicit speech/music permissions and source actions outside the shortened
+screenplay, preserves authored endings, and checks declared support/contact and
+physical transitions before generation. Save, resume and clip regeneration keep
+these contracts. Creative dialogue repair checks participant coverage and
+duration together; a proven existing line can receive its native speaker marker
+locally. A numeric duration label is no longer interpreted as another speaker.
+These checks validate prompt contracts; rendered motion and audio require
+separate review. Fresh longer Director plans still failed before rendering, so
+Main promotion remains held for planning reliability and subsequent media review.
+
+An additional music-video planning check allocates concrete requested story
+actions to ordered clips before the writer drafts them. For example, a requested
+climb must appear in an actual clip before the rider is shown mounted, even
+across independent cuts. Final H3 prompt compilation rechecks the action;
+global project descriptions do not count as a performed action. Ordinary
+performance-only briefs do not need this extra allocation pass.
+
+Music videos with four or more clips now start with a compact plan for the
+whole song before detailed shot writing. It gives later batches the full
+progression, supports intentional refrains, and keeps continuing physical
+facts separate from creative staging. Reviews inspect visible action rather
+than repeated identity/soundscape fields. Focused repairs preserve accepted
+neighboring shots and recheck their physical boundaries. Subjective reviewer
+suggestions are retained as diagnostics rather than rewriting accepted shots.
+
+**Use lyrics to guide visuals** is optional and off for new projects. Enable
+it to use the lyrics as thematic inspiration alongside the visual concept.
+Transcription, section/beat analysis, the supplied soundtrack and assigned
+lip-sync continue in either setting. Projects save the choice; changing it
+clears their cached visual plans while retaining audio analysis and timing.
+Final H3 compilation also checks picture ownership, handles article
+variants in reference names without adding a duplicate subject, and keeps
+placeholder names such as “Unnamed” from merging distinct performers.
 
 ## Memory management and performance
 
@@ -205,6 +240,10 @@ Director compilation also removes empty scene-transition shells and repairs
 global numbering on timed visual cuts before H3 preflight. Actual scene action,
 cut timestamps and exact dialogue remain intact; malformed substantive prompts
 still fail validation.
+
+H3 music-video planning now requires one complete prompt per native clip.
+Unwanted rolling-window prompts enter focused planning repair before rendering,
+preventing separate zero-based timelines from being joined into one clip.
 
 When native frame fitting changes a planned clip's length, Director retains the
 authored duration and adjusts local visual cues to the fitted clip. The timing

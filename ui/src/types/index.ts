@@ -1948,6 +1948,7 @@ export interface SavedPipelineState {
   completed_at: number | null
   status: string
   pipeline_type: string
+  use_lyrics_context?: boolean
   workspace?: string
   scene_description: string
   reference_image_path: string | null

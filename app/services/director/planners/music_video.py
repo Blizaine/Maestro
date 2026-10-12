@@ -8,6 +8,8 @@ Outputs: ProductionPlan with ShotPlan objects (NOT final prompts).
 """
 
 from __future__ import annotations
+import copy
+import json
 import math
 import os
 import re
@@ -22,7 +24,29 @@ from ..policies import build_character_rules_block, build_camera_style_block
 from ..vocal_activity import classify_vocal_intervals
 from ..music_performance import MUSIC_PERFORMANCE_RULES, PERFORMANCE_ROLES
 from ..prompt_timing import music_video_visual_timing_issue
+from ..physical_continuity import (
+    GROUNDED_STATE_VALUES,
+    MAX_PHYSICAL_FACTS,
+    MAX_PHYSICAL_TEXT_CHARS,
+    MAX_PHYSICAL_TRANSITIONS,
+    MAX_PHYSICAL_VALUE_CHARS,
+    PHYSICAL_STATE_PREDICATES,
+    format_physical_state_for_prompt,
+    music_video_progression_issue,
+    normalize_physical_state,
+    physical_transition_actions_missing_from_prompt,
+    physical_state_json_schema,
+    source_physical_state_issues,
+    validate_physical_state_sequence,
+)
 from .base import BasePlanner
+from ..music_narrative import (
+    build_music_narrative_contract,
+    format_music_narrative_context,
+    music_narrative_row_issue,
+    validate_music_narrative_allocation,
+)
+from ..lyrics_context import lyrics_context_enabled, lyric_visual_policy
 
 
 def _compact_lyrics_for_context(
@@ -208,11 +232,21 @@ _MUSIC_SHOT_PROPERTIES = {
         },
     },
     "spatial_setup": {"type": "string"},
+    "continuity_strategy": {
+        "type": "string",
+        "enum": ["continuous", "independent", "extend_previous"],
+    },
     "environment": {"type": "string"},
     "visual_style": {"type": "string"},
     "lighting": {"type": "string"},
     "mood": {"type": "string"},
     "action_beats": {"type": "array", "items": {"type": "string"}},
+    "physical_state": physical_state_json_schema(),
+    "source_event_ids": {
+        "type": "array",
+        "items": {"type": "string", "maxLength": 80},
+        "maxItems": 16,
+    },
     "camera_plan": {
         "type": "object",
         "properties": {
@@ -234,15 +268,184 @@ _MUSIC_SHOT_PROPERTIES = {
     "window_prompts": {"type": "array", "items": {"type": "string"}},
 }
 
+_EXPLICIT_PHYSICAL_RELATION_RE = re.compile(
+    r"\b(?:riders?|riding|rides|rode|aboard|astride|mounted|mounts?|mounting|"
+    r"carried\s+by|carrying|carries|sits?\s+(?:on|atop|astride)|"
+    r"sitting\s+(?:on|atop|astride)|seated\s+(?:on|atop|astride)|"
+    r"stands?\s+(?:on|atop)|standing\s+(?:on|atop)|"
+    r"gripping|grips|touching|touches|"
+    r"leaning\s+against|leans\s+against)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_HOLD_VERB_RE = re.compile(r"\b(?:hold|holds|holding|held)\b", re.IGNORECASE)
+_NONCONTACT_HOLD_HEADS = frozenset(
+    {
+        "pose", "posture", "stance", "gaze", "note", "breath", "line",
+        "melody", "tune", "chord", "rhythm", "beat", "frame", "framing", "shot",
+        "focus", "attention", "position", "stillness",
+    }
+)
+_HOLD_COMPLEMENT_MODIFIERS = frozenset(
+    {
+        "a", "an", "the", "its", "his", "her", "their", "our", "my",
+        "your", "this", "that", "one", "both", "very", "still", "steady",
+        "high", "low", "determined", "focused", "sustained", "long", "final",
+        "last", "fixed", "upright", "composed", "wide", "in", "at", "with",
+        "to", "on", "of", "by", "up", "down", "into",
+    }
+)
+_HOLD_CLAUSE_BOUNDARY_RE = re.compile(r"\b(?:and|but|while|as|then)\b|[,;.!?]")
+_NEGATED_PHYSICAL_RELATION_RE = re.compile(
+    r"\b(?:unsupported|unmounted|not\s+(?:mounted|seated|sitting|"
+    r"standing\s+on|touching|in\s+contact|holding|gripping)|"
+    r"without\s+(?:support|contact|a\s+grip))\b",
+    re.IGNORECASE,
+)
+
+
+def _source_establishes_physical_relation(
+    scene_description: Any,
+    row: dict[str, Any],
+) -> bool:
+    """Use a bounded phrase check to catch omitted declared support/contact."""
+
+    if not _has_explicit_physical_relation(str(scene_description or "")):
+        return False
+    row_text = [
+        str(row.get(field) or "")
+        for field in ("scene_goal", "video_prompt", "ending_beat")
+    ]
+    beats = row.get("action_beats")
+    if isinstance(beats, list):
+        row_text.extend(str(value) for value in beats[:4] if value)
+    return _has_explicit_physical_relation(" ".join(row_text))
+
+
+def _camera_is_hold_subject(text: str, verb_start: int) -> bool:
+    """Recognize a literal camera-as-subject framing direction, not an operator."""
+
+    prefix = text[max(0, verb_start - 160) : verb_start]
+    boundaries = list(_HOLD_CLAUSE_BOUNDARY_RE.finditer(prefix))
+    if boundaries:
+        prefix = prefix[boundaries[-1].end() :]
+    return bool(
+        re.fullmatch(
+            r"\s*(?:the\s+)?camera(?:\s+(?:now|then|finally))?\s*",
+            prefix,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _has_explicit_physical_relation(text: str) -> bool:
+    """Match contact/support language without treating artistic ``holds`` as contact.
+
+    For hold/held, only the immediate complement is inspected. Abstract heads
+    such as a pose, note, gaze, or camera frame are not physical relations;
+    concrete objects and people remain eligible contact anchors.
+    """
+
+    if _EXPLICIT_PHYSICAL_RELATION_RE.search(text):
+        return True
+    for match in _EXPLICIT_HOLD_VERB_RE.finditer(text[:20000]):
+        if _camera_is_hold_subject(text, match.start()):
+            continue
+        tail = text[match.end() :]
+        boundary = _HOLD_CLAUSE_BOUNDARY_RE.search(tail)
+        if boundary:
+            tail = tail[: boundary.start()]
+        complement = re.findall(r"[a-z]+(?:['-][a-z]+)?", tail.casefold())[:8]
+        meaningful = [
+            word for word in complement
+            if word not in _HOLD_COMPLEMENT_MODIFIERS
+        ]
+        if not meaningful:
+            continue
+        if meaningful[0] in _NONCONTACT_HOLD_HEADS:
+            continue
+        return True
+    return False
+
+
+def _assigned_source_events_for_clip(clip: dict[str, Any]) -> Any:
+    """Read explicit event text attached to a clip, when the caller supplies it."""
+
+    for field in ("source_events", "source_event_texts", "assigned_source_events"):
+        value = clip.get(field)
+        if value:
+            return value
+    single_event = clip.get("source_event") or clip.get("source_event_text")
+    return single_event if single_event else None
+
+
+def _physical_prompt_conflict_issue(row: dict[str, Any]) -> Optional[str]:
+    """Catch direct negation of a declared final support/contact relation."""
+
+    state = normalize_physical_state(row.get("physical_state"))
+    prompt = str(row.get("video_prompt") or "")
+    if state is None or not _NEGATED_PHYSICAL_RELATION_RE.search(prompt):
+        return None
+    prompt_tokens = {
+        token.casefold() for token in re.findall(r"[a-z0-9]+", prompt)
+    }
+    for fact in state["closing"]:
+        predicate = fact["predicate"]
+        if predicate == "support":
+            relational = re.search(
+                r"\b(?:on|onto|atop|astride|mounted|seated|sitting|"
+                r"standing|supported|carried|riding|aboard)\b",
+                fact["value"], re.IGNORECASE,
+            )
+        elif predicate == "contact":
+            relational = re.search(
+                r"\b(?:touch|touching|contact|holding|gripping|grip|hand|"
+                r"hands|embracing|embrace)\b",
+                fact["value"], re.IGNORECASE,
+            )
+        else:
+            relational = None
+        if not relational:
+            continue
+        anchors = {
+            token.casefold()
+            for token in re.findall(r"[a-z0-9]+", fact["value"])
+            if len(token) > 2 and token.casefold() not in {
+                "the", "and", "with", "onto", "atop", "astride", "mounted",
+                "seated", "sitting", "standing", "supported", "carried",
+                "riding", "aboard", "touching", "contact", "holding",
+                "gripping", "grip", "hands",
+            }
+        }
+        if anchors and not anchors.intersection(prompt_tokens):
+            continue
+        return (
+            "video_prompt directly negates the declared closing "
+            f"{predicate} relation for {fact['subject_id']!r}"
+        )
+    return None
+
 
 def _music_shot_schema(
-    count: int, *, include_image_fields: bool, require_cast_identity: bool = False,
+    count: int,
+    *,
+    include_image_fields: bool,
+    require_cast_identity: bool = False,
+    require_physical_state: bool = False,
+    require_native_single_clip: bool = False,
+    narrative_event_ids: Optional[list[str]] = None,
 ) -> dict:
     properties = {
         key: value
         for key, value in _MUSIC_SHOT_PROPERTIES.items()
         if include_image_fields or key not in _MUSIC_IMAGE_FIELDS
     }
+    if require_native_single_clip:
+        # H3's timeline is already divided into native clips before planning.
+        # Rolling windows would replace the clip's authored prompt with a
+        # concatenation of separate timelines, each starting at zero.
+        properties["window_prompts"] = {
+            **properties["window_prompts"], "maxItems": 0,
+        }
     if require_cast_identity:
         # Grammar-constrain the structural identity fields up front rather
         # than spending a semantic repair solely to request missing keys.
@@ -271,6 +474,18 @@ def _music_shot_schema(
         "video_prompt",
         "window_prompts",
     ]
+    if require_physical_state:
+        # New H3 plans must explicitly declare an empty ledger when no
+        # physical relation is established. Code derives its continuity
+        # marker from the single planned cut strategy.
+        properties["physical_state"] = _h3_physical_state_proposal_schema()
+        required.extend(("physical_state", "continuity_strategy"))
+    if narrative_event_ids:
+        properties["source_event_ids"] = {
+            **properties["source_event_ids"],
+            "items": {"type": "string", "enum": narrative_event_ids},
+        }
+        required.append("source_event_ids")
     return {
         "type": "array",
         "items": {
@@ -282,6 +497,676 @@ def _music_shot_schema(
         "minItems": max(1, count),
         "maxItems": max(1, count),
     }
+
+
+def _h3_physical_state_proposal_schema() -> dict[str, Any]:
+    """Schema for compact H3 state proposals; code derives from/closing values."""
+
+    fact_schema = {
+        "type": "object",
+        "properties": {
+            "subject_id": {"type": "string", "maxLength": 80},
+            "predicate": {
+                "type": "string",
+                "enum": list(PHYSICAL_STATE_PREDICATES),
+            },
+            "value": {"type": "string", "maxLength": MAX_PHYSICAL_VALUE_CHARS},
+        },
+        "required": ["subject_id", "predicate", "value"],
+        "additionalProperties": False,
+    }
+    transition_schema = {
+        "type": "object",
+        "properties": {
+            "subject_id": {"type": "string", "maxLength": 80},
+            "predicate": {
+                "type": "string",
+                "enum": list(PHYSICAL_STATE_PREDICATES),
+            },
+            "to_value": {"type": "string", "maxLength": MAX_PHYSICAL_VALUE_CHARS},
+            "action": {"type": "string", "maxLength": MAX_PHYSICAL_TEXT_CHARS},
+        },
+        "required": ["subject_id", "predicate", "to_value", "action"],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "opening": {
+                "type": "array",
+                "items": fact_schema,
+                "maxItems": MAX_PHYSICAL_FACTS,
+            },
+            "transitions": {
+                "type": "array",
+                "items": transition_schema,
+                "maxItems": MAX_PHYSICAL_TRANSITIONS,
+            },
+        },
+        "required": ["opening", "transitions"],
+        "additionalProperties": False,
+    }
+
+
+def _compact_state_text(
+    value: Any,
+    *,
+    field: str,
+    max_length: int,
+    location: str,
+) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{location} needs a non-empty {field}")
+    cleaned = re.sub(r"\s+", " ", value).strip()
+    if len(cleaned) > max_length:
+        raise ValueError(f"{location}.{field} exceeds {max_length} characters")
+    return cleaned
+
+
+def _compact_fact_key(fact: dict[str, str]) -> tuple[str, str]:
+    return (fact["subject_id"].casefold(), fact["predicate"])
+
+
+_H3_PHYSICAL_STATE_PROPOSAL_ERROR_FIELD = "_h3_physical_state_proposal_error"
+
+
+def _materialize_h3_physical_state_proposals_strict(
+    shot_dicts: list[Any],
+    *,
+    previous_physical_state: Any = None,
+) -> list[Any]:
+    """Expand compact H3 proposals into the strict canonical physical ledger.
+
+    The proposal owns only explicit opening facts, destinations, and actions.
+    Current values and complete closing state are derived deterministically.
+    Existing full ledgers pass through unchanged for strict legacy validation.
+    """
+
+    if not isinstance(shot_dicts, list):
+        raise ValueError("H3 shot plans must be an array")
+    rows = copy.deepcopy(shot_dicts)
+    prior_state = normalize_physical_state(previous_physical_state)
+
+    def fact_list(value: Any, *, location: str) -> list[dict[str, str]]:
+        if not isinstance(value, list):
+            raise ValueError(f"{location} must be an array")
+        if len(value) > MAX_PHYSICAL_FACTS:
+            raise ValueError(
+                f"{location} has more than {MAX_PHYSICAL_FACTS} facts"
+            )
+        facts: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for index, raw in enumerate(value):
+            item_location = f"{location}[{index}]"
+            if not isinstance(raw, dict):
+                raise ValueError(f"{item_location} must be an object")
+            if set(raw) != {"subject_id", "predicate", "value"}:
+                raise ValueError(
+                    f"{item_location} must contain only subject_id, predicate, value"
+                )
+            subject_id = _compact_state_text(
+                raw.get("subject_id"), field="subject_id", max_length=80,
+                location=item_location,
+            )
+            predicate = raw.get("predicate")
+            if predicate not in PHYSICAL_STATE_PREDICATES:
+                raise ValueError(
+                    f"{item_location}.predicate must be one of "
+                    f"{', '.join(PHYSICAL_STATE_PREDICATES)}"
+                )
+            fact_value = _compact_state_text(
+                raw.get("value"), field="value",
+                max_length=MAX_PHYSICAL_VALUE_CHARS, location=item_location,
+            )
+            if predicate == "grounded" and fact_value not in GROUNDED_STATE_VALUES:
+                raise ValueError(
+                    f"{item_location}.value for predicate 'grounded' must be "
+                    "exactly 'grounded' or 'airborne'"
+                )
+            fact = {
+                "subject_id": subject_id,
+                "predicate": predicate,
+                "value": fact_value,
+            }
+            key = _compact_fact_key(fact)
+            if key in seen:
+                raise ValueError(f"{item_location} duplicates a physical fact key")
+            seen.add(key)
+            facts.append(fact)
+        return facts
+
+    for row_index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"H3 shot {row_index + 1} must be an object")
+        raw_state = row.get("physical_state")
+        if not isinstance(raw_state, dict):
+            raise ValueError(f"H3 shot {row_index + 1} needs physical_state")
+
+        # Keep any legacy/full ledger exactly as proposed; existing row and
+        # sequence validators remain responsible for accepting or rejecting it.
+        is_legacy_full_state = "closing" in raw_state
+        if is_legacy_full_state:
+            try:
+                prior_state = normalize_physical_state(raw_state)
+            except (TypeError, ValueError):
+                prior_state = None
+            continue
+
+        if set(raw_state) not in (
+            {"opening", "transitions"},
+            {"opening", "transitions", "continuity"},
+        ):
+            raise ValueError(
+                f"H3 shot {row_index + 1} compact physical_state must contain "
+                "only opening and transitions, with optional legacy continuity"
+            )
+        strategy = row.get("continuity_strategy")
+        if not isinstance(strategy, str) or strategy not in {
+            "continuous", "extend_previous", "independent",
+        }:
+            raise ValueError(
+                f"H3 shot {row_index + 1} continuity_strategy is invalid"
+            )
+        continuity = raw_state.get(
+            "continuity", "independent" if strategy == "independent" else "continuous",
+        )
+        if not isinstance(continuity, str) or continuity not in {
+            "continuous", "independent", "time_jump",
+        }:
+            raise ValueError(
+                f"H3 shot {row_index + 1} physical_state.continuity is invalid"
+            )
+        if strategy == "independent":
+            if continuity not in {"independent", "time_jump"}:
+                raise ValueError(
+                    f"H3 shot {row_index + 1} independent continuity_strategy "
+                    "requires independent or time_jump physical continuity"
+                )
+        elif continuity != "continuous":
+            raise ValueError(
+                f"H3 shot {row_index + 1} continuous continuity_strategy "
+                "requires continuous physical continuity"
+            )
+
+        proposed_opening = fact_list(
+            raw_state.get("opening"),
+            location=f"H3 shot {row_index + 1} physical_state.opening",
+        )
+        raw_transitions = raw_state.get("transitions")
+        if not isinstance(raw_transitions, list):
+            raise ValueError(
+                f"H3 shot {row_index + 1} physical_state.transitions must be an array"
+            )
+        if len(raw_transitions) > MAX_PHYSICAL_TRANSITIONS:
+            raise ValueError(
+                f"H3 shot {row_index + 1} has more than "
+                f"{MAX_PHYSICAL_TRANSITIONS} transitions"
+            )
+
+        visible_ids: set[str] = set()
+        subjects = row.get("subjects_on_screen")
+        if isinstance(subjects, list):
+            for subject in subjects:
+                if not isinstance(subject, dict):
+                    continue
+                identifier = subject.get("character_id") or subject.get("speaker_name")
+                if isinstance(identifier, str) and identifier.strip():
+                    visible_ids.add(identifier.strip().casefold())
+
+        def check_visible_owner(fact: dict[str, str], location: str) -> None:
+            if visible_ids and fact["subject_id"].casefold() not in visible_ids:
+                raise ValueError(
+                    f"{location} subject_id {fact['subject_id']!r} is not in "
+                    "subjects_on_screen"
+                )
+
+        is_discontinuity = continuity in {"independent", "time_jump"}
+        prior_closing = (
+            prior_state["closing"]
+            if prior_state is not None and not is_discontinuity else []
+        )
+        if is_discontinuity and prior_state and prior_state["closing"] and not proposed_opening:
+            raise ValueError(
+                f"H3 shot {row_index + 1} must explicitly establish opening facts "
+                "when resetting an active physical state"
+            )
+
+        current: dict[tuple[str, str], dict[str, str]] = {}
+        opening: list[dict[str, str]] = []
+        for fact in prior_closing:
+            copied = dict(fact)
+            key = _compact_fact_key(copied)
+            current[key] = copied
+            opening.append(copied)
+
+        for fact in proposed_opening:
+            check_visible_owner(fact, f"H3 shot {row_index + 1} opening")
+            key = _compact_fact_key(fact)
+            existing = current.get(key)
+            if existing is not None:
+                if existing["value"] != fact["value"]:
+                    raise ValueError(
+                        f"H3 shot {row_index + 1} opening conflicts with carried "
+                        f"{fact['subject_id']} {fact['predicate']} state: "
+                        f"expected {existing['value']!r}, received {fact['value']!r}. "
+                        "Omit this carried opening key and use a visible transition "
+                        "to change it, or plan an intentional independent cut."
+                    )
+                continue
+            if len(opening) >= MAX_PHYSICAL_FACTS:
+                raise ValueError(
+                    f"H3 shot {row_index + 1} opening has more than "
+                    f"{MAX_PHYSICAL_FACTS} facts after carry-forward"
+                )
+            current[key] = dict(fact)
+            opening.append(dict(fact))
+
+        transitions: list[dict[str, str]] = []
+        for transition_index, raw_transition in enumerate(raw_transitions):
+            location = (
+                f"H3 shot {row_index + 1} physical_state.transitions"
+                f"[{transition_index}]"
+            )
+            if not isinstance(raw_transition, dict):
+                raise ValueError(f"{location} must be an object")
+            if set(raw_transition) != {
+                "subject_id", "predicate", "to_value", "action",
+            }:
+                raise ValueError(
+                    f"{location} must contain only subject_id, predicate, "
+                    "to_value, and action"
+                )
+            subject_id = _compact_state_text(
+                raw_transition.get("subject_id"), field="subject_id",
+                max_length=80, location=location,
+            )
+            predicate = raw_transition.get("predicate")
+            if predicate not in PHYSICAL_STATE_PREDICATES:
+                raise ValueError(
+                    f"{location}.predicate must be one of "
+                    f"{', '.join(PHYSICAL_STATE_PREDICATES)}"
+                )
+            to_value = _compact_state_text(
+                raw_transition.get("to_value"), field="to_value",
+                max_length=MAX_PHYSICAL_VALUE_CHARS, location=location,
+            )
+            if predicate == "grounded" and to_value not in GROUNDED_STATE_VALUES:
+                raise ValueError(
+                    f"{location}.to_value for predicate 'grounded' must be "
+                    "exactly 'grounded' or 'airborne'"
+                )
+            action = _compact_state_text(
+                raw_transition.get("action"), field="action",
+                max_length=MAX_PHYSICAL_TEXT_CHARS, location=location,
+            )
+            transition_fact = {
+                "subject_id": subject_id,
+                "predicate": predicate,
+                "value": to_value,
+            }
+            check_visible_owner(transition_fact, location)
+            key = _compact_fact_key(transition_fact)
+            before = current.get(key)
+            if before is None:
+                raise ValueError(
+                    f"{location} has no explicit opening/current fact for "
+                    f"{subject_id} {predicate}"
+                )
+            transitions.append({
+                "subject_id": subject_id,
+                "predicate": predicate,
+                "from_value": before["value"],
+                "to_value": to_value,
+                "action": action,
+            })
+            current[key] = transition_fact
+
+        if len(current) > MAX_PHYSICAL_FACTS:
+            raise ValueError(
+                f"H3 shot {row_index + 1} closing has more than "
+                f"{MAX_PHYSICAL_FACTS} facts"
+            )
+        materialized = {
+            "opening": opening,
+            "transitions": transitions,
+            "closing": list(current.values()),
+            "continuity": continuity,
+        }
+        row["physical_state"] = normalize_physical_state(materialized)
+        prior_state = row["physical_state"]
+
+    return rows
+
+
+def _materialize_h3_physical_state_proposals(
+    shot_dicts: list[Any],
+    *,
+    previous_physical_state: Any = None,
+    preserve_invalid_tail: bool = False,
+) -> list[Any]:
+    """Materialize rows strictly, optionally retaining a valid prefix.
+
+    Batch planning needs per-row recovery: a malformed later compact proposal
+    must not erase earlier rows that can be checkpointed. The first malformed
+    row is returned unchanged with a private error marker so the normal row
+    validator rejects it and starts bounded tail repair. Direct callers remain
+    strict by default.
+    """
+
+    if not preserve_invalid_tail:
+        return _materialize_h3_physical_state_proposals_strict(
+            shot_dicts,
+            previous_physical_state=previous_physical_state,
+        )
+    if not isinstance(shot_dicts, list):
+        raise ValueError("H3 shot plans must be an array")
+
+    materialized_rows: list[Any] = []
+    prior_state = copy.deepcopy(previous_physical_state)
+    for row_index, raw_row in enumerate(shot_dicts):
+        try:
+            materialized = _materialize_h3_physical_state_proposals_strict(
+                [raw_row],
+                previous_physical_state=prior_state,
+            )
+        except (TypeError, ValueError) as exc:
+            tail = copy.deepcopy(shot_dicts[row_index:])
+            if tail and isinstance(tail[0], dict):
+                tail[0][_H3_PHYSICAL_STATE_PROPOSAL_ERROR_FIELD] = str(exc)[:500]
+            materialized_rows.extend(tail)
+            break
+        materialized_rows.extend(materialized)
+        last_row = materialized[-1] if materialized else None
+        prior_state = (
+            copy.deepcopy(last_row.get("physical_state"))
+            if isinstance(last_row, dict) else None
+        )
+    return materialized_rows
+
+
+def _h3_metadata_repair_row_is_complete(
+    row: Any,
+    *,
+    include_image_fields: bool,
+) -> bool:
+    """Keep state-only repair for shots whose visible plan is already usable."""
+
+    if not isinstance(row, dict):
+        return False
+    required_text = [
+        "scene_goal", "scene_type", "environment", "visual_style", "lighting",
+        "mood", "ending_beat", "video_prompt",
+    ]
+    if include_image_fields:
+        required_text.extend(("image_source", "image_prompt"))
+    if any(
+        not isinstance(row.get(field), str) or not row[field].strip()
+        for field in required_text
+    ):
+        return False
+    if include_image_fields and not isinstance(row.get("visual_changes"), list):
+        return False
+
+    subjects = row.get("subjects_on_screen")
+    if not isinstance(subjects, list) or any(
+        not isinstance(subject, dict) or not _has_meaningful_cast_identity(subject)
+        for subject in subjects
+    ):
+        return False
+    action_beats = row.get("action_beats")
+    if not isinstance(action_beats, list) or not any(
+        isinstance(beat, str) and beat.strip() for beat in action_beats
+    ):
+        return False
+    camera = row.get("camera_plan")
+    if not isinstance(camera, dict) or not str(camera.get("framing") or "").strip():
+        return False
+    windows = row.get("window_prompts")
+    if not isinstance(windows, list) or windows:
+        return False
+    if row.get("continuity_strategy") not in {
+        "continuous", "independent", "extend_previous",
+    }:
+        return False
+
+    proposal = row.get("physical_state")
+    if not isinstance(proposal, dict):
+        return False
+    if set(proposal) - {"opening", "transitions", "continuity"}:
+        return False
+    return isinstance(proposal.get("opening"), list) and isinstance(
+        proposal.get("transitions"), list
+    )
+
+
+def _try_repair_h3_physical_state_only(
+    planner: Any,
+    *,
+    index: int,
+    row: dict[str, Any],
+    issue: str,
+    clip: dict[str, Any],
+    previous: Optional[dict[str, Any]],
+    contract: Any,
+    allocation: Any,
+    include_image_fields: bool,
+) -> Optional[list[dict[str, Any]]]:
+    """Repair one H3 compact-state materialization failure without rewriting its shot.
+
+    ``None`` means this failure is outside the narrow metadata-only path and
+    should use the ordinary row repair. An empty list means the metadata call
+    was malformed; the batch runner owns the existing bounded retry. A
+    schema-shaped proposal that still fails materialization returns its tagged
+    row so the next attempt can see the updated, exact materializer error.
+    """
+
+    if (
+        "compact physical-state proposal could not be materialized" not in issue
+        or not isinstance(row, dict)
+        or not row.get(_H3_PHYSICAL_STATE_PROPOSAL_ERROR_FIELD)
+        or getattr(planner, "_last_music_narrative_issue", "")
+        or getattr(planner, "_last_music_creative_issue", "")
+        or not _h3_metadata_repair_row_is_complete(
+            row,
+            include_image_fields=include_image_fields,
+        )
+    ):
+        return None
+
+    source_ids = row.get("source_event_ids")
+    source_ids = source_ids if isinstance(source_ids, list) else []
+    assigned_ids = [
+        item.get("event_id")
+        for item in (allocation if isinstance(allocation, list) else [])
+        if isinstance(item, dict) and item.get("clip_index") == index
+        and isinstance(item.get("event_id"), str)
+    ]
+    event_ids = assigned_ids or [
+        event_id for event_id in source_ids if isinstance(event_id, str)
+    ]
+    event_by_id = {
+        str(event.get("event_id") or ""): event
+        for event in (
+            contract.get("events", [])
+            if isinstance(contract, dict) and isinstance(contract.get("events"), list)
+            else []
+        )
+        if isinstance(event, dict)
+    }
+    assigned_actions = [
+        {
+            "event_id": event_id,
+            "text": event_by_id[event_id].get("text", ""),
+            "kind": event_by_id[event_id].get("kind", ""),
+        }
+        for event_id in event_ids if event_id in event_by_id
+    ]
+    state = normalize_physical_state(
+        previous.get("physical_state") if isinstance(previous, dict) else None
+    )
+    preceding_closing = state["closing"] if state else []
+    proposal = row.get("physical_state")
+    proposal = proposal if isinstance(proposal, dict) else {}
+    opening = proposal.get("opening")
+    opening = opening if isinstance(opening, list) else []
+    transitions = proposal.get("transitions")
+    transitions = transitions if isinstance(transitions, list) else []
+    carries_previous = (
+        row.get("continuity_strategy") in {"continuous", "extend_previous"}
+        and proposal.get("continuity") not in {"independent", "time_jump"}
+    )
+    known_current_keys: list[dict[str, str]] = []
+    known_key_pairs: set[tuple[str, str]] = set()
+
+    def add_known_key(raw: Any, source: str) -> None:
+        if not isinstance(raw, dict):
+            return
+        subject_id = raw.get("subject_id")
+        predicate = raw.get("predicate")
+        value = raw.get("value")
+        if not all(isinstance(item, str) and item.strip() for item in (subject_id, predicate, value)):
+            return
+        key = (subject_id.casefold(), predicate)
+        known_key_pairs.add(key)
+        known_current_keys.append({
+            "subject_id": subject_id,
+            "predicate": predicate,
+            "value": value,
+            "source": source,
+        })
+
+    if carries_previous:
+        for fact_item in preceding_closing:
+            add_known_key(fact_item, "preceding_closing")
+    for fact_item in opening[:MAX_PHYSICAL_FACTS]:
+        add_known_key(fact_item, "proposed_opening")
+
+    missing_transition_keys: list[dict[str, str]] = []
+    for transition_item in transitions[:MAX_PHYSICAL_TRANSITIONS]:
+        if not isinstance(transition_item, dict):
+            continue
+        subject_id = transition_item.get("subject_id")
+        predicate = transition_item.get("predicate")
+        if not isinstance(subject_id, str) or not subject_id.strip() or not isinstance(predicate, str):
+            continue
+        if (subject_id.casefold(), predicate) in known_key_pairs:
+            continue
+        missing_transition_keys.append({
+            "subject_id": subject_id,
+            "predicate": predicate,
+            "to_value": str(transition_item.get("to_value") or ""),
+            "action": str(transition_item.get("action") or ""),
+            "required_start_fact": "an explicit opening fact or carried prior closing fact",
+        })
+    cast_ids = []
+    subjects = row.get("subjects_on_screen")
+    if isinstance(subjects, list):
+        for subject in subjects[:32]:
+            if not isinstance(subject, dict):
+                continue
+            identity = {
+                key: subject[key]
+                for key in ("character_id", "speaker_name")
+                if isinstance(subject.get(key), str) and subject[key].strip()
+            }
+            if identity:
+                cast_ids.append(identity)
+
+    schema = {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "physical_state": _h3_physical_state_proposal_schema(),
+            },
+            "required": ["physical_state"],
+            "additionalProperties": False,
+        },
+        "minItems": 1,
+        "maxItems": 1,
+    }
+    context = {
+        "target_clip_index_zero_based": index,
+        "target_clip_number": index + 1,
+        "musical_clip_context": clip,
+        "validation_issue": issue,
+        "cast_ids": cast_ids,
+        "preceding_authoritative_closing_facts": preceding_closing,
+        "known_current_physical_keys": known_current_keys,
+        "transition_keys_missing_prior_or_opening_fact": missing_transition_keys,
+        "source_event_ids": event_ids,
+        "assigned_source_actions": assigned_actions,
+        "existing_action_beats": row.get("action_beats", []),
+        "continuity_strategy": row.get("continuity_strategy", ""),
+        "original_visible_prompt": row.get("video_prompt", ""),
+        "original_compact_physical_state_proposal": row.get("physical_state"),
+        "clip_source_actions": _assigned_source_events_for_clip(clip),
+    }
+    user_prompt = (
+        "Repair only the compact physical_state metadata for this one H3 music-video clip. "
+        "Return exactly one array item containing only physical_state. The caller will "
+        "preserve the original visible prompt, action_beats, source_event_ids, cast IDs, "
+        "continuity_strategy, and every other shot field unchanged.\n\n"
+        "Use the validation issue and visible evidence below. The known-current list "
+        "shows keys available at the clip start. Every transition key must already "
+        "have an explicit opening fact or a carried prior closing fact. For each key "
+        "listed as missing, add a genuinely supported opening fact before keeping a "
+        "relevant transition; otherwise omit that transition. A transition cannot "
+        "supply its own starting fact. For a continuous clip, treat preceding closing "
+        "facts as authoritative and inherit unchanged keys. Add explicit supported "
+        "opening facts only for genuinely new keys. For predicate grounded, use exactly "
+        "'grounded' or 'airborne' as the value; never use a location or descriptive phrase. "
+        "Do not encode unchanged or decorative motion (for example, cloth fluttering "
+        "in persistent wind) as a physical-state transition. Omit irrelevant state "
+        "metadata while leaving the original visible prose intact. Keep each remaining "
+        "transition action grounded in the original prompt or action beats. Do not "
+        "change or paraphrase the visible shot.\n\n"
+        + json.dumps(context, ensure_ascii=False)
+    )
+    try:
+        response = planner._call_llm_json(
+            user_prompt=user_prompt,
+            system_prompt=(
+                "Edit only compact physical-state metadata. Follow the supplied strict "
+                "JSON schema and return JSON only. Do not rewrite the shot or invent "
+                "visible actions."
+            ),
+            max_tokens=1800,
+            temperature=0.1,
+            thinking_budget=0,
+            json_schema=schema,
+        )
+    except InterruptedError:
+        raise
+    except Exception:
+        return []
+
+    if (
+        not isinstance(response, list)
+        or len(response) != 1
+        or not isinstance(response[0], dict)
+        or set(response[0]) != {"physical_state"}
+        or not isinstance(response[0].get("physical_state"), dict)
+        or set(response[0]["physical_state"]) != {"opening", "transitions"}
+    ):
+        return []
+
+    candidate = copy.deepcopy(row)
+    candidate.pop(_H3_PHYSICAL_STATE_PROPOSAL_ERROR_FIELD, None)
+    candidate["physical_state"] = copy.deepcopy(response[0]["physical_state"])
+    try:
+        materialized = _materialize_h3_physical_state_proposals(
+            [candidate],
+            previous_physical_state=(
+                previous.get("physical_state") if isinstance(previous, dict) else None
+            ),
+            preserve_invalid_tail=True,
+        )
+    except (TypeError, ValueError):
+        return []
+    if len(materialized) != 1 or not isinstance(materialized[0], dict):
+        return []
+    return materialized
 
 
 def _discard_unused_image_fields(shot_dicts: list[dict]) -> list[dict]:
@@ -370,6 +1255,7 @@ class MusicVideoPlanner(BasePlanner):
         """
         has_reference = bool(reference_image_path)
         video_model = str(kwargs.get("video_model") or "")
+        self._use_lyrics_context = lyrics_context_enabled(kwargs.get("use_lyrics_context"))
         shot_image_policy = str(kwargs.get("shot_image_policy") or "")
         self._uses_generated_shot_images = shot_image_policy not in {
             "prompt_only",
@@ -410,7 +1296,8 @@ class MusicVideoPlanner(BasePlanner):
             kwargs,
             kind="music_video",
             fingerprint_payload={
-                "planner_revision": 7,
+                "planner_revision": 23,
+                "use_lyrics_context": self._use_lyrics_context,
                 "scene_description": scene_description,
                 "clips": clips,
                 "lyrics": lyrics or [],
@@ -427,10 +1314,27 @@ class MusicVideoPlanner(BasePlanner):
             },
         )
 
+        self._music_narrative_contract = (
+            build_music_narrative_contract(scene_description)
+            if video_model.lower().startswith("minimax_h3") else {"events": [], "source": scene_description}
+        )
+        self._music_arc = self._plan_music_arc(
+            clips, scene_description, lyrics=lyrics,
+        ) if len(clips) >= 4 else []
+        if self._music_arc:
+            from ..music_arc import arc_allocation
+            self._music_narrative_allocation = arc_allocation(self._music_arc)
+        else:
+            self._music_narrative_allocation = self._allocate_narrative_actions(
+                self._music_narrative_contract, clips, scene_description,
+            )
+        self._last_music_narrative_issue = ""
+
         # Build reference assets
         ref_assets = ReferenceAssets(
             start_image=AssetRef(id="ref_image", type="image", uri=reference_image_path) if has_reference else None,
-            lyrics=self._format_lyrics_text(lyrics) if lyrics else None,
+            lyrics=(self._format_lyrics_text(lyrics)
+                    if lyrics and self._use_lyrics_context else None),
             speaker_map=[
                 SpeakerMapEntry(speaker_id=sid, name=info.get("name", ""), voice_description=info.get("role", ""))
                 for sid, info in (speaker_mappings or {}).items()
@@ -449,6 +1353,7 @@ class MusicVideoPlanner(BasePlanner):
             speaker_mappings,
             source_audio_drives_vocals=source_audio_drives_vocals,
             vocal_activity=vocal_activity,
+            use_lyrics_context=self._use_lyrics_context,
         )
 
         # Call LLM for creative planning
@@ -594,7 +1499,263 @@ class MusicVideoPlanner(BasePlanner):
             ],
         )
 
+    # ── Whole-song creative direction ────────────────────────────────
+
+    def _plan_music_arc(self, clips, scene_description, *, lyrics=None):
+        """Plan progression before detail, bounded even for hour-long songs."""
+        from ..music_arc import (
+            creative_plan_schema, normalize_music_arc, music_arc_quality_issues,
+            music_arc_action_issues,
+        )
+        cached = self._planning_resume_checkpoint.get("music_creative_arc")
+        contract = self._music_narrative_contract
+        self._music_arc_assignment_notes = []
+        if isinstance(cached, list):
+            try:
+                normalized = normalize_music_arc(cached, clips, contract)
+                self._music_arc_assignment_notes = music_arc_action_issues(normalized, contract)
+                return normalized
+            except ValueError:
+                pass
+        # Long timelines receive one overview item per bounded group, then the
+        # detailed writer develops that beat over its assigned native clips.
+        group_size = max(1, math.ceil(len(clips) / 48))
+        groups = []
+        for start in range(0, len(clips), group_size):
+            end = min(len(clips), start + group_size)
+            groups.append({
+                "start": clips[start].get("start", 0),
+                "end": clips[end - 1].get("end", 0),
+                "label": clips[start].get("label") or clips[start].get("section_label") or "scene",
+                "energy": clips[start].get("energy"),
+            })
+        timeline = [{"clip_index": i, **c} for i, c in enumerate(groups)]
+        schema = creative_plan_schema()
+        schema["minItems"] = schema["maxItems"] = len(groups)
+        event_field = schema["items"]["properties"]["source_event_ids"]
+        event_ids = [event["event_id"] for event in contract.get("events", [])]
+        if event_ids:
+            # Keyed assignments let the grammar enforce exactly one slot for
+            # each source action. Repeating an ID across 23 independent rows
+            # was a bookkeeping trap even when their visual beats were sound.
+            schema["items"]["properties"].pop("source_event_ids")
+            schema["items"]["required"].remove("source_event_ids")
+            response_schema = {
+                "type": "object",
+                "properties": {
+                    "beats": schema,
+                    "source_event_clips": {
+                        "type": "object",
+                        "properties": {event_id: {"type": "integer", "minimum": 0,
+                                                   "maximum": len(groups) - 1}
+                                       for event_id in event_ids},
+                        "required": event_ids,
+                        "additionalProperties": False,
+                    },
+                },
+                "required": ["beats", "source_event_clips"],
+                "additionalProperties": False,
+            }
+        else:
+            event_field["maxItems"] = 0
+            response_schema = schema
+        lyric_context = ""
+        if self._use_lyrics_context and lyrics:
+            lyric_context = "\nOptional thematic lyric context:\n" + _compact_lyrics_for_context(
+                self._format_lyrics_text(lyrics), max_words=900, max_chars=6000,
+            )
+        prompt = (
+            f"User visual concept: {scene_description}\n"
+            + lyric_visual_policy(self._use_lyrics_context)
+            + "\nPlan the COMPLETE song before writing detailed shots. Output one compact "
+            "creative beat for each timeline item. Develop the requested narrative, "
+            "performance, dance, atmosphere or abstract idea in its own form; do not "
+            "force a story, new characters, costume changes or a new location. Preserve "
+            "explicit fixed-camera, single-location, continuous-shot or immediate-action "
+            "requests. Choose a deliberate opening, development, contrast and ending "
+            "appropriate to THIS concept and the music. Let important moments breathe. "
+            "Place enabling actions before their consequences, but do not rush every "
+            "requested action into the opening. Distribute the main developments across "
+            "the song's sections; later clips need meaningful development, not camera "
+            "synonyms for the same action. Cutaways and performance inserts may develop "
+            "the concept without resetting persistent physical facts. An intentional "
+            "reprise needs a specific purpose and new development or treatment. "
+            "Only source_event_ids below are immutable obligations: assign each once "
+            "in order; other creative beats may be invented within the concept. "
+            "A continuing state (e.g. travelling together) does not require replaying "
+            "the transition that established it. Visibly complete each assigned "
+            "source action in its item, describing the action rather than merely "
+            "writing its event ID. Following items begin from its completed result; "
+            "do not spread an enabling action across unassigned items. Keep each text field concise.\n"
+            "Required source actions: " + json.dumps(contract.get("events", []), ensure_ascii=False)
+            + "\nSong timeline: " + json.dumps(timeline, ensure_ascii=False)
+            + lyric_context
+        )
+        if event_ids:
+            prompt += (
+                "\nOutput an object with beats and source_event_clips. Each beat "
+                "omits source_event_ids; source_event_clips maps each immutable "
+                "source-event key to exactly one ZERO-BASED timeline item where "
+                "its visible action occurs. Keep those clip indices in source order."
+            )
+        issue = ""
+        rejected_outline = []
+        for _ in range(2):
+            self._raise_if_planning_cancelled()
+            self._emit_planning_progress(message="Planning progression across the whole song...",
+                                         current=0, total=len(clips), stage="music_creative_arc")
+            repair_context = ""
+            if issue:
+                repair_context = (
+                    "\nRepair this outline: " + issue
+                    + "\nKeep valid beats and their pacing. If an action is already "
+                    "depicted in another beat, move its source_event_id there in "
+                    "source order rather than forcing it into an opening performance "
+                    "shot. Otherwise repair only the beat missing that action."
+                )
+                if rejected_outline:
+                    repair_context += "\nRejected outline to edit in place:\n" + json.dumps(
+                        rejected_outline, ensure_ascii=False,
+                    )
+            rows = self._call_llm_json(
+                user_prompt=prompt + repair_context,
+                system_prompt="Direct a complete music video. Output only the requested JSON structure.",
+                max_tokens=max(2048, 160 * len(groups) + 1024),
+                temperature=0.55, thinking_budget=0,
+                json_schema=response_schema,
+            )
+            try:
+                if event_ids and len(rows) == 1 and isinstance(rows[0], dict) and "beats" in rows[0]:
+                    envelope = rows[0]
+                    if set(envelope) != {"beats", "source_event_clips"}:
+                        raise ValueError("outline response must contain only beats and source_event_clips")
+                    assignments = envelope.get("source_event_clips")
+                    beats = envelope.get("beats")
+                    if not isinstance(assignments, dict) or set(assignments) != set(event_ids):
+                        raise ValueError("source_event_clips must contain exactly the required source-event keys")
+                    if (not isinstance(beats, list) or len(beats) != len(groups)
+                            or not all(isinstance(row, dict) for row in beats)):
+                        raise ValueError("beats must cover exactly the requested timeline items")
+                    rows = copy.deepcopy(beats)
+                    for row in rows:
+                        index = row.get("clip_index")
+                        if not isinstance(index, int) or isinstance(index, bool):
+                            raise ValueError("each outline beat needs an integer clip_index")
+                        if "source_event_ids" in row:
+                            raise ValueError("outline beats must omit source_event_ids; use source_event_clips")
+                    by_index = {row.get("clip_index"): row for row in rows if isinstance(row, dict)}
+                    for row in rows:
+                        row["source_event_ids"] = []
+                    for event_id in event_ids:
+                        index = assignments[event_id]
+                        if not isinstance(index, int) or isinstance(index, bool) or index not in by_index:
+                            raise ValueError(f"source event {event_id} needs a valid zero-based timeline index")
+                        by_index[index]["source_event_ids"].append(event_id)
+                outline = normalize_music_arc(rows, groups, contract)
+                rejected_outline = outline
+                early = bool(re.search(
+                    r"\b(?:immediately|right away|from the start)\b",
+                    scene_description, re.I,
+                ))
+                issues = music_arc_quality_issues(outline, contract, allow_early_events=early)
+                if issues:
+                    raise ValueError("; ".join(issues[:3]))
+                # An outline is shorthand, not the final visual prompt.
+                # "Takes flight" or "launches onto" can be valid treatments
+                # even when the literal action matcher is inconclusive. Keep
+                # those notes; the detailed source-action validator remains
+                # authoritative at the actual generation handoff.
+                self._music_arc_assignment_notes = music_arc_action_issues(outline, contract)
+                expanded = []
+                for i, row in enumerate(outline):
+                    start = i * group_size
+                    end = min(len(clips), start + group_size)
+                    for index in range(start, end):
+                        item = copy.deepcopy(row)
+                        item["clip_index"] = index
+                        if index != start:
+                            item["source_event_ids"] = []
+                        expanded.append(item)
+                checkpoint = copy.deepcopy(self._planning_resume_checkpoint)
+                checkpoint["music_creative_arc"] = expanded
+                checkpoint["music_arc_assignment_notes"] = copy.deepcopy(self._music_arc_assignment_notes)
+                checkpoint["music_narrative_contract"] = copy.deepcopy(contract)
+                checkpoint["music_narrative_allocation"] = [
+                    {"event_id": event, "clip_index": row["clip_index"]}
+                    for row in expanded for event in row["source_event_ids"]
+                ]
+                self._publish_planning_checkpoint(checkpoint)
+                return expanded
+            except ValueError as exc:
+                issue = str(exc)
+        raise RuntimeError("Music-video whole-song planning needs revision: " + issue)
+
     # ── Character Building ───────────────────────────────────────────
+
+    def _allocate_narrative_actions(
+        self, contract: dict, clips: list[dict], scene_description: str,
+    ) -> list[dict]:
+        """Allocate source-owned actions before independently writing clips."""
+        events = contract.get("events") or []
+        if not events:
+            return []
+        cached = self._planning_resume_checkpoint.get("music_narrative_allocation")
+        if isinstance(cached, list) and not validate_music_narrative_allocation(
+            contract, cached, len(clips),
+        ):
+            return copy.deepcopy(cached)
+        event_ids = [event["event_id"] for event in events]
+        schema = {
+            "type": "array", "minItems": len(events), "maxItems": len(events),
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "event_id": {"type": "string", "enum": event_ids},
+                    "clip_index": {"type": "integer", "minimum": 0,
+                                   "maximum": max(0, len(clips) - 1)},
+                },
+                "required": ["event_id", "clip_index"],
+            },
+        }
+        prompt = (
+            f"Original music-video brief: {scene_description}\n\n"
+            "Assign each immutable action below to one global clip, in source "
+            "order. clip_index is ZERO BASED. Establish the cast, then show "
+            "boarding/climbing before riding or flight. Give the opening room "
+            "for the user's concept; spread major developments across the song. Later clips can develop "
+            "the resulting state with varied action and camera work. Never "
+            "repeat a completed enabling action. Multiple ordered events may "
+            "share a clip when necessary. Do not invent or rewrite events.\n"
+            + json.dumps(events, ensure_ascii=False)
+            + "\nAvailable clips:\n"
+            + "\n".join(
+                f"{index}: {clip.get('label') or clip.get('section_label') or 'scene'}, "
+                f"{_music_clip_duration_seconds(clip):.3f}s"
+                for index, clip in enumerate(clips)
+            )
+        )
+        issue = ""
+        for attempt in range(2):
+            self._emit_planning_progress(
+                message="Allocating required music-video story actions...",
+                current=0, total=len(clips), stage="music_narrative_allocation",
+            )
+            allocation = self._call_llm_json(
+                user_prompt=prompt + (f"\nRepair this allocation error: {issue}" if issue else ""),
+                system_prompt="Allocate source actions to clips. Output only the requested JSON array.",
+                max_tokens=max(1024, len(events) * 80), thinking_budget=0,
+                json_schema=schema,
+            )
+            issues = validate_music_narrative_allocation(contract, allocation, len(clips))
+            if not issues:
+                checkpoint = copy.deepcopy(self._planning_resume_checkpoint)
+                checkpoint["music_narrative_contract"] = copy.deepcopy(contract)
+                checkpoint["music_narrative_allocation"] = copy.deepcopy(allocation)
+                self._planning_resume_checkpoint = checkpoint
+                self._publish_planning_checkpoint(checkpoint)
+                return copy.deepcopy(allocation)
+            issue = "; ".join(issues[:3])
+        raise RuntimeError(f"Music-video story-action allocation failed: {issue}")
 
     def _build_characters(
         self,
@@ -671,6 +1832,7 @@ class MusicVideoPlanner(BasePlanner):
         *,
         source_audio_drives_vocals: bool = False,
         vocal_activity: Optional[list[str]] = None,
+        use_lyrics_context: bool = False,
     ) -> list[str]:
         """Build text descriptions for each clip (context for LLM)."""
         if source_audio_drives_vocals and vocal_activity is None:
@@ -741,13 +1903,38 @@ class MusicVideoPlanner(BasePlanner):
                         "soundtrack; lip movement follows an actually audible "
                         "voice, not musical rhythm"
                     )
-            else:
+            elif use_lyrics_context:
                 vocal_info = (
                     f'lyrics excerpt: "{lyrics_snippet}"'
                     if lyrics_snippet else "instrumental"
                 )
+            else:
+                # Retain transcript-derived vocal/speaker timing without
+                # exposing its words to creative planning on legacy models.
+                vocal_info = (
+                    "source recording has vocals in this interval; preserve "
+                    "the assigned performer and timing without adding words"
+                    if lyrics_snippet else "no transcribed vocals in this interval"
+                )
+
+            if source_audio_drives_vocals and use_lyrics_context and lyrics_snippet:
+                vocal_info += f' Optional lyric imagery context: "{lyrics_snippet}"'
 
             ctx = f"Clip {i + 1}: {section}, {beat_count} beats, {vocal_info}.{performer_hint}"
+            source_event_ids = clip.get("source_event_ids")
+            if isinstance(source_event_ids, list):
+                usable_event_ids = [
+                    str(value).strip()[:80]
+                    for value in source_event_ids[:16]
+                    if isinstance(value, str) and value.strip()
+                ]
+                if usable_event_ids:
+                    ctx += (
+                        " Source event IDs for this clip: "
+                        + ", ".join(usable_event_ids)
+                        + ". Preserve these exact IDs in source_event_ids; "
+                        "do not invent IDs."
+                    )
             if local_duration is not None:
                 end_timecode = (
                     f"{int(local_duration // 60):02d}:"
@@ -785,6 +1972,10 @@ class MusicVideoPlanner(BasePlanner):
         duration_seconds: Optional[float] = None,
         validate_visual_timing: bool = False,
         require_stable_cast_identity: bool = False,
+        require_source_physical_state: bool = False,
+        require_native_single_clip: bool = False,
+        source_events_for_row: Any = None,
+        progression_context: Optional[dict[str, Any]] = None,
     ) -> Optional[str]:
         """Return why a music-video row is incomplete or not shot-specific."""
 
@@ -798,6 +1989,12 @@ class MusicVideoPlanner(BasePlanner):
             "ending_beat",
             "video_prompt",
         ]
+        proposal_error = row.get(_H3_PHYSICAL_STATE_PROPOSAL_ERROR_FIELD)
+        if isinstance(proposal_error, str) and proposal_error:
+            return (
+                f"clip {index + 1} compact physical-state proposal could not "
+                f"be materialized: {proposal_error}"
+            )
         if include_image_fields:
             required_text.extend(("image_source", "image_prompt"))
         for field in required_text:
@@ -828,6 +2025,12 @@ class MusicVideoPlanner(BasePlanner):
             return f"clip {index + 1} has no usable camera framing"
         if not isinstance(row.get("window_prompts"), list):
             return f"clip {index + 1} has no window_prompts list"
+        if require_native_single_clip and row["window_prompts"]:
+            return (
+                f"clip {index + 1} is one native H3 clip; window_prompts must "
+                "be empty. Put this clip's complete local timeline in "
+                "video_prompt, starting at [Shot 1]."
+            )
         if include_image_fields and not isinstance(row.get("visual_changes"), list):
             return f"clip {index + 1} has no visual_changes list"
 
@@ -852,6 +2055,56 @@ class MusicVideoPlanner(BasePlanner):
             )
             if timing_issue:
                 return f"clip {index + 1} {timing_issue}"
+
+        prefix_rows = [*previous_rows, row]
+        physical_issues = validate_physical_state_sequence(
+            prefix_rows,
+            require_state_after_first=True,
+        )
+        if physical_issues:
+            return physical_issues[0]
+
+        physical_prompt_issue = _physical_prompt_conflict_issue(row)
+        if physical_prompt_issue:
+            return f"clip {index + 1} {physical_prompt_issue}"
+
+        if require_source_physical_state:
+            assigned_source_issues = source_physical_state_issues(
+                [row], [source_events_for_row],
+            )
+            if assigned_source_issues:
+                return f"clip {index + 1} {assigned_source_issues[0]}"
+
+        if (
+            require_source_physical_state
+            and not source_events_for_row
+            and _source_establishes_physical_relation(scene_description, row)
+        ):
+            state = normalize_physical_state(row.get("physical_state"))
+            required_predicates = {"support", "contact"}
+            opening_relations = {
+                (fact["subject_id"].casefold(), fact["predicate"])
+                for fact in (state or {}).get("opening", [])
+                if fact["predicate"] in required_predicates
+            }
+            closing_relations = {
+                (fact["subject_id"].casefold(), fact["predicate"])
+                for fact in (state or {}).get("closing", [])
+                if fact["predicate"] in required_predicates
+            }
+            if not opening_relations or not closing_relations:
+                return (
+                    f"clip {index + 1} keeps an explicitly established physical "
+                    "relation in its planned action, so physical_state must name "
+                    "a support/contact fact in both opening and closing"
+                )
+
+        progression_issue = music_video_progression_issue(
+            prefix_rows,
+            **(progression_context or {}),
+        )
+        if progression_issue:
+            return progression_issue
         return None
 
     # ── LLM Planning Call ────────────────────────────────────────────
@@ -875,11 +2128,18 @@ class MusicVideoPlanner(BasePlanner):
         is_minimax_h3 = str(kwargs.get("video_model") or "").lower().startswith(
             "minimax_h3"
         )
+        # H3 rows include the native prompt and a complete physical ledger.
+        # Six such rows exceeded the former LTX-sized output allowance and
+        # truncated otherwise usable long-song plans in the middle of JSON.
+        batch_size = 3 if is_minimax_h3 else self._LONG_FORM_BATCH_SIZE
         if not kwargs.get("_bounded_music_batch"):
+            invalid_drafts: dict[int, dict] = {}
             forwarded_kwargs = {
                 key: value for key, value in kwargs.items()
                 if key not in {
                     "_bounded_music_batch",
+                    "_music_global_start",
+                    "_music_previous_physical_state",
                     "_preserve_short_music_reasoning",
                     "_planning_progress_callback",
                     "_planning_checkpoint_callback",
@@ -908,6 +2168,19 @@ class MusicVideoPlanner(BasePlanner):
                         text = str(value or "").strip()
                         if text:
                             state_parts.append(f"{label}: {text}")
+                    physical_state = normalize_physical_state(previous.get("physical_state"))
+                    if is_minimax_h3 and physical_state and physical_state["closing"]:
+                        # Only the previous final frame is the next opening.
+                        # Replaying the prior opening and actions here invited
+                        # the writer to restart the earlier pose/scene.
+                        state_parts.append(
+                            "authoritative previous closing facts: "
+                            + json.dumps(physical_state["closing"], ensure_ascii=False)
+                        )
+                    elif not is_minimax_h3:
+                        physical_state_text = format_physical_state_for_prompt(physical_state)
+                        if physical_state_text:
+                            state_parts.append(physical_state_text)
                     subjects = previous.get("subjects_on_screen")
                     if isinstance(subjects, list):
                         names = [
@@ -933,6 +2206,28 @@ class MusicVideoPlanner(BasePlanner):
                     "Carry that visible state into the next clip without "
                     "repeating the previous shot."
                 )
+                narrative_contract = getattr(self, "_music_narrative_contract", {})
+                creative_arc = getattr(self, "_music_arc", [])
+                if creative_arc:
+                    from ..music_arc import format_music_arc_context
+                    batch_concept += "\n\n" + format_music_arc_context(creative_arc, start, end)
+                if narrative_contract.get("events"):
+                    batch_concept += "\n\n" + format_music_narrative_context(
+                        narrative_contract,
+                        self._music_narrative_allocation,
+                        start, end,
+                    )
+                if is_minimax_h3 and previous:
+                    batch_concept += (
+                        "\nFor a continuous first clip in this batch, use "
+                        "physical_state.opening=[] for all carried keys. Code "
+                        "copies the authoritative closing facts above. Propose "
+                        "only newly established opening keys; change a carried "
+                        "posture, contact, or support through a visible transition. "
+                        "Do not copy the previous clip's original opening or replay "
+                        "its completed action. An independent cut explicitly "
+                        "establishes a new opening instead."
+                    )
                 if repair:
                     batch_concept += (
                         "\n\nTAIL REPAIR: Earlier clips are already complete. "
@@ -940,6 +2235,30 @@ class MusicVideoPlanner(BasePlanner):
                         "Keep their original clip numbers and musical contexts; "
                         "do not restart the video or repeat the global scene brief."
                     )
+                    if getattr(self, "_last_music_narrative_issue", ""):
+                        batch_concept += (
+                            "\nRequired story-action repair: "
+                            + self._last_music_narrative_issue
+                        )
+                    if getattr(self, "_last_music_creative_issue", ""):
+                        batch_concept += "\nFOCUSED CREATIVE REPAIR:\n" + self._last_music_creative_issue
+                    if getattr(self, "_last_music_row_issue", ""):
+                        batch_concept += "\nREQUIRED VALIDATION REPAIR:\n" + self._last_music_row_issue
+                    rejected = [
+                        {"global_clip": index + 1, "draft": invalid_drafts[index]}
+                        for index in range(start, end) if index in invalid_drafts
+                    ]
+                    if rejected:
+                        batch_concept += (
+                            "\nEDIT THE REJECTED DRAFT IN PLACE:\n"
+                            "Fix the stated validation error while retaining the valid "
+                            "visible actions, source-event obligations, stable subject IDs "
+                            "and unaffected direction. Do not replace a correctly performed "
+                            "action with a pose while fixing its physical-state facts. "
+                            "The authoritative preceding closing facts and source actions "
+                            "above take precedence over an inconsistent draft or outline.\n"
+                            + json.dumps(rejected, ensure_ascii=False)
+                        )
                 return self._plan_with_llm(
                     clips=batch_clips,
                     clip_contexts=clip_contexts[start:end],
@@ -951,8 +2270,12 @@ class MusicVideoPlanner(BasePlanner):
                     performer_map=performer_map,
                     nsfw=nsfw,
                     _bounded_music_batch=True,
+                    _music_global_start=start,
                     _preserve_short_music_reasoning=(
                         not repair and len(clips) <= self._LONG_FORM_BATCH_SIZE
+                    ),
+                    _music_previous_physical_state=(
+                        previous.get("physical_state") if previous else None
                     ),
                     **forwarded_kwargs,
                 )
@@ -977,6 +2300,33 @@ class MusicVideoPlanner(BasePlanner):
                 batch_clips: list[dict],
                 previous: Optional[dict],
             ) -> list[dict]:
+                if is_minimax_h3 and len(batch_clips) == 1:
+                    index = start
+                    rejected_indexes = [
+                        rejected_index
+                        for rejected_index in invalid_drafts
+                        if start <= rejected_index < start + len(batch_clips)
+                    ]
+                    issue = str(getattr(self, "_last_music_row_issue", "") or "")
+                    if (
+                        rejected_indexes == [index]
+                        and "compact physical-state proposal could not be materialized" in issue
+                        and not getattr(self, "_last_music_narrative_issue", "")
+                        and not getattr(self, "_last_music_creative_issue", "")
+                    ):
+                        metadata_repair = _try_repair_h3_physical_state_only(
+                            self,
+                            index=index,
+                            row=invalid_drafts[index],
+                            issue=issue,
+                            clip=batch_clips[0],
+                            previous=previous,
+                            contract=getattr(self, "_music_narrative_contract", {}),
+                            allocation=getattr(self, "_music_narrative_allocation", []),
+                            include_image_fields=uses_generated_images,
+                        )
+                        if metadata_repair is not None:
+                            return metadata_repair
                 return plan_batch(
                     batch_number,
                     start,
@@ -988,32 +2338,82 @@ class MusicVideoPlanner(BasePlanner):
             uses_generated_images = bool(
                 getattr(self, "_uses_generated_shot_images", True)
             )
-            return self._run_checkpointed_json_batches(
+            def validate_music_row(index, row, previous_rows):
+                contract = getattr(self, "_music_narrative_contract", {})
+                allocation = getattr(self, "_music_narrative_allocation", [])
+                if contract.get("events"):
+                    issue = music_narrative_row_issue(
+                        row, contract=contract, allocation=allocation, index=index,
+                    )
+                    if issue:
+                        invalid_drafts[index] = copy.deepcopy(row)
+                        self._last_music_narrative_issue = issue
+                        self._last_music_row_issue = issue
+                        return issue
+                self._last_music_narrative_issue = ""
+                assigned_ids = {
+                    item["event_id"] for item in allocation
+                    if item["clip_index"] == index
+                }
+                assigned_events = [
+                    event for event in contract.get("events", [])
+                    if event["event_id"] in assigned_ids
+                ]
+                issue = self._music_video_row_issue(
+                    index, row, previous_rows,
+                    scene_description=scene_description,
+                    include_image_fields=uses_generated_images,
+                    duration_seconds=(
+                        _music_clip_duration_seconds(clips[index])
+                        if 0 <= index < len(clips) else None
+                    ),
+                    validate_visual_timing=is_minimax_h3,
+                    require_stable_cast_identity=is_minimax_h3,
+                    require_source_physical_state=is_minimax_h3,
+                    require_native_single_clip=is_minimax_h3,
+                    source_events_for_row=(
+                        _assigned_source_events_for_clip(clips[index]) or assigned_events
+                        if 0 <= index < len(clips) else None
+                    ),
+                    progression_context={
+                        "sections": [
+                            str(clips[i].get("label") or clips[i].get("section_label") or "")
+                            for i in range(index + 1)
+                        ],
+                        "source_event_ids_by_index": [
+                            clips[i].get("source_event_ids") for i in range(index + 1)
+                        ],
+                    },
+                )
+                self._last_music_row_issue = issue or ""
+                if issue:
+                    invalid_drafts[index] = copy.deepcopy(row)
+                else:
+                    invalid_drafts.pop(index, None)
+                return issue
+            rows = self._run_checkpointed_json_batches(
                 items=clips,
-                batch_size=self._LONG_FORM_BATCH_SIZE,
+                batch_size=batch_size,
                 checkpoint_key="music_video_batches",
                 stage="music_video_batch",
                 progress_label="music-video",
                 call_batch=call_batch,
                 repair_batch=repair_batch,
-                row_validator=lambda index, row, previous_rows: (
-                    self._music_video_row_issue(
-                        index,
-                        row,
-                        previous_rows,
-                        scene_description=scene_description,
-                        include_image_fields=uses_generated_images,
-                        duration_seconds=(
-                            _music_clip_duration_seconds(clips[index])
-                            if 0 <= index < len(clips) else None
-                        ),
-                        validate_visual_timing=is_minimax_h3,
-                        require_stable_cast_identity=is_minimax_h3,
-                    )
-                ),
-                repair_batch_size=max(1, self._LONG_FORM_BATCH_SIZE // 2),
+                row_validator=validate_music_row,
+                repair_batch_size=max(1, batch_size // 2),
                 repair_attempts=2,
             )
+            if getattr(self, "_music_arc", []):
+                rows = self._review_music_plan(
+                    rows, clips, clip_contexts, scene_description,
+                    row_validator=validate_music_row,
+                    repair_row=lambda index, feedback, current: plan_batch(
+                        index + 1, index, clips[index:index + 1],
+                        current[index - 1] if index else None, repair=True,
+                    ),
+                    batch_size=batch_size,
+                )
+            return rows
 
         num_character_refs = len(kwargs.get("character_ref_paths", []) or [])
         num_location_refs = len(kwargs.get("location_ref_paths", []) or [])
@@ -1033,6 +2433,66 @@ class MusicVideoPlanner(BasePlanner):
         )
         camera_block = build_camera_style_block()
         # video_guide now merged into ltx2_music_video_rules.md — no separate load needed
+        if is_minimax_h3:
+            physical_continuity_rules = (
+                "H3 COMPACT PHYSICAL-STATE PROPOSAL:\n"
+                "- Every clip includes physical_state with exactly opening and "
+                "transitions. Opening lists explicit facts at "
+                "this clip's first frame. For a continuous clip, code carries "
+                "all previous closing facts automatically; prefer opening=[] "
+                "unless a new fact key begins here. A repeated carried fact "
+                "must exactly match its subject_id, predicate, and value.\n"
+                "- For an independent cut or time jump, provide facts that establish the "
+                "reset opening; do not assume prior facts. If no physical "
+                "relation is relevant, use an empty opening and no transitions.\n"
+                "- Each transition has exactly subject_id, predicate, to_value, "
+                "and action. Never output from_value or closing: code derives "
+                "them. A transition must target an explicit opening/current "
+                "fact; do not invent a missing starting state. Order transitions "
+                "as they happen.\n"
+                f"- Predicates: {', '.join(PHYSICAL_STATE_PREDICATES)}. Values "
+                f"are compact state atoms of at most {MAX_PHYSICAL_VALUE_CHARS} "
+                "characters; grounded values are exactly 'grounded' or "
+                "'airborne'. Transition actions are visible and also appear "
+                "in action_beats/video_prompt.\n"
+                "- Choose continuity_strategy once: continuous or "
+                "extend_previous carries state; independent resets state. "
+                "Code derives physical continuity from that choice. Do not "
+                "output a separate physical_state.continuity marker. A camera "
+                "change alone stays continuous.\n"
+                "- Do not invent a mount, grip, support relation, or prop "
+                "handoff that the Scene Concept has not established. Keep "
+                "video_prompt consistent with the opening and transitions."
+            )
+        else:
+            physical_continuity_rules = (
+                "PHYSICAL CONTINUITY:\n"
+                "- Every clip must include physical_state. Use empty opening, "
+                "transitions, and closing arrays only when no established "
+                "physical relation is relevant to the action. If the Scene "
+                "Concept or clip context establishes riding, carrying, holding, "
+                "touching, standing on, or another support/contact relation, "
+                "opening and closing facts must state that relation; never use "
+                "an empty ledger to omit it. Use the same stable subject_id "
+                "values throughout.\n"
+                "- A transition must name the visible action that changes the "
+                "fact. Keep every transition action in action_beats and make the "
+                "support/contact facts visible in video_prompt.\n"
+                "- Carry active closing facts into the next continuous clip's "
+                "opening. Mark physical_state.continuity as independent or "
+                "time_jump only when that clip is actually planned as a new "
+                "place/time or a discontinuous story beat, and pair it with "
+                "continuity_strategy independent. A camera or framing change "
+                "alone keeps physical continuity intact.\n"
+                "- Do not invent a mount, grip, support relation, or prop handoff "
+                "that the Scene Concept has not established.\n"
+                "- Treat physical_state as the blocking authority. Make "
+                "video_prompt agree with the opening facts and transitions, "
+                "and end on the closing facts; do not leave conflicting earlier "
+                "blocking prose in the prompt.\n"
+                "- When clip context supplies source event IDs, preserve those "
+                "exact IDs in source_event_ids. Do not make up source event IDs."
+            )
 
         image_prompt_rules = ""
         if uses_generated_images:
@@ -1090,6 +2550,11 @@ scene concept explicitly calls for a style change. End each image_prompt with
             '    "keyframe_prompts": [],\n'
             if uses_generated_images else ""
         )
+        physical_state_output_example = (
+            '{"opening": [], "transitions": []}'
+            if is_minimax_h3 else
+            '{"opening": [], "transitions": [], "closing": []}'
+        )
         image_workflow_notes = (
             """- image_source: "original" = user's reference photo (default). "previous" = previous scene's output for same-location continuity.
 - FIELD ORDER: Write image_prompt FIRST (starting state), then visual_changes, then video_prompt.
@@ -1109,7 +2574,7 @@ Character references define identity and location references define the setting.
 No visual reference was provided. Follow the Scene Concept, which may be narrative, dance, environment, or performance-focused. Do not add people or objects solely because the soundtrack contains vocals. Keep the identity and role of any requested or explicitly assigned person consistent across clips."""
 
         subject_identity_field = (
-            '"character_id": "lead_performer", "speaker_name": "Ari", '
+            '"character_id": "lead_performer", "speaker_name": "", '
             if is_minimax_h3 else ""
         )
 
@@ -1128,6 +2593,8 @@ MUSIC VIDEO RULES:
 - Instrumental = environment, textures. Bridge = contrasting, unexpected.
 - Vary visuals across clips. Performer must be visible when assigned.
 
+{physical_continuity_rules}
+
 {music_video_rules}
 
 {MUSIC_PERFORMANCE_RULES}
@@ -1137,19 +2604,21 @@ MUSIC VIDEO RULES:
 {image_prompt_rules}
 
 
-For MiniMax H3, the Ari/lead_performer values in the schema example are illustrative only: preserve supplied cast names exactly, and never invent a real name. Emit both identity keys. For unnamed cast, use a stable semantic character_id such as lead_performer and an empty speaker_name; do not invent a name.
+For MiniMax H3, preserve supplied cast names exactly and emit both identity keys. For unnamed cast, use a stable semantic character_id such as lead_performer and an empty speaker_name; never use a placeholder name such as Unnamed or N/A. Subjects can be objects, animals, materials or abstract forms; do not add a person for an instrumental or abstract concept. If no support/contact/posture relation matters, use physical_state opening=[] and transitions=[] rather than creating a physical ledger for scenery. Every physical-state subject_id must be present in subjects_on_screen; use its exact stable character_id.
 
 OUTPUT — respond with ONLY a JSON array:
 [
   {{
     "scene_goal": "What this clip achieves",
     "scene_type": "performance|narrative|atmospheric",
+    "continuity_strategy": "independent|continuous|extend_previous",
     "subjects_on_screen": [{{{subject_identity_field}"visual_description": "a visible person", "position_or_relation": "center frame", "performance_role": "non_vocal"}}],
     "environment": "Setting details",
     "visual_style": "Style",
     "lighting": "Lighting",
     "mood": "Tone",
     "action_beats": ["Action 1", "Action 2"],
+    "physical_state": {physical_state_output_example},
     "camera_plan": {{"framing": "medium shot", "movement": "slow dolly in", "movement_intensity": "subtle"}},
     "ending_beat": "Final image",
 {image_output_fields}    "video_prompt": "Energetic prompt describing the visible performance, action, sound, and camera.",
@@ -1159,7 +2628,7 @@ OUTPUT — respond with ONLY a JSON array:
 
 Notes:
 {image_workflow_notes}
-- window_prompts: empty ([]) unless the scene needs >26s continuous video.
+- window_prompts: {"always empty ([]). Each listed H3 clip is already one native generation. Put all local action and any consecutive visual cuts in video_prompt; never add rolling windows or restart the clip's clock." if is_minimax_h3 else "empty ([]) unless the scene needs >26s continuous video."}
 
 {scene_anchoring_rules}
 
@@ -1187,6 +2656,9 @@ Output exactly {len(clips)} objects. Go:"""
             "both" if uses_generated_images else "video",
         )
 
+        system_prompt += "\n\n" + lyric_visual_policy(
+            bool(getattr(self, "_use_lyrics_context", False))
+        )
         user_prompt = f"""Scene Concept: {scene_description}
 Song tempo: {bpm:.0f} BPM
 
@@ -1194,6 +2666,30 @@ Clips:
 {chr(10).join(clip_contexts)}
 
 Write {len(clips)} structured shot plans. Go:"""
+
+        narrative_contract = getattr(self, "_music_narrative_contract", {})
+        if is_minimax_h3 and narrative_contract.get("events"):
+            global_start = int(kwargs.get("_music_global_start") or 0)
+            user_prompt += (
+                "\n\nFINAL REQUIRED STORY ACTIONS: These override creative "
+                "paraphrasing. In video_prompt, write each assigned source "
+                "action clause unchanged, with its named actor, as an actual "
+                "visible action. Expand the physical movement around that "
+                "clause. Do not replace it with a scene_goal, summary, or "
+                "action_beats entry. "
+                + (
+                    "For boarding/climbing, establish the actor beside the "
+                    "target, show continuous contact during the climb, and "
+                    "settle securely on it before riding or flight. "
+                    if any(event.get("kind") == "boarding" for event in narrative_contract["events"])
+                    else ""
+                )
+                + "\n"
+                + format_music_narrative_context(
+                    narrative_contract, self._music_narrative_allocation,
+                    global_start, global_start + len(clips),
+                )
+            )
 
         # Send ALL reference images to the LLM (main + character + location refs)
         image_paths = []
@@ -1207,7 +2703,9 @@ Write {len(clips)} structured shot plans. Go:"""
                 image_paths.append(lp)
         if not image_paths:
             image_paths = None
-        per_clip_tokens = 700 if uses_generated_images else 900
+        per_clip_tokens = (
+            2800 if uses_generated_images else 2300
+        ) if is_minimax_h3 else (700 if uses_generated_images else 900)
         max_tokens = max(4096, len(clips) * per_clip_tokens + 1024)
         shot_dicts = self._call_llm_json(
             user_prompt=user_prompt,
@@ -1215,20 +2713,153 @@ Write {len(clips)} structured shot plans. Go:"""
             max_tokens=max_tokens,
             # A long timeline is already divided into a bounded, explicit clip
             # batch. Keep that structured transformation grammar-constrained
-            # and spend reasoning only on the historical short-form path.
+            # and spend reasoning only on the historical non-H3 short-form path.
             thinking_budget=(
-                4096 if kwargs.get("_preserve_short_music_reasoning") else 0
+                4096 if kwargs.get("_preserve_short_music_reasoning") and not is_minimax_h3 else 0
             ),
             image_paths=image_paths,
             json_schema=_music_shot_schema(
                 len(clips),
                 include_image_fields=uses_generated_images,
                 require_cast_identity=is_minimax_h3,
+                require_physical_state=is_minimax_h3,
+                require_native_single_clip=is_minimax_h3,
+                narrative_event_ids=[
+                    event["event_id"] for event in getattr(
+                        self, "_music_narrative_contract", {},
+                    ).get("events", [])
+                ],
             ),
         )
+        if is_minimax_h3:
+            shot_dicts = _materialize_h3_physical_state_proposals(
+                shot_dicts,
+                previous_physical_state=kwargs.get(
+                    "_music_previous_physical_state"
+                ),
+                preserve_invalid_tail=True,
+            )
         if not uses_generated_images:
             _discard_unused_image_fields(shot_dicts)
         return shot_dicts
+
+    def _review_music_plan(self, rows, clips, contexts, source, *, row_validator,
+                           repair_row, batch_size):
+        """Review actual visual bodies and repair only evidenced weak clips."""
+        from ..music_arc import format_music_arc_context
+        from ..music_review import (
+            creative_review_schema, grounded_review_findings,
+            music_review_fingerprint, music_visual_body,
+            music_visual_reset_issue, repair_music_rows,
+            repeated_music_visuals,
+        )
+        arc = self._music_arc
+        cached = self._planning_resume_checkpoint.get("music_creative_review", {})
+        if cached.get("fingerprint") == music_review_fingerprint(rows, arc):
+            return rows
+        repaired = set()
+        review_notes = []
+
+        def save(current, *, complete=False):
+            checkpoint = copy.deepcopy(self._planning_resume_checkpoint)
+            batches = checkpoint.setdefault("music_video_batches", {})
+            for start in range(0, len(current), batch_size):
+                part = current[start:start + batch_size]
+                batches[str(start)] = {"count": len(part), "expected_count": len(part),
+                                       "rows": copy.deepcopy(part)}
+            checkpoint["music_creative_review"] = {
+                "fingerprint": music_review_fingerprint(current, arc) if complete else "",
+                "repaired_clip_indices": sorted(repaired),
+                "preserved_clip_indices": [i for i in range(len(current)) if i not in repaired],
+                "review_notes": copy.deepcopy(review_notes),
+            }
+            self._publish_planning_checkpoint(checkpoint)
+
+        def replace(index, feedback, current):
+            self._raise_if_planning_cancelled()
+            self._last_music_narrative_issue = ""
+            self._last_music_creative_issue = (
+                feedback + "\nKeep the accepted neighboring clips unchanged. "
+                "Keep this clip's source_event_ids and stable subject IDs. "
+                "Preserve its authoritative opening and closing physical facts; "
+                "change only its visible treatment/action within those boundaries.\n"
+                "Required closing facts: " + json.dumps(
+                    (current[index].get("physical_state") or {}).get("closing", []),
+                    ensure_ascii=False,
+                )
+                + "\nCurrent clip to revise in place:\n"
+                + json.dumps(current[index], ensure_ascii=False)
+            )
+            try:
+                replacement = repair_row(index, feedback, current)
+            finally:
+                self._last_music_creative_issue = ""
+            repaired.add(index)
+            return replacement
+
+        for round_index in range(2):
+            findings = repeated_music_visuals(rows, arc)
+            for start in range(0, len(rows), 22):
+                self._raise_if_planning_cancelled()
+                end = min(len(rows), start + 24)
+                self._emit_planning_progress(
+                    message="Reviewing musical progression and visible shot variety...",
+                    current=start, total=len(rows), stage="music_creative_review",
+                )
+                cards = [{"clip_index": i, "assigned_beat": arc[i]["visual_beat"],
+                          "intentional_reprise": arc[i]["intentional_reprise"],
+                          "reprise_reason": arc[i]["reprise_reason"],
+                          "visual_body": music_visual_body(rows[i].get("video_prompt"))[:2600]}
+                         for i in range(start, end)]
+                request = (
+                    f"User visual concept: {source}\n"
+                    + format_music_arc_context(arc, start, end)
+                    + "\nReview the actual visual bodies below, not identity headers, "
+                    "summary text or repeated soundscape rules. Flag only material "
+                    "failures: a whole-brief reset; replaying the same enabling action; "
+                    "an unplanned repetitive visible sequence with only camera-word "
+                    "changes; or contradicting the assigned creative beat. A persistent "
+                    "physical state is not repetition by itself. Permit recurring "
+                    "performance, motifs, chorus reprises, fixed cameras/locations and "
+                    "abstract imagery when deliberate and developed. Do not demand "
+                    "new characters, locations, story arcs or constant novelty. Do not "
+                    "flag stylistic preferences. Quote exact visual-body evidence "
+                    "(24+ characters); a repetition finding needs quotes from both "
+                    "supplied clips. Use ZERO-BASED clip_index. Return [] if sound.\n"
+                    + json.dumps(cards, ensure_ascii=False)
+                )
+                review = self._call_llm_json(
+                    user_prompt=request, system_prompt="Review music-video direction conservatively. Output JSON only.",
+                    max_tokens=2400, temperature=0.15, thinking_budget=0,
+                    json_schema=creative_review_schema(),
+                )
+                try:
+                    grounded = grounded_review_findings(review, rows, set(range(start, end)))
+                    # A small writer's subjective arc-mismatch judgment must
+                    # not rewrite an accepted shot. Source obligations already
+                    # have strict validators; preserve this judgment for review.
+                    for item in review:
+                        index = item["clip_index"]
+                        if item["category"] == "repeated_action" and not arc[index]["intentional_reprise"]:
+                            findings[index] = grounded[index]
+                        else:
+                            review_notes.append(item)
+                except ValueError as exc:
+                    review_notes.append({"window": [start, end], "inconclusive": str(exc)})
+                    print(f"[MusicVideoPlanner] Creative reviewer was inconclusive: {exc}")
+                for i in range(start, end):
+                    issue = music_visual_reset_issue(rows[i].get("video_prompt"), source)
+                    if issue:
+                        findings[i] = issue
+            if not findings:
+                save(rows, complete=True)
+                return rows
+            if round_index == 1:
+                raise RuntimeError("Music-video creative review still found issues in clips "
+                                   + ", ".join(str(i + 1) for i in sorted(findings))
+                                   + ". Accepted clips are saved; retry planning to repair these clips.")
+            rows = repair_music_rows(rows, findings, replace, row_validator, checkpoint=save)
+        return rows
 
     # ── Convert LLM Output to ShotPlans ──────────────────────────────
 
@@ -1312,6 +2943,54 @@ Write {len(clips)} structured shot plans. Go:"""
                         for value in raw["window_prompts"]
                     ]
 
+            physical_state = normalize_physical_state(raw.get("physical_state"))
+            if physical_state is not None:
+                raw["physical_state"] = physical_state
+                physical_prompt = format_physical_state_for_prompt(
+                    physical_state,
+                    include_transitions=False,
+                )
+                if physical_prompt and isinstance(raw.get("video_prompt"), str):
+                    if physical_prompt not in raw["video_prompt"]:
+                        raw["video_prompt"] = (
+                            f"{raw['video_prompt'].rstrip()} {physical_prompt}"
+                        )
+                if isinstance(raw.get("video_prompt"), str):
+                    missing_action_clauses = physical_transition_actions_missing_from_prompt(
+                        physical_state,
+                        raw["video_prompt"],
+                    )
+                    if missing_action_clauses:
+                        raw["video_prompt"] = (
+                            f"{raw['video_prompt'].rstrip()} Transition detail to show: "
+                            + "; then ".join(missing_action_clauses)
+                            + "."
+                        )
+                transition_actions = [
+                    transition["action"]
+                    for transition in physical_state["transitions"]
+                ]
+                action_beats = raw.get("action_beats")
+                if not isinstance(action_beats, list):
+                    action_beats = []
+                existing_actions = {
+                    re.sub(r"\s+", " ", str(value)).strip().casefold()
+                    for value in action_beats if isinstance(value, str)
+                }
+                for action in transition_actions:
+                    key = re.sub(r"\s+", " ", action).strip().casefold()
+                    if key not in existing_actions:
+                        action_beats.append(action)
+                        existing_actions.add(key)
+                raw["action_beats"] = action_beats
+                if physical_prompt and isinstance(raw.get("window_prompts"), list):
+                    raw["window_prompts"] = [
+                        f"{value.rstrip()} {physical_prompt}"
+                        if isinstance(value, str) and physical_prompt not in value
+                        else value
+                        for value in raw["window_prompts"]
+                    ]
+
             # Parse dialogue beats if present
             dialogue_beats = None
             if raw.get("dialogue_beats"):
@@ -1321,6 +3000,50 @@ Write {len(clips)} structured shot plans. Go:"""
             image_strategy = "reference_edit" if has_reference else "fresh_generation"
             if section == "instrumental" and not has_reference:
                 image_strategy = "fresh_generation"
+
+            metadata = {
+                "section": section,
+                "beat_count": clip.get("beat_count", 0),
+                "bpm": clip.get("bpm", 120),
+                "clip_start": clip.get("start", 0),
+                "clip_end": clip.get("end", 0),
+            }
+            creative_arc = getattr(self, "_music_arc", [])
+            if i < len(creative_arc):
+                metadata["_director_music_arc"] = copy.deepcopy(creative_arc[i])
+                metadata["_director_music_arc"]["source_brief"] = getattr(
+                    self, "_music_narrative_contract", {},
+                ).get("source", "")
+            narrative_contract = getattr(self, "_music_narrative_contract", {})
+            if narrative_contract.get("events"):
+                metadata["_director_music_narrative"] = {
+                    "contract": copy.deepcopy(narrative_contract),
+                    "allocation": copy.deepcopy(self._music_narrative_allocation),
+                    "index": i,
+                    "source_event_ids": list(raw.get("source_event_ids") or []),
+                }
+            if physical_state is not None:
+                metadata["physical_state"] = physical_state
+            source_event_ids = (
+                raw.get("source_event_ids") if narrative_contract.get("events")
+                else clip.get("source_event_ids")
+            )
+            if isinstance(source_event_ids, list):
+                usable_event_ids = [
+                    str(value).strip()[:80]
+                    for value in source_event_ids[:16]
+                    if isinstance(value, str) and value.strip()
+                ]
+                if usable_event_ids:
+                    metadata["source_event_ids"] = usable_event_ids
+
+            continuity_strategy = str(
+                raw.get("continuity_strategy") or "independent"
+            ).strip().casefold()
+            if continuity_strategy not in {
+                "continuous", "independent", "extend_previous",
+            }:
+                continuity_strategy = "independent"
 
             shot = ShotPlan(
                 shot_id=self._make_shot_id(i, "mv"),
@@ -1332,7 +3055,7 @@ Write {len(clips)} structured shot plans. Go:"""
                 scene_type=raw.get("scene_type", "performance" if section != "instrumental" else "atmospheric"),
                 source_mode_preference="i2v" if has_reference else "t2v",
                 image_strategy=image_strategy,
-                continuity_strategy="independent",
+                continuity_strategy=continuity_strategy,
                 subjects_on_screen=subjects,
                 spatial_setup=raw.get("spatial_setup", ""),
                 environment=raw.get("environment", ""),
@@ -1345,13 +3068,7 @@ Write {len(clips)} structured shot plans. Go:"""
                 camera_plan=camera,
                 audio_plan=audio,
                 ending_beat=raw.get("ending_beat", ""),
-                metadata={
-                    "section": section,
-                    "beat_count": clip.get("beat_count", 0),
-                    "bpm": clip.get("bpm", 120),
-                    "clip_start": clip.get("start", 0),
-                    "clip_end": clip.get("end", 0),
-                },
+                metadata=metadata,
                 # LLM-generated prompts (used directly, skipping renderer pass 2)
                 video_prompt=raw.get("video_prompt"),
                 image_prompt=raw.get("image_prompt"),

@@ -300,17 +300,27 @@ FADE OUT."""
             llm_generate=fake_writer,
             llm_generate_streaming=fake_writer,
         )
-        production = planner.plan(
-            story_description=story,
-            target_duration=40.5,
-            target_scenes=5,
-            fps=24,
-            frames_steps=17,
-            frames_minimum=124,
-            frames_maximum=345,
-            video_model="minimax_h3_base",
-            shot_image_policy="prompt_only",
-        )
+        native_planner = planner._plan_story_h3_native
+
+        def replay_legacy_plan(*args, **kwargs):
+            # These captured pre-contract rows intentionally lack source IDs.
+            # Exercise their timing conversion without pretending they satisfy
+            # the new source-action contract used by fresh generations.
+            kwargs["require_source_contract"] = False
+            return native_planner(*args, **kwargs)
+
+        with patch.object(planner, "_plan_story_h3_native", side_effect=replay_legacy_plan):
+            production = planner.plan(
+                story_description=story,
+                target_duration=40.5,
+                target_scenes=5,
+                fps=24,
+                frames_steps=17,
+                frames_minimum=124,
+                frames_maximum=345,
+                video_model="minimax_h3_base",
+                shot_image_policy="prompt_only",
+            )
 
         self.assertEqual(len(calls), 4)
         shot3 = production.shots[2]

@@ -179,6 +179,12 @@ class TestDirectorModelAssessment(unittest.TestCase):
             return json.dumps([{
                 "scene_goal": "Introduce the performer",
                 "scene_type": "performance",
+                "continuity_strategy": "continuous",
+                "physical_state": {
+                    "opening": [],
+                    "transitions": [],
+                    "continuity": "continuous",
+                },
                 "subjects_on_screen": [{
                     "character_id": "office_performer",
                     "speaker_name": "Dwight",
@@ -550,10 +556,10 @@ class TestDirectorModelAssessment(unittest.TestCase):
         self.assertTrue(all(shot.subjects_on_screen[0].wardrobe for shot in plan.shots))
         self.assertIn("OPENING CONTINUITY", plan.shots[0].video_prompt)
         self.assertIn("FINAL BLOCKING", plan.shots[0].video_prompt)
-        self.assertIn("naturally move", plan.shots[0].video_prompt)
-        self.assertIn("seated screen-right", plan.shots[0].video_prompt)
-        self.assertIn("naturally move", plan.shots[0].ending_beat)
-        self.assertEqual(plan.shots[1].continuity_strategy, "continuous")
+        self.assertNotIn("naturally move", plan.shots[0].video_prompt)
+        self.assertIn("remains standing screen-left", plan.shots[0].video_prompt)
+        self.assertEqual(plan.shots[0].ending_beat, "The room falls quiet")
+        self.assertEqual(plan.shots[1].continuity_strategy, "independent")
         self.assertIn(
             "<d>[English] Identity theft is not a joke, Jim.</d>",
             plan.shots[0].video_prompt,

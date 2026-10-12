@@ -16,6 +16,78 @@ def spoken_word_count(text: str) -> int:
     return len(re.findall(r"\b[\w'’-]+\b", str(text or "")))
 
 
+def dialogue_minimum_threshold(
+    minimum_words: int,
+    *,
+    automatic: bool,
+    exchange_complete: bool,
+) -> int:
+    minimum = max(0, int(minimum_words))
+    # A duration-derived minimum guides the writer toward a developed exchange,
+    # but cannot justify padding a complete natural exchange. Explicit minimums
+    # and incomplete exchanges remain strict; the hard maximum is checked
+    # separately and always remains strict.
+    if automatic and exchange_complete:
+        return 0
+    return minimum
+
+
+def explicit_dialogue_minimum_words(prompt: str) -> int | None:
+    """Read a clearly stated numeric minimum for the spoken exchange only."""
+
+    source = re.sub(
+        r'"[^"\r\n]*"|“[^”\r\n]*”|‘[^’\r\n]*’|`[^`\r\n]*`',
+        " ",
+        str(prompt or ""),
+    )
+    minimum = r"(?:at\s+least|no\s+fewer\s+than|not\s+less\s+than|minimum(?:\s+of)?)"
+    speech_noun = r"(?:dialogue|exchange|conversation|speech)"
+    minima = [
+        int(match.group(1))
+        for match in re.finditer(
+            rf"\b{minimum}\s+(\d{{1,3}})\s+"
+            rf"(?:spoken\s+words?|dialogue\s+words?|words?\s+of\s+(?:spoken\s+)?{speech_noun})\b",
+            source,
+            flags=re.IGNORECASE,
+        )
+    ]
+    # Also accept a minimum attached to the speech noun by an explicit
+    # requirement verb, or phrased as a minimum ``in/for`` the exchange. Mere
+    # proximity to “dialogue” is insufficient: visual copy may share a clause.
+    clause_pattern = re.compile(r"[^.!?;\r\n]+", flags=re.DOTALL)
+    attached_minimum_patterns = (
+        re.compile(
+            rf"\b{speech_noun}\b[^.!?;\r\n]{{0,40}}?"
+            rf"\b(?:must|should|needs?\s+to|has\s+to|requires?|contain(?:s)?|include(?:s)?|use(?:s)?|be)\b"
+            rf"[^.!?;\r\n]{{0,25}}?\b{minimum}\s+(?:of\s+)?(\d{{1,3}})\s+words?\b",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            rf"\b{minimum}\s+(?:of\s+)?(\d{{1,3}})\s+words?\b"
+            rf"[^.!?;\r\n]{{0,25}}?\b(?:in|for|across)\s+(?:the\s+)?{speech_noun}\b",
+            flags=re.IGNORECASE,
+        ),
+    )
+    for clause in clause_pattern.findall(source):
+        for pattern in attached_minimum_patterns:
+            minima.extend(int(match.group(1)) for match in pattern.finditer(clause))
+    return max(minima) if minima else None
+
+
+def dialogue_minimum_satisfied(
+    actual_words: int,
+    minimum_words: int,
+    *,
+    automatic: bool = False,
+    exchange_complete: bool = True,
+) -> bool:
+    return int(actual_words) >= dialogue_minimum_threshold(
+        minimum_words,
+        automatic=automatic,
+        exchange_complete=exchange_complete,
+    )
+
+
 def only_supplied_dialogue_requested(prompt: str) -> bool:
     return bool(re.search(
         r"\b(?:only\s+(?:use|speak|say)?\s*(?:these|the supplied|the quoted|the following|the provided)?\s*"
@@ -160,6 +232,59 @@ def requested_dialogue_turns(prompt: str) -> int | None:
     return words.get(token, int(token) if token.isdigit() else None)
 
 
+def explicit_multi_speaker_dialogue(prompt: str) -> bool:
+    """Recognize clear reciprocal/group intent without treating any speech as a conversation."""
+
+    if dialogue_forbidden(prompt) or requested_dialogue_turns(prompt) == 1:
+        return False
+    source = _speech_context(prompt)
+    if re.search(
+        r"\b(?:write|create|deliver|perform|give)\s+(?:(?:a|an|short|brief|solo|single-speaker)\s+){0,3}"
+        r"monologue\b|\bmonologue\s+(?:from|by)\b",
+        source,
+        re.IGNORECASE,
+    ):
+        return False
+
+    conversation_noun = re.compile(
+        r"\b(?:conversation|dialogue|exchange|discussion|debate|chat|banter)\b",
+        re.IGNORECASE,
+    )
+    explicit_link = re.compile(r"\b(?:between|among)\b", re.IGNORECASE)
+    named_group = re.compile(
+        r"\b(?:the\s+)?(?:two|three|four|five|both|a\s+pair\s+of|the\s+pair\s+of)\s+"
+        r"(?:[\w'-]+\s+){0,3}(?:people|persons|strangers|friends|characters|speakers|voices|"
+        r"partners|coworkers|colleagues|siblings|mechanics|workers|soldiers|guards|students|"
+        r"neighbors|neighbours|passengers|children|adults|teammates|classmates|actors|couples)\b",
+        re.IGNORECASE,
+    )
+    dialogue_action = re.compile(
+        r"\b(?:talk(?:s|ed|ing)?|speak(?:s|ing)?|spoke|convers(?:e|es|ed|ing)|"
+        r"chat(?:s|ted|ting)?|discuss(?:es|ed|ing)?|debate(?:s|d|ing)?|"
+        r"argu(?:e|es|ed|ing)|exchange(?:s|d|ing)?|banter(?:s|ed|ing)?)\b",
+        re.IGNORECASE,
+    )
+    clauses = re.split(r"(?<=[.!?;])\s+|[\r\n]+", source)
+    for clause in clauses:
+        if conversation_noun.search(clause) and (
+            explicit_link.search(clause) or named_group.search(clause)
+        ):
+            return True
+        if re.search(r"\b(?:each other|one another)\b", clause, re.IGNORECASE) and dialogue_action.search(clause):
+            return True
+        group_match = named_group.search(clause)
+        if group_match:
+            tail = clause[group_match.end():]
+            action = dialogue_action.search(tail)
+            if action and not re.search(
+                r"\b(?:listen|listening|silent|quiet|narrator|voiceover|audience)\b",
+                tail[:action.start()],
+                re.IGNORECASE,
+            ):
+                return True
+    return False
+
+
 def compact_dialogue_brief(prompt: str) -> bool:
     """Return whether the user explicitly asks for a brief exchange."""
 
@@ -190,11 +315,17 @@ class DialogueBudget:
     minimum: int
     target: int
     maximum: int
+    minimum_is_automatic: bool = True
 
     def instruction(self) -> str:
+        minimum_guidance = (
+            f"duration-derived minimum {self.minimum} is a writing target once the exchange is complete"
+            if self.minimum_is_automatic
+            else f"explicit minimum {self.minimum} is strict"
+        )
         return (
             f"Aim for {self.target} spoken words total across all speakers "
-            f"(at least {self.minimum} for a developed exchange; hard maximum {self.maximum}). "
+            f"({minimum_guidance}; hard maximum {self.maximum}). "
             f"Schedule speech at {DIALOGUE_DEFAULT_WORDS_PER_SECOND:g} words per second by default, "
             f"never above {DIALOGUE_MAX_WORDS_PER_SECOND:g}. "
             "Use the allocated speech time for specific ideas, questions, answers, and character reactions, "
@@ -234,7 +365,13 @@ def creative_dialogue_budget(prompt: str, duration_seconds: float | None) -> Dia
     # single short reaction per window. Keep sustained speech close to its
     # allocation while leaving mixed action scenes their wider breathing room.
     minimum_fraction = 0.9 if conversation_brief(prompt) and not compact_exchange else 0.75
-    return DialogueBudget(1 if sparse_speech else max(1, math.ceil(target * minimum_fraction)), target, maximum)
+    automatic_minimum = 1 if sparse_speech else max(1, math.ceil(target * minimum_fraction))
+    explicit_minimum = explicit_dialogue_minimum_words(prompt)
+    minimum_is_automatic = explicit_minimum is None
+    minimum = automatic_minimum if minimum_is_automatic else explicit_minimum
+    if explicit_minimum is not None:
+        target = min(maximum, max(target, explicit_minimum))
+    return DialogueBudget(minimum, target, maximum, minimum_is_automatic)
 
 
 def requested_dialogue_topics(prompt: str) -> list[str]:
@@ -301,3 +438,271 @@ def dialogue_topic_covered(topic: str, spoken_text: str) -> bool:
     if any(not _dialogue_topic_terms(name) <= spoken for name in named_terms):
         return False
     return len(terms & spoken) >= max(1, math.ceil(len(terms) * 0.65))
+
+
+_DIALOGUE_ACTION_RE = re.compile(
+    r"\b(?:talk(?:s|ed|ing)?|speak(?:s|ing)?|spoke|convers(?:e|es|ed|ing)|"
+    r"chat(?:s|ted|ting)?|discuss(?:es|ed|ing)?|debate(?:s|d|ing)?|"
+    r"argu(?:e|es|ed|ing)|exchange(?:s|d|ing)?|banter(?:s|ed|ing)?)\b",
+    re.IGNORECASE,
+)
+_DIALOGUE_GROUP_RE = re.compile(
+    r"\b(?:each\s+other|one\s+another|all\s+(?:of\s+them\s+)?)\b|"
+    r"\b(?:everyone|everybody|the\s+(?:group|trio|pair))\b[^.!?;\r\n]{0,80}"
+    r"\b(?:talk|speak|convers|chat|discuss|debate|argu|exchange|banter)\w*\b|"
+    r"\b(?:talk|speak|convers|chat|discuss|debate|argu|exchange|banter)\w*"
+    r"[^.!?;\r\n]{0,80}\b(?:all|everyone|everybody|the\s+(?:group|trio|pair))\b",
+    re.IGNORECASE,
+)
+_DIALOGUE_LISTENER_RE = re.compile(
+    r"\b(?:listen(?:s|ed|ing)?|(?:is|are|was|were)\s+(?:deliberately\s+)?"
+    r"(?:silent|quiet|listening)|remain(?:s|ed)?\s+(?:silent|quiet)|"
+    r"stay(?:s|ed)?\s+(?:silent|quiet)|keep(?:s|ing)?\s+(?:silent|quiet)|"
+    r"sit(?:s|ting)?\s+(?:silently|quietly)|(?:do|does|did|will|won't|doesn't|"
+    r"don't|didn't)\s+not\s+(?:speak|talk|join\s+the\s+conversation)|"
+    r"(?:doesn't|don't|didn't|won't)\s+(?:speak|talk|join\s+the\s+conversation)|"
+    r"(?:never|refuses?\s+to)\s+(?:speak|talk|join\s+the\s+conversation)|"
+    r"mouths?\s+(?:stay\s+)?closed|holds?\s+(?:their|his|her)\s+tongue|"
+    r"silent\s+listener)\b",
+    re.IGNORECASE,
+)
+
+
+def requested_dialogue_speakers(prompt: str) -> list[str]:
+    """Return named speakers explicitly included in a mutual group exchange.
+
+    A list of characters is not a speaking contract by itself. Require an
+    explicit reciprocal or collective conversation cue, then remove anyone
+    the brief deliberately leaves listening or silent in that same exchange
+    clause. Nearby scene beats do not change the original exchange's cast.
+    """
+
+    if not conversation_brief(prompt) or dialogue_forbidden(prompt):
+        return []
+    try:
+        from services.h3_story_ledger import extract_h3_source_intent
+
+        cast_names = extract_h3_source_intent(prompt).get("cast_names") or []
+    except (ImportError, KeyError, TypeError, ValueError):
+        return []
+    if len(cast_names) < 2:
+        return []
+
+    source = _speech_context(prompt)
+    source = re.sub(r"<d\b[^>]*>[\s\S]*?</d>", " ", source, flags=re.IGNORECASE)
+    clauses = [
+        clause.strip()
+        for clause in re.split(r"(?<=[.!?;])\s+|[\r\n]+", source)
+        if clause.strip()
+    ]
+
+    first_names = {}
+    for name in cast_names:
+        first_names.setdefault(name.split()[0].casefold(), []).append(name)
+
+    def name_in(text: str, name: str) -> bool:
+        full_name = re.search(
+            rf"(?<![\w]){re.escape(name)}(?![\w])", text, flags=re.IGNORECASE,
+        )
+        if full_name:
+            return True
+        first_name = name.split()[0]
+        return len(first_names.get(first_name.casefold(), [])) == 1 and bool(re.search(
+            rf"(?<![\w]){re.escape(first_name)}(?![\w])", text, flags=re.IGNORECASE,
+        ))
+
+    def remove_named_source_references(text: str) -> str:
+        # Franchise and source labels such as "Ron Swanson from Parks and
+        # Rec" are present in cast extraction as proper nouns. They describe
+        # a character; they are not additional people in the exchange.
+        return re.sub(
+            r"\bfrom\s+(?:the\s+)?[A-Z][\w'’-]*"
+            r"(?:\s+(?:and|&)\s+[A-Z][\w'’-]*)*"
+            r"(?:\s+[A-Z][\w'’-]*){0,2}",
+            " ", text,
+        )
+
+    def listener_subjects(text: str) -> set[str]:
+        """Find cast names that are the local grammatical subject of a cue."""
+        occurrences: list[tuple[int, int, str]] = []
+        for name in cast_names:
+            aliases = [name]
+            first = name.split()[0]
+            if len(first_names.get(first.casefold(), [])) == 1:
+                aliases.append(first)
+            for alias in aliases:
+                occurrences.extend(
+                    (match.start(), match.end(), name)
+                    for match in re.finditer(
+                        rf"(?<![\w]){re.escape(alias)}(?![\w])", text,
+                        flags=re.IGNORECASE,
+                    )
+                )
+        # Prefer a full name over its overlapping first-name alias.
+        occurrences.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+        distinct: list[tuple[int, int, str]] = []
+        for occurrence in occurrences:
+            if any(
+                occurrence[0] < prior[1] and prior[0] < occurrence[1]
+                for prior in distinct
+            ):
+                continue
+            distinct.append(occurrence)
+
+        explicit: set[str] = set()
+        for cue in _DIALOGUE_LISTENER_RE.finditer(text):
+            before = [item for item in distinct if item[1] <= cue.start()]
+            direct_subjects = [
+                item for item in before
+                if re.fullmatch(
+                    r"\s*(?:,\s*)?(?:(?:who|that)\s+)?"
+                    r"(?:(?:still|quietly|silently|closely|intently|patiently|"
+                    r"calmly|deliberately|attentively)\s+)?",
+                    text[item[1]:cue.start()],
+                    flags=re.IGNORECASE,
+                )
+            ]
+            if not direct_subjects:
+                continue
+            nearest = direct_subjects[-1]
+            subjects = [nearest]
+            cursor = nearest[0]
+            for previous in reversed([item for item in before if item[1] <= nearest[0]]):
+                if re.fullmatch(
+                    r"\s*(?:,\s*(?:(?:and|&)\s*)?|(?:and|&)\s+)\s*",
+                    text[previous[1]:cursor],
+                    flags=re.IGNORECASE,
+                ):
+                    subjects.append(previous)
+                    cursor = previous[0]
+                else:
+                    break
+            explicit.update(item[2] for item in subjects)
+        return explicit
+
+    for clause_index, clause in enumerate(clauses):
+        if not _DIALOGUE_GROUP_RE.search(clause) or not _DIALOGUE_ACTION_RE.search(clause):
+            continue
+        speaker_clause = remove_named_source_references(clause)
+        participants = [name for name in cast_names if name_in(speaker_clause, name)]
+        explicit_listeners = listener_subjects(clause)
+        participants = [
+            name for name in participants
+            if name not in explicit_listeners
+        ]
+        if len(participants) >= 2:
+            return participants
+    return []
+
+
+def canonical_requested_dialogue_speaker(
+    speaker: str,
+    expected_speakers: list[str],
+) -> str:
+    """Expand a uniquely resolvable whole-token shortening to its cast name."""
+
+    normalized = " ".join(str(speaker or "").split())
+    if not normalized:
+        return normalized
+    key = normalized.casefold()
+    exact = [name for name in expected_speakers if name.casefold() == key]
+    if exact:
+        return exact[0]
+    prefixes = [
+        name for name in expected_speakers
+        if name.casefold().startswith(key + " ")
+    ]
+    if len(prefixes) == 1:
+        return prefixes[0]
+    return normalized
+
+
+def creative_dialogue_violations(
+    prompt: str,
+    turns: list[dict],
+    *,
+    minimum_words: int | None = None,
+    maximum_words: int | None = None,
+    automatic_minimum: bool = False,
+) -> list[str]:
+    """Audit a structured exchange against its speaker, word, and topic contracts."""
+
+    valid_turns = [
+        turn for turn in turns
+        if isinstance(turn, dict)
+        and isinstance(turn.get("speaker"), str)
+        and turn["speaker"].strip()
+        and isinstance(turn.get("text"), str)
+        and turn["text"].strip()
+    ]
+    if len(valid_turns) != len(turns):
+        return ["every dialogue turn needs a nonempty speaker and spoken text"]
+
+    from services.h3_story_ledger import extract_locked_dialogue
+
+    violations: list[str] = []
+    actual_words = sum(spoken_word_count(turn["text"]) for turn in valid_turns)
+    if maximum_words is not None and actual_words > int(maximum_words):
+        violations.append(f"{actual_words} spoken words; at most {int(maximum_words)} allowed")
+
+    expected_speakers = requested_dialogue_speakers(prompt)
+    actual_speakers = [" ".join(turn["speaker"].split()) for turn in valid_turns]
+
+    def speaker_matches(expected: str, actual: str) -> bool:
+        expected_key = expected.casefold()
+        actual_key = actual.casefold()
+        if expected_key == actual_key:
+            return True
+        # A first-name shortening is safe only when it identifies one requested
+        # speaker uniquely. Do not turn arbitrary cast mentions into new owners.
+        candidates = {
+            name.casefold() for name in expected_speakers
+            if name.casefold() == actual_key or name.casefold().startswith(actual_key + " ")
+        }
+        return candidates == {expected_key}
+
+    missing_speakers = [
+        name for name in expected_speakers
+        if not any(speaker_matches(name, actual) for actual in actual_speakers)
+    ]
+    if missing_speakers:
+        violations.append("missing requested speaking participants: " + ", ".join(missing_speakers))
+    unexpected_speakers = [
+        actual for actual in actual_speakers
+        if expected_speakers and not any(speaker_matches(expected, actual) for expected in expected_speakers)
+    ]
+    if unexpected_speakers:
+        violations.append("unrequested dialogue speakers: " + ", ".join(unexpected_speakers))
+
+    if (
+        len(expected_speakers) < 2
+        and explicit_multi_speaker_dialogue(prompt)
+        and len({speaker.casefold() for speaker in actual_speakers}) < 2
+    ):
+        violations.append("the requested conversation needs at least two distinct speakers")
+
+    exact_turns = requested_dialogue_turns(prompt)
+    if exact_turns is not None and len(valid_turns) != exact_turns:
+        violations.append(f"the user requested exactly {exact_turns} turns; found {len(valid_turns)}")
+
+    spoken = " ".join(turn["text"] for turn in valid_turns)
+    missing_topics = [
+        topic for topic in requested_dialogue_topics(prompt)
+        if not dialogue_topic_covered(topic, spoken)
+    ]
+    if missing_topics:
+        violations.append("missing spoken talking points: " + "; ".join(missing_topics))
+
+    locked_lines = [item["text"] for item in extract_locked_dialogue(prompt)]
+    missing_quotes = [line for line in locked_lines if line not in [turn["text"] for turn in valid_turns]]
+    if missing_quotes:
+        violations.append("supplied dialogue must remain verbatim: " + "; ".join(missing_quotes))
+
+    if minimum_words is not None and not dialogue_minimum_satisfied(
+        actual_words,
+        int(minimum_words),
+        automatic=automatic_minimum,
+        exchange_complete=not violations,
+    ):
+        violations.append(f"{actual_words} spoken words; at least {int(minimum_words)} required")
+    return violations

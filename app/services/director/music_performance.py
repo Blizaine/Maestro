@@ -215,6 +215,44 @@ _VOCAL_ACTION = re.compile(
     r"mouths? (?:the )?lyrics)\b(?:(?!\band\b)[^,.;])*", re.I,
 )
 _VOCAL_BREATH = re.compile(r"\b(?:deep,? audible breath|breathing heavily|panting)\b", re.I)
+_COLLECTIVE_CAST_SCOPE = re.compile(
+    r"\b(?:all\s+(?:(?P<count>two|three|four|five|six|seven|eight|nine|ten|"
+    r"\d+)\s+)?(?:(?:of\s+)?(?:the\s+)?(?:visible\s+|on-screen\s+)?)?"
+    r"(?:subjects?|people|performers|characters|members|musicians|band|cast|"
+    r"group|ensemble)|both\s+(?:visible\s+)?(?:subjects?|people|performers|"
+    r"characters|members|musicians|band|cast|group|ensemble))\b",
+    re.I,
+)
+_COLLECTIVE_CLOSED_MOUTH_ADJUNCT = re.compile(
+    r"(?P<connector>,\s*|\s+with\s+)"
+    r"(?:(?:their|all\s+their|everyone['’]s|the\s+subjects?['’]?)\s+)?"
+    r"(?:mouths?|lips)\s+"
+    r"(?:(?:stay|remain|are|is|keep|keeps|held|hold)\s+)?"
+    r"(?:relaxed\s+)?closed\b"
+    r"(?:\s+(?:and|but)\s+(?:attentive|focused|still|silent|quiet|calm))?",
+    re.I,
+)
+_SOURCE_CLOSED_MOUTH_REQUEST = re.compile(
+    r"\b(?:(?:keep|keeps|maintain|maintains|stay|stays|remain|remains|"
+    r"are|is|hold|holds)\s+(?:(?:their|his|her|the\s+performer['’]s)\s+)?"
+    r"(?:mouths?|lips)\s+(?:relaxed\s+)?(?:closed|shut)|"
+    r"(?:mouths?|lips)\s+(?:stay|remain|are|is|keep|keeps)\s+"
+    r"(?:relaxed\s+)?(?:closed|shut)|(?:closed|shut)\s+(?:mouths?|lips))\b",
+    re.I,
+)
+_SOURCE_NO_SONG_REQUEST = re.compile(
+    r"\b(?:no\s+(?:one|singing|lip[- ]?sync(?:ing)?|lyric\s+mouthing)|"
+    r"(?:do\s+not|does\s+not|did\s+not|don't|doesn't|didn't|never|"
+    r"without|should\s+not|must\s+not)\s+(?:sing|singing|lip[- ]?sync(?:ing)?|"
+    r"mouth(?:ing)?\s+(?:the\s+)?lyrics))\b",
+    re.I,
+)
+_SOURCE_GLOBAL_NO_SONG_REQUEST = re.compile(
+    r"\b(?:no\s+(?:singing|lip[- ]?sync(?:ing)?|lyric\s+mouthing)|"
+    r"no\s+(?:one|one should|anyone)\s+(?:sings?|lip[- ]?syncs?|"
+    r"mouths?\s+lyrics)|nobody\s+(?:sings?|lip[- ]?syncs?))\b",
+    re.I,
+)
 
 
 def _field(subject, key):
@@ -244,6 +282,98 @@ def _requested_expression(subject, project_context):
     )
 
 
+_CAST_COUNTS = {
+    "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+
+
+def _collective_scope_covers_cast(sentence, subject_count):
+    if subject_count < 2:
+        return False
+    for match in _COLLECTIVE_CAST_SCOPE.finditer(sentence or ""):
+        raw_count = match.group("count")
+        if raw_count:
+            count = _CAST_COUNTS.get(raw_count.casefold())
+            if count is None:
+                try:
+                    count = int(raw_count)
+                except ValueError:
+                    continue
+            if count != subject_count:
+                continue
+        elif match.group(0).lstrip().casefold().startswith("both "):
+            # "Both" is explicitly a two-person scope; it cannot safely
+            # describe a larger visible cast that includes an active singer.
+            if subject_count != 2:
+                continue
+        return True
+    return False
+
+
+def _source_requests_vocalist_silence(project_context, vocalists, subject_count):
+    """Do not override an explicit source request to keep the singer silent."""
+
+    for sentence in re.split(r"[.!?;]\s*", project_context or ""):
+        if _SOURCE_GLOBAL_NO_SONG_REQUEST.search(sentence):
+            return True
+        if not (
+            _SOURCE_CLOSED_MOUTH_REQUEST.search(sentence)
+            or _SOURCE_NO_SONG_REQUEST.search(sentence)
+        ):
+            continue
+        if _collective_scope_covers_cast(sentence, subject_count):
+            return True
+        if any(
+            alias.search(sentence)
+            for subject in vocalists
+            for alias in _aliases(subject)
+        ):
+            return True
+    return False
+
+
+def _remove_collective_active_vocal_closure(
+    prompt,
+    subjects,
+    vocal_activity,
+    *,
+    project_context="",
+):
+    """Drop only a cast-wide closed-mouth adjunct that contradicts active vocals."""
+
+    vocalists = [
+        subject for subject in subjects or ()
+        if _field(subject, "performance_role") == "vocalist"
+    ]
+    if (
+        vocal_activity != "active"
+        or not vocalists
+        or _source_requests_vocalist_silence(
+            project_context, vocalists, len(subjects or ()),
+        )
+    ):
+        return str(prompt or "")
+
+    pieces = re.split(r"(?<=[.!?;])(?=\s)|(?=\[Shot\s+\d+\])", str(prompt or ""))
+    for index, sentence in enumerate(pieces):
+        if not _collective_scope_covers_cast(sentence, len(subjects or ())):
+            continue
+        match = _COLLECTIVE_CLOSED_MOUTH_ADJUNCT.search(sentence)
+        if not match:
+            continue
+        # Keep action/focus prose and only remove a sentence-final adjunct. A
+        # main predicate such as "Everyone keeps their mouths closed" is not
+        # safe to rewrite because removing it would leave a broken sentence.
+        if sentence[match.end():].strip(" .!?;,"):
+            continue
+        collective = _COLLECTIVE_CAST_SCOPE.search(sentence)
+        if not collective or not sentence[collective.end():match.start()].strip(" ,;:"):
+            continue
+        pieces[index] = sentence[:match.start()] + sentence[match.end():]
+    return "".join(pieces)
+
+
 def constrain_music_performance(prompt, subjects=(), vocal_activity=None, *, project_context=""):
     """Resolve contradictory musician mouth cues, without replacing choreography.
 
@@ -254,6 +384,12 @@ def constrain_music_performance(prompt, subjects=(), vocal_activity=None, *, pro
     """
     text = strip_legacy_music_performance_direction(
         prompt,
+        subjects,
+        vocal_activity,
+        project_context=project_context,
+    )
+    text = _remove_collective_active_vocal_closure(
+        text,
         subjects,
         vocal_activity,
         project_context=project_context,
