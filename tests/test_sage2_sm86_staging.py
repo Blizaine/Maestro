@@ -2,21 +2,118 @@
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest import mock
 
-
 _ROOT = Path(__file__).resolve().parents[1]
-_APP = str(_ROOT / "app")
-if _APP not in sys.path:
-    sys.path.insert(0, _APP)
-
 import torch
 
-from shared import sage2_core
+
+def _module(name, *, package=False, **attributes):
+    module = ModuleType(name)
+    if package:
+        module.__path__ = []
+    for name, value in attributes.items():
+        setattr(module, name, value)
+    return module
+
+
+def _noop(*args, **kwargs):
+    pass
+
+
+def _load_sage2_core():
+    """Load the real module with temporary, dependency-light Sage stubs."""
+    sageattention = _module(
+        "sageattention",
+        package=True,
+        _fused=SimpleNamespace(transpose_pad_permute_cuda=_noop),
+        _qattn_sm80=SimpleNamespace(qk_int8_sv_f16_accum_f32_attn=_noop),
+        _qattn_sm89=SimpleNamespace(
+            qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf=_noop
+        ),
+        _qattn_sm90=SimpleNamespace(
+            qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf=_noop
+        ),
+    )
+    triton = _module("sageattention.triton", package=True)
+    quant_per_block = _module(
+        "sageattention.triton.quant_per_block",
+        per_block_int8=_noop,
+        quant_per_block_int8_kernel=object(),
+    )
+    quant_per_block_varlen = _module(
+        "sageattention.triton.quant_per_block_varlen", per_block_int8=_noop
+    )
+    attn_kernel = SimpleNamespace(arg_names=("mask",))
+    attn_per_block = _module(
+        "sageattention.triton.attn_qk_int8_per_block",
+        forward=_noop,
+        _attn_fwd=attn_kernel,
+    )
+    attn_modules = {
+        name: _module(f"sageattention.triton.{name}", forward=_noop)
+        for name in (
+            "attn_qk_int8_per_block_causal",
+            "attn_qk_int8_block_varlen",
+            "attn_qk_int8_per_block_causal_varlen",
+        )
+    }
+    quant_per_thread = _module(
+        "sageattention.triton.quant_per_thread",
+        per_thread_int8=_noop,
+        quant_key_per_thread_int8_kernel=object(),
+        quant_query_per_thread_int8_kernel=object(),
+    )
+    quant = _module(
+        "sageattention.quant",
+        per_block_int8=_noop,
+        per_warp_int8=_noop,
+        sub_mean=_noop,
+        per_channel_fp8=_noop,
+    )
+    sageattention.triton = triton
+    sageattention.quant = quant
+    triton.quant_per_block = quant_per_block
+    triton.quant_per_block_varlen = quant_per_block_varlen
+    triton.attn_qk_int8_per_block = attn_per_block
+    triton.quant_per_thread = quant_per_thread
+    for name, module in attn_modules.items():
+        setattr(triton, name, module)
+    fake_modules = {
+        "sageattention": sageattention,
+        "sageattention.triton": triton,
+        "sageattention.triton.quant_per_block": quant_per_block,
+        "sageattention.triton.quant_per_block_varlen": quant_per_block_varlen,
+        "sageattention.triton.attn_qk_int8_per_block": attn_per_block,
+        "sageattention.triton.quant_per_thread": quant_per_thread,
+        "sageattention.quant": quant,
+        **{
+            module.__name__: module
+            for module in attn_modules.values()
+        },
+    }
+    module_name = "_sage2_core_sm86_cpu_test"
+
+    with (
+        mock.patch.dict(sys.modules, fake_modules),
+        mock.patch("importlib.metadata.version", return_value="2.2.0"),
+        mock.patch.object(torch.cuda, "device_count", return_value=0),
+    ):
+        spec = importlib.util.spec_from_file_location(
+            module_name, _ROOT / "app" / "shared" / "sage2_core.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(sys.modules, {module_name: module}):
+            spec.loader.exec_module(module)
+        return module
+
+
+sage2_core = _load_sage2_core()
 
 
 class _KernelCapture:
