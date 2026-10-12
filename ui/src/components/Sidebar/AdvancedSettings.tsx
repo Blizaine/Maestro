@@ -13,6 +13,7 @@ import { WindowSettings } from './DurationSlider'
 import { DirectorH3Optimizations } from './DirectorH3Optimizations'
 import { H3MediaControls } from './H3MediaControls'
 import { MiniMaxH3Optimizations } from './MiniMaxH3Optimizations'
+import { directorH3SlaEnabled } from '../../lib/h3Attention'
 import { AutomaticFaceRefiner } from '../Characters/FaceRefiner'
 import { SidebarDialog } from './SidebarPanels'
 import type { GenerateParams } from '../../types'
@@ -259,6 +260,7 @@ function useAdvancedActiveSections(): Record<AdvancedSectionKey, string[]> {
   const directorVideoModel = useStore(s => s.selectedModelPerMode.video || '')
   const directorTurboMode = useStore(s => s.directorH3TurboModeByModel)
   const directorSolMode = useStore(s => s.directorH3SolModeByModel)
+  const directorSlaMode = useStore(s => s.directorH3SlaModeByModel)
   const directorFirstBlockCache = useStore(s => s.directorH3FirstBlockCacheByModel)
   const spatialUpsampling = useStore(s => s.spatialUpsampling)
   const filmGrainIntensity = useStore(s => s.filmGrainIntensity)
@@ -284,12 +286,14 @@ function useAdvancedActiveSections(): Record<AdvancedSectionKey, string[]> {
   const items: Record<AdvancedSectionKey, string[]> = { performance: [], finishing: [], loras: [], generation: [] }
   if (sidebarMode === 'director') {
     if (directorTurboMode[directorVideoModel] === true) items.performance.push('H3 Turbo')
-    if (directorSolMode[directorVideoModel] === true) {
-      items.performance.push(
-        directorVideoModel.includes('fused_turbo')
-          ? 'H3 SLA'
-          : 'H3 Sol Engine',
-      )
+    const fused = directorVideoModel.includes('fused_turbo')
+    if (directorH3SlaEnabled(
+      { sla_attention: true, sla_attention_default: fused },
+      directorVideoModel, directorSlaMode, directorSolMode,
+    )) {
+      items.performance.push('H3 SLA')
+    } else if (!fused && directorSolMode[directorVideoModel] === true) {
+      items.performance.push('H3 Sol Engine')
     }
     if (directorFirstBlockCache[directorVideoModel] === true) items.performance.push('First Block Cache')
     return items

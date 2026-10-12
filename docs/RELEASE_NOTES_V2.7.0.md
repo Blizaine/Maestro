@@ -181,6 +181,13 @@ automatic INT8 backend dispatch and VAE convolution/activation changes. Sol rema
 and can change generated results. Quantized FP8, NVFP4 and GGUF paths retain their
 format-specific kernels and compatible fallbacks.
 
+Full and Pruned H3 now expose **SLA Sparse Attention — Experimental** in Studio
+and Director for Frames and References. It defaults off and preserves the
+selected checkpoint, sampler and step count. Fused retains its default SLA
+recipe. Director saves SLA separately from Sol with its project. Sparse
+attention can change motion, reference fidelity and audio; compare warmed runs
+before adopting it. See the [SLA comparison guide](Performance-auto-tune.md#experimental-sla-for-full-and-pruned-h3).
+
 Explicit-device factories and model placement updates cover eligible Wan, H3,
 Flux, Qwen Image, Hunyuan, HiDream, Krea2, Z-Image and audio pipelines. LTX,
 LongCat and other routes that still need implicit factories retain their device

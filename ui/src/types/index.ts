@@ -944,6 +944,7 @@ export interface ModelOptions {
   } | null
   sla_attention?: boolean
   sla_attention_default?: boolean
+  sla_attention_experimental?: boolean
   sla_attention_status?: {
     installed: boolean
     supported: boolean

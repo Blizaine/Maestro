@@ -1863,6 +1863,7 @@ class family_handler:
         fused_turbo = bool(
             (model_def or {}).get("minimax_h3_fused_turbo", False)
         )
+        vdn = bool((model_def or {}).get("vdn", False))
         explicit_video_vae = (
             "minimax_h3_video_vae_filename" in (model_def or {})
         )
@@ -1876,6 +1877,28 @@ class family_handler:
         dasiwa = bool((model_def or {}).get("minimax_h3_dasiwa", False))
         baked_turbo = bool((model_def or {}).get("minimax_h3_baked_turbo", False))
         import_profile = (model_def or {}).get("minimax_h3_import_profile")
+        locked_inference_steps = bool(
+            (model_def or {}).get("lock_inference_steps", False)
+        )
+        sla_attention = fused_turbo or (
+            base_model_type
+            in {
+                _MODEL_TYPE,
+                _FULL_MODEL_TYPE,
+                _REF2VA_MODEL_TYPE,
+                _REF2VA_FULL_MODEL_TYPE,
+            }
+            and not (
+                audio_only
+                or vdn
+                or singularity
+                or dasiwa
+                or baked_turbo
+                or bool(import_profile)
+                or locked_inference_steps
+                or bool((model_def or {}).get("minimax_h3_viggle", False))
+            )
+        )
         if dasiwa and (
             base_model_type not in {_MODEL_TYPE, _REF2VA_MODEL_TYPE}
             or audio_only or full_checkpoint or singularity or fused_turbo
@@ -2061,8 +2084,9 @@ class family_handler:
             # H3's packed BF16 head-dimension-128 attention can use the
             # bundled Sol Engine from a compatible SM89+ / Triton 3.6 runtime.
             "sol_attention": not fused_turbo,
-            "sla_attention": fused_turbo,
+            "sla_attention": sla_attention,
             "sla_attention_default": fused_turbo,
+            "sla_attention_experimental": sla_attention and not fused_turbo,
             "sla_attention_config": {
                 "sparsity_ratio": 0.90,
                 "block_size": 64,
@@ -2199,9 +2223,7 @@ class family_handler:
             "source_sha256": str((model_def or {}).get("source_sha256") or ""),
             "source_size_bytes": (model_def or {}).get("source_size_bytes"),
             "model_size_gb": (model_def or {}).get("model_size_gb"),
-            "lock_inference_steps": False if fused_turbo else bool(
-                (model_def or {}).get("lock_inference_steps", False)
-            ),
+            "lock_inference_steps": False if fused_turbo else locked_inference_steps,
             "inference_steps_min": (
                 _H3_FUSED_MIN_EVALUATIONS if fused_turbo else 1
             ),
@@ -2360,6 +2382,7 @@ class family_handler:
                            "video_guide_outpainting_label": "Extend the H3 Control Video canvas"})
         if (model_def or {}).get("vdn", False):
             result.update({"vdn": True, "sol_attention": False, "sla_attention": False,
+                           "sla_attention_default": False, "sla_attention_experimental": False,
                            "minimax_h3_transformer_working_vram_gb": 12,
                            "selector_help": workflow_help + "\n\nVDN uses trained hybrid attention, its module and default LoRA. Requires Triton and more VRAM. Start with a shorter clip before raising duration."})
         if audio_only:
@@ -2370,6 +2393,7 @@ class family_handler:
                 "returns_audio": False, "image_prompt_types_allowed": "", "i2v_class": False,
                 "custom_frames_injection": False, "custom_settings": [], "max_voice_count": 2,
                 "sol_attention": False, "sla_attention": False,
+                "sla_attention_default": False, "sla_attention_experimental": False,
                 "audio_mode_from_voice_count": True, "any_audio_prompt": True, "audio_prompt_choices": True,
                 "audio_reference_max_total_duration": 15, "video_length_not_limited_by_audio": True,
                 "audio_guide_label": "Voice / Audio Reference 1", "audio_guide2_label": "Voice / Audio Reference 2",
@@ -2402,6 +2426,7 @@ class family_handler:
                 "first_block_cache": not baked_turbo,
                 "sla_attention": False,
                 "sla_attention_default": False,
+                "sla_attention_experimental": False,
                 "selector_help": str((model_def or {}).get("selector_help") or workflow_help),
                 "lora_compatibility_note": "Turbo is already baked in. Additional Turbo/PDD, VDN and DoRA adapters are excluded; ordinary H3 LoRAs remain experimental." if baked_turbo else "Hybrid uses the Ref2VA AdaLN basis in both workflows; compatible H3 adapters are converted when needed.",
             })
@@ -2425,6 +2450,7 @@ class family_handler:
                 "inference_steps_help": f"Imported {import_profile['sampling_profile']} recipe; start with {import_profile['default_steps']} steps.",
                 "sol_attention": True, "first_block_cache": not baked_turbo,
                 "sla_attention": False, "sla_attention_default": False,
+                "sla_attention_experimental": False,
                 "selector_help": str((model_def or {}).get("selector_help") or workflow_help),
             })
             if baked_turbo:

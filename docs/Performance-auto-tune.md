@@ -106,6 +106,33 @@ other checkpoint/attention recipes and requests beyond the tested 15.08s
 receive a conservative starting choice, with a caution that hardware differs.
 Head-split changes do not require a restart or a model reload by themselves.
 
+## Experimental SLA for Full and Pruned H3
+
+Full and Pruned H3 now offer **SLA Sparse Attention — Experimental** for both
+Frames and References. In Studio, open **Advanced → Performance → H3
+Optimizations**. In Director, open **Advanced → H3 Optimizations**. The option
+defaults off for these checkpoints; Fused keeps its published default-on recipe.
+Studio and Director keep independent choices, and Director saves its choice with
+the project for resume and regeneration. SLA and Sol are separate, mutually
+exclusive attention choices.
+
+SLA uses approximate 90% block-sparse attention with protected reference/audio
+prefix rows. It changes attention only: enabling it does not select Turbo,
+reduce steps, or change the sampler or checkpoint. Disabling it returns ordinary
+Full/Pruned to the saved Auto/attention backend; disabling Fused's default SLA
+selects SDPA. Auto-tune does not enable experimental SLA for Full/Pruned.
+Specialty H3 recipes, including VDN, Singularity, Viggle, audio-only and imported
+checkpoints, retain their existing attention options.
+
+For an A/B comparison, fix the checkpoint, seed, resolution, duration, steps and
+references, turn First Block Cache off, and compare SLA off versus on. The first
+SLA use compiles Triton kernels, so compare warmed runs and inspect motion,
+reference fidelity and audio alongside timing. The console's H3 performance line
+reports `attention=sla`; the SLA run summary reports sparse calls and any dense
+fall-throughs. Unsupported runtimes or kernel failures use the existing dense
+fallback and log the reason. Enabling SLA is not a guarantee of memory fit or
+equivalent output quality.
+
 ## Testing a 32 GB RAM / RTX 3080 machine
 
 1. In Pinokio, choose **Download from URL**, enter

@@ -6532,6 +6532,9 @@ def get_model_options(model_type: str):
         "sol_attention_status": _sol_attention_status,
         "sla_attention": md.get("sla_attention", False),
         "sla_attention_default": md.get("sla_attention_default", False),
+        "sla_attention_experimental": md.get(
+            "sla_attention_experimental", False
+        ),
         "sla_attention_status": _sla_attention_status,
         "sla_attention_config": md.get("sla_attention_config"),
         "skip_steps_multiplier_choices": [

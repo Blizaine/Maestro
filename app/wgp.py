@@ -8210,7 +8210,7 @@ def generate_video(
     elif attn == "sla" and not model_def.get("sla_attention", False):
         send_cmd(
             "info",
-            "H3 SLA is available only for compatible fused MiniMax H3 models.",
+            "H3 SLA is available only for compatible MiniMax H3 models.",
         )
         send_cmd("exit")
         return True

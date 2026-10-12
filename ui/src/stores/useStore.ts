@@ -6,6 +6,7 @@ import {
   normalizeModelVisibilityOverrides, type ModelVisibilityOverrides, type ModelVisibilityScope,
 } from '../lib/modelVisibility'
 import { isDirectorRenderChild } from '../lib/directorJobs'
+import { directorH3SlaEnabled, normalizeH3Attention } from '../lib/h3Attention'
 import {
   modelOptionsForSelectedModel,
   sanitizeH3VaeUpsampling,
@@ -2206,6 +2207,8 @@ interface AppState {
   directorH3TurboPresetByModel: Record<string, string>
   /** Director-owned experimental H3 Sol Engine choices. */
   directorH3SolModeByModel: Record<string, boolean>
+  /** SLA is independent of Sol and defaults off for ordinary Full/Pruned H3. */
+  directorH3SlaModeByModel: Record<string, boolean>
   /** Director-owned H3 First Block Cache choices and tuning. */
   directorH3FirstBlockCacheByModel: Record<string, boolean>
   directorH3FirstBlockCacheMultiplierByModel: Record<string, number>
@@ -2222,6 +2225,7 @@ interface AppState {
   setDirectorH3TurboPreset: (modelType: string, presetId: string) => void
   initializeDirectorH3Turbo: (modelType: string, options: ModelOptions) => void
   setDirectorH3SolMode: (modelType: string, enabled: boolean) => void
+  setDirectorH3SlaMode: (modelType: string, enabled: boolean) => void
   setDirectorH3FirstBlockCache: (modelType: string, enabled: boolean) => void
   setDirectorH3FirstBlockCacheMultiplier: (modelType: string, value: number) => void
   setDirectorH3FirstBlockCacheWarmup: (modelType: string, value: number) => void
@@ -2604,6 +2608,7 @@ async function _buildDirectorRestorePatch(
     directorH3TurboModeByModel: _record(ui.directorH3TurboModeByModel) as Record<string, boolean>,
     directorH3TurboPresetByModel: _record(ui.directorH3TurboPresetByModel) as Record<string, string>,
     directorH3SolModeByModel: _record(ui.directorH3SolModeByModel) as Record<string, boolean>,
+    directorH3SlaModeByModel: _record(ui.directorH3SlaModeByModel) as Record<string, boolean>,
     directorH3FirstBlockCacheByModel: _record(ui.directorH3FirstBlockCacheByModel) as Record<string, boolean>,
     directorH3FirstBlockCacheMultiplierByModel: _record(ui.directorH3FirstBlockCacheMultiplierByModel) as Record<string, number>,
     directorH3FirstBlockCacheWarmupByModel: _record(ui.directorH3FirstBlockCacheWarmupByModel) as Record<string, number>,
@@ -7771,18 +7776,8 @@ export const useStore = create<AppState>((set, get) => ({
     } else {
       delete params.ltx25_video_vae
     }
-    if (state.modelOptions?.sla_attention) {
-      // The fused recipe may request SLA before its first Triton compile.
-      // Keep that intent even on unsupported hardware: the backend owns the
-      // advertised safe dense fallback and records which path actually ran.
-      params.override_attention = (
-        params.override_attention === 'sdpa' ? 'sdpa' : 'sla'
-      )
-    } else if (state.modelOptions?.sol_attention) {
-      params.override_attention = params.override_attention === 'sdpa'
-        ? 'sdpa'
-        : params.override_attention === 'sol'
-          && state.modelOptions.sol_attention_status?.supported ? 'sol' : ''
+    if (state.modelOptions?.sla_attention || state.modelOptions?.sol_attention) {
+      params.override_attention = normalizeH3Attention(state.modelOptions, params.override_attention)
     } else {
       delete params.override_attention
     }
@@ -9597,20 +9592,22 @@ export const useStore = create<AppState>((set, get) => ({
           )
         }
       }
-      if (options.sla_attention) {
-        const requestedAttention = get().params.override_attention
-        paramUpdates.override_attention = requestedAttention === 'sdpa'
-          ? 'sdpa'
-          : 'sla'
+      const requestedAttention = get().params.override_attention
+      // Fused's SLA/default-off SDPA choices must not opt a different
+      // Full/Pruned checkpoint into sparse attention or force slower SDPA.
+      // Restored output params are applied after options and still win.
+      const inheritedFusedAttention = (requestedAttention === 'sla' || requestedAttention === 'sdpa')
+        && activeState.modelOptions?.minimax_h3_fused_turbo === true
+        && activeState.modelOptions.model_type !== modelType
+        && options.sla_attention_experimental === true
+      paramUpdates.override_attention = normalizeH3Attention(
+        options, inheritedFusedAttention ? '' : requestedAttention,
+      ) ?? ''
+      if (options.minimax_h3_fused_turbo) {
         // This checkpoint's acceleration adapters are already fused into
         // its transformer. Never inherit an independent cache recipe across
         // a model switch.
         paramUpdates.skip_steps_cache_type = ''
-      } else if (
-        get().params.override_attention === 'sla'
-        || get().params.override_attention === 'sdpa'
-      ) {
-        paramUpdates.override_attention = ''
       }
       if (options.minimax_h3_baked_turbo) {
         const requestedAttention = get().params.override_attention
@@ -10532,6 +10529,7 @@ export const useStore = create<AppState>((set, get) => ({
   directorH3TurboModeByModel: {},
   directorH3TurboPresetByModel: {},
   directorH3SolModeByModel: {},
+  directorH3SlaModeByModel: {},
   directorH3FirstBlockCacheByModel: {},
   directorH3FirstBlockCacheMultiplierByModel: {},
   directorH3FirstBlockCacheWarmupByModel: {},
@@ -10678,6 +10676,14 @@ export const useStore = create<AppState>((set, get) => ({
       ...s.directorH3SolModeByModel,
       [modelType]: enabled,
     },
+    ...(enabled ? { directorH3SlaModeByModel: { ...s.directorH3SlaModeByModel, [modelType]: false } } : {}),
+  })),
+  setDirectorH3SlaMode: (modelType, enabled) => set(s => ({
+    directorH3SlaModeByModel: {
+      ...s.directorH3SlaModeByModel,
+      [modelType]: enabled,
+    },
+    ...(enabled ? { directorH3SolModeByModel: { ...s.directorH3SolModeByModel, [modelType]: false } } : {}),
   })),
   setDirectorH3FirstBlockCache: (modelType, enabled) => set(s => ({
     directorH3FirstBlockCacheByModel: {
@@ -13939,7 +13945,7 @@ export const useStore = create<AppState>((set, get) => ({
             directorAutoMode, directorSeamless, directorShotImageGuidance,
             directorResolution, directorAspectRatio,
             directorVideoMaxShotFramesByModel, directorH3TurboModeByModel,
-            directorH3TurboPresetByModel, directorH3SolModeByModel,
+            directorH3TurboPresetByModel, directorH3SolModeByModel, directorH3SlaModeByModel,
             directorH3FirstBlockCacheByModel,
             directorH3FirstBlockCacheMultiplierByModel,
             directorH3FirstBlockCacheWarmupByModel,
@@ -14092,12 +14098,8 @@ export const useStore = create<AppState>((set, get) => ({
       && directorVideoOptions.sol_attention_status?.supported
       && directorH3SolModeByModel[selectedVideoModel] === true
     )
-    const directorSlaEnabled = Boolean(
-      directorVideoOptions?.sla_attention
-      && (
-        directorH3SolModeByModel[selectedVideoModel]
-        ?? directorVideoOptions.sla_attention_default
-      ) !== false
+    const directorSlaEnabled = directorH3SlaEnabled(
+      directorVideoOptions, selectedVideoModel, directorH3SlaModeByModel, directorH3SolModeByModel,
     )
     const directorFirstBlockCacheEnabled = Boolean(
       directorVideoOptions?.first_block_cache
@@ -14297,10 +14299,10 @@ export const useStore = create<AppState>((set, get) => ({
         minimax_h3_turbo_preset: directorTurboPreset?.id,
         override_attention: directorSlaEnabled
           ? 'sla'
-          : directorVideoOptions?.sla_attention
-            ? 'sdpa'
-            : directorSolEnabled
-              ? 'sol'
+          : directorSolEnabled
+            ? 'sol'
+            : directorVideoOptions?.sla_attention_default
+              ? 'sdpa'
               : '',
         skip_steps_cache_type: directorFirstBlockCacheEnabled ? 'first_block' : '',
         skip_steps_multiplier: directorCacheMultiplier,
@@ -14376,6 +14378,7 @@ export const useStore = create<AppState>((set, get) => ({
         directorH3TurboModeByModel: state.directorH3TurboModeByModel,
         directorH3TurboPresetByModel: state.directorH3TurboPresetByModel,
         directorH3SolModeByModel: state.directorH3SolModeByModel,
+        directorH3SlaModeByModel: state.directorH3SlaModeByModel,
         directorH3FirstBlockCacheByModel: state.directorH3FirstBlockCacheByModel,
         directorH3FirstBlockCacheMultiplierByModel: state.directorH3FirstBlockCacheMultiplierByModel,
         directorH3FirstBlockCacheWarmupByModel: state.directorH3FirstBlockCacheWarmupByModel,

@@ -21,9 +21,23 @@ class TestSolEngineSourceContracts(unittest.TestCase):
         attention = (APP / "shared" / "attention.py").read_text(encoding="utf-8")
 
         self.assertIn('"sol_attention": not fused_turbo', handler)
-        self.assertIn('"sla_attention": fused_turbo', handler)
+        self.assertIn('"sla_attention": sla_attention', handler)
+        self.assertIn('"sla_attention_default": fused_turbo', handler)
+        self.assertIn(
+            '"sla_attention_experimental": sla_attention and not fused_turbo',
+            handler,
+        )
+        self.assertIn(
+            '"sla_attention_experimental": md.get(',
+            launch,
+        )
         self.assertIn('"sol_attention_status": _sol_attention_status', launch)
         self.assertIn('attn == "sol" and not model_def.get("sol_attention"', engine)
+        self.assertIn(
+            '"H3 SLA is available only for compatible MiniMax H3 models."',
+            engine,
+        )
+        self.assertNotIn("compatible fused MiniMax H3 models", engine)
         self.assertIn("get_supported_override_attention_modes", engine)
         self.assertIn("def get_override_attention_modes", attention)
         self.assertNotIn('ret.append("sol")', attention)

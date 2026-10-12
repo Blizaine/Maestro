@@ -68,6 +68,7 @@ export function MiniMaxH3Optimizations() {
   const cacheEnabled = params.skip_steps_cache_type === 'first_block'
   const solSupported = modelOptions?.sol_attention_status?.supported === true
   const slaSupported = modelOptions?.sla_attention_status?.supported === true
+  const slaExperimental = modelOptions?.sla_attention_experimental === true
   const activeCount = [turboEnabled, solEnabled, slaEnabled, cacheEnabled].filter(Boolean).length
 
   if (!isH3 && !advisory) return null
@@ -338,23 +339,29 @@ export function MiniMaxH3Optimizations() {
                     checked={slaEnabled}
                     onChange={event => setParam(
                       'override_attention',
-                      event.target.checked ? 'sla' : 'sdpa',
+                      event.target.checked ? 'sla' : modelOptions.sla_attention_default ? 'sdpa' : '',
                     )}
                     className="accent-accent-blue"
                   />
                   <Gauge size={13} className={slaEnabled ? 'text-accent-blue' : 'text-text-muted'} />
                   <span className="min-w-0">
-                    <span className="block text-[11px] font-medium text-text-primary">SLA Sparse Attention</span>
+                    <span className="block text-[11px] font-medium text-text-primary">
+                      SLA Sparse Attention{slaExperimental ? ' — Experimental' : ''}
+                    </span>
                     <span className="block text-[9px] text-text-muted">
-                      {slaSupported ? 'Published FastH3 sparse recipe' : 'Safe dense fallback when unavailable'}
+                      {slaSupported
+                        ? slaExperimental ? 'Optional acceleration; compare motion and audio' : 'Published FastH3 sparse recipe'
+                        : 'Safe dense fallback when unavailable'}
                     </span>
                   </span>
                 </label>
                 <InfoTooltip
                   label="About H3 SLA"
                   text={slaSupported
-                    ? 'Uses the checkpoint author\'s 90% block-sparse SLA recipe. The first use compiles and caches Triton kernels; reference and audio prefix rows stay protected.'
-                    : `${modelOptions?.sla_attention_status?.reason || 'SLA is unavailable in this runtime.'} Maestro will automatically use dense attention, so the four-step model remains usable.`}
+                    ? slaExperimental
+                      ? 'Uses 90% block-sparse attention on this Full or Pruned checkpoint. Off by default; speed, motion, reference fidelity and audio quality need comparison. The first use compiles Triton kernels. Reference and audio prefix rows stay protected.'
+                      : 'Uses the checkpoint author\'s 90% block-sparse SLA recipe. The first use compiles and caches Triton kernels; reference and audio prefix rows stay protected.'
+                    : `${modelOptions?.sla_attention_status?.reason || 'SLA is unavailable in this runtime.'} Maestro will automatically use dense attention.`}
                 />
               </div>
             )}
