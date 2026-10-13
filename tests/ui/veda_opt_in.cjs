@@ -8,7 +8,7 @@ const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
 const ordinary = ['minimax_h3', 'minimax_h3_ref2va'];
 const unsupported = 'minimax_h3_ref2va_full';
 const fused = 'minimax_h3_ref2va_fused_turbo';
-const vedaCapable = id => ordinary.includes(id) || id === unsupported;
+const vedaCapable = id => ordinary.includes(id) || id === unsupported || id === fused;
 const optionsFor = id => ({
   model_type: id, architecture: id.includes('ref2va') ? 'minimax_h3_ref2va' : 'minimax_h3',
   fps: 24, frames_minimum: 124, frames_maximum: 345, frames_steps: 17,
@@ -203,12 +203,46 @@ const models = [...ordinary, unsupported, fused].map(id => ({...optionsFor(id), 
     await fusedSla.waitFor();
     assert.equal(await fusedSla.isChecked(), true, 'Fused retains its default-on SLA recipe');
     await submitStudio('sla');
+    const fusedVeda = page.getByRole('checkbox', {name: vedaLabel});
+    await fusedVeda.waitFor();
+    assert.equal(await fusedVeda.isChecked(), false, 'Fused Veda remains opt-in');
+    await fusedVeda.check();
+    assert.equal(await fusedSla.isChecked(), false, 'Fused Veda replaces SLA');
+    await submitStudio('veda');
+    await page.evaluate(() => window.store.getState().loadModelOptions(window.store.getState().params.model_type));
+    assert.equal(await fusedVeda.isChecked(), true, 'Fused Veda survives an option refresh');
+    await submitStudio('veda');
+    await fusedSla.check();
+    assert.equal(await fusedVeda.isChecked(), false, 'Fused SLA replaces Veda');
     await fusedSla.uncheck();
     await submitStudio('sdpa');
     await page.evaluate(id => window.store.getState().selectModel(id), ordinary[1]);
     await page.waitForFunction(id => window.store.getState().modelOptions?.model_type === id, ordinary[1]);
     assert.equal(await page.evaluate(() => window.store.getState().params.override_attention), '',
       'Fused SDPA opt-out does not leak into an ordinary model');
+
+    await page.evaluate(id => {
+      window.store.setState({selectedOutputMeta: {source: 'sidecar', params: {
+        model_type: id, override_attention: 'veda', prompt: 'A restored fused scene', seed: 42,
+        resolution: '1280x704', video_length: 124, num_inference_steps: 4,
+      }}});
+      return window.store.getState().loadSettingsFromOutput();
+    }, fused);
+    assert.equal(await page.evaluate(() => window.store.getState().params.override_attention), 'veda',
+      'Fused output settings restore Veda instead of silently substituting SLA');
+
+    await seed(fused);
+    await page.evaluate(() => window.showDirector());
+    await page.getByTestId('director').waitFor();
+    const directorFusedVeda = page.getByRole('checkbox', {name: vedaLabel});
+    await directorFusedVeda.waitFor();
+    assert.equal(await directorFusedVeda.isChecked(), false, 'Director Fused Veda remains opt-in');
+    await directorFusedVeda.check();
+    await submitDirector('veda');
+    assert.equal(pipelines.at(-1).video_params.num_inference_steps, 4, 'Fused Veda keeps its four-step recipe');
+    await page.getByRole('checkbox', {name: /^SLA Sparse Attention/}).check();
+    assert.equal(await directorFusedVeda.isChecked(), false, 'Director Fused SLA replaces Veda');
+    await submitDirector('sla');
     assert.deepEqual(errors, []);
     console.log('Veda: Studio and Director opt-in, exclusivity, per-model persistence, unsupported handling, metadata restore, and Fused defaults passed.');
   } finally { await browser.close(); }

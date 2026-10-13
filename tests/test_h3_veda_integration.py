@@ -43,7 +43,7 @@ class TestVedaIntegration(unittest.TestCase):
     def tearDown(self):
         attention_kit.configure(0)
 
-    def test_only_ordinary_full_and_pruned_modes_offer_veda_without_changing_defaults(self):
+    def test_ordinary_and_fused_modes_offer_veda_without_changing_defaults(self):
         for name in ("minimax_h3", "minimax_h3_full", "minimax_h3_ref2va", "minimax_h3_ref2va_full"):
             model_def = family_handler.query_model_def(name, {})
             self.assertTrue(model_def["veda_attention"])
@@ -51,8 +51,57 @@ class TestVedaIntegration(unittest.TestCase):
             defaults = {}
             family_handler.update_default_settings(name, model_def, defaults)
             self.assertEqual(defaults["override_attention"], "")
-        for name, options in (("minimax_h3", {"minimax_h3_fused_turbo": True}),
-                              ("minimax_h3", {"vdn": True}),
+
+        for name in ("minimax_h3", "minimax_h3_ref2va"):
+            model_def = family_handler.query_model_def(
+                name,
+                {"minimax_h3_fused_turbo": True},
+            )
+            self.assertTrue(model_def["veda_attention"])
+            self.assertTrue(model_def["veda_attention_experimental"])
+            self.assertTrue(model_def["sla_attention"])
+            self.assertTrue(model_def["sla_attention_default"])
+            self.assertFalse(model_def["sol_attention"])
+            self.assertFalse(model_def["first_block_cache"])
+
+            defaults = {}
+            family_handler.update_default_settings(name, model_def, defaults)
+            self.assertEqual(defaults["override_attention"], "sla")
+
+            saved = {"override_attention": "veda"}
+            family_handler.fix_settings(name, 2.58, model_def, saved)
+            self.assertEqual(saved["override_attention"], "veda")
+
+            body = {
+                "override_attention": "veda",
+                "skip_steps_cache_type": "first_block",
+                "num_inference_steps": 4,
+                "video_length": 243,
+                "sliding_window_size": 243,
+            }
+            from models.minimax_h3.fused_turbo import normalize_fused_h3_request
+            normalize_fused_h3_request(body)
+            self.assertIsNone(
+                family_handler.validate_generative_settings(name, model_def, body)
+            )
+            self.assertEqual(body["override_attention"], "veda")
+            self.assertEqual(body["skip_steps_cache_type"], "")
+
+            blocked = {
+                "override_attention": "sol",
+                "skip_steps_cache_type": "first_block",
+                "num_inference_steps": 4,
+                "video_length": 243,
+                "sliding_window_size": 243,
+            }
+            self.assertIsNone(
+                family_handler.validate_generative_settings(name, model_def, blocked)
+            )
+            self.assertEqual(blocked["override_attention"], "sla")
+            self.assertEqual(blocked["skip_steps_cache_type"], "")
+
+        for name, options in (("minimax_h3", {"vdn": True}),
+                              ("minimax_h3", {"minimax_h3_fused_turbo": True, "vdn": True}),
                               ("minimax_h3_voice_audio", {}), ("viggle_animate", {}),
                               ("minimax_h3_ref2va", {"minimax_h3_singularity": True}),
                               ("minimax_h3_ref2va", {"minimax_h3_dasiwa": True}),

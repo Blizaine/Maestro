@@ -8067,7 +8067,7 @@ def generate_video(
         veda_status = get_veda_attention_status()
         if not model_def.get("veda_attention") or not veda_status["supported"]:
             reason = (veda_status.get("reason") if model_def.get("veda_attention") else
-                      "Veda is available only for ordinary Full and Pruned H3 Frames/References models.")
+                      "Veda is available only for supported H3 Full, Pruned, and experimental Fused Frames/References models.")
             send_cmd("info", f"H3 Veda cannot run: {reason}")
             send_cmd("exit")
             return True
@@ -8231,7 +8231,7 @@ def generate_video(
         send_cmd("exit")
         return True
     elif attn == "veda" and not model_def.get("veda_attention", False):
-        send_cmd("info", "Veda is available only for ordinary Full and Pruned H3 Frames/References models.")
+        send_cmd("info", "Veda is available only for supported H3 Full, Pruned, and experimental Fused Frames/References models.")
         send_cmd("exit")
         return True
     elif attn == "sol" and attn not in override_attention_modes_supported:

@@ -172,6 +172,13 @@ def _normalize_h3_fused_steps(value) -> int:
     return steps
 
 
+def _normalize_h3_fused_attention(value) -> str:
+    """Keep explicit supported overrides while defaulting Fused to SLA."""
+
+    attention = str(value or "").strip().lower()
+    return attention if attention in {"sla", "veda", "sdpa"} else "sla"
+
+
 def resolve_h3_long_sequence_discard_frames(
     custom_settings,
     *,
@@ -1899,6 +1906,26 @@ class family_handler:
                 or bool((model_def or {}).get("minimax_h3_viggle", False))
             )
         )
+        veda_attention = bool(
+            sla_attention
+            and base_model_type
+            in {
+                _MODEL_TYPE,
+                _REF2VA_MODEL_TYPE,
+                _FULL_MODEL_TYPE,
+                _REF2VA_FULL_MODEL_TYPE,
+            }
+            and not (
+                audio_only
+                or vdn
+                or singularity
+                or dasiwa
+                or baked_turbo
+                or bool(import_profile)
+                or locked_inference_steps
+                or bool((model_def or {}).get("minimax_h3_viggle", False))
+            )
+        )
         if dasiwa and (
             base_model_type not in {_MODEL_TYPE, _REF2VA_MODEL_TYPE}
             or audio_only or full_checkpoint or singularity or fused_turbo
@@ -1994,7 +2021,7 @@ class family_handler:
             "Advanced can experimentally raise Total Steps through eight. "
             "Compatible H3 character, style and concept LoRAs are experimental. "
             "Additional Turbo/PDD and VDN adapters remain blocked, as do Sol "
-            "and First Block Cache. SLA is its supported attention accelerator."
+            "and First Block Cache. SLA remains the default; Veda is available experimentally."
             if fused_turbo
             else
             "FULL 33B\n"
@@ -2087,8 +2114,8 @@ class family_handler:
             "sla_attention": sla_attention,
             "sla_attention_default": fused_turbo,
             "sla_attention_experimental": sla_attention and not fused_turbo,
-            "veda_attention": sla_attention and not fused_turbo,
-            "veda_attention_experimental": sla_attention and not fused_turbo,
+            "veda_attention": veda_attention,
+            "veda_attention_experimental": veda_attention,
             "sla_attention_config": {
                 "sparsity_ratio": 0.90,
                 "block_size": 64,
@@ -2852,8 +2879,8 @@ class family_handler:
             ui_defaults["minimax_h3_turbo_mode"] = False
             ui_defaults["minimax_h3_turbo_preset"] = ""
             ui_defaults["skip_steps_cache_type"] = ""
-            ui_defaults["override_attention"] = (
-                "" if ui_defaults.get("override_attention") == "sdpa" else "sla"
+            ui_defaults["override_attention"] = _normalize_h3_fused_attention(
+                ui_defaults.get("override_attention")
             )
         if (model_def or {}).get("minimax_h3_baked_turbo"):
             from .imported import normalize_baked_h3_attention, normalize_baked_h3_request
@@ -2987,8 +3014,9 @@ class family_handler:
             inputs["minimax_h3_turbo_mode"] = False
             inputs["minimax_h3_turbo_preset"] = ""
             inputs["skip_steps_cache_type"] = ""
-            attention = str(inputs.get("override_attention") or "").strip().lower()
-            inputs["override_attention"] = "sdpa" if attention == "sdpa" else "sla"
+            inputs["override_attention"] = _normalize_h3_fused_attention(
+                inputs.get("override_attention")
+            )
 
         omni_reference = base_model_type in {
             _REF2VA_MODEL_TYPE,

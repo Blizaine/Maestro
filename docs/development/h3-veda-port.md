@@ -35,8 +35,10 @@ Veda is off by default. Studio and Director save independent selections.
 It requires BF16 activations on NVIDIA SM80+ with Triton 3.0 or newer. First
 use compiles kernels and downloads the matching learned predictor. An
 unsupported explicit Veda request fails clearly before loading model
-weights, rather than silently producing a dense benchmark. Fused, VDN,
-audio-only, Singularity, DaSiWa and imported specialty profiles are excluded.
+weights, rather than silently producing a dense benchmark. Fused Frames and
+References offer Veda experimentally for local comparisons; SLA remains their
+default. Fused output quality with Veda has not been validated. VDN, audio-only,
+Singularity, DaSiWa and imported specialty profiles are excluded.
 Grouped Rows masked editing requires ordinary dense attention.
 
 Veda uses learned per-layer/per-head tile selection, while preserving dense

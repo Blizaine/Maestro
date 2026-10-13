@@ -1296,7 +1296,7 @@ class MiniMaxH3Model:
         self.model_def = model_def
         self.veda = bool(minimax_h3_veda)
         if self.veda and (not model_def.get("veda_attention") or dtype != torch.bfloat16):
-            raise ValueError("Experimental H3 Veda requires ordinary Full/Pruned H3 with BF16 activations.")
+            raise ValueError("Experimental H3 Veda requires a Veda-capable H3 model with BF16 activations.")
         self.assets_root = model_def.get("minimax_h3_assets_root", "minimax_h3")
         self.audio_only = bool(model_def.get("minimax_h3_audio_only", False))
         self.viggle = bool(model_def.get("minimax_h3_viggle", False))

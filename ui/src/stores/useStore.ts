@@ -12938,7 +12938,7 @@ export const useStore = create<AppState>((set, get) => ({
           ? 'sdpa'
           : p.override_attention === 'sol' && restoredModelOptions.sol_attention
             && restoredModelOptions.sol_attention_status?.supported ? 'sol' : ''
-        : p.override_attention === 'sdpa' ? 'sdpa' : 'sla'
+        : normalizeH3Attention(restoredModelOptions, p.override_attention) ?? 'sla'
     }
     const restoredCustomSettings = (
       p.custom_settings
