@@ -23,7 +23,10 @@ from ..schema import (
 from ..policies import build_character_rules_block, build_camera_style_block
 from ..vocal_activity import classify_vocal_intervals
 from ..music_performance import MUSIC_PERFORMANCE_RULES, PERFORMANCE_ROLES
-from ..prompt_timing import music_video_visual_timing_issue
+from ..prompt_timing import (
+    music_video_visual_timing_issue,
+    normalize_music_video_visual_timecodes,
+)
 from ..physical_continuity import (
     GROUNDED_STATE_VALUES,
     MAX_PHYSICAL_FACTS,
@@ -2893,7 +2896,8 @@ class MusicVideoPlanner(BasePlanner):
                     f" Local visual duration: {local_duration:.3f}s "
                     f"(clip-local timeline 00:00.000 through {end_timecode}); "
                     "visual cut timecodes in video_prompt reset to 00:00.000 "
-                    "for this clip and must stay within this duration. "
+                    "for this clip and must stay within this duration, using "
+                    "exactly one decimal separator (for example 00:06.210). "
                     "Source-song lyric and cue offsets remain audio timing, "
                     "not visual cut timecodes."
                 )
@@ -2927,6 +2931,19 @@ class MusicVideoPlanner(BasePlanner):
         progression_context: Optional[dict[str, Any]] = None,
     ) -> Optional[str]:
         """Return why a music-video row is incomplete or not shot-specific."""
+
+        if validate_visual_timing:
+            for field in ("video_prompt", "ending_beat"):
+                value = row.get(field)
+                if isinstance(value, str):
+                    row[field] = normalize_music_video_visual_timecodes(value)
+            action_beats = row.get("action_beats")
+            if isinstance(action_beats, list):
+                row["action_beats"] = [
+                    normalize_music_video_visual_timecodes(beat)
+                    if isinstance(beat, str) else beat
+                    for beat in action_beats
+                ]
 
         required_text = [
             "scene_goal",

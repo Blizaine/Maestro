@@ -12,6 +12,9 @@ _TIME_LIKE_RE = re.compile(r"^(?:\d+|mm|\?{2,})[:.]", re.IGNORECASE)
 _LOCAL_TIMECODE_RE = re.compile(
     r"^(?P<minutes>\d{2,}):(?P<seconds>\d{2})(?:\.(?P<fraction>\d{1,3}))?$"
 )
+_DUPLICATED_ZERO_FRACTION_RE = re.compile(
+    r"^(?P<base>\d{2,}:(?:[0-5]\d)\.\d{1,3})\.000$"
+)
 _DIALOGUE_TAG_RE = re.compile(r"<d\b[^>]*>.*?</d\s*>", re.IGNORECASE | re.DOTALL)
 _SOURCE_TIMING_LABEL_RE = re.compile(
     r"\b(?:source[ -]?(?:song|audio)|song|audio|lyrics?)\b"
@@ -43,6 +46,49 @@ def _format_local_timecode(seconds: float) -> str:
     total_millis = max(0, round(seconds * 1000))
     minutes, remainder = divmod(total_millis, 60_000)
     return f"{minutes:02d}:{remainder / 1000:06.3f}"
+
+
+def normalize_music_video_visual_timecodes(prompt: Any) -> Any:
+    """Collapse only an unambiguous duplicate zero fraction in visual At cues.
+
+    A form such as ``00:06.21.000`` has a valid fractional-seconds value
+    followed by a redundant all-zero fraction. Preserve the first value and
+    canonicalize its precision (``00:06.210``); leave other malformed forms,
+    dialogue, and labeled source-audio cues untouched.
+    """
+
+    if not isinstance(prompt, str) or not prompt:
+        return prompt
+
+    masked = _mask_dialogue_tags(prompt)
+    replacements: list[tuple[int, int, str]] = []
+    for match in _AT_TIME_RE.finditer(masked):
+        if _is_source_timing_reference(masked, match.start()):
+            continue
+
+        start, end = match.span("value")
+        token = prompt[start:end]
+        prefix_len = len(token) - len(token.lstrip("([{<"))
+        core_end = len(token.rstrip(".,:)]}>"))
+        raw_value = token[prefix_len:core_end]
+        duplicate = _DUPLICATED_ZERO_FRACTION_RE.fullmatch(raw_value)
+        if not duplicate:
+            continue
+
+        base = duplicate.group("base")
+        time_match = _LOCAL_TIMECODE_RE.fullmatch(base)
+        if not time_match:
+            continue
+        fraction = (time_match.group("fraction") or "").ljust(3, "0")
+        canonical = (
+            f"{time_match.group('minutes')}:{time_match.group('seconds')}.{fraction}"
+        )
+        replacement = token[:prefix_len] + canonical + token[core_end:]
+        replacements.append((start, end, replacement))
+
+    for start, end, replacement in reversed(replacements):
+        prompt = prompt[:start] + replacement + prompt[end:]
+    return prompt
 
 
 def music_video_visual_timing_issue(

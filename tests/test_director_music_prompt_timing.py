@@ -20,6 +20,7 @@ from services.director.planners.music_video import (  # noqa: E402
 )
 from services.director.prompt_timing import (  # noqa: E402
     music_video_visual_timing_issue,
+    normalize_music_video_visual_timecodes,
 )
 from services.director.h3_dialogue import (  # noqa: E402
     compile_h3_clip_plans,
@@ -134,6 +135,77 @@ class MusicVideoPromptTimingTests(unittest.TestCase):
             "At 00:11.000: the performer turns toward the stage.", 10.125
         )
         self.assertIn("exceeds local clip duration 00:10.125", out_of_range or "")
+
+    def test_redundant_zero_fraction_is_canonicalized_without_changing_time(self):
+        raw = "[Shot 1] At 00:06.21.000: Ari turns toward the stage."
+        normalized = normalize_music_video_visual_timecodes(raw)
+
+        self.assertEqual(
+            normalized,
+            "[Shot 1] At 00:06.210: Ari turns toward the stage.",
+        )
+        self.assertEqual(
+            normalize_music_video_visual_timecodes(normalized), normalized
+        )
+        self.assertIsNone(music_video_visual_timing_issue(normalized, 6.21))
+        self.assertIn(
+            "exceeds local clip duration",
+            music_video_visual_timing_issue(normalized, 6.1) or "",
+        )
+
+        full_precision = normalize_music_video_visual_timecodes(
+            "At 00:06.210.000: Ari turns."
+        )
+        self.assertEqual(full_precision, "At 00:06.210: Ari turns.")
+
+    def test_ambiguous_timecodes_source_offsets_and_dialogue_are_unchanged(self):
+        malformed = (
+            "At 00:06.21.001: Ari turns.",
+            "At 00:06.21.00: Ari turns.",
+            "At 00:06.21.000.000: Ari turns.",
+            "At 00:61.21.000: Ari turns.",
+        )
+        for prompt in malformed:
+            with self.subTest(prompt=prompt):
+                self.assertEqual(
+                    normalize_music_video_visual_timecodes(prompt), prompt
+                )
+                self.assertIn(
+                    "malformed",
+                    music_video_visual_timing_issue(prompt, 10.0) or "",
+                )
+
+        source_and_dialogue = (
+            "Source-song offset: At 00:06.21.000. "
+            "The singer says <d>[English] At 00:06.21.000</d>."
+        )
+        self.assertEqual(
+            normalize_music_video_visual_timecodes(source_and_dialogue),
+            source_and_dialogue,
+        )
+
+    def test_h3_row_canonicalizes_prompt_and_action_beat_before_validation(self):
+        row = _row(
+            prompt="[Shot 1] At 00:06.21.000: Ari turns toward the stage."
+        )
+        row["action_beats"] = ["At 00:06.21.000: Ari turns toward the stage."]
+
+        issue = MusicVideoPlanner._music_video_row_issue(
+            0,
+            row,
+            [],
+            scene_description="Ari performs on a rooftop",
+            include_image_fields=False,
+            duration_seconds=6.21,
+            validate_visual_timing=True,
+        )
+
+        self.assertIsNone(issue)
+        self.assertIn("At 00:06.210", row["video_prompt"])
+        self.assertEqual(
+            row["action_beats"],
+            ["At 00:06.210: Ari turns toward the stage."],
+        )
 
     def test_plain_at_markers_accept_seconds_and_fractional_clock_forms(self):
         self.assertIsNone(music_video_visual_timing_issue(
