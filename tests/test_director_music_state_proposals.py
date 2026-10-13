@@ -1,4 +1,4 @@
-"""Compact H3 music-state proposals materialize as strict physical ledgers."""
+"""Strict physical-state helpers and H3 music planner integration regressions."""
 
 import copy
 import json
@@ -10,6 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 from services.director.physical_continuity import PHYSICAL_STATE_JSON_SCHEMA
+from services.director.music_narrative import build_music_narrative_contract
 from services.director.planners.music_video import (
     MusicVideoPlanner,
     _bridge_h3_conflicting_openings,
@@ -222,6 +223,16 @@ class MusicStateProposalTests(unittest.TestCase):
             legacy_schema["items"]["properties"]["physical_state"],
             PHYSICAL_STATE_JSON_SCHEMA,
         )
+        production_h3_schema = _music_shot_schema(
+            1,
+            include_image_fields=False,
+            require_cast_identity=True,
+            omit_physical_state=True,
+            require_continuity_strategy=True,
+            require_native_single_clip=True,
+        )
+        self.assertNotIn("physical_state", production_h3_schema["items"]["properties"])
+        self.assertIn("continuity_strategy", production_h3_schema["items"]["required"])
 
     def test_new_proposal_derives_continuity_from_single_cut_strategy(self):
         for strategy, expected in (
@@ -1139,334 +1150,219 @@ class MusicStateProposalTests(unittest.TestCase):
             _has_explicit_physical_relation("The camera holds on the singer.")
         )
 
-    def test_invalid_compact_second_row_repairs_after_checkpointing_first(self):
+    def test_h3_production_omits_and_discards_misclassified_physical_ledgers(self):
         planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")
-        planner._uses_generated_shot_images = False
-        checkpoints = []
-        planner._planning_checkpoint_callback = checkpoints.append
         clips = [{"start": 0, "end": 10}, {"start": 10, "end": 20}]
-        initial_rows = [
+        callbacks = self._repair_callbacks(planner, clips)
+        breath = complete_shot(
+            "[Shot 1] Ari takes a deep breath, shoulders rising before she sings."
+        )
+        breath["action_beats"] = ["Ari takes a deep breath before singing."]
+        breath["physical_state"] = {
+            "opening": [],
+            "transitions": [transition(
+                "lead_performer", "prop", "holding a deep breath",
+                "Ari takes a deep breath",
+            )],
+            "closing": [],
+        }
+        breath["_h3_physical_state_proposal_error"] = (
+            "prop transition has no explicit opening/current fact"
+        )
+
+        with patch.object(planner, "_call_llm_json", return_value=[copy.deepcopy(breath)]) as generate:
+            planned = callbacks["call_batch"](1, 0, [clips[0]], None)
+        request = generate.call_args.kwargs
+        item_schema = request["json_schema"]["items"]
+        self.assertNotIn("physical_state", item_schema["properties"])
+        self.assertIn("continuity_strategy", item_schema["required"])
+        self.assertNotIn("physical_state", request["system_prompt"])
+        self.assertIn("support and contact", request["system_prompt"])
+        self.assertIn("local shot direction", request["system_prompt"])
+        self.assertEqual(planned[0]["video_prompt"], breath["video_prompt"])
+        self.assertEqual(planned[0]["action_beats"], breath["action_beats"])
+        self.assertNotIn("physical_state", planned[0])
+        self.assertNotIn("_h3_physical_state_proposal_error", planned[0])
+
+        # The same validator is used for fresh, resumed, and checkpoint rows.
+        # These two old drafts represent the observed prop/breath and
+        # contact/gaze misclassifications; their visible direction survives.
+        drafts = [
+            breath,
             complete_shot(
-                "[Shot 1] Ari turns toward the rooftop crowd.",
-                ending="Ari turns toward the crowd",
-            ),
-            complete_shot(
-                "[Shot 1] Ari walks toward the microphone.",
-                transitions=[
-                    transition(
-                        "lead_performer",
-                        "support",
-                        "standing at microphone",
-                        "Ari walks to the microphone",
-                    )
-                ],
-                ending="Ari reaches the microphone",
+                "[Shot 1] Ari's gaze shifts off-camera right as she sings."
             ),
         ]
-        repaired_state = {
-            "physical_state": {
-                "opening": [
-                    fact("lead_performer", "support", "standing on the rooftop stage")
-                ],
-                "transitions": [
-                    transition(
-                        "lead_performer",
-                        "support",
-                        "standing at microphone",
-                        "Ari walks toward the microphone",
-                    )
-                ],
-            }
-        }
-
-        with patch.object(
-            planner,
-            "_call_llm_json",
-            side_effect=[initial_rows, [repaired_state]],
-        ) as generate:
-            result = planner._plan_with_llm(
-                clips=clips,
-                clip_contexts=["Global clip 1", "Global clip 2"],
-                scene_description="A performance on a rooftop stage",
-                bpm=120,
-                has_reference=False,
-                reference_image_path=None,
-                char_profiles=[],
-                performer_map={},
-                video_model="minimax_h3_ref2va_fused_turbo",
+        drafts[1]["physical_state"] = full_state([
+            fact("lead_performer", "contact", "looking off-camera right"),
+        ])
+        drafts[1]["_h3_physical_state_proposal_error"] = (
+            "gaze was mislabeled as a contact change"
+        )
+        strict_draft = copy.deepcopy(breath)
+        strict_issue = MusicVideoPlanner._music_video_row_issue(
+            0,
+            strict_draft,
+            [],
+            scene_description="Ari performs on stage.",
+            include_image_fields=False,
+        )
+        self.assertIn(
+            "compact physical-state proposal could not be materialized",
+            strict_issue,
+        )
+        for index, row in enumerate(drafts):
+            visible = (row["video_prompt"], copy.deepcopy(row["action_beats"]))
+            issue = callbacks["row_validator"](index, row, [])
+            self.assertIsNone(issue, issue)
+            self.assertEqual(
+                (row["video_prompt"], row["action_beats"]), visible,
             )
+            self.assertNotIn("physical_state", row)
+            self.assertNotIn("_h3_physical_state_proposal_error", row)
 
-        self.assertEqual(len(result), 2)
-        self.assertEqual(generate.call_count, 2)
-        self.assertEqual(result[1]["video_prompt"], initial_rows[1]["video_prompt"])
-        self.assertEqual(
-            set(generate.call_args_list[1].kwargs["json_schema"]["items"]["properties"]),
-            {"physical_state"},
-        )
-        self.assertTrue(
-            any(
-                batch.get("count") == 1
-                and batch.get("expected_count") == 2
-                and len(batch.get("rows", [])) == 1
-                for checkpoint in checkpoints
-                for batch in checkpoint.get("music_video_batches", {}).values()
-            )
-        )
-
-    def test_batch_context_carries_previous_state_into_compact_h3_call(self):
-        planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")
-        planner._uses_generated_shot_images = False
-        clips = [{"start": 0, "end": 10}, {"start": 10, "end": 20}]
-        prior_row = {
-            "scene_goal": "Ari finishes the first shot",
-            "environment": "A stage",
-            "ending_beat": "Ari holds the sword",
-            "subjects_on_screen": [{"visual_description": "Ari"}],
-            "physical_state": full_state(
-                [
-                    fact("lead_performer", "contact", "holding sword"),
-                ]
-            ),
-        }
-        candidate = proposal_row(
-            transitions=[
-                transition(
-                    "lead_performer",
-                    "contact",
-                    "sheathed sword",
-                    "Ari sheathes the sword",
-                )
-            ]
-        )
-        with patch.object(
-            planner, "_run_checkpointed_json_batches", return_value=[]
-        ) as batches:
-            planner._plan_with_llm(
-                clips=clips,
-                clip_contexts=["clip 1", "clip 2"],
-                scene_description="A performer on stage",
-                bpm=120,
-                has_reference=False,
-                reference_image_path=None,
-                char_profiles=[],
-                performer_map={},
-                video_model="minimax_h3_ref2va_fused_turbo",
-            )
-        config = batches.call_args.kwargs
-        with patch.object(
-            planner, "_call_llm_json", return_value=[candidate]
-        ) as generate:
-            result = config["call_batch"](1, 1, [clips[1]], prior_row)
-        state = result[0]["physical_state"]
-        self.assertEqual(
-            state["opening"],
-            [fact("lead_performer", "contact", "holding sword")],
-        )
-        self.assertEqual(state["transitions"][0]["from_value"], "holding sword")
-        self.assertNotIn("_music_previous_physical_state", generate.call_args.kwargs)
-        schema_state = generate.call_args.kwargs["json_schema"]["items"]["properties"][
-            "physical_state"
-        ]
-        self.assertNotIn("closing", schema_state["properties"])
-
-    def test_metadata_only_repair_preserves_shot_and_includes_validation_context(self):
+    def test_h3_production_accepts_local_pose_changes_and_unknown_starting_pose(self):
         planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")
         clips = [
-            {"start": 0, "end": 10},
-            {"start": 10, "end": 20, "source_event_ids": ["M1"]},
+            {"start": index * 10, "end": (index + 1) * 10}
+            for index in range(4)
         ]
-        planner._music_narrative_contract = {
-            "events": [{
-                "event_id": "M1",
-                "text": "raises a lantern",
-                "kind": "action",
-                "actor_aliases": ["Ari"],
+        callbacks = self._repair_callbacks(planner, clips)
+        examples = (
+            ("head tilt", "A kitten's head tilts, then she stands centered, looking right."),
+            ("gaze", "A singer's gaze shifts toward the lights, then she stands centered."),
+            ("gesture", "A sailor raises one hand in greeting, then stands centered."),
+        )
+        for index, (kind, prompt) in enumerate(examples):
+            with self.subTest(kind=kind):
+                previous = complete_shot(f"[Shot 1] The performer {kind}s toward camera.")
+                previous["physical_state"] = full_state([
+                    fact("lead_performer", "posture", f"{kind} directed toward camera"),
+                ])
+                current = complete_shot(f"[Shot 1] {prompt}")
+                current["physical_state"] = full_state([
+                    fact("lead_performer", "posture", "standing centered"),
+                ])
+                issue = callbacks["row_validator"](
+                    index, current, [previous],
+                )
+                self.assertIsNone(issue, issue)
+                self.assertNotIn("physical_state", current)
+                self.assertNotIn("physical_state", previous)
+
+        # No first-frame posture is inferred when visible prose supplies the pose.
+        no_start = complete_shot(
+            "[Shot 1] Ari turns toward the camera and settles into a standing pose."
+        )
+        no_start.pop("physical_state", None)
+        issue = callbacks["row_validator"](0, no_start, [])
+        self.assertIsNone(issue, issue)
+        self.assertNotIn("physical_state", no_start)
+
+    def test_h3_conversion_does_not_append_ledger_text_or_save_ledger_metadata(self):
+        planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")
+        baseline = complete_shot(
+            "[Shot 1] Ari turns her gaze toward the lights and takes a deep breath."
+        )
+        baseline["action_beats"] = ["Ari turns her gaze toward the lights."]
+        with_ledger = copy.deepcopy(baseline)
+        with_ledger["physical_state"] = {
+            "opening": [],
+            "transitions": [{
+                "subject_id": "lead_performer",
+                "predicate": "contact",
+                "value": "holding a lantern",
             }],
+            "closing": [],
         }
+        with_ledger["_h3_physical_state_proposal_error"] = "stale proposal failure"
+        args = (
+            [{"start": 0, "end": 10, "label": "verse"}],
+            [],
+            False,
+            {},
+            None,
+            {},
+        )
+        without_state = planner._convert_to_shots(
+            [baseline], *args, ignore_physical_state_ledger=True,
+        )[0]
+        with_state = planner._convert_to_shots(
+            [with_ledger], *args, ignore_physical_state_ledger=True,
+        )[0]
+        self.assertEqual(with_state.video_prompt, without_state.video_prompt)
+        self.assertEqual(with_state.action_beats, without_state.action_beats)
+        self.assertNotIn("physical_state", with_state.metadata)
+
+    def test_h3_source_action_boarding_order_and_cast_guards_remain_strict(self):
+        source = (
+            "The kitten climbs on the dragon, then the dragon breathes fire over enemies."
+        )
+        contract = build_music_narrative_contract(source)
+        clips = [{"start": 0, "end": 10}, {"start": 10, "end": 20}]
+        planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")
+        planner._music_narrative_contract = contract
         planner._music_narrative_allocation = [
-            {"event_id": "M1", "clip_index": 1},
+            {"event_id": event["event_id"], "clip_index": 0}
+            for event in contract["events"]
         ]
         callbacks = self._repair_callbacks(planner, clips)
-        original = self._invalid_materialized_row(source_event_ids=["M1"])
-        issue = callbacks["row_validator"](1, original, [self._previous_state_row()])
-        self.assertIn("compact physical-state proposal could not be materialized", issue)
-        previous = self._previous_state_row()
-        metadata = {
-            "physical_state": {
-                "opening": [
-                    fact("lead_performer", "contact", "holding the lantern at waist")
-                ],
-                "transitions": [
-                    transition(
-                        "lead_performer",
-                        "contact",
-                        "holding the lantern overhead",
-                        "Ari raises the lantern",
-                    )
-                ],
-            }
-        }
-
-        with patch.object(planner, "_call_llm_json", return_value=[metadata]) as generate:
-            result = callbacks["repair_batch"](1, 1, [clips[1]], previous)
-
-        self.assertEqual(len(result), 1)
-        expected = copy.deepcopy(original)
-        expected.pop("_h3_physical_state_proposal_error", None)
-        expected["physical_state"] = result[0]["physical_state"]
-        self.assertEqual(result[0], expected)
-        self.assertEqual(result[0]["source_event_ids"], ["M1"])
-        self.assertEqual(result[0]["video_prompt"], original["video_prompt"])
-        self.assertEqual(result[0]["action_beats"], original["action_beats"])
-        self.assertIn(
-            fact("lead_performer", "posture", "upright"),
-            result[0]["physical_state"]["opening"],
-        )
-
-        request = generate.call_args.kwargs
-        self.assertEqual(request["thinking_budget"], 0)
-        self.assertLessEqual(request["max_tokens"], 2048)
-        schema = request["json_schema"]
-        self.assertEqual((schema["minItems"], schema["maxItems"]), (1, 1))
-        self.assertEqual(
-            set(schema["items"]["properties"]), {"physical_state"},
-        )
-        prompt = request["user_prompt"]
-        for evidence in (
-            "compact physical-state proposal could not be materialized",
-            "target_clip_index_zero_based",
-            "lead_performer",
-            "preceding_authoritative_closing_facts",
-            "known_current_physical_keys",
-            "transition_keys_missing_prior_or_opening_fact",
-            "contact",
-            "raises a lantern",
-            "exactly 'grounded' or 'airborne'",
-            "cloth fluttering in persistent wind",
-            "leaving the original visible prose intact",
-            original["video_prompt"],
-            json.dumps(original["physical_state"], ensure_ascii=False),
-        ):
-            with self.subTest(evidence=evidence):
-                self.assertIn(evidence, prompt)
-
-    def test_incomplete_row_uses_full_repair_instead_of_state_only_repair(self):
-        cases = ("missing physical_state", "missing video_prompt")
-        for case in cases:
-            with self.subTest(case=case):
-                planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")
-                clips = [{"start": 0, "end": 10}, {"start": 10, "end": 20}]
-                callbacks = self._repair_callbacks(planner, clips)
-                if case == "missing physical_state":
-                    row = complete_shot("Ari pauses on the rooftop stage.")
-                    row.pop("physical_state")
-                    row = _materialize_h3_physical_state_proposals(
-                        [row], preserve_invalid_tail=True,
-                    )[0]
-                else:
-                    row = self._invalid_materialized_row()
-                    row.pop("video_prompt")
-
-                previous = self._previous_state_row()
-                issue = callbacks["row_validator"](1, row, [previous])
-                self.assertIn("compact physical-state proposal could not be materialized", issue)
-
-                with patch.object(planner, "_call_llm_json", return_value=[]) as generate:
-                    callbacks["repair_batch"](1, 1, [clips[1]], previous)
-
-                self.assertEqual(generate.call_count, 1)
-                properties = generate.call_args.kwargs["json_schema"]["items"]["properties"]
-                self.assertIn("physical_state", properties)
-                self.assertIn("video_prompt", properties)
-                self.assertNotEqual(set(properties), {"physical_state"})
-
-    def test_malformed_metadata_repair_returns_empty_for_bounded_retry(self):
-        planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")
-        clips = [{"start": 0, "end": 10}, {"start": 10, "end": 20}]
-        callbacks = self._repair_callbacks(planner, clips)
-        invalid = self._invalid_materialized_row()
-        issue = callbacks["row_validator"](1, invalid, [self._previous_state_row()])
-        self.assertIn("could not be materialized", issue)
-
-        with patch.object(planner, "_call_llm_json", return_value=[]) as generate:
-            result = callbacks["repair_batch"](
-                1, 1, [clips[1]], self._previous_state_row(),
-            )
-
-        self.assertEqual(result, [])
-        self.assertEqual(generate.call_count, 1)
-        self.assertEqual(callbacks["repair_attempts"], 2)
-        self.assertEqual(
-            set(generate.call_args.kwargs["json_schema"]["items"]["properties"]),
-            {"physical_state"},
-        )
-
-    def test_failed_valid_metadata_is_tagged_and_second_attempt_gets_new_error(self):
-        planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")
-        clips = [{"start": 0, "end": 10}, {"start": 10, "end": 20}]
-        callbacks = self._repair_callbacks(planner, clips)
-        previous = self._previous_state_row()
-        invalid = self._invalid_materialized_row()
-        first_issue = callbacks["row_validator"](1, invalid, [previous])
-        self.assertIn("no explicit opening/current fact", first_issue)
-
-        still_invalid = {
-            "physical_state": {
-                "opening": [
-                    fact("lead_performer", "grounded", "beside fallen sword"),
-                ],
-                "transitions": [
-                    transition(
-                        "lead_performer",
-                        "contact",
-                        "holding the lantern overhead",
-                        "Ari raises the lantern",
-                    ),
-                ],
+        cast = [
+            {
+                "character_id": "kitten", "speaker_name": "Kitten",
+                "visual_description": "a small kitten", "performance_role": "non_vocal",
             },
-        }
-        repaired = {
-            "physical_state": {
-                "opening": [
-                    fact("lead_performer", "grounded", "grounded"),
-                    fact("lead_performer", "contact", "holding the lantern at waist"),
-                ],
-                "transitions": [
-                    transition(
-                        "lead_performer",
-                        "contact",
-                        "holding the lantern overhead",
-                        "Ari raises the lantern",
-                    ),
-                ],
+            {
+                "character_id": "dragon", "speaker_name": "Dragon",
+                "visual_description": "a large dragon", "performance_role": "non_vocal",
             },
-        }
-        with patch.object(
-            planner,
-            "_call_llm_json",
-            side_effect=[[still_invalid], [repaired]],
-        ) as generate:
-            first_result = callbacks["repair_batch"](1, 1, [clips[1]], previous)
-            self.assertIn("_h3_physical_state_proposal_error", first_result[0])
-            grounded_issue = callbacks["row_validator"](1, first_result[0], [previous])
-            self.assertIn("exactly 'grounded' or 'airborne'", grounded_issue)
+        ]
 
-            second_result = callbacks["repair_batch"](1, 1, [clips[1]], previous)
+        def row(prompt):
+            result = complete_shot(f"[Shot 1] {prompt}")
+            result["subjects_on_screen"] = copy.deepcopy(cast)
+            # Invalid or stale ledger data is removed before narrative checks.
+            result["physical_state"] = {"invalid": "legacy ledger"}
+            return result
 
-        self.assertEqual(generate.call_count, 2)
-        second_prompt = generate.call_args_list[1].kwargs["user_prompt"]
-        self.assertIn("transition_keys_missing_prior_or_opening_fact", second_prompt)
-        self.assertIn('"predicate": "contact"', second_prompt)
-        self.assertIn("exactly 'grounded' or 'airborne'", second_prompt)
-        self.assertNotIn("_h3_physical_state_proposal_error", second_result[0])
-        state = second_result[0]["physical_state"]
-        self.assertEqual(
-            next(item["value"] for item in state["opening"] if item["predicate"] == "grounded"),
-            "grounded",
+        valid = row(
+            "The kitten stands on the ground beside the dragon. The kitten climbs "
+            "on the dragon, then rides it as the dragon breathes fire over enemies."
         )
-        self.assertIsNone(callbacks["row_validator"](1, second_result[0], [previous]))
+        valid_issue = callbacks["row_validator"](0, valid, [])
+        self.assertIsNone(valid_issue, valid_issue)
 
-    def test_narrative_creative_and_general_errors_keep_full_row_repair(self):
+        rejected = (
+            ("The kitten sings beside the dragon.", "source verb family"),
+            (
+                "A puppy climbs on the dragon. The dragon breathes fire over enemies.",
+                "requested actor",
+            ),
+            (
+                "The kitten is already perched on the dragon; then the kitten climbs "
+                "on the dragon. The dragon breathes fire over enemies.",
+                "opens with",
+            ),
+            (
+                "The dragon breathes fire over enemies, then the kitten climbs on the dragon.",
+                "out of source order",
+            ),
+        )
+        for prompt, expected in rejected:
+            with self.subTest(expected=expected):
+                issue = callbacks["row_validator"](0, row(prompt), [])
+                self.assertIn(expected, issue)
+
+        cast_planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")
+        cast_callbacks = self._repair_callbacks(cast_planner, clips)
+        missing_identity = complete_shot("[Shot 1] Ari sings to camera.")
+        missing_identity["subjects_on_screen"] = [{
+            "visual_description": "Ari", "performance_role": "non_vocal",
+        }]
+        cast_issue = cast_callbacks["row_validator"](0, missing_identity, [])
+        self.assertIn("stable, meaningful character_id or speaker_name", cast_issue)
+
+    def test_unsuccessful_narrative_patch_falls_back_to_full_row_repair(self):
         for case in ("narrative", "creative", "general"):
             with self.subTest(case=case):
                 planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")
@@ -1493,15 +1389,31 @@ class MusicStateProposalTests(unittest.TestCase):
                     row["mood"] = ""
 
                 callbacks = self._repair_callbacks(planner, clips)
-                issue = callbacks["row_validator"](1, row, [previous])
-                self.assertTrue(issue)
                 if case == "creative":
-                    planner._last_music_creative_issue = "Keep the assigned beat intact."
+                    planner._last_music_creative_issue = (
+                        "Keep the assigned beat intact."
+                    )
+                issue = callbacks["row_validator"](1, row, [previous])
+                if case == "creative":
+                    self.assertIsNone(issue, issue)
+                else:
+                    self.assertTrue(issue)
 
                 with patch.object(planner, "_call_llm_json", return_value=[]) as generate:
                     callbacks["repair_batch"](1, 1, [clips[1]], previous)
 
-                self.assertEqual(generate.call_count, 1)
+                self.assertEqual(generate.call_count, 2 if case == "narrative" else 1)
+                if case == "narrative":
+                    focused_schema = generate.call_args_list[0].kwargs["json_schema"]
+                    self.assertEqual(
+                        set(focused_schema["items"]["properties"]),
+                        {"scene_goal", "video_prompt", "action_beats", "ending_beat"},
+                    )
+                if case == "creative":
+                    self.assertIn(
+                        "Keep the assigned beat intact.",
+                        generate.call_args.kwargs["user_prompt"],
+                    )
                 properties = generate.call_args.kwargs["json_schema"]["items"]["properties"]
                 self.assertIn("video_prompt", properties)
                 self.assertIn("action_beats", properties)

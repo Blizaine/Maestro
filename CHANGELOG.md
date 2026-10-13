@@ -7,6 +7,19 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 Public Dev testing candidate; not promoted to Main. See the [full release notes](docs/RELEASE_NOTES_V2.7.0.md).
 
+- Keep H3 music-video physical direction in the visible shot prompt instead of
+  requiring an auxiliary free-text state ledger. Prevent ordinary pose changes
+  and misclassified gestures from stopping planning or overriding authored shots;
+  retain checks for requested story actions, actors, timing and repeated scenes.
+- Keep camera framing and static descriptions out of music-video action
+  obligations. Use focused visual-prompt repairs when a draft changes or omits
+  an assigned story action instead of copying a conflicting outline again.
+  If bounded writer repairs still fail, compile the affected clip directly
+  from its assigned source actions and retain the same validation checks.
+  Identify source-compiled recovery in saved clip metadata and the console.
+- Stop inserting the entire music-video project brief into each final H3
+  visual prompt. Preserve shot-specific cast and setting anchors without
+  reintroducing completed or future story actions after planning validation.
 - Add a saved, opt-in **Use lyrics to guide visuals** control for Director
   music videos. Keep transcription, musical timing, soundtrack and assigned
   lip-sync independent of lyric meaning.

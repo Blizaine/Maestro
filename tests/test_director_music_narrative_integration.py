@@ -31,7 +31,7 @@ class MusicNarrativeIntegrationTests(unittest.TestCase):
         self.planner._music_narrative_allocation = self.allocation
         self.planner._uses_generated_shot_images = False
 
-    def _row_validator(self):
+    def _batch_callbacks(self):
         with patch.object(
             self.planner, "_run_checkpointed_json_batches", return_value=[],
         ) as batches:
@@ -43,7 +43,10 @@ class MusicNarrativeIntegrationTests(unittest.TestCase):
                 char_profiles=[], performer_map={},
                 video_model="minimax_h3_ref2va_fused_turbo",
             )
-        return batches.call_args.kwargs["row_validator"]
+        return batches.call_args.kwargs
+
+    def _row_validator(self):
+        return self._batch_callbacks()["row_validator"]
 
     def test_allocation_is_bounded_and_durably_reused(self):
         self.assertTrue(self.contract["events"])
@@ -168,6 +171,37 @@ class MusicNarrativeIntegrationTests(unittest.TestCase):
         self.assertIn("music narrative allocation is invalid", issue or "")
         self.assertEqual(row["source_event_ids"], ["M2"])
 
+    def test_source_failure_uses_focused_visual_repair_then_existing_row_checks(self):
+        with patch.object(
+            self.planner, "_run_checkpointed_json_batches", return_value=[],
+        ) as batches:
+            self.planner._plan_with_llm(
+                clips=self.clips, clip_contexts=["Clip"] * len(self.clips),
+                scene_description=self.contract["source"], bpm=120,
+                has_reference=False, reference_image_path=None,
+                char_profiles=[], performer_map={},
+                video_model="minimax_h3_ref2va_fused_turbo",
+            )
+        callbacks = batches.call_args.kwargs
+        rejected = {"video_prompt": "The sailor waits on shore.", "source_event_ids": []}
+        issue = callbacks["row_validator"](1, rejected, [])
+        self.assertIn("must visibly perform assigned source event M1", issue)
+        repaired = {
+            "video_prompt": "The sailor climbs onto the boat.",
+            "source_event_ids": ["M1"],
+        }
+        with patch(
+            "services.director.music_narrative_repair.repair_music_narrative_visuals",
+            return_value=[repaired],
+        ) as focused, patch.object(self.planner, "_call_llm_json") as full:
+            result = callbacks["repair_batch"](1, 1, [self.clips[1]], None)
+        self.assertEqual(result, [repaired])
+        focused.assert_called_once()
+        self.assertEqual(focused.call_args.kwargs["row"], rejected)
+        full.assert_not_called()
+        # Passing the source gate does not bypass the other production checks.
+        self.assertIn("missing a usable scene_goal", callbacks["row_validator"](1, repaired, []))
+
     def test_metadata_keeps_global_index_for_individual_clip_regeneration(self):
         rows = [{"video_prompt": event["text"], "source_event_ids": [event["event_id"]]}
                 for event in self.contract["events"]]
@@ -177,6 +211,136 @@ class MusicNarrativeIntegrationTests(unittest.TestCase):
             self.assertEqual(metadata["index"], index)
             self.assertEqual(metadata["allocation"], self.allocation)
             self.assertEqual(metadata["source_event_ids"], rows[index]["source_event_ids"])
+
+    def test_source_compiler_runs_only_after_two_failed_visual_repairs(self):
+        callbacks = self._batch_callbacks()
+        rejected = {"video_prompt": "The sailor waits on shore.", "source_event_ids": []}
+        self.assertIn("must visibly perform", callbacks["row_validator"](1, rejected, []))
+        compiled = {
+            "video_prompt": "The sailor climbs onto the boat.",
+            "source_event_ids": ["M1"],
+            "_music_source_compiled": True,
+        }
+        previous = {"video_prompt": "The sailor stands on the pier."}
+        with patch(
+            "services.director.music_narrative_repair.repair_music_narrative_visuals",
+            return_value=None,
+        ) as focused, patch(
+            "services.director.music_narrative_repair.compile_music_narrative_source_row",
+            return_value=[compiled],
+        ) as compiler, patch.object(self.planner, "_call_llm_json", return_value=[]) as full:
+            callbacks["repair_batch"](1, 1, [self.clips[1]], previous)
+            compiler.assert_not_called()
+            result = callbacks["repair_batch"](1, 1, [self.clips[1]], previous)
+        self.assertEqual(result, [compiled])
+        self.assertEqual(focused.call_count, 2)
+        compiler.assert_called_once()
+        self.assertEqual(compiler.call_args.kwargs["previous"], previous)
+        self.assertEqual(full.call_count, 1)
+        # Source compilation does not skip scene, camera, cast or native validation.
+        self.assertIn("missing a usable scene_goal", callbacks["row_validator"](1, compiled, []))
+
+    def test_successful_visual_repair_does_not_compile_source(self):
+        callbacks = self._batch_callbacks()
+        rejected = {"video_prompt": "The sailor waits on shore.", "source_event_ids": []}
+        callbacks["row_validator"](1, rejected, [])
+        repaired = {"video_prompt": "The sailor climbs onto the boat.", "source_event_ids": ["M1"]}
+        with patch(
+            "services.director.music_narrative_repair.repair_music_narrative_visuals",
+            return_value=[repaired],
+        ), patch(
+            "services.director.music_narrative_repair.compile_music_narrative_source_row",
+        ) as compiler:
+            self.assertEqual(callbacks["repair_batch"](1, 1, [self.clips[1]], None), [repaired])
+        compiler.assert_not_called()
+
+    def test_uncached_later_batch_row_still_gets_source_recovery_within_retry_cap(self):
+        callbacks = self._batch_callbacks()
+        rejected = {"video_prompt": "The sailor waits on shore.", "source_event_ids": []}
+        # The original batch stops validation at its first bad row, so this
+        # later row has no cached draft for its first repair call.
+        with patch.object(self.planner, "_call_llm_json", return_value=[rejected]):
+            first = callbacks["repair_batch"](1, 1, [self.clips[1]], None)
+        self.assertIn("must visibly perform", callbacks["row_validator"](1, first[0], []))
+        compiled = {"video_prompt": "The sailor climbs onto the boat.", "source_event_ids": ["M1"]}
+        with patch(
+            "services.director.music_narrative_repair.repair_music_narrative_visuals",
+            return_value=None,
+        ), patch(
+            "services.director.music_narrative_repair.compile_music_narrative_source_row",
+            return_value=[compiled],
+        ) as compiler, patch.object(self.planner, "_call_llm_json") as full:
+            second = callbacks["repair_batch"](1, 1, [self.clips[1]], None)
+        self.assertEqual(second, [compiled])
+        compiler.assert_called_once()
+        full.assert_not_called()
+
+    def test_source_compiled_recovery_is_identified_in_saved_metadata(self):
+        event = self.contract["events"][0]
+        row = {
+            "video_prompt": event["text"], "source_event_ids": [event["event_id"]],
+            "_music_source_compiled": True,
+            "_music_source_recovery_reason": "Assigned action missing from writer draft",
+        }
+        shots = self.planner._convert_to_shots([row], self.clips[:1], [], False, {}, None, {})
+        metadata = shots[0].metadata["_director_music_narrative"]
+        self.assertTrue(metadata["source_compiled"])
+        self.assertEqual(metadata["recovery_reason"], row["_music_source_recovery_reason"])
+
+    def test_actual_source_recovery_passes_production_and_native_preflight(self):
+        callbacks = self._batch_callbacks()
+        rejected = {
+            "scene_goal": "The sailor waits for departure.",
+            "scene_type": "narrative",
+            "environment": "A wooden pier beside a lake.",
+            "visual_style": "Cinematic coastal film.",
+            "lighting": "Soft daylight.",
+            "mood": "Hopeful.",
+            "subjects_on_screen": [{
+                "character_id": "sailor", "speaker_name": "",
+                "visual_description": "The sailor in a navy coat.",
+                "position_or_relation": "beside the boat",
+                "performance_role": "non_vocal",
+            }],
+            "camera_plan": {"framing": "wide shot", "movement": "slow lateral track"},
+            "action_beats": ["The sailor waits on shore."],
+            "ending_beat": "The sailor looks across the lake.",
+            "video_prompt": "[Shot 1] The sailor waits on shore.",
+            "window_prompts": [], "source_event_ids": [],
+            "continuity_strategy": "continuous",
+        }
+        self.assertIn("must visibly perform", callbacks["row_validator"](1, rejected, []))
+        # Simulate two unsuccessful model repairs while using the real source
+        # compiler and the same full row validator as the running application.
+        with patch(
+            "services.director.music_narrative_repair.repair_music_narrative_visuals",
+            return_value=None,
+        ), patch.object(self.planner, "_call_llm_json", return_value=[]):
+            callbacks["repair_batch"](1, 1, [self.clips[1]], None)
+            result = callbacks["repair_batch"](1, 1, [self.clips[1]], None)
+        self.assertEqual(len(result), 1)
+        compiled = result[0]
+        self.assertTrue(compiled["_music_source_compiled"])
+        self.assertIsNone(callbacks["row_validator"](1, compiled, []))
+        plan = {
+            "video_prompt": compiled["video_prompt"],
+            "_director_subjects_on_screen": compiled["subjects_on_screen"],
+            "_director_project_context": self.contract["source"],
+            "_director_audio_plan": {"mode": "music_driven", "vocal_activity": "instrumental"},
+            "_director_music_narrative": {
+                "contract": self.contract, "allocation": self.allocation,
+                "index": 1, "source_event_ids": compiled["source_event_ids"],
+            },
+        }
+        path = ROOT / "app/services/director_pipeline.py"
+        node = next(n for n in ast.parse(path.read_text(encoding="utf-8")).body
+                    if isinstance(n, ast.FunctionDef) and n.name == "_preflight_h3_director_prompts")
+        namespace = {"Optional": Optional}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), namespace)
+        namespace["_preflight_h3_director_prompts"](
+            "minimax_h3_fused_turbo", [plan], prompt_modes=["t2va"], durations=[10.0],
+        )
+        self.assertIn("climbs onto the boat", plan["video_prompt"])
 
     def test_controller_rechecks_compiled_prompt_before_gpu(self):
         # Load the production preflight function without booting the GPU server.

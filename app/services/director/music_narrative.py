@@ -114,8 +114,36 @@ _GENERIC_ENTITY_HEADS = {
 _STATIC_MODIFIER_HEADS = {
     "arms", "background", "camera", "clothes", "door", "doors", "field",
     "frame", "hair", "landscape", "lights", "lips", "mouth", "pose",
-    "scene", "shot", "shots", "sky", "sunset", "view",
+    "scene", "shot", "shots", "sky", "sunset", "view", "water", "waters",
 }
+_BODY_PART_NOUN_PREFIX_RE = re.compile(
+    r"\b(?:a|an|the|this|that|these|those|my|your|his|her|its|our|their|"
+    r"one|two|both|each|left|right|front|back|upper|lower|dominant|off)\s+"
+    r"(?:(?:left|right|front|back|upper|lower|dominant|off|bare|raised|open|closed)\s+)?$",
+    re.I,
+)
+_DIRECTORIAL_SENTENCE_PREFIX_RE = re.compile(
+    r"^\s*(?:show|include|depict|feature|capture|follow|frame|"
+    r"focus(?:\s+on)?|illustrate|portray)\b",
+    re.I,
+)
+_ACTION_REFERENCE_HEAD_RE = re.compile(
+    r"^\s+(?:action|event|beat|sequence|moment|scene|shot|move|movement|"
+    r"step|direction|instruction|schedule|plan)\b",
+    re.I,
+)
+_ACTION_REFERENCE_VERB_PREFIX_RE = re.compile(
+    r"\b(?:replay|repeat|revisit|restate|mention|reference|describe|show|"
+    r"include|depict|preserve|avoid|omit|skip)(?:s|ed|ing)?\s+"
+    r"(?:(?:the|a|an|requested|previous|prior|above|earlier|completed)\s+)?$",
+    re.I,
+)
+_DIRECTIVE_ACTION_REFERENCE_RE = re.compile(
+    r"\b(?:show|include|depict|feature|capture|reference|describe|preserve)\b"
+    r"[^.!?;]{0,96}\b(?:action|event|beat|sequence|moment|scene|shot|move|"
+    r"movement|step)\b",
+    re.I,
+)
 _FILMMAKING_CUE_RE = re.compile(
     r"\b(?:camera|cameras|lens|lenses|cinematograph\w*|filmmak\w*|"
     r"wide|medium|close[- ]?up|establishing|tracking|pov|locked|static|fixed|"
@@ -421,10 +449,49 @@ def _is_negated_before(value: str, start: int) -> bool:
     return len(words_after) <= 6
 
 
+def _is_nominal_action_reference(
+    value: str,
+    start: int,
+    end: int,
+    verb: str,
+) -> bool:
+    """Ignore gerunds used as references or timeline labels, not performed acts."""
+
+    if not _normal_text(verb).endswith("ing"):
+        return False
+    prefix = value[max(0, start - 96):start]
+    tail = value[end:min(len(value), end + 80)]
+    if _ACTION_REFERENCE_HEAD_RE.match(tail):
+        return True
+    if _ACTION_REFERENCE_VERB_PREFIX_RE.search(prefix):
+        return True
+    if re.search(r"\b(?:before|after|during)\s*$", prefix, re.I):
+        return bool(_DIRECTIVE_ACTION_REFERENCE_RE.search(prefix))
+    return False
+
+
 def _is_static_modifier_match(value: str, start: int, end: int, verb: str) -> bool:
     """Skip common adjective/noun phrases that resemble an action verb."""
 
     normalized_verb = _normal_text(verb)
+    prefix = value[max(0, start - 64):start]
+    tail = value[end:min(len(value), end + 72)]
+    if normalized_verb in {"hand", "hands", "handed", "handing"}:
+        if _BODY_PART_NOUN_PREFIX_RE.search(prefix) or re.search(
+            r"\b[A-Za-z][\w’'-]*['’]s\s+"
+            r"(?:(?:left|right|front|back|upper|lower)\s+)?$",
+            prefix,
+            re.I,
+        ):
+            return True
+        if re.match(
+            r"\s+(?:gesture|gestures|grip|grips|signal|signals|shape|shapes)\b",
+            tail,
+            re.I,
+        ):
+            return True
+    if normalized_verb == "close" and re.match(r"\s*-\s*ups?\b", tail, re.I):
+        return True
     if normalized_verb not in {"open", "closed", "raised", "burning", "landing", "close", "opening"}:
         return False
     tail_words = re.findall(r"[A-Za-z][\w'-]*", value[end:end + 72])
@@ -436,9 +503,20 @@ def _is_static_modifier_match(value: str, start: int, end: int, verb: str) -> bo
     # body-part heads ("open grassy field", "raised arms", "landing lights").
     if tail_words[0].casefold() in {"a", "an", "the"}:
         return False  # "opens the gate" / "closed a door" are verb phrases.
+    if normalized_verb == "open" and tail_words[0].casefold() in {"water", "waters"}:
+        # "at golden-hour open water" is a setting description, while a
+        # concrete opening action normally has an explicit object ("opens a
+        # door") or a subject immediately before the verb.
+        if re.search(
+            r"\b(?:at|in|across|on|over|toward|towards|into|out\s+of|near|"
+            r"by|around|through|off|along|from)\s+"
+            r"(?:[A-Za-z][\w'-]*\s+){0,3}$",
+            prefix,
+            re.I,
+        ):
+            return True
     if not any(word.casefold() in _STATIC_MODIFIER_HEADS for word in tail_words[:5]):
         return False
-    prefix = value[max(0, start - 42):start]
     # Also recognize adjectival phrases introduced by an article or a common
     # scene preposition, without treating an actual finite subject+verb as one.
     return bool(re.search(
@@ -520,6 +598,14 @@ def _actor_aliases(
                     aliases.extend(candidate[2])
                 return _dedupe(aliases)
             return _select_entity(antecedents)
+
+    if action_number == 0:
+        directive = _DIRECTORIAL_SENTENCE_PREFIX_RE.match(sentence)
+        if directive and directive.end() <= action_start:
+            directed_subjects = _entity_candidates(prefix[directive.end():])
+            for candidate in directed_subjects:
+                if candidate[2]:
+                    return candidate[2]
 
     candidates = _entity_candidates(prefix)
     if action_number > 0 and prior_actor:
@@ -611,6 +697,9 @@ def build_music_narrative_contract(source: Any) -> dict[str, Any]:
         matches = [
             match for match in _action_matches(visible_sentence)
             if not _is_static_modifier_match(
+                visible_sentence, match[0], match[1], match[3],
+            )
+            and not _is_nominal_action_reference(
                 visible_sentence, match[0], match[1], match[3],
             )
         ]

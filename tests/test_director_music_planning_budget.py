@@ -36,7 +36,12 @@ class MusicPlanningBudgetTests(unittest.TestCase):
         self.assertGreaterEqual(first["max_tokens"], 7000)
         self.assertLessEqual(first["max_tokens"], 10000)
         self.assertEqual(first["thinking_budget"], 0)
-        self.assertIn("physical_state", first["json_schema"]["items"]["required"])
+        schema = first["json_schema"]["items"]
+        self.assertNotIn("physical_state", schema["properties"])
+        self.assertIn("continuity_strategy", schema["required"])
+        self.assertNotIn("physical_state", first["system_prompt"])
+        self.assertIn("local shot direction", first["system_prompt"])
+        self.assertIn("support and contact", first["system_prompt"])
 
     def test_h3_short_form_keeps_the_output_allowance_for_json(self):
         planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")
@@ -68,9 +73,12 @@ class MusicPlanningBudgetTests(unittest.TestCase):
         with patch.object(planner, "_call_llm_json", return_value=[]) as generate:
             config["repair_batch"](2, 3, config["items"][3:4], previous)
         request = generate.call_args.kwargs["user_prompt"]
-        self.assertIn('"value": "crouched"', request)
+        self.assertIn("ending: Ari finishes crouched beside the amplifier.", request)
+        self.assertNotIn('"value": "crouched"', request)
         self.assertNotIn("standing upright", request)
-        self.assertIn("physical_state.opening=[]", request)
+        self.assertNotIn("physical_state", request)
+        self.assertIn("local visual direction", request)
+        self.assertIn("support, contact, grounding, prop ownership, and location", request)
 
     def test_ltx_retains_its_six_row_batches_and_short_form_reasoning(self):
         planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")

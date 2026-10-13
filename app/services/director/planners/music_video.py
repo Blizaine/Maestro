@@ -434,6 +434,8 @@ def _music_shot_schema(
     include_image_fields: bool,
     require_cast_identity: bool = False,
     require_physical_state: bool = False,
+    omit_physical_state: bool = False,
+    require_continuity_strategy: bool = False,
     require_native_single_clip: bool = False,
     narrative_event_ids: Optional[list[str]] = None,
 ) -> dict:
@@ -477,12 +479,18 @@ def _music_shot_schema(
         "video_prompt",
         "window_prompts",
     ]
-    if require_physical_state:
+    if omit_physical_state:
+        # H3 music direction is authored as visible prose. Keep the auxiliary
+        # ledger available to strict callers, but out of production H3 output.
+        properties.pop("physical_state", None)
+    elif require_physical_state:
         # New H3 plans must explicitly declare an empty ledger when no
         # physical relation is established. Code derives its continuity
         # marker from the single planned cut strategy.
         properties["physical_state"] = _h3_physical_state_proposal_schema()
         required.extend(("physical_state", "continuity_strategy"))
+    if require_continuity_strategy and "continuity_strategy" in properties:
+        required.append("continuity_strategy")
     if narrative_event_ids:
         properties["source_event_ids"] = {
             **properties["source_event_ids"],
@@ -598,6 +606,15 @@ def _is_prop_manipulation_posture_mislabel(
 
 
 _H3_PHYSICAL_STATE_PROPOSAL_ERROR_FIELD = "_h3_physical_state_proposal_error"
+
+
+def _strip_h3_physical_state_fields(row: Any) -> None:
+    """Discard the auxiliary ledger from H3 music rows and cached drafts."""
+
+    if not isinstance(row, dict):
+        return
+    row.pop("physical_state", None)
+    row.pop(_H3_PHYSICAL_STATE_PROPOSAL_ERROR_FIELD, None)
 
 
 def _materialize_h3_physical_state_proposals_strict(
@@ -2249,6 +2266,10 @@ class MusicVideoPlanner(BasePlanner):
             kind="music_video",
             fingerprint_payload={
                 "planner_revision": 23,
+                **(
+                    {"h3_music_physical_state_policy": "visual-prose-v1"}
+                    if video_model.lower().startswith("minimax_h3") else {}
+                ),
                 "use_lyrics_context": self._use_lyrics_context,
                 "scene_description": scene_description,
                 "clips": clips,
@@ -2432,6 +2453,7 @@ class MusicVideoPlanner(BasePlanner):
             speaker_names=speaker_names,
             vocal_activity=vocal_activity,
             project_context=scene_description,
+            ignore_physical_state_ledger=video_model.lower().startswith("minimax_h3"),
         )
 
         total_duration = sum(c.get("end", 0) - c.get("start", 0) for c in clips) if clips else None
@@ -2926,11 +2948,17 @@ class MusicVideoPlanner(BasePlanner):
         validate_visual_timing: bool = False,
         require_stable_cast_identity: bool = False,
         require_source_physical_state: bool = False,
+        ignore_physical_state_ledger: bool = False,
         require_native_single_clip: bool = False,
         source_events_for_row: Any = None,
         progression_context: Optional[dict[str, Any]] = None,
     ) -> Optional[str]:
         """Return why a music-video row is incomplete or not shot-specific."""
+
+        if ignore_physical_state_ledger:
+            _strip_h3_physical_state_fields(row)
+            for previous in previous_rows:
+                _strip_h3_physical_state_fields(previous)
 
         if validate_visual_timing:
             for field in ("video_prompt", "ending_beat"):
@@ -3023,26 +3051,28 @@ class MusicVideoPlanner(BasePlanner):
                 return f"clip {index + 1} {timing_issue}"
 
         prefix_rows = [*previous_rows, row]
-        physical_issues = validate_physical_state_sequence(
-            prefix_rows,
-            require_state_after_first=True,
-        )
-        if physical_issues:
-            return physical_issues[0]
-
-        physical_prompt_issue = _physical_prompt_conflict_issue(row)
-        if physical_prompt_issue:
-            return f"clip {index + 1} {physical_prompt_issue}"
-
-        if require_source_physical_state:
-            assigned_source_issues = source_physical_state_issues(
-                [row], [source_events_for_row],
+        if not ignore_physical_state_ledger:
+            physical_issues = validate_physical_state_sequence(
+                prefix_rows,
+                require_state_after_first=True,
             )
-            if assigned_source_issues:
-                return f"clip {index + 1} {assigned_source_issues[0]}"
+            if physical_issues:
+                return physical_issues[0]
+
+            physical_prompt_issue = _physical_prompt_conflict_issue(row)
+            if physical_prompt_issue:
+                return f"clip {index + 1} {physical_prompt_issue}"
+
+            if require_source_physical_state:
+                assigned_source_issues = source_physical_state_issues(
+                    [row], [source_events_for_row],
+                )
+                if assigned_source_issues:
+                    return f"clip {index + 1} {assigned_source_issues[0]}"
 
         if (
-            require_source_physical_state
+            not ignore_physical_state_ledger
+            and require_source_physical_state
             and not source_events_for_row
             and _source_establishes_physical_relation(scene_description, row)
         ):
@@ -3094,12 +3124,13 @@ class MusicVideoPlanner(BasePlanner):
         is_minimax_h3 = str(kwargs.get("video_model") or "").lower().startswith(
             "minimax_h3"
         )
-        # H3 rows include the native prompt and a complete physical ledger.
+        # H3 rows include the native prompt and full cast/camera direction.
         # Six such rows exceeded the former LTX-sized output allowance and
         # truncated otherwise usable long-song plans in the middle of JSON.
         batch_size = 3 if is_minimax_h3 else self._LONG_FORM_BATCH_SIZE
         if not kwargs.get("_bounded_music_batch"):
             invalid_drafts: dict[int, dict] = {}
+            narrative_repair_attempts: dict[int, int] = {}
             forwarded_kwargs = {
                 key: value for key, value in kwargs.items()
                 if key not in {
@@ -3122,6 +3153,10 @@ class MusicVideoPlanner(BasePlanner):
                 *,
                 repair: bool,
             ) -> list[dict]:
+                if is_minimax_h3:
+                    _strip_h3_physical_state_fields(previous)
+                    for rejected_row in invalid_drafts.values():
+                        _strip_h3_physical_state_fields(rejected_row)
                 end = start + len(batch_clips)
                 previous_state = "No prior completed clip; establish the opening cleanly."
                 if previous:
@@ -3134,16 +3169,8 @@ class MusicVideoPlanner(BasePlanner):
                         text = str(value or "").strip()
                         if text:
                             state_parts.append(f"{label}: {text}")
-                    physical_state = normalize_physical_state(previous.get("physical_state"))
-                    if is_minimax_h3 and physical_state and physical_state["closing"]:
-                        # Only the previous final frame is the next opening.
-                        # Replaying the prior opening and actions here invited
-                        # the writer to restart the earlier pose/scene.
-                        state_parts.append(
-                            "authoritative previous closing facts: "
-                            + json.dumps(physical_state["closing"], ensure_ascii=False)
-                        )
-                    elif not is_minimax_h3:
+                    if not is_minimax_h3:
+                        physical_state = normalize_physical_state(previous.get("physical_state"))
                         physical_state_text = format_physical_state_for_prompt(physical_state)
                         if physical_state_text:
                             state_parts.append(physical_state_text)
@@ -3185,14 +3212,15 @@ class MusicVideoPlanner(BasePlanner):
                     )
                 if is_minimax_h3 and previous:
                     batch_concept += (
-                        "\nFor a continuous first clip in this batch, use "
-                        "physical_state.opening=[] for all carried keys. Code "
-                        "copies the authoritative closing facts above. Propose "
-                        "only newly established opening keys; change a carried "
-                        "posture, contact, or support through a visible transition. "
-                        "Do not copy the previous clip's original opening or replay "
-                        "its completed action. An independent cut explicitly "
-                        "establishes a new opening instead."
+                        "\nAt this shot boundary, posture, head angle, gaze, "
+                        "expression, and gesture are local visual direction and "
+                        "may be re-established in the new shot without matching "
+                        "prior wording. Preserve concrete source-established "
+                        "support, contact, grounding, prop ownership, and location "
+                        "in the visible action when they remain relevant; show a "
+                        "change through the requested action. Do not invent a "
+                        "mount, grip, contact, or starting position. Do not replay "
+                        "the completed action from the previous clip."
                     )
                 if repair:
                     batch_concept += (
@@ -3220,9 +3248,10 @@ class MusicVideoPlanner(BasePlanner):
                             "Fix the stated validation error while retaining the valid "
                             "visible actions, source-event obligations, stable subject IDs "
                             "and unaffected direction. Do not replace a correctly performed "
-                            "action with a pose while fixing its physical-state facts. "
-                            "The authoritative preceding closing facts and source actions "
-                            "above take precedence over an inconsistent draft or outline.\n"
+                            "action with a static pose. Keep physical relations accurate "
+                            "in visible prose and preserve the source action and actor. "
+                            "Source actions above take precedence over an inconsistent "
+                            "draft or outline.\n"
                             + json.dumps(rejected, ensure_ascii=False)
                         )
                 return self._plan_with_llm(
@@ -3239,9 +3268,6 @@ class MusicVideoPlanner(BasePlanner):
                     _music_global_start=start,
                     _preserve_short_music_reasoning=(
                         not repair and len(clips) <= self._LONG_FORM_BATCH_SIZE
-                    ),
-                    _music_previous_physical_state=(
-                        previous.get("physical_state") if previous else None
                     ),
                     **forwarded_kwargs,
                 )
@@ -3267,32 +3293,62 @@ class MusicVideoPlanner(BasePlanner):
                 previous: Optional[dict],
             ) -> list[dict]:
                 if is_minimax_h3 and len(batch_clips) == 1:
-                    index = start
-                    rejected_indexes = [
-                        rejected_index
-                        for rejected_index in invalid_drafts
-                        if start <= rejected_index < start + len(batch_clips)
-                    ]
-                    issue = str(getattr(self, "_last_music_row_issue", "") or "")
-                    if (
-                        rejected_indexes == [index]
-                        and "compact physical-state proposal could not be materialized" in issue
-                        and not getattr(self, "_last_music_narrative_issue", "")
-                        and not getattr(self, "_last_music_creative_issue", "")
-                    ):
-                        metadata_repair = _try_repair_h3_physical_state_only(
-                            self,
-                            index=index,
-                            row=invalid_drafts[index],
-                            issue=issue,
-                            clip=batch_clips[0],
+                    # A later row in a rejected batch may have no cached draft
+                    # until its first full-row repair. Count that writer call
+                    # too, so source recovery fits the shared two-attempt cap.
+                    narrative_repair_attempts[start] = narrative_repair_attempts.get(start, 0) + 1
+                narrative_issue = getattr(self, "_last_music_narrative_issue", "")
+                if (
+                    is_minimax_h3
+                    and len(batch_clips) == 1
+                    and start in invalid_drafts
+                    and narrative_issue
+                    and not getattr(self, "_last_music_creative_issue", "")
+                    and not narrative_allocation_issue
+                ):
+                    # A small writer can echo a conflicting outline when asked
+                    # to regenerate every field. Repair the actual visual action
+                    # with a compact source-owned request, then run the same full
+                    # production row validator on the merged row below.
+                    from ..music_narrative_repair import (
+                        compile_music_narrative_source_row,
+                        repair_music_narrative_visuals,
+                    )
+
+                    repaired = repair_music_narrative_visuals(
+                        self,
+                        index=start,
+                        row=invalid_drafts[start],
+                        issue=narrative_issue,
+                        contract=narrative_contract,
+                        allocation=narrative_allocation,
+                        duration_seconds=_music_clip_duration_seconds(batch_clips[0]),
+                    )
+                    if repaired is not None:
+                        return repaired
+                    if narrative_repair_attempts[start] >= 2:
+                        compiled = compile_music_narrative_source_row(
+                            index=start,
+                            row=invalid_drafts[start],
+                            issue=narrative_issue,
+                            contract=narrative_contract,
+                            allocation=narrative_allocation,
                             previous=previous,
-                            contract=getattr(self, "_music_narrative_contract", {}),
-                            allocation=getattr(self, "_music_narrative_allocation", []),
-                            include_image_fields=uses_generated_images,
                         )
-                        if metadata_repair is not None:
-                            return metadata_repair
+                        if compiled is not None:
+                            print(
+                                f"[MusicVideoPlanner] Clip {start + 1} compiled "
+                                "directly from its assigned source actions after "
+                                "two writer repair attempts."
+                            )
+                            self._emit_planning_progress(
+                                message=(f"Clip {start + 1}: compiled from "
+                                         "the requested source actions"),
+                                current=start,
+                                total=len(clips),
+                                stage="music_source_recovery",
+                            )
+                            return compiled
                 return plan_batch(
                     batch_number,
                     start,
@@ -3347,6 +3403,10 @@ class MusicVideoPlanner(BasePlanner):
                         ]
 
             def validate_music_row(index, row, previous_rows):
+                if is_minimax_h3:
+                    _strip_h3_physical_state_fields(row)
+                    for previous in previous_rows:
+                        _strip_h3_physical_state_fields(previous)
                 if narrative_allocation_issue:
                     issue = narrative_allocation_issue
                     self._last_music_narrative_issue = issue
@@ -3391,7 +3451,8 @@ class MusicVideoPlanner(BasePlanner):
                     ),
                     validate_visual_timing=is_minimax_h3,
                     require_stable_cast_identity=is_minimax_h3,
-                    require_source_physical_state=is_minimax_h3,
+                    require_source_physical_state=False,
+                    ignore_physical_state_ledger=is_minimax_h3,
                     require_native_single_clip=is_minimax_h3,
                     source_events_for_row=(
                         _assigned_source_events_for_clip(clips[index]) or assigned_events
@@ -3434,6 +3495,7 @@ class MusicVideoPlanner(BasePlanner):
                         current[index - 1] if index else None, repair=True,
                     ),
                     batch_size=batch_size,
+                    ignore_physical_state_ledger=is_minimax_h3,
                 )
             return rows
 
@@ -3457,36 +3519,19 @@ class MusicVideoPlanner(BasePlanner):
         # video_guide now merged into ltx2_music_video_rules.md — no separate load needed
         if is_minimax_h3:
             physical_continuity_rules = (
-                "H3 COMPACT PHYSICAL-STATE PROPOSAL:\n"
-                "- Every clip includes physical_state with exactly opening and "
-                "transitions. Opening lists explicit facts at "
-                "this clip's first frame. For a continuous clip, code carries "
-                "all previous closing facts automatically; prefer opening=[] "
-                "unless a new fact key begins here. A repeated carried fact "
-                "must exactly match its subject_id, predicate, and value.\n"
-                "- For an independent cut or time jump, provide facts that establish the "
-                "reset opening; do not assume prior facts. If no physical "
-                "relation is relevant, use an empty opening and no transitions.\n"
-                "- Each transition has exactly subject_id, predicate, to_value, "
-                "and action. Never output from_value or closing: code derives "
-                "them. A transition must target an explicit opening/current "
-                "fact; do not invent a missing starting state. Order transitions "
-                "as they happen. Posture is body pose; prop is object manipulation. "
-                "Preserve seated/standing pose during prop gestures unless the body "
-                "visibly changes pose.\n"
-                f"- Predicates: {', '.join(PHYSICAL_STATE_PREDICATES)}. Values "
-                f"are compact state atoms of at most {MAX_PHYSICAL_VALUE_CHARS} "
-                "characters; grounded values are exactly 'grounded' or "
-                "'airborne'. Transition actions are visible and also appear "
-                "in action_beats/video_prompt.\n"
-                "- Choose continuity_strategy once: continuous or "
-                "extend_previous carries state; independent resets state. "
-                "Code derives physical continuity from that choice. Do not "
-                "output a separate physical_state.continuity marker. A camera "
-                "change alone stays continuous.\n"
-                "- Do not invent a mount, grip, support relation, or prop "
-                "handoff that the Scene Concept has not established. Keep "
-                "video_prompt consistent with the opening and transitions."
+                "H3 VISIBLE PHYSICAL CONTINUITY:\n"
+                "- Describe concrete support and contact in the visible action: "
+                "who is standing on, riding, holding, touching, or carrying what; "
+                "state whether a subject is grounded or airborne when it matters. "
+                "Preserve source-established prop ownership and location when "
+                "they remain relevant, and show a change through its visible action.\n"
+                "- Head angle, gaze, expression, gesture, and body pose are local "
+                "shot direction, not exact-text state that must carry across cuts. "
+                "A new shot may establish a different pose without a transition "
+                "from a prior pose.\n"
+                "- Do not invent a mount, grip, support relation, contact, or "
+                "starting position the Scene Concept has not established. Keep "
+                "actor, target, and action order faithful to the requested story."
             )
         else:
             physical_continuity_rules = (
@@ -3574,10 +3619,9 @@ scene concept explicitly calls for a style change. End each image_prompt with
             '    "keyframe_prompts": [],\n'
             if uses_generated_images else ""
         )
-        physical_state_output_example = (
-            '{"opening": [], "transitions": []}'
-            if is_minimax_h3 else
-            '{"opening": [], "transitions": [], "closing": []}'
+        physical_state_output_field = (
+            '' if is_minimax_h3 else
+            '    "physical_state": {"opening": [], "transitions": [], "closing": []},\n'
         )
         image_workflow_notes = (
             """- image_source: "original" = user's reference photo (default). "previous" = previous scene's output for same-location continuity.
@@ -3627,8 +3671,7 @@ MUSIC VIDEO RULES:
 
 {image_prompt_rules}
 
-
-For MiniMax H3, preserve supplied cast names exactly and emit both identity keys. For unnamed cast, use a stable semantic character_id such as lead_performer and an empty speaker_name; never use a placeholder name such as Unnamed or N/A. Subjects can be objects, animals, materials or abstract forms; do not add a person for an instrumental or abstract concept. If no support/contact/posture relation matters, use physical_state opening=[] and transitions=[] rather than creating a physical ledger for scenery. Every physical-state subject_id must be present in subjects_on_screen; use its exact stable character_id.
+For MiniMax H3, preserve supplied cast names exactly and emit both identity keys. For unnamed cast, use a stable semantic character_id such as lead_performer and an empty speaker_name; never use a placeholder name such as Unnamed or N/A. Subjects can be objects, animals, materials or abstract forms; do not add a person for an instrumental or abstract concept. Keep concrete support, contact, grounding, prop ownership, and location accurate in visible prose. Posture, gaze, head angle, expression, and gesture are local shot direction and may be re-established at a cut; do not invent a starting physical relation.
 
 OUTPUT — respond with ONLY a JSON array:
 [
@@ -3642,8 +3685,7 @@ OUTPUT — respond with ONLY a JSON array:
     "lighting": "Lighting",
     "mood": "Tone",
     "action_beats": ["Action 1", "Action 2"],
-    "physical_state": {physical_state_output_example},
-    "camera_plan": {{"framing": "medium shot", "movement": "slow dolly in", "movement_intensity": "subtle"}},
+{physical_state_output_field}    "camera_plan": {{"framing": "medium shot", "movement": "slow dolly in", "movement_intensity": "subtle"}},
     "ending_beat": "Final image",
 {image_output_fields}    "video_prompt": "Energetic prompt describing the visible performance, action, sound, and camera.",
 {keyframe_output_field}    "window_prompts": []
@@ -3746,7 +3788,8 @@ Write {len(clips)} structured shot plans. Go:"""
                 len(clips),
                 include_image_fields=uses_generated_images,
                 require_cast_identity=is_minimax_h3,
-                require_physical_state=is_minimax_h3,
+                omit_physical_state=is_minimax_h3,
+                require_continuity_strategy=is_minimax_h3,
                 require_native_single_clip=is_minimax_h3,
                 narrative_event_ids=[
                     event["event_id"] for event in getattr(
@@ -3756,19 +3799,15 @@ Write {len(clips)} structured shot plans. Go:"""
             ),
         )
         if is_minimax_h3:
-            shot_dicts = _materialize_h3_physical_state_proposals(
-                shot_dicts,
-                previous_physical_state=kwargs.get(
-                    "_music_previous_physical_state"
-                ),
-                preserve_invalid_tail=True,
-            )
+            for row in shot_dicts:
+                _strip_h3_physical_state_fields(row)
         if not uses_generated_images:
             _discard_unused_image_fields(shot_dicts)
         return shot_dicts
 
     def _review_music_plan(self, rows, clips, contexts, source, *, row_validator,
-                           repair_row, batch_size):
+                           repair_row, batch_size,
+                           ignore_physical_state_ledger=False):
         """Review actual visual bodies and repair only evidenced weak clips."""
         from ..music_arc import format_music_arc_context
         from ..music_review import (
@@ -3778,6 +3817,9 @@ Write {len(clips)} structured shot plans. Go:"""
             repeated_music_visuals,
         )
         arc = self._music_arc
+        if ignore_physical_state_ledger:
+            for row in rows:
+                _strip_h3_physical_state_fields(row)
         cached = self._planning_resume_checkpoint.get("music_creative_review", {})
         if cached.get("fingerprint") == music_review_fingerprint(rows, arc):
             return rows
@@ -3785,6 +3827,9 @@ Write {len(clips)} structured shot plans. Go:"""
         review_notes = []
 
         def save(current, *, complete=False):
+            if ignore_physical_state_ledger:
+                for row in current:
+                    _strip_h3_physical_state_fields(row)
             checkpoint = copy.deepcopy(self._planning_resume_checkpoint)
             batches = checkpoint.setdefault("music_video_batches", {})
             for start in range(0, len(current), batch_size):
@@ -3801,17 +3846,30 @@ Write {len(clips)} structured shot plans. Go:"""
 
         def replace(index, feedback, current):
             self._raise_if_planning_cancelled()
+            if ignore_physical_state_ledger:
+                for row in current:
+                    _strip_h3_physical_state_fields(row)
+                continuity_instruction = (
+                    "Keep source actions, stable subject IDs, and concrete support, "
+                    "contact, grounding, prop ownership, and location accurate in "
+                    "visible prose. Head angle, gaze, expression, gesture, and pose "
+                    "are local direction and may change at a cut.\n"
+                )
+            else:
+                continuity_instruction = (
+                    "Preserve its authoritative opening and closing physical facts; "
+                    "change only its visible treatment/action within those boundaries.\n"
+                    "Required closing facts: " + json.dumps(
+                        (current[index].get("physical_state") or {}).get("closing", []),
+                        ensure_ascii=False,
+                    ) + "\n"
+                )
             self._last_music_narrative_issue = ""
             self._last_music_creative_issue = (
                 feedback + "\nKeep the accepted neighboring clips unchanged. "
                 "Keep this clip's source_event_ids and stable subject IDs. "
-                "Preserve its authoritative opening and closing physical facts; "
-                "change only its visible treatment/action within those boundaries.\n"
-                "Required closing facts: " + json.dumps(
-                    (current[index].get("physical_state") or {}).get("closing", []),
-                    ensure_ascii=False,
-                )
-                + "\nCurrent clip to revise in place:\n"
+                + continuity_instruction
+                + "Current clip to revise in place:\n"
                 + json.dumps(current[index], ensure_ascii=False)
             )
             try:
@@ -3898,11 +3956,14 @@ Write {len(clips)} structured shot plans. Go:"""
         speaker_names: dict[str, str],
         vocal_activity: Optional[list[str]] = None,
         project_context: str = "",
+        ignore_physical_state_ledger: bool = False,
     ) -> list[ShotPlan]:
         """Convert raw LLM JSON output into validated ShotPlan objects."""
         shots = []
         for i, clip in enumerate(clips):
             raw = dict(shot_dicts[i]) if i < len(shot_dicts) else {}
+            if ignore_physical_state_ledger:
+                _strip_h3_physical_state_fields(raw)
             section = (clip.get("label") or clip.get("section_label") or "verse").lower()
             strategy = _SECTION_VISUAL_STRATEGY.get(section, _SECTION_VISUAL_STRATEGY["verse"])
             duration = clip.get("end", 0) - clip.get("start", 0)
@@ -3967,7 +4028,10 @@ Write {len(clips)} structured shot plans. Go:"""
                         for value in raw["window_prompts"]
                     ]
 
-            physical_state = normalize_physical_state(raw.get("physical_state"))
+            physical_state = (
+                None if ignore_physical_state_ledger
+                else normalize_physical_state(raw.get("physical_state"))
+            )
             if physical_state is not None:
                 raw["physical_state"] = physical_state
                 physical_prompt = format_physical_state_for_prompt(
@@ -4046,6 +4110,11 @@ Write {len(clips)} structured shot plans. Go:"""
                     "index": i,
                     "source_event_ids": list(raw.get("source_event_ids") or []),
                 }
+                if raw.get("_music_source_compiled"):
+                    metadata["_director_music_narrative"].update({
+                        "source_compiled": True,
+                        "recovery_reason": str(raw.get("_music_source_recovery_reason") or ""),
+                    })
             if physical_state is not None:
                 metadata["physical_state"] = physical_state
             source_event_ids = (

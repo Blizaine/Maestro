@@ -58,6 +58,73 @@ class MusicNarrativeTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assertEqual(contract_for(source)["events"], [])
 
+    def test_stage_performance_description_has_no_static_action_milestones(self):
+        source = (
+            "A cinematic soul music video. Ari, an adult singer in a blue jacket, "
+            "performs on a warehouse stage, holding a microphone in the right hand. "
+            "Begin with intimate facial close-ups, develop into side-tracking "
+            "performance shots and wide silhouettes against warm stage lights, then "
+            "end on a quiet close-up. Include natural head tilts, glances, small arm "
+            "gestures and changes of stance. Preserve the singer, wardrobe and "
+            "microphone throughout while varying camera distance, framing, energy "
+            "and lighting with the song."
+        )
+        self.assertEqual(contract_for(source)["events"], [])
+
+    def test_sailor_description_extracts_only_climb_and_sailing_actions(self):
+        source = (
+            "A cinematic coastal folk music video. Ari, an adult sailor in a navy "
+            "coat, sings on a harbor pier at sunrise. Establish the singer with "
+            "solo performance shots. Ari then climbs onto a small wooden sailboat, "
+            "settles securely aboard, and the boat sails across the bay. Show the "
+            "boarding action before sailing. Develop varied close-ups, shore-wide "
+            "views, water-level tracking and onboard POV, finishing at golden-hour "
+            "open water. Preserve identity, wardrobe, clear physical support and "
+            "natural story progression without replaying the boarding."
+        )
+        events = contract_for(source)["events"]
+        self.assertEqual([event["text"] for event in events], [
+            "climbs onto a small wooden sailboat",
+            "sails across the bay",
+        ])
+        self.assertEqual([event["kind"] for event in events], ["boarding", "action"])
+        self.assertIn("ari", events[0]["actor_aliases"])
+        self.assertIn("sailboat", events[0]["target_aliases"])
+        self.assertIn("boat", events[1]["actor_aliases"])
+
+    def test_static_or_directorial_wording_does_not_hide_real_actions(self):
+        cases = (
+            ("Ari hands the microphone to Jo.", "hands the microphone to Jo", "action", "ari"),
+            ("The sailor opens a door.", "opens a door", "action", "sailor"),
+            ("Show the sailor boarding the boat.", "boarding the boat", "boarding", "sailor"),
+            ("The ship sails across the bay.", "sails across the bay", "action", "ship"),
+            ("A soldier fires a gun at the target.", "fires a gun at the target", "attack", "soldier"),
+            ("The sailor sings before boarding the boat.", "boarding the boat", "boarding", "sailor"),
+            (
+                "Ari performs after climbing onto the dragon.",
+                "climbing onto the dragon",
+                "boarding",
+                "ari",
+            ),
+        )
+        for source, expected_text, expected_kind, expected_actor in cases:
+            with self.subTest(source=source):
+                events = contract_for(source)["events"]
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0]["text"], expected_text)
+                self.assertEqual(events[0]["kind"], expected_kind)
+                self.assertIn(expected_actor, events[0]["actor_aliases"])
+        boarding = contract_for("Show the sailor boarding the boat.")["events"][0]
+        self.assertIn("boat", boarding["target_aliases"])
+
+    def test_explicit_action_references_do_not_create_milestones(self):
+        for source in (
+            "Show the boarding action before sailing.",
+            "Preserve natural story progression without replaying the boarding.",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(contract_for(source)["events"], [])
+
     def test_camera_directions_do_not_become_physical_attack_events(self):
         sources = (
             "One vocalist sings with a drummer and guitarist in a single rehearsal room. "
@@ -741,6 +808,7 @@ class MusicNarrativeTests(unittest.TestCase):
                     contract=contract, allocation=allocation, index=0,
                 )
                 self.assertIsNotNone(issue)
+
 
     def test_climb_paraphrase_allows_adjectives_in_target_noun_phrase(self):
         contract = contract_for("The kitten climbs on the dragon.")

@@ -1318,8 +1318,17 @@ def _source_prompt_parts(
     body = re.sub(r"^\s*\[Shot\s+1\]\s*", "", body, flags=re.IGNORECASE)
     body = _normalized_space(body)
 
+    plan = audio_plan if isinstance(audio_plan, Mapping) else {}
+    audio_mode = _normalized_space(_field(plan, "mode", "")).casefold()
     context = _normalized_space(normalize_h3_text(project_context))
-    if context and not _meaningful_context_present(context, body):
+    # The song-wide brief can name actions assigned to later clips. Keep it
+    # available to vocal helpers, while this shot's prose and anchors below
+    # remain authoritative for its visual action.
+    if (
+        context
+        and audio_mode != "music_driven"
+        and not _meaningful_context_present(context, body)
+    ):
         if len(context) > 360:
             context = context[:360].rsplit(" ", 1)[0].rstrip(" ,;:-") + "..."
         body = f"Project context: {context}. {body}".strip()
@@ -1340,7 +1349,6 @@ def _source_prompt_parts(
     ):
         body = f"{body} By the final beat, {closing}.".strip()
 
-    plan = audio_plan if isinstance(audio_plan, Mapping) else {}
     if not _trim_sentence(soundscape):
         sound_bits = []
         ambience = _trim_sentence(plan.get("ambience", ""))

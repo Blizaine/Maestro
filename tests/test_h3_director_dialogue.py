@@ -977,6 +977,61 @@ Then change the agenda.
                 [],
             )
 
+    def test_music_driven_visual_body_does_not_repeat_later_project_actions(self):
+        project = (
+            "Ari wears a blue jacket and black boots. At dawn on a rooftop, "
+            "Ari sings before climbing onto a dragon. The dragon swoops down "
+            "and breathes fire over an enemy fortress."
+        )
+        source = (
+            "On a rooftop at dawn, Ari sings the opening verse, eyes fixed "
+            "on the horizon."
+        )
+
+        def plan(audio_mode=None):
+            value = {
+                "video_prompt": source,
+                "_director_project_context": project,
+                "_director_environment": "Rooftop at dawn",
+                "_director_duration_sec": 8.0,
+                "_director_subjects_on_screen": [{
+                    "character_id": "ari",
+                    "speaker_name": "Ari",
+                    "visual_description": (
+                        "Ari is a vocalist in a blue jacket and black boots."
+                    ),
+                    "performance_role": "vocalist",
+                }],
+            }
+            if audio_mode:
+                value["_director_audio_plan"] = {
+                    "mode": audio_mode,
+                    "vocal_activity": "active",
+                }
+            return value
+
+        music_plan = plan("music_driven")
+        ordinary_plan = plan()
+        compile_h3_clip_plans([music_plan, ordinary_plan])
+
+        music_prompt = music_plan["video_prompt"].casefold()
+        self.assertIn("ari", music_prompt)
+        self.assertIn("rooftop", music_prompt)
+        self.assertIn("dawn", music_prompt)
+        self.assertIn("sings", music_prompt)
+        for later_action in (
+            "climbing onto a dragon",
+            "swoops down",
+            "breathes fire",
+        ):
+            with self.subTest(later_action=later_action):
+                self.assertNotIn(later_action, music_prompt)
+
+        # Non-music H3 callers keep the existing project-context behavior.
+        ordinary_prompt = ordinary_plan["video_prompt"].casefold()
+        self.assertIn("swoops down", ordinary_prompt)
+        self.assertIn("breathes fire", ordinary_prompt)
+
     def test_prompt_contract_reports_missing_canonical_world_ledger(self):
         prompt, _ = compile_h3_official_prompt(
             "A man enters a cafe. overall_soundscape: Room tone.",
