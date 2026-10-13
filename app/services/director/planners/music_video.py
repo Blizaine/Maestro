@@ -3660,6 +3660,9 @@ MUSIC VIDEO RULES:
 - Chorus = high energy, bold framing. Verse = intimate, character focus.
 - Instrumental = environment, textures. Bridge = contrasting, unexpected.
 - Vary visuals across clips. Performer must be visible when assigned.
+- Keep anatomy and proportions stable. Convey energy through natural expression,
+  gesture, movement, and camera work; do not invent expanding, pulsing, or bulging
+  body parts. Preserve any transformation the Scene Concept explicitly requests.
 
 {physical_continuity_rules}
 
@@ -4004,7 +4007,16 @@ Write {len(clips)} structured shot plans. Go:"""
 
             # Keep role-specific mouth cues consistent across generated views
             # of the shot. The final H3 compiler repeats this after later polish.
-            from ..music_performance import constrain_music_performance, music_performance_direction
+            from ..music_performance import (
+                constrain_music_performance,
+                music_performance_direction,
+                resolved_music_performance_role,
+            )
+            if audio.mode == "music_driven":
+                for subject in subjects:
+                    subject.performance_role = resolved_music_performance_role(
+                        subject, project_context,
+                    )
             for key in ("video_prompt", "image_prompt", "spatial_setup", "ending_beat"):
                 if isinstance(raw.get(key), str):
                     raw[key] = constrain_music_performance(

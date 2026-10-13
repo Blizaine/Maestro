@@ -152,6 +152,24 @@ class DirectorReferenceContractTests(unittest.TestCase):
             self.assertEqual(visual.count('Canonical identity and world:'), 1)
             self.assertEqual(visual.count('Airborne above the valley'), 1)
 
+    def test_style_opening_does_not_copy_action_after_lighting_label(self):
+        for action in ('The kitten climbs on the dragon.', 'Ari boards the sailboat.'):
+            with self.subTest(action=action):
+                source = (
+                    '[Shot 1] Visual style: Cinematic realism. Lighting: Warm daylight. '
+                    'Stable appearance: A navy coat. At the start, the rider is beside the mount. '
+                    + action + ' At the end, the rider is securely aboard.'
+                )
+                kwargs = dict(mode='ref2va', audio_plan={'mode': 'music_driven'})
+                first, _ = compile_h3_official_prompt(source, [], [], **kwargs)
+                second, _ = compile_h3_official_prompt(first, [], [], **kwargs)
+                for prompt in (first, second):
+                    visual = prompt.split('detailed_description:', 1)[1].split('overall_soundscape:', 1)[0]
+                    self.assertEqual(visual.count(action), 1)
+                    self.assertEqual(visual.count('At the start,'), 1)
+                    self.assertEqual(visual.count('At the end,'), 1)
+                    self.assertEqual(visual.count('Warm daylight'), 1)
+
     def test_music_compilation_is_idempotent_and_preserves_non_song_expression(self):
         subject = {'speaker_name': 'Kitten', 'visual_description': 'Kitten in silver armor', 'performance_role': 'vocalist'}
         direction = music_performance_direction([subject], 'active')

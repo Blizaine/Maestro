@@ -3037,19 +3037,13 @@ def _split_ref2va_style_opening(body: str) -> tuple[str, str]:
     if shot and not timed_first_shot:
         text = text[shot.end():].strip()
 
-    lighting = _h3_labeled_value(text, "Lighting")
-    mood = _h3_labeled_value(text, "Mood")
-    if lighting or mood:
-        details = "; ".join(value for value in (lighting, mood) if value)
-        opening = (
-            "The target video maintains the requested visual treatment, with "
-            f"{details}."
-        )
-    else:
-        opening = (
-            "The target video maintains the requested visual style, lighting, "
-            "color, and cinematic texture."
-        )
+    # Free-form prose after a Lighting/Mood label can include the whole action
+    # timeline. Echoing that span here performed source transitions twice.
+    # Keep authored lighting and mood in the body, with a neutral style opening.
+    opening = (
+        "The target video maintains the requested visual style, lighting, "
+        "color, and cinematic texture."
+    )
     return opening, text
 
 

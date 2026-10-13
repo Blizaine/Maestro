@@ -129,7 +129,7 @@ class MusicMouthCueTests(unittest.TestCase):
             self.assertNotIn("sings the riff", text)
             self.assertNotIn("shouts loudly", text)
         self.assertIn("Camera pushes in", shot.video_prompt)
-        self.assertIn("Mara the lead singer in red keeps relaxed closed lips through this interval", shot.video_prompt)
+        self.assertIn("Mara keeps relaxed closed lips through this interval", shot.video_prompt)
 
     def test_h3_final_compile_catches_conflicts_in_source_and_ending(self):
         for mode in ("ref2va", "i2va", "fl2va"):
@@ -147,7 +147,7 @@ class MusicMouthCueTests(unittest.TestCase):
                 self.assertNotIn("bellows", first)
                 self.assertNotIn("mid-vocalization", first)
                 self.assertIn("Camera pushes in", first)
-                self.assertIn("Mara the lead singer in red keeps relaxed closed lips through this interval", first)
+                self.assertIn("Mara keeps relaxed closed lips through this interval", first)
                 self.assertEqual(validate_h3_prompt_contract(first, mode=mode), [])
                 compile_h3_clip_plans([plan])
                 self.assertEqual(plan["video_prompt"], first)
@@ -157,7 +157,7 @@ class MusicMouthCueTests(unittest.TestCase):
         prompt, _ = compile_h3_official_prompt("Cal the drummer shouts. His arm strikes the cymbal.", [DRUMMER], [], **kwargs)
         again, _ = compile_h3_official_prompt(prompt, [DRUMMER], [], **kwargs)
         self.assertIn("His arm strikes the cymbal", again)
-        self.assertEqual(again.count("Cal the drummer in blue plays with relaxed closed lips"), 1)
+        self.assertEqual(again.count("Cal plays with relaxed closed lips"), 1)
         self.assertNotIn("drummer shouts", again)
         self.assertNotIn("singer", again.casefold())
 

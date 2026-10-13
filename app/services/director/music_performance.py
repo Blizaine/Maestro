@@ -13,6 +13,8 @@ MUSIC_PERFORMANCE_RULES = """MUSIC PERFORMANCE ROLES:
   or reference: vocalist (sings in this shot), instrumentalist (plays without singing),
   non_vocal (dancer, listener, or other non-singing person), or non_performer.
   Do not infer a role from camera focus, musical energy, or an unknown voice.
+- An explicitly assigned singer stays a vocalist when shown in narrative or movement
+  shots, including riding; vocal activity controls mouth movement during each interval.
 - A visible assigned vocalist lip-syncs only their own audible part. Keep their lips relaxed
   and closed during instrumental intros, gaps, and pauses; detected vocals do not require
   that vocalist to be visible.
@@ -69,11 +71,16 @@ def strip_legacy_music_performance_direction(
     for activity in (vocal_activity, None, "active", "silent", "unknown"):
         for subject in subjects or ():
             for context in (project_context, ""):
-                emitted = music_performance_direction(
-                    [subject], activity, project_context=context,
-                )
-                if emitted:
-                    text = text.replace(emitted, "")
+                description = _cue_description(subject)
+                labels = list(dict.fromkeys(filter(None, (_cue_label(subject), description))))
+                for role in PERFORMANCE_ROLES:
+                    for label in labels:
+                        emitted = _compile_music_performance_direction(
+                            [subject], activity, project_context=context,
+                            role_overrides=[role], labels=[label],
+                        )
+                        if emitted:
+                            text = text.replace(emitted, "")
     for emitted in (_LEGACY_GLOBAL_DIRECTION, *_LEGACY_ACTIVITY_DIRECTIONS):
         text = text.replace(emitted, "")
 
@@ -134,32 +141,47 @@ def strip_legacy_music_performance_direction(
 
 def music_performance_direction(subjects=(), vocal_activity=None, *, project_context=""):
     """Compile concise directions only for people explicitly visible in this shot."""
-    parts = []
-    for subject in subjects or ():
-        def field(key):
-            return subject.get(key) if isinstance(subject, Mapping) else getattr(subject, key, None)
+    return _compile_music_performance_direction(
+        subjects, vocal_activity, project_context=project_context,
+    )
 
-        role = field("performance_role")
-        description = re.sub(r"\s+", " ", str(field("visual_description") or "")).strip(" .")
-        if not description or role not in PERFORMANCE_ROLES or role == "non_performer":
+
+def _compile_music_performance_direction(
+    subjects=(), vocal_activity=None, *, project_context="",
+    role_overrides=None, labels=None,
+):
+    parts = []
+    for index, subject in enumerate(subjects or ()):
+        role = (
+            role_overrides[index]
+            if role_overrides is not None and index < len(role_overrides)
+            else resolved_music_performance_role(subject, project_context)
+        )
+        description = _cue_description(subject)
+        label = (
+            labels[index]
+            if labels is not None and index < len(labels)
+            else _cue_label(subject)
+        )
+        if not label or role not in PERFORMANCE_ROLES or role == "non_performer":
             continue
         requested_expression = _requested_expression(subject, project_context)
         if role == "vocalist":
             if vocal_activity in {"silent", "unknown"}:
                 if requested_expression:
                     direction = (
-                        f"{description} keeps relaxed closed lips except during the "
+                        f"{label} keeps relaxed closed lips except during the "
                         "explicitly requested non-song expression; do not lip-sync "
                         "unless their own vocal part is audible."
                     )
                 else:
                     direction = (
-                        f"{description} keeps relaxed closed lips through this interval; "
+                        f"{label} keeps relaxed closed lips through this interval; "
                         "no singing or lyric mouthing."
                     )
             else:
                 direction = (
-                    f"{description} lip-syncs only their own audible vocal part, "
+                    f"{label} lip-syncs only their own audible vocal part, "
                     "with relaxed closed lips during instrumental gaps."
                 )
             if requested_expression:
@@ -167,7 +189,7 @@ def music_performance_direction(subjects=(), vocal_activity=None, *, project_con
             parts.append(direction)
         elif role == "instrumentalist" and _WIND_PLAYER.search(description):
             direction = (
-                f"{description} uses the instrument's natural embouchure without "
+                f"{label} uses the instrument's natural embouchure without "
                 "singing or mouthing lyrics."
             )
             if requested_expression:
@@ -176,19 +198,19 @@ def music_performance_direction(subjects=(), vocal_activity=None, *, project_con
         elif role == "instrumentalist":
             if requested_expression:
                 direction = (
-                    f"{description} keeps relaxed closed lips except during the "
+                    f"{label} keeps relaxed closed lips except during the "
                     "explicitly requested non-song expression; never lip-sync to "
                     "source vocals, and keep hands and body active."
                 )
             else:
                 direction = (
-                    f"{description} plays with relaxed closed lips, without singing or "
+                    f"{label} plays with relaxed closed lips, without singing or "
                     "mouthing lyrics; keep hands and body active."
                 )
             parts.append(direction)
         else:
             direction = (
-                f"{description} remains a non-singing presence; preserve their "
+                f"{label} remains a non-singing presence; preserve their "
                 "described action without lip-syncing to the soundtrack."
             )
             if requested_expression:
@@ -259,6 +281,19 @@ def _field(subject, key):
     return subject.get(key) if isinstance(subject, Mapping) else getattr(subject, key, None)
 
 
+def _cue_description(subject):
+    return re.sub(
+        r"\s+", " ", str(_field(subject, "visual_description") or "")
+    ).strip(" .")
+
+
+def _cue_label(subject):
+    """Prefer the explicit cast name; keep appearance prose for unnamed subjects."""
+    return re.sub(
+        r"\s+", " ", str(_field(subject, "speaker_name") or "")
+    ).strip(" .") or _cue_description(subject)
+
+
 def _aliases(subject):
     description = str(_field(subject, "visual_description") or "")
     aliases = [str(_field(subject, key) or "").strip() for key in ("speaker_name", "character_id")]
@@ -271,6 +306,102 @@ def _aliases(subject):
     if opening and opening.casefold() not in {"the man", "the woman", "a man", "a woman", "person", "performer"}:
         aliases.append(opening)
     return [re.compile(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", re.I) for alias in aliases if alias]
+
+
+_GENERIC_IDENTITY_LABELS = {
+    "a man", "the man", "a woman", "the woman", "a person", "the person",
+    "person", "performer", "a performer", "the performer", "unidentified person",
+}
+
+
+def _assignment_aliases(subject):
+    """Use mapped identities and distinctive descriptions, not generic roles."""
+    aliases = []
+    speaker_name = str(_field(subject, "speaker_name") or "").strip()
+    if speaker_name and speaker_name.casefold() not in _GENERIC_IDENTITY_LABELS:
+        aliases.append(speaker_name)
+    character_id = str(_field(subject, "character_id") or "").strip()
+    if character_id:
+        aliases.append(character_id)
+    description = str(_field(subject, "visual_description") or "")
+    opening = re.split(
+        r"\s+(?:in|with|wearing)\s+|[,(]", description,
+        maxsplit=1, flags=re.I,
+    )[0].strip()
+    if opening and opening.casefold() not in _GENERIC_IDENTITY_LABELS:
+        aliases.append(opening)
+    return [
+        re.compile(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", re.I)
+        for alias in dict.fromkeys(aliases)
+    ]
+
+
+_VOCAL_ASSIGNMENT = re.compile(
+    r"\b(?:sing(?:s|ing)?|sang|sung|rap(?:s|ping|ped)?|"
+    r"(?:lead\s+|backing\s+)?(?:singer|vocalist)|"
+    r"vocali[sz](?:es|ing|ed)|lip[- ]sync(?:s|ing)?|"
+    r"perform(?:s|ing)?\s+(?:the\s+)?(?:song|vocals?)|"
+    r"provides?\s+(?:the\s+)?vocals?)\b",
+    re.I,
+)
+_NEGATED_VOCAL_PREFIX = re.compile(
+    r"(?:\b(?:is|are|was|were|do|does|did|will|would|should|must|can|could|"
+    r"may|might|has|have|had)\s+)?"
+    r"(?:not|never|without|no|isn't|aren't|wasn't|weren't|doesn't|don't|"
+    r"didn't|won't|wouldn't|shouldn't|mustn't|can't|couldn't|hasn't|haven't)\s+"
+    r"(?:(?:to|be|being|a|an|the|lead|backing|really|currently|ever)\s*)*$",
+    re.I,
+)
+_DIRECT_ASSIGNMENT_MODIFIERS = re.compile(
+    r"^(?:(?:is|are|was|were|be|been|being|will|would|should|must|can|could|"
+    r"may|might|do|does|did|has|have|had|to|the|a|an|lead|backing|assigned|"
+    r"now|also|still|currently|together|both|happily|proudly|loudly|softly|"
+    r"enthusiastically)\b\s*|\w+ly\b\s*)*$",
+    re.I,
+)
+_COORDINATED_ASSIGNMENT_GAP = re.compile(
+    r"^(?:(?:,\s*)?(?:and|&)\s+|,\s+)"
+    r"(?:the\s+)?[A-Z][\w'’\-]*(?:\s+[A-Z][\w'’\-]*){0,2}"
+    r"(?:(?:\s*,\s*(?:and\s+)?|\s+and\s+)"
+    r"(?:the\s+)?[A-Z][\w'’\-]*(?:\s+[A-Z][\w'’\-]*){0,2})*"
+    r"(?:\s+(?:is|are|was|were|will|would|should|can|could|must|may|might|"
+    r"also|both|together|now))*$"
+)
+
+
+def _direct_assignment_gap(gap):
+    gap = re.sub(r"\s+", " ", gap or "").strip()
+    if not gap or _DIRECT_ASSIGNMENT_MODIFIERS.fullmatch(gap):
+        return True
+    # Shared predicates such as "Mara and Kitten sing" are explicit for both
+    # cast identities, while a different person watching the singer is not.
+    return bool(_COORDINATED_ASSIGNMENT_GAP.fullmatch(gap))
+
+
+def _has_explicit_vocal_assignment(subject, project_context):
+    aliases = _assignment_aliases(subject)
+    if not aliases:
+        return False
+    for sentence in re.split(r"[.!?;]\s*", project_context or ""):
+        for predicate in _VOCAL_ASSIGNMENT.finditer(sentence):
+            prefix = sentence[:predicate.start()]
+            if _NEGATED_VOCAL_PREFIX.search(prefix[-96:]):
+                continue
+            for alias in aliases:
+                for mention in alias.finditer(sentence, 0, predicate.start()):
+                    if _direct_assignment_gap(sentence[mention.end():predicate.start()]):
+                        return True
+    return False
+
+
+def resolved_music_performance_role(subject, project_context=""):
+    """Resolve a shot role from the explicit project assignment for this identity."""
+    role = _field(subject, "performance_role")
+    if role == "vocalist":
+        return role
+    if _has_explicit_vocal_assignment(subject, project_context):
+        return "vocalist"
+    return role
 
 
 def _requested_expression(subject, project_context):
@@ -344,7 +475,7 @@ def _remove_collective_active_vocal_closure(
 
     vocalists = [
         subject for subject in subjects or ()
-        if _field(subject, "performance_role") == "vocalist"
+        if resolved_music_performance_role(subject, project_context) == "vocalist"
     ]
     if (
         vocal_activity != "active"
@@ -394,17 +525,26 @@ def constrain_music_performance(prompt, subjects=(), vocal_activity=None, *, pro
         vocal_activity,
         project_context=project_context,
     )
-    people = [s for s in subjects or () if _field(s, "performance_role") in {"vocalist", "instrumentalist"}]
+    subject_list = list(subjects or ())
+    roles = [
+        resolved_music_performance_role(subject, project_context)
+        for subject in subject_list
+    ]
+    people = [
+        subject for subject, role in zip(subject_list, roles)
+        if role in {"vocalist", "instrumentalist"}
+    ]
     if not people:
         return text
     aliases = [_aliases(s) for s in people]
     blocked = []
     for person in people:
+        role = resolved_music_performance_role(person, project_context)
         explicitly_requested = _requested_expression(person, project_context)
         blocked.append(
             not explicitly_requested
             and not _WIND_PLAYER.search(str(_field(person, "visual_description") or ""))
-            and (_field(person, "performance_role") == "instrumentalist" or vocal_activity in {"silent", "unknown"})
+            and (role == "instrumentalist" or vocal_activity in {"silent", "unknown"})
         )
     # Resolve simple sentence-local subjects, then their following pronouns.
     # Never transfer a drummer's restriction to a singer in a mixed shot.
