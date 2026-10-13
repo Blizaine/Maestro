@@ -1835,6 +1835,8 @@ interface AppState {
   slidingWindowOverlap: number
   setSlidingWindowOverlap: (frames: number) => void
   slidingWindowLocked: boolean
+  /** In-memory ownership of the window geometry loaded from a Director clip. */
+  restoredWindowSelectionKey: string | null
   setSlidingWindowLocked: (locked: boolean) => void
   setH3ExtendedDuration: (enabled: boolean) => void
   /** Durable H3 pass lengths keyed by exact model type and resolution. */
@@ -4216,6 +4218,8 @@ export const useStore = create<AppState>((set, get) => ({
       }
       return {
         params: nextParams,
+        ...((key === 'model_type' || key === 'resolution') && value !== s.params[key]
+          ? { restoredWindowSelectionKey: null } : {}),
         ...(invalidatesH3Plan ? { h3WindowPlan: null } : {}),
         ...(invalidatesH3Plan ? { promptEnhanceError: null } : {}),
       }
@@ -4369,7 +4373,12 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
   setParams: (partial) => {
-    set(s => ({ params: { ...s.params, ...partial } }))
+    set(s => ({
+      params: { ...s.params, ...partial },
+      ...((partial.model_type != null && partial.model_type !== s.params.model_type)
+        || (partial.resolution != null && partial.resolution !== s.params.resolution)
+        ? { restoredWindowSelectionKey: null } : {}),
+    }))
   },
 
   settingsOpen: false,
@@ -5752,6 +5761,7 @@ export const useStore = create<AppState>((set, get) => ({
     set(s => ({
       resolutionPreset: preset,
       params: { ...s.params, resolution },
+      ...(resolution !== s.params.resolution ? { restoredWindowSelectionKey: null } : {}),
       h3WindowPlan: null,
     }))
   },
@@ -5769,6 +5779,7 @@ export const useStore = create<AppState>((set, get) => ({
       resolutionPreset: preset,
       aspectRatio: ratio,
       params: { ...s.params, resolution },
+      ...(resolution !== s.params.resolution ? { restoredWindowSelectionKey: null } : {}),
       h3WindowPlan: null,
     }))
   },
@@ -6009,6 +6020,7 @@ export const useStore = create<AppState>((set, get) => ({
     })
   },
   slidingWindowLocked: false,
+  restoredWindowSelectionKey: null,
   setH3ExtendedDuration: (enabled) => {
     const state = get()
     if (!supportsH3ExtendedDuration(state.modelOptions)) return
@@ -12080,6 +12092,7 @@ export const useStore = create<AppState>((set, get) => ({
     const leaveAvatar = currentMode === 'video' && get().studioVideoWorkflow === 'avatar' && !avatarModel
     set(s => ({
       ...((avatarModel || leaveAvatar) ? { studioVideoWorkflow: avatarModel ? 'avatar' as const : 'frames' as const } : {}),
+      ...(modelType !== previousModelType ? { restoredWindowSelectionKey: null } : {}),
       ...(avatarModel ? {
         studioVideoModelPerCreateRoute: { ...s.studioVideoModelPerCreateRoute, avatar: modelType },
       } : {}),
@@ -12930,7 +12943,7 @@ export const useStore = create<AppState>((set, get) => ({
       || p._audio_sub_mode === 'music'
       || p._audio_sub_mode === 'sfx'
     ) ? p._audio_sub_mode : undefined
-    newParams._duration_planning_mode = (
+    newParams._duration_planning_mode = isDirectorClip ? 'duration' : (
       p._duration_planning_mode === 'duration'
       || p._duration_planning_mode === 'windows'
       || p._duration_planning_mode === 'auto'
@@ -13434,8 +13447,41 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
 
+    const fps = restoredModelOptions?.fps ?? model?.fps ?? 16
+    const restoredNativePassFrames = isDirectorClip
+      ? newParams.sliding_window_size ?? newParams.video_length
+      : newParams.minimax_h3_sequence_clip_frames ?? newParams.sliding_window_size
+    const restoreDirectorWindow = isDirectorClip
+      && restoredNativePassFrames != null
+      && Number.isFinite(restoredNativePassFrames)
+      && restoredNativePassFrames > 0
+    if (restoreDirectorWindow) {
+      // A pencil load owns its exact native geometry. Hardware Auto remains
+      // available when the user unlocks the window or chooses another setup.
+      newParams.sliding_window_memory_override = true
+      const needsSequence = Number(newParams.video_length) > restoredNativePassFrames
+      if (restoredIsH3) {
+        const omni = restoredModelOptions?.omni_reference === true
+        newParams.minimax_h3_multi_window = !omni && needsSequence
+        newParams.minimax_h3_reference_sequence = omni && needsSequence
+        if (omni) {
+          newParams.minimax_h3_sequence_clip_frames = restoredNativePassFrames
+          newParams.minimax_h3_sequence_memory_override = true
+        }
+      }
+    }
+
     set(s => ({
       sidebarMode: 'studio',
+      restoredWindowSelectionKey: restoreDirectorWindow
+        ? h3WindowOverrideKey(modelType, String(newParams.resolution || ''))
+        : null,
+      ...(restoreDirectorWindow ? {
+        slidingWindowSeconds: restoredNativePassFrames / fps,
+        slidingWindowLocked: true,
+        ...(newParams.sliding_window_overlap != null
+          ? { slidingWindowOverlap: newParams.sliding_window_overlap } : {}),
+      } : {}),
       ...(isDirectorClip && s.enhanceOnGenerationRevision === restoreEnhancementRevision
         ? {
             // Keep a restored clip's reviewed prompt exact even when the
@@ -13628,16 +13674,13 @@ export const useStore = create<AppState>((set, get) => ({
     // placeholder video_length of 0/81, and edit/control-fps workflows write
     // the authoritative seconds separately. Only derive from frames for old
     // video sidecars that predate those fields.
-    const fps = model?.fps || 16
     const frames = newParams.video_length || 81
     if (restoredDuration > 0) {
       set({ durationSeconds: isDirectorClip ? restoredDuration : Math.round(restoredDuration * 10) / 10 })
     } else if (restoredModelMode === 'video' || restoredModelMode === 'avatar') {
       set({ durationSeconds: Math.round((frames / fps) * 10) / 10 })
     }
-    const restoredNativePassFrames = newParams.minimax_h3_sequence_clip_frames
-      ?? newParams.sliding_window_size
-    if (restoredNativePassFrames) {
+    if (restoredNativePassFrames && !isDirectorClip) {
       set({
         slidingWindowSeconds: restoredNativePassFrames / fps,
         slidingWindowLocked: newParams.minimax_h3_reference_sequence === true

@@ -1605,9 +1605,13 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("const restoredH3SequencePromptMode", store)
         self.assertIn("p.minimax_h3_sequence_prompt_mode === 'creative'", store)
         self.assertIn("p.minimax_h3_window_storyboard === false ? 'manual' : 'auto'", store)
-        self.assertIn(
-            "newParams.minimax_h3_sequence_prompt_mode = restoredH3SequencePromptMode",
-            store,
+        self.assertTrue(
+            re.search(
+                r"newParams\.minimax_h3_sequence_prompt_mode\s*=\s*isDirectorClip"
+                r"\s*\?\s*'manual'\s*:\s*restoredH3SequencePromptMode",
+                store,
+            ),
+            "Director clips retain their exact prompt; ordinary Studio clips restore their saved writer mode",
         )
         non_omni_cleanup = store.split("if (isOmniReference) {", 1)[1].split(
             "if (!isH3Model) {", 1

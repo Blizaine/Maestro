@@ -34,6 +34,21 @@ After an idle restart, the live metadata API returned the expected scoped
 recipes for those four outputs, and their archived reference/soundtrack URLs
 were reachable. The server also served the current frontend bundle.
 
+The Director clip window follow-up exercises the actual mounted Studio duration
+controls during model and resolution hydration. Frames and References recipes
+retain a single 345-frame window even when the hardware Auto profile recommends
+243 frames, including two mounted panels and a Veda-to-SLA change. The intercepted
+References submission retains the exact prompt, seed and single-window geometry;
+ordinary new Auto generations still follow the hardware profile. Replaying the
+old unconditional selection reset fails this browser regression. Existing
+Studio duration, measured-default, reference-duration and Editor draft browser
+checks passed, along with 151 focused H3/settings/duration Python tests, frontend
+lint, TypeScript and the production build. The prior CI source assertion was
+updated to accept Director's exact-prompt restore while retaining ordinary Studio
+writer-mode restoration. The running server serves the rebuilt UI without a
+restart. These checks used intercepted submissions and did not interrupt or
+enqueue a live generation.
+
 Expanded H3 identity regressions passed 102 focused tests. An isolated final
 compilation of all 16 saved music-video plans produced two uniquely mapped
 subjects per clip, with no duplicate third subject. The historical prompts

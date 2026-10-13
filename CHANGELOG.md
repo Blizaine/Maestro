@@ -10,6 +10,8 @@ Public Dev testing candidate; not promoted to Main. See the [full release notes]
 - Restore individual Director clips into Studio from their own prompt, seed,
   timing and media inputs; retain full Director restore for joined videos.
   Reconstruct supported older clip recipes without rewriting saved media.
+- Keep a restored Director clip's duration and window geometry through model
+  and resolution hydration, so Auto does not silently add another window.
 - Extend H3 reference identity matching to qualified character names and semantic
   IDs, retaining unique picture ownership and distinct-character checks.
 - Use character-neutral wording in shared Director and H3 reference instructions

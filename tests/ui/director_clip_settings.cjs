@@ -9,7 +9,16 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
 
 const referencesModel = 'minimax_h3_ref2va_clip_restore_test';
 const framesModel = 'minimax_h3_frames_clip_restore_test';
-const modelTypes = [referencesModel, framesModel];
+const previousFramesModel = 'minimax_h3_frames_previous_clip_restore_test';
+const modelTypes = [referencesModel, framesModel, previousFramesModel];
+const clipRestoreMemoryPolicy = {
+  checkpoint: 'pruned',
+  auto_resolution_pixels: {'864x480': 414720, '1280x720': 921600},
+  resolution_bands: [{
+    min_pixels: 0,
+    vram_tiers: [{max_vram_gb: 24, frames: 243, fallback_resolution: '864x480'}],
+  }],
+};
 const optionsFor = modelType => {
   const references = modelType === referencesModel;
   return {
@@ -23,7 +32,9 @@ const optionsFor = modelType => {
     default_guidance_scale: 4,
     guidance_max_phases: 1,
     omni_reference: references,
-    sliding_window: !references,
+    sliding_window: true,
+    sliding_window_memory_policy: clipRestoreMemoryPolicy,
+    omni_sequence_memory_policy: clipRestoreMemoryPolicy,
     sliding_window_auto_prompt_pacing: true,
     sliding_window_defaults: {
       window_min: 124,
@@ -39,6 +50,8 @@ const optionsFor = modelType => {
     },
     veda_attention: true,
     veda_attention_status: {supported: true},
+    sla_attention: true,
+    sla_attention_default: false,
   };
 };
 
@@ -106,10 +119,26 @@ function clipMetadata({index, modelType, prompt, params = {}, uploads = {}, urls
   const bundle = await esbuild.build({
     stdin: {
       contents: `
+        import {createElement} from 'react';
+        import {createRoot} from 'react-dom/client';
+        import {DurationSlider} from './src/components/Sidebar/DurationSlider';
         import {useStore, shouldEnhanceOnGeneration} from './src/stores/useStore';
         import {subscribeMaestroAlerts} from './src/lib/notifications';
         window.store = useStore;
         window.shouldEnhanceOnGeneration = shouldEnhanceOnGeneration;
+        window.mountDurationSlider = (copies = 1) => {
+          const container = document.createElement('div');
+          container.id = 'duration-slider-test';
+          document.body.appendChild(container);
+          window.durationSliderRoot = createRoot(container);
+          window.durationSliderRoot.render(createElement('div', {},
+            Array.from({length: copies}, (_, key) => createElement(DurationSlider, {key, includeWindowSettings: true}))));
+        };
+        window.unmountDurationSlider = () => {
+          window.durationSliderRoot?.unmount();
+          document.getElementById('duration-slider-test')?.remove();
+          window.durationSliderRoot = null;
+        };
         window.alerts = [];
         subscribeMaestroAlerts(alert => window.alerts.push(alert));
       `,
@@ -195,6 +224,7 @@ function clipMetadata({index, modelType, prompt, params = {}, uploads = {}, urls
           modelsLoaded: true,
           enabledModels: new Set(modelTypes),
           selectedModelPerMode: {video: modelType},
+          restoredWindowSelectionKey: null,
           savedParamsPerMode: {},
           savedLoraPerMode: {},
           savedPromptPerMode: {},
@@ -336,6 +366,7 @@ function clipMetadata({index, modelType, prompt, params = {}, uploads = {}, urls
         image_refs: [imageRefPath],
         audio_guide: undefined,
         minimax_h3_references: undefined,
+        sliding_window_memory_override: true,
       },
       uploads: {
         image_start: '_director_assets/saved-director-project/frames/start.png',
@@ -348,9 +379,52 @@ function clipMetadata({index, modelType, prompt, params = {}, uploads = {}, urls
     });
     await seed(clipSeven, output('clip-7.mp4', archiveWorkspace), framesModel);
     await page.evaluate(() => window.store.setState({audioGuideFilename: 'whole-song.wav'}));
+
+    // Mount the actual Studio duration controls on a prior H3 model and
+    // resolution. The archived clip then changes both selectors while the
+    // hardware profile recommends 243 frames (10.1s) for ordinary Auto use.
+    const priorModelOptions = await page.evaluate(async modelType => {
+      const response = await fetch(`/api/v1/model-options/${modelType}`);
+      return response.json();
+    }, previousFramesModel);
+    await page.evaluate(({modelType, modelOptions}) => {
+      const store = window.store;
+      const state = store.getState();
+      store.setState({
+        modelOptions,
+        selectedModelPerMode: {...state.selectedModelPerMode, video: modelType},
+        systemStats: {gpu: {vram_total_gb: 16}, ram: {total_gb: 64}},
+        durationSeconds: 14.375,
+        slidingWindowSeconds: 14.375,
+        slidingWindowLocked: false,
+        params: {
+          ...state.params,
+          model_type: modelType,
+          resolution: '1280x720',
+          prompt: 'Create a 14.4 second scene.',
+          _duration_planning_mode: 'duration',
+          video_length: 345,
+          duration_seconds: 14.375,
+          sliding_window_size: 345,
+          sliding_window_memory_override: false,
+          minimax_h3_multi_window: true,
+          minimax_h3_reference_sequence: false,
+          override_attention: 'sla',
+        },
+      });
+    }, {modelType: previousFramesModel, modelOptions: priorModelOptions});
+    await page.evaluate(() => window.mountDurationSlider(2));
+    await page.waitForFunction(() => document.querySelector('#duration-slider-test [aria-label="Window length"]'));
     await page.evaluate(() => window.store.getState().loadSettingsFromOutput());
     await page.waitForFunction(() => window.store.getState().startImage?.name === 'start.png'
       && window.store.getState().imageRefs.length === 1);
+    await page.waitForFunction(() => {
+      const state = window.store.getState();
+      return state.modelOptions?.model_type === 'minimax_h3_frames_clip_restore_test'
+        && state.restoredWindowSelectionKey === 'minimax_h3_frames_clip_restore_test::864x480'
+        && state.slidingWindowLocked
+        && state.slidingWindowSeconds === 345 / 24;
+    });
     assert.equal(await page.evaluate(() => window.store.getState().params.prompt), 'Clip seven exact prompt.');
     assert.equal(await page.evaluate(() => window.store.getState().params.image_start), startPath);
     assert.equal(await page.evaluate(() => window.store.getState().startImage.name), 'start.png');
@@ -361,6 +435,106 @@ function clipMetadata({index, modelType, prompt, params = {}, uploads = {}, urls
       && request.workspace === archiveWorkspace), 'the nested start frame is hydrated from its archive workspace');
     assert.ok(fileRequests.some(request => request.pathname.endsWith('/refs/look.png')
       && request.workspace === archiveWorkspace), 'nested reference previews use the selected output workspace');
+    assert.match(await page.locator('#duration-slider-test').innerText(), /1 window · 14\.4s final output/,
+      'the mounted Studio duration control displays the restored 345-frame clip as one window');
+
+    await page.evaluate(() => window.store.getState().setParam('override_attention', 'sla'));
+    await page.waitForFunction(() => window.store.getState().params.override_attention === 'sla');
+    assert.equal(await page.evaluate(() => window.store.getState().slidingWindowLocked), true,
+      'changing the attention backend preserves the restored manual window');
+    assert.equal(await page.evaluate(() => window.store.getState().slidingWindowSeconds), 345 / 24,
+      'changing the attention backend does not replace the restored 345-frame window with the Auto profile');
+    assert.match(await page.locator('#duration-slider-test').innerText(), /1 window · 14\.4s final output/,
+      'Veda-to-SLA leaves the mounted clip at one window');
+
+    // Match the reported References workflow too, keeping both mounted
+    // duration panels alive across the model/resolution hydration.
+    const referenceClipSeven = {
+      ...clipZero,
+      director_clip_index: 6,
+      params: {
+        ...clipZero.params,
+        prompt: 'Reference clip seven exact prompt.',
+        resolution: '1280x704',
+        sliding_window_size: 345,
+        sliding_window_memory_override: false,
+        minimax_h3_reference_sequence: true,
+        minimax_h3_sequence_clip_frames: 243,
+        minimax_h3_sequence_memory_override: false,
+      },
+    };
+    await page.evaluate(({metadata, media}) => window.store.setState({
+      selectedOutputMeta: metadata, selectedOutput: 0, outputs: [media],
+    }), {metadata: referenceClipSeven, media: output('reference-clip-7.mp4', archiveWorkspace)});
+    await page.evaluate(() => window.store.getState().loadSettingsFromOutput());
+    await page.waitForFunction(() => window.store.getState().params.model_type === 'minimax_h3_ref2va_clip_restore_test'
+      && window.store.getState().slidingWindowSeconds === 345 / 24
+      && window.store.getState().slidingWindowLocked);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_reference_sequence), false);
+    assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_sequence_clip_frames), 345);
+    assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_sequence_memory_override), true);
+    assert.equal(await page.evaluate(() => window.store.getState().params._duration_planning_mode), 'duration');
+    assert.deepEqual(await page.evaluate(() => window.store.getState().h3WindowOverrides), {},
+      'restoring a clip does not save a per-model hardware override');
+    assert.equal((await page.locator('#duration-slider-test').innerText()).match(/1 window · 14\.4s final output/g)?.length, 2,
+      'both mounted References duration panels retain the original single window');
+    await page.evaluate(() => window.store.getState().setParam('override_attention', 'sla'));
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.evaluate(() => window.store.getState().slidingWindowSeconds), 345 / 24);
+    assert.equal(await page.evaluate(() => window.store.getState().durationSeconds), 345 / 24);
+    await page.evaluate(() => window.store.getState().startGeneration('queue'));
+    assert.equal(generationRequests.length, 2);
+    const referenceRequest = generationRequests[1];
+    assert.equal(referenceRequest.prompt, 'Reference clip seven exact prompt.');
+    assert.equal(referenceRequest.seed, 8302);
+    assert.equal(referenceRequest.override_attention, 'sla');
+    assert.equal(referenceRequest.video_length, 345);
+    assert.equal(referenceRequest.sliding_window_size, 345);
+    assert.equal(referenceRequest.minimax_h3_reference_sequence, false,
+      'the matching SLA request remains a single native References window');
+    assert.equal(referenceRequest.restoredWindowSelectionKey, undefined,
+      'transient UI restore ownership is not a generation setting');
+    await page.evaluate(() => window.unmountDurationSlider());
+
+    const autoModelOptions = await page.evaluate(async modelType => {
+      const response = await fetch(`/api/v1/model-options/${modelType}`);
+      return response.json();
+    }, framesModel);
+    await page.evaluate(({modelType, modelOptions}) => {
+      const store = window.store;
+      const state = store.getState();
+      store.setState({
+        modelOptions,
+        restoredWindowSelectionKey: null,
+        systemStats: {gpu: {vram_total_gb: 16}, ram: {total_gb: 64}},
+        durationSeconds: 14.375,
+        slidingWindowSeconds: 345 / 24,
+        slidingWindowLocked: false,
+        params: {
+          ...state.params,
+          model_type: modelType,
+          resolution: '864x480',
+          prompt: 'Create a 14.375 second scene.',
+          _duration_planning_mode: 'auto',
+          video_length: 345,
+          duration_seconds: 14.375,
+          sliding_window_size: 345,
+          sliding_window_memory_override: false,
+          minimax_h3_multi_window: false,
+          minimax_h3_reference_sequence: false,
+          override_attention: 'sla',
+        },
+      });
+    }, {modelType: framesModel, modelOptions: autoModelOptions});
+    await page.evaluate(() => window.mountDurationSlider());
+    await page.waitForFunction(() => window.store.getState().slidingWindowSeconds === 243 / 24
+      && window.store.getState().params.minimax_h3_multi_window === true);
+    assert.equal(await page.evaluate(() => window.store.getState().slidingWindowLocked), false,
+      'a user-created Auto duration remains unlocked');
+    assert.match(await page.locator('#duration-slider-test').innerText(), /2 windows of up to 10\.1s/,
+      'ordinary Auto still follows the 243-frame hardware recommendation');
+    await page.evaluate(() => window.unmountDurationSlider());
 
     const beforeError = await page.evaluate(() => {
       const state = window.store.getState();

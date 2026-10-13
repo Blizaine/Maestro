@@ -68,6 +68,7 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
   const h3FirstLastMultiWindow = useStore(s => s.params.minimax_h3_multi_window === true)
   const ltxMultiWindow = useStore(s => s.params.ltx_multi_window === true)
   const h3WindowOverrides = useStore(s => s.h3WindowOverrides)
+  const restoredWindowSelectionKey = useStore(s => s.restoredWindowSelectionKey)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
   const totalRamGb = useStore(s => s.systemStats?.ram?.total_gb ?? 0)
   const fps = modelOptions?.fps ?? 16
@@ -194,14 +195,21 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
   useEffect(() => {
     if (previousSelection.current !== overrideKey) {
       previousSelection.current = overrideKey
-      setLocked(extendedDuration || savedOverrideFrames != null)
-      if (!extendedDuration && savedOverrideFrames != null) setWindowSize(savedOverrideFrames / fps)
+      // A restored Director clip carries an explicit one-shot window choice.
+      // Keep that choice through the model-options transition triggered by the
+      // restore; ordinary model/resolution selections still use the saved or
+      // recommended capacity for their own key.
+      if (restoredWindowSelectionKey !== overrideKey) {
+        setLocked(extendedDuration || savedOverrideFrames != null)
+        if (!extendedDuration && savedOverrideFrames != null) setWindowSize(savedOverrideFrames / fps)
+      }
     }
     // A child Auto effect may already have changed the timeline this commit.
     // Reconcile that current value instead of restoring this render's stale one.
     setDuration(useStore.getState().durationSeconds)
   }, [duration, durationPlanningMode, windowSize, resolution, modelType, totalVramGb, totalRamGb, savedOverrideFrames, locked, overlap,
-    modelOptions, setDuration, overrideKey, setLocked, setWindowSize, fps, extendedDuration])
+    modelOptions, setDuration, overrideKey, setLocked, setWindowSize, fps, extendedDuration,
+    restoredWindowSelectionKey])
 
   const imageMode = useStore(s => s.params.image_mode)
   const isMultiClip = imageMode === 2
