@@ -398,7 +398,7 @@ class MusicNarrativeIntegrationTests(unittest.TestCase):
         rejected = copy.deepcopy(previous)
         rejected.update(
             environment="Open water in the middle of the lake.",
-            video_prompt="[Shot 1] The boat sails across the lake with the sailor aboard.",
+            video_prompt="[Shot 1] The sailor sings aboard the boat beside the pier.",
             scene_goal="The boat is sailing across the lake.",
             ending_beat="The boat sails across the lake.",
             action_beats=["The boat sails across the lake."], source_event_ids=[],
@@ -420,6 +420,7 @@ class MusicNarrativeIntegrationTests(unittest.TestCase):
         native, _ = compile_h3_official_prompt(
             recovered["video_prompt"], recovered["subjects_on_screen"], [], mode="ref2va",
             audio_plan={"mode": "music_driven", "vocal_activity": "active"},
+            closing_blocking=recovered["ending_beat"],
         )
         self.assertEqual(validate_h3_prompt_contract(native, mode="ref2va"), [])
         self.assertNotIn("climbs onto", native)

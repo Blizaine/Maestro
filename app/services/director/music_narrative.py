@@ -1616,12 +1616,22 @@ def music_narrative_row_issue(
     event_by_id = {str(event.get("event_id") or ""): event for event in events}
 
     # A future milestone may be described in global context, but it must not
-    # already be performed in this clip's actual visual prompt.
+    # already be performed in this clip's actual visual prompt or ending beat.
+    # H3 later appends ending_beat to the visual prompt, so check it here too;
+    # keep assigned-action coverage below tied to video_prompt itself.
+    future_prompt = prompt
+    ending_beat = row.get("ending_beat")
+    if isinstance(ending_beat, str) and ending_beat.strip():
+        future_prompt = f"{prompt}\n{ending_beat}"
     for event in events:
         event_id = str(event.get("event_id") or "")
         assigned_index = assignments.get(event_id)
         row_event = _event_with_row_actor_identity(row, event)
-        if assigned_index is not None and index < assigned_index and _event_coverage_positions(prompt, row_event):
+        if (
+            assigned_index is not None
+            and index < assigned_index
+            and _event_coverage_positions(future_prompt, row_event)
+        ):
             return (
                 f"clip {index + 1} performs future music narrative event {event_id} "
                 f"before its assigned clip {assigned_index + 1}"

@@ -587,6 +587,61 @@ class MusicNarrativeTests(unittest.TestCase):
         self.assertIsNotNone(issue)
         self.assertIn("out of source order", issue)
 
+    def test_future_event_in_ending_beat_cannot_appear_before_assignment(self):
+        contract = contract_for(
+            "The kitten climbs on the dragon, then the dragon soars into the sky."
+        )
+        allocation = [
+            {"event_id": "M1", "clip_index": 0},
+            {"event_id": "M2", "clip_index": 2},
+        ]
+        row = {
+            "source_event_ids": [],
+            "video_prompt": "The kitten waits beside the dragon at the ridge.",
+            "ending_beat": "The dragon is soaring above the clouds.",
+        }
+
+        issue = music_narrative_row_issue(
+            row, contract=contract, allocation=allocation, index=1,
+        )
+
+        self.assertIsNotNone(issue)
+        self.assertIn("future music narrative event M2", issue)
+
+    def test_ending_beat_cannot_fulfill_an_assigned_event(self):
+        contract = contract_for("The kitten climbs on the dragon.")
+        allocation = [{"event_id": "M1", "clip_index": 0}]
+        row = {
+            "source_event_ids": ["M1"],
+            "video_prompt": "The kitten sings to camera in a close shot.",
+            "ending_beat": "The kitten climbs on the dragon.",
+        }
+
+        issue = music_narrative_row_issue(
+            row, contract=contract, allocation=allocation, index=0,
+        )
+
+        self.assertIsNotNone(issue)
+        self.assertIn("source verb family", issue)
+
+    def test_unrelated_static_ending_beat_does_not_trigger_future_event(self):
+        contract = contract_for(
+            "The kitten climbs on the dragon, then the dragon soars into the sky."
+        )
+        allocation = [
+            {"event_id": "M1", "clip_index": 0},
+            {"event_id": "M2", "clip_index": 2},
+        ]
+        row = {
+            "source_event_ids": [],
+            "video_prompt": "The kitten watches from the ridge beside the dragon.",
+            "ending_beat": "The kitten holds a steady pose in the sunrise.",
+        }
+
+        self.assertIsNone(music_narrative_row_issue(
+            row, contract=contract, allocation=allocation, index=1,
+        ))
+
     def test_identity_definition_cannot_bake_in_unperformed_boarding(self):
         contract = contract_for("The kitten climbs on the dragon.")
         allocation = [{"event_id": "M1", "clip_index": 2}]
