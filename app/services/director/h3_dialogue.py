@@ -2891,7 +2891,7 @@ def _reference_relationships(
                 source_clause = f"environment and location identity come from {label}"
                 explanation = (
                     f"preserve the architecture, materials, lighting context, and "
-                    f"location identity supplied by {label}, but not incidental people"
+                    f"location identity supplied by {label}, but not incidental characters"
                 )
                 marker = "fully_preserved"
                 detail_bindings.append(
@@ -2901,7 +2901,7 @@ def _reference_relationships(
                 source_clause = f"visual style is guided by {label}"
                 explanation = (
                     f"retain broad similarity to the medium, palette, lighting "
-                    f"language, and texture of {label}, but not its people, pose, "
+                    f"language, and texture of {label}, but not its characters, pose, "
                     "framing, or exact composition"
                 )
                 marker = "weak_reference"
@@ -2934,9 +2934,9 @@ def _reference_relationships(
                 marker = "fully_preserved"
                 detail_bindings.append(
                     f"<Subject {subject_no}> uses facial, bodily, and character "
-                    f"identity from {label} as the same single person already "
+                    f"identity from {label} as the same single character already "
                     "described in this shot, never as inserted source footage or "
-                    "an additional person."
+                    "an additional character."
                     if not allow_multiple else
                     f"<Subject {subject_no}> uses facial, bodily, and character "
                     f"identity from {label} for the explicitly requested multiple "

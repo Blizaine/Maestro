@@ -108,7 +108,7 @@ class TestDirectorReferenceInputs(unittest.TestCase):
         self.assertTrue(calls)
         self.assertEqual(calls[0]["image_paths"], [self.paths[0]])
         self.assertIn("VISUAL REFERENCE IDENTITY", calls[0]["system_prompt"])
-        self.assertIn("group photo", calls[0]["system_prompt"])
+        self.assertIn("group image", calls[0]["system_prompt"])
         self.assertIn("long-haired drummer", plans[0]["video_prompt"])
         self.assertEqual(params["minimax_h3_references"][0]["path"], self.paths[0])
 

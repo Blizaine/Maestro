@@ -7,6 +7,8 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 Public Dev testing candidate; not promoted to Main. See the [full release notes](docs/RELEASE_NOTES_V2.7.0.md).
 
+- Use character-neutral wording in shared Director and H3 reference instructions
+  so identity guidance also fits animals and creatures.
 - Save Editor Director prompt drafts with their shots, independently of the
   last rendered prompt. Keep drafts through deselection and failed reruns,
   show persistent shot-local errors, and report the actual Director clip number.
