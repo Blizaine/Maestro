@@ -654,10 +654,9 @@ def _source_event_entries(value: Any) -> list[tuple[str | None, str]]:
     return output
 
 
-_LOWERING_POSTURE_RE = re.compile(r"\blower(?:s|ed|ing)?\b", re.IGNORECASE)
 _LOWERING_SHOULDER_RE = re.compile(
-    r"\blower(?:s|ed|ing)?\b[^.;!?]{0,50}\bshoulder\b|"
-    r"\bshoulder\b[^.;!?]{0,40}\blower(?:s|ed|ing)?\b",
+    r"\blower(?:s|ed|ing)?\b[^.;!?]{0,50}\bshoulders?\b|"
+    r"\bshoulders?\b[^.;!?]{0,40}\blower(?:s|ed|ing)?\b",
     re.IGNORECASE,
 )
 _SOURCE_ACTOR_TERMINAL_CUES: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -1242,10 +1241,14 @@ def _event_transition_cue_issues(
         action = str(transition.get("action") or "")
         target = str(transition.get("to_value") or "")
         action_claims_shoulder_lowering = bool(_LOWERING_SHOULDER_RE.search(action))
-        target_claims_lowering = predicate == "posture" and bool(_LOWERING_POSTURE_RE.search(target))
-        if not action_claims_shoulder_lowering and not target_claims_lowering:
+        target_claims_shoulder_lowering = (
+            predicate == "posture" and bool(_LOWERING_SHOULDER_RE.search(target))
+        )
+        if not action_claims_shoulder_lowering and not target_claims_shoulder_lowering:
             continue
-        # Shoulder lowering is the narrow posture event observed in the v8 failure.
+        # This provenance check owns shoulder-lowering events. Other authored
+        # gestures, such as lowering a head or foreleg, must not be recast as
+        # an unsupported shoulder-lowering requirement.
         exact_shoulder_cue = any(
             (subject_id, "lower_shoulder") in {
                 (cue_subject_id, family)

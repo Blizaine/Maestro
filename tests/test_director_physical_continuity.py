@@ -48,6 +48,39 @@ def transition(subject_id, predicate, from_value, to_value, action):
 
 
 class PhysicalContinuityTests(unittest.TestCase):
+    def test_lowering_head_or_foreleg_is_not_a_shoulder_lowering_event(self):
+        for destination, action in (
+            ("lowered head", "Briar lowers its head toward the path"),
+            ("lowering head and foreleg", "Briar lowers its head and foreleg"),
+        ):
+            with self.subTest(destination=destination):
+                row = {
+                    "subjects_on_screen": [{"character_id": "animal", "speaker_name": "Briar"}],
+                    "physical_state": physical_state(
+                        [fact("animal", "posture", "upright")],
+                        [transition("animal", "posture", "upright", destination, action)],
+                        [fact("animal", "posture", destination)],
+                    ),
+                }
+                self.assertEqual(source_physical_state_issues(
+                    [row], [[{"event_id": "M1", "text": "Briar waits beside the path."}]],
+                ), [])
+
+    def test_shoulder_lowering_still_requires_matching_source_action(self):
+        row = {
+            "subjects_on_screen": [{"character_id": "performer", "speaker_name": "Ari"}],
+            "physical_state": physical_state(
+                [fact("performer", "posture", "upright shoulders")],
+                [transition("performer", "posture", "upright shoulders", "lowered shoulders",
+                            "Ari lowers their shoulders")],
+                [fact("performer", "posture", "lowered shoulders")],
+            ),
+        }
+        issues = source_physical_state_issues(
+            [row], [[{"event_id": "M1", "text": "Ari waits beside the path."}]],
+        )
+        self.assertTrue(any("lowering posture/action is not supported" in issue for issue in issues), issues)
+
     def test_legacy_rows_without_typed_state_remain_valid(self):
         self.assertEqual(
             validate_physical_state_sequence([

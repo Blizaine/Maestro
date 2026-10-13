@@ -1519,6 +1519,39 @@ class LongFormDirectorPlanningTests(unittest.TestCase):
         self.assertNotIn("TAIL REPAIR", prompts[0])
         self.assertEqual(result.shots[0].scene_goal, "Fresh clip 1 advances a distinct musical beat")
 
+    def test_physical_state_failure_reports_saved_progress_without_token_limit_advice(self):
+        checkpoints = []
+        planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")
+        planner._configure_planning_runtime(
+            {"_planning_checkpoint_callback": checkpoints.append},
+            kind="music_video",
+            fingerprint_payload={"case": "continuity-repair"},
+        )
+        valid = {"accepted": True}
+        invalid = {"accepted": False}
+        issue = (
+            "clip 2 compact physical-state proposal could not be materialized: "
+            "opening conflicts with carried performer posture state"
+        )
+        with self.assertRaises(RuntimeError) as failure:
+            planner._run_checkpointed_json_batches(
+                items=[{}, {}],
+                batch_size=2,
+                checkpoint_key="music_video_batches",
+                stage="music_video_batch",
+                progress_label="music-video",
+                call_batch=lambda *args: [valid, invalid],
+                repair_batch=lambda *args: [invalid],
+                row_validator=lambda index, row, previous: None if row["accepted"] else issue,
+                repair_batch_size=1,
+                repair_attempts=2,
+            )
+        message = str(failure.exception)
+        self.assertIn("physical continuity", message)
+        self.assertIn("Accepted shot plans were saved", message)
+        self.assertNotIn("larger output limit", message)
+        self.assertEqual(checkpoints[-1]["music_video_batches"]["0"]["rows"], [valid])
+
     def test_music_video_failed_repair_raises_and_checkpoints_only_valid_prefix(self):
         checkpoints: list[dict] = []
         call_count = 0

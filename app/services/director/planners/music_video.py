@@ -939,6 +939,682 @@ def _h3_metadata_repair_row_is_complete(
     )
 
 
+_H3_STATE_ACTION_ROOTS = frozenset({
+    "approach", "board", "climb", "crouch", "descend", "drop", "emerge",
+    "fall", "face", "flare", "fly", "grip", "hover", "jump", "kneel",
+    "land", "launch", "lean", "leap", "leave", "lift", "look", "lower",
+    "move", "mount", "pounce", "reach", "release", "retreat", "ride", "rise",
+    "roll", "run", "settle", "shift", "sit", "soar", "spin", "stand", "step",
+    "swoop", "swing", "turn", "twirl", "walk",
+})
+_H3_ACTION_MATCH_STOP_WORDS = frozenset({
+    "a", "an", "and", "as", "her", "his", "its", "of", "the",
+    "their", "with",
+})
+_H3_SUPPORT_BOARDING_ACTION_ROOTS = frozenset({"board", "climb", "land", "mount"})
+_H3_UNSUPPORTED_ACTION_MARKERS = frozenset({
+    "already", "appear", "attempt", "can", "cannot", "could", "describe",
+    "fail", "hope", "if", "imagine", "intend", "may", "maybe", "might",
+    "never", "no", "not", "perhaps", "plan", "possible", "possibly", "pretend",
+    "recall", "remember", "report", "say", "should", "talk", "tell", "teleport",
+    "try", "unless", "unable", "want", "wish", "without", "would",
+})
+
+
+def _h3_action_match_tokens(value: Any) -> list[str]:
+    normalized = re.sub(
+        r"n['’]t\b", " not", str(value or "").casefold(),
+    )
+    return re.findall(r"[^\W_]+", normalized)
+
+
+def _h3_action_match_roots(token: str) -> set[str]:
+    """Return conservative English inflection stems for one action token."""
+
+    roots = {token}
+    suffix = "ing" if token.endswith("ing") else "ed" if token.endswith("ed") else ""
+    if suffix and len(token) > len(suffix) + 2:
+        base = token[:-len(suffix)]
+        roots.update((base, base + "e"))
+        if len(base) > 2 and base[-1] == base[-2]:
+            roots.update((base[:-1], base[:-1] + "e"))
+    elif token.endswith("ies") and len(token) > 4:
+        roots.add(token[:-3] + "y")
+    elif token.endswith("es") and len(token) > 4:
+        roots.update((token[:-2], token[:-1]))
+    elif token.endswith("s") and len(token) > 3:
+        roots.add(token[:-1])
+    return roots
+
+
+def _h3_action_is_asserted(tokens: list[str], index: int) -> bool:
+    token = tokens[index]
+    previous = tokens[index - 1] if index else ""
+    if token.endswith("s"):
+        return True
+    if token.endswith("ed"):
+        return previous not in {
+            "am", "are", "be", "been", "being", "has", "have", "had",
+            "is", "was", "were",
+        }
+    if index > 0 and token.endswith("ing") and tokens[index - 1] in {
+        "am", "are", "is", "was", "were",
+    }:
+        return True
+    return (
+        index > 1
+        and tokens[index - 1] == "to"
+        and tokens[index - 2] in {
+            "begin", "begins", "continue", "continues", "proceed", "proceeds",
+            "start", "starts",
+        }
+    )
+
+
+def _h3_subject_aliases(row: dict[str, Any]) -> list[tuple[str, tuple[str, ...]]]:
+    aliases: list[tuple[str, tuple[str, ...]]] = []
+    subjects = row.get("subjects_on_screen")
+    if not isinstance(subjects, list):
+        return aliases
+    for subject in subjects:
+        if not isinstance(subject, dict):
+            continue
+        subject_id = subject.get("character_id")
+        if not isinstance(subject_id, str) or not subject_id.strip():
+            continue
+        names = [subject_id, subject.get("speaker_name")]
+        for name in names:
+            tokens = tuple(
+                token for token in _h3_action_match_tokens(name)
+                if token not in {"a", "an", "the"}
+            )
+            if tokens:
+                aliases.append((subject_id.casefold(), tokens))
+    return list(dict.fromkeys(aliases))
+
+
+def _h3_action_beat_for_state_fact(
+    row: dict[str, Any],
+    fact: dict[str, str],
+) -> Optional[tuple[int, str]]:
+    """Find one positive authored beat that explicitly enacts a fact value."""
+
+    value_tokens = [
+        token for token in _h3_action_match_tokens(fact.get("value"))
+        if token not in _H3_ACTION_MATCH_STOP_WORDS
+    ]
+    action_roots = [
+        root
+        for token in value_tokens
+        for root in _h3_action_match_roots(token)
+        if root in _H3_STATE_ACTION_ROOTS
+    ]
+    if not value_tokens or not action_roots:
+        return None
+    action_roots = [action_roots[0]]
+
+    aliases = _h3_subject_aliases(row)
+    target_id = fact["subject_id"].casefold()
+    if not any(owner == target_id for owner, _ in aliases):
+        return None
+    beats = row.get("action_beats")
+    if not isinstance(beats, list):
+        return None
+
+    matches: list[tuple[int, str]] = []
+    for beat_index, beat in enumerate(beats):
+        if not isinstance(beat, str) or not beat.strip():
+            continue
+        beat_tokens = _h3_action_match_tokens(beat)
+        if not beat_tokens or any(
+            root in _H3_UNSUPPORTED_ACTION_MARKERS
+            for token in beat_tokens
+            for root in _h3_action_match_roots(token)
+        ):
+            continue
+        beat_roots = set().union(*(
+            _h3_action_match_roots(token) for token in beat_tokens
+        ))
+        if any(
+            not (_h3_action_match_roots(token) & beat_roots)
+            for token in value_tokens
+        ):
+            continue
+
+        action_positions = [
+            index for index, token in enumerate(beat_tokens)
+            if (
+                any(root in _h3_action_match_roots(token) for root in action_roots)
+                and _h3_action_is_asserted(beat_tokens, index)
+            )
+        ]
+        if not action_positions:
+            continue
+
+        # Attribute each candidate action to the nearest named subject before
+        # its verb, so another visible subject cannot supply the evidence.
+        owned_action = False
+        for action_position in action_positions:
+            preceding_mentions: list[tuple[int, str]] = []
+            for owner, alias_tokens in aliases:
+                span = len(alias_tokens)
+                for start in range(0, action_position - span + 1):
+                    if tuple(beat_tokens[start:start + span]) == alias_tokens:
+                        preceding_mentions.append((start + span, owner))
+            if not preceding_mentions:
+                continue
+            nearest_end = max(end for end, _ in preceding_mentions)
+            nearest_owners = {
+                owner for end, owner in preceding_mentions if end == nearest_end
+            }
+            if nearest_owners == {target_id}:
+                owned_action = True
+                break
+        if owned_action:
+            matches.append((beat_index, beat.strip()))
+
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _h3_action_beat_for_transition(
+    row: dict[str, Any], transition: dict[str, Any],
+) -> Optional[tuple[int, str]]:
+    subject_id = transition.get("subject_id")
+    action = transition.get("action")
+    if not isinstance(subject_id, str) or not isinstance(action, str):
+        return None
+    action_token = next((
+        token for token in _h3_action_match_tokens(action)
+        if _h3_action_match_roots(token) & _H3_STATE_ACTION_ROOTS
+    ), None)
+    if action_token is None:
+        return None
+    return _h3_action_beat_for_state_fact(
+        row, {"subject_id": subject_id, "value": action_token},
+    )
+
+
+def _bridge_h3_conflicting_openings(
+    row: dict[str, Any],
+    preceding_closing: list[dict[str, str]],
+) -> Optional[dict[str, Any]]:
+    """Bridge explicit opening actions from exact carried facts, or fail closed."""
+
+    if row.get("continuity_strategy") not in {"continuous", "extend_previous"}:
+        return None
+    proposal = row.get("physical_state")
+    if not isinstance(proposal, dict) or proposal.get("continuity") in {
+        "independent", "time_jump",
+    }:
+        return None
+    openings = proposal.get("opening")
+    transitions = proposal.get("transitions")
+    if not isinstance(openings, list) or not isinstance(transitions, list):
+        return None
+
+    prior_by_key = {
+        _compact_fact_key(fact): fact for fact in preceding_closing
+        if isinstance(fact, dict)
+        and isinstance(fact.get("subject_id"), str)
+        and isinstance(fact.get("predicate"), str)
+        and isinstance(fact.get("value"), str)
+    }
+    conflicts: list[dict[str, str]] = []
+    conflict_keys: set[tuple[str, str]] = set()
+    for opening in openings:
+        if not isinstance(opening, dict):
+            return None
+        key = _compact_fact_key(opening) if all(
+            isinstance(opening.get(field), str)
+            for field in ("subject_id", "predicate")
+        ) else None
+        prior = prior_by_key.get(key) if key is not None else None
+        if prior is not None and opening.get("value") != prior.get("value"):
+            if key in conflict_keys:
+                return None
+            conflict_keys.add(key)
+            conflicts.append(opening)
+    if not conflicts:
+        return None
+
+    bridge_specs: list[tuple[int, dict[str, str]]] = []
+    for opening in conflicts:
+        action_beat = _h3_action_beat_for_state_fact(row, opening)
+        if action_beat is None:
+            return None
+        beat_index, beat_text = action_beat
+        try:
+            action = _compact_state_text(
+                beat_text,
+                field="action",
+                max_length=MAX_PHYSICAL_TEXT_CHARS,
+                location="H3 metadata repair action beat",
+            )
+            to_value = _compact_state_text(
+                opening.get("value"),
+                field="to_value",
+                max_length=MAX_PHYSICAL_VALUE_CHARS,
+                location="H3 metadata repair opening",
+            )
+        except ValueError:
+            return None
+        if opening.get("predicate") not in PHYSICAL_STATE_PREDICATES:
+            return None
+        if opening["predicate"] == "grounded" and to_value not in GROUNDED_STATE_VALUES:
+            return None
+        same_key_transitions: list[tuple[int, dict[str, Any]]] = []
+        for transition_index, item in enumerate(transitions):
+            if not isinstance(item, dict):
+                continue
+            transition_subject = item.get("subject_id")
+            if (
+                isinstance(transition_subject, str)
+                and transition_subject.casefold() == opening["subject_id"].casefold()
+                and item.get("predicate") == opening["predicate"]
+            ):
+                same_key_transitions.append((transition_index, item))
+        destination_transitions = [
+            transition_index for transition_index, item in same_key_transitions
+            if item.get("to_value") == to_value
+        ]
+        if destination_transitions:
+            if (
+                not same_key_transitions
+                or destination_transitions[0] != same_key_transitions[0][0]
+            ):
+                return None
+            existing_action_beat = _h3_action_beat_for_transition(
+                row, same_key_transitions[0][1],
+            )
+            if existing_action_beat is None or existing_action_beat[0] != beat_index:
+                return None
+            continue
+        if same_key_transitions:
+            first_transition = same_key_transitions[0][1]
+            first_destination = first_transition.get("to_value")
+            if not isinstance(first_destination, str):
+                return None
+            first_action_beat = _h3_action_beat_for_state_fact(
+                row,
+                {
+                    "subject_id": opening["subject_id"],
+                    "predicate": opening["predicate"],
+                    "value": first_destination,
+                },
+            )
+            if first_action_beat is None or beat_index >= first_action_beat[0]:
+                return None
+        bridge_specs.append((beat_index, {
+            "subject_id": opening["subject_id"],
+            "predicate": opening["predicate"],
+            "to_value": to_value,
+            "action": action,
+        }))
+
+    if len(transitions) + len(bridge_specs) > MAX_PHYSICAL_TRANSITIONS:
+        return None
+
+    bridge_indices = [beat_index for beat_index, _ in bridge_specs]
+    if bridge_indices != list(range(len(bridge_indices))):
+        return None
+    if bridge_indices:
+        existing_beat_indices: list[int] = []
+        for item in transitions:
+            if not isinstance(item, dict):
+                return None
+            action_beat = _h3_action_beat_for_transition(row, item)
+            if action_beat is None or action_beat[0] <= bridge_indices[-1]:
+                return None
+            existing_beat_indices.append(action_beat[0])
+        if existing_beat_indices != sorted(existing_beat_indices):
+            return None
+
+    candidate = copy.deepcopy(row)
+    candidate.pop(_H3_PHYSICAL_STATE_PROPOSAL_ERROR_FIELD, None)
+    candidate_state = copy.deepcopy(proposal)
+    candidate_state["opening"] = [
+        opening for opening in openings if opening not in conflicts
+    ]
+    candidate_state["transitions"] = [
+        item for _, item in sorted(bridge_specs, key=lambda spec: spec[0])
+    ] + copy.deepcopy(transitions)
+    candidate["physical_state"] = candidate_state
+    return candidate
+
+
+def _h3_word_tokens(value: Any) -> tuple[str, ...]:
+    return tuple(re.findall(r"[a-z0-9]+", str(value or "").casefold()))
+
+
+def _h3_contains_phrase(text: Any, phrase: Any) -> bool:
+    words = _h3_word_tokens(text)
+    wanted = _h3_word_tokens(phrase)
+    return bool(wanted) and any(
+        words[index:index + len(wanted)] == wanted
+        for index in range(len(words) - len(wanted) + 1)
+    )
+
+
+def _h3_source_support_patch_spec(
+    issues: list[str],
+    *,
+    row: dict[str, Any],
+    cast_ids: list[dict[str, str]],
+    preceding_closing: list[dict[str, str]],
+    assigned_actions: list[dict[str, Any]],
+    repair_seed: dict[str, list[dict[str, str]]],
+) -> Optional[dict[str, Any]]:
+    """Allow one additive support patch only when its start and owner are grounded."""
+
+    obligations: dict[tuple[str, str], set[str]] = {}
+    for issue in issues:
+        match = re.search(
+            r"source action ['\"](.+?)['\"] requires a "
+            r"([a-z_]+(?:/[a-z_]+)*) fact in physical_state\.(opening|closing)",
+            issue,
+        )
+        if match is None:
+            continue
+        phrase, predicates, endpoint = match.groups()
+        for predicate in predicates.split("/"):
+            if predicate in PHYSICAL_STATE_PREDICATES:
+                obligations.setdefault((phrase.casefold(), predicate), set()).add(endpoint)
+    missing_both = [
+        (phrase, predicate)
+        for (phrase, predicate), endpoints in obligations.items()
+        if endpoints == {"opening", "closing"}
+    ]
+    if len(missing_both) != 1 or missing_both[0][1] != "support":
+        return None
+    phrase, predicate = missing_both[0]
+
+    seed_items = repair_seed.get("opening", []) + repair_seed.get("transitions", [])
+    if any(
+        isinstance(item, dict) and item.get("predicate") == predicate
+        for item in seed_items
+    ):
+        return None
+    matching_actions = [
+        action for action in assigned_actions
+        if isinstance(action, dict)
+        and _h3_contains_phrase(action.get("text"), phrase)
+        and isinstance(action.get("actor_aliases"), list)
+        and action.get("actor_aliases")
+        and isinstance(action.get("target_aliases"), list)
+        and action.get("target_aliases")
+    ]
+    if len(matching_actions) != 1:
+        return None
+    source_action = matching_actions[0]
+    source_text = source_action.get("text")
+    if not isinstance(source_text, str):
+        return None
+    target_aliases = [
+        alias for alias in source_action["target_aliases"]
+        if isinstance(alias, str) and alias.strip()
+    ]
+    matched_target_aliases = [
+        alias for alias in target_aliases
+        if _h3_contains_phrase(source_text, alias)
+    ]
+    if len(matched_target_aliases) != 1:
+        return None
+    target_alias = matched_target_aliases[0]
+
+    owner_ids = {
+        cast.get("character_id")
+        for cast in cast_ids
+        if isinstance(cast.get("character_id"), str)
+        and any(
+            isinstance(alias, str)
+            and any(_h3_contains_phrase(name, alias) for name in cast.values())
+            for alias in source_action["actor_aliases"]
+        )
+    }
+    if len(owner_ids) != 1:
+        return None
+    owner_id = next(iter(owner_ids))
+    has_grounded_start = any(
+        isinstance(item, dict)
+        and isinstance(item.get("subject_id"), str)
+        and item["subject_id"].casefold() == owner_id.casefold()
+        and isinstance(item.get("value"), str)
+        and (
+            (item.get("predicate") == "grounded" and item["value"] == "grounded")
+            or (
+                item.get("predicate") == "contact"
+                and (
+                    item["value"].casefold() == "grounded"
+                    or _h3_support_ground_start(item["value"])
+                )
+            )
+        )
+        for item in preceding_closing
+    )
+    if not has_grounded_start:
+        return None
+    beats = row.get("action_beats")
+    if not isinstance(beats, list):
+        return None
+    source_roots = list(dict.fromkeys(
+        root
+        for token in _h3_action_match_tokens(source_text)
+        for root in _h3_action_match_roots(token)
+        if root in _H3_SUPPORT_BOARDING_ACTION_ROOTS
+    ))
+    if len(source_roots) != 1:
+        return None
+    source_tokens = _h3_action_match_tokens(source_text)
+    if any(
+        root in _H3_UNSUPPORTED_ACTION_MARKERS
+        for token in source_tokens
+        for root in _h3_action_match_roots(token)
+    ) or not any(
+        _h3_action_is_asserted(source_tokens, token_index)
+        and bool(_h3_action_match_roots(token) & set(source_roots))
+        for token_index, token in enumerate(source_tokens)
+    ):
+        return None
+    action_candidates: list[tuple[int, str]] = []
+    for beat_index, beat in enumerate(beats[:MAX_PHYSICAL_TRANSITIONS]):
+        if (
+            not isinstance(beat, str)
+            or not beat.strip()
+            or len(beat) > MAX_PHYSICAL_TEXT_CHARS
+            or not _h3_contains_phrase(beat, target_alias)
+        ):
+            continue
+        single_beat_row = {**row, "action_beats": [beat]}
+        if _h3_action_beat_for_state_fact(
+            single_beat_row,
+            {"subject_id": owner_id, "value": source_roots[0]},
+        ) is not None:
+            action_candidates.append((beat_index, beat.strip()))
+    if len(action_candidates) != 1:
+        return None
+    _, action_beat = action_candidates[0]
+    return {
+        "predicate": predicate,
+        "subject_id": owner_id,
+        "source_action": source_action,
+        "target_alias": target_alias,
+        "opening_value": "on the ground",
+        "to_value": f"on {target_alias}",
+        "action": action_beat,
+    }
+
+
+def _h3_support_ground_start(value: str) -> bool:
+    return bool(re.fullmatch(
+        r"(?:(?:standing|stood|sitting|seated|resting)\s+)?"
+        r"(?:on|upon)\s+(?:the\s+)?(?:ground|floor|earth|soil|pavement)",
+        re.sub(r"\s+", " ", value).strip(),
+        re.IGNORECASE,
+    ))
+
+
+def _h3_support_value_matches_target(value: str, aliases: list[str]) -> bool:
+    if re.search(
+        r"\b(?:hover(?:s|ed|ing)?|float(?:s|ed|ing)?)\s+above\b|"
+        r"\b(?:as\s+if|as\s+though|pretend(?:s|ed|ing)?|"
+        r"imagin(?:e|es|ed|ing))\b|"
+        r"\b(?:not|never|without|no)\b[^,.;]{0,32}"
+        r"\b(?:supported\s+by|mounted\s+on|riding(?:\s+on)?|"
+        r"on|onto|upon|astride|aboard)\b|"
+        r"\b(?:as\s+if|as\s+though|pretend(?:s|ed|ing)?|"
+        r"imagin(?:e|es|ed|ing))\b[^,.;]{0,32}"
+        r"\b(?:supported\s+by|mounted\s+on|riding(?:\s+on)?|"
+        r"on|onto|upon|astride|aboard)\b",
+        value,
+        re.IGNORECASE,
+    ):
+        return False
+    relation = re.search(
+        r"\b(?:supported\s+by|mounted\s+on|riding\s+on|riding|"
+        r"on|onto|upon|astride|aboard)\b",
+        value,
+        re.IGNORECASE,
+    )
+    if relation is None:
+        return False
+    if re.search(r"\b(?:contact|touch(?:es|ed|ing)?)\b", value, re.IGNORECASE):
+        return False
+    tail = list(_h3_word_tokens(value[relation.end():]))
+    if tail and tail[0] in {"a", "an", "the"}:
+        tail = tail[1:]
+    return any(
+        (alias_words := list(_h3_word_tokens(alias)))
+        and tail[:len(alias_words)] == alias_words
+        for alias in aliases
+    )
+
+
+def _merge_h3_source_support_patch(
+    row: dict[str, Any],
+    repair_seed: dict[str, list[dict[str, str]]],
+    patch: Any,
+    spec: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    if (
+        not isinstance(patch, dict)
+        or set(patch) != {"opening_additions", "transition_additions"}
+    ):
+        return None
+    openings = patch.get("opening_additions")
+    transitions = patch.get("transition_additions")
+    if not isinstance(openings, list) or len(openings) != 1:
+        return None
+    if not isinstance(transitions, list) or len(transitions) != 1:
+        return None
+
+    opening = openings[0]
+    transition_item = transitions[0]
+    if not isinstance(opening, dict) or set(opening) != {
+        "subject_id", "predicate", "value",
+    }:
+        return None
+    if not isinstance(transition_item, dict) or set(transition_item) != {
+        "subject_id", "predicate", "to_value", "action",
+    }:
+        return None
+    owner_id = spec["subject_id"]
+    predicate = spec["predicate"]
+    if any(
+        item.get("subject_id") != owner_id or item.get("predicate") != predicate
+        for item in (opening, transition_item)
+    ):
+        return None
+    if opening.get("value") != spec["opening_value"]:
+        return None
+    if transition_item.get("to_value") != spec["to_value"]:
+        return None
+    if transition_item.get("action") != spec["action"]:
+        return None
+    try:
+        opening_value = _compact_state_text(
+            opening.get("value"), field="value",
+            max_length=MAX_PHYSICAL_VALUE_CHARS,
+            location="H3 source support opening addition",
+        )
+        to_value = _compact_state_text(
+            transition_item.get("to_value"), field="to_value",
+            max_length=MAX_PHYSICAL_VALUE_CHARS,
+            location="H3 source support transition addition",
+        )
+        action = _compact_state_text(
+            transition_item.get("action"), field="action",
+            max_length=MAX_PHYSICAL_TEXT_CHARS,
+            location="H3 source support transition addition",
+        )
+    except ValueError:
+        return None
+    if not _h3_support_ground_start(opening_value):
+        return None
+    if not _h3_support_value_matches_target(to_value, [spec["target_alias"]]):
+        return None
+    if action != spec["action"]:
+        return None
+
+    seed_openings = repair_seed.get("opening", [])
+    seed_transitions = repair_seed.get("transitions", [])
+    opening_key = (owner_id.casefold(), predicate)
+    if any(
+        isinstance(item, dict)
+        and isinstance(item.get("subject_id"), str)
+        and _compact_fact_key(item) == opening_key
+        for item in seed_openings
+    ):
+        return None
+    if any(
+        isinstance(item, dict)
+        and isinstance(item.get("subject_id"), str)
+        and item.get("subject_id", "").casefold() == owner_id.casefold()
+        and item.get("predicate") == predicate
+        for item in seed_transitions
+    ):
+        return None
+
+    added_transition = {
+        "subject_id": owner_id,
+        "predicate": predicate,
+        "to_value": to_value,
+        "action": action,
+    }
+    added_beat = _h3_action_beat_for_transition(row, added_transition)
+    if added_beat is None:
+        return None
+    tagged: list[tuple[int, int, dict[str, str]]] = []
+    last_beat = -1
+    for index, item in enumerate(seed_transitions):
+        if not isinstance(item, dict):
+            return None
+        action_beat = _h3_action_beat_for_transition(row, item)
+        if action_beat is None or action_beat[0] < last_beat:
+            return None
+        last_beat = action_beat[0]
+        tagged.append((action_beat[0], index, copy.deepcopy(item)))
+    tagged.append((added_beat[0], len(tagged), added_transition))
+    tagged.sort(key=lambda item: (item[0], item[1]))
+
+    physical_state = {
+        "opening": copy.deepcopy(seed_openings) + [{
+            "subject_id": owner_id,
+            "predicate": predicate,
+            "value": opening_value,
+        }],
+        "transitions": [item[2] for item in tagged],
+    }
+    continuity = row.get("physical_state", {}).get("continuity")
+    if continuity in {"continuous", "independent", "time_jump"}:
+        physical_state["continuity"] = continuity
+    candidate = copy.deepcopy(row)
+    candidate.pop(_H3_PHYSICAL_STATE_PROPOSAL_ERROR_FIELD, None)
+    candidate["physical_state"] = physical_state
+    return candidate
+
+
 def _try_repair_h3_physical_state_only(
     planner: Any,
     *,
@@ -993,20 +1669,31 @@ def _try_repair_h3_physical_state_only(
         )
         if isinstance(event, dict)
     }
-    assigned_actions = [
-        {
+    assigned_actions = []
+    for event_id in event_ids:
+        event = event_by_id.get(event_id)
+        if event is None:
+            continue
+        action = {
             "event_id": event_id,
-            "text": event_by_id[event_id].get("text", ""),
-            "kind": event_by_id[event_id].get("kind", ""),
+            "text": event.get("text", ""),
+            "kind": event.get("kind", ""),
         }
-        for event_id in event_ids if event_id in event_by_id
-    ]
+        for key in ("actor_aliases", "target_aliases"):
+            aliases = event.get(key)
+            if isinstance(aliases, list):
+                action[key] = [
+                    value for value in aliases[:16]
+                    if isinstance(value, str) and value.strip()
+                ]
+        assigned_actions.append(action)
     state = normalize_physical_state(
         previous.get("physical_state") if isinstance(previous, dict) else None
     )
     preceding_closing = state["closing"] if state else []
     proposal = row.get("physical_state")
     proposal = proposal if isinstance(proposal, dict) else {}
+    original_proposal = copy.deepcopy(proposal)
     opening = proposal.get("opening")
     opening = opening if isinstance(opening, list) else []
     transitions = proposal.get("transitions")
@@ -1015,8 +1702,67 @@ def _try_repair_h3_physical_state_only(
         row.get("continuity_strategy") in {"continuous", "extend_previous"}
         and proposal.get("continuity") not in {"independent", "time_jump"}
     )
+    bridge_source_issues: list[str] = []
+    bridge_conflicts: list[dict[str, str]] = []
+    if carries_previous and preceding_closing:
+        prior_by_key = {
+            _compact_fact_key(item): item for item in preceding_closing
+            if isinstance(item, dict)
+            and isinstance(item.get("subject_id"), str)
+            and isinstance(item.get("predicate"), str)
+            and isinstance(item.get("value"), str)
+        }
+        for opening_item in opening:
+            if not isinstance(opening_item, dict):
+                continue
+            subject_id = opening_item.get("subject_id")
+            predicate = opening_item.get("predicate")
+            value = opening_item.get("value")
+            if not all(isinstance(item, str) for item in (subject_id, predicate, value)):
+                continue
+            prior = prior_by_key.get((subject_id.casefold(), predicate))
+            if prior is not None and prior.get("value") != value:
+                bridge_conflicts.append({
+                    "subject_id": subject_id,
+                    "predicate": predicate,
+                    "authoritative_value": prior["value"],
+                    "proposed_value": value,
+                })
+        bridge_candidate = _bridge_h3_conflicting_openings(
+            row, preceding_closing,
+        )
+        if bridge_candidate is not None:
+            try:
+                bridged = _materialize_h3_physical_state_proposals(
+                    [bridge_candidate],
+                    previous_physical_state=(
+                        previous.get("physical_state")
+                        if isinstance(previous, dict) else None
+                    ),
+                    preserve_invalid_tail=True,
+                )
+            except (TypeError, ValueError):
+                bridged = []
+            if (
+                len(bridged) == 1
+                and isinstance(bridged[0], dict)
+                and not bridged[0].get(_H3_PHYSICAL_STATE_PROPOSAL_ERROR_FIELD)
+            ):
+                source_events = _assigned_source_events_for_clip(clip) or assigned_actions
+                bridge_source_issues = source_physical_state_issues(
+                    [bridged[0]], [source_events],
+                )
+                if not bridge_source_issues:
+                    return bridged
+                row = bridged[0]
+                proposal = row["physical_state"]
+                opening = proposal["opening"]
+                transitions = proposal["transitions"]
+
     known_current_keys: list[dict[str, str]] = []
     known_key_pairs: set[tuple[str, str]] = set()
+    known_by_pair: dict[tuple[str, str], dict[str, str]] = {}
+    conflicting_openings: list[dict[str, str]] = []
 
     def add_known_key(raw: Any, source: str) -> None:
         if not isinstance(raw, dict):
@@ -1027,19 +1773,43 @@ def _try_repair_h3_physical_state_only(
         if not all(isinstance(item, str) and item.strip() for item in (subject_id, predicate, value)):
             return
         key = (subject_id.casefold(), predicate)
+        if key in known_by_pair:
+            return
         known_key_pairs.add(key)
-        known_current_keys.append({
+        known_fact = {
             "subject_id": subject_id,
             "predicate": predicate,
             "value": value,
             "source": source,
-        })
+        }
+        known_by_pair[key] = known_fact
+        known_current_keys.append(known_fact)
 
     if carries_previous:
         for fact_item in preceding_closing:
             add_known_key(fact_item, "preceding_closing")
     for fact_item in opening[:MAX_PHYSICAL_FACTS]:
-        add_known_key(fact_item, "proposed_opening")
+        if not isinstance(fact_item, dict):
+            continue
+        subject_id = fact_item.get("subject_id")
+        predicate = fact_item.get("predicate")
+        value = fact_item.get("value")
+        if not all(
+            isinstance(item, str) and item.strip()
+            for item in (subject_id, predicate, value)
+        ):
+            continue
+        known = known_by_pair.get((subject_id.casefold(), predicate))
+        if known is None:
+            add_known_key(fact_item, "proposed_opening")
+        elif known["value"] != value:
+            conflicting_openings.append({
+                "subject_id": subject_id,
+                "predicate": predicate,
+                "authoritative_value": known["value"],
+                "authoritative_source": known["source"],
+                "proposed_value": value,
+            })
 
     missing_transition_keys: list[dict[str, str]] = []
     for transition_item in transitions[:MAX_PHYSICAL_TRANSITIONS]:
@@ -1085,75 +1855,193 @@ def _try_repair_h3_physical_state_only(
         "minItems": 1,
         "maxItems": 1,
     }
+    repair_seed_state = row.get("physical_state")
+    repair_seed = None
+    if isinstance(repair_seed_state, dict):
+        seed_opening = repair_seed_state.get("opening")
+        seed_transitions = repair_seed_state.get("transitions")
+        repair_seed = {
+            "opening": [
+                {
+                    key: item[key]
+                    for key in ("subject_id", "predicate", "value")
+                    if key in item
+                }
+                for item in seed_opening[:MAX_PHYSICAL_FACTS]
+                if isinstance(item, dict)
+            ] if isinstance(seed_opening, list) else [],
+            "transitions": [
+                {
+                    key: item[key]
+                    for key in ("subject_id", "predicate", "to_value", "action")
+                    if key in item
+                }
+                for item in seed_transitions[:MAX_PHYSICAL_TRANSITIONS]
+                if isinstance(item, dict)
+            ] if isinstance(seed_transitions, list) else [],
+        }
+    source_issue_summary = "; ".join(bridge_source_issues)
     context = {
         "target_clip_index_zero_based": index,
         "target_clip_number": index + 1,
         "musical_clip_context": clip,
-        "validation_issue": issue,
+        "validation_issue": (
+            f"Outstanding source physical-state issues: {source_issue_summary}"
+            if bridge_source_issues else issue
+        ),
+        "resolved_original_issue": issue if bridge_source_issues else None,
         "cast_ids": cast_ids,
         "preceding_authoritative_closing_facts": preceding_closing,
         "known_current_physical_keys": known_current_keys,
+        "conflicting_proposed_opening_keys": conflicting_openings,
+        "bridged_conflicting_opening_keys": (
+            [] if bridge_source_issues else bridge_conflicts
+        ),
+        "bridge_candidate_source_physical_state_issues": bridge_source_issues,
         "transition_keys_missing_prior_or_opening_fact": missing_transition_keys,
         "source_event_ids": event_ids,
         "assigned_source_actions": assigned_actions,
         "existing_action_beats": row.get("action_beats", []),
         "continuity_strategy": row.get("continuity_strategy", ""),
         "original_visible_prompt": row.get("video_prompt", ""),
-        "original_compact_physical_state_proposal": row.get("physical_state"),
+        "original_compact_physical_state_proposal": (
+            None if bridge_source_issues else original_proposal
+        ),
+        "repair_seed_compact_physical_state_proposal": repair_seed,
         "clip_source_actions": _assigned_source_events_for_clip(clip),
     }
-    user_prompt = (
-        "Repair only the compact physical_state metadata for this one H3 music-video clip. "
-        "Return exactly one array item containing only physical_state. The caller will "
-        "preserve the original visible prompt, action_beats, source_event_ids, cast IDs, "
-        "continuity_strategy, and every other shot field unchanged.\n\n"
-        "Use the validation issue and visible evidence below. The known-current list "
-        "shows keys available at the clip start. Every transition key must already "
-        "have an explicit opening fact or a carried prior closing fact. For each key "
-        "listed as missing, add a genuinely supported opening fact before keeping a "
-        "relevant transition; otherwise omit that transition. A transition cannot "
-        "supply its own starting fact. For a continuous clip, treat preceding closing "
-        "facts as authoritative and inherit unchanged keys. Add explicit supported "
-        "opening facts only for genuinely new keys. For predicate grounded, use exactly "
-        "'grounded' or 'airborne' as the value; never use a location or descriptive phrase. "
-        "Do not encode unchanged or decorative motion (for example, cloth fluttering "
-        "in persistent wind) as a physical-state transition. Omit irrelevant state "
-        "metadata while leaving the original visible prose intact. Keep each remaining "
-        "transition action grounded in the original prompt or action beats. Do not "
-        "change or paraphrase the visible shot.\n\n"
-        + json.dumps(context, ensure_ascii=False)
-    )
-    try:
-        response = planner._call_llm_json(
-            user_prompt=user_prompt,
-            system_prompt=(
-                "Edit only compact physical-state metadata. Follow the supplied strict "
-                "JSON schema and return JSON only. Do not rewrite the shot or invent "
-                "visible actions."
-            ),
-            max_tokens=1800,
-            temperature=0.1,
-            thinking_budget=0,
-            json_schema=schema,
+    source_support_patch_spec = (
+        _h3_source_support_patch_spec(
+            bridge_source_issues,
+            row=row,
+            cast_ids=cast_ids,
+            preceding_closing=preceding_closing,
+            assigned_actions=assigned_actions,
+            repair_seed=repair_seed,
         )
-    except InterruptedError:
-        raise
-    except Exception:
-        return []
+        if bridge_source_issues and repair_seed is not None else None
+    )
+    if bridge_source_issues:
+        user_prompt = (
+            "Repair only compact physical_state metadata for this H3 clip. Return "
+            "exactly one array item containing only physical_state; the caller keeps "
+            "all visible shot fields unchanged. The repair seed already contains the "
+            "deterministic opening bridges. Preserve those bridges and every supported "
+            "contact or posture fact. The initial carried-state mismatch is resolved; "
+            "repair only the outstanding source issues. Returning the seed unchanged "
+            "is invalid.\n\n"
+            "Use actor_aliases and target_aliases in assigned_source_actions to bind "
+            "each required relation to its source owner and target. Add only facts or "
+            "transitions supported by those source actions, authored beats, or carried "
+            "physical facts. A required opening relation may describe the supported "
+            "pre-action state when carried grounded/contact facts and the visible action "
+            "establish it. Do not invent a starting relation or target. Closing is "
+            "derived and cannot be supplied as a field: to reach a required closing "
+            "relation, include its supported opening fact and an authored transition "
+            "to the exact supported target.\n\n"
+            + json.dumps(context, ensure_ascii=False)
+        )
+    else:
+        user_prompt = (
+            "Repair only the compact physical_state metadata for this one H3 music-video clip. "
+            "Return exactly one array item containing only physical_state. The caller will "
+            "preserve the original visible prompt, action_beats, source_event_ids, cast IDs, "
+            "continuity_strategy, and every other shot field unchanged.\n\n"
+            "Use the validation issue and visible evidence below. The known-current list "
+            "shows keys available at the clip start, with each key listed once. The "
+            "preceding_authoritative_closing_facts are authoritative for carried values. "
+            "Omit every value listed in conflicting_proposed_opening_keys from opening. "
+            "When one of those different values is the destination of an explicit positive "
+            "action already present in the visible prompt or action beats, represent that "
+            "change as a transition from the exact carried value; otherwise keep the carried "
+            "value unchanged. Preserve existing supported transitions and their specific "
+            "destination values and actions. Every transition key must already "
+            "have an explicit opening fact or a carried prior closing fact. For each key "
+            "listed as missing, add a genuinely supported opening fact before keeping a "
+            "relevant transition; otherwise omit that transition. A transition cannot "
+            "supply its own starting fact. For a continuous clip, treat preceding closing "
+            "facts as authoritative and inherit unchanged keys. Add explicit supported "
+            "opening facts only for genuinely new keys. For predicate grounded, use exactly "
+            "'grounded' or 'airborne' as the value; this restriction applies only to that "
+            "predicate. Keep descriptive posture, contact, support, location, and prop values "
+            "specific; never replace them with the generic word 'grounded'. "
+            "Do not encode unchanged or decorative motion (for example, cloth fluttering "
+            "in persistent wind) as a physical-state transition. Omit irrelevant state "
+            "metadata while leaving the original visible prose intact. Keep each remaining "
+            "transition action grounded in the original prompt or action beats. Do not "
+            "change or paraphrase the visible shot. If a repair seed is supplied, preserve "
+            "its already-added deterministic opening bridges and all supported existing "
+            "facts and transitions. Address every listed source physical-state issue by "
+            "adding required opening/closing relation facts or transitions only when the "
+            "assigned source action or authored beats explicitly support their owner and "
+            "target. Never erase a supported contact/posture fact or infer a target the "
+            "source does not name.\n\n"
+            + json.dumps(context, ensure_ascii=False)
+        )
+    if source_support_patch_spec is not None:
+        response = [{
+            "physical_state_patch": {
+                "opening_additions": [{
+                    "subject_id": source_support_patch_spec["subject_id"],
+                    "predicate": source_support_patch_spec["predicate"],
+                    "value": source_support_patch_spec["opening_value"],
+                }],
+                "transition_additions": [{
+                    "subject_id": source_support_patch_spec["subject_id"],
+                    "predicate": source_support_patch_spec["predicate"],
+                    "to_value": source_support_patch_spec["to_value"],
+                    "action": source_support_patch_spec["action"],
+                }],
+            },
+        }]
+    else:
+        try:
+            response = planner._call_llm_json(
+                user_prompt=user_prompt,
+                system_prompt=(
+                    "Edit only compact physical-state metadata. Follow the supplied strict "
+                    "JSON schema and return JSON only. Do not rewrite the shot or invent "
+                    "visible actions."
+                ),
+                max_tokens=1800,
+                temperature=0.1,
+                thinking_budget=0,
+                json_schema=schema,
+            )
+        except InterruptedError:
+            raise
+        except Exception:
+            return []
 
-    if (
-        not isinstance(response, list)
-        or len(response) != 1
-        or not isinstance(response[0], dict)
-        or set(response[0]) != {"physical_state"}
-        or not isinstance(response[0].get("physical_state"), dict)
-        or set(response[0]["physical_state"]) != {"opening", "transitions"}
-    ):
-        return []
-
-    candidate = copy.deepcopy(row)
-    candidate.pop(_H3_PHYSICAL_STATE_PROPOSAL_ERROR_FIELD, None)
-    candidate["physical_state"] = copy.deepcopy(response[0]["physical_state"])
+    if source_support_patch_spec is not None:
+        if (
+            not isinstance(response, list)
+            or len(response) != 1
+            or not isinstance(response[0], dict)
+            or set(response[0]) != {"physical_state_patch"}
+        ):
+            return []
+        candidate = _merge_h3_source_support_patch(
+            row,
+            repair_seed,
+            response[0]["physical_state_patch"],
+            source_support_patch_spec,
+        )
+        if candidate is None:
+            return []
+    else:
+        if (
+            not isinstance(response, list)
+            or len(response) != 1
+            or not isinstance(response[0], dict)
+            or set(response[0]) != {"physical_state"}
+            or not isinstance(response[0].get("physical_state"), dict)
+            or set(response[0]["physical_state"]) != {"opening", "transitions"}
+        ):
+            return []
+        candidate = copy.deepcopy(row)
+        candidate.pop(_H3_PHYSICAL_STATE_PROPOSAL_ERROR_FIELD, None)
+        candidate["physical_state"] = copy.deepcopy(response[0]["physical_state"])
     try:
         materialized = _materialize_h3_physical_state_proposals(
             [candidate],
@@ -1166,6 +2054,15 @@ def _try_repair_h3_physical_state_only(
         return []
     if len(materialized) != 1 or not isinstance(materialized[0], dict):
         return []
+    if (
+        source_support_patch_spec is not None
+        and materialized[0].get(_H3_PHYSICAL_STATE_PROPOSAL_ERROR_FIELD)
+    ):
+        return []
+    if source_support_patch_spec is not None:
+        source_events = _assigned_source_events_for_clip(clip) or assigned_actions
+        if source_physical_state_issues([materialized[0]], [source_events]):
+            return []
     return materialized
 
 

@@ -12,10 +12,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 from services.director.physical_continuity import PHYSICAL_STATE_JSON_SCHEMA
 from services.director.planners.music_video import (
     MusicVideoPlanner,
+    _bridge_h3_conflicting_openings,
+    _h3_source_support_patch_spec,
+    _h3_support_ground_start,
+    _h3_support_value_matches_target,
     _has_explicit_physical_relation,
     _materialize_h3_physical_state_proposals,
     _music_shot_schema,
     _source_establishes_physical_relation,
+    _try_repair_h3_physical_state_only,
 )
 
 
@@ -136,6 +141,65 @@ class MusicStateProposalTests(unittest.TestCase):
             [fact("lead_performer", "posture", "upright")],
         )
         return row
+
+    @staticmethod
+    def _bridge_row(opening_value="leaping onto the ledge"):
+        row = complete_shot(
+            "Ari leaps onto the ledge and settles into a crouch.",
+            opening=[fact("lead_performer", "posture", opening_value)],
+        )
+        row["action_beats"] = [
+            "Ari leaps onto the ledge.",
+            "Ari settles into a crouch.",
+        ]
+        row["video_prompt"] = (
+            "Ari leaps onto the ledge, then settles into a crouch."
+        )
+        return row
+
+    @staticmethod
+    def _bridge_previous_row():
+        row = complete_shot("Ari watches the rooftop stage.")
+        row["physical_state"] = full_state(
+            [fact("lead_performer", "posture", "looking over the valley")],
+        )
+        return row
+
+    @staticmethod
+    def _source_support_patch_case():
+        planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")
+        previous = MusicStateProposalTests._bridge_previous_row()
+        grounded_contact = fact("lead_performer", "contact", "grounded")
+        previous["physical_state"]["opening"].append(grounded_contact)
+        previous["physical_state"]["closing"].append(grounded_contact)
+        row = MusicStateProposalTests._bridge_row("leaping onto the platform")
+        row["action_beats"] = [
+            "Ari leaps onto the platform.",
+            "Ari climbs onto the platform.",
+        ]
+        row["video_prompt"] = (
+            "Ari leaps onto the platform, then climbs onto it."
+        )
+        row["source_event_ids"] = ["M1"]
+        clip = {"start": 10, "end": 20, "source_event_ids": ["M1"]}
+        contract = {"events": [{
+            "event_id": "M1",
+            "text": "climbs onto the platform",
+            "kind": "boarding",
+            "actor_aliases": ["Ari"],
+            "target_aliases": ["platform"],
+        }]}
+        allocation = [{"event_id": "M1", "clip_index": 1}]
+        invalid = _materialize_h3_physical_state_proposals(
+            [row],
+            previous_physical_state=previous["physical_state"],
+            preserve_invalid_tail=True,
+        )[0]
+        issue = (
+            "clip 2 compact physical-state proposal could not be materialized: "
+            + invalid["_h3_physical_state_proposal_error"]
+        )
+        return planner, previous, row, invalid, issue, clip, contract, allocation
 
     def test_h3_schema_is_compact_and_non_h3_keeps_legacy_schema(self):
         h3_schema = _music_shot_schema(
@@ -282,6 +346,471 @@ class MusicStateProposalTests(unittest.TestCase):
                 fact("lead_performer", "location", "near the stage"),
             ],
         )
+
+    def test_metadata_bridge_uses_exact_carried_value_and_authored_opening_action(self):
+        previous = self._bridge_previous_row()
+        row = self._bridge_row()
+        original = copy.deepcopy(row)
+        candidate = _bridge_h3_conflicting_openings(
+            row, previous["physical_state"]["closing"],
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(row, original)
+        self.assertEqual(candidate["action_beats"], original["action_beats"])
+        self.assertEqual(candidate["video_prompt"], original["video_prompt"])
+        materialized = _materialize_h3_physical_state_proposals(
+            [candidate],
+            previous_physical_state=previous["physical_state"],
+            preserve_invalid_tail=True,
+        )[0]
+        self.assertNotIn("_h3_physical_state_proposal_error", materialized)
+        state = materialized["physical_state"]
+        self.assertEqual(
+            state["opening"],
+            [fact("lead_performer", "posture", "looking over the valley")],
+        )
+        self.assertEqual(
+            state["transitions"][0],
+            {
+                "subject_id": "lead_performer",
+                "predicate": "posture",
+                "from_value": "looking over the valley",
+                "to_value": "leaping onto the ledge",
+                "action": "Ari leaps onto the ledge.",
+            },
+        )
+
+    def test_source_clean_metadata_bridge_skips_writer(self):
+        planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")
+        previous = self._bridge_previous_row()
+        row = self._bridge_row()
+        invalid = _materialize_h3_physical_state_proposals(
+            [row],
+            previous_physical_state=previous["physical_state"],
+            preserve_invalid_tail=True,
+        )[0]
+        issue = (
+            "clip 2 compact physical-state proposal could not be materialized: "
+            + invalid["_h3_physical_state_proposal_error"]
+        )
+        with patch.object(planner, "_call_llm_json", return_value=[]) as generate:
+            result = _try_repair_h3_physical_state_only(
+                planner,
+                index=1,
+                row=invalid,
+                issue=issue,
+                clip={"start": 10, "end": 20},
+                previous=previous,
+                contract={"events": []},
+                allocation=[],
+                include_image_fields=False,
+            )
+
+        self.assertEqual(generate.call_count, 0)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(
+            result[0]["physical_state"]["transitions"][0]["from_value"],
+            "looking over the valley",
+        )
+
+    def test_grounded_source_support_obligation_is_patched_deterministically(self):
+        (
+            planner, previous, row, invalid, issue, clip, contract, allocation,
+        ) = self._source_support_patch_case()
+        original_visible = {
+            key: copy.deepcopy(row.get(key))
+            for key in ("action_beats", "video_prompt", "source_event_ids")
+        }
+        with patch.object(
+            planner, "_call_llm_json",
+            side_effect=AssertionError("verified additive patch should not call writer"),
+        ) as generate:
+            result = _try_repair_h3_physical_state_only(
+                planner,
+                index=1,
+                row=invalid,
+                issue=issue,
+                clip=clip,
+                previous=previous,
+                contract=contract,
+                allocation=allocation,
+                include_image_fields=False,
+            )
+
+        self.assertEqual(generate.call_count, 0)
+        self.assertEqual(len(result), 1)
+        repaired = result[0]
+        self.assertEqual(
+            {key: repaired.get(key) for key in original_visible},
+            original_visible,
+        )
+        state = repaired["physical_state"]
+        support_opening = next(
+            item for item in state["opening"] if item["predicate"] == "support"
+        )
+        self.assertEqual(
+            support_opening,
+            fact("lead_performer", "support", "on the ground"),
+        )
+        support_transition = next(
+            item for item in state["transitions"] if item["predicate"] == "support"
+        )
+        self.assertEqual(
+            support_transition["to_value"], "on platform",
+        )
+        self.assertEqual(
+            support_transition["action"], "Ari climbs onto the platform.",
+        )
+        self.assertEqual(
+            [item["predicate"] for item in state["transitions"]],
+            ["posture", "support"],
+        )
+        row_issue = MusicVideoPlanner._music_video_row_issue(
+            1,
+            repaired,
+            [previous],
+            scene_description="Ari leaps onto and climbs onto a platform.",
+            include_image_fields=False,
+            require_stable_cast_identity=True,
+            require_source_physical_state=True,
+            require_native_single_clip=True,
+            source_events_for_row=[{
+                "event_id": "M1",
+                "text": "climbs onto the platform",
+                "actor_aliases": ["Ari"],
+                "target_aliases": ["platform"],
+            }],
+        )
+        self.assertIsNone(row_issue, row_issue)
+
+    def test_support_patch_requires_ground_target_and_affirmative_owned_boarding(self):
+        self.assertTrue(_h3_support_ground_start("on the ground"))
+        for value in ("grounded", "not grounded", "above ground", "hovering over ground"):
+            with self.subTest(value=value):
+                self.assertFalse(_h3_support_ground_start(value))
+        self.assertTrue(_h3_support_value_matches_target("on platform", ["platform"]))
+        for value in (
+            "contact with platform",
+            "not on platform",
+            "as if on platform",
+            "hovering above platform",
+            "on the platform as if supported",
+        ):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    _h3_support_value_matches_target(value, ["platform"]),
+                )
+
+        _, _, row, _, _, _, contract, _ = self._source_support_patch_case()
+        issues = [
+            "source action 'climbs onto the platform' requires a support fact "
+            "in physical_state.opening",
+            "source action 'climbs onto the platform' requires a support fact "
+            "in physical_state.closing",
+        ]
+        assigned_actions = [{
+            "event_id": "M1",
+            "text": contract["events"][0]["text"],
+            "kind": "boarding",
+            "actor_aliases": ["Ari"],
+            "target_aliases": ["platform"],
+        }]
+        repair_seed = {
+            "opening": [fact("lead_performer", "posture", "looking over the valley")],
+            "transitions": [],
+        }
+        kwargs = {
+            "issues": issues,
+            "row": row,
+            "cast_ids": [{
+                "character_id": "lead_performer",
+                "speaker_name": "Ari",
+            }],
+            "preceding_closing": [
+                fact("lead_performer", "contact", "grounded"),
+            ],
+            "assigned_actions": assigned_actions,
+            "repair_seed": repair_seed,
+        }
+        spec = _h3_source_support_patch_spec(**kwargs)
+        self.assertEqual(spec["opening_value"], "on the ground")
+        self.assertEqual(spec["to_value"], "on platform")
+        self.assertEqual(spec["action"], "Ari climbs onto the platform.")
+
+        bad_cases = []
+        ungrounded = copy.deepcopy(kwargs)
+        ungrounded["preceding_closing"] = [
+            fact("lead_performer", "contact", "not grounded"),
+        ]
+        bad_cases.append(("ungrounded start", ungrounded))
+
+        ambiguous_actor = copy.deepcopy(kwargs)
+        ambiguous_actor["assigned_actions"][0]["actor_aliases"] = ["Ari", "Mira"]
+        ambiguous_actor["cast_ids"].append({
+            "character_id": "second_performer",
+            "speaker_name": "Mira",
+        })
+        bad_cases.append(("ambiguous actor alias", ambiguous_actor))
+
+        ambiguous_target = copy.deepcopy(kwargs)
+        ambiguous_target["assigned_actions"][0]["target_aliases"] = [
+            "platform", "the platform",
+        ]
+        bad_cases.append(("ambiguous target alias", ambiguous_target))
+
+        wrong_owner = copy.deepcopy(kwargs)
+        wrong_owner["row"]["action_beats"] = [
+            "Ari leaps onto the platform.",
+            "Mira climbs onto the platform.",
+        ]
+        bad_cases.append(("authored action has wrong owner", wrong_owner))
+
+        hypothetical_source = copy.deepcopy(kwargs)
+        hypothetical_source["assigned_actions"][0]["text"] = (
+            "Ari plans to climb onto the platform"
+        )
+        bad_cases.append(("hypothetical source action", hypothetical_source))
+
+        for label, case in bad_cases:
+            with self.subTest(case=label):
+                self.assertIsNone(_h3_source_support_patch_spec(**case))
+
+    def test_metadata_bridge_fails_closed_for_unasserted_or_mismatched_actions(self):
+        previous = self._bridge_previous_row()
+        unsupported_beats = (
+            "Ari talks about leaping onto the ledge.",
+            "Ari remembers jumping onto the ledge.",
+            "Ari plans to leap onto the ledge.",
+            "Ari is shown leaping onto the ledge.",
+            "Ari doesn't leap onto the ledge.",
+            "Ari can't leap onto the ledge.",
+            "Mira leaps onto the ledge.",
+            "Ari leaps from the ledge toward the dragon.",
+            "Ari stands beside the ledge.",
+        )
+        for beat in unsupported_beats:
+            with self.subTest(beat=beat):
+                row = self._bridge_row()
+                row["action_beats"] = [beat, "Ari settles into a crouch."]
+                self.assertIsNone(_bridge_h3_conflicting_openings(
+                    row, previous["physical_state"]["closing"],
+                ))
+
+    def test_metadata_bridge_rejects_beat_reordering_and_later_same_key_destination(self):
+        previous = self._bridge_previous_row()
+        reordered = self._bridge_row()
+        reordered["physical_state"]["opening"].append(
+            fact("lead_performer", "contact", "gripping the ledge")
+        )
+        reordered["action_beats"] = [
+            "Ari grips the ledge.",
+            "Ari leaps onto the ledge.",
+        ]
+        self.assertIsNone(_bridge_h3_conflicting_openings(
+            reordered, previous["physical_state"]["closing"],
+        ))
+
+        existing_early_transition = self._bridge_row()
+        existing_early_transition["physical_state"]["opening"].append(
+            fact("lead_performer", "contact", "holding a sword")
+        )
+        existing_early_transition["physical_state"]["transitions"] = [
+            transition(
+                "lead_performer", "contact", "twirling a sword",
+                "Ari twirls the sword",
+            )
+        ]
+        existing_early_transition["action_beats"] = [
+            "Ari twirls the sword.",
+            "Ari leaps onto the ledge.",
+        ]
+        self.assertIsNone(_bridge_h3_conflicting_openings(
+            existing_early_transition, previous["physical_state"]["closing"],
+        ))
+
+        destination_after_same_key_transition = self._bridge_row()
+        destination_after_same_key_transition["physical_state"]["transitions"] = [
+            transition(
+                "lead_performer", "posture", "upright on the rooftop",
+                "Ari stands upright",
+            ),
+            transition(
+                "lead_performer", "posture", "leaping onto the ledge",
+                "Ari leaps onto the ledge",
+            ),
+        ]
+        destination_after_same_key_transition["action_beats"] = [
+            "Ari leaps onto the ledge.",
+            "Ari stands upright on the rooftop.",
+        ]
+        self.assertIsNone(_bridge_h3_conflicting_openings(
+            destination_after_same_key_transition,
+            previous["physical_state"]["closing"],
+        ))
+
+        already_transitioned = self._bridge_row()
+        already_transitioned["physical_state"]["transitions"] = [
+            transition(
+                "lead_performer", "posture", "leaping onto the ledge",
+                "Ari leaps onto the ledge",
+            )
+        ]
+        candidate = _bridge_h3_conflicting_openings(
+            already_transitioned, previous["physical_state"]["closing"],
+        )
+        self.assertIsNotNone(candidate)
+        self.assertEqual(len(candidate["physical_state"]["transitions"]), 1)
+
+    def test_source_obligations_fall_through_once_with_bridged_metadata_context(self):
+        planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")
+        previous = self._bridge_previous_row()
+        carried_support = fact(
+            "lead_performer", "support", "standing on the ground",
+        )
+        previous["physical_state"]["opening"].append(carried_support)
+        previous["physical_state"]["closing"].append(carried_support)
+        row = self._bridge_row("leaping onto the platform")
+        row["action_beats"] = [
+            "Ari leaps onto the platform.",
+            "Ari climbs onto the platform.",
+        ]
+        row["video_prompt"] = (
+            "Ari leaps onto the platform, then climbs onto it."
+        )
+        row["source_event_ids"] = ["M1"]
+        clip = {"start": 10, "end": 20, "source_event_ids": ["M1"]}
+        contract = {"events": [{
+            "event_id": "M1",
+            "text": "Ari climbs onto the platform.",
+            "kind": "action",
+            "actor_aliases": ["Ari"],
+            "target_aliases": ["platform"],
+        }]}
+        allocation = [{"event_id": "M1", "clip_index": 1}]
+        invalid = _materialize_h3_physical_state_proposals(
+            [row],
+            previous_physical_state=previous["physical_state"],
+            preserve_invalid_tail=True,
+        )[0]
+        initial_issue = invalid["_h3_physical_state_proposal_error"]
+        issue = (
+            "clip 2 compact physical-state proposal could not be materialized: "
+            + initial_issue
+        )
+        repaired_state = {
+            "opening": [
+                fact("lead_performer", "posture", "looking over the valley"),
+                fact("lead_performer", "support", "standing on the ground"),
+            ],
+            "transitions": [
+                transition(
+                    "lead_performer", "posture", "leaping onto the platform",
+                    "Ari leaps onto the platform.",
+                ),
+                transition(
+                    "lead_performer", "support", "standing on the platform",
+                    "Ari climbs onto the platform.",
+                ),
+            ],
+        }
+        with patch.object(
+            planner, "_call_llm_json", return_value=[{"physical_state": repaired_state}],
+        ) as generate:
+            result = _try_repair_h3_physical_state_only(
+                planner,
+                index=1,
+                row=invalid,
+                issue=issue,
+                clip=clip,
+                previous=previous,
+                contract=contract,
+                allocation=allocation,
+                include_image_fields=False,
+            )
+
+        self.assertEqual(generate.call_count, 1)
+        self.assertIsNotNone(result)
+        repaired = result[0]
+        state = repaired["physical_state"]
+        self.assertEqual(
+            state["opening"],
+            [
+                fact("lead_performer", "posture", "looking over the valley"),
+                fact("lead_performer", "support", "standing on the ground"),
+            ],
+        )
+        self.assertEqual(
+            [item["to_value"] for item in state["transitions"]],
+            ["leaping onto the platform", "standing on the platform"],
+        )
+        self.assertEqual(repaired["action_beats"], row["action_beats"])
+        request = generate.call_args.kwargs
+        context_text = request["user_prompt"]
+        self.assertIn("bridge_candidate_source_physical_state_issues", context_text)
+        self.assertIn("support", context_text)
+        self.assertIn("climbs onto the platform", context_text)
+        self.assertIn("repair_seed_compact_physical_state_proposal", context_text)
+        self.assertIn("Preserve those bridges", context_text)
+        self.assertIn("Returning the seed unchanged is invalid", context_text)
+        self.assertIn("Closing is derived", context_text)
+        self.assertIn("cannot be supplied as a field", context_text)
+        self.assertIn("required opening relation may describe the supported", context_text)
+        context = json.loads(context_text.rsplit("\n\n", 1)[-1])
+        self.assertIn("support", context["validation_issue"])
+        self.assertNotIn("conflicts with carried", context["validation_issue"])
+        self.assertIn("conflicts with carried", context["resolved_original_issue"])
+        self.assertIsNone(context["original_compact_physical_state_proposal"])
+        self.assertEqual(context["bridged_conflicting_opening_keys"], [])
+        self.assertEqual(
+            context["assigned_source_actions"],
+            [{
+                "event_id": "M1",
+                "text": "Ari climbs onto the platform.",
+                "kind": "action",
+                "actor_aliases": ["Ari"],
+                "target_aliases": ["platform"],
+            }],
+        )
+        known_keys = context["known_current_physical_keys"]
+        self.assertEqual(len(known_keys), len({
+            (item["subject_id"].casefold(), item["predicate"])
+            for item in known_keys
+        }))
+        self.assertEqual(
+            known_keys[0]["value"], "looking over the valley",
+        )
+        self.assertTrue(context["bridge_candidate_source_physical_state_issues"])
+        self.assertEqual(
+            [
+                item["predicate"]
+                for item in context["repair_seed_compact_physical_state_proposal"]["opening"]
+            ],
+            ["posture", "support"],
+        )
+        repair_seed = context["repair_seed_compact_physical_state_proposal"]
+        self.assertEqual(set(repair_seed), {"opening", "transitions"})
+        self.assertTrue(all(
+            set(item) <= {"subject_id", "predicate", "to_value", "action"}
+            for item in repair_seed["transitions"]
+        ))
+        self.assertNotIn("from_value", json.dumps(repair_seed))
+
+        row_issue = MusicVideoPlanner._music_video_row_issue(
+            1,
+            repaired,
+            [previous],
+            scene_description="Ari performs on a rooftop stage.",
+            include_image_fields=False,
+            require_stable_cast_identity=True,
+            require_source_physical_state=True,
+            require_native_single_clip=True,
+            source_events_for_row=[{
+                "event_id": "M1",
+                "text": "Ari climbs onto the platform.",
+            }],
+        )
+        self.assertIsNone(row_issue, row_issue)
 
     def test_conflicting_carried_fact_is_rejected(self):
         previous = full_state(

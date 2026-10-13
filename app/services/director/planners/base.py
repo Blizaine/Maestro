@@ -393,6 +393,16 @@ class BasePlanner(ABC):
                         if attempt >= max_repair_attempts:
                             missing_start = start + len(rows) + 1
                             missing_end = start + expected
+                            recovery = (
+                                "Accepted shot plans were saved. Retry planning "
+                                "to continue from the saved checkpoint and repair "
+                                "this clip's physical continuity."
+                                if "compact physical-state proposal could not be materialized"
+                                in repair_reason
+                                else "Retry with a shorter or simpler scene "
+                                "description, or use a model with a larger "
+                                "output limit."
+                            )
                             raise RuntimeError(
                                 f"{progress_label.capitalize()} planning "
                                 f"could not produce usable shot plans for "
@@ -400,9 +410,7 @@ class BasePlanner(ABC):
                                 f"of {total} after "
                                 f"{max_repair_attempts} failed repair "
                                 f"attempts. Last issue: {repair_reason}. "
-                                "Retry with a shorter or simpler scene "
-                                "description, or use a model with a larger "
-                                "output limit."
+                                f"{recovery}"
                             )
 
                 if len(rows) != expected:
