@@ -125,6 +125,8 @@ class TestDirectorMusicTimeline(unittest.TestCase):
             stack.enter_context(mock.patch.object(pipeline, "_run_planning",
                                                  side_effect=RuntimeError("Invalid source-action plan")))
             render = stack.enter_context(mock.patch.object(pipeline, "_run_video_generation"))
+            # Error cleanup uses the already-loaded engine in production.
+            stack.enter_context(mock.patch.dict(sys.modules, {"wgp": pipeline._wgp}))
             pipeline._run_pipeline("failed-plan")
             self.assertEqual(record["status"], "failed")
             self.assertFalse(record["llm_streaming"])

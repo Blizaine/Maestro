@@ -3304,25 +3304,81 @@ class MusicVideoPlanner(BasePlanner):
             uses_generated_images = bool(
                 getattr(self, "_uses_generated_shot_images", True)
             )
+            narrative_contract = getattr(self, "_music_narrative_contract", {})
+            narrative_allocation = getattr(self, "_music_narrative_allocation", [])
+            contract_events = (
+                narrative_contract.get("events")
+                if isinstance(narrative_contract, dict) else None
+            )
+            # Event IDs are planner-owned bookkeeping; visible actions remain
+            # subject to the narrative row validator below.
+            source_event_ids_by_clip: Optional[list[list[str]]] = None
+            narrative_allocation_issue = ""
+            if is_minimax_h3 and isinstance(contract_events, list):
+                if any(
+                    not isinstance(event, dict)
+                    or not isinstance(event.get("event_id"), str)
+                    or not event["event_id"].strip()
+                    for event in contract_events
+                ):
+                    narrative_allocation_issue = (
+                        "music narrative contract is incomplete or invalid"
+                    )
+                else:
+                    allocation_issues = validate_music_narrative_allocation(
+                        narrative_contract, narrative_allocation, len(clips),
+                    )
+                    if allocation_issues:
+                        narrative_allocation_issue = (
+                            "music narrative allocation is invalid: "
+                            + allocation_issues[0]
+                        )
+                    else:
+                        assignments = {
+                            item["event_id"]: item["clip_index"]
+                            for item in narrative_allocation
+                        }
+                        source_event_ids_by_clip = [
+                            [
+                                event["event_id"] for event in contract_events
+                                if assignments[event["event_id"]] == clip_index
+                            ]
+                            for clip_index in range(len(clips))
+                        ]
+
             def validate_music_row(index, row, previous_rows):
-                contract = getattr(self, "_music_narrative_contract", {})
-                allocation = getattr(self, "_music_narrative_allocation", [])
-                if contract.get("events"):
+                if narrative_allocation_issue:
+                    issue = narrative_allocation_issue
+                    self._last_music_narrative_issue = issue
+                    self._last_music_row_issue = issue
+                    invalid_drafts[index] = copy.deepcopy(row)
+                    return issue
+                if (
+                    source_event_ids_by_clip is not None
+                    and isinstance(row, dict)
+                    and 0 <= index < len(source_event_ids_by_clip)
+                ):
+                    row["source_event_ids"] = list(source_event_ids_by_clip[index])
+
+                if contract_events:
                     issue = music_narrative_row_issue(
-                        row, contract=contract, allocation=allocation, index=index,
+                        row,
+                        contract=narrative_contract,
+                        allocation=narrative_allocation,
+                        index=index,
                     )
                     if issue:
-                        invalid_drafts[index] = copy.deepcopy(row)
                         self._last_music_narrative_issue = issue
+                        invalid_drafts[index] = copy.deepcopy(row)
                         self._last_music_row_issue = issue
                         return issue
                 self._last_music_narrative_issue = ""
                 assigned_ids = {
-                    item["event_id"] for item in allocation
+                    item["event_id"] for item in narrative_allocation
                     if item["clip_index"] == index
                 }
                 assigned_events = [
-                    event for event in contract.get("events", [])
+                    event for event in narrative_contract.get("events", [])
                     if event["event_id"] in assigned_ids
                 ]
                 issue = self._music_video_row_issue(

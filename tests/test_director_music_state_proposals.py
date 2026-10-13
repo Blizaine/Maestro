@@ -1275,7 +1275,6 @@ class MusicStateProposalTests(unittest.TestCase):
             {"start": 0, "end": 10},
             {"start": 10, "end": 20, "source_event_ids": ["M1"]},
         ]
-        callbacks = self._repair_callbacks(planner, clips)
         planner._music_narrative_contract = {
             "events": [{
                 "event_id": "M1",
@@ -1287,6 +1286,7 @@ class MusicStateProposalTests(unittest.TestCase):
         planner._music_narrative_allocation = [
             {"event_id": "M1", "clip_index": 1},
         ]
+        callbacks = self._repair_callbacks(planner, clips)
         original = self._invalid_materialized_row(source_event_ids=["M1"])
         issue = callbacks["row_validator"](1, original, [self._previous_state_row()])
         self.assertIn("compact physical-state proposal could not be materialized", issue)
@@ -1471,7 +1471,6 @@ class MusicStateProposalTests(unittest.TestCase):
             with self.subTest(case=case):
                 planner = MusicVideoPlanner(llm_generate=lambda **kwargs: "[]")
                 clips = [{"start": 0, "end": 10}, {"start": 10, "end": 20}]
-                callbacks = self._repair_callbacks(planner, clips)
                 row = self._invalid_materialized_row(source_event_ids=[])
                 previous = self._previous_state_row()
                 if case == "narrative":
@@ -1486,11 +1485,14 @@ class MusicStateProposalTests(unittest.TestCase):
                     planner._music_narrative_allocation = [
                         {"event_id": "M1", "clip_index": 1},
                     ]
+                    row["video_prompt"] = "Ari watches the lantern and sings."
+                    row["action_beats"] = ["Ari watches the lantern and sings."]
                 elif case == "general":
                     row.pop("_h3_physical_state_proposal_error", None)
                     row["physical_state"] = full_state([])
                     row["mood"] = ""
 
+                callbacks = self._repair_callbacks(planner, clips)
                 issue = callbacks["row_validator"](1, row, [previous])
                 self.assertTrue(issue)
                 if case == "creative":

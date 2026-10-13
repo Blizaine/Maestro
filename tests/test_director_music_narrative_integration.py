@@ -31,6 +31,20 @@ class MusicNarrativeIntegrationTests(unittest.TestCase):
         self.planner._music_narrative_allocation = self.allocation
         self.planner._uses_generated_shot_images = False
 
+    def _row_validator(self):
+        with patch.object(
+            self.planner, "_run_checkpointed_json_batches", return_value=[],
+        ) as batches:
+            self.planner._plan_with_llm(
+                clips=self.clips,
+                clip_contexts=[f"Clip {i + 1}" for i in range(len(self.clips))],
+                scene_description=self.contract["source"], bpm=120,
+                has_reference=False, reference_image_path=None,
+                char_profiles=[], performer_map={},
+                video_model="minimax_h3_ref2va_fused_turbo",
+            )
+        return batches.call_args.kwargs["row_validator"]
+
     def test_allocation_is_bounded_and_durably_reused(self):
         self.assertTrue(self.contract["events"])
         published = []
@@ -93,6 +107,66 @@ class MusicNarrativeIntegrationTests(unittest.TestCase):
         final = request.split("FINAL REQUIRED STORY ACTIONS", 1)[1]
         self.assertIn("clip 10: source_event_ids must be exactly []", final)
         self.assertNotIn("clip 1: source_event_ids", final)
+
+    def test_writer_copied_completed_event_ids_are_replaced_without_changing_prose(self):
+        row_validator = self._row_validator()
+        prompt = "The sailor watches the fire fade over the distant battlefield."
+        row = {"video_prompt": prompt, "source_event_ids": ["M2"]}
+
+        with patch.object(
+            self.planner, "_music_video_row_issue", return_value=None,
+        ) as row_check:
+            issue = row_validator(10, row, [])
+
+        self.assertIsNone(issue)
+        self.assertEqual(row["source_event_ids"], [])
+        self.assertEqual(row["video_prompt"], prompt)
+        row_check.assert_called_once()
+
+    def test_materialized_event_ids_follow_contract_order(self):
+        event_ids = [event["event_id"] for event in self.contract["events"]]
+        self.planner._music_narrative_allocation = [
+            {"event_id": event_id, "clip_index": 10}
+            for event_id in event_ids
+        ]
+        prompt = "The sailor climbs onto the boat. Then the boat sails across the lake."
+        row = {"video_prompt": prompt, "source_event_ids": list(reversed(event_ids))}
+
+        with patch.object(
+            self.planner, "_music_video_row_issue", return_value=None,
+        ):
+            issue = self._row_validator()(10, row, [])
+
+        self.assertIsNone(issue)
+        self.assertEqual(row["source_event_ids"], event_ids)
+        self.assertEqual(row["video_prompt"], prompt)
+
+    def test_narrative_action_checks_still_reject_future_and_missing_actions(self):
+        row_validator = self._row_validator()
+        future = {
+            "video_prompt": "The sailor climbs onto the boat.",
+            "source_event_ids": ["M2"],
+        }
+        future_issue = row_validator(0, future, [])
+        self.assertIn("performs future music narrative event M1", future_issue or "")
+        self.assertEqual(future["source_event_ids"], [])
+
+        missing = {
+            "video_prompt": "The sailor waves from the shore.",
+            "source_event_ids": [],
+        }
+        missing_issue = row_validator(1, missing, [])
+        self.assertIn("must visibly perform assigned source event M1", missing_issue or "")
+        self.assertEqual(missing["source_event_ids"], ["M1"])
+
+    def test_invalid_authoritative_allocation_fails_without_rewriting_ids(self):
+        self.planner._music_narrative_allocation = self.allocation[:-1]
+        row = {"video_prompt": "The sailor watches from shore.", "source_event_ids": ["M2"]}
+
+        issue = self._row_validator()(10, row, [])
+
+        self.assertIn("music narrative allocation is invalid", issue or "")
+        self.assertEqual(row["source_event_ids"], ["M2"])
 
     def test_metadata_keeps_global_index_for_individual_clip_regeneration(self):
         rows = [{"video_prompt": event["text"], "source_event_ids": [event["event_id"]]}
