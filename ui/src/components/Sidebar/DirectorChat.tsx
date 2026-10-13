@@ -42,6 +42,7 @@ function DirectorTargetDurationControl() {
   const resolution = useStore(s => s.directorResolution)
   const aspectRatio = useStore(s => s.directorAspectRatio)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
+  const totalRamGb = useStore(s => s.systemStats?.ram?.total_gb ?? 0)
   const [options, setOptions] = useState<ModelOptions | null>(null)
   const [planningMode, setPlanningMode] = useState<'duration' | 'windows' | 'auto'>('auto')
 
@@ -59,6 +60,7 @@ function DirectorTargetDurationControl() {
     options?.director_memory_policy || options?.sliding_window_memory_policy,
     resolvedResolution,
     totalVramGb,
+    totalRamGb,
   )
   const defaults = options?.sliding_window_defaults
   const windowFrames = recommendation?.frames
@@ -1443,6 +1445,7 @@ function DirectorResolutionSelector({ disabled = false }: { disabled?: boolean }
   const setResolution = useStore(s => s.setDirectorResolution)
   const videoModel = useStore(s => s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
+  const totalRamGb = useStore(s => s.systemStats?.ram?.total_gb ?? 0)
   const [options, setOptions] = useState<ModelOptions | null>(null)
 
   useEffect(() => {
@@ -1469,6 +1472,7 @@ function DirectorResolutionSelector({ disabled = false }: { disabled?: boolean }
     options?.director_memory_policy || options?.sliding_window_memory_policy,
     resolvedResolution,
     totalVramGb,
+    totalRamGb,
   )
   const fps = options?.fps || 24
   const selectedConfig = options?.resolution_presets?.[resolution]

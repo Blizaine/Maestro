@@ -48,6 +48,15 @@ VRAM protection can shorten a requested window. A deliberate
 and can exceed the card's conservative automatic recommendation. It is not a
 way to establish a generally safe duration.
 
+Studio and Director share the versioned automatic H3 duration policy in
+`app/shared/h3_duration_recommendations.json`. The tested 12 GB VRAM / 32 GB RAM
+class recommends 345 frames (14.4 seconds as displayed) for Pruned and Fused
+at 720p or smaller canvases, including References. This tier requires at least
+30 GiB of detected system RAM; unknown or smaller RAM retains the conservative
+profile. Native 1080p keeps its shorter recommendation. Saved manual durations
+and window limits remain explicit overrides; resume Auto to use the current
+recommendation. Music-led cuts may be shorter than the maximum clip length.
+
 Results are written incrementally to `results.json` and `results.csv`. A private
 settings backup is written before changes. The runner disables auto-tune during
 the matrix and restores the changed settings and original auto-tune preference

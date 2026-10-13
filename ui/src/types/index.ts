@@ -905,6 +905,8 @@ export interface SlidingWindowMemoryPolicy {
       min_pixels?: number
       max_pixels: number
       frames: number
+      /** Reference headroom already accounted for in this tested tier. */
+      reference_margin_steps?: number
     }>
   }
   manual_override?: boolean

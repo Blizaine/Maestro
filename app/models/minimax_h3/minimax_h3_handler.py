@@ -1255,16 +1255,13 @@ def recommended_h3_omni_sequence_profile(
     maximum = max(minimum, int(model_def.get("frames_maximum") or _H3_MAX_FRAMES))
     step = max(1, int(model_def.get("frames_steps") or _H3_FRAME_STEP))
     policy = model_def.get("omni_sequence_memory_policy") or {}
+    resource_tier = profile.get("resource_recommendation") or {}
+    margin_steps_value = resource_tier.get(
+        "reference_margin_steps",
+        policy.get("reference_margin_steps", _H3_OMNI_REFERENCE_MARGIN_STEPS),
+    )
     try:
-        margin_steps = max(
-            0,
-            int(
-                policy.get(
-                    "reference_margin_steps",
-                    _H3_OMNI_REFERENCE_MARGIN_STEPS,
-                )
-            ),
-        )
+        margin_steps = max(0, int(margin_steps_value))
     except (TypeError, ValueError):
         margin_steps = _H3_OMNI_REFERENCE_MARGIN_STEPS
 

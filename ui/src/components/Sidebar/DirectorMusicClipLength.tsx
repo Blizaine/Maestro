@@ -7,6 +7,8 @@ export function DirectorMusicClipLength({disabled = false}: {disabled?: boolean}
   const model = useStore(s => s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL)
   const resolution = useStore(s => s.directorResolution)
   const aspect = useStore(s => s.directorAspectRatio)
+  const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
+  const totalRamGb = useStore(s => s.systemStats?.ram?.total_gb ?? 0)
   const manualFrames = useStore(s => s.directorVideoMaxShotFramesByModel[model])
   const seconds = useStore(s => s.directorMusicClipSeconds)
   const setSeconds = useStore(s => s.setDirectorMusicClipSeconds)
@@ -17,7 +19,7 @@ export function DirectorMusicClipLength({disabled = false}: {disabled?: boolean}
   const bias = useStore(s => s.directorEnergyBias)
   const loading = useStore(s => s.directorLoading)
   const [appliedSeconds, setAppliedSeconds] = useState(seconds)
-  const limitsKey = JSON.stringify([model, resolution, aspect, manualFrames])
+  const limitsKey = JSON.stringify([model, resolution, aspect, manualFrames, totalVramGb, totalRamGb])
   const [result, setResult] = useState<{key: string; limits?: DirectorMusicClipLimits; error?: string} | null>(null)
   const limits = result?.key === limitsKey ? result.limits : undefined
   const error = result?.key === limitsKey ? result.error : ''

@@ -198,11 +198,12 @@ def _recommended_director_h3_profile(
             reference_margin_frames = 0
             if omni_reference:
                 sequence_policy = model_def.get("omni_sequence_memory_policy") or {}
+                margin_steps_value = resource_tier.get(
+                    "reference_margin_steps",
+                    sequence_policy.get("reference_margin_steps", 0),
+                )
                 try:
-                    margin_steps = max(
-                        0,
-                        int(sequence_policy.get("reference_margin_steps", 0)),
-                    )
+                    margin_steps = max(0, int(margin_steps_value))
                 except (TypeError, ValueError, OverflowError):
                     margin_steps = 0
                 reference_margin_frames = min(

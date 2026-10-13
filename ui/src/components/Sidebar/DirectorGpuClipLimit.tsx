@@ -7,11 +7,13 @@ import { formatSeconds } from './DurationSlider'
 export function DirectorGpuClipLimit({model, options}: {model: string; options: ModelOptions | null}) {
   const resolution = useStore(s => s.directorResolution)
   const aspect = useStore(s => s.directorAspectRatio)
+  const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
+  const totalRamGb = useStore(s => s.systemStats?.ram?.total_gb ?? 0)
   const frames = useStore(s => s.directorVideoMaxShotFramesByModel[model])
   const setFrames = useStore(s => s.setDirectorVideoMaxShotFrames)
   const [result, setResult] = useState<{key: string; limits?: DirectorMusicClipLimits; error?: string} | null>(null)
   const canvas = resolveResolution(options, resolution, aspect)
-  const key = JSON.stringify([model, canvas, frames])
+  const key = JSON.stringify([model, canvas, frames, totalVramGb, totalRamGb])
   const bounded = Boolean(options?.frames_maximum && (options?.architecture?.startsWith('minimax_h3') || options?.omni_reference
     || options?.director_memory_policy || options?.sliding_window_memory_policy))
   useEffect(() => {

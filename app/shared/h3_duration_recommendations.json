@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-10",
+  "version": "2026-10-12",
   "evidence": [
     {
       "id": "rtx3080ti-12gb-31_76gib-profile4-pruned",
@@ -10,14 +10,18 @@
       "summary": "The same system completed a 243-frame 720p Fused References run with image and song guidance; longer 720p runs around 14.4–15 seconds also succeeded."
     },
     {
+      "id": "rtx3080ti-12gb-32gb-720p-repeated-345-user-report",
+      "summary": "User reports repeated successful 345-frame (14.375 seconds at 24 fps, displayed as 14.4 seconds) 720p MiniMax H3 Pruned and Fused generations on an RTX 3080 Ti 12 GB system with 32 GB RAM. These are reported outcomes; no controlled benchmark timings or peak-memory measurements were provided."
+    },
+    {
       "id": "h3-24gb-high-ram-reference-music-envelope",
       "summary": "Reference and music conditioning supports promoting the tested 24 GB class only at 63 GiB or more system RAM and canvases no larger than 1280x704."
     }
   ],
   "tiers": [
-    {"checkpoint": "fused_4step", "min_vram_gb": 11, "max_vram_gb": 12.5, "min_ram_gb": 30, "max_pixels": 901120, "frames": 345, "evidence": ["rtx3080ti-12gb-31_76gib-profile4-fused-references"]},
-    {"checkpoint": "fused_4step_references", "min_vram_gb": 11, "max_vram_gb": 12.5, "min_ram_gb": 30, "max_pixels": 901120, "frames": 345, "evidence": ["rtx3080ti-12gb-31_76gib-profile4-fused-references"]},
-    {"checkpoint": "pruned", "min_vram_gb": 11, "max_vram_gb": 12.5, "min_ram_gb": 30, "min_pixels": 800000, "max_pixels": 901120, "frames": 243, "evidence": ["rtx3080ti-12gb-31_76gib-profile4-pruned"]},
+    {"checkpoint": "fused_4step", "min_vram_gb": 11, "max_vram_gb": 12.5, "min_ram_gb": 30, "max_pixels": 901120, "frames": 345, "evidence": ["rtx3080ti-12gb-31_76gib-profile4-fused-references", "rtx3080ti-12gb-32gb-720p-repeated-345-user-report"]},
+    {"checkpoint": "fused_4step_references", "min_vram_gb": 11, "max_vram_gb": 12.5, "min_ram_gb": 30, "max_pixels": 901120, "frames": 345, "evidence": ["rtx3080ti-12gb-31_76gib-profile4-fused-references", "rtx3080ti-12gb-32gb-720p-repeated-345-user-report"]},
+    {"checkpoint": "pruned", "min_vram_gb": 11, "max_vram_gb": 12.5, "min_ram_gb": 30, "max_pixels": 901120, "frames": 345, "reference_margin_steps": 0, "evidence": ["rtx3080ti-12gb-31_76gib-profile4-pruned", "rtx3080ti-12gb-32gb-720p-repeated-345-user-report"]},
     {"checkpoint": "fused_4step", "min_vram_gb": 11, "max_vram_gb": 12.5, "min_ram_gb": 30, "min_pixels": 1800000, "max_pixels": 2088960, "frames": 124, "evidence": ["rtx3080ti-12gb-31_76gib-profile4-pruned"]},
     {"checkpoint": "fused_4step_references", "min_vram_gb": 11, "max_vram_gb": 12.5, "min_ram_gb": 30, "min_pixels": 1800000, "max_pixels": 2088960, "frames": 124, "evidence": ["rtx3080ti-12gb-31_76gib-profile4-pruned"]},
     {"checkpoint": "pruned", "min_vram_gb": 11, "max_vram_gb": 12.5, "min_ram_gb": 30, "min_pixels": 1800000, "max_pixels": 2088960, "frames": 124, "evidence": ["rtx3080ti-12gb-31_76gib-profile4-pruned"]},

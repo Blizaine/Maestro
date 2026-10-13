@@ -12,7 +12,7 @@ const memory=checkpoint=>({checkpoint,resource_recommendations:measured,
   resolution_bands:[{min_pixels:1800000,vram_tiers:[{max_vram_gb:12,frames:null},{frames:158}]},
     {min_pixels:800000,vram_tiers:[{max_vram_gb:12,frames:124},{frames:243}]},
     {min_pixels:0,vram_tiers:[{frames:345}]}]});
-const model=(reference=false,pruned=false)=>({model_type:reference?'minimax_h3_ref2va_fused_turbo':pruned?'minimax_h3_fl2va':'minimax_h3_fused_turbo',
+const model=(reference=false,pruned=false)=>({model_type:reference?(pruned?'minimax_h3_ref2va':'minimax_h3_ref2va_fused_turbo'):pruned?'minimax_h3_fl2va':'minimax_h3_fused_turbo',
   architecture:reference?'minimax_h3_ref2va':'minimax_h3',omni_reference:reference,minimax_h3_fused_turbo:!pruned,
   guidance_max_phases:1,fps:24,frames_minimum:124,frames_maximum:345,frames_steps:17,sliding_window:true,
   sliding_window_defaults:{window_min:124,window_max:345,window_step:17,window_default:243,overlap_default:18,discard_last_frames:0},
@@ -28,10 +28,11 @@ const model=(reference=false,pruned=false)=>({model_type:reference?'minimax_h3_r
  import {DurationSlider} from './src/components/Sidebar/DurationSlider';
  import {DirectorPanel} from './src/components/Sidebar/DirectorPanel';
  import {DirectorMusicClipLength} from './src/components/Sidebar/DirectorMusicClipLength';
+ import {DirectorChat} from './src/components/Sidebar/DirectorChat';
  window.store=useStore;window.h3=h3;window.root=createRoot(document.getElementById('root'));
- window.mount=kind=>window.root.render(kind==='studio'?<DurationSlider includeWindowSettings/>:<><DirectorMusicClipLength/><DirectorPanel/></>);
+ window.mount=kind=>window.root.render(kind==='studio'?<DurationSlider includeWindowSettings/>:kind==='director-chat'?<DirectorChat key={useStore.getState().selectedModelPerMode.video}/>:<><DirectorMusicClipLength/><DirectorPanel/></>);
  `,resolveDir:path.join(root,'ui'),loader:'tsx'},bundle:true,write:false,jsx:'automatic',define:{'process.env.NODE_ENV':'"development"'},logLevel:'silent'});
- const browser=await chromium.launch({headless:true,...(process.platform==='win32'?{executablePath:process.env.MAESTRO_CHROME||'C:/Program Files/Google/Chrome/Application/chrome.exe'}:{})});
+ const browser=await chromium.launch({headless:true,args:['--disable-gpu'],...(process.platform==='win32'?{executablePath:process.env.MAESTRO_CHROME||'C:/Program Files/Google/Chrome/Application/chrome.exe'}:{})});
  try{
   const page=await browser.newPage({viewport:{width:390,height:844}});const errors=[],requests=[];
   page.on('pageerror',e=>errors.push(e.message));let selected=model();
@@ -77,8 +78,19 @@ const model=(reference=false,pruned=false)=>({model_type:reference?'minimax_h3_r
   assert.equal(await page.evaluate(()=>window.store.getState().slidingWindowSeconds*24),345,'References gets the new longer cap');
   selected=model(false,true);
   await page.evaluate(async selected=>{const s=window.store.getState();window.store.setState({studioVideoWorkflow:'frames',params:{...s.params,model_type:selected.model_type},modelOptions:null});await window.store.getState().loadModelOptions(selected.model_type);},selected);
-  await page.waitForFunction(()=>window.store.getState().params.video_length===243);
-  assert.equal(await page.evaluate(()=>window.store.getState().slidingWindowSeconds*24),243,'Pruned uses practical speed cap');
+  await page.waitForFunction(()=>window.store.getState().params.video_length===345);
+  assert.equal(await page.evaluate(()=>window.store.getState().slidingWindowSeconds*24),345,'Pruned Frames uses the repeatedly tested 14.4s cap');
+  selected=model(true,true);
+  await page.evaluate(async selected=>{const s=window.store.getState();window.store.setState({studioVideoWorkflow:'references',params:{...s.params,model_type:selected.model_type},modelOptions:null});await window.store.getState().loadModelOptions(selected.model_type);},selected);
+  await page.waitForFunction(()=>window.store.getState().params.video_length===345);
+  assert.equal(await page.evaluate(()=>window.store.getState().slidingWindowSeconds*24),345,'Pruned References includes tested reference headroom');
+  const referenceProfiles=await page.evaluate(policy=>[
+   window.h3.recommendedH3OmniSequenceProfile(policy,'1280x704',12,124,345,17,31.76),
+   window.h3.recommendedH3OmniSequenceProfile(policy,'1280x704',12,124,345,17,16),
+  ],memory('pruned'));
+  assert.equal(referenceProfiles[0].frames,345);
+  assert.equal(referenceProfiles[0].referenceMarginFrames,0);
+  assert.equal(referenceProfiles[1].frames,124,'Low RAM stays on the conservative fallback');
   selected=model(true);
   await page.evaluate(selected=>{const s=window.store.getState();s.directorReset();window.store.setState({selectedModelPerMode:{video:selected.model_type},
    directorSkill:'music_video',directorResolution:'720p',directorAspectRatio:'16:9',directorSeamless:false,directorStep:'structure',
@@ -90,7 +102,27 @@ const model=(reference=false,pruned=false)=>({model_type:reference?'minimax_h3_r
   const cut=page.locator('input[type=range]').last();assert.equal(await cut.inputValue(),'-2');await cut.focus();await cut.press('ArrowRight');
   await page.waitForFunction(()=>window.store.getState().directorEnergyBias===-1 && !window.store.getState().directorLoading);assert.equal(requests.at(-1).energy_bias,-1);
   await auto.click();await page.waitForFunction(()=>window.store.getState().directorEnergyBias===null && !window.store.getState().directorLoading);assert.equal(requests.at(-1).energy_bias,null);
+
+  // Real Director setup controls used to omit RAM, bypassing measured tiers.
+  for (const [reference,pruned] of [[false,false],[true,false],[false,true],[true,true]]) {
+   selected=model(reference,pruned);
+   await page.evaluate(selected=>{const s=window.store.getState();s.directorReset();window.store.setState({
+    selectedModelPerMode:{video:selected.model_type},directorSkill:'short_film',shortFilmPath:'story',directorStep:'style',
+    directorResolution:'720p',directorAspectRatio:'16:9',directorSceneDescription:'',directorLoading:false,directorError:null,
+    directorVideoMaxShotFramesByModel:{},systemStats:{gpu:{vram_total_gb:12},ram:{total_gb:0}},
+   });window.mount('director-chat');},selected);
+   await page.getByText(/Auto max shot 5\.2s on 12 GB/).waitFor();
+   await page.getByRole('button',{name:'Advanced',exact:true}).click();
+   await page.getByRole('option',{name:'Auto · 5.2s',exact:true}).waitFor({state:'attached'});
+   await page.evaluate(()=>window.store.setState({systemStats:{gpu:{vram_total_gb:12},ram:{total_gb:31.76}}}));
+   await page.getByText(/Auto max shot 14\.4s on 12 GB/).waitFor();
+   await page.getByRole('option',{name:'Auto · 14.4s',exact:true}).waitFor({state:'attached'});
+   await page.getByRole('button',{name:'Window',exact:true}).click();
+   await page.getByRole('spinbutton',{name:'Window count',exact:true}).fill('1');
+   await page.waitForFunction(()=>window.store.getState().shortFilmTargetDuration===345/24);
+   await page.getByText(/current automatic shot target is 14\.4s/).waitFor();
+  }
   assert.deepEqual(errors,[]);
-  console.log('H3 duration defaults: RAM/VRAM scopes, late detection, Studio Frames/References, manual Time/windows, conservative1080p and Director Auto/manual pacing passed');
+  console.log('H3 duration defaults: measured 14.4s Pruned/Fused Frames/References, reference headroom, RAM/VRAM scopes, late detection in Studio/Director, manual Time/windows, conservative1080p and Director Auto/manual pacing passed');
  }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1});

@@ -18,6 +18,7 @@ export type H3MemoryRecommendation = {
   frames: number | null
   baseFrames?: number | null
   referenceMarginFrames?: number
+  referenceMarginSteps?: number
   fallbackResolution?: string
 }
 
@@ -49,7 +50,11 @@ export function recommendedH3PassProfile(
         && Number(totalRamGb) >= tier.min_ram_gb
         && pixels! >= (tier.min_pixels ?? 0) && pixels! <= tier.max_pixels
       )) : undefined
-  if (measured) return { supported: true, frames: measured.frames }
+  if (measured) return {
+    supported: true,
+    frames: measured.frames,
+    referenceMarginSteps: measured.reference_margin_steps,
+  }
   const band = policy.resolution_bands.find(item => pixels! >= item.min_pixels)
   const tier = band?.vram_tiers.find(item => (
     item.max_vram_gb == null || totalVramGb <= item.max_vram_gb
@@ -149,7 +154,9 @@ export function recommendedH3OmniSequenceProfile(
     maximumFrames,
     frameStep,
   )
-  const marginSteps = Math.max(0, Math.round(policy?.reference_margin_steps ?? 1))
+  const marginSteps = Math.max(0, Math.round(
+    profile.referenceMarginSteps ?? policy?.reference_margin_steps ?? 1,
+  ))
   const safeFrames = normalizeH3NativeFrames(
     baseFrames - marginSteps * Math.max(1, frameStep),
     minimumFrames,

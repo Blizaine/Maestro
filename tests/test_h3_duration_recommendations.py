@@ -42,9 +42,13 @@ class TestH3DurationRecommendations(unittest.TestCase):
         recommendations = model["sliding_window_memory_policy"][
             "resource_recommendations"
         ]
-        self.assertEqual(recommendations["version"], "2026-10-10")
+        self.assertEqual(recommendations["version"], "2026-10-12")
         self.assertTrue(recommendations["evidence"])
         self.assertTrue(recommendations["tiers"])
+        self.assertIn(
+            "rtx3080ti-12gb-32gb-720p-repeated-345-user-report",
+            {item["id"] for item in recommendations["evidence"]},
+        )
         self.assertEqual(
             model["director_memory_policy"]["resource_recommendations"]["version"],
             recommendations["version"],
@@ -52,7 +56,8 @@ class TestH3DurationRecommendations(unittest.TestCase):
 
     def test_12gb_32gib_promotes_tested_720p_checkpoint_profiles(self):
         cases = (
-            ("minimax_h3", {}, 243),
+            ("minimax_h3", {}, 345),
+            ("minimax_h3_ref2va", {}, 345),
             ("minimax_h3", {"minimax_h3_fused_turbo": True}, 345),
             (
                 "minimax_h3_ref2va",
@@ -66,7 +71,7 @@ class TestH3DurationRecommendations(unittest.TestCase):
                 profile = self.profile(model)
                 self.assertEqual(profile["frames"], expected)
                 self.assertLessEqual(profile["frames"], 345)
-                self.assertEqual(profile["resource_recommendation_version"], "2026-10-10")
+                self.assertEqual(profile["resource_recommendation_version"], "2026-10-12")
 
         fused = self.model("minimax_h3", {"minimax_h3_fused_turbo": True})
         self.assertEqual(
@@ -141,9 +146,9 @@ class TestH3DurationRecommendations(unittest.TestCase):
         pruned = self.model()
         profile = self.profile(pruned, resolution="864x480")
         self.assertEqual(profile["frames"], 345)
-        self.assertNotIn("resource_recommendation", profile)
+        self.assertLessEqual(profile["pixels"], 901120)
 
-    def test_omni_sequence_margins_remain_per_checkpoint(self):
+    def test_omni_sequence_margin_is_overridden_only_for_measured_pruned_tier(self):
         pruned_reference = self.model("minimax_h3_ref2va")
         base = self.profile(pruned_reference)
         sequence = recommended_h3_omni_sequence_profile(
@@ -152,9 +157,10 @@ class TestH3DurationRecommendations(unittest.TestCase):
             pruned_reference,
             32,
         )
-        self.assertEqual(base["frames"], 243)
-        self.assertEqual(sequence["frames"], 226)
-        self.assertEqual(sequence["reference_margin_frames"], 17)
+        self.assertEqual(base["frames"], 345)
+        self.assertEqual(sequence["frames"], 345)
+        self.assertEqual(sequence["reference_margin_frames"], 0)
+        self.assertEqual(sequence["reference_margin_steps"], 0)
 
         fused_reference = self.model(
             "minimax_h3_ref2va",
@@ -169,12 +175,55 @@ class TestH3DurationRecommendations(unittest.TestCase):
         self.assertEqual(fused_sequence["frames"], 345)
         self.assertEqual(fused_sequence["reference_margin_frames"], 0)
 
-    def test_runtime_auto_helpers_receive_ram_and_keep_omni_margin(self):
+        # The legacy reference margin remains active when the RAM-gated row
+        # does not match, including unknown RAM and another VRAM class.
+        for vram, ram in ((12, None), (12, 29.9), (16, 32)):
+            with self.subTest(vram=vram, ram=ram):
+                fallback = recommended_h3_omni_sequence_profile(
+                    vram, "1280x704", pruned_reference, ram
+                )
+                self.assertNotIn("resource_recommendation", fallback)
+                self.assertEqual(fallback["reference_margin_steps"], 1)
+                self.assertEqual(
+                    fallback["reference_margin_frames"],
+                    min(17, max(0, fallback["base_frames"] - 124)),
+                )
+                self.assertLess(fallback["frames"], 345)
+
+    def test_pruned_tier_resource_boundaries_remain_conservative(self):
+        pruned = self.model()
+        matched = self.profile(pruned, vram=12, ram=30)
+        self.assertEqual(matched["frames"], 345)
+        self.assertIn("resource_recommendation", matched)
+        for boundary_vram in (11, 12.5):
+            with self.subTest(boundary_vram=boundary_vram):
+                self.assertIn(
+                    "resource_recommendation",
+                    self.profile(pruned, vram=boundary_vram, ram=30),
+                )
+
+        for vram, ram, resolution in (
+            (12, 29.9, "1280x704"),
+            (12, None, "1280x704"),
+            (10.9, 32, "1280x704"),
+            (12.6, 32, "1280x704"),
+            (12, 32, "1344x768"),
+        ):
+            with self.subTest(vram=vram, ram=ram, resolution=resolution):
+                profile = self.profile(
+                    pruned,
+                    vram=vram,
+                    ram=ram,
+                    resolution=resolution,
+                )
+                self.assertNotIn("resource_recommendation", profile)
+
+    def test_runtime_auto_helpers_apply_measured_tier_and_keep_manual_controls(self):
         hardware = {"gpu_vram_gb": 12, "ram_gb": 32}
         pruned = self.model()
         window_inputs = {
-            "video_length": 345,
-            "sliding_window_size": 345,
+            "video_length": 362,
+            "sliding_window_size": 362,
             "resolution": "1280x704",
         }
         adjustment = apply_h3_window_memory_policy(
@@ -182,23 +231,24 @@ class TestH3DurationRecommendations(unittest.TestCase):
             pruned,
             hardware,
         )
-        self.assertEqual(adjustment["effective_window_frames"], 243)
-        self.assertEqual(window_inputs["sliding_window_size"], 243)
+        self.assertEqual(adjustment["effective_window_frames"], 345)
+        self.assertEqual(window_inputs["sliding_window_size"], 345)
 
         pruned_reference = self.model("minimax_h3_ref2va")
         sequence_inputs = {
-            "video_length": 345,
+            "video_length": 362,
             "resolution": "1280x704",
             "minimax_h3_reference_sequence": True,
-            "minimax_h3_sequence_clip_frames": 345,
+            "minimax_h3_sequence_clip_frames": 362,
         }
         sequence = apply_h3_omni_sequence_memory_policy(
             sequence_inputs,
             pruned_reference,
             hardware,
         )
-        self.assertEqual(sequence["effective_clip_frames"], 226)
-        self.assertEqual(sequence_inputs["minimax_h3_sequence_clip_frames"], 226)
+        self.assertEqual(sequence["effective_clip_frames"], 345)
+        self.assertEqual(sequence["reference_margin_frames"], 0)
+        self.assertEqual(sequence_inputs["minimax_h3_sequence_clip_frames"], 345)
     def test_director_matches_studio_and_preserves_manual_controls(self):
         hardware = {"gpu_vram_gb": 12, "ram_gb": 32}
         cases = (
