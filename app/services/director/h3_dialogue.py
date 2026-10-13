@@ -135,15 +135,15 @@ _H3_CUSTOM_SECTION_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _H3_SOUND_PROSE_RE = re.compile(
-    r"\b(?:the\s+)?soundscape\s+(?:is\s+dominated\s+by|includes|contains|is)\s+"
+    r"\b(?:(?:the|overall)\s+)?(?:ambient\s+)?soundscape\s+(?:is\s+dominated\s+by|includes|contains|features|is)\s+"
     r"(.+?)(?=\s+(?:non-diegetic\s+music|the\s+final\s+beat|"
-    r"closing\s+blocking|opening\s+continuity|final\s+blocking)\b|\s*\[Shot\s+\d+\]|$)",
+    r"closing\s+blocking|opening\s+continuity|final\s+blocking)\b|\s*\[Shot\s+\d+\]|(?<=[.!?])\s+|$)",
     re.IGNORECASE | re.DOTALL,
 )
 _H3_MUSIC_PROSE_RE = re.compile(
     r"\bnon-diegetic\s+music\s+is\s+(.+?)"
     r"(?=\s+(?:the\s+final\s+beat|closing\s+blocking|"
-    r"opening\s+continuity|final\s+blocking)\b|\s*\[Shot\s+\d+\]|$)",
+    r"opening\s+continuity|final\s+blocking)\b|\s*\[Shot\s+\d+\]|(?<=[.!?])\s+|$)",
     re.IGNORECASE | re.DOTALL,
 )
 _H3_SCENE_TIMESTAMP_PATTERN = r"\d{2,}:[0-5]\d(?:\.\d{1,3})?"

@@ -3202,8 +3202,19 @@ class MusicVideoPlanner(BasePlanner):
                 narrative_contract = getattr(self, "_music_narrative_contract", {})
                 creative_arc = getattr(self, "_music_arc", [])
                 if creative_arc:
-                    from ..music_arc import format_music_arc_context
-                    batch_concept += "\n\n" + format_music_arc_context(creative_arc, start, end)
+                    from ..music_arc import filter_music_arc_context, format_music_arc_context
+                    # Creative shorthand cannot overrule the story schedule.
+                    # A rejected beat must not be fed back as repair direction.
+                    repair_indices = (
+                        range(start, end)
+                        if repair and getattr(self, "_last_music_narrative_issue", "")
+                        else ()
+                    )
+                    arc_context = filter_music_arc_context(
+                        creative_arc, narrative_contract, self._music_narrative_allocation,
+                        suppressed_indices=repair_indices,
+                    )
+                    batch_concept += "\n\n" + format_music_arc_context(arc_context, start, end, one_based=True)
                 if narrative_contract.get("events"):
                     batch_concept += "\n\n" + format_music_narrative_context(
                         narrative_contract,
@@ -3233,6 +3244,13 @@ class MusicVideoPlanner(BasePlanner):
                         batch_concept += (
                             "\nRequired story-action repair: "
                             + self._last_music_narrative_issue
+                            + "\nUse the accepted previous scene and the source-action "
+                            "schedule to rebuild this clip's local action, environment "
+                            "and subject positions. Revise any rejected draft details "
+                            "that depict a pending milestone early. When this clip has "
+                            "no assigned milestone, develop a distinct performance, "
+                            "reaction or camera beat within the established scene, "
+                            "preserving visible support and contact."
                         )
                     if getattr(self, "_last_music_creative_issue", ""):
                         batch_concept += "\nFOCUSED CREATIVE REPAIR:\n" + self._last_music_creative_issue
@@ -3311,6 +3329,7 @@ class MusicVideoPlanner(BasePlanner):
                     # with a compact source-owned request, then run the same full
                     # production row validator on the merged row below.
                     from ..music_narrative_repair import (
+                        compile_music_narrative_bridge_row,
                         compile_music_narrative_source_row,
                         repair_music_narrative_visuals,
                     )
@@ -3335,15 +3354,24 @@ class MusicVideoPlanner(BasePlanner):
                             allocation=narrative_allocation,
                             previous=previous,
                         )
+                        if compiled is None:
+                            compiled = compile_music_narrative_bridge_row(
+                                index=start,
+                                row=invalid_drafts[start],
+                                issue=narrative_issue,
+                                contract=narrative_contract,
+                                allocation=narrative_allocation,
+                                previous=previous,
+                            )
                         if compiled is not None:
                             print(
                                 f"[MusicVideoPlanner] Clip {start + 1} compiled "
-                                "directly from its assigned source actions after "
+                                "from its source actions or established scene after "
                                 "two writer repair attempts."
                             )
                             self._emit_planning_progress(
                                 message=(f"Clip {start + 1}: compiled from "
-                                         "the requested source actions"),
+                                         "the requested story and established scene"),
                                 current=start,
                                 total=len(clips),
                                 stage="music_source_recovery",
@@ -4127,6 +4155,8 @@ Write {len(clips)} structured shot plans. Go:"""
                         "source_compiled": True,
                         "recovery_reason": str(raw.get("_music_source_recovery_reason") or ""),
                     })
+                    if raw.get("_music_bridge_compiled"):
+                        metadata["_director_music_narrative"]["bridge_compiled"] = True
             if physical_state is not None:
                 metadata["physical_state"] = physical_state
             source_event_ids = (

@@ -17,6 +17,7 @@ from services.director.music_narrative import (
     music_narrative_row_issue,
 )
 from services.director.music_narrative_repair import (
+    compile_music_narrative_bridge_row,
     compile_music_narrative_source_row,
     repair_music_narrative_visuals,
 )
@@ -532,6 +533,279 @@ class MusicNarrativeSourceCompilerTests(unittest.TestCase):
                 issue="failed source action",
                 contract=contract,
                 allocation=allocation,
+            )
+        )
+
+
+class MusicNarrativeBridgeCompilerTests(unittest.TestCase):
+    def test_builds_sailor_boat_bridge_from_previous_state_and_recompiles_native_fields(self):
+        contract = build_music_narrative_contract(
+            "Ari climbs onto a small wooden sailboat. The boat sails across the bay."
+        )
+        allocation = [
+            {"event_id": "M1", "clip_index": 0},
+            {"event_id": "M2", "clip_index": 2},
+        ]
+        previous_source = source_row(
+            source_ids=["M1"],
+            video_prompt="[Shot 1] Ari is already aboard the yellow canoe.",
+        )
+        previous = compile_music_narrative_source_row(
+            index=0,
+            row=previous_source,
+            issue="repair boarding",
+            contract=contract,
+            allocation=allocation,
+        )[0]
+        row = source_row(
+            source_ids=[],
+            video_prompt=(
+                "[Shot 1] The boat sails across the bay as Ari sings; "
+                "the camera follows over open water."
+            ),
+        )
+        row["environment"] = "Open water while the boat sails across the bay."
+        row["subjects_on_screen"] = [
+            {
+                "character_id": "ari-current",
+                "speaker_name": "Ari",
+                "visual_description": "Ari, an adult sailor in a navy coat.",
+                "position_or_relation": "already sailing across the bay",
+                "performance_role": "lead_vocalist",
+            },
+            {
+                "character_id": "sailboat-current",
+                "speaker_name": "Boat",
+                "visual_description": "A small wooden sailboat with a cream sail.",
+                "position_or_relation": "underway across the bay",
+                "performance_role": "non_vocal",
+            },
+        ]
+        row["camera_plan"] = {
+            "framing": "medium-wide",
+            "angle": "eye level",
+            "movement": "slow lateral track",
+            "movement_intensity": "low",
+            "lens_feel": "natural",
+        }
+        row["native_ir"] = "detailed_description: The boat sails across the bay."
+        row["video_ir"] = "The boat sails across the bay."
+        row["prompt_ir"] = "The boat sails across the bay."
+        row["_director_native_ir"] = "The boat sails across the bay."
+        row["detailed_description"] = "The boat sails across the bay."
+        row["subject_definitions"] = ["The boat is sailing across the bay."]
+        row["soundtrack"] = {"path": "song.wav", "sha256": "stable-audio-id"}
+        original = copy.deepcopy(row)
+        issue = music_narrative_row_issue(
+            row, contract=contract, allocation=allocation, index=1,
+        )
+        self.assertIsNotNone(issue)
+
+        result = compile_music_narrative_bridge_row(
+            index=1,
+            row=row,
+            issue=issue,
+            contract=contract,
+            allocation=allocation,
+            previous=previous,
+        )
+
+        self.assertIsNotNone(result)
+        compiled = result[0]
+        self.assertEqual(compiled["source_event_ids"], [])
+        self.assertEqual(
+            [subject["character_id"] for subject in compiled["subjects_on_screen"]],
+            ["ari-current", "sailboat-current"],
+        )
+        self.assertEqual(
+            [subject["performance_role"] for subject in compiled["subjects_on_screen"]],
+            ["lead_vocalist", "non_vocal"],
+        )
+        self.assertEqual(
+            compiled["subjects_on_screen"][0]["visual_description"],
+            row["subjects_on_screen"][0]["visual_description"],
+        )
+        self.assertIn("securely aboard a small wooden sailboat", compiled["video_prompt"])
+        self.assertIn("Harbor pier at sunrise", compiled["environment"])
+        self.assertIn("slow lateral track", compiled["video_prompt"])
+        self.assertNotIn("sails across the bay", compiled["environment"])
+        self.assertNotIn("sails across the bay", compiled["video_prompt"])
+        self.assertNotIn("sailing across the bay", compiled["subjects_on_screen"][0]["position_or_relation"])
+        self.assertEqual(compiled["soundtrack"], original["soundtrack"])
+        self.assertTrue(compiled["_music_bridge_compiled"])
+        self.assertTrue(compiled["_music_source_compiled"])
+        for field in ("native_ir", "video_ir", "prompt_ir", "_director_native_ir", "detailed_description"):
+            self.assertEqual(compiled[field], compiled["video_prompt"])
+        self.assertEqual(compiled["window_prompts"], [])
+        self.assertEqual(compiled["subject_definitions"], [])
+        self.assertEqual(row, original)
+        self.assertIsNone(
+            music_narrative_row_issue(
+                compiled, contract=contract, allocation=allocation, index=1,
+            )
+        )
+
+    def test_preserves_partial_kitten_contact_without_replaying_boarding_or_future_flight(self):
+        contract = build_music_narrative_contract(
+            "The kitten climbs on the dragon. The dragon flies through the air."
+        )
+        allocation = [
+            {"event_id": "M1", "clip_index": 1},
+            {"event_id": "M2", "clip_index": 3},
+        ]
+        previous = source_row(
+            source_ids=["M1"],
+            video_prompt="[Shot 1] The kitten climbs on the dragon.",
+        )
+        previous["environment"] = "A grassy plateau beneath a bright sky."
+        previous["subjects_on_screen"] = [
+            {
+                "character_id": "kitten-before",
+                "speaker_name": "Kitten",
+                "visual_description": "A cute warrior kitten with a pink bow.",
+                "position_or_relation": "halfway up the dragon's foreleg",
+                "performance_role": "lead_vocalist",
+            },
+            {
+                "character_id": "dragon-before",
+                "speaker_name": "Dragon",
+                "visual_description": "A massive dark-scaled dragon.",
+                "position_or_relation": "beside the kitten on the plateau",
+                "performance_role": "non_vocal",
+            },
+        ]
+        previous["ending_beat"] = (
+            "The kitten is halfway up the dragon's foreleg after climbing aboard. "
+            "The dragon remains beside the kitten."
+        )
+        row = source_row(
+            source_ids=[],
+            video_prompt=(
+                "[Shot 1] The dragon flies over clouds while the kitten rides high above the battlefield."
+            ),
+        )
+        row["environment"] = "Open sky as the dragon flies over clouds."
+        row["subjects_on_screen"] = [
+            {
+                "character_id": "hero-cat-current",
+                "speaker_name": "Kitten",
+                "visual_description": "A cute warrior kitten with a pink bow.",
+                "position_or_relation": "riding high above the battlefield",
+                "performance_role": "lead_vocalist",
+            },
+            {
+                "character_id": "dragon-current",
+                "speaker_name": "Dragon",
+                "visual_description": "A massive dark-scaled dragon.",
+                "position_or_relation": "flying through clouds",
+                "performance_role": "non_vocal",
+            },
+        ]
+        original = copy.deepcopy(row)
+        issue = music_narrative_row_issue(
+            row, contract=contract, allocation=allocation, index=2,
+        )
+        self.assertIsNotNone(issue)
+        self.assertIsNone(
+            music_narrative_row_issue(
+                previous, contract=contract, allocation=allocation, index=1,
+            )
+        )
+
+        result = compile_music_narrative_bridge_row(
+            index=2,
+            row=row,
+            issue=issue,
+            contract=contract,
+            allocation=allocation,
+            previous=previous,
+        )
+
+        self.assertIsNotNone(result)
+        compiled = result[0]
+        self.assertIn("halfway up the dragon's foreleg", compiled["video_prompt"])
+        self.assertNotIn("climbs on the dragon", compiled["video_prompt"])
+        self.assertNotIn("climbing aboard", compiled["video_prompt"])
+        self.assertNotIn("flies over clouds", compiled["video_prompt"])
+        self.assertIn("grassy plateau", compiled["environment"])
+        self.assertEqual(compiled["source_event_ids"], [])
+        self.assertEqual(
+            [subject["character_id"] for subject in compiled["subjects_on_screen"]],
+            ["hero-cat-current", "dragon-current"],
+        )
+        self.assertEqual(row, original)
+        self.assertIsNone(
+            music_narrative_row_issue(
+                compiled, contract=contract, allocation=allocation, index=2,
+            )
+        )
+
+    def test_refuses_bridge_without_accepted_previous_row_or_matching_cast(self):
+        contract = build_music_narrative_contract(
+            "The sailor climbs onto a boat. The boat sails across the lake."
+        )
+        allocation = [
+            {"event_id": "M1", "clip_index": 0},
+            {"event_id": "M2", "clip_index": 2},
+        ]
+        previous = source_row(
+            source_ids=["M1"],
+            video_prompt="[Shot 1] The sailor climbs onto a boat.",
+        )
+        row = source_row(
+            source_ids=[],
+            video_prompt="[Shot 1] The boat sails across the lake.",
+        )
+        issue = music_narrative_row_issue(
+            row, contract=contract, allocation=allocation, index=1,
+        )
+        self.assertIsNotNone(issue)
+        self.assertIsNone(
+            compile_music_narrative_bridge_row(
+                index=1,
+                row=row,
+                issue=issue,
+                contract=contract,
+                allocation=allocation,
+                previous=None,
+            )
+        )
+
+        previous["source_event_ids"] = []
+        previous_issue = music_narrative_row_issue(
+            previous, contract=contract, allocation=allocation, index=0,
+        )
+        self.assertIsNotNone(previous_issue)
+        self.assertIsNone(
+            compile_music_narrative_bridge_row(
+                index=1,
+                row=row,
+                issue=issue,
+                contract=contract,
+                allocation=allocation,
+                previous=previous,
+            )
+        )
+
+        accepted_previous = source_row(
+            source_ids=["M1"],
+            video_prompt="[Shot 1] The sailor climbs onto a boat.",
+        )
+        row["subjects_on_screen"] = [{
+            "character_id": "new-person",
+            "speaker_name": "New Person",
+            "visual_description": "A stranger in a red coat.",
+            "position_or_relation": "",
+            "performance_role": "non_vocal",
+        }]
+        self.assertIsNone(
+            compile_music_narrative_bridge_row(
+                index=1,
+                row=row,
+                issue=issue,
+                contract=contract,
+                allocation=allocation,
+                previous=accepted_previous,
             )
         )
 

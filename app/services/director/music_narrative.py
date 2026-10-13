@@ -144,6 +144,11 @@ _DIRECTIVE_ACTION_REFERENCE_RE = re.compile(
     r"movement|step)\b",
     re.I,
 )
+_BARE_ACTION_ORDER_REFERENCE_RE = re.compile(
+    r"^\s*(?:show|include|depict|preserve)\s+(?:the\s+)?[a-z]+ing\s+"
+    r"(?:before|after|during)\s*$",
+    re.I,
+)
 _FILMMAKING_CUE_RE = re.compile(
     r"\b(?:camera|cameras|lens|lenses|cinematograph\w*|filmmak\w*|"
     r"wide|medium|close[- ]?up|establishing|tracking|pov|locked|static|fixed|"
@@ -466,7 +471,10 @@ def _is_nominal_action_reference(
     if _ACTION_REFERENCE_VERB_PREFIX_RE.search(prefix):
         return True
     if re.search(r"\b(?:before|after|during)\s*$", prefix, re.I):
-        return bool(_DIRECTIVE_ACTION_REFERENCE_RE.search(prefix))
+        return bool(
+            _DIRECTIVE_ACTION_REFERENCE_RE.search(prefix)
+            or _BARE_ACTION_ORDER_REFERENCE_RE.fullmatch(prefix)
+        )
     return False
 
 

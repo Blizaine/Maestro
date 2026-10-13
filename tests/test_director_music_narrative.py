@@ -120,10 +120,36 @@ class MusicNarrativeTests(unittest.TestCase):
     def test_explicit_action_references_do_not_create_milestones(self):
         for source in (
             "Show the boarding action before sailing.",
+            "Show boarding before sailing.",
+            "Include the boarding before sailing.",
+            "Depict flying after boarding.",
             "Preserve natural story progression without replaying the boarding.",
         ):
             with self.subTest(source=source):
                 self.assertEqual(contract_for(source)["events"], [])
+
+    def test_actor_free_order_reminder_does_not_add_an_event_to_the_story(self):
+        source = (
+            "Ari climbs onto a small wooden sailboat, settles securely aboard, "
+            "and the boat sails across the bay. Show boarding before sailing."
+        )
+        events = contract_for(source)["events"]
+        self.assertEqual([event["text"] for event in events], [
+            "climbs onto a small wooden sailboat", "sails across the bay",
+        ])
+        self.assertEqual(events[0]["actor_aliases"], ["ari"])
+        self.assertEqual(events[1]["actor_aliases"], ["boat"])
+
+    def test_order_reminder_filter_keeps_directed_actions_with_an_actor(self):
+        for source in (
+            "Show the sailor boarding the boat before sailing across the bay.",
+            "Show Ari boarding the boat before sailing across the bay.",
+        ):
+            with self.subTest(source=source):
+                events = contract_for(source)["events"]
+                self.assertEqual(len(events), 2)
+                self.assertEqual(events[0]["kind"], "boarding")
+                self.assertEqual(events[1]["text"], "sailing across the bay")
 
     def test_camera_directions_do_not_become_physical_attack_events(self):
         sources = (

@@ -399,6 +399,11 @@ class BasePlanner(ABC):
                                 "this clip's physical continuity."
                                 if "compact physical-state proposal could not be materialized"
                                 in repair_reason
+                                else "Accepted shot plans were saved. Retry planning "
+                                "to continue from the saved checkpoint and repair "
+                                "this clip's story order."
+                                if "music narrative" in repair_reason
+                                or "assigned source event" in repair_reason
                                 else "Retry with a shorter or simpler scene "
                                 "description, or use a model with a larger "
                                 "output limit."

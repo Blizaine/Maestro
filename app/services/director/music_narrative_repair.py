@@ -11,10 +11,13 @@ from .music_narrative import (
     _action_matches,
     _allocation_map,
     _contract_events,
+    _event_coverage_positions,
+    _event_with_row_actor_identity,
     _is_nominal_action_reference,
     _is_static_modifier_match,
     format_music_narrative_context,
     music_narrative_row_issue,
+    validate_music_narrative_allocation,
 )
 from .physical_continuity import identity_only_description
 
@@ -385,6 +388,271 @@ def _current_row_is_complete(row: dict[str, Any]) -> bool:
         and bool(camera["framing"].strip())
         and isinstance(row.get("window_prompts"), list)
     )
+
+
+_BRIDGE_IDENTITY_FIELDS = (
+    "character_id",
+    "speaker_name",
+    "visual_description",
+    "identity",
+    "identity_description",
+    "description",
+)
+_BRIDGE_IDENTITY_STOPWORDS = {"a", "an", "and", "as", "of", "the", "to", "with"}
+
+
+def _safe_text_parts(value: Any, *, limit: int = 180) -> list[str]:
+    if not isinstance(value, str) or not value.strip():
+        return []
+    parts = re.split(r"[,;.!?]+", value)
+    safe = [_safe_detail(part, limit=limit) for part in parts]
+    return [part for part in safe if part]
+
+
+def _bridge_subject_texts(subject: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for field in _BRIDGE_IDENTITY_FIELDS:
+        value = subject.get(field)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        if field in {"visual_description", "identity", "identity_description", "description"}:
+            value = identity_only_description(value)
+        normalized = " ".join(_phrase_tokens(value))
+        if normalized and normalized not in values:
+            values.append(normalized)
+    return values
+
+
+def _bridge_subjects_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_name = _phrase_tokens(left.get("speaker_name"))
+    right_name = _phrase_tokens(right.get("speaker_name"))
+    if left_name and right_name:
+        return left_name == right_name
+    left_id = _phrase_tokens(left.get("character_id"))
+    if left_id and left_id == _phrase_tokens(right.get("character_id")):
+        return True
+    # Row-local IDs may drift. Accept the same distinctive appearance, with
+    # punctuation/connectives normalized, rather than guessing from resemblance.
+    for left_text in _bridge_subject_texts(left):
+        left_tokens = tuple(t for t in _phrase_tokens(left_text) if t not in _BRIDGE_IDENTITY_STOPWORDS)
+        for right_text in _bridge_subject_texts(right):
+            right_tokens = tuple(t for t in _phrase_tokens(right_text) if t not in _BRIDGE_IDENTITY_STOPWORDS)
+            if len(left_tokens) >= 3 and left_tokens == right_tokens:
+                return True
+    return False
+
+
+def _bridge_ending_state(previous: dict[str, Any], events: list[dict[str, Any]]) -> str:
+    # Keep ownership intact: never split comma clauses and reassign them to
+    # individual cast members. Recognized source transitions are not replayed.
+    ending = str(previous.get("ending_beat") or "")
+    for sentence in re.split(r"(?<=[.!?])\s+", ending):
+        text = re.sub(r"\s+", " ", sentence).strip(" .")
+        if text and len(text) <= 900 and not any(
+            _event_coverage_positions(text, _event_with_row_actor_identity(previous, event))
+            for event in events
+        ):
+            return text
+    return ""
+
+
+def _bridge_camera(row: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+    current = row.get("camera_plan")
+    prior = previous.get("camera_plan")
+    current = current if isinstance(current, dict) else {}
+    prior = prior if isinstance(prior, dict) else {}
+    camera: dict[str, Any] = {}
+    for field in _CAMERA_FIELDS:
+        value = _safe_detail(current.get(field), limit=80)
+        if not value:
+            value = _safe_detail(prior.get(field), limit=80)
+        if value:
+            camera[field] = value
+    if not camera.get("framing"):
+        camera["framing"] = "wide shot"
+    return camera
+
+
+def compile_music_narrative_bridge_row(
+    *,
+    index: int,
+    row: Any,
+    issue: str,
+    contract: Any,
+    allocation: Any,
+    previous: Any = None,
+) -> list[dict[str, Any]] | None:
+    """Build a grounded no-event bridge from an accepted preceding clip.
+
+    The bridge keeps the current row's cast and any safe camera choice, while
+    sourcing visible state and location from the accepted previous row. It
+    cannot perform or reallocate a source event.
+    """
+
+    if (
+        not isinstance(row, dict)
+        or not isinstance(previous, dict)
+        or not isinstance(index, int)
+        or isinstance(index, bool)
+        or index < 1
+        or not isinstance(issue, str)
+        or not issue.strip()
+        or not _current_row_is_complete(row)
+        or not _current_row_is_complete(previous)
+        or row.get("image_prompt")
+        or row.get("keyframe_prompts")
+    ):
+        return None
+
+    events = _contract_events(contract)
+    if not events or not isinstance(allocation, list):
+        return None
+    allocation_indexes = [
+        item.get("clip_index")
+        for item in allocation
+        if isinstance(item, dict)
+        and isinstance(item.get("clip_index"), int)
+        and not isinstance(item.get("clip_index"), bool)
+    ]
+    clip_count = max([index + 1, *(value + 1 for value in allocation_indexes)])
+    if validate_music_narrative_allocation(contract, allocation, clip_count):
+        return None
+
+    if music_narrative_row_issue(
+        row, contract=contract, allocation=allocation, index=index,
+    ) is None:
+        return None
+    if music_narrative_row_issue(
+        previous, contract=contract, allocation=allocation, index=index - 1,
+    ) is not None:
+        return None
+    assignments = _allocation_map(allocation)
+    if any(
+        assignments.get(str(event.get("event_id") or "")) == index
+        for event in events
+    ):
+        return None
+    expected_ids = [
+        str(event.get("event_id") or "")
+        for event in events
+        if assignments.get(str(event.get("event_id") or "")) == index
+    ]
+    if expected_ids or row.get("source_event_ids") != []:
+        return None
+
+    previous_environment = ". ".join(_safe_text_parts(previous.get("environment")))
+    previous_environment = _safe_detail(previous_environment, limit=360)
+    if not previous_environment:
+        return None
+
+    current_subjects = row.get("subjects_on_screen")
+    previous_subjects = previous.get("subjects_on_screen")
+    if not isinstance(current_subjects, list) or not isinstance(previous_subjects, list):
+        return None
+    prior_subjects = [subject for subject in previous_subjects if isinstance(subject, dict)]
+    ending_state = _bridge_ending_state(previous, events)
+    matched_subjects: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for subject in current_subjects:
+        if not isinstance(subject, dict):
+            return None
+        matches = [
+            prior for prior in prior_subjects
+            if _bridge_subjects_match(subject, prior)
+        ]
+        if len(matches) != 1:
+            return None
+        matched_subjects.append((subject, matches[0]))
+
+    # A whole ending can include every visible actor. Require the same cast
+    # when using it; a cutaway can carry only its own proven position fields.
+    matched_prior = {id(prior) for _, prior in matched_subjects}
+    if len(matched_prior) != len(matched_subjects):
+        return None
+    same_cast = len(matched_prior) == len(prior_subjects)
+    merged = copy.deepcopy(row)
+    merged_subjects: list[dict[str, Any]] = []
+    visible_states: list[str] = []
+    for current_subject, prior_subject in matched_subjects:
+        copied = copy.deepcopy(current_subject)
+        for field in ("visual_description", "identity", "identity_description", "description"):
+            if isinstance(copied.get(field), str):
+                copied[field] = identity_only_description(copied[field])
+        position = _safe_detail(prior_subject.get("position_or_relation"), limit=360)
+        copied["position_or_relation"] = position
+        if position:
+            label = str(current_subject.get("speaker_name") or current_subject.get("character_id") or "").strip()
+            if label:
+                visible_states.append(f"{label} remains {position}")
+        elif not same_cast or not ending_state:
+            return None
+        merged_subjects.append(copied)
+    if same_cast and ending_state:
+        state_text = "; ".join([ending_state, *visible_states])
+    elif visible_states:
+        state_text = "; ".join(visible_states)
+    elif not merged_subjects:
+        state_text = f"The established setting remains {previous_environment}"
+    else:
+        return None
+
+    camera = _bridge_camera(row, previous)
+    camera_bits = [
+        _safe_detail(camera.get(field), limit=80)
+        for field in ("framing", "angle", "movement", "lens_feel")
+    ]
+    camera_bits = [value for value in camera_bits if value]
+    appearance_bits = [
+        _safe_detail(identity_only_description(subject.get("visual_description")), limit=240)
+        for subject in merged_subjects
+    ]
+    appearance_bits = [value for value in appearance_bits if value]
+    prompt_parts = ["[Shot 1]"]
+    if camera_bits:
+        prompt_parts.append("Composition: " + ", ".join(camera_bits) + ".")
+    prompt_parts.append(f"Setting: {previous_environment}.")
+    prompt_parts.append("Established visible state: " + state_text + ".")
+    for appearance in appearance_bits:
+        prompt_parts.append(f"Stable appearance: {appearance}.")
+    prompt_parts.append(
+        "The camera sustains a visual music bridge over the supplied soundtrack, "
+        "which continues unchanged; add no dialogue or transcribed lyrics."
+    )
+    prompt = " ".join(prompt_parts)
+
+    merged["subjects_on_screen"] = merged_subjects
+    merged["camera_plan"] = camera
+    merged["environment"] = previous_environment
+    for field, fallback in (
+        ("visual_style", "Cinematic visual style"),
+        ("lighting", "Natural, consistent lighting"),
+        ("mood", "Steady, reflective mood"),
+    ):
+        value = _safe_detail(previous.get(field)) or _safe_detail(row.get(field)) or fallback
+        merged[field] = value
+    merged["scene_goal"] = "Hold a camera bridge on the established visible state."
+    merged["video_prompt"] = prompt
+    merged["detailed_description"] = prompt
+    merged["action_beats"] = [
+        "The camera holds on the established visible state as the supplied soundtrack continues."
+    ]
+    merged["ending_beat"] = state_text
+    merged["spatial_setup"] = state_text
+    merged["window_prompts"] = []
+    for field in _NARRATIVE_DEFINITION_FIELDS:
+        if field in merged:
+            merged[field] = []
+    for field in _NATIVE_TEXT_FIELDS:
+        if field in merged:
+            merged[field] = prompt
+    merged["_music_bridge_compiled"] = True
+    merged["_music_source_compiled"] = True
+    merged["_music_source_recovery_reason"] = issue
+
+    if music_narrative_row_issue(
+        merged, contract=contract, allocation=allocation, index=index,
+    ) is not None:
+        return None
+    return [merged]
 
 
 def _same_entity(left: str, right: str) -> bool:

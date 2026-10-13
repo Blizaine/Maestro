@@ -170,6 +170,28 @@ class DirectorReferenceContractTests(unittest.TestCase):
                     self.assertEqual(visual.count('At the end,'), 1)
                     self.assertEqual(visual.count('Warm daylight'), 1)
 
+    def test_audio_prose_extraction_preserves_following_visual_actions(self):
+        cases = (
+            ('The Dragon breathes fire over the battlefield.',
+             'The ambient soundscape is dominated by wind and distant steel. '),
+            ('Ari climbs onto the sailboat.',
+             'Overall soundscape features harbor wind. Non-diegetic music is soft folk. '),
+        )
+        for action, audio in cases:
+            for mode in ('t2va', 'ref2va'):
+                with self.subTest(action=action, mode=mode):
+                    source = '[Shot 1] A wide establishing view. ' + audio + action
+                    kwargs = dict(mode=mode, audio_plan={'mode': 'music_driven'})
+                    compiled, _ = compile_h3_official_prompt(source, [], [], **kwargs)
+                    again, _ = compile_h3_official_prompt(compiled, [], [], **kwargs)
+                    for prompt in (compiled, again):
+                        visual_key = 'detailed_description:' if mode == 'ref2va' else 'integrated_multimodal_description:'
+                        visual = prompt.split(visual_key, 1)[1].split('overall_soundscape:', 1)[0]
+                        sound = prompt.split('overall_soundscape:', 1)[1]
+                        self.assertEqual(visual.count(action), 1)
+                        self.assertNotIn(action, sound)
+                        self.assertNotIn('The ambient Any audible', visual)
+
     def test_music_compilation_is_idempotent_and_preserves_non_song_expression(self):
         subject = {'speaker_name': 'Kitten', 'visual_description': 'Kitten in silver armor', 'performance_role': 'vocalist'}
         direction = music_performance_direction([subject], 'active')

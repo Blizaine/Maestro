@@ -162,6 +162,36 @@ class MusicNarrativeIntegrationTests(unittest.TestCase):
         self.assertIn("must visibly perform assigned source event M1", missing_issue or "")
         self.assertEqual(missing["source_event_ids"], ["M1"])
 
+    def test_narrative_repair_drops_rejected_outline_hint_from_full_writer_context(self):
+        arc = [{
+            "clip_index": i, "visual_beat": f"Distinct performance detail {i}",
+            "purpose": "Musical performance", "environment": "Harbor pier",
+            "camera": "Slow track", "source_event_ids": [],
+            "intentional_reprise": False, "reprise_reason": "",
+        } for i in range(len(self.clips))]
+        arc[0]["visual_beat"] = "REJECTED_OUTLINE_HINT: the performer launches into the next act."
+        arc[5]["visual_beat"] = "PRESERVED_OUTLINE_HINT: an intimate performance insert."
+        self.planner._music_arc = copy.deepcopy(arc)
+        callbacks = self._batch_callbacks()
+        with patch.object(self.planner, "_call_llm_json", return_value=[]) as writer:
+            callbacks["call_batch"](1, 0, self.clips[:1], None)
+        self.assertIn("REJECTED_OUTLINE_HINT", writer.call_args.kwargs["user_prompt"])
+        issue = callbacks["row_validator"](0, {
+            "video_prompt": "The sailor climbs onto the boat.", "source_event_ids": [],
+        }, [])
+        self.assertIn("future music narrative", issue)
+        with patch(
+            "services.director.music_narrative_repair.repair_music_narrative_visuals", return_value=None,
+        ), patch.object(self.planner, "_call_llm_json", return_value=[]) as writer:
+            callbacks["repair_batch"](1, 0, self.clips[:1], None)
+        repaired_context = writer.call_args.kwargs["user_prompt"]
+        self.assertIn("global clip numbers, starting at 1", repaired_context)
+        self.assertNotIn("ASSIGNED GROUPS FOR THIS BATCH [zero-based", repaired_context)
+        self.assertNotIn("REJECTED_OUTLINE_HINT", repaired_context)
+        self.assertIn("PRESERVED_OUTLINE_HINT", repaired_context)
+        self.assertIn("Use the accepted previous scene", repaired_context)
+        self.assertEqual(self.planner._music_arc, arc)
+
     def test_invalid_authoritative_allocation_fails_without_rewriting_ids(self):
         self.planner._music_narrative_allocation = self.allocation[:-1]
         row = {"video_prompt": "The sailor watches from shore.", "source_event_ids": ["M2"]}
@@ -341,6 +371,60 @@ class MusicNarrativeIntegrationTests(unittest.TestCase):
             "minimax_h3_fused_turbo", [plan], prompt_modes=["t2va"], durations=[10.0],
         )
         self.assertIn("climbs onto the boat", plan["video_prompt"])
+
+    def test_gap_clip_recovers_early_sailing_through_production_row_and_native_checks(self):
+        self.planner._music_narrative_allocation = [
+            {"event_id": "M1", "clip_index": 1},
+            {"event_id": "M2", "clip_index": 3},
+        ]
+        callbacks = self._batch_callbacks()
+        previous = {
+            "scene_goal": "The sailor boards for the journey.",
+            "scene_type": "narrative", "environment": "A wooden harbor pier.",
+            "visual_style": "Cinematic coastal film.", "lighting": "Soft daylight.",
+            "mood": "Hopeful.", "continuity_strategy": "continuous",
+            "subjects_on_screen": [{
+                "character_id": "sailor", "speaker_name": "The sailor",
+                "visual_description": "The sailor in a navy coat.",
+                "position_or_relation": "securely aboard the boat at the pier",
+                "performance_role": "vocalist",
+            }],
+            "camera_plan": {"framing": "medium shot", "movement": "slow lateral track"},
+            "video_prompt": "[Shot 1] The sailor climbs onto the boat and settles aboard.",
+            "action_beats": ["The sailor climbs onto the boat."],
+            "ending_beat": "The sailor is securely aboard the boat at the pier.",
+            "window_prompts": [], "source_event_ids": ["M1"],
+        }
+        rejected = copy.deepcopy(previous)
+        rejected.update(
+            environment="Open water in the middle of the lake.",
+            video_prompt="[Shot 1] The boat sails across the lake with the sailor aboard.",
+            scene_goal="The boat is sailing across the lake.",
+            ending_beat="The boat sails across the lake.",
+            action_beats=["The boat sails across the lake."], source_event_ids=[],
+        )
+        prior_snapshot = copy.deepcopy(previous)
+        self.assertIn("future music narrative event M2", callbacks["row_validator"](2, rejected, [previous]))
+        with patch(
+            "services.director.music_narrative_repair.repair_music_narrative_visuals", return_value=None,
+        ), patch.object(self.planner, "_call_llm_json", return_value=[]):
+            callbacks["repair_batch"](1, 2, self.clips[2:3], previous)
+            result = callbacks["repair_batch"](1, 2, self.clips[2:3], previous)
+        self.assertEqual(len(result), 1)
+        recovered = result[0]
+        self.assertIsNone(callbacks["row_validator"](2, recovered, [previous]))
+        self.assertEqual(previous, prior_snapshot)
+        self.assertEqual(recovered["source_event_ids"], [])
+        self.assertEqual(recovered["environment"].rstrip("."), previous["environment"].rstrip("."))
+        from services.director.h3_dialogue import compile_h3_official_prompt, validate_h3_prompt_contract
+        native, _ = compile_h3_official_prompt(
+            recovered["video_prompt"], recovered["subjects_on_screen"], [], mode="ref2va",
+            audio_plan={"mode": "music_driven", "vocal_activity": "active"},
+        )
+        self.assertEqual(validate_h3_prompt_contract(native, mode="ref2va"), [])
+        self.assertNotIn("climbs onto", native)
+        self.assertNotIn("sails across", native)
+        self.assertIn("lip-syncs only their own audible vocal part", native)
 
     def test_controller_rechecks_compiled_prompt_before_gpu(self):
         # Load the production preflight function without booting the GPU server.

@@ -7,6 +7,7 @@ contract and are assigned exactly once, in source order.
 
 from __future__ import annotations
 
+import copy
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -382,6 +383,110 @@ def music_arc_action_issues(rows: Any, contract: Any) -> list[str]:
     return issues
 
 
+def filter_music_arc_context(
+    plan: Any,
+    contract: Any,
+    allocation: Any,
+    *,
+    suppressed_indices: Any = (),
+) -> list[dict[str, Any]]:
+    """Return a nonmutating arc view without explicit future-event conflicts.
+
+    Detailed writers see the full arc overview, so a row that performs an
+    event before its canonical assignment can keep steering repairs toward
+    that early action. Use the narrative contract's allocation as the source
+    of truth; the arc's own event IDs are only hints and may be inconsistent.
+    Inconclusive or merely incomplete outline prose stays available to the
+    writer. A rejected row can also be suppressed explicitly during repair.
+    """
+
+    if not _is_sequence(plan):
+        return []
+
+    suppressed: set[int] = set()
+    if isinstance(suppressed_indices, int) and not isinstance(suppressed_indices, bool):
+        if suppressed_indices >= 0:
+            suppressed.add(suppressed_indices)
+    elif _is_sequence(suppressed_indices) or isinstance(suppressed_indices, (set, frozenset)):
+        for index in suppressed_indices:
+            if isinstance(index, int) and not isinstance(index, bool) and index >= 0:
+                suppressed.add(index)
+
+    allocation_map: dict[str, int] = {}
+    events: list[Mapping[str, Any]] = []
+    contract_valid = isinstance(contract, Mapping) and _is_sequence(contract.get("events"))
+    if contract_valid:
+        events = [event for event in contract["events"] if isinstance(event, Mapping)]
+        if len(events) == len(contract["events"]) and isinstance(allocation, list):
+            from .music_narrative import validate_music_narrative_allocation
+
+            if validate_music_narrative_allocation(contract, allocation, len(plan)):
+                allocation = None
+        if len(events) == len(contract["events"]) and isinstance(allocation, list):
+            for item in allocation:
+                if not isinstance(item, Mapping):
+                    allocation_map.clear()
+                    break
+                event_id = item.get("event_id")
+                clip_index = item.get("clip_index")
+                if (
+                    not isinstance(event_id, str)
+                    or not event_id
+                    or not isinstance(clip_index, int)
+                    or isinstance(clip_index, bool)
+                    or clip_index < 0
+                ):
+                    allocation_map.clear()
+                    break
+                allocation_map[event_id] = clip_index
+            expected_ids = [str(event.get("event_id") or "") for event in events]
+            if (
+                len(allocation_map) != len(allocation)
+                or len(allocation_map) != len(expected_ids)
+                or any(not event_id for event_id in expected_ids)
+                or set(allocation_map) != set(expected_ids)
+            ):
+                allocation_map.clear()
+
+    filtered: list[dict[str, Any]] = []
+    for raw in plan:
+        if not isinstance(raw, Mapping):
+            continue
+        row = copy.deepcopy(dict(raw))
+        index = row.get("clip_index")
+        if isinstance(index, int) and not isinstance(index, bool) and index in suppressed:
+            continue
+
+        if (
+            allocation_map
+            and isinstance(index, int)
+            and not isinstance(index, bool)
+            and index >= 0
+        ):
+            assigned_ids = [
+                str(event.get("event_id") or "")
+                for event in events
+                if allocation_map.get(str(event.get("event_id") or "")) == index
+            ]
+            row["source_event_ids"] = assigned_ids
+            from .music_narrative import music_narrative_row_issue
+
+            issue = music_narrative_row_issue(
+                {
+                    "source_event_ids": assigned_ids,
+                    "video_prompt": str(row.get("visual_beat") or ""),
+                },
+                contract=contract,
+                allocation=allocation,
+                index=index,
+            )
+            if issue and "performs future music narrative event" in issue:
+                continue
+
+        filtered.append(row)
+    return filtered
+
+
 def normalize_music_arc(rows: Any, clips: Any, contract: Any) -> list[dict[str, Any]]:
     """Normalize an outline or expanded arc against its clip rows.
 
@@ -496,10 +601,12 @@ def arc_allocation(plan: Any) -> list[dict[str, Any]]:
     return allocation
 
 
-def format_music_arc_context(plan: Any, start: Any, end: Any) -> str:
+def format_music_arc_context(plan: Any, start: Any, end: Any, *, one_based: bool = False) -> str:
     """Format the full compact arc and detailed assignments in ``[start,end)``.
 
     ``start`` and ``end`` are zero-based, half-open timeline-group indexes.
+    Detailed writers use ``one_based`` to match the source-action schedule;
+    reviewers that return clip_index values retain zero-based labels.
     The overview collapses inherited group beats to at most 48 entries, and per-clip text is shortened to
     keep detailed three-clip prompts bounded.
     """
@@ -521,6 +628,7 @@ def format_music_arc_context(plan: Any, start: Any, end: Any) -> str:
         first, stop = 0, 0
     first = max(0, min(first, MAX_MUSIC_ARC_CLIPS))
     stop = max(first, min(stop, MAX_MUSIC_ARC_CLIPS))
+    offset = 1 if one_based else 0
 
     def text(row: Mapping[str, Any], key: str, limit: int) -> str:
         value = " ".join(str(row.get(key) or "").split())
@@ -543,7 +651,7 @@ def format_music_arc_context(plan: Any, start: Any, end: Any) -> str:
             overview_groups.append((index, index, row))
     overview_groups = overview_groups[:MAX_MUSIC_ARC_ROWS]
     overview = [
-        f"{group_start}-{group_end}: {text(row, 'visual_beat', 112)}"
+        f"{group_start + offset}-{group_end + offset}: {text(row, 'visual_beat', 112)}"
         + (f" [{text(row, 'purpose', 44)}]" if row.get("purpose") else "")
         for group_start, group_end, row in overview_groups
     ]
@@ -551,7 +659,7 @@ def format_music_arc_context(plan: Any, start: Any, end: Any) -> str:
         shown_end = overview_groups[-1][1]
         omitted = sum(1 for index in by_index if index > shown_end)
         if omitted:
-            overview.append(f"Further clips through {max(by_index)} continue the established progression ({omitted} rows summarized).")
+            overview.append(f"Further clips through {max(by_index) + offset} continue the established progression ({omitted} rows summarized).")
     assigned: list[str] = []
     for index in range(first, stop):
         row = by_index.get(index)
@@ -560,7 +668,7 @@ def format_music_arc_context(plan: Any, start: Any, end: Any) -> str:
         ids = row.get("source_event_ids")
         id_text = repr(ids) if isinstance(ids, list) else "[]"
         line = (
-            f"clip {index}: visual_beat={text(row, 'visual_beat', 180)}; "
+            f"clip {index + offset}: visual_beat={text(row, 'visual_beat', 180)}; "
             f"purpose={text(row, 'purpose', 88)}; "
             f"environment={text(row, 'environment', 96)}; "
             f"camera={text(row, 'camera', 96)}; source_event_ids={id_text}"
@@ -572,13 +680,17 @@ def format_music_arc_context(plan: Any, start: Any, end: Any) -> str:
     overview_text = "\n".join(f"- {line}" for line in overview) if overview else "- None"
     assigned_text = "\n".join(f"- {line}" for line in assigned) if assigned else "- No groups in this batch"
     return "\n\n".join((
-        "WHOLE-SONG MUSIC VIDEO ARC (timeline groups in clip_index order)",
+        ("WHOLE-SONG MUSIC VIDEO ARC (global clip numbers, starting at 1)"
+         if one_based else "WHOLE-SONG MUSIC VIDEO ARC (timeline groups in clip_index order)"),
         overview_text,
-        f"ASSIGNED GROUPS FOR THIS BATCH [zero-based {first}, {stop})",
+        (f"ASSIGNED CLIPS FOR THIS BATCH [global clips {first + 1}-{stop}]"
+         if one_based else f"ASSIGNED GROUPS FOR THIS BATCH [zero-based {first}, {stop})"),
         assigned_text,
         "Follow the full-song progression while preserving the requested genre, concept, and continuity. "
         "Keep each assigned visual beat distinct and develop it through the group's detailed clips. "
         "Use source_event_ids exactly as assigned; keep source actions in source order and place them "
         "at their assigned group's opening. Camera or environment may stay fixed when the brief calls "
         "for it. Repeat a visual beat only when intentional_reprise has a specific reason.",
+        ("Complete each assigned source action within its clip; following clips begin from its completed result."
+         if one_based else ""),
     ))

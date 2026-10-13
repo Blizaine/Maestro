@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import sys
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ from services.director.music_arc import (
     MAX_MUSIC_ARC_ROWS,
     arc_allocation,
     creative_plan_schema,
+    filter_music_arc_context,
     format_music_arc_context,
     music_arc_quality_issues,
     music_arc_action_issues,
@@ -80,6 +82,88 @@ class MusicArcTests(unittest.TestCase):
     def test_outline_action_check_leaves_non_narrative_concepts_alone(self):
         rows = [arc_row(0, "Thin ink threads disperse into rolling clouds.")]
         self.assertEqual(music_arc_action_issues(rows, {"events": []}), [])
+
+    def test_context_filter_uses_canonical_allocation_for_unassigned_and_reversed_future_actions(self):
+        source_contract = build_music_narrative_contract(
+            "The kitten climbs on the dragon, then the dragon breathes fire over enemies."
+        )
+        allocation = [
+            {"event_id": "M1", "clip_index": 2},
+            {"event_id": "M2", "clip_index": 4},
+        ]
+        rows = [
+            arc_row(0, "The kitten climbs on the dragon."),
+            arc_row(1, "The kitten watches lanterns drift above the road."),
+            arc_row(
+                2,
+                "The dragon breathes fire over enemies, then the kitten climbs on the dragon.",
+                source_event_ids=["M2"],
+            ),
+            arc_row(3, "The dragon banks over a valley as the clouds open."),
+            arc_row(4, "The dragon breathes fire over enemies.", source_event_ids=["M1"]),
+        ]
+
+        filtered = filter_music_arc_context(rows, source_contract, allocation)
+
+        self.assertEqual([row["clip_index"] for row in filtered], [1, 3, 4])
+        self.assertIn("The dragon breathes fire", filtered[-1]["visual_beat"])
+        self.assertEqual(filtered[-1]["source_event_ids"], ["M2"])
+        context = format_music_arc_context(filtered, 4, 5, one_based=True)
+        self.assertIn("source_event_ids=['M2']", context)
+        self.assertNotIn("source_event_ids=['M1']", context)
+        self.assertEqual(rows[-1]["source_event_ids"], ["M1"])
+
+    def test_context_filter_preserves_inconclusive_and_unrelated_arc_rows(self):
+        source_contract = build_music_narrative_contract(
+            "The kitten climbs on the dragon, then the dragon breathes fire over enemies."
+        )
+        allocation = [
+            {"event_id": "M1", "clip_index": 2},
+            {"event_id": "M2", "clip_index": 4},
+        ]
+        rows = [
+            arc_row(
+                2,
+                "The kitten reaches toward the dragon and prepares to climb.",
+                source_event_ids=["M1"],
+            ),
+            arc_row(3, "The dragon banks over a valley as the clouds open."),
+        ]
+
+        filtered = filter_music_arc_context(rows, source_contract, allocation)
+
+        self.assertEqual([row["clip_index"] for row in filtered], [2, 3])
+
+    def test_suppressed_repair_index_disappears_from_overview_and_is_deep_copied(self):
+        rows = [
+            arc_row(0, "A musician arrives alone at the empty station."),
+            arc_row(
+                1,
+                "A missed train leaves a red scarf on the platform.",
+                purpose="mark the missed connection",
+                environment="the east platform beneath a clock",
+                camera="tight insert on the red scarf",
+            ),
+            arc_row(2, "The musician follows the scarf through the morning crowd."),
+        ]
+
+        filtered = filter_music_arc_context(
+            rows, contract(), [], suppressed_indices=1,
+        )
+        context = format_music_arc_context(filtered, 0, 3)
+        filtered[1]["source_event_ids"].append("changed")
+        filtered[1]["environment"] = "changed environment"
+
+        self.assertEqual([row["clip_index"] for row in filtered], [0, 2])
+        self.assertIn("0: A musician arrives alone", context)
+        self.assertIn("2: The musician follows", context)
+        self.assertNotIn("A missed train leaves a red scarf", context)
+        self.assertNotIn("mark the missed connection", context)
+        self.assertNotIn("the east platform beneath a clock", context)
+        self.assertNotIn("tight insert on the red scarf", context)
+        self.assertNotIn("clip 1:", context)
+        self.assertEqual(rows[2]["source_event_ids"], [])
+        self.assertEqual(rows[2]["environment"], "the same location")
 
     def test_schema_is_a_strict_bounded_array_of_arc_rows(self):
         schema = creative_plan_schema()
@@ -274,6 +358,20 @@ class MusicArcTests(unittest.TestCase):
         self.assertIn("clip 1:", context)
         self.assertNotIn("clip 0:", context)
         self.assertIn("Use source_event_ids exactly as assigned", context)
+
+    def test_detailed_writer_arc_uses_same_clip_numbers_as_source_schedule(self):
+        rows = [arc_row(i, f"Unique visual beat for shot {i + 1}.") for i in range(6)]
+        rows[4]["source_event_ids"] = ["M2"]
+        original = copy.deepcopy(rows)
+        context = format_music_arc_context(rows, 3, 6, one_based=True)
+        assigned = context.split("ASSIGNED CLIPS FOR THIS BATCH", 1)[1]
+        self.assertIn("global clips 4-6", assigned)
+        self.assertIn("clip 4: visual_beat=Unique visual beat for shot 4.", assigned)
+        self.assertIn("clip 5: visual_beat=Unique visual beat for shot 5.", assigned)
+        self.assertIn("source_event_ids=['M2']", assigned)
+        self.assertNotIn("clip 3:", assigned)
+        self.assertNotIn("zero-based", context)
+        self.assertEqual(rows, original)
 
 
 if __name__ == "__main__":
