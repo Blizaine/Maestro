@@ -45,6 +45,17 @@ Director clip. H3 reference matching also recognizes semantic cast IDs such as
 `dragon_creature`. On rerun it repairs unambiguous legacy duplicates created by
 the compiler while preserving authored action text and distinct characters.
 Appearance wording such as “scary-looking” is retained during identity cleanup.
+Qualified character names and semantic IDs now match their unique reference
+roles too, without merging distinct picture owners or multiple characters.
+
+The gallery's **Load Settings** pencil opens an individual Director clip in
+Studio with its own rendered prompt, seed, duration and media inputs. A supplied
+soundtrack is restored at that clip's interval, and Frames clips retain their
+start/end images. The joined video's pencil reopens the complete Director
+project. Supported older sidecars are reconstructed without rewriting their
+saved prompts or media; unavailable or ambiguous recipes show an error.
+Prompt enhancement is initially off for a restored clip so attention comparisons
+can use the saved prompt unchanged.
 
 ## Memory management and performance
 
@@ -58,8 +69,9 @@ Full and Pruned H3 in Frames and References now offer **Veda Sparse Attention
 exclusive with Sol and SLA. Its learned predictor is downloaded on first use,
 verified against pinned size and SHA-256 values, and managed with transformer
 weights by MMGP. Standard ConvRot models use an approximately 281-MB predictor;
-other eligible weights use the approximately 551-MB BF16 predictor. Fused and
-specialty checkpoints are excluded. CPU regressions cover dispatch, reference
+other eligible weights use the approximately 551-MB BF16 predictor. Fused Frames
+and References also permit an explicit experimental Veda selection, retaining
+their default SLA recipe. Specialty checkpoints are excluded. CPU regressions cover dispatch, reference
 geometry, selection and asset handling; hardware speed and output quality
 remain to be measured. [Integration and comparison guide](development/h3-veda-port.md).
 

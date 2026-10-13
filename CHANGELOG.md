@@ -7,6 +7,11 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 Public Dev testing candidate; not promoted to Main. See the [full release notes](docs/RELEASE_NOTES_V2.7.0.md).
 
+- Restore individual Director clips into Studio from their own prompt, seed,
+  timing and media inputs; retain full Director restore for joined videos.
+  Reconstruct supported older clip recipes without rewriting saved media.
+- Extend H3 reference identity matching to qualified character names and semantic
+  IDs, retaining unique picture ownership and distinct-character checks.
 - Use character-neutral wording in shared Director and H3 reference instructions
   so identity guidance also fits animals and creatures.
 - Save Editor Director prompt drafts with their shots, independently of the

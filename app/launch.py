@@ -11044,12 +11044,118 @@ def _reviewed_h3_runtime_geometry_error(
     )
 
 
-def _generation_sidecar_params(params: dict) -> dict:
-    """Copy restorable settings without private queue-validation metadata."""
+def _generation_sidecar_params(
+    params: dict,
+    *,
+    path_params: dict | None = None,
+    attachment_keys=(),
+) -> dict:
+    """Copy JSON-safe settings without WGP runtime state or PIL objects."""
 
-    sidecar_params = params.copy()
-    sidecar_params.pop("_reviewed_h3_runtime_geometry", None)
-    return sidecar_params
+    from services.director_clip_settings import json_safe_generation_params
+
+    return json_safe_generation_params(
+        params,
+        path_params=path_params,
+        attachment_keys=attachment_keys,
+        omit_keys={"_reviewed_h3_runtime_geometry"},
+    )
+
+
+def _director_clip_sidecar_timing(
+    task_params: dict,
+    request_params: dict,
+    clip_index: int,
+    wgp_module,
+) -> dict:
+    """Persist the immutable timing needed by a future single-clip recipe."""
+
+    task_params = task_params if isinstance(task_params, dict) else {}
+    request_params = request_params if isinstance(request_params, dict) else {}
+    try:
+        native_frames = max(1, int(task_params.get("video_length") or 1))
+    except (TypeError, ValueError, OverflowError):
+        native_frames = None
+    try:
+        trim = max(0, int(task_params.get("trim_tail_frames") or 0))
+    except (TypeError, ValueError, OverflowError):
+        trim = 0
+    output_frames = (
+        max(1, native_frames - trim) if native_frames is not None else None
+    )
+    profile = (
+        request_params.get("_director_video_execution_profile")
+        or task_params.get("_director_video_execution_profile")
+        or {}
+    )
+    fps = task_params.get("fps") or request_params.get("fps")
+    if not fps:
+        model_type = task_params.get("model_type") or request_params.get(
+            "model_type"
+        )
+        try:
+            model_def = wgp_module.get_model_def(model_type) or {}
+            fps = model_def.get("fps")
+        except Exception:
+            fps = None
+    try:
+        fps = float(fps or profile.get("fps") or 0)
+        if fps <= 0 or not math.isfinite(fps):
+            fps = None
+    except (TypeError, ValueError, OverflowError):
+        fps = None
+
+    clip_info = task_params.get("multi_clip_info")
+    if not isinstance(clip_info, dict):
+        clip_info = {}
+    direct_start = (
+        task_params.get("_director_clip_audio_start_sec")
+        if task_params.get("_director_clip_audio_start_sec") is not None
+        else request_params.get("_director_clip_audio_start_sec")
+    )
+    audio_start = None
+    try:
+        if direct_start is not None:
+            audio_start = max(0.0, float(direct_start))
+        elif fps:
+            base = float(
+                clip_info.get("audio_start_sec")
+                or task_params.get("multi_clip_audio_start_sec")
+                or request_params.get("multi_clip_audio_start_sec")
+                or 0
+            )
+            offset = max(0.0, float(task_params.get("audio_frame_offset") or 0))
+            audio_start = max(0.0, base + offset / fps)
+    except (TypeError, ValueError, OverflowError):
+        audio_start = None
+
+    source_path = (
+        task_params.get("_director_clip_audio_source_path")
+        or request_params.get("_director_clip_audio_source_path")
+        or task_params.get("audio_guide")
+        or request_params.get("audio_guide")
+    )
+    return {
+        "native_frames": native_frames,
+        "output_frames": output_frames,
+        "fps": fps,
+        "audio_start_sec": audio_start,
+        "audio_base_start_sec": (
+            clip_info.get("audio_start_sec")
+            or task_params.get("multi_clip_audio_start_sec")
+            or request_params.get("multi_clip_audio_start_sec")
+        ),
+        "audio_source_path": source_path,
+        "video_strategy": (
+            task_params.get("_director_video_strategy")
+            or request_params.get("_director_video_strategy")
+        ),
+        "shot_image_policy": (
+            task_params.get("_director_shot_image_policy")
+            or request_params.get("_director_shot_image_policy")
+        ),
+        "clip_index": int(clip_index),
+    }
 
 
 async def _prepare_generation_submission(
@@ -26580,6 +26686,23 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     "plugin_data": {},
                 }]
 
+            # Keep each child's attachment paths before WGP replaces image
+            # filenames with PIL objects and adds its live state to params.
+            # This small sidecar-only snapshot is never a generation input.
+            preparse_params_by_task_id = {}
+            for manifest_item in manifest:
+                if not isinstance(manifest_item, dict):
+                    continue
+                manifest_params = manifest_item.get("params")
+                if not isinstance(manifest_params, dict):
+                    continue
+                manifest_task_id = manifest_item.get("id")
+                if manifest_task_id is None:
+                    continue
+                preparse_params_by_task_id[str(manifest_task_id)] = (
+                    _generation_sidecar_params(manifest_params)
+                )
+
             queue, error = wgp._parse_task_manifest(manifest, state, os.getcwd())
 
             if not error and queue:
@@ -26634,6 +26757,9 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             active_generation_seconds_by_task: dict[int, int] = {}
             multi_window_timing_by_output: dict[str, dict] = {}
             multi_window_timing_by_task: dict[int, dict] = {}
+            effective_params_by_output: dict[str, dict] = {}
+            effective_params_by_clip: dict[int, dict] = {}
+            effective_clip_index_by_output: dict[str, int] = {}
 
             # Video renders can contain differently-sized tasks and internal
             # sliding windows. Learn their timing from the live sampler
@@ -26829,15 +26955,70 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 if dpid:
                     sidecar["director_pipeline_id"] = dpid
                 clip_index_by_filename = {
-                    filename: index
+                    os.path.basename(filename): index
                     for index, filename in clip_output_files.items()
+                    if isinstance(filename, str) and filename
                 }
                 for fname in file_names:
                     ext = os.path.splitext(fname)[1].lower()
                     if ext not in GENERATED_MEDIA_EXTENSIONS:
                         continue
                     file_sidecar = dict(sidecar)
-                    file_sidecar["params"] = sidecar_params.copy()
+                    basename = os.path.basename(fname)
+                    clip_index = clip_index_by_filename.get(basename)
+                    if clip_index is None:
+                        clip_index = effective_clip_index_by_output.get(
+                            basename,
+                        )
+                    explicit_director_clip_index = job["params"].get(
+                        "_director_clip_index"
+                    )
+                    if clip_index is None and isinstance(
+                        explicit_director_clip_index, int
+                    ) and not isinstance(explicit_director_clip_index, bool):
+                        if explicit_director_clip_index >= 0:
+                            clip_index = explicit_director_clip_index
+                    is_joined = bool(
+                        join_output_file
+                        and basename == os.path.basename(join_output_file)
+                    )
+                    child_params = (
+                        None if not dpid or is_joined else (
+                            effective_params_by_output.get(basename)
+                            or effective_params_by_clip.get(clip_index)
+                            or (
+                                job["params"]
+                                if isinstance(explicit_director_clip_index, int)
+                                and not isinstance(
+                                    explicit_director_clip_index, bool,
+                                )
+                                else None
+                            )
+                        )
+                    )
+                    output_params = (
+                        _generation_sidecar_params(child_params)
+                        if isinstance(child_params, dict)
+                        else sidecar_params.copy()
+                    )
+                    # These settings are stripped before generation and
+                    # applied afterward, so preserve them per output too.
+                    if pp_film_grain_intensity > 0:
+                        output_params["film_grain_intensity"] = (
+                            pp_film_grain_intensity
+                        )
+                        output_params["film_grain_saturation"] = (
+                            pp_film_grain_saturation
+                        )
+                    if pp_spatial_upsampling:
+                        output_params["spatial_upsampling"] = (
+                            pp_spatial_upsampling
+                        )
+                    if pp_media_spatial:
+                        output_params["spatial_upsampling"] = pp_media_spatial
+                    if pp_media_temporal:
+                        output_params["temporal_upsampling"] = pp_media_temporal
+                    file_sidecar["params"] = output_params
                     if fname in model_metadata_by_output:
                         file_sidecar["model_details"] = model_metadata_by_output[fname]
                     if fname in processing_by_output:
@@ -26849,10 +27030,41 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         # store it so Load Settings reproduces a good result,
                         # including after ffmpeg post-processing.
                         file_sidecar["params"]["seed"] = resolved_seed
-                    if fname in clip_index_by_filename:
-                        file_sidecar["director_clip_index"] = (
-                            clip_index_by_filename[fname]
-                        )
+                    if dpid and ext in {".mp4", ".mkv", ".webm", ".mov"}:
+                        file_sidecar["director_clip_settings_version"] = 1
+                        if is_joined:
+                            file_sidecar["director_artifact_kind"] = "joined"
+                            file_sidecar.pop("director_clip_index", None)
+                            file_sidecar.pop(
+                                "director_clip_settings_provenance", None,
+                            )
+                        elif clip_index is not None:
+                            file_sidecar["director_artifact_kind"] = "clip"
+                            file_sidecar["director_clip_index"] = int(
+                                clip_index
+                            )
+                            file_sidecar[
+                                "director_clip_settings_provenance"
+                            ] = (
+                                "per_output_effective_params"
+                                if isinstance(child_params, dict)
+                                else "director_rerun_request_marker"
+                            )
+                            task_params = child_params or job["params"]
+                            file_sidecar["director_clip_timing"] = (
+                                _director_clip_sidecar_timing(
+                                    task_params,
+                                    job.get("params") or {},
+                                    clip_index,
+                                    wgp,
+                                )
+                            )
+                        else:
+                            file_sidecar["director_artifact_kind"] = "unknown"
+                            file_sidecar.pop("director_clip_index", None)
+                            file_sidecar.pop(
+                                "director_clip_settings_provenance", None,
+                            )
                     else:
                         file_sidecar.pop("director_clip_index", None)
                     file_sidecar["output_filename"] = fname
@@ -27026,6 +27238,18 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     )
                     update_job(job, error=validation_error, message=validation_error)
                     continue
+
+                preparse_params = preparse_params_by_task_id.get(
+                    str(task.get("id")),
+                )
+                attachment_keys = tuple(
+                    getattr(wgp, "ATTACHMENT_KEYS", ())
+                ) + ("minimax_h3_references", "voice_reference")
+                task_sidecar_params = _generation_sidecar_params(
+                    validated_params,
+                    path_params=preparse_params,
+                    attachment_keys=attachment_keys,
+                )
 
                 gen["prompt_no"] = task_no
                 gen["prompts_max"] = total_tasks
@@ -27308,6 +27532,50 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 ):
                     if output_path not in task_files:
                         task_files.append(output_path)
+                task_params_for_sidecar = deepcopy(task_sidecar_params)
+                clip_info_for_sidecar = (
+                    (task.get("params") or {}).get("multi_clip_info")
+                )
+                task_clip_index = None
+                if isinstance(clip_info_for_sidecar, dict):
+                    try:
+                        candidate_index = int(
+                            clip_info_for_sidecar.get("index")
+                        )
+                        if candidate_index >= 0:
+                            task_clip_index = candidate_index
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                if task_clip_index is None:
+                    candidate_index = job["params"].get(
+                        "_director_clip_index"
+                    )
+                    if isinstance(candidate_index, int) and not isinstance(
+                        candidate_index, bool,
+                    ) and candidate_index >= 0:
+                        task_clip_index = candidate_index
+                for output_path in task_files:
+                    if not isinstance(output_path, str) or not output_path:
+                        continue
+                    output_basename = os.path.basename(output_path)
+                    output_ext = os.path.splitext(output_basename)[1].lower()
+                    if (
+                        output_ext not in {".mp4", ".mkv", ".webm", ".mov"}
+                        or "_multiclip" in os.path.splitext(
+                            output_basename
+                        )[0].lower()
+                    ):
+                        continue
+                    effective_params_by_output[output_basename] = (
+                        deepcopy(task_params_for_sidecar)
+                    )
+                    if task_clip_index is not None:
+                        effective_clip_index_by_output[output_basename] = (
+                            task_clip_index
+                        )
+                        effective_params_by_clip[task_clip_index] = (
+                            deepcopy(task_params_for_sidecar)
+                        )
                 if task_generation_time is not None:
                     active_generation_seconds_by_task[
                         task_idx
@@ -29621,6 +29889,23 @@ def get_output_metadata(name: str, workspace: str = ""):
         return enrich_metadata(filepath, metadata,
             source_roots=(out_dir, os.path.join(os.getcwd(), "uploads")))
 
+    def _director_restore_failure(metadata):
+        params = metadata.get("params") if isinstance(metadata, dict) else None
+        params = params if isinstance(params, dict) else {}
+        if not (
+            (metadata.get("director_pipeline_id") if isinstance(metadata, dict) else None)
+            or params.get("_director_pipeline_id")
+        ):
+            return metadata
+        metadata["director_artifact_kind"] = "unknown"
+        metadata["director_clip_settings_version"] = 1
+        metadata["director_clip_settings_error"] = (
+            "Director clip settings could not be reconstructed safely. "
+            "Open the Director pipeline to inspect the saved clip and assets."
+        )
+        metadata["params"] = None
+        return metadata
+
     # Helper: read embedded metadata from the media file
     def _read_embedded():
         ext = os.path.splitext(name)[1].lower()
@@ -29641,9 +29926,13 @@ def get_output_metadata(name: str, workspace: str = ""):
     # Strategy 1: Read sidecar .meta.json
     meta_path = os.path.join(out_dir, os.path.splitext(name)[0] + ".meta.json")
     if os.path.isfile(meta_path):
+        sidecar = None
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 sidecar = json.load(f)
+        except Exception:
+            sidecar = None
+        if isinstance(sidecar, dict):
             # An upload date sidecar must not conceal generation metadata
             # already embedded in an imported image, video or audio file.
             if "params" not in sidecar:
@@ -29652,7 +29941,7 @@ def get_output_metadata(name: str, workspace: str = ""):
                     sidecar["params"] = imported_params
             # Merge actual seed from embedded metadata if sidecar has seed=-1
             params = sidecar.get("params") or {}
-            if params.get("seed", -1) == -1:
+            if isinstance(params, dict) and params.get("seed", -1) == -1:
                 embedded = _read_embedded()
                 if embedded and "seed" in embedded:
                     params["seed"] = embedded["seed"]
@@ -29660,14 +29949,37 @@ def get_output_metadata(name: str, workspace: str = ""):
                     resolved_seed = _extract_output_seed(name)
                     if resolved_seed is not None:
                         params["seed"] = resolved_seed
+            try:
+                from services.director_clip_settings import (
+                    enrich_director_output_metadata,
+                )
+                sidecar = enrich_director_output_metadata(
+                    out_dir,
+                    workspace or _get_active_workspace(),
+                    name,
+                    sidecar,
+                )
+            except Exception:
+                sidecar = _director_restore_failure(sidecar)
             return _with_file_details({"source": "sidecar", **sidecar})
-        except Exception:
-            pass
 
     # Strategy 2: Read embedded metadata from media file
     embedded = _read_embedded()
     if embedded:
-        return _with_file_details({"source": "embedded", "params": embedded})
+        metadata = {"source": "embedded", "params": embedded}
+        from services.director_clip_settings import (
+            enrich_director_output_metadata,
+        )
+        try:
+            metadata = enrich_director_output_metadata(
+                out_dir,
+                workspace or _get_active_workspace(),
+                name,
+                metadata,
+            )
+        except Exception:
+            metadata = _director_restore_failure(metadata)
+        return _with_file_details(metadata)
 
     return _with_file_details({"source": "none", "params": None})
 

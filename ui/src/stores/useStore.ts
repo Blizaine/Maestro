@@ -1,4 +1,5 @@
 import { galleryOutput, galleryOutputIsOlder, outputIdentity } from '../lib/galleryIdentity'
+import { announceMaestroEvent } from '../lib/notifications'
 import { create } from 'zustand'
 import {
   defaultVisibilityForScope, defaultVisibilityOverrides,
@@ -12339,6 +12340,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   loadSettingsFromOutput: async () => {
+    const restoreEnhancementRevision = get().enhanceOnGenerationRevision
     // Metadata is normally fetched in the background when an output is selected.
     // On a slow/high-latency link (e.g. the user is remote over VPN) that fetch
     // may not have landed — or may have failed — by the time "Load Settings" is
@@ -12347,7 +12349,7 @@ export const useStore = create<AppState>((set, get) => ({
     let selectedOutputMeta = get().selectedOutputMeta
     console.log('[LoadSettings] clicked — meta present:', !!selectedOutputMeta?.params,
                 '| metadataLoading:', get().metadataLoading, '| selectedOutput idx:', get().selectedOutput)
-    if (!selectedOutputMeta?.params) {
+    if (!selectedOutputMeta?.params && !selectedOutputMeta?.director_clip_settings_error) {
       const pendingOutput = get().filteredOutputs()[get().selectedOutput]
       console.log('[LoadSettings] no meta yet — on-demand fetch for:', pendingOutput?.name ?? '(no output at index)')
       if (pendingOutput) {
@@ -12357,17 +12359,100 @@ export const useStore = create<AppState>((set, get) => ({
                     '| source:', selectedOutputMeta?.source)
       }
     }
-    if (selectedOutputMeta?.director_pipeline_id) {
-      await get().loadDirectorFromPipeline(selectedOutputMeta.director_pipeline_id)
+    const directorClipIndexValue = selectedOutputMeta?.director_clip_index
+    const hasDirectorClipIndex = directorClipIndexValue != null
+    const pipelineId = selectedOutputMeta?.director_pipeline_id
+    const directorClipIndex = typeof directorClipIndexValue === 'number'
+      && Number.isInteger(directorClipIndexValue)
+      && directorClipIndexValue >= 0
+      ? directorClipIndexValue
+      : null
+    const isDirectorClip = selectedOutputMeta?.director_artifact_kind === 'clip'
+      || (!!pipelineId && hasDirectorClipIndex)
+    const reportDirectorClipRestoreError = (message: string) => {
+      const output = get().filteredOutputs()[get().selectedOutput]
+      announceMaestroEvent({
+        key: `director-clip-settings:${pipelineId || output?.name || 'unknown'}:${String(directorClipIndexValue ?? 'missing')}:${Date.now()}`,
+        category: 'failure',
+        title: 'Clip settings could not be restored',
+        body: message,
+        system: false,
+        sound: false,
+      })
+    }
+    if (selectedOutputMeta?.director_clip_settings_error) {
+      reportDirectorClipRestoreError(selectedOutputMeta.director_clip_settings_error)
+      return
+    }
+    if (selectedOutputMeta?.director_artifact_kind === 'joined') {
+      if (!pipelineId) {
+        reportDirectorClipRestoreError('The joined Director project could not be identified.')
+        return
+      }
+      await get().loadDirectorFromPipeline(pipelineId)
+      return
+    }
+    if (hasDirectorClipIndex && directorClipIndex == null
+      && (pipelineId || selectedOutputMeta?.director_artifact_kind === 'clip')) {
+      reportDirectorClipRestoreError('The saved clip index is invalid, so its settings cannot be restored safely.')
+      return
+    }
+    if (selectedOutputMeta?.director_artifact_kind === 'clip' && directorClipIndex == null) {
+      reportDirectorClipRestoreError('The saved clip index is missing, so its settings cannot be restored safely.')
+      return
+    }
+    if (pipelineId && !hasDirectorClipIndex) {
+      await get().loadDirectorFromPipeline(pipelineId)
       return
     }
     if (!selectedOutputMeta?.params) {
+      if (isDirectorClip) {
+        reportDirectorClipRestoreError('This Director clip has no safe settings recipe to restore.')
+        return
+      }
       console.warn('[LoadSettings] ABORT — no params available after fetch attempt; button is a no-op')
       return
     }
     const { models } = get()
     const p = selectedOutputMeta.params as Record<string, unknown>
     const uploadFilenames = selectedOutputMeta.upload_filenames as Record<string, string | string[]> | undefined
+    const directorClipAssetUrls = selectedOutputMeta.director_clip_asset_urls
+    if (isDirectorClip && (
+      Number(p.multi_prompts_gen_type) === 3
+      || Array.isArray(p.image_start)
+      || Array.isArray(p.image_end)
+      || Array.isArray(p.per_clip_frames)
+      || Array.isArray(p.per_clip_keyframes)
+      || (typeof p.prompt === 'string' && p.prompt.includes('---CLIP_BOUNDARY---'))
+    )) {
+      reportDirectorClipRestoreError('This clip still has a multi-clip recipe and cannot be restored individually.')
+      return
+    }
+    const selectedOutputForRestore = get().filteredOutputs()[get().selectedOutput]
+    const restoreWorkspace = selectedOutputForRestore?.workspace
+      || (typeof p.workspace === 'string' ? p.workspace : undefined)
+    const directorAssetPath = (value: unknown): string => {
+      if (typeof value !== 'string') return ''
+      const normalized = value.trim().replace(/\\/g, '/')
+      if (!normalized || /^(?:[a-z]:\/|\/)/i.test(normalized)) return ''
+      if (normalized.split('/').some(part => part === '..')) return ''
+      return normalized
+    }
+    const directorAssetUrl = (
+      value: unknown,
+      fallback?: string,
+      assetKey?: string,
+      assetIndex = 0,
+    ): string => {
+      const mapped = assetKey ? directorClipAssetUrls?.[assetKey] : undefined
+      const mappedUrl = Array.isArray(mapped) ? mapped[assetIndex] : mapped
+      if (typeof mappedUrl === 'string' && mappedUrl.trim()) return mappedUrl.trim()
+      if (typeof value === 'string' && /^(?:https?:|blob:)/i.test(value.trim())) {
+        return value.trim()
+      }
+      const path = directorAssetPath(value) || directorAssetPath(fallback) || ''
+      return path ? api.getFileUrl(path, restoreWorkspace) : ''
+    }
     console.log('[LoadSettings] applying settings — model_type:', p.model_type, '| param keys:', Object.keys(p).length)
 
     // Editor exports have their own durable project document instead of a
@@ -12598,15 +12683,19 @@ export const useStore = create<AppState>((set, get) => ({
     ).startsWith('minimax_h3')
 
     // Detect I2V: if image_start was used or image_prompt_type contains "S"
-    const hadStartImage = !!(p.image_start || (p.image_prompt_type as string || '').includes('S'))
-    const hadEndImage = !!(p.image_end || (p.image_prompt_type as string || '').includes('E'))
+    const hadStartImage = isDirectorClip
+      ? !!p.image_start
+      : !!(p.image_start || (p.image_prompt_type as string || '').includes('S'))
+    const hadEndImage = isDirectorClip
+      ? !!p.image_end
+      : !!(p.image_end || (p.image_prompt_type as string || '').includes('E'))
 
-    const restoredH3WindowPlan = (
+    const restoredH3WindowPlan = !isDirectorClip && (
       p.h3_window_plan
       && typeof p.h3_window_plan === 'object'
       && Array.isArray((p.h3_window_plan as Record<string, unknown>).windows)
     ) ? p.h3_window_plan as unknown as H3WindowPlan : null
-    const restoredH3WindowPrompts = Array.isArray(p.h3_window_prompts)
+    const restoredH3WindowPrompts = !isDirectorClip && Array.isArray(p.h3_window_prompts)
       ? p.h3_window_prompts
         .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
         .map(item => item.trim())
@@ -12684,7 +12773,9 @@ export const useStore = create<AppState>((set, get) => ({
 
     // TTS restores names before Speaker 1/2 substitution. Edit workflows
     // restore the user's text rather than internal conditioning guidance.
-    const originalPrompt = (p._tts_original_prompt as string) || (
+    const originalPrompt = isDirectorClip
+      ? (typeof p.prompt === 'string' ? p.prompt : '')
+      : (p._tts_original_prompt as string) || (
       p.edit_sub_mode === 'recast' && typeof p.edit_recast_raw_prompt === 'string'
         ? p.edit_recast_raw_prompt as string
         : p.edit_sub_mode === 'outpaint' && typeof p.edit_outpaint_raw_prompt === 'string'
@@ -12716,15 +12807,28 @@ export const useStore = create<AppState>((set, get) => ({
       // multi-clip recipe. Leaving this undefined while merging into the
       // store caused an unrelated output to inherit multi_prompts_gen_type=3.
       multi_prompts_gen_type: Number(p.multi_prompts_gen_type) || 0,
-      per_clip_frames: Array.isArray(p.per_clip_frames)
+      per_clip_frames: !isDirectorClip && Array.isArray(p.per_clip_frames)
         ? (p.per_clip_frames as number[])
         : undefined,
       minimax_h3_references: Array.isArray(p.minimax_h3_references)
-        ? (p.minimax_h3_references as GenerateParams['minimax_h3_references'])?.filter(
-            reference => !(
-              reference as { _maestro_generated_continuity?: boolean }
-            )._maestro_generated_continuity,
-          )
+        ? ((p.minimax_h3_references as NonNullable<GenerateParams['minimax_h3_references']>) || [])
+          .filter(reference => isDirectorClip || !(
+            reference as { _maestro_generated_continuity?: boolean }
+          )._maestro_generated_continuity)
+          .map((reference, index) => {
+            if (!isDirectorClip) return reference
+            const uploadedPaths = uploadFilenames?.minimax_h3_references
+            const fallbackPath = Array.isArray(uploadedPaths)
+              ? uploadedPaths[index]
+              : undefined
+            const url = directorAssetUrl(
+              reference.path,
+              fallbackPath,
+              'minimax_h3_references',
+              index,
+            ) || (typeof reference.url === 'string' ? reference.url : '')
+            return url && url !== reference.url ? { ...reference, url } : reference
+          })
         : undefined,
       minimax_h3_reference_detail: (
         p.minimax_h3_reference_detail === 'max'
@@ -12733,6 +12837,7 @@ export const useStore = create<AppState>((set, get) => ({
       ),
       settings_version: p.settings_version as number,
     }
+    if (isDirectorClip) newParams.multi_prompts_gen_type = 0
 
     // Copy optional fields — explicitly clear when absent to prevent stale values leaking
     newParams.sliding_window_size = (p.sliding_window_size as number) ?? undefined
@@ -12883,7 +12988,9 @@ export const useStore = create<AppState>((set, get) => ({
     (newParams as Record<string, unknown>).audio_guidance_scale = (p.audio_guidance_scale as number) ?? undefined
     // H3 optimization controls are a cohesive saved recipe. Explicit off
     // values matter: undefined would retain the clip selected before this one.
-    newParams.override_attention = restoredModelOptions && restoredIsH3
+    newParams.override_attention = isDirectorClip && p.override_attention === 'veda'
+      ? 'veda'
+      : restoredModelOptions && restoredIsH3
       ? normalizeH3Attention(restoredModelOptions, p.override_attention) ?? ''
       : (
           p.override_attention === 'sol'
@@ -12933,7 +13040,9 @@ export const useStore = create<AppState>((set, get) => ({
       newParams.minimax_h3_turbo_mode = false
       newParams.minimax_h3_turbo_preset = undefined
       newParams.skip_steps_cache_type = ''
-      newParams.override_attention = restoredModelOptions.minimax_h3_baked_turbo
+      newParams.override_attention = isDirectorClip && p.override_attention === 'veda'
+        ? 'veda'
+        : restoredModelOptions.minimax_h3_baked_turbo
         ? p.override_attention === 'sdpa'
           ? 'sdpa'
           : p.override_attention === 'sol' && restoredModelOptions.sol_attention
@@ -12998,7 +13107,9 @@ export const useStore = create<AppState>((set, get) => ({
       && p._ltx_original_prompt.trim()
     ) ? p._ltx_original_prompt : undefined
     newParams.minimax_h3_reference_sequence = (p.minimax_h3_reference_sequence as boolean) ?? undefined
-    newParams.minimax_h3_sequence_prompt_mode = restoredH3SequencePromptMode
+    newParams.minimax_h3_sequence_prompt_mode = isDirectorClip
+      ? 'manual'
+      : restoredH3SequencePromptMode
     newParams.minimax_h3_sequence_continuity = (p.minimax_h3_sequence_continuity as boolean) ?? undefined
     newParams.minimax_h3_sequence_clip_frames = (
       p.minimax_h3_sequence_clip_frames as number
@@ -13010,20 +13121,25 @@ export const useStore = create<AppState>((set, get) => ({
       p.minimax_h3_camera_coverage === 'continuous'
       || p.minimax_h3_camera_coverage === 'multi_shot'
     ) ? p.minimax_h3_camera_coverage : 'auto'
-    newParams._h3_original_prompt = (
+    newParams._h3_original_prompt = !isDirectorClip && (
       typeof p._h3_original_prompt === 'string'
       && p._h3_original_prompt.trim()
     ) ? p._h3_original_prompt : undefined
     // Restore (or explicitly clear) compiled H3 planning artifacts as one
     // unit. They are revalidated before submission, but stale prompts from
     // the previously selected gallery item must never hitchhike into a run.
-    newParams.h3_window_prompts = restoredH3WindowPrompts.length > 0
+    newParams.h3_window_prompts = !isDirectorClip && restoredH3WindowPrompts.length > 0
       ? restoredH3WindowPrompts
       : undefined
-    newParams.h3_window_plan_signature = typeof p.h3_window_plan_signature === 'string'
+    newParams.h3_window_plan_signature = !isDirectorClip && typeof p.h3_window_plan_signature === 'string'
       ? p.h3_window_plan_signature
       : undefined
     newParams.h3_window_plan = restoredH3WindowPlan || undefined
+    if (isDirectorClip) {
+      // A restored clip is a reviewed historical prompt. Keep Studio's next
+      // submission from applying a stale saved storyboard to that one-clip run.
+      newParams.minimax_h3_window_storyboard = false
+    }
     // Detect multi-clip output and reconstruct clips
     if (p.multi_prompts_gen_type === 3 && Array.isArray(p.image_start)) {
       // Director Mode joins per-clip prompts with `\n---CLIP_BOUNDARY---\n`
@@ -13197,9 +13313,13 @@ export const useStore = create<AppState>((set, get) => ({
     }
     const restoredImageGuide = _deriveBase(p.image_guide)
     const restoredImageMask = _deriveBase(p.image_mask)
-    const restoredAudioGuideFilename =
-      (typeof uploadFilenames?.audio_guide === 'string' ? uploadFilenames.audio_guide : null)
-      || _deriveBase(p.audio_guide)
+    const restoredAudioGuideFilename = isDirectorClip
+      ? _deriveBase(
+          (typeof uploadFilenames?.audio_guide === 'string' ? uploadFilenames.audio_guide : null)
+          || p.audio_guide,
+        )
+      : (typeof uploadFilenames?.audio_guide === 'string' ? uploadFilenames.audio_guide : null)
+        || _deriveBase(p.audio_guide)
     const restoredAudioGuide2Filename =
       (typeof uploadFilenames?.audio_guide2 === 'string' ? uploadFilenames.audio_guide2 : null)
       || _deriveBase(p.audio_guide2)
@@ -13316,6 +13436,14 @@ export const useStore = create<AppState>((set, get) => ({
 
     set(s => ({
       sidebarMode: 'studio',
+      ...(isDirectorClip && s.enhanceOnGenerationRevision === restoreEnhancementRevision
+        ? {
+            // Keep a restored clip's reviewed prompt exact even when the
+            // user's sticky default enables enhancement for new prompts.
+            enhanceOnGeneration: false,
+            enhanceOnGenerationRevision: s.enhanceOnGenerationRevision + 1,
+          }
+        : {}),
       ...(restoredModelMode ? { generationMode: restoredModelMode } : {}),
       ...(restoredModelMode ? {
         selectedModelPerMode: {
@@ -13473,12 +13601,18 @@ export const useStore = create<AppState>((set, get) => ({
       set({ imageRefType: refType })
 
       // Fetch all ref images in parallel, then set in original order
-      const refPromises = imageRefPaths.map(refPath => {
-        const fname = refPath.replace(/\\/g, '/').split('/').pop() || ''
+      const uploadedRefs = Array.isArray(uploadFilenames?.image_refs)
+        ? uploadFilenames.image_refs
+        : []
+      const refPromises = imageRefPaths.map((refPath, index) => {
+        const fname = _deriveBase(uploadedRefs[index] || refPath) || ''
         if (!fname) return Promise.resolve(null)
         // /file searches active/all workspaces and uploads, so both generated
         // references and newly uploaded images restore correctly.
-        const url = api.getFileUrl(fname)
+        const url = isDirectorClip
+          ? directorAssetUrl(refPath, uploadedRefs[index], 'image_refs', index)
+          : api.getFileUrl(fname)
+        if (!url) return Promise.resolve(null)
         return fetch(url)
           .then(r => r.ok ? r.blob() : null)
           .then(blob => blob ? new File([blob], fname, { type: blob.type || 'image/png' }) : null)
@@ -13497,7 +13631,7 @@ export const useStore = create<AppState>((set, get) => ({
     const fps = model?.fps || 16
     const frames = newParams.video_length || 81
     if (restoredDuration > 0) {
-      set({ durationSeconds: Math.round(restoredDuration * 10) / 10 })
+      set({ durationSeconds: isDirectorClip ? restoredDuration : Math.round(restoredDuration * 10) / 10 })
     } else if (restoredModelMode === 'video' || restoredModelMode === 'avatar') {
       set({ durationSeconds: Math.round((frames / fps) * 10) / 10 })
     }
@@ -13525,9 +13659,9 @@ export const useStore = create<AppState>((set, get) => ({
       })
     }
 
-    // Restore start/end images from upload URLs as File objects. Prefer
-    // upload_filenames.image_{start,end} (basename); fall back to deriving
-    // from the full path in params for sidecars missing upload_filenames.
+    // Restore start/end images as File objects. Director clip metadata can
+    // carry workspace-relative asset paths, so retain those path segments in
+    // the /file URL instead of reducing them to a basename.
     const startFile = (typeof uploadFilenames?.image_start === 'string'
       ? uploadFilenames.image_start
       : null) || _deriveBase(p.image_start)
@@ -13535,21 +13669,37 @@ export const useStore = create<AppState>((set, get) => ({
       ? uploadFilenames.image_end
       : null) || _deriveBase(p.image_end)
     if (hadStartImage && startFile) {
-      fetch(api.getFileUrl(startFile))
+      const startUrl = isDirectorClip
+        ? directorAssetUrl(p.image_start, startFile, 'image_start')
+        : api.getFileUrl(startFile)
+      const startName = _deriveBase(
+        directorAssetPath(p.image_start)
+          || (typeof uploadFilenames?.image_start === 'string' ? uploadFilenames.image_start : '')
+          || startFile,
+      ) || startFile
+      fetch(startUrl)
         .then(r => r.ok ? r.blob() : null)
         .then(blob => {
           if (!blob) return
-          const file = new File([blob], startFile, { type: blob.type })
+          const file = new File([blob], startName, { type: blob.type })
           set({ startImage: file })
         })
         .catch(() => {})
     }
     if (hadEndImage && endFile) {
-      fetch(api.getFileUrl(endFile))
+      const endUrl = isDirectorClip
+        ? directorAssetUrl(p.image_end, endFile, 'image_end')
+        : api.getFileUrl(endFile)
+      const endName = _deriveBase(
+        directorAssetPath(p.image_end)
+          || (typeof uploadFilenames?.image_end === 'string' ? uploadFilenames.image_end : '')
+          || endFile,
+      ) || endFile
+      fetch(endUrl)
         .then(r => r.ok ? r.blob() : null)
         .then(blob => {
           if (!blob) return
-          const file = new File([blob], endFile, { type: blob.type })
+          const file = new File([blob], endName, { type: blob.type })
           set({ endImage: file })
         })
         .catch(() => {})

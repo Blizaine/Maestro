@@ -57,6 +57,56 @@ def _subject_definition_lines(prompt):
 
 
 class H3FinalSubjectBindingTests(unittest.TestCase):
+    def test_qualified_identity_names_bind_without_appending_another_subject(self):
+        references = [{"type": "image", "role": "Kitten"}, {"type": "image", "role": "Dragon"}]
+        for name in ("Northern Kingdom Dragon", "northernkingdom_dragon", "nk_realm_dragon"):
+            with self.subTest(name=name):
+                subjects = [
+                    {"character_id": "kitten", "speaker_name": "Kitten", "visual_description": "a fluffy kitten"},
+                    {"character_id": name, "speaker_name": name,
+                     "visual_description": "a massive creature covered in dark scales"},
+                ]
+                plan = _plan(subjects, references, "[Shot 1] The kitten rides the dragon over a valley.")
+                compile_h3_clip_plans([plan])
+                self.assertEqual(set(_subject_definition_lines(plan["video_prompt"])), {1, 2})
+                self.assertEqual(validate_final_h3_subject_bindings(plan["video_prompt"], {1: 1, 2: 2}), [])
+
+    def test_legacy_qualified_identity_duplicate_is_repaired_without_merging_distinct_owners(self):
+        references = [{"type": "image", "role": "Kitten"}, {"type": "image", "role": "Dragon"}]
+        for name in ("Northern Kingdom Dragon", "northernkingdom_dragon", "nk_realm_dragon"):
+            with self.subTest(name=name):
+                prompt = (
+                    "subject_definitions: <Subject 1> is Kitten: a fluffy kitten; identity comes from <Picture 1>.\n"
+                    f"<Subject 2> is {name}: a massive creature covered in dark scales.\n"
+                    "<Subject 3> is Dragon, whose facial, bodily, and character identity come from <Picture 2>.\n\n"
+                    "summary: [reference generation] A kitten rides a dragon.\n\n"
+                    "retention_analysis: Preserve the mapped identities.\n\n"
+                    "detailed_description: Fantasy. [Shot 1] <Subject 1> raises its sword while "
+                    "<Subject 2> banks left. <Subject 3> continues forward.\n\n"
+                    "overall_soundscape: Wind.\n\nnon_diegetic_music: N/A"
+                )
+                plan = _plan([], [], prompt)
+                plan["_director_prompt_user_edited"] = True
+                compile_h3_clip_plans([plan], reference_manifests=[[]])
+                compile_h3_clip_plans([plan], reference_manifests=[references])
+                self.assertNotIn("<Subject 3>", plan["video_prompt"])
+                self.assertIn("banks left", plan["video_prompt"])
+                self.assertIn("continues forward", plan["video_prompt"])
+                self.assertEqual(validate_final_h3_subject_bindings(plan["video_prompt"], {1: 1, 2: 2}), [])
+                distinct_owner = prompt.replace(
+                    "a massive creature covered in dark scales.",
+                    "a massive creature covered in dark scales; identity comes from <Picture 1>.",
+                )
+                self.assertEqual(_collapse_ref2va_compiler_identity_duplicates(distinct_owner, references), distinct_owner)
+
+        with self.assertRaisesRegex(H3DialogueContractError, "multiple visible subjects"):
+            _mapped_ref2va_subject("Dragon", [
+                {"speaker_name": "Northern Kingdom Dragon"},
+                {"speaker_name": "Southern Kingdom Dragon"},
+            ])
+        other_character = prompt.replace(name, "Dragon Slayer")
+        self.assertEqual(_collapse_ref2va_compiler_identity_duplicates(other_character, references), other_character)
+
     def test_semantic_cast_ids_bind_reference_without_adding_a_second_identity(self):
         subjects = [
             {"character_id": "kitten_character", "speaker_name": "Kitten",
@@ -163,6 +213,9 @@ class H3FinalSubjectBindingTests(unittest.TestCase):
                 variant = prompt.replace("Two dragons meet.", description).replace("Two dragons stand apart.", description)
                 variant = variant.replace("Preserve both dragons.", "Preserve the described identities.")
                 self.assertEqual(_collapse_ref2va_compiler_identity_duplicates(variant, references), variant)
+                self.assertEqual(_collapse_ref2va_compiler_identity_duplicates(
+                    variant, [{"type": "image", "role": "the Dragon"}],
+                ), variant)
                 self.assertEqual(_collapse_ref2va_compiler_identity_duplicates(variant, []), variant)
 
     def test_legacy_repair_respects_each_clips_actual_prompt_mode(self):

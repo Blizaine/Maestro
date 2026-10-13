@@ -2580,6 +2580,20 @@ def _ref2va_identity_aliases(subject: Any) -> list[str]:
         compound_alias = _ref2va_compound_identity_alias(name)
         if compound_alias:
             aliases.append(compound_alias)
+        # Qualified names and semantic IDs can share an explicit identity noun
+        # with their reference role ("Northern Kingdom Dragon" / "Dragon").
+        # Retain the full name; a shared short alias must still resolve uniquely.
+        readable_name = re.sub(r"[_-]+", " ", compound_alias or name).strip()
+        name_parts = readable_name.split()
+        if 1 < len(name_parts) <= 6:
+            aliases.append(readable_name)
+            noun = name_parts[-1].strip("'’-")
+            if re.fullmatch(r"[A-Za-z][A-Za-z'’-]+", noun) and noun.casefold() not in {
+                "person", "man", "woman", "child", "boy", "girl", "performer",
+                "singer", "subject", "character", "figure", "people", "actor",
+                "creature", "entity",
+            }:
+                aliases.append(noun)
         # Planner names and reference roles commonly differ only by a leading
         # article ("the Kitten" vs "Kitten"). Keep the original alias and add
         # the article-free form so a native Subject ID remains authoritative.
@@ -2737,23 +2751,25 @@ def _collapse_ref2va_compiler_identity_duplicates(
         ]
     replacements: dict[int, int] = {}
     for picture_no, role in identity_references:
-        if not role or _h3_source_requests_multiple_instances(prompt, role):
+        role_name = re.sub(r"^(?:the|a|an)\s+", "", role, flags=re.I)
+        if not role_name or _h3_source_requests_multiple_instances(prompt, role_name):
             continue
         # Fail closed when the authored text could describe distinct instances,
         # including plural nouns and a second/another named identity.
-        escaped_role = re.escape(role)
+        escaped_role = re.escape(role_name)
         if re.search(
             rf"\b{escaped_role}(?:s|es)\b|\b(?:another|second|additional|different)\s+"
             rf"(?:[A-Za-z'-]+\s+){{0,3}}{escaped_role}\b", prompt, re.I,
         ):
             continue
-        role_key = _h3_anchor_key(re.sub(r"^(?:the|a|an)\s+", "", role, flags=re.I))
+        role_key = _h3_anchor_key(role_name)
         generated: list[int] = []
         existing: list[int] = []
         for number, definition in definitions.items():
             template = template_pattern.fullmatch(definition)
             if template:
-                if int(template[2]) == picture_no and _h3_anchor_key(template[1]) == role_key:
+                template_name = re.sub(r"^(?:the|a|an)\s+", "", template[1], flags=re.I)
+                if int(template[2]) == picture_no and _h3_anchor_key(template_name) == role_key:
                     generated.append(number)
                 continue
             label = re.match(
@@ -2763,9 +2779,15 @@ def _collapse_ref2va_compiler_identity_duplicates(
             if not label:
                 continue
             identity = label[1].strip(" .")
+            pictures = {int(value) for value in re.findall(r"<Picture\s+(\d+)>", definition, re.I)}
+            if pictures - {picture_no}:
+                continue
             identity = re.sub(r"^(?:the|a|an)\s+", "", identity, flags=re.I)
             identity = _ref2va_compound_identity_alias(identity) or identity
-            if _h3_anchor_key(identity) == role_key:
+            readable_identity = re.sub(r"[_-]+", " ", identity).strip()
+            if _h3_anchor_key(readable_identity) == role_key or re.search(
+                rf"(?<![\w]){re.escape(role_name)}$", readable_identity, re.I,
+            ):
                 existing.append(number)
         if len(generated) == 1 and len(existing) == 1:
             replacements[generated[0]] = existing[0]

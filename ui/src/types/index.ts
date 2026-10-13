@@ -1278,11 +1278,22 @@ export interface OutputMetadata {
   tool_source?: string
   upload_filenames?: Record<string, string | string[]>
   job_id?: string
-  /** Director revision that produced this artifact. Gallery "Load settings"
-   *  uses it to reopen the complete Director project instead of flattening
-   *  the clip into an unrelated Studio job. */
+  /** Director revision that produced this artifact. Joined outputs reopen the
+   *  complete Director project; individual clips restore their scoped Studio
+   *  recipe using director_clip_index. */
   director_pipeline_id?: string
+  /** Distinguishes a single rendered clip from the joined Director artifact. */
+  director_artifact_kind?: 'clip' | 'joined'
+  /** Zero-based index of an individual Director clip; index 0 is valid. */
   director_clip_index?: number
+  /** Version of the scope-normalized settings recipe for a Director clip. */
+  director_clip_settings_version?: number
+  /** Unsafe or unavailable individual clip recipe; displayed to the user. */
+  director_clip_settings_error?: string
+  /** Read-time source used to identify a clip in its saved Director pipeline. */
+  director_clip_settings_provenance?: string
+  /** Workspace-qualified file URLs for archived assets in a clip recipe. */
+  director_clip_asset_urls?: Record<string, string | string[]>
   generation_time?: number
   generation_time_basis?: 'active' | 'elapsed'
   /** Exact native-window render timings captured after each successfully

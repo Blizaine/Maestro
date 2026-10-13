@@ -16,6 +16,30 @@ tags remain unchanged. The planning and media limitations below still apply.
 
 ## Automated checks
 
+The October 13 gallery restore follow-up passed mocked browser checks for
+individual Director clips (including index zero), joined-project routing,
+archived media URLs, exact prompt/seed/attention restoration, enhancement
+ownership and errors that leave the active settings unchanged. Existing Editor
+draft-persistence checks, frontend lint, TypeScript and the production build
+also passed. Isolated checks against four saved outputs covered an original
+first clip, an original seventh clip, its later rerun and the joined video.
+Individual recipes retained their own prompts, seeds, six-step Veda selection,
+345 native frames and 14.375-second soundtrack slices; the joined recipe retained
+the full run. Saved pipeline and sidecar hashes were unchanged. These checks
+did not submit a new generation or establish an attention-quality comparison.
+The final combined Director/H3/gallery/settings/lifecycle suite passed 845
+tests. A concurrent soundtrack-cache check passed 80 repeated runs after
+serializing cache publication for Windows file-sharing behavior.
+After an idle restart, the live metadata API returned the expected scoped
+recipes for those four outputs, and their archived reference/soundtrack URLs
+were reachable. The server also served the current frontend bundle.
+
+Expanded H3 identity regressions passed 102 focused tests. An isolated final
+compilation of all 16 saved music-video plans produced two uniquely mapped
+subjects per clip, with no duplicate third subject. The historical prompts
+remain available unchanged for matched attention tests. This verifies the
+compiler repair, not a retroactive change to existing rendered video.
+
 The October 13 Editor rerun follow-up passed 783 focused Director/H3 tests and
 20 additional Editor project tests. An isolated replay of a saved shot and two
 edited-prompt cases passed both production preflights with unique image-subject

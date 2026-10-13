@@ -2452,6 +2452,7 @@ def _rerun_clip_image_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             m.split(";")[0] for m in (image_loras.get("loras_multipliers", "") or "").split(" ") if m
         ),
         "_director_pipeline_id": pid,
+        "_director_clip_index": clip_index,
         "_director_detached_operation": True,
     }
     with _pipeline_lock:
@@ -3134,6 +3135,9 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             m.split(";")[0] for m in (video_loras.get("loras_multipliers", "") or "").split(" ") if m
         ),
         "_director_pipeline_id": pid,
+        "_director_clip_index": clip_index,
+        "_director_video_strategy": director_strategy,
+        "_director_shot_image_policy": shot_image_policy,
         "_director_detached_operation": True,
     }
     _apply_director_h3_optimizations(
@@ -3183,6 +3187,10 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         from services.director_music_timing import music_output_trim
         clip_start = float(planned_clips[clip_index]["start"])
         gen_params["trim_tail_frames"] = music_output_trim(video_length, planned_clips[clip_index]["output_frames"])
+    gen_params["_director_clip_audio_source_path"] = (
+        audio_path if audio_path and os.path.isfile(audio_path) else ""
+    )
+    gen_params["_director_clip_audio_start_sec"] = float(clip_start)
     slice_path = None
     vocal_slice_path = None
     has_story_drive_audio = bool(snapshot.get("_director_omni_drive_audio"))
@@ -8213,6 +8221,8 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 print(f"[Pipeline {pid}] Keyframe injection: {[len(p) for p in per_clip_kf_paths]} keyframes per clip")
 
     # Common params
+    gen_params["_director_video_strategy"] = director_strategy
+    gen_params["_director_shot_image_policy"] = shot_image_policy
     gen_params["input_video_strength"] = video_params.get(
         "input_video_strength", 1.0,
     )
