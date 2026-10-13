@@ -567,6 +567,33 @@ def _compact_fact_key(fact: dict[str, str]) -> tuple[str, str]:
     return (fact["subject_id"].casefold(), fact["predicate"])
 
 
+def _is_prop_manipulation_posture_mislabel(
+    row: dict[str, Any], subject_id: str, action: str, value: str,
+) -> bool:
+    match = re.search(
+        r"\b(?P<verb>twirl(?:s|ed|ing)?|brandish(?:es|ed|ing)?|"
+        r"wave(?:s|d|ing)?|swing(?:s|ing)?|swung)\s+"
+        r"(?:(?:a|an|the|its|his|her|their)\s+)?(?P<object>[\w’'-]+)\b",
+        action, re.IGNORECASE,
+    )
+    if match is None:
+        return False
+    if _h3_action_beat_for_state_fact(
+        row, {"subject_id": subject_id, "value": action},
+        additional_roots={"brandish", "wave"},
+    ) is None:
+        return False
+    root = "swing" if match.group("verb").casefold() == "swung" else re.match(
+        r"(?:twirl|brandish|wave|swing)", match.group("verb").casefold(),
+    ).group(0)
+    value_tokens = re.findall(r"[a-z0-9]+", value.casefold())
+    value_roots = {
+        stem for token in value_tokens for stem in _h3_action_match_roots(token)
+    }
+    object_token = re.findall(r"[a-z0-9]+", match.group("object").casefold())
+    return root in value_roots and bool(object_token) and object_token[0] in value_tokens
+
+
 _H3_PHYSICAL_STATE_PROPOSAL_ERROR_FIELD = "_h3_physical_state_proposal_error"
 
 
@@ -762,6 +789,15 @@ def _materialize_h3_physical_state_proposals_strict(
             opening.append(dict(fact))
 
         transitions: list[dict[str, str]] = []
+        unchanged_props = {
+            subject: item["value"] for (subject, predicate), item in current.items()
+            if predicate == "prop"
+        }
+        prop_transition_subjects = {
+            item["subject_id"].casefold() for item in raw_transitions
+            if isinstance(item, dict) and item.get("predicate") == "prop"
+            and isinstance(item.get("subject_id"), str)
+        }
         for transition_index, raw_transition in enumerate(raw_transitions):
             location = (
                 f"H3 shot {row_index + 1} physical_state.transitions"
@@ -812,6 +848,15 @@ def _materialize_h3_physical_state_proposals_strict(
                     f"{location} has no explicit opening/current fact for "
                     f"{subject_id} {predicate}"
                 )
+            if (
+                predicate == "posture"
+                and subject_id.casefold() not in prop_transition_subjects
+                and to_value == unchanged_props.get(subject_id.casefold())
+                and _is_prop_manipulation_posture_mislabel(
+                    row, subject_id, action, to_value,
+                )
+            ):
+                continue
             transitions.append({
                 "subject_id": subject_id,
                 "predicate": predicate,
@@ -1036,6 +1081,8 @@ def _h3_subject_aliases(row: dict[str, Any]) -> list[tuple[str, tuple[str, ...]]
 def _h3_action_beat_for_state_fact(
     row: dict[str, Any],
     fact: dict[str, str],
+    *,
+    additional_roots: frozenset[str] | set[str] = frozenset(),
 ) -> Optional[tuple[int, str]]:
     """Find one positive authored beat that explicitly enacts a fact value."""
 
@@ -1047,7 +1094,7 @@ def _h3_action_beat_for_state_fact(
         root
         for token in value_tokens
         for root in _h3_action_match_roots(token)
-        if root in _H3_STATE_ACTION_ROOTS
+        if root in _H3_STATE_ACTION_ROOTS or root in additional_roots
     ]
     if not value_tokens or not action_roots:
         return None
@@ -1927,7 +1974,9 @@ def _try_repair_h3_physical_state_only(
             "exactly one array item containing only physical_state; the caller keeps "
             "all visible shot fields unchanged. The repair seed already contains the "
             "deterministic opening bridges. Preserve those bridges and every supported "
-            "contact or posture fact. The initial carried-state mismatch is resolved; "
+            "contact or posture fact. Treat posture as body pose and prop as object "
+            "manipulation; preserve seated/standing pose during unrelated prop gestures. "
+            "The initial carried-state mismatch is resolved; "
             "repair only the outstanding source issues. Returning the seed unchanged "
             "is invalid.\n\n"
             "Use actor_aliases and target_aliases in assigned_source_actions to bind "
@@ -1947,6 +1996,9 @@ def _try_repair_h3_physical_state_only(
             "Return exactly one array item containing only physical_state. The caller will "
             "preserve the original visible prompt, action_beats, source_event_ids, cast IDs, "
             "continuity_strategy, and every other shot field unchanged.\n\n"
+            "Treat posture as body pose and prop as object manipulation; preserve "
+            "seated/standing pose during unrelated prop gestures unless the body visibly "
+            "changes pose.\n\n"
             "Use the validation issue and visible evidence below. The known-current list "
             "shows keys available at the clip start, with each key listed once. The "
             "preceding_authoritative_closing_facts are authoritative for carried values. "
@@ -3346,7 +3398,9 @@ class MusicVideoPlanner(BasePlanner):
                 "and action. Never output from_value or closing: code derives "
                 "them. A transition must target an explicit opening/current "
                 "fact; do not invent a missing starting state. Order transitions "
-                "as they happen.\n"
+                "as they happen. Posture is body pose; prop is object manipulation. "
+                "Preserve seated/standing pose during prop gestures unless the body "
+                "visibly changes pose.\n"
                 f"- Predicates: {', '.join(PHYSICAL_STATE_PREDICATES)}. Values "
                 f"are compact state atoms of at most {MAX_PHYSICAL_VALUE_CHARS} "
                 "characters; grounded values are exactly 'grounded' or "

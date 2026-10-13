@@ -347,6 +347,64 @@ class MusicStateProposalTests(unittest.TestCase):
             ],
         )
 
+    def test_prop_manipulation_mislabeled_as_posture_keeps_carried_posture(self):
+        seated = fact("lead_performer", "posture", "seated near the dragon's neck")
+        prop = fact("lead_performer", "prop", "twirling sword")
+        previous = full_state([seated, prop])
+        row = proposal_row(transitions=[transition(
+            "lead_performer", "posture", "twirling sword",
+            "twirls its sword in a tight circle",
+        )])
+        row["action_beats"] = ["Ari twirls its sword in a tight circle."]
+
+        result = _materialize_h3_physical_state_proposals(
+            [row], previous_physical_state=previous,
+        )[0]["physical_state"]
+
+        self.assertEqual(result["closing"], [seated, prop])
+        self.assertEqual(result["transitions"], [])
+
+    def test_real_posture_change_survives_when_actor_has_prop_fact(self):
+        previous = full_state([
+            fact("lead_performer", "posture", "seated near the dragon's neck"),
+            fact("lead_performer", "prop", "twirling sword"),
+        ])
+        row = proposal_row(transitions=[transition(
+            "lead_performer", "posture", "standing upright", "Ari stands upright.",
+        )])
+
+        result = _materialize_h3_physical_state_proposals(
+            [row], previous_physical_state=previous,
+        )[0]["physical_state"]
+
+        self.assertEqual(result["transitions"][0]["to_value"], "standing upright")
+        self.assertEqual(
+            next(item["value"] for item in result["closing"]
+                 if item["predicate"] == "posture"),
+            "standing upright",
+        )
+
+    def test_ambiguous_or_unasserted_prop_phrases_are_not_normalized(self):
+        previous = full_state([
+            fact("lead_performer", "posture", "seated"),
+            fact("lead_performer", "prop", "twirling sword"),
+        ])
+        for action in (
+            "Ari plans to twirl the sword.",
+            "Ari talks about twirling the sword.",
+            "Ari twirls or waves the sword.",
+            "Mira twirls the sword.",
+        ):
+            with self.subTest(action=action):
+                row = proposal_row(transitions=[transition(
+                    "lead_performer", "posture", "twirling sword", action,
+                )])
+                row["action_beats"] = [action]
+                result = _materialize_h3_physical_state_proposals(
+                    [row], previous_physical_state=previous,
+                )[0]["physical_state"]
+                self.assertEqual(result["transitions"][0]["to_value"], "twirling sword")
+
     def test_metadata_bridge_uses_exact_carried_value_and_authored_opening_action(self):
         previous = self._bridge_previous_row()
         row = self._bridge_row()
