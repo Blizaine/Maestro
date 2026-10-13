@@ -76,6 +76,7 @@ interface EditorState {
   directorRuns: PipelineListItem[]
   directorImportingId: string | null
   directorRerunItemId: string | null
+  directorRerunErrors: Record<string, { projectId: string; message: string }>
   loading: boolean
   saving: boolean
   dirty: boolean
@@ -113,6 +114,8 @@ interface EditorState {
   relinkMedia: (assetId: string, file: File) => Promise<void>
   addMedia: (asset: EditorAsset, at?: number, trackId?: string) => Promise<void>
   importDirectorRun: (pipelineId: string, at?: number) => Promise<void>
+  setDirectorDraftPrompt: (itemId: string, prompt: string) => void
+  clearDirectorRerunError: (itemId: string) => void
   rerunDirectorClip: (itemId: string, prompt?: string) => Promise<void>
   addTitle: (at?: number, trackId?: string) => void
   addTrack: (type: EditorTrackType) => void
@@ -542,6 +545,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   directorRuns: [],
   directorImportingId: null,
   directorRerunItemId: null,
+  directorRerunErrors: {},
   loading: false,
   saving: false,
   dirty: false,
@@ -1293,6 +1297,29 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
   },
 
+  setDirectorDraftPrompt: (itemId, prompt) => {
+    set(state => {
+      const current = state.project
+      const located = current ? itemLocation(current, itemId) : null
+      if (!current || !located?.item.director || located.item.director.draft_video_prompt === prompt) return {}
+      const next = cloneProject(current)
+      const target = itemLocation(next, itemId)
+      if (!target?.item.director) return {}
+      target.item.director = { ...target.item.director, draft_video_prompt: prompt }
+      next.updated_at = Date.now() / 1000
+      return { project: next, dirty: true }
+    })
+  },
+
+  clearDirectorRerunError: (itemId) => {
+    set(state => {
+      if (!state.directorRerunErrors[itemId]) return {}
+      const directorRerunErrors = { ...state.directorRerunErrors }
+      delete directorRerunErrors[itemId]
+      return { directorRerunErrors }
+    })
+  },
+
   rerunDirectorClip: async (itemId, prompt) => {
     if (get().directorRerunItemId) return
     const project = get().project
@@ -1302,11 +1329,33 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       set({ error: 'Select a Director shot in the timeline before rerunning it.' })
       return
     }
-    const saved = await get().saveProject()
-    if (!saved) return
-    const requestedPrompt = prompt?.trim() || undefined
+    const requestedPrompt = prompt ?? provenance.draft_video_prompt ?? (
+      provenance.window_prompts?.length
+        ? provenance.window_prompts.join('\n\n')
+        : provenance.video_prompt || ''
+    )
+    set(state => {
+      const directorRerunErrors = { ...state.directorRerunErrors }
+      delete directorRerunErrors[itemId]
+      return { directorRerunErrors, error: null, playing: false }
+    })
+    get().setDirectorDraftPrompt(itemId, requestedPrompt)
+    if (!requestedPrompt.trim()) {
+      set(state => ({
+        directorRerunErrors: {
+          ...state.directorRerunErrors,
+          [itemId]: { projectId: project.id, message: 'Enter a video prompt before rerunning this shot.' },
+        },
+        error: null,
+      }))
+      return
+    }
     set({ directorRerunItemId: itemId, error: null, playing: false })
     try {
+      const saved = await get().saveProject()
+      if (!saved) {
+        throw new Error(get().error || 'Unable to save the Director prompt draft before rerunning the shot.')
+      }
       const result = await api.rerunClipVideo(
         provenance.pipeline_id,
         provenance.clip_index,
@@ -1386,28 +1435,61 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       target.item.speed = 1
       target.item.director = {
         ...target.item.director,
-        video_prompt: requestedPrompt || target.item.director.video_prompt,
-        window_prompts: requestedPrompt ? undefined : target.item.director.window_prompts,
+        video_prompt: requestedPrompt,
+        window_prompts: undefined,
       }
       clampItemToSource(next, target.item)
       next.updated_at = Date.now() / 1000
       const persisted = await api.saveEditorProject(next)
-      set(state => ({
-        ...(state.project?.id === persisted.id ? {
-          project: persisted,
-          dirty: false,
-          history: [...state.history, before].slice(-HISTORY_LIMIT),
-          future: [],
-        } : {}),
-        library: [generatedAsset, ...state.library.filter(asset => (
-          asset.name !== generatedAsset.name || asset.workspace !== generatedAsset.workspace
-        ))],
-        error: null,
-      }))
+      set(state => {
+        let projectUpdate: Partial<EditorState> = {}
+        if (state.project?.id === persisted.id) {
+          let project = persisted
+          let dirty = false
+          const draftBaseline = new Map<string, string | undefined>()
+          next.tracks.forEach(track => track.items.forEach(item => {
+            if (item.director) draftBaseline.set(item.id, item.director.draft_video_prompt)
+          }))
+          state.project.tracks.forEach(track => track.items.forEach(item => {
+            if (!item.director || item.director.draft_video_prompt === draftBaseline.get(item.id)) return
+            const persistedTarget = itemLocation(project, item.id)
+            if (!persistedTarget?.item.director) return
+            if (project === persisted) project = cloneProject(persisted)
+            const mergedTarget = itemLocation(project, item.id)
+            if (!mergedTarget?.item.director) return
+            const director = { ...mergedTarget.item.director }
+            if (item.director.draft_video_prompt === undefined) delete director.draft_video_prompt
+            else director.draft_video_prompt = item.director.draft_video_prompt
+            mergedTarget.item.director = director
+            project.updated_at = Date.now() / 1000
+            dirty = true
+          }))
+          projectUpdate = {
+            project,
+            dirty,
+            history: [...state.history, before].slice(-HISTORY_LIMIT),
+            future: [],
+          }
+        }
+        return {
+          ...projectUpdate,
+          library: [generatedAsset, ...state.library.filter(asset => (
+            asset.name !== generatedAsset.name || asset.workspace !== generatedAsset.workspace
+          ))],
+          error: null,
+        }
+      })
       await get().refreshProjects()
       void useStore.getState().loadOutputs()
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : 'Director shot rerun failed.' })
+      const message = error instanceof Error ? error.message : 'Director shot rerun failed.'
+      set(state => ({
+        directorRerunErrors: {
+          ...state.directorRerunErrors,
+          [itemId]: { projectId: project.id, message },
+        },
+        error: null,
+      }))
     } finally {
       set({ directorRerunItemId: null })
     }

@@ -1961,7 +1961,7 @@ def _h3_source_requests_multiple_instances(source: Any, name: Any) -> bool:
     )
     return bool(re.search(
         rf"(?:{quantity})\s+(?:identical\s+)?(?:copies?\s+of\s+)?"
-        rf"{escaped}\b|\b{escaped}(?:es|s)?\b[^.!?]{{0,45}}\b"
+        rf"{escaped}(?:es|s)?\b|\b{escaped}(?:es|s)?\b[^.!?]{{0,45}}\b"
         r"(?:twins?|clones?|copies|duplicates?|multiple\s+versions?)\b",
         text,
         flags=re.IGNORECASE,
@@ -2543,6 +2543,25 @@ def _ref2va_inferred_visible_identity(subject: Any) -> str:
     return opening
 
 
+def _ref2va_compound_identity_alias(value: str) -> str:
+    """Read a semantic identity before neutral planner-ID suffixes."""
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*(?:[_-][A-Za-z0-9]+)+", value):
+        return ""
+    parts = re.split(r"[_-]+", value)
+    original_count = len(parts)
+    while parts and (
+        parts[-1].isdigit()
+        or parts[-1].casefold() in {"actor", "character", "creature", "entity", "subject"}
+    ):
+        parts.pop()
+    if not parts or len(parts) == original_count:
+        return ""
+    alias = " ".join(parts)
+    return "" if alias.casefold() in {
+        "actor", "char", "character", "creature", "entity", "identity", "native", "speaker", "subject",
+    } else alias
+
+
 def _ref2va_identity_aliases(subject: Any) -> list[str]:
     """Read explicit names or a conservative leading identity noun phrase.
 
@@ -2558,6 +2577,9 @@ def _ref2va_identity_aliases(subject: Any) -> list[str]:
     if inferred:
         aliases.append(inferred)
     for name in list(aliases):
+        compound_alias = _ref2va_compound_identity_alias(name)
+        if compound_alias:
+            aliases.append(compound_alias)
         # Planner names and reference roles commonly differ only by a leading
         # article ("the Kitten" vs "Kitten"). Keep the original alias and add
         # the article-free form so a native Subject ID remains authoritative.
@@ -2678,6 +2700,88 @@ def _ref2va_cast_from_source(
                 )
             recovered[index] = subject
     return recovered, definitions
+
+
+def _collapse_ref2va_compiler_identity_duplicates(
+    prompt: str, references: Sequence[Mapping[str, Any]] | None,
+) -> str:
+    """Repair only redundant identity definitions in the compiler's template.
+
+    Older native prompts can contain both a semantic cast ID and an appended
+    reference-only definition for that same identity. Rich authored cast
+    definitions and ambiguous identities remain untouched.
+    """
+    field = _extract_h3_fields(prompt).get("subject_definitions", "")
+    if not field:
+        return prompt
+    _cast, definitions = _ref2va_cast_from_source(prompt, [])
+    template_pattern = re.compile(
+        r"<Subject\s+\d+>\s+is\s+(.+?),\s+whose\s+facial,\s+bodily,\s+"
+        r"and\s+character\s+identity\s+come\s+from\s+<Picture\s+(\d+)>\.", re.I,
+    )
+    identity_references: list[tuple[int, str]] = []
+    if references:
+        picture_no = 0
+        for reference in references:
+            if str(reference.get("type") or "").casefold() != "image":
+                continue
+            picture_no += 1
+            if str(reference.get("image_intent") or "identity").casefold() == "identity":
+                identity_references.append((picture_no, _trim_sentence(reference.get("role", ""))))
+    else:
+        # The first rerun preflight precedes concrete asset resolution. Exact
+        # compiler-owned definitions already prove their picture/name mapping.
+        identity_references = [
+            (int(match[2]), match[1]) for definition in definitions.values()
+            if (match := template_pattern.fullmatch(definition))
+        ]
+    replacements: dict[int, int] = {}
+    for picture_no, role in identity_references:
+        if not role or _h3_source_requests_multiple_instances(prompt, role):
+            continue
+        # Fail closed when the authored text could describe distinct instances,
+        # including plural nouns and a second/another named identity.
+        escaped_role = re.escape(role)
+        if re.search(
+            rf"\b{escaped_role}(?:s|es)\b|\b(?:another|second|additional|different)\s+"
+            rf"(?:[A-Za-z'-]+\s+){{0,3}}{escaped_role}\b", prompt, re.I,
+        ):
+            continue
+        role_key = _h3_anchor_key(re.sub(r"^(?:the|a|an)\s+", "", role, flags=re.I))
+        generated: list[int] = []
+        existing: list[int] = []
+        for number, definition in definitions.items():
+            template = template_pattern.fullmatch(definition)
+            if template:
+                if int(template[2]) == picture_no and _h3_anchor_key(template[1]) == role_key:
+                    generated.append(number)
+                continue
+            label = re.match(
+                r"<Subject\s+\d+>\s*(?:\(S\d+\)\s*)?is\s+([^:;,\n]+)",
+                definition, re.I,
+            )
+            if not label:
+                continue
+            identity = label[1].strip(" .")
+            identity = re.sub(r"^(?:the|a|an)\s+", "", identity, flags=re.I)
+            identity = _ref2va_compound_identity_alias(identity) or identity
+            if _h3_anchor_key(identity) == role_key:
+                existing.append(number)
+        if len(generated) == 1 and len(existing) == 1:
+            replacements[generated[0]] = existing[0]
+    if not replacements:
+        return prompt
+    surviving = [number for number in definitions if number not in replacements]
+    renumbered = {number: index + 1 for index, number in enumerate(surviving)}
+    cleaned_field = field
+    for number in replacements:
+        cleaned_field = cleaned_field.replace(definitions[number], "", 1)
+    cleaned = prompt.replace(field, cleaned_field.strip(), 1)
+    return re.sub(
+        r"<Subject\s+(\d+)>",
+        lambda match: f"<Subject {renumbered.get(replacements.get(int(match[1]), int(match[1])), int(match[1]))}>",
+        cleaned, flags=re.I,
+    )
 
 
 def _reference_relationships(
@@ -3102,6 +3206,7 @@ def compile_h3_official_prompt(
     registry = speaker_registry if isinstance(speaker_registry, Mapping) else {}
     reviewed_definitions: dict[int, str] = {}
     if mode == "ref2va":
+        prompt = _collapse_ref2va_compiler_identity_duplicates(prompt, references)
         subjects, reviewed_definitions = _ref2va_cast_from_source(prompt, subjects or [])
     (
         reference_definitions,
@@ -3758,7 +3863,26 @@ def compile_h3_clip_plans(
                 audio_plan["timing_anchor"] = "video"
                 audio_plan["lip_sync_critical"] = False
 
-    for plan in clip_plans:
+    for index, (plan, references) in enumerate(zip(clip_plans, references_by_plan)):
+        source = str(plan.get("_director_h3_source_prompt") or plan.get("video_prompt") or "")
+        current = str(plan.get("video_prompt") or "")
+        previous = str(plan.get("_director_h3_compiled_prompt") or "")
+        if source and previous and current != previous:
+            source = current
+        mode = (
+            prompt_modes[index]
+            if prompt_modes is not None and index < len(prompt_modes)
+            else plan.get("_director_h3_prompt_mode") or plan.get("_director_h3_model_family") or "t2va"
+        )
+        repaired = (
+            _collapse_ref2va_compiler_identity_duplicates(source, references)
+            if str(mode).strip().casefold() == "ref2va" else source
+        )
+        if repaired != source:
+            plan["_director_h3_source_prompt"] = repaired
+            if current == source:
+                plan["video_prompt"] = repaired
+            plan["_director_h3_compiled_prompt"] = ""
         if plan.get("_director_prompt_user_edited"):
             source = str(plan.get("_director_h3_source_prompt") or plan.get("video_prompt") or "")
             if _extract_h3_fields(source).get("subject_definitions"):

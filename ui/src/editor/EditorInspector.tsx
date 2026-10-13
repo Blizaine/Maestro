@@ -87,13 +87,19 @@ function SliderField({
 
 function DirectorRerunPanel({ item }: { item: EditorTimelineItem }) {
   const source = item.director
-  const [prompt, setPrompt] = useState(() => (
+  const prompt = source?.draft_video_prompt ?? (
     source?.window_prompts?.length
       ? source.window_prompts.join('\n\n')
       : source?.video_prompt || ''
-  ))
+  )
   const rerunDirectorClip = useEditorStore(state => state.rerunDirectorClip)
+  const setDirectorDraftPrompt = useEditorStore(state => state.setDirectorDraftPrompt)
+  const clearDirectorRerunError = useEditorStore(state => state.clearDirectorRerunError)
   const directorRerunItemId = useEditorStore(state => state.directorRerunItemId)
+  const rerunError = useEditorStore(state => {
+    const error = state.directorRerunErrors[item.id]
+    return error?.projectId === state.project?.id ? error.message : null
+  })
   if (!source) return null
   return (
     <div className="overflow-hidden rounded-xl border border-accent-blue/25 bg-accent-blue/5">
@@ -107,10 +113,11 @@ function DirectorRerunPanel({ item }: { item: EditorTimelineItem }) {
       </div>
       <div className="space-y-2 p-2.5">
         <div>
-          <FieldLabel>Video prompt</FieldLabel>
+          <FieldLabel>Video prompt draft</FieldLabel>
           <textarea
+            aria-label="Video prompt draft"
             value={prompt}
-            onChange={event => setPrompt(event.target.value)}
+            onChange={event => setDirectorDraftPrompt(item.id, event.target.value)}
             rows={6}
             className="mt-1 w-full resize-y rounded-lg border border-border bg-bg-tertiary px-2 py-2 text-[9px] leading-relaxed text-text-primary outline-none focus:border-accent-blue/60"
           />
@@ -126,6 +133,27 @@ function DirectorRerunPanel({ item }: { item: EditorTimelineItem }) {
             : <RotateCcw size={11} />}
           {directorRerunItemId === item.id ? 'Regenerating in Director…' : 'Re-run Director shot'}
         </button>
+        {rerunError && (
+          <div
+            role="alert"
+            onPointerDown={event => event.stopPropagation()}
+            onMouseDown={event => event.stopPropagation()}
+            onClick={event => event.stopPropagation()}
+            className="flex items-start justify-between gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-2.5 py-2 text-[8px] leading-relaxed text-red-200"
+          >
+            <span className="min-w-0 break-words">Director rerun failed: {rerunError}</span>
+            <button
+              type="button"
+              onClick={event => {
+                event.stopPropagation()
+                clearDirectorRerunError(item.id)
+              }}
+              className="shrink-0 underline underline-offset-2 opacity-80 hover:opacity-100"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         <p className="text-[8px] leading-relaxed text-text-muted">
           Uses the original Director model, references, soundtrack timing, LoRAs, and settings. The new render becomes the active take; the current take stays available.
         </p>

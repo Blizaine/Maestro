@@ -7,6 +7,12 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 Public Dev testing candidate; not promoted to Main. See the [full release notes](docs/RELEASE_NOTES_V2.7.0.md).
 
+- Save Editor Director prompt drafts with their shots, independently of the
+  last rendered prompt. Keep drafts through deselection and failed reruns,
+  show persistent shot-local errors, and report the actual Director clip number.
+- Match semantic cast IDs such as `dragon_creature` to their named H3 image
+  references. Repair unambiguous duplicate compiler-generated identities on
+  rerun, and retain appearance descriptions such as “scary-looking.”
 - Keep H3 music-video physical direction in the visible shot prompt instead of
   requiring an auxiliary free-text state ledger. Prevent ordinary pose changes
   and misclassified gestures from stopping planning or overriding authored shots;

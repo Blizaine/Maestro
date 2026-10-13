@@ -102,6 +102,7 @@ Appearance mode is **Dark / Light / Auto** — Auto follows your system's appear
 - Arrange video, audio, and title layers on a non-destructive multi-track timeline with snapping, trim, split, duplicate, undo/redo, transitions, speed, opacity, volume, and canvas transforms.
 - Browse outputs across workspaces, uploads, favorites, and complete Director productions; import Director shots as individual clips with their original soundtrack.
 - Send a selected clip back through Maestro AI, then return the generated take to the same timeline position without rebuilding the edit.
+- Edit a Director shot's prompt as a saved draft. Changing selection or a failed rerun keeps your text; rerun errors stay beside the shot's button and previous takes remain available.
 - Export H.264, H.265, or AV1 at project or delivery resolutions with automatic hardware-encoder selection and export history.
 - Responsive desktop and mobile layouts keep core editing controls usable from a phone or tablet.
 

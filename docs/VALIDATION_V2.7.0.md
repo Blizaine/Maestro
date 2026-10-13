@@ -16,6 +16,16 @@ tags remain unchanged. The planning and media limitations below still apply.
 
 ## Automated checks
 
+The October 13 Editor rerun follow-up passed 783 focused Director/H3 tests and
+20 additional Editor project tests. An isolated replay of a saved shot and two
+edited-prompt cases passed both production preflights with unique image-subject
+bindings; submission was intercepted before GPU enqueue and existing media
+was retained. A mocked browser integration test covered draft persistence,
+failed reruns, blank-input rejection, duplicate-submit prevention and edits
+made to multiple shots while a rerun/save was pending. Frontend lint,
+TypeScript and the production build passed. These checks establish prompt
+compilation and Editor behavior, not the visual quality of a new render.
+
 The October 12 Dev preflight identified an avoidable recurrence-parser hot path
 in the one-hour Studio planning fixture. Checking recurrence eligibility before
 parsing connective prose reduced that fixture from a timed-out run to 2.935

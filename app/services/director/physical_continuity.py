@@ -31,7 +31,7 @@ _TEMPORARY_POSE_OR_PROP_ACTION_RE = re.compile(
     r"(?<![-\w])facing(?!\s+eyes?\b)|faces?|leaning|leans?|sliding|slides?|"
     r"riding(?!\s+boots?\b)|rides?|mounted|mounting|"
     r"climbing|climbs?|kneeling|kneels?|lying|lies?|resting|rests?|turning|turns?|"
-    r"looking|looks?|grounded|airborne|wielding|wields?|carrying|carries?|"
+    r"(?<![-\w])looking|looks?|grounded|airborne|wielding|wields?|carrying|carries?|"
     r"brandishing|brandishes|drawing|draws?|unsheathing|unsheathes?|"
     r"unholstering|unholsters?|sheathed|sheathe|sheathes|holstered|holsters?|"
     r"strapped|straps?|fastened|fastens?|clipped|clips?|tucked|tucks?|"

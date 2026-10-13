@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import copy
 import sys
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 from services.director.h3_dialogue import (  # noqa: E402
     H3DialogueContractError,
     _mapped_ref2va_subject,
+    _collapse_ref2va_compiler_identity_duplicates,
     compile_h3_clip_plans,
     validate_final_h3_subject_bindings,
 )
@@ -55,6 +57,133 @@ def _subject_definition_lines(prompt):
 
 
 class H3FinalSubjectBindingTests(unittest.TestCase):
+    def test_semantic_cast_ids_bind_reference_without_adding_a_second_identity(self):
+        subjects = [
+            {"character_id": "kitten_character", "speaker_name": "Kitten",
+             "visual_description": "A fluffy kitten wearing silver armor"},
+            {"character_id": "dragon_creature", "speaker_name": "dragon_creature",
+             "visual_description": "A scary-looking, highly detailed dragon with dark scales"},
+        ]
+        original = copy.deepcopy(subjects)
+        references = [
+            {"type": "image", "role": "Kitten"},
+            {"type": "image", "role": "Dragon"},
+        ]
+        plan = _plan(subjects, references, "[Shot 1] The kitten raises its left paw beside the dragon.")
+        compile_h3_clip_plans([plan])
+        definitions = _subject_definition_lines(plan["video_prompt"])
+        self.assertEqual(set(definitions), {1, 2})
+        self.assertIn("scary-looking", definitions[2])
+        self.assertIn("<Picture 2>", definitions[2])
+        self.assertNotIn("<Subject 3>", plan["video_prompt"])
+        self.assertEqual(subjects, original)
+        self.assertEqual(validate_final_h3_subject_bindings(plan["video_prompt"], {1: 1, 2: 2}), [])
+
+    def test_legacy_reference_duplicate_is_repaired_across_both_rerun_preflights(self):
+        references = [{"type": "image", "role": "Kitten"}, {"type": "image", "role": "Dragon"}]
+        for existing_picture in ("", "; identity comes from <Picture 2>"):
+            with self.subTest(existing_picture=existing_picture):
+                prompt = (
+                    "subject_definitions: <Subject 1> is Kitten: a fluffy kitten; identity comes from <Picture 1>.\n"
+                    f"<Subject 2> is dragon_creature: a scary{existing_picture}.\n"
+                    "<Subject 3> is Dragon, whose facial, bodily, and character identity come from <Picture 2>.\n\n"
+                    "summary: [reference generation] The kitten approaches the dragon.\n\n"
+                    "retention_analysis: Preserve both reference identities.\n\n"
+                    "detailed_description: Cinematic fantasy. [Shot 1] <Subject 1> raises its left paw. "
+                    "<Subject 2> (dragon_creature) lowers its head. <Subject 3> (Dragon) rests on the grass.\n\n"
+                    "overall_soundscape: Wind.\n\nnon_diegetic_music: N/A"
+                )
+                plan = _plan([
+                    {"character_id": "kitten", "speaker_name": "Kitten", "visual_description": "a fluffy kitten"},
+                    {"character_id": "dragon_creature", "speaker_name": "dragon_creature", "visual_description": "a scary"},
+                ], [], prompt)
+                plan["_director_prompt_user_edited"] = True
+                compile_h3_clip_plans([plan], reference_manifests=[[]])
+                self.assertEqual(set(_subject_definition_lines(plan["video_prompt"])), {1, 2})
+                self.assertEqual(validate_final_h3_subject_bindings(plan["video_prompt"]), [])
+                compile_h3_clip_plans([plan], reference_manifests=[references])
+                result = plan["video_prompt"]
+                self.assertEqual(set(_subject_definition_lines(result)), {1, 2})
+                self.assertNotIn("<Subject 3>", result)
+                self.assertIn("raises its left paw", result)
+                self.assertIn("lowers its head", result)
+                self.assertIn("rests on the grass", result)
+                self.assertEqual(validate_final_h3_subject_bindings(result, {1: 1, 2: 2}), [])
+                compile_h3_clip_plans([plan], reference_manifests=[references])
+                self.assertEqual(plan["video_prompt"], result)
+
+    def test_legacy_repair_preserves_authored_and_ambiguous_cast_definitions(self):
+        prompt = (
+            "subject_definitions: <Subject 1> is dragon_creature: a red dragon.\n"
+            "<Subject 2> is Dragon, a blue dragon with a scar; identity comes from <Picture 1>.\n\n"
+            "summary: [reference generation] Two different dragons.\n\n"
+            "retention_analysis: Preserve distinct identities.\n\n"
+            "detailed_description: Fantasy. [Shot 1] The two dragons stand apart.\n\n"
+            "overall_soundscape: Wind.\n\nnon_diegetic_music: N/A"
+        )
+        references = [{"type": "image", "role": "Dragon"}]
+        self.assertEqual(_collapse_ref2va_compiler_identity_duplicates(prompt, references), prompt)
+        with self.assertRaisesRegex(H3DialogueContractError, "multiple visible subjects"):
+            _mapped_ref2va_subject("Dragon", [
+                {"character_id": "dragon_creature", "speaker_name": "dragon_creature"},
+                {"character_id": "dragon_actor", "speaker_name": "dragon_actor"},
+            ])
+
+    def test_reference_only_identity_is_preserved_when_no_cast_member_matches(self):
+        references = [{"type": "image", "role": "Kitten"}, {"type": "image", "role": "Dragon"}]
+        plan = _plan([
+            {"character_id": "kitten", "speaker_name": "Kitten", "visual_description": "a fluffy kitten"},
+        ], references, "[Shot 1] The kitten sings alone on the grassy ridge.")
+        compile_h3_clip_plans([plan])
+        first = plan["video_prompt"]
+        self.assertEqual(set(_subject_definition_lines(first)), {1, 2})
+        self.assertIn("<Picture 2>", _subject_definition_lines(first)[2])
+        plan["_director_prompt_user_edited"] = True
+        compile_h3_clip_plans([plan])
+        self.assertEqual(set(_subject_definition_lines(plan["video_prompt"])), {1, 2})
+        self.assertEqual(validate_final_h3_subject_bindings(plan["video_prompt"], {1: 1, 2: 2}), [])
+
+    def test_explicit_plural_cast_is_never_collapsed_as_a_legacy_duplicate(self):
+        prompt = (
+            "subject_definitions: <Subject 1> is dragon_creature: a red dragon.\n"
+            "<Subject 2> is Dragon, whose facial, bodily, and character identity come from <Picture 1>.\n\n"
+            "summary: [reference generation] Two dragons meet.\n\n"
+            "retention_analysis: Preserve both dragons.\n\n"
+            "detailed_description: Fantasy. [Shot 1] Two dragons stand apart. "
+            "<Subject 1> rests while <Subject 2> walks around it.\n\n"
+            "overall_soundscape: Wind.\n\nnon_diegetic_music: N/A"
+        )
+        references = [{"type": "image", "role": "Dragon"}]
+        for description in (
+            "Two dragons stand apart.", "Both dragons stand apart.",
+            "Two distinct dragons stand apart.", "Dragon and another dragon stand apart.",
+            "A second Dragon stands alongside the first.",
+        ):
+            with self.subTest(description=description):
+                variant = prompt.replace("Two dragons meet.", description).replace("Two dragons stand apart.", description)
+                variant = variant.replace("Preserve both dragons.", "Preserve the described identities.")
+                self.assertEqual(_collapse_ref2va_compiler_identity_duplicates(variant, references), variant)
+                self.assertEqual(_collapse_ref2va_compiler_identity_duplicates(variant, []), variant)
+
+    def test_legacy_repair_respects_each_clips_actual_prompt_mode(self):
+        prompt = (
+            "subject_definitions: <Subject 1> is dragon_creature: a red dragon.\n"
+            "<Subject 2> is Dragon, whose facial, bodily, and character identity come from <Picture 1>.\n\n"
+            "summary: [reference generation] A dragon rests.\n\n"
+            "retention_analysis: Preserve the dragon.\n\n"
+            "detailed_description: Fantasy. [Shot 1] <Subject 1> rests. <Subject 2> watches the ridge.\n\n"
+            "overall_soundscape: Wind.\n\nnon_diegetic_music: N/A"
+        )
+        first = _plan([{"character_id": "dragon_creature", "speaker_name": "dragon_creature"}], [], prompt)
+        first["_director_prompt_user_edited"] = True
+        second = copy.deepcopy(first)
+        compile_h3_clip_plans(
+            [first, second], prompt_modes=["ref2va", "t2va"],
+            reference_manifests=[[{"type": "image", "role": "Dragon"}], []],
+        )
+        self.assertNotIn("<Subject 2>", first["_director_h3_source_prompt"])
+        self.assertIn("<Subject 2>", second["_director_h3_source_prompt"])
+
     def test_sanitized_captured_kitten_reference_binds_native_subject_and_is_idempotent(self):
         subjects = [{
             "character_id": "director_identity_the_kitten",

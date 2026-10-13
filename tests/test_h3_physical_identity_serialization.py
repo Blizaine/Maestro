@@ -77,6 +77,14 @@ def _plan(*, dialogue=False, music=False):
 
 
 class H3PhysicalIdentitySerializationTests(unittest.TestCase):
+    def test_appearance_compound_keeps_the_identity_after_looking(self):
+        description = "A scary-looking, highly detailed dragon with dark scales"
+        self.assertEqual(identity_only_description(description), description)
+        self.assertEqual(
+            identity_only_description(description + " looking toward the ridge"),
+            description,
+        )
+
     def test_bare_noun_pose_clause_keeps_preceding_appearance_and_costume(self):
         cleaned = identity_only_description(
             "A fluffy gray kitten wearing a pink bow, holding a long sword vertically."

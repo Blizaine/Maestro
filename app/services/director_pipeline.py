@@ -2816,6 +2816,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         raise ValueError(f"Clip index {clip_index} out of range (0-{len(clips)-1})")
 
     clip = clips[clip_index]
+    display_clip_number = clip_index + 1
     prompt = prompt_override or clip.get("video_prompt", "")
     if not prompt:
         raise ValueError("No video prompt for this clip")
@@ -2873,7 +2874,32 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             "scene_description": prompt_override if prompt_override is not None else snapshot.get("scene_description", ""),
         },
     )
-    _preflight_h3_director_prompts(video_model, [prompt_plan], pid=pid)
+
+    def preflight_rerun(**preflight_options):
+        try:
+            return _preflight_h3_director_prompts(
+                video_model,
+                [prompt_plan],
+                pid=pid,
+                **preflight_options,
+            )
+        except ValueError as error:
+            # The compiler numbers this one-item list from Shot 1. Surface the
+            # selected pipeline clip number so its diagnostic matches the
+            # Editor/API index the user reran.
+            detail = re.sub(
+                r"^(?:Shot|Clip)\s+\d+\s*:\s*",
+                "",
+                str(error),
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            raise ValueError(
+                f"Director clip {display_clip_number} H3 prompt preflight "
+                f"failed: {detail}"
+            ) from error
+
+    preflight_rerun()
     prompt = prompt_plan["video_prompt"]
     video_loras = state.get("video_loras") or {}
     video_params = state.get("video_params") or {}
@@ -3039,7 +3065,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
     else:
         rerun_window_frames = video_length + latent_size + 1
     print(
-        f"[Pipeline {pid}] Clip {clip_index} rerun frame budget: "
+        f"[Pipeline {pid}] Clip {display_clip_number} rerun frame budget: "
         f"{video_length} frames at {fps:g} fps ({video_length / fps:.3f}s)"
     )
 
@@ -3216,15 +3242,17 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
                             pass
                     vocal_slice_path = None
                     print(
-                        f"[Pipeline {pid}] Clip {clip_index} vocal-stem "
+                        f"[Pipeline {pid}] Clip {display_clip_number} vocal-stem "
                         "slice failed; falling back to the original song "
                         f"for visual conditioning: {vocal_error}"
                     )
             if rerun_audio_scale is not None:
                 gen_params["audio_scale"] = rerun_audio_scale
-            print(f"[Pipeline {pid}] Clip {clip_index} rerun conditioned on song segment "
-                  f"{float(clip_start):.3f}s-"
-                  f"{float(clip_start) + float(clip_duration_sec):.3f}s")
+            print(
+                f"[Pipeline {pid}] Clip {display_clip_number} rerun conditioned "
+                f"on song segment {float(clip_start):.3f}s-"
+                f"{float(clip_start) + float(clip_duration_sec):.3f}s"
+            )
         except Exception as e:
             if director_strategy == OMNI_REFERENCE:
                 if slice_path and os.path.isfile(slice_path):
@@ -3235,8 +3263,10 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
                 raise RuntimeError(
                     f"Could not prepare H3 Omni audio for clip {clip_index + 1}: {e}"
                 ) from e
-            print(f"[Pipeline {pid}] Clip {clip_index} audio slice failed; "
-                  f"regenerating without soundtrack conditioning: {e}")
+            print(
+                f"[Pipeline {pid}] Clip {display_clip_number} audio slice failed; "
+                f"regenerating without soundtrack conditioning: {e}"
+            )
 
     if director_strategy == OMNI_REFERENCE:
         manifest_params = dict(snapshot)
@@ -3283,10 +3313,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             if director_strategy == OMNI_REFERENCE
             else None
         )
-        _preflight_h3_director_prompts(
-            video_model,
-            [prompt_plan],
-            pid=pid,
+        preflight_rerun(
             prompt_modes=[final_prompt_mode],
             durations=[clip_duration_sec],
             reference_manifests=final_references,

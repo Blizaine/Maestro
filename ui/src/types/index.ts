@@ -659,6 +659,8 @@ export interface EditorDirectorClipSource {
   clip_index: number
   pipeline_type: string
   workspace: string
+  /** Prompt being prepared for a future rerun; kept separate from the last rendered prompt below. */
+  draft_video_prompt?: string
   video_prompt: string
   window_prompts?: string[]
 }

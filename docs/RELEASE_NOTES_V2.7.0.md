@@ -1,6 +1,6 @@
 # Maestro v2.7.0
 
-October 10, 2026, with follow-ups through October 12. Public Dev testing
+October 10, 2026, with follow-ups through October 13. Public Dev testing
 candidate; not promoted to Main. Changes since the public v2.6.0 Main release.
 
 The October 11 follow-up remains under validation in this Dev candidate. Director
@@ -37,6 +37,14 @@ clears their cached visual plans while retaining audio analysis and timing.
 Final H3 compilation also checks picture ownership, handles article
 variants in reference names without adding a duplicate subject, and keeps
 placeholder names such as “Unnamed” from merging distinct performers.
+
+Editor Director prompt edits now save as per-shot drafts, separately from the
+prompt used for the last rendered take. Deselection and failed reruns retain
+the draft; errors remain beside the rerun button and identify the actual
+Director clip. H3 reference matching also recognizes semantic cast IDs such as
+`dragon_creature`. On rerun it repairs unambiguous legacy duplicates created by
+the compiler while preserving authored action text and distinct characters.
+Appearance wording such as “scary-looking” is retained during identity cleanup.
 
 ## Memory management and performance
 
