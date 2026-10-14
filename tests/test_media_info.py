@@ -42,6 +42,39 @@ class MediaInfoTests(unittest.TestCase):
         self.output.write_bytes(b"not an image yet")
         self.assertEqual(probe_media(self.output), {"size_bytes": len(b"not an image yet")})
 
+    def test_video_duration_uses_headers_and_cached_file_signature_without_decoding(self):
+        from fractions import Fraction
+        from services.media_info import _probe
+
+        path = self.root / "headers-only.mp4"
+        path.write_bytes(b"header")
+        video = SimpleNamespace(width=1280, height=704, average_rate=Fraction(24),
+                                frames=345, duration=345, time_base=Fraction(1, 24))
+
+        class HeaderContainer:
+            streams = SimpleNamespace(video=[video])
+            duration = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            def decode(self, *_args, **_kwargs):
+                raise AssertionError("Gallery facts must not decode video frames")
+
+        _probe.cache_clear()
+        with patch("av.open", return_value=HeaderContainer()) as opened:
+            first = probe_media(path)
+            self.assertEqual(first["duration_seconds"], 14.375)
+            self.assertEqual(probe_media(path), first)
+            opened.assert_called_once()
+            path.write_bytes(b"new-longer-header")
+            video.duration = 690
+            self.assertEqual(probe_media(path)["duration_seconds"], 28.75)
+            self.assertEqual(opened.call_count, 2)
+
     def test_processing_records_exact_measured_geometry_and_relevant_options(self):
         record = processing_record(spatial="dlss5*1.724", temporal="rife2",
             before={"width": 610, "height": 352, "fps": 24},

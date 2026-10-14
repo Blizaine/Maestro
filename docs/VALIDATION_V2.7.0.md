@@ -20,7 +20,7 @@ The release candidate is prepared locally as v2.7.0. The tested public Dev code
 snapshot is `ad3293339c8ecad68c4a7800c7bf7f41a048b3fb`; public Main remains the
 v2.6.0 baseline `31d7396eb3b5586c1828fc69a6af5eb2a9e83bff`. Release preparation
 does not publish Main, a tag or a GitHub release, and does not restart either
-workstation or interrupt user generations. Later entries supersede earlier
+workstation or interrupt user generations in that October 13 preparation. Later entries supersede earlier
 failures only for the scope actually retested; historical evidence is retained.
 
 | Gate | Current evidence and status |
@@ -51,8 +51,36 @@ changed application JSON files and verified the 14 bundled MMGP allocator files
 against their recorded SHA-256 values. TypeScript's commented configuration
 is covered by the successful frontend compiler check. The source-boundary guard
 passed on all 2,938 tracked files. Only release documentation changed after the
-tested Dev code snapshot; no new model weights, private reports or generated
-media are included in the candidate.
+tested Dev code snapshot during that preparation; no new model weights, private
+reports or generated media were included. The October 14 gallery follow-up below
+is a subsequent local code change and is not covered by that October 13 CI run.
+
+## Gallery duration follow-up — October 14
+
+Gallery video cards and side thumbnails now display measured duration before
+playback, retaining image posters and `preload="none"`. A workspace-qualified
+header-facts endpoint reuses the bounded, file-stat-invalidated media cache.
+Visible UI consumers share requests, with bounded queue/concurrency/cache and
+an abort timeout. Unknown, invalid and boolean durations do not become labels;
+a matching measured metadata seed can survive a failed lookup.
+
+All 29 focused thumbnail, media-facts and gallery-library backend tests passed,
+including no-frame-decode, workspace/upload boundaries, actual versus requested
+duration, unreadable files and replacement invalidation. The isolated desktop
+and phone browser checks passed with no video-byte requests before playback.
+They cover visible-only loading, shared lookups, same-name workspace separation,
+fallbacks, stat-only and URL invalidation, formatting and control clearance.
+Existing desktop/StrictMode/mobile gallery navigation and clip-action menus at
+three viewport sizes passed. Frontend lint, TypeScript and production build,
+Python syntax and undefined-name checks passed.
+
+After jobs, the Director queue and saved pipelines were confirmed idle, only
+the local development app was restarted through Pinokio. The new endpoint read
+two existing 345-frame / 24-fps videos as 14.375 seconds, with file sizes matching
+the listing, and the server served the rebuilt frontend. No render, preference,
+saved prompt or media file was modified; the second workstation was untouched.
+The release notes include this follow-up. Main, public Dev and release tags
+were not pushed by this change.
 
 ## Automated checks
 

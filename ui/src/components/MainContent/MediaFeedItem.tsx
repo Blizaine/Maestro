@@ -15,8 +15,10 @@ import { modelDisplayName } from '../../lib/modelDisplay'
 import { sendToGalleryInput, useGalleryInputs, type GalleryInputTarget } from '../../lib/galleryInputs'
 import { getVideoPosterUrl } from '../../lib/thumbnailCache'
 import { useVideoPosterSize } from '../../lib/useVideoPosterSize'
+import { useMediaDuration } from '../../lib/mediaDuration'
 import { getMediaTimestamp } from '../../lib/mediaTimestamp'
 import { MediaMetadataDetails } from './MediaMetadataDetails'
+import { MediaDurationBadge } from './MediaDurationBadge'
 
 interface Props {
   file: OutputFile
@@ -139,6 +141,11 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const itemRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const posterSize = useVideoPosterSize(videoRef, file.type === 'video' ? file.url : '')
+  const measuredMediaInfo = meta?.media_info
+  const durationSeed = measuredMediaInfo?.size_bytes === file.size
+    ? measuredMediaInfo.duration_seconds
+    : undefined
+  const mediaDuration = useMediaDuration(itemRef, file, durationSeed)
   const audioRef = useRef<HTMLAudioElement>(null)
 
   useEffect(() => () => {
@@ -823,6 +830,9 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
           </button>
         ) : (
           <RetryImage key={file.url} url={file.url} alt={file.name} />
+        )}
+        {file.type === 'video' && (
+          <MediaDurationBadge seconds={mediaDuration} className="left-2 top-2 px-1.5 py-1 text-[10px]" />
         )}
         {file.type === 'video' && onOpenViewer && (
           <button type="button" className="absolute top-2 right-2 rounded-lg bg-black/65 p-2 text-white hover:bg-black/85"

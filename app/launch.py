@@ -29850,6 +29850,14 @@ def _resolve_gallery_media_file(filename: str, workspace: str = "") -> str:
     raise HTTPException(status_code=404, detail="File not found")
 
 
+@api.get("/api/v1/media-info/{filename:path}")
+def serve_gallery_media_info(filename: str, workspace: str = ""):
+    """Read cached file-header facts without loading browser video or model assets."""
+    from services.media_info import probe_media
+    filepath = _resolve_gallery_media_file(filename, workspace)
+    return probe_media(filepath)
+
+
 @api.get("/api/v1/thumbnail/{filename:path}")
 def serve_gallery_thumbnail(filename: str, workspace: str = "", size: int = 480):
     """Return an on-demand first-frame JPEG for a local gallery video."""

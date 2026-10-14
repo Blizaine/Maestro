@@ -33,7 +33,7 @@ def _load_gallery_route_functions(root: Path):
     names = {
         "_safe_join", "_get_active_workspace", "_workspace_dir",
         "_workspace_browse_dir", "_resolve_gallery_media_file",
-        "serve_gallery_thumbnail",
+        "serve_gallery_thumbnail", "serve_gallery_media_info",
     }
     functions = [
         node for node in tree.body
@@ -377,6 +377,51 @@ class GalleryThumbnailTests(unittest.TestCase):
         self.assertEqual(result["headers"]["Cache-Control"], "private, max-age=60, must-revalidate")
         self.assertEqual(larger["path"], str(self.cache / "poster-960.jpg"))
         self.assertEqual(unsupported.exception.status_code, 400)
+
+    def test_media_info_route_measures_actual_files_without_generation_metadata(self):
+        import wave
+
+        folder_a = self.root / "outputs" / "Folder A"
+        folder_b = self.root / "outputs" / "Folder B"
+        uploads = self.root / "app" / "uploads"
+        for directory, seconds in ((folder_a, 1), (folder_b, 3), (uploads, 2)):
+            directory.mkdir(parents=True)
+            with wave.open(str(directory / "same.wav"), "wb") as audio:
+                audio.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
+                audio.writeframes(b"\x00\x00" * 8000 * seconds)
+        # Requested timeline metadata must never replace the actual file duration.
+        (folder_a / "same.meta.json").write_text(
+            '{"params":{"duration_seconds":99}}', encoding="utf-8"
+        )
+        namespace = _load_gallery_route_functions(self.root)
+        route = namespace["serve_gallery_media_info"]
+        with patch("os.getcwd", return_value=str(self.root / "app")):
+            for workspace, seconds in (("Folder A", 1), ("Folder B", 3), ("__uploads__", 2)):
+                facts = route("same.wav", workspace)
+                self.assertAlmostEqual(facts["duration_seconds"], seconds)
+                self.assertNotIn("path", facts)
+                self.assertNotIn("params", facts)
+            with self.assertRaises(_RouteError) as missing:
+                route("missing.mp4", "Folder A")
+            self.assertEqual(missing.exception.status_code, 404)
+            with self.assertRaises(_RouteError) as traversal:
+                route("../../outside.mp4", "Folder A")
+            self.assertEqual(traversal.exception.status_code, 404)
+
+    def test_media_info_route_tolerates_incomplete_video_and_rechecks_replacements(self):
+        import wave
+
+        folder = self.root / "outputs" / "Folder A"
+        folder.mkdir(parents=True)
+        path = folder / "clip.wav"
+        path.write_bytes(b"incomplete")
+        namespace = _load_gallery_route_functions(self.root)
+        route = namespace["serve_gallery_media_info"]
+        self.assertNotIn("duration_seconds", route("clip.wav", "Folder A"))
+        with wave.open(str(path), "wb") as audio:
+            audio.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
+            audio.writeframes(b"\x00\x00" * 4000)
+        self.assertAlmostEqual(route("clip.wav", "Folder A")["duration_seconds"], 0.5)
 
 
 if __name__ == "__main__":

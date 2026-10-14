@@ -1,12 +1,14 @@
 # Maestro v2.7.0
 
-Prepared October 13, 2026. Public Dev testing candidate; not promoted to Main.
+Prepared October 13, 2026, with gallery follow-up on October 14.
+Public Dev testing candidate; not promoted to Main.
 Changes since the public v2.6.0 Main release.
 
 This update brings the adapted WanGP 17 / MMGP 4 memory engine, workload-aware
 Auto-tune, longer recommended 720p H3 clips on the tested 12-GB tier, experimental
 SLA/Veda choices, H3 VAE 2× decoding, Director planning and editing fixes, a simpler
-model picker and Qwen Image 2.1 Turbo. The latest Dev code passes CI. Main
+model picker and Qwen Image 2.1 Turbo. The published Dev baseline passes CI;
+the October 14 gallery follow-up passed focused local backend and browser checks. Main
 publication awaits the remaining review and update checks in the
 [readiness record](VALIDATION_V2.7.0.md#release-readiness--october-13).
 
@@ -65,6 +67,14 @@ Prompt enhancement is initially off for a restored clip so attention comparisons
 can use the saved prompt unchanged. Its original duration and window geometry
 survive model/resolution hydration and attention changes, instead of Auto
 silently splitting a single native clip into multiple windows.
+
+Video cards and the side thumbnail strip also show the actual clip duration
+before playback. Labels use measured file-header facts, rather than the requested
+generation duration, while retaining image posters and lazy video loading on
+desktop and mobile. Visible cards share bounded lookups, file replacements
+invalidate the cached duration, and unreadable files omit the label. A lightweight
+`GET /api/v1/media-info/{filename:path}?workspace=...` endpoint exposes the same
+cached measured facts without loading generation metadata or decoding frames.
 
 ## Memory management and performance
 

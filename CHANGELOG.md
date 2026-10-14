@@ -7,6 +7,9 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 Public Dev testing candidate; not promoted to Main. See the [full release notes](docs/RELEASE_NOTES_V2.7.0.md).
 
+- Show measured video duration on gallery cards and side thumbnails before
+  playback, retaining image posters and lazy browser video loading. Read only
+  visible media headers, share bounded lookups and refresh replaced-file facts.
 - Add opt-in experimental SLA Sparse Attention for Full and Pruned H3 in
   Frames and References. Preserve Fused's default SLA recipe.
 - Add opt-in experimental Veda learned sparse attention for Full, Pruned and
