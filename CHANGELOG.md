@@ -3,10 +3,17 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## [2.7.0] - 2026-10-10
+## [2.7.0] - Unreleased
 
 Public Dev testing candidate; not promoted to Main. See the [full release notes](docs/RELEASE_NOTES_V2.7.0.md).
 
+- Add opt-in experimental SLA Sparse Attention for Full and Pruned H3 in
+  Frames and References. Preserve Fused's default SLA recipe.
+- Add opt-in experimental Veda learned sparse attention for Full, Pruned and
+  Fused H3 Frames/References, with verified predictors downloaded on first use.
+  Keep unsupported and specialty checkpoint routes excluded.
+- Stage compatible SageAttention buffers on SM86 GPUs such as the RTX 3080 Ti
+  to reduce temporary allocation lifetimes without changing manual attention choices.
 - Restore individual Director clips into Studio from their own prompt, seed,
   timing and media inputs; retain full Director restore for joined videos.
   Reconstruct supported older clip recipes without rewriting saved media.
@@ -133,10 +140,10 @@ Public Dev testing candidate; not promoted to Main. See the [full release notes]
   BF16/INT8 checkpoints, the published eight-step / CFG 1 recipe, reference
   editing and accurate output settings. Retain Qwen's model-license notice.
 
-The October 10–11 overnight review passed the final backend gate and selected
-real model smokes, but found unresolved Director silent-brief prompt-contract,
-action-order and clip-boundary failures. Main promotion remains pending that
-quality review; see the [validation record](docs/VALIDATION_V2.7.0.md).
+The October 13 Dev candidate passes CI, and later music-video planning checks
+passed native preflight after the recorded repairs. Main promotion still awaits
+final Director media review, a fresh silent short-film check and an idle update
+smoke test; see the [current readiness record](docs/VALIDATION_V2.7.0.md#release-readiness--october-13).
 
 ## [2.6.0] - 2026-10-04
 

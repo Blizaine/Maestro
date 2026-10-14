@@ -183,13 +183,16 @@ and checkpoint family, independently of the performance profile number.
 | Tested resources | H3 workflow | Automatic maximum per pass |
 | --- | --- | --- |
 | 12 GB VRAM, at least 30 GiB RAM, up to 1280×704 | Fused Frames or Fused References | 345 frames, about 14.4 s |
-| 12 GB VRAM, at least 30 GiB RAM, 720p | Pruned Frames | 243 frames, about 10.1 s |
-| Same resources and resolution | Pruned References | 226 frames, about 9.4 s, including its reference margin |
+| 12 GB VRAM, at least 30 GiB RAM, up to 1280×704 | Pruned Frames or Pruned References | 345 frames, about 14.4 s |
 | 12 GB VRAM, at least 30 GiB RAM, native 1080p | Fused or Pruned | 124 frames, about 5.2 s |
 | 24 GB VRAM, at least 63 GiB RAM, up to 1280×704 | Fused References | 345 frames, about 14.4 s |
 
 These are recommendations from the tested Windows configurations, not a
 promise that every reference/LoRA workload will fit or finish equally quickly.
+The 14.4-second Pruned tier includes repeated successful user tests on the
+12-GB RTX 3080 Ti / 32-GB RAM machine, rather than a controlled timing study.
+That tier explicitly removes the older Pruned reference-duration margin;
+other resource tiers retain their own margins and conservative limits.
 Longer native 1080p passes remain manual because some tested combinations
 became impractically slow. Full, imported, alternate and audio-only H3 models
 retain their existing recommendations. Unknown RAM, other VRAM tiers and

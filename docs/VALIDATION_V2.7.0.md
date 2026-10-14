@@ -14,6 +14,46 @@ installations can receive the local Director and dialogue changes through the
 normal Pinokio Update action. This promotion targets Dev only; Main and release
 tags remain unchanged. The planning and media limitations below still apply.
 
+## Release readiness — October 13
+
+The release candidate is prepared locally as v2.7.0. The tested public Dev code
+snapshot is `ad3293339c8ecad68c4a7800c7bf7f41a048b3fb`; public Main remains the
+v2.6.0 baseline `31d7396eb3b5586c1828fc69a6af5eb2a9e83bff`. Release preparation
+does not publish Main, a tag or a GitHub release, and does not restart either
+workstation or interrupt user generations. Later entries supersede earlier
+failures only for the scope actually retested; historical evidence is retained.
+
+| Gate | Current evidence and status |
+| --- | --- |
+| Automated source/build checks | Passed on the Dev code snapshot: [CI run 38480363663](https://github.com/Blizaine/Maestro/actions/runs/38480363663), both jobs successful. Backend discovery ran 4,042 tests with 57 skipped; standalone regressions passed 137 with one skipped. Source-boundary, syntax, undefined-name, JSON-grammar, frontend lint, TypeScript and production build checks passed. |
+| Director music planning regressions | Later fresh 16-clip narrative, performance and boarding plans reached native preflight; bounded recovery was disclosed. The specific future-event/closing-beat failure was replayed successfully after its fix, and the original project passed all 16 final native prompts and entered generation. These are planning and handoff checks. |
+| Editor and per-clip Studio restore | Focused CPU and real mounted-browser checks passed, including retained drafts, unique reference ownership, exact recipe restoration, one-window geometry and switching attention without resizing the pass. |
+| Final Director media acceptance | Pending the user's latest render review. Check sustained motion, flashes, singing/lip-sync, physical transitions and whole-video scene progression. Earlier successful decoding does not clear semantic or visual findings. |
+| Silent/action-only short films | Pending a fresh end-to-end check of explicit no-speech/no-music requests, prop retention and causal transitions after the latest fixes. Earlier failures were followed by code and contract tests, but no fresh approved short-film render clears this gate. |
+| Public-version update path | Pending an idle v2.6.0-to-candidate Update/restart smoke, including preserved workspaces, manual preferences and model links. Existing installed Dev updates are not a substitute for this baseline check. |
+
+No failing CI/build gate is known on this snapshot. Main promotion remains held
+for the three pending acceptance/update gates above. Experimental Veda is opt-in;
+the reported one-frame flash/motion change requires a matched comparison before
+making quality claims. Linux CUDA and 6/8/10-GB VRAM or 16-GB RAM validation remain
+separate coverage limits, rather than tested compatibility claims. The remaining
+validation limits near the end of this document still apply.
+
+Release notes and the Auto-tune guide now match the shared resource policy:
+the tested 12-GB / at-least-30-GiB-usable-RAM tier recommends 345-frame, approximately
+14.4-second 720p Pruned and Fused passes. The Pruned tier includes repeated user
+success reports and removes its older reference margin for this tier only.
+Native 1080p remains conservative. No generation settings are changed by this
+release-document preparation.
+
+Local packaging preflight checked 152 relative document links, parsed all 13
+changed application JSON files and verified the 14 bundled MMGP allocator files
+against their recorded SHA-256 values. TypeScript's commented configuration
+is covered by the successful frontend compiler check. The source-boundary guard
+passed on all 2,938 tracked files. Only release documentation changed after the
+tested Dev code snapshot; no new model weights, private reports or generated
+media are included in the candidate.
+
 ## Automated checks
 
 The October 13 gallery restore follow-up passed mocked browser checks for
@@ -879,6 +919,34 @@ creative acceptance. Text checks cannot establish rendered motion, identity,
 lip-sync, or whether a full-length video is interesting; a matched media review
 remains necessary before making those claims.
 
+## October 13 Director planning follow-ups
+
+Private frozen receipts at `f8fd02e` record four fresh 16-clip plans passing
+final H3 native preflight: two narrative variants, a fixed-stage performance
+and a separate boarding concept. One narrative case used source-compiled
+recovery for one clip; the others did not. The corresponding focused gate
+passed 709 tests with one skip. No video was submitted by these planning trials,
+and their receipt explicitly does not verify rendered quality.
+
+Later trials at `7150bb3` retained their failed controls and exposed mixed
+writer numbering, a visual action misclassified into audio, and a closing beat
+that performed a future action. The latter is now included in raw validation
+and focused repair before native compilation. The exact rejected closing draft
+passes recovery and final native validation with earlier accepted rows unchanged.
+A separate fresh 16-clip boarding plan passed native preflight in 164.208 seconds.
+The user's original 16-clip project also passed final preflight and entered
+generation after recovery. These results supersede the specific captured
+future-event failure, without establishing that every stochastic plan succeeds.
+
+Text review still recorded an ambiguous mounted-versus-side-by-side description
+in one closing beat. Subsequent fixes preserve visible physical direction,
+performer/vocalist roles, assigned source actions and unique picture ownership;
+tests and captured replays verify those compiler contracts. The current user
+render reached generation with 18 planned clips and no pipeline error when
+checked read-only during release preparation. Completion and human acceptance
+of that render remain pending, as do matched attention-quality checks. No
+generation was cancelled, restarted or enqueued for this preparation.
+
 ## Remaining validation limits
 
 - 6/8/10 GB VRAM and 16 GB RAM recommendations are conservative extrapolations,
@@ -892,8 +960,8 @@ remains necessary before making those claims.
   RAM-spill performance and recovery under genuine overflow remain unverified.
 - Selected installed LTX, Flux, Qwen Turbo and ACE-Step smokes extend non-H3
   video/image/audio coverage, but do not verify every shared pipeline. A fresh
-  installation and a normal public-v2.6.0-to-candidate Update/restart check
-  remain recommended before promotion to Main.
+  installation remains recommended. The public-v2.6.0-to-candidate Update/restart
+  smoke is a pending Main gate in the [readiness record](#release-readiness--october-13).
 - Physical iPhone testing of Director preview appearance without refreshing
   remains pending after updating/restarting the idle test machine.
 

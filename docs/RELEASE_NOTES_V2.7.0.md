@@ -1,18 +1,25 @@
 # Maestro v2.7.0
 
-October 10, 2026, with follow-ups through October 13. Public Dev testing
-candidate; not promoted to Main. Changes since the public v2.6.0 Main release.
+Prepared October 13, 2026. Public Dev testing candidate; not promoted to Main.
+Changes since the public v2.6.0 Main release.
 
-The October 11 follow-up remains under validation in this Dev candidate. Director
-now keeps explicit speech/music permissions and source actions outside the shortened
+This update brings the adapted WanGP 17 / MMGP 4 memory engine, workload-aware
+Auto-tune, longer recommended 720p H3 clips on the tested 12-GB tier, experimental
+SLA/Veda choices, H3 VAE 2× decoding, Director planning and editing fixes, a simpler
+model picker and Qwen Image 2.1 Turbo. The latest Dev code passes CI. Main
+publication awaits the remaining review and update checks in the
+[readiness record](VALIDATION_V2.7.0.md#release-readiness--october-13).
+
+Director now keeps explicit speech/music permissions and source actions outside the shortened
 screenplay, preserves authored endings, and checks declared support/contact and
 physical transitions before generation. Save, resume and clip regeneration keep
 these contracts. Creative dialogue repair checks participant coverage and
 duration together; a proven existing line can receive its native speaker marker
 locally. A numeric duration label is no longer interpreted as another speaker.
 These checks validate prompt contracts; rendered motion and audio require
-separate review. Fresh longer Director plans still failed before rendering, so
-Main promotion remains held for planning reliability and subsequent media review.
+separate review. Later 16-clip music plans passed native preflight after bounded
+repairs. Earlier failures remain in the validation history; they do not establish
+the current candidate's rendered quality or clear the separate short-film review.
 
 An additional music-video planning check allocates concrete requested story
 actions to ordered clips before the writer drafts them. For example, a requested
@@ -55,7 +62,9 @@ start/end images. The joined video's pencil reopens the complete Director
 project. Supported older sidecars are reconstructed without rewriting their
 saved prompts or media; unavailable or ambiguous recipes show an error.
 Prompt enhancement is initially off for a restored clip so attention comparisons
-can use the saved prompt unchanged.
+can use the saved prompt unchanged. Its original duration and window geometry
+survive model/resolution hydration and attention changes, instead of Auto
+silently splitting a single native clip into multiple windows.
 
 ## Memory management and performance
 
@@ -72,8 +81,9 @@ weights by MMGP. Standard ConvRot models use an approximately 281-MB predictor;
 other eligible weights use the approximately 551-MB BF16 predictor. Fused Frames
 and References also permit an explicit experimental Veda selection, retaining
 their default SLA recipe. Specialty checkpoints are excluded. CPU regressions cover dispatch, reference
-geometry, selection and asset handling; hardware speed and output quality
-remain to be measured. [Integration and comparison guide](development/h3-veda-port.md).
+geometry, selection and asset handling. Selected user hardware tests have run,
+but no controlled release-wide speed or output-quality claim is made.
+[Integration and comparison guide](development/h3-veda-port.md).
 
 Maestro now includes an adaptation of WanGP 17 and MMGP 4 for its existing
 generation pipelines. It adds optional VRAM and RAM allocator choices, smarter
@@ -171,8 +181,9 @@ used different settings and is not a matched speed comparison. See the
 
 Studio and Director now share measured duration recommendations based on usable
 VRAM, system RAM, resolution and checkpoint. On the tested nominal 12-GB GPU /
-32-GB RAM tier, Auto recommends approximately **14.4 seconds for 720p Fused**,
-**10.1 seconds for 720p Pruned** and **5.2 seconds for native 1080p**. Reference
+32-GB RAM tier, Auto recommends approximately **14.4 seconds for 720p Fused
+and Pruned** and **5.2 seconds for native 1080p**. The Pruned increase includes
+repeated successful user tests, rather than a controlled timing study. Reference
 and rolling-window policies can subtract a safety margin or include history in
 the actual pass. On the tested 24-GB / high-RAM tier, Fused References also uses
 the longer 720p recommendation. Unsupported combinations retain conservative
@@ -267,6 +278,15 @@ checks reduce repeated scene descriptions. Native H3 reference workflows keep
 reference images as identity/design guidance rather than silently copying them
 into opening frames. These checks reduce the observed repeated-action and
 reference-still problems; generated stories still benefit from human review.
+
+Ordinary pose changes and camera descriptions no longer create auxiliary
+physical-state obligations that stop an otherwise usable music-video plan.
+Requested actions, their actors and timing remain checked. Focused repairs retain
+authored shots; when bounded writer repair still cannot preserve an assigned
+action, Maestro can compile the affected clip from those source actions and
+validate it again. Saved metadata and the console identify this recovery.
+Final compilation also preserves explicit vocalist direction and avoids
+duplicating an authored action in both the shot body and its closing beat.
 
 H3 music planning now supplies each clip's local duration and requests stable
 cast identities. Malformed or out-of-range visual timecodes enter bounded
@@ -406,15 +426,21 @@ The upstream WanGP release's speed claims are not Maestro measurements. The
 current evidence covers selected candidate-build comparisons on the documented
 machines; it is not a universal speed, OOM or output-quality guarantee.
 
-The October 10–11 overnight review is not an unconditional release clearance.
-Selected installed video, image, audio and x2-decoder smokes passed, and the
-final backend suite passed 3,813 tests with 12 skipped. Fresh Director prompts still
-inserted dialogue and music instructions into a silent brief and omitted required
-prop state; rendered clips showed contradictory boarding/landing boundaries.
-No perceptual audio review was performed. Creative enhancement also
-retained an incomplete-exchange failure and a repeated-fallback case. These
-findings remain open before promotion to Main; full decoding alone does not
-establish story fidelity. See the validation record for source snapshots,
-measurements and the remaining installation/device checks.
+The [October 13 Dev CI](https://github.com/Blizaine/Maestro/actions/runs/38480363663)
+ran 4,042 backend tests successfully (57 skipped) and passed 137 standalone
+tests (one skipped), source-boundary, syntax, undefined-name and JSON-grammar checks, plus frontend
+lint, TypeScript and the production build. Local browser regressions cover the
+latest Editor and clip-restore behavior. Selected earlier installed video,
+image, audio and x2-decoder smokes also passed.
+
+The remaining Main gates are human review of the latest Director motion,
+lip-sync and scene progression; a fresh silent/action-only short-film check
+against the earlier speech/music, prop and transition findings; and an idle
+v2.6.0-to-candidate update/restart smoke. Veda remains experimental, and the
+reported flash/motion change still needs a matched attention comparison.
+Creative enhancement can still need source fallback or fail validation on a
+particular draft. Full media decoding and passing text tests do not establish
+story fidelity. See the [readiness record](VALIDATION_V2.7.0.md#release-readiness--october-13)
+for the evidence and remaining installation/device limits.
 
 [Validation and limitations](VALIDATION_V2.7.0.md) · [Changelog](../CHANGELOG.md)

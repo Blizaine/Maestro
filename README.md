@@ -126,11 +126,12 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
-### v2.7.0 (prepared 2026-10-10)
+### v2.7.0 (prepared 2026-10-13; pending Main publication)
 
 - **WanGP 17 memory engine:** bundled MMGP 4, optimized VRAM allocation, smart pinning, dynamic preload, optional RAM allocation and Windows read-ahead controls. Compatible attention, INT8 and VAE paths reduce memory overhead; saved manual preferences remain in control.
 - **Generation-aware Auto-tune:** uses the GPU, system RAM, resolution, window length and references to choose temporary H3 placement. Bounded local comparisons can teach it a faster safe placement. Includes conservative recommendations for smaller-memory machines.
-- **Hardware-aware clip defaults:** Studio and Director share measured H3 duration recommendations. Fused models can use longer 720p windows on tested 12-GB cards; native 1080p remains conservative. Saved manual durations stay in control.
+- **Hardware-aware clip defaults:** Studio and Director share H3 duration recommendations. Tested 12-GB / 32-GB systems now default to approximately 14.4-second 720p Pruned and Fused clips; native 1080p remains conservative. Saved manual durations stay in control.
+- **Experimental H3 sparse attention:** opt-in SLA for Full/Pruned and Veda for Full/Pruned/Fused in Frames and References. Veda downloads verified learned predictors on first use; Fused retains its default SLA recipe. Compatible 3080 Ti SageAttention jobs also use shorter temporary-buffer lifetimes.
 - **Simpler model selection:** grouped Video, Image and Audio settings, workflow-specific model visibility, concise names, compact download controls and a reset that preserves downloaded files. New Director projects default to H3 Fused 4-Step References, and song analysis returns users to reference setup.
 - **Qwen Image 2.1 Turbo:** optional native eight-step image generation and editing with the official Turbo schedule, compatible LoRAs and verified BF16/INT8 assets. [Qwen guide](docs/Qwen-Image-2.1.md).
 - **Fused checkpoint labels:** Frames and References now appear as **H3 Fused 4-Step**, without the Experimental suffix. Both continue to share the same verified upstream weights.
@@ -139,6 +140,8 @@ The version you are running is shown next to the Maestro title in the UI. To upd
 - **Director live previews:** discover previews as clips start, combine progress and preview in one tile, and retain whole-project Stop and ETA. Tap/click a preview to hide or restore its information overlay; playback controls remain separate.
 - **More reliable prompt enhancement:** allow longer CUDA writer startup, distinguish device-probe timeouts, expose dialogue validation reasons, and shorten AI-written exchanges to fit the selected duration while preserving speakers and user-supplied lines.
 - **Director prompt fixes:** preserve multiline prompts in single-shot music videos and carry the selected H3 encoder through generation, regeneration, repair and resume. Music-video planning preserves completed shots and repairs incomplete batches in smaller requests; unrecoverable plans stop before rendering instead of repeating the overall story.
+- **Whole-song direction and optional lyric context:** plan visual progression across the song, keep requested actions in order and repair repeated actions without replacing accepted neighboring shots. **Use lyrics to guide visuals** is off for new projects; soundtrack timing and assigned lip-sync remain available either way.
+- **Safer Director editing and clip comparisons:** retain per-shot prompt drafts through deselection and failed reruns, identify errors beside the affected shot, and prevent unambiguous reference aliases from creating duplicate subjects. An individual clip's pencil restores its own recipe into Studio, including its original window size; the joined video reopens the full Director project.
 - **Optional developer test bench:** manual diagnostics, prompt/render regressions, cold/warm comparisons and multi-machine report collection, plus Windows SSH setup and bounded diagnostics. Test results remain local; no recurring schedule is installed.
 
 This is a prepared release candidate. Use **Update** in Pinokio after publication,
