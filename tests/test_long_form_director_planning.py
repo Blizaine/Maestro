@@ -1442,7 +1442,7 @@ class LongFormDirectorPlanningTests(unittest.TestCase):
             {},
             kind="music_video",
             fingerprint_payload={
-                "planner_revision": 23,
+                "planner_revision": 24,
                 "use_lyrics_context": False,
                 "scene_description": scene_description,
                 "clips": clips,

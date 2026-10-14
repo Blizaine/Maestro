@@ -173,6 +173,38 @@ follow-up. The experimental label and default-off behavior retain that limit.
 
 ## Automated checks
 
+### Music-video repetition follow-up — October 14
+
+Two consecutive Saluki music-video planning attempts failed in the whole-song
+outline check. Three saved 29-row drafts reproduce the rejection, including
+both near-matching flight beats and a literal duplicate outline beat. The old
+comparison removed treatment details and normalization rejected the draft
+before retaining it for an in-place repair. The repair could rewrite the whole
+arc and fail on a different pair.
+
+Outline repetition is now separate from structural validation. Similarity
+requires a close beat and treatment; justified reprises are allowed. A bounded
+repair edits only flagged later rows, preserving valid neighbors and immutable
+source-action assignments. A malformed or still-repetitive optional repair
+retains the valid outline and saves advisory notes for detailed writing.
+Subjective detailed-review findings also retain validated originals after the
+repair budget. Literal complete-native-prompt recycling, whole-project resets,
+source-action obligations and timeline coverage keep their strict checks.
+
+The earlier Dev CI failure was seven stale exact-call assertions in the
+enhancement-provider routing tests after the MTP loader argument was added.
+Their expectations now explicitly require MTP to remain off for those cases.
+
+Validation: the 845-test broader compatibility suite was green with three
+environment skips, and the final 89-test arc/review/routing/long-form integration
+suite passed. The latter includes the 42 focused arc/review regressions and six
+optional-review regressions. All three captured rejected outlines now pass six
+CPU replay cases (unchanged versus malformed repair), preserving their original
+beats and all four source-event assignments. Duplicate required source events
+still fail validation. Python compilation, undefined-name and whitespace checks
+passed. No new writer inference or video generation was submitted for this fix;
+these checks establish planning recovery, not rendered variety or lip sync.
+
 The October 13 gallery restore follow-up passed mocked browser checks for
 individual Director clips (including index zero), joined-project routing,
 archived media URLs, exact prompt/seed/attention restoration, enhancement

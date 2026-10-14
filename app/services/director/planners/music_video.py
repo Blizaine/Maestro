@@ -2265,7 +2265,7 @@ class MusicVideoPlanner(BasePlanner):
             kwargs,
             kind="music_video",
             fingerprint_payload={
-                "planner_revision": 23,
+                "planner_revision": 24,
                 **(
                     {"h3_music_physical_state_policy": "visual-prose-v1"}
                     if video_model.lower().startswith("minimax_h3") else {}
@@ -2479,20 +2479,13 @@ class MusicVideoPlanner(BasePlanner):
         """Plan progression before detail, bounded even for hour-long songs."""
         from ..music_arc import (
             creative_plan_schema, normalize_music_arc, music_arc_quality_issues,
-            music_arc_action_issues,
+            music_arc_action_issues, music_arc_repetition_findings,
+            music_arc_reprise_reason_findings,
         )
         cached = self._planning_resume_checkpoint.get("music_creative_arc")
         contract = self._music_narrative_contract
         self._music_arc_assignment_notes = []
-        if isinstance(cached, list):
-            try:
-                normalized = normalize_music_arc(cached, clips, contract)
-                self._music_arc_assignment_notes = music_arc_action_issues(normalized, contract)
-                return normalized
-            except ValueError:
-                pass
-        # Long timelines receive one overview item per bounded group, then the
-        # detailed writer develops that beat over its assigned native clips.
+        self._music_arc_quality_notes = []
         group_size = max(1, math.ceil(len(clips) / 48))
         groups = []
         for start in range(0, len(clips), group_size):
@@ -2503,6 +2496,128 @@ class MusicVideoPlanner(BasePlanner):
                 "label": clips[start].get("label") or clips[start].get("section_label") or "scene",
                 "energy": clips[start].get("energy"),
             })
+
+        def quality_notes_for(outline):
+            """Map zero-based outline findings onto global detailed-clip ranges."""
+            repetition_findings = music_arc_repetition_findings(outline)
+            reprise_findings = music_arc_reprise_reason_findings(outline)
+            reprise_by_index = {finding["clip_index"]: finding for finding in reprise_findings}
+            paired_indexes = {finding["clip_index"] for finding in repetition_findings}
+            notes = []
+
+            def clip_range(index):
+                first = index * group_size
+                return first, min(len(clips), first + group_size) - 1
+
+            def clip_label(first, last):
+                return (
+                    f"global clip {first + 1}" if first == last
+                    else f"global clips {first + 1}-{last + 1}"
+                )
+
+            for finding in repetition_findings:
+                current = finding["clip_index"]
+                prior = finding["prior_clip_index"]
+                current_first, current_last = clip_range(current)
+                prior_first, prior_last = clip_range(prior)
+                message = (
+                    f"{clip_label(current_first, current_last)} has a very similar visual beat and "
+                    f"purpose, environment, and camera treatment to {clip_label(prior_first, prior_last)}. "
+                    "This is advisory; develop distinct visible progression while preserving the concept, "
+                    "cast, source assignment, and pacing."
+                )
+                if current in reprise_by_index:
+                    message += " The reprise label has no concise reason; no reason was invented."
+                notes.append({
+                    "kind": "repeated_visual_treatment",
+                    "clip_index": current_first,
+                    "clip_end_index": current_last,
+                    "prior_clip_index": prior_first,
+                    "prior_clip_end_index": prior_last,
+                    "evidence": copy.deepcopy(finding["evidence"]),
+                    "message": message[:360],
+                })
+                if len(notes) >= 12:
+                    break
+
+            if len(notes) < 12:
+                for finding in reprise_findings:
+                    index = finding["clip_index"]
+                    if index in paired_indexes:
+                        continue
+                    first, last = clip_range(index)
+                    notes.append({
+                        "kind": "missing_reprise_reason",
+                        "clip_index": first,
+                        "clip_end_index": last,
+                        "prior_clip_index": None,
+                        "prior_clip_end_index": None,
+                        "evidence": copy.deepcopy(finding["evidence"]),
+                        "message": (
+                            f"{clip_label(first, last)} is marked as an intentional reprise without a "
+                            "concise reason. Keep this as an advisory; do not invent a reason."
+                        )[:360],
+                    })
+                    if len(notes) >= 12:
+                        break
+            if len(notes) < 12:
+                early_allowed = bool(re.search(
+                    r"\b(?:immediately|right away|from the start)\b",
+                    scene_description, re.I,
+                ))
+                pacing_issues = [
+                    issue for issue in music_arc_quality_issues(
+                        outline, contract, allow_early_events=early_allowed,
+                    )
+                    if issue.startswith("Repairable planning issue:")
+                ]
+                if pacing_issues:
+                    assigned_groups = [
+                        row["clip_index"] for row in outline
+                        if row.get("source_event_ids")
+                    ]
+                    if assigned_groups:
+                        first, _first_end = clip_range(min(assigned_groups))
+                        _last_start, last = clip_range(max(assigned_groups))
+                        notes.append({
+                            "kind": "source_event_pacing",
+                            "clip_index": first,
+                            "clip_end_index": last,
+                            "prior_clip_index": None,
+                            "prior_clip_end_index": None,
+                            "evidence": {"assigned_group_indices": assigned_groups[:16]},
+                            "message": (
+                                "Source-action payoffs cluster near the opening. This is advisory: "
+                                "keep their exact source order and assignments, and give later sections "
+                                "room to develop the resulting state."
+                            ),
+                        })
+            return notes
+
+        if isinstance(cached, list):
+            try:
+                normalized = normalize_music_arc(cached, clips, contract)
+                self._music_arc_assignment_notes = music_arc_action_issues(normalized, contract)
+                saved_notes = self._planning_resume_checkpoint.get("music_arc_quality_notes")
+                if isinstance(saved_notes, list):
+                    self._music_arc_quality_notes = copy.deepcopy(
+                        [note for note in saved_notes if isinstance(note, dict)][:12]
+                    )
+                else:
+                    compact_cached = []
+                    for group_index, clip_index in enumerate(range(0, len(normalized), group_size)):
+                        row = copy.deepcopy(normalized[clip_index])
+                        row["clip_index"] = group_index
+                        compact_cached.append(row)
+                    self._music_arc_quality_notes = quality_notes_for(compact_cached)
+                    checkpoint = copy.deepcopy(self._planning_resume_checkpoint)
+                    checkpoint["music_arc_quality_notes"] = copy.deepcopy(self._music_arc_quality_notes)
+                    self._publish_planning_checkpoint(checkpoint)
+                return normalized
+            except ValueError:
+                pass
+        # Long timelines receive one overview item per bounded group, then the
+        # detailed writer develops that beat over its assigned native clips.
         timeline = [{"clip_index": i, **c} for i, c in enumerate(groups)]
         schema = creative_plan_schema()
         schema["minItems"] = schema["maxItems"] = len(groups)
@@ -2572,26 +2687,176 @@ class MusicVideoPlanner(BasePlanner):
                 "source-event key to exactly one ZERO-BASED timeline item where "
                 "its visible action occurs. Keep those clip indices in source order."
             )
+        def parse_candidate(response, baseline=None):
+            """Parse and validate one response, preserving locked source assignments."""
+            rows = response
+            assignments = None
+            if event_ids:
+                if (
+                    not isinstance(response, list) or len(response) != 1
+                    or not isinstance(response[0], dict)
+                    or set(response[0]) != {"beats", "source_event_clips"}
+                ):
+                    raise ValueError("outline response must contain beats and source_event_clips")
+                envelope = response[0]
+                assignments = envelope.get("source_event_clips")
+                rows = envelope.get("beats")
+                if not isinstance(assignments, dict) or set(assignments) != set(event_ids):
+                    raise ValueError("source_event_clips must contain exactly the required source-event keys")
+                for event_id in event_ids:
+                    index = assignments[event_id]
+                    if (
+                        not isinstance(index, int) or isinstance(index, bool)
+                        or index < 0 or index >= len(groups)
+                    ):
+                        raise ValueError(f"source event {event_id} needs a valid zero-based timeline index")
+                if (
+                    not isinstance(rows, list) or len(rows) != len(groups)
+                    or not all(isinstance(row, dict) for row in rows)
+                ):
+                    raise ValueError("beats must cover exactly the requested timeline items")
+                rows = copy.deepcopy(rows)
+                by_index = {}
+                for row in rows:
+                    index = row.get("clip_index")
+                    if not isinstance(index, int) or isinstance(index, bool):
+                        raise ValueError("each outline beat needs an integer clip_index")
+                    if index in by_index:
+                        raise ValueError("outline beat clip_index values must be unique")
+                    if "source_event_ids" in row:
+                        raise ValueError("outline beats must omit source_event_ids; use source_event_clips")
+                    by_index[index] = row
+                if set(by_index) != set(range(len(groups))):
+                    raise ValueError("beats must cover each requested timeline item exactly once")
+                if baseline is None:
+                    for row in rows:
+                        row["source_event_ids"] = []
+                    for event_id in event_ids:
+                        by_index[assignments[event_id]]["source_event_ids"].append(event_id)
+                else:
+                    baseline_by_index = {row["clip_index"]: row for row in baseline}
+                    for row in rows:
+                        # Source-event ownership is immutable during a creative repair.
+                        row["source_event_ids"] = copy.deepcopy(
+                            baseline_by_index[row["clip_index"]]["source_event_ids"]
+                        )
+            outline = normalize_music_arc(rows, groups, contract)
+            early = bool(re.search(
+                r"\b(?:immediately|right away|from the start)\b",
+                scene_description, re.I,
+            ))
+            issues = music_arc_quality_issues(outline, contract, allow_early_events=early)
+            hard_issues = [
+                issue for issue in issues
+                if not issue.startswith("Repairable planning issue:")
+            ]
+            if hard_issues:
+                raise ValueError("; ".join(hard_issues[:3]))
+            return outline
+
+        def expand_and_checkpoint(outline, notes):
+            self._music_arc_assignment_notes = music_arc_action_issues(outline, contract)
+            self._music_arc_quality_notes = copy.deepcopy(notes[:12])
+            if self._music_arc_quality_notes:
+                print(f"[MusicVideoPlanner] Whole-song outline accepted with "
+                      f"{len(self._music_arc_quality_notes)} creative advisory note(s); "
+                      "source-action and timeline checks passed.")
+                for note in self._music_arc_quality_notes[:3]:
+                    print(f"[MusicVideoPlanner] Advisory: {str(note.get('message') or '')[:360]}")
+            expanded = []
+            for i, row in enumerate(outline):
+                start = i * group_size
+                end = min(len(clips), start + group_size)
+                for index in range(start, end):
+                    item = copy.deepcopy(row)
+                    item["clip_index"] = index
+                    if index != start:
+                        item["source_event_ids"] = []
+                    expanded.append(item)
+            checkpoint = copy.deepcopy(self._planning_resume_checkpoint)
+            checkpoint["music_creative_arc"] = expanded
+            checkpoint["music_arc_assignment_notes"] = copy.deepcopy(self._music_arc_assignment_notes)
+            checkpoint["music_arc_quality_notes"] = copy.deepcopy(self._music_arc_quality_notes)
+            checkpoint["music_narrative_contract"] = copy.deepcopy(contract)
+            checkpoint["music_narrative_allocation"] = [
+                {"event_id": event, "clip_index": row["clip_index"]}
+                for row in expanded for event in row["source_event_ids"]
+            ]
+            self._publish_planning_checkpoint(checkpoint)
+            return expanded
+
+        def merged_repair(baseline, candidate, findings):
+            """Use only improving edits to flagged later rows; keep the best valid arc."""
+            merged = copy.deepcopy(baseline)
+            baseline_findings = music_arc_repetition_findings(baseline)
+            baseline_pairs = {
+                (finding["clip_index"], finding["prior_clip_index"])
+                for finding in baseline_findings
+            }
+            implicated = sorted({finding["clip_index"] for finding in findings})
+            for index in implicated:
+                candidate_by_index = {row["clip_index"]: row for row in candidate}
+                current_by_index = {row["clip_index"]: row for row in merged}
+                replacement = copy.deepcopy(candidate_by_index[index])
+                replacement["source_event_ids"] = copy.deepcopy(
+                    current_by_index[index]["source_event_ids"]
+                )
+                # A repair may improve creative fields but cannot invent or
+                # remove reprise intent to evade the conservative comparison.
+                replacement["intentional_reprise"] = current_by_index[index]["intentional_reprise"]
+                replacement["reprise_reason"] = current_by_index[index]["reprise_reason"]
+                current_by_index[index] = replacement
+                trial = [current_by_index[i] for i in sorted(current_by_index)]
+                trial_pairs = {
+                    (finding["clip_index"], finding["prior_clip_index"])
+                    for finding in music_arc_repetition_findings(trial)
+                }
+                if len(trial_pairs) < len(baseline_pairs):
+                    merged = trial
+                    baseline_pairs = trial_pairs
+            # Validate the combined outline, including all immutable event slots.
+            return normalize_music_arc(merged, groups, contract)
+
         issue = ""
-        rejected_outline = []
-        for _ in range(2):
+        baseline = None
+        baseline_findings = []
+        best_outline = None
+        for attempt in range(2):
             self._raise_if_planning_cancelled()
             self._emit_planning_progress(message="Planning progression across the whole song...",
                                          current=0, total=len(clips), stage="music_creative_arc")
             repair_context = ""
-            if issue:
+            if baseline is not None and baseline_findings:
+                implicated = sorted({finding["clip_index"] for finding in baseline_findings})
+                pair_details = [
+                    {
+                        "later_clip_index": finding["clip_index"],
+                        "prior_clip_index": finding["prior_clip_index"],
+                        "evidence": finding["evidence"],
+                    }
+                    for finding in baseline_findings
+                ]
                 repair_context = (
-                    "\nRepair this outline: " + issue
-                    + "\nKeep valid beats and their pacing. If an action is already "
-                    "depicted in another beat, move its source_event_id there in "
-                    "source order rather than forcing it into an opening performance "
-                    "shot. Otherwise repair only the beat missing that action."
+                    "\nOne focused creative repair is allowed. The valid outline below is the baseline. "
+                    "Edit only the implicated later rows at zero-based indices "
+                    + json.dumps(implicated)
+                    + ". Preserve every unflagged row, cast, pacing, and each immutable source-event assignment. "
+                    "Do not move source events, invent intentional_reprise labels, or fabricate reasons. "
+                    "Develop only those later beats into distinct visible progression. Exact flagged pairs and evidence: "
+                    + json.dumps(pair_details, ensure_ascii=False)
+                    + "\nOriginal valid outline to edit in place:\n"
+                    + json.dumps(baseline, ensure_ascii=False)
                 )
-                if rejected_outline:
-                    repair_context += "\nRejected outline to edit in place:\n" + json.dumps(
-                        rejected_outline, ensure_ascii=False,
+            elif issue:
+                repair_context = (
+                    "\nRepair this outline's structural or source-assignment issue: " + issue
+                    + "\nPreserve valid beats, cast, and pacing. Keep immutable source actions exactly once and in order."
+                )
+                if best_outline:
+                    repair_context += "\nBest previously accepted outline:\n" + json.dumps(
+                        best_outline, ensure_ascii=False,
                     )
-            rows = self._call_llm_json(
+            response = self._call_llm_json(
                 user_prompt=prompt + repair_context,
                 system_prompt="Direct a complete music video. Output only the requested JSON structure.",
                 max_tokens=max(2048, 160 * len(groups) + 1024),
@@ -2599,69 +2864,33 @@ class MusicVideoPlanner(BasePlanner):
                 json_schema=response_schema,
             )
             try:
-                if event_ids and len(rows) == 1 and isinstance(rows[0], dict) and "beats" in rows[0]:
-                    envelope = rows[0]
-                    if set(envelope) != {"beats", "source_event_clips"}:
-                        raise ValueError("outline response must contain only beats and source_event_clips")
-                    assignments = envelope.get("source_event_clips")
-                    beats = envelope.get("beats")
-                    if not isinstance(assignments, dict) or set(assignments) != set(event_ids):
-                        raise ValueError("source_event_clips must contain exactly the required source-event keys")
-                    if (not isinstance(beats, list) or len(beats) != len(groups)
-                            or not all(isinstance(row, dict) for row in beats)):
-                        raise ValueError("beats must cover exactly the requested timeline items")
-                    rows = copy.deepcopy(beats)
-                    for row in rows:
-                        index = row.get("clip_index")
-                        if not isinstance(index, int) or isinstance(index, bool):
-                            raise ValueError("each outline beat needs an integer clip_index")
-                        if "source_event_ids" in row:
-                            raise ValueError("outline beats must omit source_event_ids; use source_event_clips")
-                    by_index = {row.get("clip_index"): row for row in rows if isinstance(row, dict)}
-                    for row in rows:
-                        row["source_event_ids"] = []
-                    for event_id in event_ids:
-                        index = assignments[event_id]
-                        if not isinstance(index, int) or isinstance(index, bool) or index not in by_index:
-                            raise ValueError(f"source event {event_id} needs a valid zero-based timeline index")
-                        by_index[index]["source_event_ids"].append(event_id)
-                outline = normalize_music_arc(rows, groups, contract)
-                rejected_outline = outline
-                early = bool(re.search(
-                    r"\b(?:immediately|right away|from the start)\b",
-                    scene_description, re.I,
-                ))
-                issues = music_arc_quality_issues(outline, contract, allow_early_events=early)
-                if issues:
-                    raise ValueError("; ".join(issues[:3]))
-                # An outline is shorthand, not the final visual prompt.
-                # "Takes flight" or "launches onto" can be valid treatments
-                # even when the literal action matcher is inconclusive. Keep
-                # those notes; the detailed source-action validator remains
-                # authoritative at the actual generation handoff.
-                self._music_arc_assignment_notes = music_arc_action_issues(outline, contract)
-                expanded = []
-                for i, row in enumerate(outline):
-                    start = i * group_size
-                    end = min(len(clips), start + group_size)
-                    for index in range(start, end):
-                        item = copy.deepcopy(row)
-                        item["clip_index"] = index
-                        if index != start:
-                            item["source_event_ids"] = []
-                        expanded.append(item)
-                checkpoint = copy.deepcopy(self._planning_resume_checkpoint)
-                checkpoint["music_creative_arc"] = expanded
-                checkpoint["music_arc_assignment_notes"] = copy.deepcopy(self._music_arc_assignment_notes)
-                checkpoint["music_narrative_contract"] = copy.deepcopy(contract)
-                checkpoint["music_narrative_allocation"] = [
-                    {"event_id": event, "clip_index": row["clip_index"]}
-                    for row in expanded for event in row["source_event_ids"]
-                ]
-                self._publish_planning_checkpoint(checkpoint)
-                return expanded
+                candidate = parse_candidate(response, baseline=baseline)
+                if baseline is None:
+                    baseline = candidate
+                    baseline_findings = music_arc_repetition_findings(baseline)
+                    if not baseline_findings:
+                        return expand_and_checkpoint(baseline, quality_notes_for(baseline))
+                    best_outline = baseline
+                else:
+                    try:
+                        merged = merged_repair(baseline, candidate, baseline_findings)
+                    except ValueError:
+                        merged = None
+                    if merged is not None:
+                        merged_findings = music_arc_repetition_findings(merged)
+                        if len(merged_findings) < len(baseline_findings):
+                            best_outline = merged
+                    # The initial outline is already structurally valid. A failed,
+                    # malformed, or still-repetitive optional edit cannot abort it.
+                    chosen = best_outline or baseline
+                    return expand_and_checkpoint(chosen, quality_notes_for(chosen))
             except ValueError as exc:
                 issue = str(exc)
+                if baseline is not None:
+                    # Optional repetition repair errors are advisory after a valid baseline.
+                    return expand_and_checkpoint(baseline, quality_notes_for(baseline))
+        if baseline is not None:
+            return expand_and_checkpoint(baseline, quality_notes_for(baseline))
         raise RuntimeError("Music-video whole-song planning needs revision: " + issue)
 
     # ── Character Building ───────────────────────────────────────────
@@ -3214,7 +3443,10 @@ class MusicVideoPlanner(BasePlanner):
                         creative_arc, narrative_contract, self._music_narrative_allocation,
                         suppressed_indices=repair_indices,
                     )
-                    batch_concept += "\n\n" + format_music_arc_context(arc_context, start, end, one_based=True)
+                    batch_concept += "\n\n" + format_music_arc_context(
+                        arc_context, start, end, one_based=True,
+                        quality_notes=getattr(self, "_music_arc_quality_notes", []),
+                    )
                 if narrative_contract.get("events"):
                     batch_concept += "\n\n" + format_music_narrative_context(
                         narrative_contract,
@@ -3845,7 +4077,7 @@ Write {len(clips)} structured shot plans. Go:"""
             creative_review_schema, grounded_review_findings,
             music_review_fingerprint, music_visual_body,
             music_visual_reset_issue, repair_music_rows,
-            repeated_music_visuals,
+            repeated_music_visuals, justified_music_reprise,
         )
         arc = self._music_arc
         if ignore_physical_state_ledger:
@@ -3907,11 +4139,19 @@ Write {len(clips)} structured shot plans. Go:"""
                 replacement = repair_row(index, feedback, current)
             finally:
                 self._last_music_creative_issue = ""
-            repaired.add(index)
             return replacement
+
+        def keep_advisory(index, issue):
+            if index in hard_findings:
+                raise RuntimeError(f"Music-video clip {index + 1} creative repair needs revision: {issue}")
+            review_notes.append({"clip_index": index, "severity": "advisory",
+                                 "inconclusive": issue})
+            print(f"[MusicVideoPlanner] Optional variety repair for clip {index + 1} "
+                  "was inconclusive; keeping its validated original.")
 
         for round_index in range(2):
             findings = repeated_music_visuals(rows, arc)
+            hard_findings = set(findings)
             for start in range(0, len(rows), 22):
                 self._raise_if_planning_cancelled()
                 end = min(len(rows), start + 24)
@@ -3953,7 +4193,7 @@ Write {len(clips)} structured shot plans. Go:"""
                     # have strict validators; preserve this judgment for review.
                     for item in review:
                         index = item["clip_index"]
-                        if item["category"] == "repeated_action" and not arc[index]["intentional_reprise"]:
+                        if item["category"] == "repeated_action" and not justified_music_reprise(arc[index]):
                             findings[index] = grounded[index]
                         else:
                             review_notes.append(item)
@@ -3964,14 +4204,27 @@ Write {len(clips)} structured shot plans. Go:"""
                     issue = music_visual_reset_issue(rows[i].get("video_prompt"), source)
                     if issue:
                         findings[i] = issue
+                        hard_findings.add(i)
             if not findings:
                 save(rows, complete=True)
                 return rows
             if round_index == 1:
-                raise RuntimeError("Music-video creative review still found issues in clips "
-                                   + ", ".join(str(i + 1) for i in sorted(findings))
-                                   + ". Accepted clips are saved; retry planning to repair these clips.")
-            rows = repair_music_rows(rows, findings, replace, row_validator, checkpoint=save)
+                if hard_findings:
+                    raise RuntimeError("Music-video creative review still found issues in clips "
+                                       + ", ".join(str(i + 1) for i in sorted(hard_findings))
+                                       + ". Accepted clips are saved; retry planning to repair these clips.")
+                for index, feedback in sorted(findings.items()):
+                    review_notes.append({"clip_index": index, "severity": "advisory",
+                                         "inconclusive": feedback})
+                print("[MusicVideoPlanner] Variety review remains inconclusive for clips "
+                      + ", ".join(str(i + 1) for i in sorted(findings))
+                      + "; keeping validated shots and saving advisory notes.")
+                save(rows, complete=True)
+                return rows
+            rows = repair_music_rows(
+                rows, findings, replace, row_validator, checkpoint=save,
+                on_failure=keep_advisory, on_repaired=repaired.add,
+            )
         return rows
 
     # ── Convert LLM Output to ShotPlans ──────────────────────────────

@@ -22,6 +22,7 @@ _MAX_BEAT_CHARS = 360
 _MAX_FIELD_CHARS = 240
 _MAX_REPRISE_REASON_CHARS = 200
 _MAX_ISSUES = 12
+_MAX_REPETITION_FINDINGS = 12
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 _COMMON_WORDS = {
@@ -139,37 +140,130 @@ def _content_tokens(value: str) -> list[str]:
     return [token for token in _tokens(value) if token not in _COMMON_WORDS | _GENERIC_WORDS]
 
 
-def _beat_fingerprint(value: str) -> tuple[str, ...]:
-    # Normalize common performance-role wording without deciding whether a
-    # music video must use that role or any particular story structure.
+def _normalized_arc_text(value: str) -> str:
+    """Normalize spelling variants while retaining visible treatment details."""
     aliases = {"singer": "performer", "vocalist": "performer", "frontperson": "performer"}
     actions = {"singing": "sing", "sings": "sing", "performed": "perform", "performing": "perform", "performs": "perform"}
-    result: list[str] = []
-    for token in _tokens(value):
-        if token in _COMMON_WORDS | _GENERIC_WORDS | _SETTING_CAMERA_WORDS:
-            continue
-        token = aliases.get(token, token)
-        token = actions.get(token, token)
-        result.append(token)
-    return tuple(result)
+    return " ".join(actions.get(aliases.get(token, token), aliases.get(token, token)) for token in _tokens(value))
 
 
-def _repeats_visual_beat(left: str, right: str) -> bool:
-    left_norm = " ".join(_tokens(left))
-    right_norm = " ".join(_tokens(right))
+def _very_close_arc_text(left: Any, right: Any) -> bool:
+    if not isinstance(left, str) or not isinstance(right, str):
+        return False
+    left_norm = _normalized_arc_text(left)
+    right_norm = _normalized_arc_text(right)
+    if not left_norm or not right_norm:
+        return False
     if left_norm == right_norm:
         return True
-    left_core = _beat_fingerprint(left)
-    right_core = _beat_fingerprint(right)
-    left_set, right_set = set(left_core), set(right_core)
-    if len(left_set) >= 2 and left_set == right_set:
-        return True
-    if left_norm and right_norm and len(left_set & right_set) >= 3:
-        shared = len(left_set & right_set)
-        smaller = min(len(left_set), len(right_set))
-        if shared / smaller >= 0.86 and SequenceMatcher(None, left_norm, right_norm).ratio() >= 0.74:
-            return True
-    return False
+    left_tokens = set(left_norm.split())
+    right_tokens = set(right_norm.split())
+    smaller = min(len(left_tokens), len(right_tokens))
+    if smaller < 2:
+        return False
+    shared = len(left_tokens & right_tokens)
+    return (
+        shared / smaller >= 0.90
+        and SequenceMatcher(None, left_norm, right_norm).ratio() >= 0.90
+    )
+
+
+def music_arc_repetition_findings(rows: Any) -> list[dict[str, Any]]:
+    """Return conservative, zero-based pairs of repeated beat and treatment.
+
+    Similar performance roles or a continuing state do not establish a
+    repetition. A finding requires a very close visual beat plus matching
+    purpose, environment, and camera treatment. Findings are advisory records,
+    separate from structural and source-assignment validation.
+    """
+    if not _is_sequence(rows) or len(rows) > MAX_MUSIC_ARC_ROWS:
+        return []
+    ordered: list[tuple[int, Mapping[str, Any]]] = []
+    seen: set[int] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        index = row.get("clip_index")
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0 or index in seen:
+            continue
+        if not all(isinstance(row.get(field), str) and row[field].strip()
+                   for field in ("visual_beat", "purpose", "environment", "camera")):
+            continue
+        seen.add(index)
+        ordered.append((index, row))
+    ordered.sort(key=lambda item: item[0])
+
+    findings: list[dict[str, Any]] = []
+    for current_index, current in ordered:
+        current_reason = current.get("reprise_reason")
+        if (
+            current.get("intentional_reprise") is True
+            and isinstance(current_reason, str)
+            and _reason_is_meaningful(" ".join(current_reason.split()))
+        ):
+            continue
+        match = None
+        for prior_index, prior in reversed(ordered):
+            if prior_index >= current_index:
+                continue
+            if not _very_close_arc_text(current["visual_beat"], prior["visual_beat"]):
+                continue
+            if not all(_very_close_arc_text(current[field], prior[field])
+                       for field in ("purpose", "environment", "camera")):
+                continue
+            match = (prior_index, prior)
+            break
+        if match is None:
+            continue
+        prior_index, prior = match
+        findings.append({
+            "clip_index": current_index,
+            "prior_clip_index": prior_index,
+            "evidence": {
+                "visual_beat": {
+                    "current": current["visual_beat"],
+                    "prior": prior["visual_beat"],
+                },
+                "purpose": {"current": current["purpose"], "prior": prior["purpose"]},
+                "environment": {
+                    "current": current["environment"], "prior": prior["environment"],
+                },
+                "camera": {"current": current["camera"], "prior": prior["camera"]},
+                "current_intentional_reprise": current.get("intentional_reprise") is True,
+                "current_reprise_reason": str(current.get("reprise_reason") or "")[:_MAX_REPRISE_REASON_CHARS],
+            },
+        })
+        if len(findings) >= _MAX_REPETITION_FINDINGS:
+            break
+    return findings
+
+
+def music_arc_reprise_reason_findings(rows: Any) -> list[dict[str, Any]]:
+    """Return advisory records for reprise flags without a concise reason."""
+    if not _is_sequence(rows) or len(rows) > MAX_MUSIC_ARC_ROWS:
+        return []
+    findings: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or row.get("intentional_reprise") is not True:
+            continue
+        index = row.get("clip_index")
+        reason = row.get("reprise_reason")
+        if (
+            not isinstance(index, int) or isinstance(index, bool) or index < 0
+            or isinstance(reason, str) and _reason_is_meaningful(" ".join(reason.split()))
+        ):
+            continue
+        findings.append({
+            "clip_index": index,
+            "prior_clip_index": None,
+            "evidence": {
+                "visual_beat": str(row.get("visual_beat") or "")[:_MAX_BEAT_CHARS],
+                "reprise_reason": str(reason or "")[:_MAX_REPRISE_REASON_CHARS],
+            },
+        })
+        if len(findings) >= _MAX_REPETITION_FINDINGS:
+            break
+    return findings
 
 
 def _whole_brief_copy(beat: str, contract: Any) -> bool:
@@ -246,7 +340,6 @@ def music_arc_quality_issues(
 
     source_assignments: list[str] = []
     assigned_positions: dict[str, list[int]] = {}
-    ordered_beats: list[tuple[int, str, Mapping[str, Any]]] = []
     for index in range(row_count):
         row = indexed.get(index)
         if row is None:
@@ -266,7 +359,6 @@ def music_arc_quality_issues(
         beat = row.get("visual_beat")
         if isinstance(beat, str) and beat.strip():
             beat = " ".join(beat.split())
-            ordered_beats.append((index, beat, row))
             if check_creative_quality:
                 content = _content_tokens(beat)
                 # Camera wording can accompany a concrete beat ("cinematic
@@ -310,32 +402,12 @@ def music_arc_quality_issues(
             _safe_issue(issues, f"clip {index} intentional_reprise must be a boolean")
         if not isinstance(reason, str) or len(reason) > _MAX_REPRISE_REASON_CHARS:
             _safe_issue(issues, f"clip {index} reprise_reason must be text of at most {_MAX_REPRISE_REASON_CHARS} characters")
-        elif reprise is True and not _reason_is_meaningful(reason.strip()):
-            _safe_issue(issues, f"clip {index} intentional_reprise needs a concise reason")
 
     if source_assignments != expected_ids:
         _safe_issue(
             issues,
             "music arc must assign every contract source_event_id exactly once and in source order",
         )
-
-    if check_creative_quality:
-        prior_beats: list[tuple[int, str]] = []
-        for index, beat, row in ordered_beats:
-            matching = next(
-                ((prior_index, prior_beat) for prior_index, prior_beat in reversed(prior_beats)
-                 if _repeats_visual_beat(prior_beat, beat)),
-                None,
-            )
-            if matching is not None:
-                reprise = row.get("intentional_reprise") is True
-                reason = row.get("reprise_reason")
-                if not reprise or not isinstance(reason, str) or not _reason_is_meaningful(reason.strip()):
-                    _safe_issue(
-                        issues,
-                        f"clip {index} repeats the visual beat from clip {matching[0]}; mark an intentional reprise with a reason or create a distinct beat",
-                    )
-            prior_beats.append((index, beat))
 
     if check_creative_quality and not allow_early_events and row_count >= 12 and len(expected_ids) >= 3:
         positions = [assigned_positions.get(event_id, []) for event_id in expected_ids]
@@ -549,9 +621,6 @@ def normalize_music_arc(rows: Any, clips: Any, contract: Any) -> list[dict[str, 
         reason = " ".join(reason_value.split())
         if len(reason) > _MAX_REPRISE_REASON_CHARS:
             raise ValueError(f"music arc row {row_number} reprise_reason exceeds {_MAX_REPRISE_REASON_CHARS} characters")
-        if reprise and not _reason_is_meaningful(reason):
-            raise ValueError(f"music arc row {row_number} intentional_reprise needs a concise reason")
-
         normalized.append({
             "clip_index": index,
             "visual_beat": _collapsed_text(raw.get("visual_beat"), "visual_beat", _MAX_BEAT_CHARS, row_number),
@@ -601,7 +670,14 @@ def arc_allocation(plan: Any) -> list[dict[str, Any]]:
     return allocation
 
 
-def format_music_arc_context(plan: Any, start: Any, end: Any, *, one_based: bool = False) -> str:
+def format_music_arc_context(
+    plan: Any,
+    start: Any,
+    end: Any,
+    *,
+    one_based: bool = False,
+    quality_notes: Any = None,
+) -> str:
     """Format the full compact arc and detailed assignments in ``[start,end)``.
 
     ``start`` and ``end`` are zero-based, half-open timeline-group indexes.
@@ -679,7 +755,31 @@ def format_music_arc_context(plan: Any, start: Any, end: Any, *, one_based: bool
 
     overview_text = "\n".join(f"- {line}" for line in overview) if overview else "- None"
     assigned_text = "\n".join(f"- {line}" for line in assigned) if assigned else "- No groups in this batch"
-    return "\n\n".join((
+    note_lines: list[str] = []
+    if _is_sequence(quality_notes):
+        for note in quality_notes[:_MAX_REPETITION_FINDINGS]:
+            if not isinstance(note, Mapping):
+                continue
+            index = note.get("clip_index")
+            end_index = note.get("clip_end_index", index)
+            if (
+                not isinstance(index, int) or isinstance(index, bool)
+                or not isinstance(end_index, int) or isinstance(end_index, bool)
+                or index < 0 or end_index < index
+                or end_index >= MAX_MUSIC_ARC_CLIPS
+                or end_index < first or index >= stop
+            ):
+                continue
+            # Batch filtering can remove a range's actual arc row (for example,
+            # a future-action row). Do not reintroduce its note on its own.
+            overlap_start = max(index, first)
+            overlap_stop = min(end_index + 1, stop, MAX_MUSIC_ARC_CLIPS)
+            if not any(row_index in by_index for row_index in range(overlap_start, overlap_stop)):
+                continue
+            message = note.get("message")
+            if isinstance(message, str) and message.strip():
+                note_lines.append("- " + text({"note": message}, "note", 360))
+    sections = [
         ("WHOLE-SONG MUSIC VIDEO ARC (global clip numbers, starting at 1)"
          if one_based else "WHOLE-SONG MUSIC VIDEO ARC (timeline groups in clip_index order)"),
         overview_text,
@@ -690,7 +790,10 @@ def format_music_arc_context(plan: Any, start: Any, end: Any, *, one_based: bool
         "Keep each assigned visual beat distinct and develop it through the group's detailed clips. "
         "Use source_event_ids exactly as assigned; keep source actions in source order and place them "
         "at their assigned group's opening. Camera or environment may stay fixed when the brief calls "
-        "for it. Repeat a visual beat only when intentional_reprise has a specific reason.",
+        "for it. Treat repeated outline notes as advisory guidance for distinct visible development.",
         ("Complete each assigned source action within its clip; following clips begin from its completed result."
          if one_based else ""),
-    ))
+    ]
+    if note_lines:
+        sections.append("WHOLE-SONG ARC QUALITY NOTES (advisory)\n" + "\n".join(note_lines))
+    return "\n\n".join(sections)

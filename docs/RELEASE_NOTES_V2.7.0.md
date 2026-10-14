@@ -38,6 +38,15 @@ than repeated identity/soundscape fields. Focused repairs preserve accepted
 neighboring shots and recheck their physical boundaries. Subjective reviewer
 suggestions are retained as diagnostics rather than rewriting accepted shots.
 
+Whole-song beat similarity no longer aborts a structurally valid music-video
+plan. The check considers visible treatment, attempts a bounded repair of the
+flagged beats, and preserves accepted neighbors and source-action assignments.
+Unresolved similarity is saved as an advisory and passed to detailed writing;
+it is not relabeled as an intentional reprise. Recurring performance and
+continuing scene state are allowed. Timeline coverage, required story actions,
+literal recycling of final visual prompts and whole-project resets retain
+their strict checks.
+
 **Use lyrics to guide visuals** is optional and off for new projects. Enable
 it to use the lyrics as thematic inspiration alongside the visual concept.
 Transcription, section/beat analysis, the supplied soundtrack and assigned

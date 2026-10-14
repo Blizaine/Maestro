@@ -37,7 +37,8 @@ class TestEnhancementProviderRouting(unittest.TestCase):
                 with patch.dict(sys.modules, {"services": package}):
                     namespace["_ensure_llm_loaded"](model_id="writer:27b", device="cuda")
                 loader.assert_called_once_with(model_id="writer:27b", device="cuda", provider=provider,
-                                               remote_url=config["llm_remote_url"], api_key=f"key-for-{provider}")
+                                               remote_url=config["llm_remote_url"], api_key=f"key-for-{provider}",
+                                               mtp_acceleration=False)
 
     def test_queue_snapshot_and_local_defaults_are_respected(self):
         loader = Mock()
@@ -52,7 +53,7 @@ class TestEnhancementProviderRouting(unittest.TestCase):
         with patch.dict(sys.modules, {"services": package}):
             namespace["_ensure_llm_loaded"]()
         loader.assert_called_once_with(model_id="queued-local-model", device="cpu", provider="local",
-                                       remote_url="", api_key="")
+                                       remote_url="", api_key="", mtp_acceleration=False)
 
     def test_enhance_endpoint_keeps_remote_override_and_skips_local_dedicated_model(self):
         from services import llm_service
@@ -80,7 +81,8 @@ class TestEnhancementProviderRouting(unittest.TestCase):
                         }))
                 lookup.assert_not_called()
                 loader.assert_called_once_with(model_id="remote-writer", device="cpu", provider=provider,
-                                               remote_url=config["llm_remote_url"], api_key=f"{provider}-key")
+                                               remote_url=config["llm_remote_url"], api_key=f"{provider}-key",
+                                               mtp_acceleration=False)
 
 
 if __name__ == "__main__":

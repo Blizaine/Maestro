@@ -17,6 +17,8 @@ from services.director.music_arc import (
     format_music_arc_context,
     music_arc_quality_issues,
     music_arc_action_issues,
+    music_arc_repetition_findings,
+    music_arc_reprise_reason_findings,
     normalize_music_arc,
 )
 from services.director.music_narrative import build_music_narrative_contract
@@ -205,8 +207,23 @@ class MusicArcTests(unittest.TestCase):
                 self.assertEqual([row["clip_index"] for row in result], list(range(len(rows))))
                 self.assertEqual(music_arc_quality_issues(result, contract()), [])
 
-    def test_intentional_refrain_reprise_requires_and_accepts_a_reason(self):
+    def test_intentional_refrain_reprise_reason_is_advisory(self):
         beat = "The vocalist closes their eyes and holds a sustained note as the chorus rises."
+        literal_reprise = [
+            arc_row(0, beat),
+            arc_row(
+                1, beat, reprise=True,
+                reprise_reason="The final refrain returns to resolve the song's tension.",
+            ),
+        ]
+        normalized_reprise = normalize_music_arc(literal_reprise, [{}, {}], contract())
+        self.assertEqual(music_arc_repetition_findings(normalized_reprise), [])
+
+        literal_reprise[1]["reprise_reason"] = ""
+        normalized_missing_reason = normalize_music_arc(literal_reprise, [{}, {}], contract())
+        self.assertEqual(len(music_arc_repetition_findings(normalized_missing_reason)), 1)
+        self.assertEqual(len(music_arc_reprise_reason_findings(normalized_missing_reason)), 1)
+
         rows = [
             arc_row(0, beat, environment="bare rehearsal stage"),
             arc_row(
@@ -221,12 +238,15 @@ class MusicArcTests(unittest.TestCase):
         result = normalize_music_arc(rows, [{}, {}], contract())
         self.assertTrue(result[1]["intentional_reprise"])
         self.assertEqual(music_arc_quality_issues(result, contract()), [])
+        self.assertEqual(music_arc_repetition_findings(result), [])
+        self.assertEqual(music_arc_reprise_reason_findings(result), [])
 
         rows[1]["reprise_reason"] = ""
-        with self.assertRaisesRegex(ValueError, "reprise needs a concise reason"):
-            normalize_music_arc(rows, [{}, {}], contract())
+        result = normalize_music_arc(rows, [{}, {}], contract())
+        self.assertEqual(len(music_arc_reprise_reason_findings(result)), 1)
+        self.assertEqual(music_arc_repetition_findings(result), [])
 
-    def test_duplicate_beats_are_detected_even_when_camera_and_environment_change(self):
+    def test_same_beat_with_distinct_camera_or_environment_is_not_a_duplicate(self):
         rows = [
             arc_row(0, "The vocalist sings toward the audience beneath crossing beams."),
             arc_row(
@@ -236,10 +256,29 @@ class MusicArcTests(unittest.TestCase):
                 camera="low close view from the crowd",
             ),
         ]
-        issues = music_arc_quality_issues(rows, contract())
-        self.assertTrue(any("repeats the visual beat" in issue for issue in issues))
-        with self.assertRaisesRegex(ValueError, "repeats the visual beat"):
-            normalize_music_arc(rows, [{}, {}], contract())
+        normalized = normalize_music_arc(rows, [{}, {}], contract())
+        self.assertEqual(music_arc_quality_issues(normalized, contract()), [])
+        self.assertEqual(music_arc_repetition_findings(normalized), [])
+
+    def test_literal_beat_and_matching_treatment_are_an_advisory_finding(self):
+        beat = "The vocalist sings toward the audience beneath crossing beams."
+        rows = [arc_row(0, beat), arc_row(1, beat)]
+        normalized = normalize_music_arc(rows, [{}, {}], contract())
+        findings = music_arc_repetition_findings(normalized)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(
+            (findings[0]["clip_index"], findings[0]["prior_clip_index"]), (1, 0),
+        )
+        self.assertEqual(findings[0]["evidence"]["visual_beat"]["current"], beat)
+        self.assertEqual(music_arc_quality_issues(normalized, contract()), [])
+
+    def test_recurring_performance_with_different_visible_actions_is_allowed(self):
+        rows = [
+            arc_row(0, "The vocalist leans into the microphone and sings the opening verse."),
+            arc_row(1, "The vocalist raises a hand as the chorus reaches its final note."),
+        ]
+        normalized = normalize_music_arc(rows, [{}, {}], contract())
+        self.assertEqual(music_arc_repetition_findings(normalized), [])
 
     def test_repeated_whole_brief_and_generic_filler_are_not_visual_beats(self):
         source = "A singer crosses the city at night, meets a friend, and watches the sunrise together."
@@ -372,6 +411,16 @@ class MusicArcTests(unittest.TestCase):
         self.assertNotIn("clip 3:", assigned)
         self.assertNotIn("zero-based", context)
         self.assertEqual(rows, original)
+
+    def test_arc_quality_note_only_appears_when_a_current_filtered_row_overlaps(self):
+        rows = [arc_row(0, "A musician arrives alone at the empty station.")]
+        notes = [{"clip_index": 1, "clip_end_index": 1, "message": "Develop this beat differently."}]
+        context = format_music_arc_context(rows, 0, 2, quality_notes=notes)
+        self.assertNotIn("WHOLE-SONG ARC QUALITY NOTES", context)
+
+        notes[0].update(clip_index=0, clip_end_index=1)
+        context = format_music_arc_context(rows, 0, 2, quality_notes=notes)
+        self.assertIn("Develop this beat differently.", context)
 
 
 if __name__ == "__main__":

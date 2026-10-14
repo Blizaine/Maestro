@@ -14,7 +14,7 @@ def music_visual_body(prompt):
 
 
 def music_review_fingerprint(rows, arc):
-    payload = json.dumps({"revision": 2, "rows": rows, "arc": arc}, sort_keys=True, ensure_ascii=False)
+    payload = json.dumps({"revision": 3, "rows": rows, "arc": arc}, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -29,6 +29,14 @@ def music_visual_reset_issue(prompt, source):
     return None
 
 
+def justified_music_reprise(row):
+    """Only an authored, explained reprise exempts literal prompt recycling."""
+    from .music_arc import _reason_is_meaningful
+    reason = row.get("reprise_reason")
+    return (row.get("intentional_reprise") is True and isinstance(reason, str)
+            and _reason_is_meaningful(" ".join(reason.split())))
+
+
 def repeated_music_visuals(rows, arc):
     """Catch literal recycled visual bodies even when a small reviewer misses them."""
     seen = {}
@@ -38,7 +46,7 @@ def repeated_music_visuals(rows, arc):
         key = " ".join(re.findall(r"\w+", body.casefold()))
         if len(key) < 50:
             continue
-        if key in seen and not arc[index].get("intentional_reprise"):
+        if key in seen and not justified_music_reprise(arc[index]):
             findings[index] = (
                 f"This visual body repeats clip {seen[key] + 1} verbatim. "
                 "Develop this clip's assigned beat while retaining its physical boundary facts."
@@ -95,8 +103,14 @@ def grounded_review_findings(findings, rows, allowed_indices):
     return result
 
 
-def repair_music_rows(rows, findings, repair_row, validate_row, *, checkpoint=None):
-    """Repair flagged rows only, keeping every unflagged row byte-equivalent."""
+def repair_music_rows(rows, findings, repair_row, validate_row, *, checkpoint=None,
+                      on_failure=None, on_repaired=None):
+    """Repair flagged rows, preserving validated originals if an advisory fails.
+
+    Strict callers keep the default failure behavior. Advisory review callers
+    may record an unresolved finding with ``on_failure``; invalid replacements
+    never enter the accepted plan. Cancellation and writer errors propagate.
+    """
     current = copy.deepcopy(rows)
     for index, feedback in sorted(findings.items()):
         issue = ""
@@ -115,10 +129,16 @@ def repair_music_rows(rows, findings, repair_row, validate_row, *, checkpoint=No
                 if issue:
                     break
             if not issue:
+                changed = candidate[index] != current[index]
                 current = candidate
+                if changed and on_repaired is not None:
+                    on_repaired(index)
                 if checkpoint:
                     checkpoint(current)
                 break
         if issue:
+            if on_failure is not None:
+                on_failure(index, issue)
+                continue
             raise RuntimeError(f"Music-video clip {index + 1} creative repair needs revision: {issue}")
     return current

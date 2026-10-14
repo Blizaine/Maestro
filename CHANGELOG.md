@@ -63,6 +63,11 @@ Public Dev testing candidate; not promoted to Main. See the [full release notes]
   bounded outlines, intentional reprises and focused repairs that retain good
   shots. Carry physical facts through cutaways without forcing the same action
   into every frame; check visual bodies separately from identity boilerplate.
+- Treat music-outline similarity as a creative advisory. Repair only flagged
+  beats, preserve the valid plan if that optional repair fails, and carry
+  remaining variety notes into detailed writing. Camera treatment, recurring
+  performance and persistent scene state do not alone invalidate a plan.
+  Keep source-action, timeline and final native-prompt checks strict.
 - Fix H3 reference identity aliases such as “the Kitten” versus “Kitten” and
   validate final picture ownership before rendering. Keep camera directions
   such as “wide shot” out of physical story-action obligations, and keep
