@@ -6234,13 +6234,14 @@ def _ensure_llm_loaded(params: dict):
         else:
             print("[Pipeline] Generation in progress — skipping pre-LLM VRAM release")
 
-    if llm_service.is_loaded():
-        status = llm_service.get_status()
-        if status.get("model_id") != desired_model or status.get("provider") != desired_provider:
-            llm_service.unload_model()
-            llm_service.load_model(model_id=desired_model, device=desired_device, provider=desired_provider, remote_url=desired_remote_url, api_key=desired_api_key)
-    else:
-        llm_service.load_model(model_id=desired_model, device=desired_device, provider=desired_provider, remote_url=desired_remote_url, api_key=desired_api_key)
+    # The loader compares the complete recipe, including experimental MTP.
+    # Keep an identical writer resident; apply changed settings on the next
+    # planning load rather than interrupting a request when settings are saved.
+    llm_service.load_model(
+        model_id=desired_model, device=desired_device, provider=desired_provider,
+        remote_url=desired_remote_url, api_key=desired_api_key,
+        mtp_acceleration=services_cfg.get("llm_mtp_acceleration") is True,
+    )
 
 
 def _capture_llm_pass(pid: str, pass_name: str):

@@ -9,8 +9,9 @@ Public Dev testing candidate; not promoted to Main. See the [full release notes]
 
 - Add Underdog Saluki 27B IQ2-Mix Uncensored to the local LLM picker, with
   its upstream Q8 vision projector, 32K context, quantized KV cache and
-  model-aware thinking/sampling. Downloads remain on demand; native MTP
-  drafting stays disabled for the multi-request Director workflow.
+  model-aware thinking/sampling. Downloads remain on demand. Add an off-by-default
+  **MTP acceleration — Experimental** opt-in for compatible local writers,
+  with runtime checks, actual loaded-mode status and application on the next load.
 - Refresh shared H3 Studio/Director duration recommendations for current
   resource tiers, including tested 24 GB Fused Frames native 1080p and explicit
   estimates for smaller/intermediate GPUs and RAM. Show recommendation provenance;

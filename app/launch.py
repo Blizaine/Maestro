@@ -7703,6 +7703,7 @@ def get_services_config():
         "llm_model_id": services.get("llm_model_id", _DEFAULT_LLM_REPO),
         "llm_device": services.get("llm_device", _llm_default_device()),
         "llm_provider": provider,
+        "llm_mtp_acceleration": services.get("llm_mtp_acceleration", False) is True,
         "llm_remote_url": services.get("llm_remote_url", ""),
         "llm_remote_api_key": _mask_key(services.get("llm_remote_api_key", "")),
         "llm_remote_api_key_set": bool(services.get("llm_remote_api_key", "")),
@@ -7795,6 +7796,7 @@ async def update_services_config(request: Request):
 
     ALLOWED_KEYS = {
         "llm_model_id", "llm_device", "llm_provider", "llm_remote_url",
+        "llm_mtp_acceleration",
         "enhance_llm_model_id", "enhance_llm_device",
         "enhance_fidelity_retries", "enhance_fidelity_auto_continue",
         "google_api_key", "llm_remote_api_key", "openai_api_key", "anthropic_api_key",
@@ -7817,6 +7819,8 @@ async def update_services_config(request: Request):
             raise HTTPException(status_code=400, detail="Fidelity retries must be a whole number from 0 to 5.")
         if key == "enhance_fidelity_auto_continue" and type(value) is not bool:
             raise HTTPException(status_code=400, detail="Continue after fidelity warnings must be true or false.")
+        if key == "llm_mtp_acceleration" and type(value) is not bool:
+            raise HTTPException(status_code=400, detail="MTP acceleration must be true or false.")
         if key.endswith("_api_key"):
             if not isinstance(value, str):
                 raise HTTPException(status_code=400, detail="API keys must be text.")
@@ -8416,7 +8420,8 @@ async def llm_load(request: Request):
         if not _gen_lock.acquire(blocking=False):
             raise HTTPException(409, "Generation resources are busy. The writer was not changed.")
         try:
-            llm_service.load_model(model_id=model_id, device=device, provider=provider, remote_url=remote_url, api_key=api_key)
+            llm_service.load_model(model_id=model_id, device=device, provider=provider, remote_url=remote_url,
+                                   api_key=api_key, mtp_acceleration=services.get("llm_mtp_acceleration") is True)
             return {"status": "ok", **llm_service.get_status()}
         finally:
             _gen_lock.release()
@@ -8533,7 +8538,8 @@ def _ensure_llm_loaded(model_id=None, device=None):
     # endpoint and current credentials. Checking only model/provider here let
     # a queued snapshot accidentally use another device or remote endpoint.
     llm_service.load_model(model_id=desired, device=desired_device, provider=desired_provider,
-                           remote_url=desired_remote_url, api_key=desired_api_key)
+                           remote_url=desired_remote_url, api_key=desired_api_key,
+                           mtp_acceleration=services.get("llm_mtp_acceleration") is True)
 
 
 def _guard_interactive_llm_against_generation() -> None:

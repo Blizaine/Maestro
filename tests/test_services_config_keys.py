@@ -23,7 +23,7 @@ class TestApiKeySaving(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / "app/launch.py"
         nodes = [node for node in ast.parse(path.read_text(encoding="utf-8")).body
                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                 and node.name in {"_mask_key", "_persist_server_config", "update_services_config"}]
+                 and node.name in {"_mask_key", "_persist_server_config", "get_services_config", "update_services_config"}]
         for node in nodes:
             node.decorator_list = []
         cls.code = compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec")
@@ -37,6 +37,7 @@ class TestApiKeySaving(unittest.TestCase):
             "os": os, "threading": threading,
             "_MODEL_VISIBILITY_WRITE_LOCK": threading.Lock(),
             "_PUBLIC_LLM_PROVIDERS": {"openai", "anthropic"},
+            "_DEFAULT_LLM_REPO": "default-writer", "_llm_default_device": lambda: "cpu",
             "wgp": SimpleNamespace(server_config={"services": {}},
                                    server_config_filename=str(self.path)),
         }
@@ -119,6 +120,25 @@ class TestApiKeySaving(unittest.TestCase):
             with self.subTest(continue_value=value), self.assertRaises(HTTPError):
                 self.save({"enhance_fidelity_auto_continue": value})
         self.assertEqual(self.services, {})
+
+    def test_mtp_is_opt_in_and_round_trips_without_loading_a_writer(self):
+        self.assertIs(self.namespace["get_services_config"]()["llm_mtp_acceleration"], False)
+        self.services["llm_model_id"] = "existing-writer"
+        self.save({"llm_mtp_acceleration": True})
+        saved = json.loads(self.path.read_text())["services"]
+        self.assertIs(saved["llm_mtp_acceleration"], True)
+        self.assertEqual(saved["llm_model_id"], "existing-writer")
+        self.assertIs(self.namespace["get_services_config"]()["llm_mtp_acceleration"], True)
+        self.save({"llm_mtp_acceleration": False})
+        self.assertIs(self.namespace["get_services_config"]()["llm_mtp_acceleration"], False)
+
+    def test_mtp_rejects_nonboolean_values_atomically(self):
+        for value in ("false", "true", 0, 1, None, []):
+            with self.subTest(value=value), self.assertRaises(HTTPError) as error:
+                self.save({"llm_device": "cuda", "llm_mtp_acceleration": value})
+            self.assertEqual(error.exception.status_code, 400)
+        self.assertEqual(self.services, {})
+        self.assertFalse(self.path.exists())
 
 
 if __name__ == "__main__":

@@ -125,7 +125,7 @@ The profile has a 32K context and Q8 K/V cache; Gemma remains the default.
 Bounded reads of the actual GGUF metadata confirmed the Qwen hybrid architecture,
 its optional NextN head and the embedded thinking/reasoning controls. The
 existing compatible llama.cpp loader handles this layout with drafting off;
-native MTP speculative decoding is not enabled for this profile.
+native MTP speculative decoding is not enabled by default for this profile.
 
 All 53 local-LLM registry, payload, lifecycle, responsiveness and UTF-8 tests
 passed, including five new Saluki contracts. Five standalone JSON-grammar
@@ -139,6 +139,37 @@ catalog exposes the Saluki entry and estimated 12-GB hint. The selected writer,
 provider, device and enhancement-writer settings matched the pre-restart
 snapshot; no model was selected or loaded by the check. The second workstation
 and public branches were untouched by this follow-up.
+
+## Experimental MTP settings follow-up — October 14
+
+Integrations now exposes an off-by-default MTP acceleration toggle for local
+writers with verified draft weights, including a separate local enhancement
+writer. Model catalog capability metadata keeps no-MTP Qwen and Gemma weights
+out of this route. The saved preference is a validated boolean and is frozen
+with queued enhancement settings; legacy snapshots retain ordinary decoding.
+Saving it does not load or unload a writer. The next eligible load compares
+the requested mode with the actual resident mode and reloads only when needed.
+Settings reports the actual loaded writer's MTP state.
+
+All 221 focused LLM, runtime, services-settings, enhancement and Director
+compatibility tests passed. The mounted desktop/mobile browser suite passed
+preference persistence, supported/unsupported weights, separate enhancement
+writers, actual-mode display, remote exclusion and no load/unload requests on
+save. Scoped frontend lint, TypeScript and production build, plus Python
+undefined-name checks passed. A CPU-only help probe of the installed runtime
+confirmed both flags and the native `draft-mtp` mode. Capability checks also
+cover missing modes, bounded timeouts, transient retries and cached results.
+The five standalone JSON-grammar checks also passed.
+
+The local development app was restarted only after the generation queues,
+Director pipelines and writer were idle. Live API checks confirmed the Saluki
+capability, default-off preference, actual unloaded/off status and rebuilt UI
+asset. The selected writer, provider, device and enhancement-writer preferences
+matched the pre-restart snapshot. Machine 02 and public branches were untouched.
+
+These checks do not establish native-MTP generation speed, output quality or
+long-run stability. No MTP inference or model download was started for this
+follow-up. The experimental label and default-off behavior retain that limit.
 
 ## Automated checks
 

@@ -33,9 +33,19 @@ controls and the publisher's thinking sampling settings. Explicit non-thinking
 and grammar-constrained requests keep thinking off. The current default writer
 is unchanged.
 
-Although the file includes an MTP prediction head, Maestro does not enable
-native MTP speculative decoding for this profile. It uses ordinary decoding,
-consistent with the existing Qwen3.8 option's multi-request stability policy.
+The file includes an MTP prediction head. Ordinary decoding is the default;
+enable **MTP acceleration — Experimental** below the local LLM options to try
+native speculative decoding. The toggle applies only to verified MTP-capable
+weights, currently this Saluki file. The existing Qwen3.8 no-MTP quant and Gemma
+models continue to use ordinary decoding. It also applies to a separate local
+enhancement writer when that writer supports MTP.
+
+The preference takes effect on the next writer load; saving it does not unload
+or interrupt current work. **Loaded writer: MTP on/off** reports the actual
+loaded mode. MTP drafts up to two tokens and may improve decoding speed, but
+can use more memory or affect stability. A bounded runtime capability check
+requires native MTP support before loading; an incompatible runtime produces
+an update-or-disable error. Turn the option off to return to ordinary decoding.
 The embedded model/template metadata and existing compatible llama.cpp loader
 were checked; end-to-end quality and memory use still require a generation test.
 

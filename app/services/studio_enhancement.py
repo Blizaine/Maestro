@@ -18,6 +18,7 @@ _request_context: ContextVar[dict | None] = ContextVar("studio_enhancement", def
 _disk_lock = threading.RLock()
 SETTING_KEYS = (
     "llm_provider", "llm_model_id", "llm_device", "llm_remote_url",
+    "llm_mtp_acceleration",
     "enhance_llm_model_id", "enhance_llm_device", "nsfw_mode",
     "enhance_fidelity_retries", "enhance_fidelity_auto_continue",
 )
@@ -26,10 +27,12 @@ SETTING_KEYS = (
 def captured_settings(services: dict) -> dict:
     # Credentials are resolved at execution, never copied into jobs/sidecars.
     defaults = {"llm_provider": "local", "llm_remote_url": "", "llm_device": "cuda",
+                "llm_mtp_acceleration": False,
                 "enhance_llm_model_id": "", "enhance_llm_device": "cuda", "nsfw_mode": False,
                 "enhance_fidelity_retries": 1, "enhance_fidelity_auto_continue": False}
     result = {key: deepcopy(services.get(key, defaults.get(key))) for key in SETTING_KEYS}
     result["nsfw_mode"] = bool(result["nsfw_mode"])
+    result["llm_mtp_acceleration"] = result["llm_mtp_acceleration"] is True
     result["enhance_fidelity_retries"] = fidelity_retry_limit(result)
     result["enhance_fidelity_auto_continue"] = result["enhance_fidelity_auto_continue"] is True
     if result["enhance_llm_model_id"]:
@@ -40,7 +43,15 @@ def captured_settings(services: dict) -> dict:
 
 def current_settings(services: dict) -> dict:
     context = _request_context.get()
-    return {**services, **{key: value for key, value in context["settings"].items() if value is not None}} if context else services
+    if context:
+        return {
+            **services,
+            **{key: value for key, value in context["settings"].items() if value is not None},
+            # Legacy snapshots predate the experimental toggle and retain
+            # ordinary decoding even if the live preference changes later.
+            "llm_mtp_acceleration": context["settings"].get("llm_mtp_acceleration") is True,
+        }
+    return services
 
 
 def fidelity_retry_limit(settings: dict | None = None) -> int:

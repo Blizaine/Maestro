@@ -179,6 +179,16 @@ class QueuedEnhancementTests(unittest.TestCase):
         self.assertEqual(fidelity_retry_limit({'enhance_fidelity_retries': 100}), 5)
         self.assertEqual(fidelity_retry_limit({'enhance_fidelity_retries': 'bad'}), 1)
 
+    def test_mtp_preference_is_frozen_and_legacy_snapshots_stay_off(self):
+        self.assertIs(captured_settings({})['llm_mtp_acceleration'], False)
+        for captured, live in ((True, False), (False, True)):
+            record = new_enhancement(self.params, {'llm_mtp_acceleration': captured})
+            with enhancement_context(record['settings'], lambda: False):
+                self.assertIs(current_settings({'llm_mtp_acceleration': live})['llm_mtp_acceleration'], captured)
+        with enhancement_context({'llm_model_id': 'legacy-writer'}, lambda: False):
+            self.assertIs(current_settings({'llm_mtp_acceleration': True})['llm_mtp_acceleration'], False)
+        self.assertIs(current_settings({'llm_mtp_acceleration': True})['llm_mtp_acceleration'], True)
+
     def test_auto_continue_keeps_warnings_and_fallback_without_review_pause(self):
         self.prepare.side_effect = None
         self.prepare.return_value = {'params': self.params, 'h3_window_plan': {

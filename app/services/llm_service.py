@@ -37,6 +37,7 @@ _model_id: str = ""
 _device: str = ""
 _server_port: int = 0
 _vision_available: bool = False
+_mtp_acceleration: bool = False
 
 # Rolling tail of llama-server's stdout/stderr, drained by a background
 # thread once the server is up. Two jobs: (1) keep the OS pipe from
@@ -362,9 +363,9 @@ MODEL_REGISTRY = {
     },
     "Kujira/Underdog-Saluki-27B-1.0-MTP-Abliterated-GGUF": {
         "label": "Underdog Saluki 27B IQ2-Mix Uncensored (Vision, Thinking)",
-        # Match the existing Qwen3.8 ordinary-decoding path for sequential
-        # multi-pass requests. Native MTP acceleration is not validated for
-        # this option and remains disabled.
+        # This repository includes verified MTP draft weights. The feature
+        # remains opt-in and is still gated by runtime flag support below.
+        "supports_mtp": True,
         "gguf_file": "Underdog-Saluki-27B-1.0-IQ2-mix-MTP-abliterated.gguf",
         "mmproj_file": "mmproj-Underdog-Saluki-27B-1.0-Q8_0.gguf",
         "mmproj_repo": "ConwayResearch/Underdog-Saluki-27B-1.0",
@@ -659,6 +660,7 @@ def get_available_models(provider: str = "local", remote_url: str = "", api_key:
             "label": MODEL_REGISTRY[repo_id]["label"],
             "size_hint": MODEL_REGISTRY[repo_id]["size_hint"],
             "provider": "local",
+            "supports_mtp": MODEL_REGISTRY[repo_id].get("supports_mtp") is True,
         }
         for repo_id in _PUBLIC_MODEL_ORDER
         if repo_id in MODEL_REGISTRY
@@ -1198,11 +1200,13 @@ def is_loaded() -> bool:
 
 
 def get_status() -> dict:
+    loaded = is_loaded()
     return {
-        "loaded": is_loaded(),
+        "loaded": loaded,
         "model_id": _model_id or None,
-        "device": _device if is_loaded() else None,
+        "device": _device if loaded else None,
         "provider": _provider,
+        "mtp_acceleration": bool(loaded and _mtp_acceleration),
     }
 
 
@@ -1777,6 +1781,78 @@ def _get_server_exe(device: str = "cpu") -> str:
     return os.path.join(bin_dir, "llama-server")
 
 
+_MTP_RUNTIME_CAPABILITY_CACHE: dict[tuple, tuple[bool, str]] = {}
+_MTP_RUNTIME_CAPABILITY_LOCK = threading.Lock()
+
+
+def _check_mtp_runtime_capability(server_exe: str) -> None:
+    """Require this llama-server binary to advertise both native MTP flags.
+
+    The short help probe is bounded and cached against the executable path
+    and file identity/stat so switching runtime builds rechecks capability.
+    """
+    resolved = os.path.normcase(os.path.realpath(os.path.abspath(server_exe)))
+    try:
+        stat = os.stat(server_exe)
+        identity = (
+            resolved, getattr(stat, "st_dev", None), getattr(stat, "st_ino", None),
+            stat.st_size, getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1e9)),
+        )
+    except OSError:
+        identity = (resolved, None, None, None, None)
+
+    with _MTP_RUNTIME_CAPABILITY_LOCK:
+        result = _MTP_RUNTIME_CAPABILITY_CACHE.get(identity)
+    if result is None:
+        cache_result = False
+        try:
+            kwargs = {"env": _llama_server_env(server_exe)}
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            help_result = subprocess.run(
+                [server_exe, "--help"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                **kwargs,
+            )
+            help_text = (help_result.stdout or "") + "\n" + (help_result.stderr or "")
+            if help_result.returncode != 0:
+                result = (
+                    False,
+                    f"the --help command exited with code {help_result.returncode}",
+                )
+            else:
+                missing = [
+                    flag for flag in ("--spec-type", "--spec-draft-n-max", "draft-mtp")
+                    if flag not in help_text
+                ]
+                if missing:
+                    result = (False, f"the --help output is missing {', '.join(missing)}")
+                else:
+                    result = (True, "")
+                # A completed help response is definitive, whether or not it
+                # advertises the required MTP mode.
+                cache_result = True
+        except Exception as exc:
+            result = (False, f"the --help capability check failed: {exc}")
+        if cache_result:
+            with _MTP_RUNTIME_CAPABILITY_LOCK:
+                _MTP_RUNTIME_CAPABILITY_CACHE[identity] = result
+
+    supported, reason = result
+    if not supported:
+        detail = f" Details: {reason}." if reason else ""
+        raise RuntimeError(
+            "Native MTP acceleration was requested, but this llama-server "
+            "does not expose the required --spec-type and --spec-draft-n-max "
+            "options. Update Maestro's llama.cpp runtime or disable MTP "
+            f"acceleration, then retry.{detail}"
+        )
+
+
 def load_model(
     model_id: str = "",
     device: str = "cpu",
@@ -1784,6 +1860,8 @@ def load_model(
     provider: str = "local",
     remote_url: str = "",
     api_key: str = "",
+    *,
+    mtp_acceleration: bool = False,
 ) -> None:
     """Load an LLM model. Supports local (llama-server), remote (OpenAI-compatible),
     OpenAI API, and Anthropic API providers.
@@ -1795,8 +1873,10 @@ def load_model(
         provider: "local" | "remote" | "openai" | "anthropic"
         remote_url: Base URL for remote/openai servers (e.g. http://192.168.1.100:1234)
         api_key: API key for openai/anthropic providers
+        mtp_acceleration: Enable native MTP only for a local registry model
+            whose exact weights are marked as MTP-capable.
     """
-    global _process, _model_id, _device, _server_port, _vision_available
+    global _process, _model_id, _device, _server_port, _vision_available, _mtp_acceleration
     global _provider, _remote_url, _api_key
 
     # Handle remote/API providers — no subprocess needed
@@ -1808,11 +1888,13 @@ def load_model(
                 and _provider == provider
                 and _remote_url == remote_url
                 and _api_key == api_key
+                and not _mtp_acceleration
                 and not force_reload
             ):
                 return
             if _process is not None:
                 _unload_inner()
+            _mtp_acceleration = False
             _provider = provider
             _remote_url = remote_url
             _api_key = api_key
@@ -1827,21 +1909,38 @@ def load_model(
         return
 
     repo_id = model_id or DEFAULT_HF_REPO
+    registry_entry = MODEL_REGISTRY.get(repo_id, {})
+    mtp_active = (
+        provider == "local"
+        and mtp_acceleration is True
+        and registry_entry.get("supports_mtp") is True
+    )
     _provider = "local"
     _remote_url = ""
     _api_key = ""
 
     with _lock:
-        if is_loaded() and _model_id == repo_id and _device == device and not force_reload:
+        if (
+            is_loaded()
+            and _model_id == repo_id
+            and _device == device
+            and _mtp_acceleration == mtp_active
+            and not force_reload
+        ):
             return
 
         if is_loaded():
             _unload_inner()
+        else:
+            # Clear stale state after a server crash before starting a new one.
+            _mtp_acceleration = False
 
         print(f"[LLM] Loading model: {repo_id} on {device}")
 
         # Detect CPU-only/missing CUDA runtimes before downloading large weights.
         server_exe = _get_server_exe(device=device)
+        if mtp_active:
+            _check_mtp_runtime_capability(server_exe)
         cuda_devices = []
         if device == "cuda":
             from services.llama_linux_runtime import require_cuda
@@ -1867,7 +1966,6 @@ def load_model(
         gguf_path = os.path.normpath(gguf_path)
 
         # Try to download mmproj for vision support (optional — not all models have it)
-        registry_entry = MODEL_REGISTRY.get(repo_id, {})
         mmproj_file = registry_entry.get("mmproj_file", DEFAULT_MMPROJ_FILE)
         mmproj_repo = registry_entry.get("mmproj_repo", repo_id)  # allow mmproj from different repo
         mmproj_path = None
@@ -1941,6 +2039,9 @@ def load_model(
         else:
             cmd += ["--n-gpu-layers", "0", "--device", "none", "--no-mmproj-offload"]
 
+        if mtp_active:
+            cmd += ["--spec-type", "draft-mtp", "--spec-draft-n-max", "2"]
+
         print(f"[LLM] Starting llama-server on port {_server_port}")
         _process = subprocess.Popen(
             cmd,
@@ -1967,6 +2068,7 @@ def load_model(
                 output = _server_log_tail(30)
                 _process = None
                 _model_id = ""
+                _mtp_acceleration = False
                 raise RuntimeError(f"llama-server exited with code {exit_code}:\n{output[-2000:]}")
             try:
                 resp = requests.get(f"{_server_url()}/health", timeout=1)
@@ -1992,6 +2094,7 @@ def load_model(
 
         _model_id = repo_id
         _device = device
+        _mtp_acceleration = mtp_active
         file_size = os.path.getsize(gguf_path) / 1e6
         print(f"[LLM] Model loaded: {repo_id} ({file_size:.0f}MB) on {device}, port {_server_port}")
 
@@ -2227,7 +2330,7 @@ def _diagnose_llm_image_request_failure(
 
 
 def _unload_inner():
-    global _process, _model_id, _device, _server_port, _vision_available
+    global _process, _model_id, _device, _server_port, _vision_available, _mtp_acceleration
     _cancel_idle_timer()
     if _process is not None:
         try:
@@ -2243,6 +2346,7 @@ def _unload_inner():
     _device = ""
     _server_port = 0
     _vision_available = False
+    _mtp_acceleration = False
     gc.collect()
 
 

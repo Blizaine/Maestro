@@ -9904,7 +9904,7 @@ export const useStore = create<AppState>((set, get) => ({
     set({ llmLoading: true })
     try {
       const result = await api.loadLlm()
-      set({ llmStatus: { loaded: result.loaded, model_id: result.model_id, device: result.device, provider: result.provider || '' }, llmLoading: false })
+      set({ llmStatus: { loaded: result.loaded, model_id: result.model_id, device: result.device, provider: result.provider || '', mtp_acceleration: result.mtp_acceleration === true }, llmLoading: false })
     } catch (e) {
       console.error('Failed to load LLM:', e)
       set({ llmLoading: false })

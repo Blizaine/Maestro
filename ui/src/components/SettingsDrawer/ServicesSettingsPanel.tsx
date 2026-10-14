@@ -225,6 +225,10 @@ export function ServicesSettingsPanel() {
   const isRemote = provider === 'remote'
   const isOpenAI = provider === 'openai'
   const isLocal = provider === 'local'
+  const mtpWriters = llmModels.filter(model => model.supports_mtp
+    && (model.id === servicesConfig.llm_model_id || model.id === servicesConfig.enhance_llm_model_id))
+  const supportsMtp = mtpWriters.length > 0
+  const mtpEnabled = servicesConfig.llm_mtp_acceleration === true
 
   const handleRefreshModels = async () => {
     setRefreshing(true)
@@ -387,6 +391,33 @@ export function ServicesSettingsPanel() {
             <p className="text-[10px] text-text-muted mt-1">
               CPU recommended to avoid conflicts with video generation
             </p>
+          </div>
+        )}
+        {isLocal && (
+          <div className="space-y-1" data-testid="llm-mtp-setting">
+            <label className={`flex items-start gap-3 ${supportsMtp ? 'cursor-pointer' : 'cursor-not-allowed'}`}>
+              <input
+                type="checkbox"
+                checked={mtpEnabled && supportsMtp}
+                disabled={!supportsMtp}
+                onChange={event => updateConfig({ llm_mtp_acceleration: event.target.checked })}
+                className="mt-1 h-4 w-4 accent-accent-blue shrink-0 disabled:opacity-40"
+              />
+              <span className="min-w-0 text-sm text-text-primary">
+                MTP acceleration <span className="text-amber-400">— Experimental</span>
+                <span className="block mt-1 text-[10px] leading-relaxed text-text-muted">
+                  {supportsMtp
+                    ? 'May speed up supported local writers. Uses more memory and may affect stability. Applies on the next model load; current work continues.'
+                    : 'Requires a local writer with MTP weights, such as Underdog Saluki. The selected writers use ordinary decoding.'}
+                </span>
+              </span>
+            </label>
+            {llmStatus?.loaded && llmStatus.provider === 'local' && (
+              <p className="pl-7 text-[10px] text-text-muted" data-testid="llm-mtp-active-state">
+                Loaded writer: MTP {llmStatus.mtp_acceleration ? 'on' : 'off'}.
+                {supportsMtp && (llmStatus.mtp_acceleration === true) !== mtpEnabled ? ' This preference applies when a compatible writer next loads.' : ''}
+              </p>
+            )}
           </div>
         )}
       </div>

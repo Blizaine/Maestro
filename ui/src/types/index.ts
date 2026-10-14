@@ -1354,6 +1354,7 @@ export interface ServicesConfig {
   llm_model_id: string
   llm_device: string
   llm_provider: string
+  llm_mtp_acceleration?: boolean
   llm_remote_url: string
   llm_remote_api_key: string
   llm_remote_api_key_set: boolean
@@ -1661,6 +1662,7 @@ export interface LlmStatus {
   model_id: string | null
   device: string | null
   provider: string
+  mtp_acceleration?: boolean
 }
 
 /** Live hardware telemetry for the sidebar status indicators.
@@ -1688,6 +1690,7 @@ export interface LlmModelOption {
   id: string
   label: string
   size_hint: string
+  supports_mtp?: boolean
 }
 
 export interface AudioBeat {
