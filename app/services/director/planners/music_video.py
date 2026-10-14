@@ -45,6 +45,7 @@ from ..physical_continuity import (
 from .base import BasePlanner
 from ..music_narrative import (
     build_music_narrative_contract,
+    format_music_combat_context,
     format_music_narrative_context,
     music_narrative_row_issue,
     validate_music_narrative_allocation,
@@ -2265,7 +2266,7 @@ class MusicVideoPlanner(BasePlanner):
             kwargs,
             kind="music_video",
             fingerprint_payload={
-                "planner_revision": 24,
+                "planner_revision": 25,
                 **(
                     {"h3_music_physical_state_policy": "visual-prose-v1"}
                     if video_model.lower().startswith("minimax_h3") else {}
@@ -2283,12 +2284,27 @@ class MusicVideoPlanner(BasePlanner):
                 "shot_image_policy": shot_image_policy,
                 "vocal_activity": vocal_activity,
                 "character_ref_labels": kwargs.get("character_ref_labels") or [],
+                "source_participant_references": [
+                    ref.get("name") or ref.get("role", "")
+                    for ref in (kwargs.get("minimax_h3_references") or [])
+                    if isinstance(ref, dict) and ref.get("type") in {"image", "video"}
+                ],
                 "location_ref_labels": kwargs.get("location_ref_labels") or [],
             },
         )
 
         self._music_narrative_contract = (
-            build_music_narrative_contract(scene_description)
+            build_music_narrative_contract(
+                scene_description,
+                participant_hints=[
+                    *(kwargs.get("character_ref_labels") or []),
+                    *[
+                        ref.get("name") or ref.get("role", "")
+                        for ref in (kwargs.get("minimax_h3_references") or [])
+                        if isinstance(ref, dict) and ref.get("type") in {"image", "video"}
+                    ],
+                ],
+            )
             if video_model.lower().startswith("minimax_h3") else {"events": [], "source": scene_description}
         )
         self._music_arc = self._plan_music_arc(
@@ -2481,11 +2497,13 @@ class MusicVideoPlanner(BasePlanner):
             creative_plan_schema, normalize_music_arc, music_arc_quality_issues,
             music_arc_action_issues, music_arc_repetition_findings,
             music_arc_reprise_reason_findings,
+            ground_music_combat_arc,
         )
         cached = self._planning_resume_checkpoint.get("music_creative_arc")
         contract = self._music_narrative_contract
         self._music_arc_assignment_notes = []
         self._music_arc_quality_notes = []
+        combat_recovery_notes = []
         group_size = max(1, math.ceil(len(clips) / 48))
         groups = []
         for start in range(0, len(clips), group_size):
@@ -2503,7 +2521,7 @@ class MusicVideoPlanner(BasePlanner):
             reprise_findings = music_arc_reprise_reason_findings(outline)
             reprise_by_index = {finding["clip_index"]: finding for finding in reprise_findings}
             paired_indexes = {finding["clip_index"] for finding in repetition_findings}
-            notes = []
+            notes = copy.deepcopy(combat_recovery_notes)
 
             def clip_range(index):
                 first = index * group_size
@@ -2663,6 +2681,8 @@ class MusicVideoPlanner(BasePlanner):
             "explicit fixed-camera, single-location, continuous-shot or immediate-action "
             "requests. Choose a deliberate opening, development, contrast and ending "
             "appropriate to THIS concept and the music. Let important moments breathe. "
+            "Preserve every explicitly requested part of a mixed concept: vocal performance "
+            "does not replace requested story action or its other participants. "
             "Place enabling actions before their consequences, but do not rush every "
             "requested action into the opening. Distribute the main developments across "
             "the song's sections; later clips need meaningful development, not camera "
@@ -2680,6 +2700,9 @@ class MusicVideoPlanner(BasePlanner):
             + "\nSong timeline: " + json.dumps(timeline, ensure_ascii=False)
             + lyric_context
         )
+        combat_context = format_music_combat_context(contract)
+        if combat_context:
+            prompt += "\n" + combat_context
         if event_ids:
             prompt += (
                 "\nOutput an object with beats and source_event_clips. Each beat "
@@ -2741,6 +2764,16 @@ class MusicVideoPlanner(BasePlanner):
                             baseline_by_index[row["clip_index"]]["source_event_ids"]
                         )
             outline = normalize_music_arc(rows, groups, contract)
+            outline, recovered = ground_music_combat_arc(outline, contract)
+            if recovered:
+                for note in recovered:
+                    note = copy.deepcopy(note)
+                    note["clip_index"] *= group_size
+                    note["clip_end_index"] = note["clip_index"]
+                    if note not in combat_recovery_notes:
+                        combat_recovery_notes.append(note)
+                # Restoring an action cannot bypass ordinary outline checks.
+                outline = normalize_music_arc(outline, groups, contract)
             early = bool(re.search(
                 r"\b(?:immediately|right away|from the start)\b",
                 scene_description, re.I,
@@ -3463,7 +3496,9 @@ class MusicVideoPlanner(BasePlanner):
                         "in the visible action when they remain relevant; show a "
                         "change through the requested action. Do not invent a "
                         "mount, grip, contact, or starting position. Do not replay "
-                        "the completed action from the previous clip."
+                        "a completed one-time transition from the previous clip. "
+                        "An explicitly requested ongoing performance or conflict "
+                        "may continue with new visible action."
                     )
                 if repair:
                     batch_concept += (

@@ -1117,6 +1117,19 @@ after updating the test machine remains a separate validation step.
 
 ### Other validation limits
 
+- A captured H3 music-video request mixing singing with reciprocal combat
+  produced nine solo-performance clips in its text plan. The original action
+  parser extracted no source events from its broad fight/battle wording; the
+  reference images still reached the renderer. Regression coverage now checks
+  collective participant binding, source-grounded outline recovery, and later
+  combat continuation without requiring combat or both characters in every clip.
+  The broader Director CPU suite passed 597 tests; focused combat, source-action,
+  recovery and repetition checks also passed. Six captured-source replays cover
+  named and unnamed reference hints and three possible fight assignments, keeping
+  the other eight outline beats intact. No fresh writer or video call was made
+  while the user's render was active.
+  These are text and planner checks. A fresh rendered comparison remains needed
+  to establish battle execution, effects, motion and lip-sync quality.
 - 6/8/10 GB VRAM and 16 GB RAM recommendations are conservative extrapolations,
   not measured generation compatibility. The pure recommendation function
   selects Profile 4.5 for 32-GB RAM / 6–10-GB VRAM and Profile 5 for 16-GB RAM.

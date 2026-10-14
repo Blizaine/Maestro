@@ -15,6 +15,7 @@ from .music_narrative import (
     _event_with_row_actor_identity,
     _is_nominal_action_reference,
     _is_static_modifier_match,
+    combat_source_action,
     format_music_narrative_context,
     music_narrative_row_issue,
     validate_music_narrative_allocation,
@@ -837,6 +838,18 @@ def compile_music_narrative_source_row(
     }
     for event in current_events:
         event_id = str(event.get("event_id") or "")
+        if str(event.get("kind") or "").casefold() == "combat":
+            clause = combat_source_action(event)
+            groups = event.get("participant_alias_groups", [])
+            if not clause or len(groups) != 2 or not all(
+                group and any(_row_has_actor(row, alias) for alias in group)
+                for group in groups
+            ):
+                return None
+            # Restore both existing cast members; never invent a missing
+            # opponent or compile only the first actor's part of the fight.
+            action_clauses.append(clause.rstrip(".!?") + ".")
+            continue
         aliases = _validated_aliases(event, "actor_aliases")
         if not aliases:
             return None

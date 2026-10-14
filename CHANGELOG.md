@@ -7,6 +7,10 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 Public Dev testing candidate; not promoted to Main. See the [full release notes](docs/RELEASE_NOTES_V2.7.0.md).
 
+- Preserve explicit reciprocal combat in Director music-video concepts, including
+  collective participants and requested power use. Recover an omitted fight at
+  its assigned outline beat without replacing the other shots; allow continuing
+  exchanges after that first fight instead of reducing the concept to singing.
 - Repair YuE2 song-generation downloads after upstream repository history
   consolidation removed the original pinned snapshot. Use a verified replacement
   snapshot for inference and optional training, preserving installed weights and

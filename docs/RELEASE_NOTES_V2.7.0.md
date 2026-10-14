@@ -445,6 +445,12 @@ paths before sharing them.
 
 ## Update and limitations
 
+Director music videos now retain explicit fights and battles alongside vocal
+performance. Both opponents remain part of the required visual action; continuing
+combat can develop after its first assigned beat. A song merely mentioning an
+antagonist does not require that character onscreen. Missing combat anchors can
+be restored from the source concept while keeping the other planned shots.
+
 YuE2 song generation now downloads from a replacement pinned snapshot after the
 upstream TTS repository consolidated its history. The required files and recorded
 weight hashes match the previous manifest; existing weights and saved artist

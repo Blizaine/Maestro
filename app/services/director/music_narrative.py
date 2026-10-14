@@ -10,7 +10,7 @@ import re
 from typing import Any
 
 
-_REVISION = 1
+_REVISION = 2
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _SENTENCE_RE = re.compile(r"[^.!?;\n]+(?:[.!?;]+|$)")
 _SUBJECT_TAG_RE = re.compile(r"<\s*subject\s+\d+\s*>", re.IGNORECASE)
@@ -18,10 +18,32 @@ _NATIVE_SECTION_RE = re.compile(
     r"(?im)^\s*(subject_definitions|summary|retention_analysis|"
     r"detailed_description|overall_soundscape|non_diegetic_music)\s*:\s*"
 )
+_CAST_CREDIT_PAREN_RE = re.compile(
+    r"\([^)]*\b(?:played|portrayed|voiced|performed)\s+by\b[^)]*\)",
+    re.IGNORECASE,
+)
+_TITLE_PERIOD_RE = re.compile(r"\b(Dr|Mr|Mrs|Ms|Prof|Capt|Gen|Lt|Col)\.\s+(?=[A-Z])")
+_COMBAT_PROPER_NAME_RE = re.compile(
+    r"\b(?:Dr|Mr|Mrs|Ms|Prof|Capt|Gen|Lt|Col)\.\s+[A-Z][\w’'-]*"
+    r"(?:\s+[A-Z][\w’'-]*){0,1}\b|"
+    r"\b[A-Z][\w’'-]*(?:\s+[A-Z][\w’'-]*){0,2}\b"
+)
+_COMBAT_GENERIC_NAME_WORDS = {
+    "a", "an", "and", "but", "cinematic", "director", "include", "music",
+    "scene", "show", "the", "then", "they", "this", "video", "we",
+}
 
 # Keep the inventory finite and action-focused. In particular, singing,
 # dancing, holding, wearing, and riding are not transitions by themselves.
 _ACTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "combat",
+        re.compile(
+            r"\b(?:fight(?:s|ing)?|fought|battle(?:s|d|ing)?|"
+            r"duel(?:s|ed|ing)?|clash(?:es|ed|ing)?)\b",
+            re.IGNORECASE,
+        ),
+    ),
     (
         "boarding",
         re.compile(
@@ -377,8 +399,71 @@ _PRONOUNS = {"he", "she", "it", "they", "them", "him", "her"}
 _CONNECTOR_RE = re.compile(r"\b(?:and\s+then|then|and|but|while|as|after|before|when)\b", re.I)
 _NEGATION_RE = re.compile(
     r"\b(?:not|never|without|avoid|avoids|avoided|cannot|can['’]t|"
-    r"don['’]t|doesn['’]t|didn['’]t|won['’]t|shouldn['’]t|no\s+longer)\b",
+    r"don['’]t|doesn['’]t|didn['’]t|won['’]t|shouldn['’]t|no\s+longer|"
+    r"refuse(?:s|d)?\s+to|decline(?:s|d)?\s+to)\b",
     re.IGNORECASE,
+)
+_ABSTRACT_COMBAT_TARGET_RE = re.compile(
+    r"\b(?:inner\s+)?(?:demons?|fears?|doubts?|grief|sorrow|despair|"
+    r"addiction|illness|disease|cancer|fate|past|self|ego|darkness|"
+    r"loneliness|regret|trauma|temptation)\b",
+    re.IGNORECASE,
+)
+_COMBAT_COVERAGE_ACTION_RE = re.compile(
+    r"\b(?:fight(?:s|ing)?|fought|battl(?:e|es|ed|ing)|duel(?:s|ed|ing)?|"
+    r"clash(?:es|ed|ing)?|attack(?:s|ed|ing)?|strik(?:e|es|ing)|struck|"
+    r"hit(?:s|ting)?|punch(?:es|ed|ing)?|kick(?:s|ed|ing)?|slash(?:es|ed|ing)?|"
+    r"stab(?:s|bed|bing)?|smash(?:es|ed|ing)?|blast(?:s|ed|ing)?|"
+    r"charg(?:e|es|ed|ing)|shoot(?:s|ing)?|fired|fire(?:s|ing)|"
+    r"block(?:s|ed|ing)?|parr(?:y|ies|ied|ying)|deflect(?:s|ed|ing)?|"
+    r"counter(?:s|ed|ing)?|counters?|swings?|swinging|hurl(?:s|ed|ing)?|"
+    r"throw(?:s|ing)|threw|trade(?:s|d|ing)?\s+(?:blows|attacks|strikes))\b",
+    re.IGNORECASE,
+)
+_COMBAT_POWER_ACTION_RE = re.compile(
+    r"\b(?:fight(?:s|ing)?|fought|battl(?:e|es|ed|ing)|duel(?:s|ed|ing)?|"
+    r"clash(?:es|ed|ing)?|attack(?:s|ed|ing)?|strik(?:e|es|ing)|struck|"
+    r"hit(?:s|ting)?|punch(?:es|ed|ing)?|kick(?:s|ed|ing)?|slash(?:es|ed|ing)?|"
+    r"blast(?:s|ed|ing)?|charg(?:e|es|ed|ing)|shoot(?:s|ing)?|fire(?:s|ing)?|"
+    r"block(?:s|ed|ing)?|parr(?:y|ies|ied|ying)|deflect(?:s|ed|ing)?|"
+    r"counter(?:s|ed|ing)?|swing(?:s|ing)?|hurl(?:s|ed|ing)?|throw(?:s|ing)|"
+    r"threw|cast(?:s|ing)?|unleash(?:es|ed|ing)?|channel(?:s|ed|ing)?|"
+    r"wield(?:s|ed|ing)?|summon(?:s|ed|ing)?|use(?:s|d|ing)?)\b",
+    re.IGNORECASE,
+)
+_COMBAT_POWER_EFFECT_RE = re.compile(
+    r"\b(?:power(?:s|ful)?|magic|magical|spell(?:s)?|lightning|energy|"
+    r"bolt(?:s)?|beam(?:s)?|blast(?:s)?|force|storm|fire|arcane|sorcery|"
+    r"telekinetic|telepathy|shockwave(?:s)?)\b",
+    re.IGNORECASE,
+)
+_COMBAT_FUTURE_RE = re.compile(
+    r"\b(?:about\s+to|ready\s+to|preparing\s+to|plans?\s+to|"
+    r"threatens?\s+to|will|might|could)\s*$",
+    re.IGNORECASE,
+)
+_COMBAT_COLLECTIVE_POWER_RE = re.compile(
+    r"\b(?:each|both)\b[^.!?;]{0,180}\b(?:use|uses|using|wield|wields|"
+    r"wielding|channel|channels|channeling|cast|casts|casting)\b"
+    r"[^.!?;]{0,100}\b(?:their|its|his|her)\s+"
+    r"(?:own|respective|distinct|different)\s+powers?\b",
+    re.I,
+)
+_COMBAT_LYRIC_REFERENCE_RE = re.compile(
+    r"\b(?:sing(?:s|ing)?|sang|song|songs|lyric|lyrics)\b"
+    r"[^.!?;]{0,96}\b(?:about|of)\b[^.!?;]{0,96}$",
+    re.I,
+)
+_COMBAT_NOMINAL_TAIL_RE = re.compile(
+    r"^\s+(?:field|ground|scene|sequence|stance|pose|style|spirit|cry|"
+    r"song|songs|lyric|lyrics|metaphor|of\s+the\s+bands)\b",
+    re.I,
+)
+_COMBAT_NONPHYSICAL_PREFIX_RE = re.compile(r"\b(?:rap|dance)\s+$", re.I)
+_COMBAT_NONPHYSICAL_CONTEXT_RE = re.compile(
+    r"\b(?:rap|dance)\s+battle\b|\bbattle\s+of\s+the\s+bands\b|"
+    r"\bfight\s+song\b|\bbattle\s+field\b",
+    re.I,
 )
 _STATE_PATTERNS: tuple[tuple[re.Pattern[str], bool], ...] = (
     (re.compile(r"\b(?:riding|rides|rode)\b", re.I), False),
@@ -415,15 +500,57 @@ def _mask_quoted_text(value: str) -> str:
     return masked
 
 
+def _mask_cast_credit_text(value: str) -> str:
+    """Hide cast-credit actor names without shifting source offsets."""
+
+    return _CAST_CREDIT_PAREN_RE.sub(
+        lambda match: " " * len(match.group(0)), value,
+    )
+
+
 def _sentence_ranges(value: str) -> list[tuple[int, int]]:
-    return [(match.start(), match.end()) for match in _SENTENCE_RE.finditer(value)]
+    # Preserve offsets while preventing honorific periods (Dr., Capt.) from
+    # splitting a participant name away from the following collective clause.
+    protected = _TITLE_PERIOD_RE.sub(
+        lambda match: match.group(0).replace(".", "\x01"), value,
+    )
+    return [(match.start(), match.end()) for match in _SENTENCE_RE.finditer(protected)]
+
+
+def _is_nominal_combat_match(value: str, start: int, end: int, verb: str) -> bool:
+    normalized = _normal_text(verb)
+    if normalized not in {"fight", "fighting", "battle", "battles", "duel", "dueling", "clash"}:
+        return False
+    return bool(
+        _COMBAT_NOMINAL_TAIL_RE.match(value[end:])
+        or (
+            normalized in {"battle", "battles"}
+            and _COMBAT_NONPHYSICAL_PREFIX_RE.search(value[max(0, start - 24):start])
+        )
+    )
+
+
+def _is_abstract_combat_target(tail: str) -> bool:
+    # "Fight inner demons" is metaphorical; "fight Doom in darkness" is
+    # still literal combat. Judge the verb's direct target, not its setting.
+    direct_target = re.sub(
+        r"^\s*(?:(?:against|with)\s+)?(?:(?:their|his|her|its|my|our|the|an?)\s+)?",
+        "", tail, flags=re.I,
+    )
+    return bool(_ABSTRACT_COMBAT_TARGET_RE.match(direct_target))
 
 
 def _action_matches(value: str) -> list[tuple[int, int, str, str]]:
     found: list[tuple[int, int, str, str]] = []
     for kind, pattern in _ACTION_PATTERNS:
         for match in pattern.finditer(value):
-            if not _is_filmmaking_action(value, match.start(), match.end(), match.group(0)):
+            if (
+                not _is_filmmaking_action(value, match.start(), match.end(), match.group(0))
+                and not (
+                    kind == "combat"
+                    and _is_nominal_combat_match(value, match.start(), match.end(), match.group(0))
+                )
+            ):
                 found.append((match.start(), match.end(), kind, match.group(0)))
     found.sort(key=lambda item: (item[0], -(item[1] - item[0])))
     selected: list[tuple[int, int, str, str]] = []
@@ -652,6 +779,215 @@ def _target_aliases(sentence_tail: str) -> list[str]:
     return _aliases_from_words(words[:5])
 
 
+def _combat_name_candidates(value: str) -> list[tuple[str, list[str]]]:
+    """Return recent named-entity candidates without cast-credit aliases."""
+
+    visible = _mask_cast_credit_text(_mask_quoted_text(value))
+    candidates: list[tuple[int, int, str, list[str]]] = []
+    for match in _COMBAT_PROPER_NAME_RE.finditer(visible):
+        surface = match.group(0).strip()
+        normalized_surface = _TITLE_PERIOD_RE.sub(
+            lambda title: title.group(1) + " ", surface,
+        )
+        words = re.findall(r"[A-Za-z][\w’'-]*", normalized_surface)
+        if not words or words[0].casefold() in _COMBAT_GENERIC_NAME_WORDS:
+            continue
+        aliases = _aliases_from_words(words)
+        if not aliases or _normal_text(aliases[0]) in _COMBAT_GENERIC_NAME_WORDS:
+            continue
+        candidates.append((match.start(), match.end(), surface, aliases))
+
+    # Prefer the longest overlapping proper-name span (Dr. Doom over Doom),
+    # then collapse repeated mentions while retaining their first surface form.
+    selected: list[tuple[int, int, str, list[str]]] = []
+    for candidate in sorted(candidates, key=lambda item: (item[0], -(item[1] - item[0]))):
+        overlapping = next((
+            index for index, prior in enumerate(selected)
+            if candidate[0] < prior[1] and candidate[1] > prior[0]
+        ), None)
+        if overlapping is not None:
+            prior = selected[overlapping]
+            if candidate[1] - candidate[0] > prior[1] - prior[0]:
+                selected[overlapping] = candidate
+            continue
+        selected.append(candidate)
+    unique: list[tuple[str, list[str]]] = []
+    seen: set[str] = set()
+    for _start, _end, surface, aliases in selected:
+        canonical = _normal_text(aliases[0])
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        unique.append((surface, aliases))
+
+    # If the brief names one or both opponents with lowercase descriptive
+    # nouns ("the kitten" / "the dragon"), retain those article-led entities
+    # as a fallback. Proper names stay preferred when two are available.
+    if len(unique) < 2:
+        for start, end, aliases in _entity_candidates(visible):
+            if any(start < prior_end and end > prior_start for prior_start, prior_end, _surface, _aliases in selected):
+                continue
+            canonical = _normal_text(aliases[0])
+            if not canonical or canonical in seen:
+                continue
+            surface = visible[start:end].strip()
+            surface = re.sub(r"^(?:the|a|an)\s+", "", surface, flags=re.I)
+            if not surface:
+                continue
+            seen.add(canonical)
+            unique.append((surface, aliases))
+    return unique
+
+
+def _combat_participants(
+    sentence: str,
+    action_start: int,
+    prior_context: str,
+    participant_hints: Any,
+) -> tuple[list[list[str]], list[str]]:
+    """Resolve two named participants for explicit reciprocal combat only."""
+
+    candidates = _combat_name_candidates(prior_context + " " + sentence)
+    hint_values = participant_hints if isinstance(participant_hints, (list, tuple)) else []
+    hinted: list[tuple[str, list[str]]] = []
+    for hint in hint_values:
+        if not isinstance(hint, str) or not hint.strip():
+            continue
+        parsed = _combat_name_candidates(hint)
+        if parsed:
+            hint_name, hint_aliases = parsed[-1]
+        else:
+            words = re.findall(r"[A-Za-z][\w’'-]*", hint)
+            hint_aliases = _aliases_from_words(words)
+            hint_name = " ".join(words)
+        if not hint_aliases:
+            continue
+        matched = next((
+            item for item in candidates
+            if _contains_alias(item[0], hint_aliases)
+            or _contains_alias(hint_name, item[1])
+        ), None)
+        if matched is not None:
+            hinted.append(matched)
+    if len({_normal_text(item[1][0]) for item in hinted}) >= 2:
+        chosen: list[tuple[str, list[str]]] = []
+        seen_hints: set[str] = set()
+        for item in hinted:
+            key = _normal_text(item[1][0])
+            if key not in seen_hints:
+                seen_hints.add(key)
+                chosen.append(item)
+        return _separate_combat_groups(chosen[:2])
+
+    prefix = sentence[:action_start]
+    if re.search(r"\b(?:they|them)\s*$", prefix, re.I):
+        # Collective pronouns are resolved against bounded source context;
+        # cast-credit parentheticals are removed before candidate extraction.
+        local_candidates = _combat_name_candidates(prior_context + " " + prefix)
+    else:
+        # For an explicit subject/object construction ("Astra fights Regent"),
+        # include the current clause's right side when selecting the pair.
+        local_candidates = _combat_name_candidates(prior_context + " " + sentence)
+    if len(local_candidates) < 2:
+        return [], []
+    chosen = local_candidates[-2:]
+    return _separate_combat_groups(chosen)
+
+
+def _separate_combat_groups(
+    chosen: list[tuple[str, list[str]]],
+) -> tuple[list[list[str]], list[str]]:
+    if len(chosen) != 2:
+        return [], []
+    first, second = chosen
+    first_full = _normal_text(first[1][0])
+    second_full = _normal_text(second[1][0])
+    if not first_full or not second_full or first_full == second_full:
+        return [], []
+    first_aliases = list(first[1])
+    second_aliases = list(second[1])
+    shared = {_normal_text(alias) for alias in first_aliases} & {
+        _normal_text(alias) for alias in second_aliases
+    }
+    first_aliases = [alias for alias in first_aliases if _normal_text(alias) not in shared]
+    second_aliases = [alias for alias in second_aliases if _normal_text(alias) not in shared]
+    if not first_aliases or not second_aliases:
+        return [], []
+    return [first_aliases, second_aliases], [first[0], second[0]]
+
+
+def _combat_event_text_end(
+    sentence: str,
+    action_end: int,
+    next_action_start: int | None,
+) -> int:
+    """Keep one complete combat clause, including coordinated action/powers."""
+
+    if next_action_start is None:
+        return len(sentence)
+    between = sentence[action_end:next_action_start]
+    separator = re.search(
+        r"[;\n]|\b(?:and\s+then|then|but|while|after|before|when)\b",
+        between,
+        re.I,
+    )
+    return action_end + separator.start() if separator else len(sentence)
+
+
+def combat_source_action(event: Any) -> str | None:
+    """Return a named, source-grounded combat clause or decline it safely."""
+
+    if not isinstance(event, dict) or str(event.get("kind") or "").casefold() != "combat":
+        return None
+    groups = event.get("participant_alias_groups")
+    names = event.get("participant_names")
+    text = str(event.get("text") or "").strip()
+    if (
+        not isinstance(groups, list) or len(groups) != 2
+        or not all(
+            isinstance(group, list)
+            and any(isinstance(alias, str) and alias.strip() for alias in group)
+            for group in groups
+        )
+        or not isinstance(names, list) or len(names) != 2
+        or not all(isinstance(name, str) and name.strip() for name in names)
+        or not text
+    ):
+        return None
+    if event.get("collective_subject") is True:
+        text = re.sub(r"^\s*(?:they|them|both)\b\s*", "", text, flags=re.I)
+        subject = f"{names[0].strip()} and {names[1].strip()}"
+    else:
+        subject = names[0].strip()
+    return f"{subject} {text}".strip()
+
+
+def format_music_combat_context(contract: Any) -> str:
+    """Explain that source-grounded combat may continue across an arc."""
+
+    events = [event for event in _contract_events(contract) if str(event.get("kind") or "").casefold() == "combat"]
+    ongoing = [event for event in events if event.get("ongoing") is True]
+    if not ongoing:
+        return ""
+    clauses = [clause for event in ongoing if (clause := combat_source_action(event))]
+    if not clauses:
+        return ""
+    powers_required = any(event.get("requires_distinct_powers") is True for event in ongoing)
+    power_guidance = (
+        "Show each opponent visibly using their own distinct power in the assigned combat anchor. "
+        if powers_required else ""
+    )
+    return (
+        "ONGOING COMBAT REQUIREMENT: Continue the source-grounded reciprocal combat "
+        "across the music video where it serves the arc, beginning with its assigned "
+        "anchor action. " + power_guidance
+        + "Later clips may develop or continue the conflict, but combat need not appear "
+        "in every clip or every frame; solo performance, reactions, and cutaways remain "
+        "valid. Anger, lyrics, identity text, or a combat reference alone do not count "
+        "as visible combat. Source combat: " + "; ".join(clauses)
+    )
+
+
 def _event_text_end(
     sentence: str,
     action_end: int,
@@ -689,7 +1025,11 @@ def _dedupe(values: list[str]) -> list[str]:
     return result
 
 
-def build_music_narrative_contract(source: Any) -> dict[str, Any]:
+def build_music_narrative_contract(
+    source: Any,
+    *,
+    participant_hints: Any = None,
+) -> dict[str, Any]:
     """Extract ordered, concrete music-video actions from the original brief."""
 
     original = str(source or "")
@@ -697,7 +1037,7 @@ def build_music_narrative_contract(source: Any) -> dict[str, Any]:
     # "Also include ... as it swoops down and breathes fire" remain visible.
     # This small parser is self-contained instead of importing H3's event
     # splitter, which can discard action clauses attached to directives.
-    visible_source = _mask_quoted_text(original)
+    visible_source = _mask_cast_credit_text(_mask_quoted_text(original))
     events: list[dict[str, Any]] = []
     for sentence_start, sentence_end in _sentence_ranges(original):
         sentence = original[sentence_start:sentence_end]
@@ -712,17 +1052,49 @@ def build_music_narrative_contract(source: Any) -> dict[str, Any]:
             )
         ]
         prior_actor: list[str] = []
+        combat_covered_until = -1
         for action_number, (action_start, action_end, kind, verb_text) in enumerate(matches):
+            if kind == "combat" and action_start < combat_covered_until:
+                continue
             if _is_negated_before(visible_sentence, action_start):
                 continue
-            actor_aliases = _actor_aliases(
-                visible_sentence, action_start, prior_actor, action_number,
-            )
+            participants: list[list[str]] = []
+            participant_names: list[str] = []
+            if kind == "combat":
+                action_tail = visible_sentence[action_end:]
+                if (
+                    _is_abstract_combat_target(action_tail)
+                    or _COMBAT_NONPHYSICAL_CONTEXT_RE.search(visible_sentence)
+                    or _COMBAT_LYRIC_REFERENCE_RE.search(
+                        _last_clause_prefix(visible_sentence, action_start),
+                    )
+                ):
+                    continue
+                participants, participant_names = _combat_participants(
+                    visible_sentence,
+                    action_start,
+                    visible_source[max(0, sentence_start - 1200):sentence_start],
+                    participant_hints,
+                )
+                if len(participants) != 2 or len(participant_names) != 2:
+                    continue
+                actor_aliases = participants[0]
+            else:
+                actor_aliases = _actor_aliases(
+                    visible_sentence, action_start, prior_actor, action_number,
+                )
             prior_actor = actor_aliases or prior_actor
             tail = sentence[action_end:]
-            following = [item[0] for item in matches if item[0] > action_start]
+            following = [
+                item[0] for item in matches
+                if item[0] > action_start and (kind != "combat" or item[2] != "combat")
+            ]
             next_action_start = following[0] if following else None
-            text_end = _event_text_end(sentence, action_end, next_action_start)
+            text_end = (
+                _combat_event_text_end(sentence, action_end, next_action_start)
+                if kind == "combat"
+                else _event_text_end(sentence, action_end, next_action_start)
+            )
             action_text = sentence[action_start:text_end].strip(" \t\r\n.,;:!?-")
             if not action_text:
                 continue
@@ -734,6 +1106,28 @@ def build_music_narrative_contract(source: Any) -> dict[str, Any]:
             }
             if actor_aliases:
                 event["actor_aliases"] = _dedupe(actor_aliases)
+            if kind == "combat":
+                event["participant_alias_groups"] = [
+                    _dedupe(group) for group in participants
+                ]
+                event["participant_names"] = participant_names
+                prefix_names = _combat_name_candidates(visible_sentence[:action_start])
+                event["collective_subject"] = bool(
+                    re.search(r"\b(?:they|them|both)\s*$", visible_sentence[:action_start], re.I)
+                    or len(prefix_names) >= 2
+                )
+                event["ongoing"] = bool(re.search(
+                    r"\b(?:battles|duels|clashes|ongoing|throughout|continue|continues|continuing|repeatedly|repeated)\b",
+                    action_text,
+                    re.I,
+                ))
+                event["requires_distinct_powers"] = bool(re.search(
+                    r"\b(?:respective|distinct|different|own)\s+powers\b|"
+                    r"\b(?:each|both)\b[^.!?;]{0,48}\b(?:using|use|uses|wield|wields|channel|channels|cast|casts)\b[^.!?;]{0,32}\bpower(?:s)?\b",
+                    action_text,
+                    re.I,
+                ))
+                combat_covered_until = text_end
             target_aliases = _target_aliases(tail) if kind == "boarding" else []
             if target_aliases:
                 event["target_aliases"] = _dedupe(target_aliases)
@@ -1519,7 +1913,107 @@ def _generic_semantic_action_positions(prompt: str, event: dict[str, Any]) -> li
     return positions
 
 
+def _combat_alias_groups(event: dict[str, Any]) -> list[list[str]]:
+    raw = event.get("participant_alias_groups")
+    if not isinstance(raw, list) or len(raw) != 2:
+        return []
+    groups = [
+        _dedupe([str(alias) for alias in group if isinstance(alias, str) and alias.strip()])
+        if isinstance(group, list) else []
+        for group in raw
+    ]
+    return groups if all(groups) else []
+
+
+def _combat_alias_spans(sentence: str, aliases: list[str]) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for alias in sorted(aliases, key=len, reverse=True):
+        normalized = alias.strip()
+        if not normalized:
+            continue
+        title_words = {"dr", "mr", "mrs", "ms", "prof", "capt", "gen", "lt", "col"}
+        parts = [
+            re.escape(word) + (r"\.?" if word.casefold() in title_words else "")
+            for word in normalized.split()
+        ]
+        alias_pattern = r"\s+".join(parts)
+        pattern = re.compile(
+            rf"(?<![\w]){alias_pattern}(?![\w])", re.I,
+        )
+        for match in pattern.finditer(sentence):
+            if not any(match.start() < end and match.end() > start for start, end in spans):
+                spans.append((match.start(), match.end()))
+    return sorted(spans)
+
+
+def _combat_power_is_visible(sentence: str, groups: list[list[str]]) -> bool:
+    for aliases in groups:
+        found = False
+        for start, end in _combat_alias_spans(sentence, aliases):
+            neighborhood = sentence[max(0, start - 44):min(len(sentence), end + 100)]
+            after_name = sentence[end:min(len(sentence), end + 88)]
+            before_name = sentence[max(0, start - 44):start]
+            after_has_action = bool(_COMBAT_POWER_ACTION_RE.search(after_name))
+            after_has_effect = bool(_COMBAT_POWER_EFFECT_RE.search(after_name))
+            before_effect = bool(_COMBAT_POWER_EFFECT_RE.search(before_name))
+            if (
+                after_has_action and after_has_effect
+                or before_effect and after_has_action
+                or _COMBAT_COLLECTIVE_POWER_RE.search(neighborhood)
+            ):
+                found = True
+                break
+        if not found:
+            return False
+    return True
+
+
+def _combat_coverage_positions(prompt: str, event: dict[str, Any]) -> list[int]:
+    """Require two named opponents and a concrete, positive combat action."""
+
+    groups = _combat_alias_groups(event)
+    if not groups:
+        return []
+    analysis_prompt = _mask_quoted_text(prompt)
+    positions: list[int] = []
+    ranges = _sentence_ranges(analysis_prompt)
+    sentences = [analysis_prompt[start:end] for start, end in ranges]
+    for sentence_index, (start, end) in enumerate(ranges):
+        sentence = analysis_prompt[start:end]
+        if not all(_combat_alias_spans(sentence, group) for group in groups):
+            continue
+        power_window = " ".join(sentences[sentence_index:sentence_index + 2])
+        for match in _COMBAT_COVERAGE_ACTION_RE.finditer(sentence):
+            if _is_negated_before(sentence, match.start()):
+                continue
+            if _COMBAT_LYRIC_REFERENCE_RE.search(
+                _last_clause_prefix(sentence, match.start()),
+            ):
+                continue
+            if _COMBAT_FUTURE_RE.search(sentence[max(0, match.start() - 36):match.start()]):
+                continue
+            tail = sentence[match.end():match.end() + 80]
+            if _is_abstract_combat_target(tail):
+                continue
+            if re.match(r"\s+(?:stance|pose|style|spirit|scene|sequence|song|lyrics)\b", tail, re.I):
+                continue
+            if (
+                event.get("requires_distinct_powers") is True
+                and not (
+                    _COMBAT_COLLECTIVE_POWER_RE.search(power_window)
+                    or _combat_power_is_visible(power_window, groups)
+                )
+            ):
+                continue
+            normalized_start = len(_normal_text(analysis_prompt[:start] + " " + sentence[:match.start()]))
+            positions.append(normalized_start)
+            break
+    return positions
+
+
 def _event_coverage_positions(prompt: str, event: dict[str, Any]) -> list[int]:
+    if str(event.get("kind") or "").casefold() == "combat":
+        return _combat_coverage_positions(prompt, event)
     literal_positions = _action_positions(prompt, event)
     semantic_positions = _semantic_action_positions(prompt, event)
     generic_semantic_positions = _generic_semantic_action_positions(prompt, event)
@@ -1676,6 +2170,12 @@ def music_narrative_row_issue(
         row_event = _event_with_row_actor_identity(row, event)
         positions = _event_coverage_positions(prompt, row_event)
         if not positions:
+            if str(event.get("kind") or "").casefold() == "combat":
+                return (
+                    f"clip {index + 1} must visibly show both named opponents "
+                    f"exchanging physical combat for assigned source event {event_id}: "
+                    f"{event.get('text', '')}"
+                )
             literal_positions = _action_positions(prompt, event, require_actor=False)
             actor_aliases = _aliases(event, "actor_aliases")
             if literal_positions and actor_aliases:

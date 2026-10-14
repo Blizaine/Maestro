@@ -377,7 +377,20 @@ def music_arc_quality_issues(
                 if len(content) < 2 or len(concrete_content) < 2:
                     _safe_issue(issues, f"clip {index} visual_beat needs a specific visible action, change, or image")
                 if _whole_brief_copy(beat, contract):
-                    _safe_issue(issues, f"clip {index} visual_beat repeats the full source brief instead of one beat")
+                    # A brief consisting only of one fight can equal the exact
+                    # named action recovered into its sole assigned slot. That
+                    # is source coverage, not global-brief recycling elsewhere.
+                    from .music_narrative import combat_source_action
+                    source_events = contract.get("events", [])
+                    event = source_events[0] if len(source_events) == 1 else {}
+                    named_action = combat_source_action(event)
+                    recovered_anchor = (
+                        named_action
+                        and row.get("source_event_ids") == [event.get("event_id")]
+                        and _normalized_arc_text(beat) == _normalized_arc_text(named_action)
+                    )
+                    if not recovered_anchor:
+                        _safe_issue(issues, f"clip {index} visual_beat repeats the full source brief instead of one beat")
 
         ids = row.get("source_event_ids")
         if not _is_sequence(ids):
@@ -453,6 +466,49 @@ def music_arc_action_issues(rows: Any, contract: Any) -> list[str]:
         if issue:
             _safe_issue(issues, "Outline action mismatch: " + issue)
     return issues
+
+
+def ground_music_combat_arc(rows: Any, contract: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Recover an omitted combat anchor from its source without resetting the arc.
+
+    The event's assigned slot is already grammar constrained. A solo performance
+    cannot stand in for that fight; keep the other beats, camera and environment
+    intact and restore only the named source action at its existing slot.
+    """
+    from .music_narrative import _event_coverage_positions, combat_source_action
+
+    if not _is_sequence(rows):
+        return [], []
+    grounded = copy.deepcopy(list(rows))
+    notes: list[dict[str, Any]] = []
+    events = contract.get("events", []) if isinstance(contract, Mapping) else []
+    for event in events:
+        if not isinstance(event, dict) or event.get("kind") != "combat":
+            continue
+        event_id = event.get("event_id")
+        anchors = [row for row in grounded if isinstance(row, dict)
+                   and event_id in row.get("source_event_ids", [])]
+        if len(anchors) != 1:
+            continue  # Structural/source assignment checks own this failure.
+        row = anchors[0]
+        if _event_coverage_positions(str(row.get("visual_beat") or ""), event):
+            continue
+        action = combat_source_action(event)
+        if not action or len(action) > _MAX_BEAT_CHARS:
+            continue  # Never truncate an actor or action to manufacture coverage.
+        if not _event_coverage_positions(action, event):
+            continue
+        row["visual_beat"] = action
+        # The rejected solo-performance purpose must not steer detail writing
+        # away from the recovered source action again.
+        row["purpose"] = "Develop the requested physical conflict between its named participants."
+        notes.append({
+            "kind": "source_combat_recovery",
+            "clip_index": row["clip_index"],
+            "clip_end_index": row["clip_index"],
+            "message": "The outline omitted its assigned fight; restored the named source action while preserving the other beats.",
+        })
+    return grounded, notes
 
 
 def filter_music_arc_context(
