@@ -360,6 +360,38 @@ MODEL_REGISTRY = {
             "--cache-type-v", "q4_0",
         ],
     },
+    "Kujira/Underdog-Saluki-27B-1.0-MTP-Abliterated-GGUF": {
+        "label": "Underdog Saluki 27B IQ2-Mix Uncensored (Vision, Thinking)",
+        # Match the existing Qwen3.8 ordinary-decoding path for sequential
+        # multi-pass requests. Native MTP acceleration is not validated for
+        # this option and remains disabled.
+        "gguf_file": "Underdog-Saluki-27B-1.0-IQ2-mix-MTP-abliterated.gguf",
+        "mmproj_file": "mmproj-Underdog-Saluki-27B-1.0-Q8_0.gguf",
+        "mmproj_repo": "ConwayResearch/Underdog-Saluki-27B-1.0",
+        "weights_gb": 8.34969, "mmproj_gb": 0.629247, "arch": "qwen38-27b",
+        "thinking_style": "qwen",
+        "default_reasoning_effort": "xhigh",
+        "enable_thinking_by_default": True,
+        "default_thinking_budget": 8192,
+        "enable_thinking_for_prompt_enhancement": True,
+        "prompt_enhancement_thinking_budget": 8192,
+        "sampling_defaults_thinking": {
+            "temperature": 1.0, "top_p": 0.95, "top_k": 20,
+            "min_p": 0.0, "repeat_penalty": 1.0,
+            "frequency_penalty": 0.0, "presence_penalty": 1.1,
+        },
+        "sampling_defaults_nonthinking": {
+            "temperature": 0.7, "top_p": 0.80, "top_k": 20,
+            "min_p": 0.0, "repeat_penalty": 1.0,
+        },
+        "extra_flags": [
+            "-c", "32768",
+            "-np", "1",
+            "-fa", "on",
+            "--cache-type-k", "q8_0",
+            "--cache-type-v", "q8_0",
+        ],
+    },
     "Youssofal/Qwen3.6-27B-Abliterated-Heretic-Uncensored-GGUF": {
         "label": "Qwen3.6 27B Abliterated Heretic (Uncensored, Vision)",
         "gguf_file": "Qwen3.6-27B-Abliterated-Heretic-Uncensored-Q4_K_M.gguf",
@@ -605,6 +637,7 @@ for _repo_id, _info in MODEL_REGISTRY.items():
 # currently in the registry is simply skipped.
 _PUBLIC_MODEL_ORDER = [
     "JonathanColetti/Qwen3.8-27B-Uncensored-GGUF",
+    "Kujira/Underdog-Saluki-27B-1.0-MTP-Abliterated-GGUF",
     "Youssofal/Qwen3.6-27B-Abliterated-Heretic-Uncensored-GGUF",
     "Nesuwka/gemma-4-E2B-it-heretic-ara-Q4_K_M-GGUF",
     "Abhiray/gemma-4-E4B-it-heretic-GGUF",                         # default (Recommended)

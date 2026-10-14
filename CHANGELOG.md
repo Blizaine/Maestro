@@ -7,6 +7,10 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 Public Dev testing candidate; not promoted to Main. See the [full release notes](docs/RELEASE_NOTES_V2.7.0.md).
 
+- Add Underdog Saluki 27B IQ2-Mix Uncensored to the local LLM picker, with
+  its upstream Q8 vision projector, 32K context, quantized KV cache and
+  model-aware thinking/sampling. Downloads remain on demand; native MTP
+  drafting stays disabled for the multi-request Director workflow.
 - Refresh shared H3 Studio/Director duration recommendations for current
   resource tiers, including tested 24 GB Fused Frames native 1080p and explicit
   estimates for smaller/intermediate GPUs and RAM. Show recommendation provenance;

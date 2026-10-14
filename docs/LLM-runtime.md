@@ -11,6 +11,34 @@ with actual CUDA device rows permits GPU loading; a partial device list from
 a timed-out process is not accepted. Maestro keeps the selected device and
 does not switch to CPU automatically.
 
+## Underdog Saluki 27B
+
+Choose **Underdog Saluki 27B IQ2-Mix Uncensored (Vision, Thinking)** in
+**Settings → Integrations → LLM Model** with the Local provider to use
+[Kujira's GGUF](https://huggingface.co/Kujira/Underdog-Saluki-27B-1.0-MTP-Abliterated-GGUF).
+It is a compressed Qwen3.8-27B derivative of
+[Underdog Saluki](https://huggingface.co/ConwayResearch/Underdog-Saluki-27B-1.0).
+The selected file is `Underdog-Saluki-27B-1.0-IQ2-mix-MTP-abliterated.gguf`
+(approximately 8.35 GB). Maestro also uses the original project's
+`mmproj-Underdog-Saluki-27B-1.0-Q8_0.gguf` vision projector (0.63 GB).
+Files download when the model is first loaded.
+
+The profile uses a 32,768-token context, one server slot, Flash Attention and
+Q8 K/V caches. Its **12 GB VRAM** picker hint estimates weights, projector and
+KV cache; it is not a measured fit guarantee for every prompt or image set.
+Runtime buffers, recurrent state and other applications also use memory.
+
+Creative writing and prompt enhancement use the existing bounded Qwen thinking
+controls and the publisher's thinking sampling settings. Explicit non-thinking
+and grammar-constrained requests keep thinking off. The current default writer
+is unchanged.
+
+Although the file includes an MTP prediction head, Maestro does not enable
+native MTP speculative decoding for this profile. It uses ordinary decoding,
+consistent with the existing Qwen3.8 option's multi-request stability policy.
+The embedded model/template metadata and existing compatible llama.cpp loader
+were checked; end-to-end quality and memory use still require a generation test.
+
 ## Windows startup checks
 
 Windows uses the prebuilt llama.cpp CUDA executable and its bundled CUDA DLLs.

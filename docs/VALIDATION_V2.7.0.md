@@ -117,6 +117,29 @@ Fused Frames at 1920×1088 and Fused References at 1280×704, and the rebuilt UI
 asset was served. The second workstation was untouched. Main, public Dev and
 release tags were not pushed.
 
+## Local writer catalog follow-up — October 14
+
+The local picker adds Kujira's Underdog Saluki 27B IQ2-Mix Uncensored, using
+the verified GGUF filename and the original project's Q8 vision projector.
+The profile has a 32K context and Q8 K/V cache; Gemma remains the default.
+Bounded reads of the actual GGUF metadata confirmed the Qwen hybrid architecture,
+its optional NextN head and the embedded thinking/reasoning controls. The
+existing compatible llama.cpp loader handles this layout with drafting off;
+native MTP speculative decoding is not enabled for this profile.
+
+All 53 local-LLM registry, payload, lifecycle, responsiveness and UTF-8 tests
+passed, including five new Saluki contracts. Five standalone JSON-grammar
+checks, Python syntax and undefined-name checks passed. These are registry,
+metadata and mocked request checks. The full model and projector were not
+downloaded, and no Saluki inference or physical 12-GB memory test was run.
+The 12-GB picker hint is an estimate, not a measured compatibility claim.
+
+The idle local development app was restarted through Pinokio. Its live local
+catalog exposes the Saluki entry and estimated 12-GB hint. The selected writer,
+provider, device and enhancement-writer settings matched the pre-restart
+snapshot; no model was selected or loaded by the check. The second workstation
+and public branches were untouched by this follow-up.
+
 ## Automated checks
 
 The October 13 gallery restore follow-up passed mocked browser checks for

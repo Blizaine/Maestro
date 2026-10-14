@@ -72,7 +72,7 @@ Direct access to every model and every knob:
 ### 🤖 Local LLM — built-in, no setup
 Maestro auto-downloads `llama-server` (~600 MB one-time) and your chosen GGUF model on first use. Defaults to **Gemma 4 4B (Recommended)** — fast, capable, and runs comfortably on smaller GPUs. Auto-detects CUDA and binds the LLM to GPU when available.
 
-- Pre-curated registry: Gemma 4 (2B / 4B / 26B MoE / 31B), Qwen3.6 27B, and **Qwen3.8 27B Uncensored** with model-aware deep thinking for creative writing and prompt enhancement
+- Pre-curated registry: Gemma 4 (2B / 4B / 26B MoE / 31B), Qwen3.6 27B, **Qwen3.8 27B Uncensored**, and **Underdog Saluki 27B IQ2-Mix Uncensored** with vision and model-aware thinking. Saluki uses approximately 8.35 GB of weights plus a 0.63 GB vision projector, with a 32K context; see the [local writer guide](docs/LLM-runtime.md#underdog-saluki-27b).
 - **External providers** also supported: OpenAI, Anthropic, custom OpenAI-compatible endpoints (currently experimental)
 - **Vision support** so LLMs can enhance prompting based on reference images
 - Auto-unloads after 60s idle to free VRAM for video gen

@@ -375,6 +375,13 @@ license. See the [Qwen guide and terms](Qwen-Image-2.1.md).
 
 ## Prompt writing and local LLM startup
 
+The local writer picker adds **Underdog Saluki 27B IQ2-Mix Uncensored**,
+with the upstream Q8 vision projector, a 32K context and Qwen thinking controls.
+Its weights are approximately 8.35 GB, plus 0.63 GB for vision. Downloads occur
+on first use; Gemma remains the default. Native MTP speculative decoding is
+not enabled for Maestro's multi-request workflow. The 12-GB picker estimate
+is a starting hardware estimate, not a measured fit or quality result.
+
 CUDA device discovery for the local llama-server writer now allows up to 120
 seconds for startup. If the probe times out, Maestro reports that CUDA support
 could not be verified, includes captured runtime output and suggests commands
