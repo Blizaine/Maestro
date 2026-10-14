@@ -7,6 +7,10 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 Public Dev testing candidate; not promoted to Main. See the [full release notes](docs/RELEASE_NOTES_V2.7.0.md).
 
+- Repair YuE2 song-generation downloads after upstream repository history
+  consolidation removed the original pinned snapshot. Use a verified replacement
+  snapshot for inference and optional training, preserving installed weights and
+  existing artist-style compatibility.
 - Add Underdog Saluki 27B IQ2-Mix Uncensored to the local LLM picker, with
   its upstream Q8 vision projector, 32K context, quantized KV cache and
   model-aware thinking/sampling. Downloads remain on demand. Add an off-by-default

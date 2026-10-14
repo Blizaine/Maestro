@@ -445,6 +445,11 @@ paths before sharing them.
 
 ## Update and limitations
 
+YuE2 song generation now downloads from a replacement pinned snapshot after the
+upstream TTS repository consolidated its history. The required files and recorded
+weight hashes match the previous manifest; existing weights and saved artist
+styles remain compatible. Missing companion assets still download on first use.
+
 When v2.7.0 is released, use **Update** in Pinokio while idle, restart Maestro
 to load the new backend, and refresh the browser. When Performance Auto is
 enabled, revised recommendations apply once at startup while preserving manual

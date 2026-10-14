@@ -4,8 +4,8 @@
         "architecture": "yue2",
         "description": "Lyrics and style to 48 kHz stereo songs with optional melody/chord planning and ABC score conditioning. CC BY-NC 4.0 weights.",
         "URLs": [
-            "https://huggingface.co/DeepBeepMeep/TTS/resolve/864a479cbf3e810e1b2c1993b438510750e383b2/YuE2_Acoustic_bf16.safetensors",
-            "https://huggingface.co/DeepBeepMeep/TTS/resolve/864a479cbf3e810e1b2c1993b438510750e383b2/YuE2_Acoustic_int8_convrot.safetensors"
+            "https://huggingface.co/DeepBeepMeep/TTS/resolve/6e87e439357e25ebb563628a2ea6e93a46a8c4b1/YuE2_Acoustic_bf16.safetensors",
+            "https://huggingface.co/DeepBeepMeep/TTS/resolve/6e87e439357e25ebb563628a2ea6e93a46a8c4b1/YuE2_Acoustic_int8_convrot.safetensors"
         ],
         "source_repo": "https://huggingface.co/m-a-p/YuE2-3B",
         "license_name": "CC BY-NC 4.0",

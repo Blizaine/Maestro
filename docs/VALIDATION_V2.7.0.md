@@ -1098,6 +1098,25 @@ generation was cancelled, restarted or enqueued for this preparation.
 
 ## Remaining validation limits
 
+### October 14 YuE2 download repair
+
+AI-WRKST-02's failed Director song request completed lyric writing, then received
+HTTP 404 for `yue2/vae_config.json` at the retired DeepBeepMeep/TTS snapshot.
+The replacement pin `6e87e439357e25ebb563628a2ea6e93a46a8c4b1` matches all 23
+checked-in asset entries' sizes and recorded LFS hashes. The small configuration
+and tokenizer were fetched and their Git blob hashes checked locally; the test
+machine also fetched and parsed the replacement configuration in memory with
+HTTP 200. No full weights or new songs were generated for these checks.
+
+Offline regressions cover actual inference/default/training descriptors and
+loading an existing artist-style bundle with the original compatibility identity.
+The YuE2 and music suites passed 131 tests (seven hardware-dependent skips);
+changed modules also passed syntax and undefined-name checks.
+The base weights and style contract are unchanged. End-to-end song generation
+after updating the test machine remains a separate validation step.
+
+### Other validation limits
+
 - 6/8/10 GB VRAM and 16 GB RAM recommendations are conservative extrapolations,
   not measured generation compatibility. The pure recommendation function
   selects Profile 4.5 for 32-GB RAM / 6–10-GB VRAM and Profile 5 for 16-GB RAM.
