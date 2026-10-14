@@ -16,10 +16,25 @@ export function h3MaximumFrames(options?: ModelOptions | null, extended?: unknow
 export type H3MemoryRecommendation = {
   supported: boolean
   frames: number | null
+  basis: H3RecommendationBasis
+  note?: string
+  evidence?: string[]
+  version?: string | number
   baseFrames?: number | null
   referenceMarginFrames?: number
   referenceMarginSteps?: number
   fallbackResolution?: string
+}
+
+export type H3RecommendationBasis = 'tested' | 'reported' | 'estimated' | 'conservative'
+
+export function h3RecommendationLabel(basis?: H3RecommendationBasis | null): string {
+  switch (basis ?? 'conservative') {
+    case 'tested': return 'Tested recommendation'
+    case 'reported': return 'Reported recommendation'
+    case 'estimated': return 'Estimated starting point'
+    default: return 'Conservative starting point'
+  }
 }
 
 /** Stable key for a user-saved H3 native-pass override. */
@@ -41,19 +56,25 @@ export function recommendedH3PassProfile(
     if (match) pixels = Number(match[1]) * Number(match[2])
   }
   if (!pixels) return null
-  // Only measured resource combinations replace the established VRAM table.
-  // Unknown RAM must never qualify for a larger automatic pass.
+  // Match explicit resource-policy rows when RAM is known. Unknown RAM must
+  // never qualify for a larger automatic pass from a resource-policy tier.
   const measured = Number.isFinite(totalRamGb) && Number(totalRamGb) > 0
     ? policy.resource_recommendations?.tiers.find(tier => (
         tier.checkpoint === policy.checkpoint
         && totalVramGb >= tier.min_vram_gb && totalVramGb <= tier.max_vram_gb
         && Number(totalRamGb) >= tier.min_ram_gb
+        && (tier.max_ram_gb == null || Number(totalRamGb) <= tier.max_ram_gb)
         && pixels! >= (tier.min_pixels ?? 0) && pixels! <= tier.max_pixels
       )) : undefined
   if (measured) return {
-    supported: true,
+    supported: measured.frames != null && measured.frames > 0,
     frames: measured.frames,
+    basis: measured.basis ?? 'conservative',
+    note: measured.note,
+    evidence: measured.evidence,
+    version: policy.resource_recommendations?.version,
     referenceMarginSteps: measured.reference_margin_steps,
+    fallbackResolution: measured.fallback_resolution,
   }
   const band = policy.resolution_bands.find(item => pixels! >= item.min_pixels)
   const tier = band?.vram_tiers.find(item => (
@@ -64,6 +85,10 @@ export function recommendedH3PassProfile(
   return {
     supported: frames != null,
     frames,
+    basis: 'conservative',
+    note: frames != null
+      ? 'Legacy VRAM and resolution profile; use as a conservative starting point.'
+      : undefined,
     fallbackResolution: tier.fallback_resolution,
   }
 }

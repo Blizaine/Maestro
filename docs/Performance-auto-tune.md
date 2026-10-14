@@ -180,24 +180,34 @@ Studio's Auto duration/window and Director's Auto clip maximum share a
 versioned resource policy. It uses total usable system RAM, VRAM, resolution
 and checkpoint family, independently of the performance profile number.
 
-| Tested resources | H3 workflow | Automatic maximum per pass |
+| Resource class | H3 workflow | Automatic maximum per pass |
 | --- | --- | --- |
 | 12 GB VRAM, at least 30 GiB RAM, up to 1280×704 | Fused Frames or Fused References | 345 frames, about 14.4 s |
 | 12 GB VRAM, at least 30 GiB RAM, up to 1280×704 | Pruned Frames or Pruned References | 345 frames, about 14.4 s |
 | 12 GB VRAM, at least 30 GiB RAM, native 1080p | Fused or Pruned | 124 frames, about 5.2 s |
 | 24 GB VRAM, at least 63 GiB RAM, up to 1280×704 | Fused References | 345 frames, about 14.4 s |
+| 24 GB VRAM, at least 120 GiB RAM, native 1080p | Fused Frames | 345 frames, about 14.4 s |
+| 24 GB VRAM, at least 63 GiB RAM, native 1080p | Pruned or Fused References | 243 frames, about 10.1 s; estimated |
+| 16 GB VRAM, at least 30 GiB RAM, 720p | Pruned or Fused | 345 frames, about 14.4 s; estimated |
+| 10 GB VRAM, at least 30 GiB RAM, 720p | Pruned or Fused | 243 frames, about 10.1 s; estimated |
+| 8 GB VRAM, nominal 16 GB RAM, 480p | Pruned or Fused | 124 frames, about 5.2 s; estimated |
 
-These are recommendations from the tested Windows configurations, not a
-promise that every reference/LoRA workload will fit or finish equally quickly.
+Measured rows are anchored to the tested Windows configurations; intermediate
+and smaller classes are estimates, not physical compatibility tests. None
+promises that every reference/LoRA workload will fit or finish equally quickly.
 The 14.4-second Pruned tier includes repeated successful user tests on the
 12-GB RTX 3080 Ti / 32-GB RAM machine, rather than a controlled timing study.
-That tier explicitly removes the older Pruned reference-duration margin;
-other resource tiers retain their own margins and conservative limits.
-Longer native 1080p passes remain manual because some tested combinations
-became impractically slow. Full, imported, alternate and audio-only H3 models
-retain their existing recommendations. Unknown RAM, other VRAM tiers and
-unmeasured canvas sizes retain the established conservative table. The native
+That tier explicitly removes the older Pruned reference-duration margin.
+The October 14 refresh fills intermediate GPU, RAM and canvas tiers with
+explicit estimates and adds the measured 24-GB / 128-GB Fused Frames 1080p
+route. The UI distinguishes tested, reported, estimated and conservative
+recommendations. Exceeding a recommendation is additional unverified load;
+it is not automatically a likely OOM. Longer 12-GB native-1080p passes remain
+manual because some tested recipes failed or became impractically slow.
+Full, imported, alternate and audio-only H3 models retain their existing
+recommendations. Unknown RAM retains the conservative fallback. The native
 14.4-second recommendation does not enable the experimental 30-second mode.
+See the [full resource matrix, evidence and assumptions](Duration-recommendations.md).
 
 New Director music projects use **Auto cut speed**, which favors fewer, longer
 H3 clips while preserving the full song and its timing. The slider still offers

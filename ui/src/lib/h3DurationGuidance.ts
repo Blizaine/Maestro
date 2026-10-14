@@ -4,6 +4,7 @@ import type {
   SlidingWindowMemoryPolicy,
 } from '../types'
 import {
+  type H3RecommendationBasis,
   normalizeH3NativeFrames,
   recommendedH3OmniSequenceProfile,
   recommendedH3PassProfile,
@@ -40,6 +41,11 @@ export type H3DurationGuidance = {
   fastMaxFrames: number | null
   risk: 'within-profile' | 'caution' | 'high' | 'unknown'
   recommendationFrames: number | null
+  recommendationBasis: H3RecommendationBasis | null
+  recommendationNote?: string
+  recommendationEvidence?: string[]
+  recommendationVersion?: string | number
+  exceedsRecommendation: boolean
   beyondRecommended: boolean
   notes: string[]
 }
@@ -574,6 +580,8 @@ export function estimateH3DurationGuidance(
       fastMaxFrames: null,
       risk: 'unknown',
       recommendationFrames: null,
+      recommendationBasis: null,
+      exceedsRecommendation: false,
       beyondRecommended: false,
       notes: ['Duration guidance is available for H3 video models; audio-only and Viggle models are excluded.'],
     }
@@ -636,11 +644,15 @@ export function estimateH3DurationGuidance(
   const hasKeyframes = Boolean(input.firstLastImageCount || input.continuationFrames)
   const hasUnknownContext = estimated.range.high == null || estimated.unknownRefmod || estimated.hasUnknownGuide
   let risk: H3DurationGuidance['risk']
-  if (extended || exceedsMemoryRecommendation || unsupportedMemoryProfile) {
+  if (extended || unsupportedMemoryProfile) {
     risk = 'high'
   } else if (recommendationFrames == null) {
     risk = 'unknown'
-  } else if (hasReferences || hasKeyframes || hasUnknownContext || detail === 'max') {
+  } else if (
+    exceedsMemoryRecommendation
+    || memoryProfile?.basis !== 'tested'
+    || hasReferences || hasKeyframes || hasUnknownContext || detail === 'max'
+  ) {
     risk = 'caution'
   } else {
     risk = 'within-profile'
@@ -649,18 +661,22 @@ export function estimateH3DurationGuidance(
   if (!Number.isFinite(input.totalVramGb) || input.totalVramGb <= 0) {
     notes.push('VRAM is unknown, so no model-specific frame recommendation is available.')
   } else if (unsupportedMemoryProfile) {
-    notes.push('The model has no supported memory recommendation for this resolution and VRAM tier; treat memory risk as high.')
+    notes.push(`The model has no automatic duration starting point for this resolution and VRAM tier. Choose ${memoryProfile?.fallbackResolution ?? 'a supported lower resolution'} or set a manual duration; memory fit is unverified.`)
   } else if (recommendationFrames == null) {
     notes.push('The loaded model has no applicable recommendation for this exact resolution and VRAM value.')
   }
   if (exceedsMemoryRecommendation && !extended) {
-    notes.push('The selected pass exceeds the loaded model’s VRAM/resolution recommendation, although it remains within the native 345-frame duration envelope.')
+    notes.push('The selected pass is above this memory recommendation’s starting point. This advisory does not predict a memory failure; actual fit depends on hardware and generation inputs.')
   }
   if (hasReferences && recommendationFrames != null && !beyondRecommended) {
-    notes.push('The VRAM profile includes a conservative reference margin, but unusually large references can still raise memory use.')
+    if ((memoryProfile?.referenceMarginFrames ?? 0) > 0) {
+      notes.push('The VRAM profile subtracts reference headroom, but unusually large references can still raise memory use.')
+    } else {
+      notes.push('References add conditioning beyond the base duration workload; large inputs can change memory use.')
+    }
   }
   if (path === 'chunked') {
-    notes.push('The estimated lower bound is above the native RMSNorm cutoff; this predicts extra chunking work, not an out-of-memory result.')
+    notes.push('The estimated lower bound is above the native RMSNorm cutoff, so normalization uses bounded chunks. This does not predict whole-render speed.')
   } else if (path === 'uncertain') {
     notes.push('The row range crosses the RMSNorm cutoff or contains context the browser cannot measure.')
   }
@@ -673,6 +689,11 @@ export function estimateH3DurationGuidance(
     fastMaxFrames: estimateFastMaxFrames(input, geometry, prompt, detail, minimumFrames),
     risk,
     recommendationFrames,
+    recommendationBasis: recommendationFrames != null ? memoryProfile?.basis ?? 'conservative' : null,
+    recommendationNote: memoryProfile?.note,
+    recommendationEvidence: memoryProfile?.evidence,
+    recommendationVersion: memoryProfile?.version,
+    exceedsRecommendation: exceedsMemoryRecommendation,
     beyondRecommended,
     notes: [...new Set(notes)],
   }

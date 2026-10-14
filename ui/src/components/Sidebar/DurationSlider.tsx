@@ -9,6 +9,7 @@ import {
 } from '../../lib/durationPlanning'
 import {
   effectiveH3OmniSequenceFrames,
+  h3RecommendationLabel,
   h3MaximumFrames,
   supportsH3ExtendedDuration,
   h3OmniSequenceWindowCount,
@@ -572,8 +573,8 @@ export function WindowSettings() {
                 ? `Manual override enabled: ${resolution} is above the automatic profile for ${totalVramGb.toFixed(0)} GB and may run out of VRAM.`
                 : `Auto does not recommend ${resolution} on ${totalVramGb.toFixed(0)} GB. Choose ${windowRecommendation.fallbackResolution ?? 'a lower resolution'}, or manually set Window Length to try it experimentally.`)
               : (exceedsSafeRecommendation
-                ? `Window limit exceeds the ${formatSeconds(safeWindowSeconds!)} recommendation for ${totalVramGb.toFixed(0)} GB at this resolution. A pass using the full limit may run out of VRAM.`
-                : `Recommended: ${formatSeconds(safeWindowSeconds!)} for ${totalVramGb.toFixed(0)} GB at this resolution. The slider remains available through ${formatSeconds(maximumFrames / fps)}.${omniReferenceSequence && (windowRecommendation.referenceMarginFrames ?? 0) > 0 ? ' Includes Ref2VA reference headroom.' : ''}`)}
+                ? `Above recommended starting point: ${formatSeconds(safeWindowSeconds!)} for ${totalVramGb.toFixed(0)} GB at this resolution. Actual memory fit depends on hardware and generation inputs.`
+                : `${h3RecommendationLabel(windowRecommendation.basis)}: ${formatSeconds(safeWindowSeconds!)} for ${totalVramGb.toFixed(0)} GB at this resolution. The slider remains available through ${formatSeconds(maximumFrames / fps)}.${omniReferenceSequence && (windowRecommendation.referenceMarginFrames ?? 0) > 0 ? ' Includes Ref2VA reference headroom.' : ''}`)}
           </div>
         )}
       </div>

@@ -1,4 +1,4 @@
-"""Shared resource-gated H3 duration recommendations."""
+"""Shared resource-gated H3 duration recommendations and their evidence basis."""
 
 from __future__ import annotations
 
@@ -92,7 +92,7 @@ def match_h3_duration_recommendation(
     total_ram_gb: Any,
     pixels: Any,
 ) -> dict[str, Any] | None:
-    """Return the first fully matching tested tier, or ``None``.
+    """Return the first fully matching tested or estimated tier, or ``None``.
 
     RAM is mandatory for these tiers. Callers should retain their existing
     VRAM-only profile when RAM is unknown or a row does not match.
@@ -104,7 +104,7 @@ def match_h3_duration_recommendation(
     vram = _number(total_vram_gb)
     ram = _number(total_ram_gb)
     area = _number(pixels)
-    if vram is None or ram is None or area is None:
+    if vram is None or ram is None or area is None or min(vram, ram, area) <= 0:
         return None
 
     checkpoint = str(checkpoint or "").strip().lower()
@@ -119,13 +119,39 @@ def match_h3_duration_recommendation(
         minimum_vram = _number(tier.get("min_vram_gb"))
         maximum_vram = _number(tier.get("max_vram_gb"))
         minimum_ram = _number(tier.get("min_ram_gb"))
+        maximum_ram = _number(tier.get("max_ram_gb"))
         minimum_pixels = _number(tier.get("min_pixels", 0))
         maximum_pixels = _number(tier.get("max_pixels"))
         if None in (minimum_vram, maximum_vram, minimum_ram, minimum_pixels, maximum_pixels):
+            continue
+        if "max_ram_gb" in tier and maximum_ram is None:
             continue
         if not minimum_vram <= vram <= maximum_vram:
             continue
         if ram < minimum_ram or not minimum_pixels <= area <= maximum_pixels:
             continue
+        if maximum_ram is not None and ram > maximum_ram:
+            continue
+        if "frames" not in tier:
+            continue
+        if tier["frames"] is not None:
+            frames = _number(tier["frames"])
+            if frames is None or not frames.is_integer() or frames <= 0:
+                continue
         return dict(tier)
     return None
+
+
+def h3_recommendation_metadata(profile: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Expose provenance without turning an estimate into a memory guarantee."""
+
+    profile = profile or {}
+    tier = profile.get("resource_recommendation") or {}
+    basis = tier.get("basis")
+    if basis not in {"tested", "reported", "estimated", "conservative"}:
+        basis = "conservative"
+    return {
+        "recommendation_basis": basis,
+        "recommendation_note": str(tier.get("note") or ""),
+        "recommendation_version": profile.get("resource_recommendation_version"),
+    }

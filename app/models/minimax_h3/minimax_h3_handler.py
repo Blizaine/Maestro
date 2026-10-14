@@ -1143,6 +1143,19 @@ def recommended_h3_window_profile(
         }
 
     if resource_tier is not None:
+        if resource_tier.get("frames") is None:
+            return {
+                "supported": False,
+                "frames": None,
+                "fallback_resolution": resource_tier.get("fallback_resolution"),
+                "gpu_vram_gb": total_vram_gb,
+                "resolution": effective_resolution,
+                "pixels": pixels,
+                "checkpoint": checkpoint,
+                "system_ram_gb": total_ram_gb,
+                "resource_recommendation": resource_tier,
+                "resource_recommendation_version": resource_recommendations.get("version"),
+            }
         try:
             recommended_frames = int(resource_tier.get("frames"))
             minimum = max(1, int(model_def.get("frames_minimum") or _H3_MIN_FRAMES))

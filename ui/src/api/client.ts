@@ -1274,6 +1274,9 @@ export interface DirectorMusicClipLimits {
   max_seconds: number
   recommended_seconds: number
   auto: boolean
+  recommendation_basis?: 'tested' | 'reported' | 'estimated' | 'conservative'
+  recommendation_note?: string | null
+  recommendation_version?: string | number | null
 }
 
 export async function fetchDirectorMusicClipLimits(params: DirectorTimelineOptions): Promise<DirectorMusicClipLimits> {

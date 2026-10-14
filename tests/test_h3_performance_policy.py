@@ -219,6 +219,22 @@ class H3PolicyTests(unittest.TestCase):
         self.assertTrue(any("pending restart" in item for item in no_allocator_telemetry["warnings"]))
         self.assertNotEqual(no_allocator_telemetry["risk"], "measured")
 
+    def test_dense_timing_warning_is_not_applied_to_sparse_attention(self):
+        for attention in ("sla", "veda"):
+            with self.subTest(attention=attention):
+                advice = self.advise(
+                    frames=345, resolution="1920x1088", fused=False,
+                    model_def=model(fused=False), override_attention=attention,
+                )
+                self.assertNotEqual(advice["risk"], "slow")
+                self.assertFalse(any("116 minutes" in item for item in advice["warnings"]))
+                saved = self.advise(
+                    frames=345, resolution="1920x1088", fused=False,
+                    model_def=model(fused=False), override_attention="auto",
+                    cfg=config(attention_mode=attention),
+                )
+                self.assertNotEqual(saved["risk"], "slow")
+
     def test_selected_checkpoint_wins_over_template_quantization_metadata(self):
         actual_gguf = self.advise(model_def=model(_checkpoint_files="selected-Q4_K_M.gguf"))
         self.assertNotEqual(actual_gguf["risk"], "measured")

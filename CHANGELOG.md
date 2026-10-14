@@ -7,6 +7,12 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 Public Dev testing candidate; not promoted to Main. See the [full release notes](docs/RELEASE_NOTES_V2.7.0.md).
 
+- Refresh shared H3 Studio/Director duration recommendations for current
+  resource tiers, including tested 24 GB Fused Frames native 1080p and explicit
+  estimates for smaller/intermediate GPUs and RAM. Show recommendation provenance;
+  exceeding a starting point no longer implies a likely OOM. Keep manual timing
+  and the opt-in extended range. Explain packed-row guidance as normalization
+  paths and scope older dense timing warnings away from SLA/Veda.
 - Show measured video duration on gallery cards and side thumbnails before
   playback, retaining image posters and lazy browser video loading. Read only
   visible media headers, share bounded lookups and refresh replaced-file facts.

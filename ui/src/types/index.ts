@@ -896,7 +896,7 @@ export interface ChoiceConfig {
 
 export interface SlidingWindowMemoryPolicy {
   checkpoint?: 'full' | 'pruned' | 'fused_4step' | 'fused_4step_references'
-  /** Measured RAM/VRAM/canvas recommendations shared with the backend. */
+  /** RAM/VRAM/canvas recommendations shared with the backend. */
   resource_recommendations?: {
     version: string | number
     tiers: Array<{
@@ -904,9 +904,14 @@ export interface SlidingWindowMemoryPolicy {
       min_vram_gb: number
       max_vram_gb: number
       min_ram_gb: number
+      max_ram_gb?: number
       min_pixels?: number
       max_pixels: number
-      frames: number
+      frames: number | null
+      fallback_resolution?: string
+      basis?: 'tested' | 'reported' | 'estimated' | 'conservative'
+      note?: string
+      evidence?: string[]
       /** Reference headroom already accounted for in this tested tier. */
       reference_margin_steps?: number
     }>

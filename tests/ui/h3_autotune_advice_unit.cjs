@@ -4,10 +4,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(__dirname, '../..');
 const esbuild = require(path.join(root, 'ui/node_modules/esbuild'));
-const bundle = esbuild.buildSync({entryPoints:[path.join(root,'ui/src/lib/h3PerformanceAdvice.ts')],
-  bundle:true, write:false, platform:'node', format:'cjs', logLevel:'silent'});
+const source = fs.readFileSync(path.join(root,'ui/src/lib/h3PerformanceAdvice.ts'),'utf8');
+const transformed = esbuild.transformSync(source,{loader:'ts',format:'cjs',target:'node22'});
+const policy = JSON.parse(fs.readFileSync(path.join(root,'app/shared/h3_performance_policy.json'),'utf8'));
 const loaded = {exports:{}};
-new Function('module','exports','require',bundle.outputFiles[0].text)(loaded,loaded.exports,require);
+new Function('module','exports','require',transformed.code)(loaded,loaded.exports,dependency=>
+  dependency==='../../../app/shared/h3_performance_policy.json'?policy:require(dependency));
 const {h3PerformanceAdvice} = loaded.exports;
 const options = {model_type:'minimax_h3_ref2va_fused_turbo',architecture:'minimax_h3_ref2va',
   minimax_h3_fused_turbo:true,sla_attention_default:true,omni_reference:true,
@@ -26,11 +28,18 @@ for (const totalRamGb of [0,16,24,NaN]) assert.equal(h3PerformanceAdvice(input({
 assert.equal(h3PerformanceAdvice(input({options:{...options,minimax_h3_full_checkpoint:true}})),null);
 assert.equal(h3PerformanceAdvice(input({options:{...options,audio_only:true}})),null);
 assert.equal(h3PerformanceAdvice(input({options:{...options,model_type:'viggle_animate'}})),null);
-const pruned=h3PerformanceAdvice(input({options:{...options,minimax_h3_fused_turbo:false,sla_attention_default:false},steps:20,attention:'sage2'}));
+const densePrunedOptions={...options,minimax_h3_fused_turbo:false,sla_attention_default:false};
+const pruned=h3PerformanceAdvice(input({options:densePrunedOptions,steps:20,attention:'sage2'}));
 assert.equal(pruned.slow,true);
-assert.equal(h3PerformanceAdvice(input({options:{...options,minimax_h3_fused_turbo:false},steps:20,frames:226})).slow,false);
-assert.equal(h3PerformanceAdvice(input({options:{...options,minimax_h3_fused_turbo:false},steps:20,frames:345})).slow,true);
-assert.ok(pruned.notes.some(text=>text.includes('116 minutes')));
+assert.equal(h3PerformanceAdvice(input({options:densePrunedOptions,steps:20,frames:226,attention:'sage2'})).slow,false);
+assert.equal(h3PerformanceAdvice(input({options:densePrunedOptions,steps:20,frames:345,attention:'sage2'})).slow,true);
+assert.ok(pruned.notes.some(text=>text.includes('116 minutes')&&text.includes('not an SLA or Veda sparse-attention ETA')));
+for (const attention of ['sla','veda']) {
+  const sparsePruned=h3PerformanceAdvice(input({options:{...options,minimax_h3_fused_turbo:false,sla_attention_default:false},
+    steps:20,attention}));
+  assert.equal(sparsePruned.slow,false,`${attention} must not inherit the dense/Sage2 duration warning`);
+  assert.ok(!sparsePruned.notes.some(text=>text.includes('116 minutes')));
+}
 const fused=h3PerformanceAdvice(input());
 assert.equal(fused.slow,false);
 assert.ok(fused.notes.some(text=>text.includes('individual test results')));

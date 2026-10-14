@@ -118,10 +118,11 @@ class H3WindowGeometryTests(unittest.TestCase):
         settings = request(sliding_window_size=345, sliding_window_memory_override=False,
                            resolution="1792x768")
         planned = copy.deepcopy(settings)
-        apply_h3_window_memory_policy(planned, MODEL, {"gpu_vram_gb": 12})
+        apply_h3_window_memory_policy(planned, MODEL, {"gpu_vram_gb": 12, "ram_gb": 32})
         normalize_h3_window_geometry(planned, MODEL)
         with patch("torch.cuda.is_available", return_value=True), \
-             patch("torch.cuda.get_device_properties", return_value=types.SimpleNamespace(total_memory=12 * 1024 ** 3)):
+             patch("torch.cuda.get_device_properties", return_value=types.SimpleNamespace(total_memory=12 * 1024 ** 3)), \
+             patch("psutil.virtual_memory", return_value=types.SimpleNamespace(total=32 * 1024 ** 3)):
             self.assertIsNone(family_handler.validate_generative_settings("minimax_h3", MODEL, settings))
         self.assertEqual(settings["video_length"], 336)
         self.assertEqual(spans(settings), spans(planned))

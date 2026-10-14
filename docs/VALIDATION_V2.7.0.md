@@ -82,6 +82,41 @@ saved prompt or media file was modified; the second workstation was untouched.
 The release notes include this follow-up. Main, public Dev and release tags
 were not pushed by this change.
 
+## Duration policy follow-up — October 14
+
+The shared matrix is now versioned `2026-10-14`. Studio and Director use the
+same RAM, VRAM, canvas and checkpoint tiers. The 12-GB / 32-GB 720p Pruned and
+Fused default remains 345 frames; the 24-GB / 128-GB Fused Frames native-1080p
+default now uses 345 frames, anchored to the completed six-step SLA control.
+Intermediate resource classes and 16-GB-host-RAM systems have explicit
+estimated starting points. The [matrix and evidence](Duration-recommendations.md)
+separate measured, reported and inferred capability. Longer native-1080p
+12-GB results remain conditional, rather than a broadly verified default.
+
+The UI labels the basis of each recommendation. Exceeding a starting point
+does not become an automatic OOM prediction. Native versus chunked RMSNorm
+guidance no longer claims a calibrated whole-render speed tier. The older
+116-minute Pruned dense/Sage2 observation is not applied to SLA or Veda as a
+sparse-attention timing warning. Manual durations and the separate experimental
+30-second opt-in retain ownership.
+
+All 278 focused H3 definition, Fused, performance-policy, duration, geometry,
+extended-window, reference-window and Director timing/model tests passed. The
+duration-policy tests also check the Director clip-limit response's provenance.
+Both focused UI unit scripts and both mounted-browser duration suites passed,
+including desktop/mobile layout, late hardware detection, manual choices and
+Studio/Director agreement. Scoped frontend lint, TypeScript and production
+build passed. These are policy and UI checks; no new GPU generation was run
+for this refresh, and no physical 8-GB / 16-GB result is claimed.
+
+After confirming jobs, the Director queue, saved pipelines and the writer were
+idle, only the local development app was restarted through Pinokio. Its live
+model policy reports version `2026-10-14` and all 101 resource rows. Read-only
+Director clip-limit requests returned 345 frames with tested provenance for
+Fused Frames at 1920×1088 and Fused References at 1280×704, and the rebuilt UI
+asset was served. The second workstation was untouched. Main, public Dev and
+release tags were not pushed.
+
 ## Automated checks
 
 The October 13 gallery restore follow-up passed mocked browser checks for

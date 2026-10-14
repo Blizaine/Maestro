@@ -416,9 +416,13 @@ def h3_performance_advice(hardware, config, model_def, params) -> dict | None:
 
     fused = bool(model_def.get("minimax_h3_fused_turbo"))
     steps = _positive_int(params.get("num_inference_steps"))
+    attention = str(params.get("override_attention") or "auto").strip().lower()
+    if attention == "auto":
+        attention = str(config.get("attention_mode") or "auto").strip().lower()
     pruned_long_1080 = (
         not fused and steps is not None and steps >= 20
         and frames >= 243 and pixels >= 1920 * 1088
+        and attention not in {"sla", "veda"}
     )
     if pruned_long_1080:
         warnings.append(

@@ -35,10 +35,15 @@ def resolve_clip_limits(model_def, requested_seconds=None, execution_profile=Non
         # Round down: the requested maximum is never exceeded by lattice rounding.
         frames = min(hard, int(profile.get('manual_max_frames') or hard), max(minimum, math.floor(seconds * fps + 1e-6)))
         effective = minimum + (frames - minimum) // step * step
-    return {'fps': fps, 'frames_minimum': minimum, 'frame_step': step,
+    result = {'fps': fps, 'frames_minimum': minimum, 'frame_step': step,
             'hard_max_frames': hard, 'recommended_frames': recommended,
             'max_frames': effective, 'max_seconds': effective / fps,
             'recommended_seconds': recommended / fps, 'auto': requested_seconds is None}
+    if profile.get('recommendation_basis'):
+        result.update({key: profile.get(key) for key in (
+            'recommendation_basis', 'recommendation_note', 'recommendation_version',
+        )})
+    return result
 
 
 def plan_capped_music_clips(analysis, *, maximum_seconds, fps, frames_steps,

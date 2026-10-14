@@ -1656,7 +1656,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn('<H3MultiWindowControls section="continuity"/>', output_controls)
         self.assertNotIn("Plan Prompt Across Windows", advanced)
         self.assertIn("Window Length", duration)
-        self.assertIn("Recommended", duration)
+        self.assertIn("h3RecommendationLabel(windowRecommendation.basis)", duration)
         self.assertIn("saveH3WindowOverride", duration)
         self.assertIn("h3MaximumFrames(modelOptions, extendedDuration) ?? 345", duration)
         self.assertIn("h3WindowOverrideKey", store)

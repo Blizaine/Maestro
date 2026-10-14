@@ -42,8 +42,10 @@ const model=(reference=false,pruned=false)=>({model_type:reference?(pruned?'mini
    if(url.pathname.includes('model-options'))body=selected;
    if(url.pathname.includes('music-clip-limits')){
     const requested=route.request().postDataJSON();
-    const frames=await page.evaluate(({requested,selected})=>{const s=window.store.getState();return window.h3.recommendedH3PassProfile(selected.director_memory_policy,requested.video_params.resolution,s.systemStats.gpu.vram_total_gb,s.systemStats.ram.total_gb).frames},{requested,selected});
-    body={fps:24,frames_minimum:124,frame_step:17,hard_max_frames:345,recommended_frames:frames,recommended_seconds:frames/24,max_frames:requested.director_max_shot_frames||frames,max_seconds:(requested.director_max_shot_frames||frames)/24,auto:true};
+    const profile=await page.evaluate(({requested,selected})=>{const s=window.store.getState();return window.h3.recommendedH3PassProfile(selected.director_memory_policy,requested.video_params.resolution,s.systemStats.gpu.vram_total_gb,s.systemStats.ram.total_gb)},{requested,selected});
+    const frames=profile?.frames||124;
+    body={fps:24,frames_minimum:124,frame_step:17,hard_max_frames:345,recommended_frames:frames,recommended_seconds:frames/24,max_frames:requested.director_max_shot_frames||frames,max_seconds:(requested.director_max_shot_frames||frames)/24,auto:true,
+     recommendation_basis:'reported',recommendation_note:'Director test fixture: reported 720p runs provide a starting point.',recommendation_version:'director-fixture-v1'};
    }
    if(url.pathname.includes('audio/plan-structure')){requests.push(route.request().postDataJSON());body={clips:[]};}
    return route.fulfill({contentType:'application/json',body:JSON.stringify(body)});
@@ -98,6 +100,21 @@ const model=(reference=false,pruned=false)=>({model_type:reference?(pruned?'mini
    directorMusicClipSeconds:null,directorLoading:false,directorError:null});window.mount('director');},selected);
   const music=page.getByRole('group',{name:'Music video clip length'});await music.getByRole('slider').waitFor();
   assert.equal(Number(await music.getByRole('slider').inputValue()),345);
+  const musicRecommendation=music.getByTestId('director-music-recommendation');
+  assert.match(await musicRecommendation.locator('summary').innerText(),/Reported recommendation/);
+  await musicRecommendation.locator('summary').click();
+  assert.match(await musicRecommendation.innerText(),/reported 720p runs provide a starting point/);
+  assert.match(await musicRecommendation.innerText(),/Guidance updated director-fixture-v1/);
+  const musicSlider=music.getByRole('slider');await musicSlider.focus();await musicSlider.press('End');
+  const manualMusicSeconds=await page.evaluate(()=>window.store.getState().directorMusicClipSeconds);
+  assert.ok(manualMusicSeconds>0,'moving the music clip slider stores a manual choice');
+  const refreshedLimits=page.waitForResponse(response=>response.url().includes('music-clip-limits')&&response.request().method()==='POST');
+  await page.evaluate(()=>window.store.setState({systemStats:{gpu:{vram_total_gb:8},ram:{total_gb:16}}}));
+  await refreshedLimits;
+  await musicRecommendation.waitFor();
+  assert.equal(await page.evaluate(()=>window.store.getState().directorMusicClipSeconds),manualMusicSeconds,
+   'resource updates refresh recommendation details without replacing a manual clip length');
+  await music.getByRole('button',{name:'Auto'}).click();
   const auto=page.getByRole('button',{name:'Automatic cut speed'});assert.equal(await auto.getAttribute('aria-pressed'),'true');
   const cut=page.locator('input[type=range]').last();assert.equal(await cut.inputValue(),'-2');await cut.focus();await cut.press('ArrowRight');
   await page.waitForFunction(()=>window.store.getState().directorEnergyBias===-1 && !window.store.getState().directorLoading);assert.equal(requests.at(-1).energy_bias,-1);
@@ -113,6 +130,11 @@ const model=(reference=false,pruned=false)=>({model_type:reference?(pruned?'mini
    });window.mount('director-chat');},selected);
    await page.getByText(/Auto max shot 5\.2s on 12 GB/).waitFor();
    await page.getByRole('button',{name:'Advanced',exact:true}).click();
+   const gpuRecommendation=page.getByTestId('director-gpu-recommendation');
+   assert.match(await gpuRecommendation.locator('summary').innerText(),/Reported recommendation/);
+   await gpuRecommendation.locator('summary').click();
+   assert.match(await gpuRecommendation.innerText(),/reported 720p runs provide a starting point/);
+   assert.match(await gpuRecommendation.innerText(),/Guidance updated director-fixture-v1/);
    await page.getByRole('option',{name:'Auto · 5.2s',exact:true}).waitFor({state:'attached'});
    await page.evaluate(()=>window.store.setState({systemStats:{gpu:{vram_total_gb:12},ram:{total_gb:31.76}}}));
    await page.getByText(/Auto max shot 14\.4s on 12 GB/).waitFor();

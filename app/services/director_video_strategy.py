@@ -18,6 +18,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from services.h3_duration_recommendations import (
+    h3_recommendation_metadata,
     h3_duration_recommendations_enabled,
     load_h3_duration_recommendations,
     match_h3_duration_recommendation,
@@ -183,6 +184,19 @@ def _recommended_director_h3_profile(
             pixels=pixels,
         )
     if resource_tier is not None:
+        if resource_tier.get("frames") is None:
+            return {
+                "supported": False,
+                "frames": None,
+                "fallback_resolution": resource_tier.get("fallback_resolution"),
+                "gpu_vram_gb": total_vram_gb,
+                "system_ram_gb": total_ram_gb,
+                "resolution": normalized_resolution,
+                "pixels": pixels,
+                "checkpoint": checkpoint,
+                "resource_recommendation": dict(resource_tier),
+                "resource_recommendation_version": resource_recommendations.get("version"),
+            }
         try:
             minimum = max(1, int(model_def.get("frames_minimum") or 124))
             frame_step = max(1, int(model_def.get("frames_steps") or 17))
@@ -438,6 +452,7 @@ def build_director_video_execution_profile(
         "resource_recommendation_version": (
             (recommendation or {}).get("resource_recommendation_version")
         ),
+        **(h3_recommendation_metadata(recommendation) if is_h3 else {}),
         "manual_override": override_frames is not None,
         "manual_max_frames": override_frames,
         "hardware_supported": bool(

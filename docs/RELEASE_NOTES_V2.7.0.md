@@ -189,16 +189,20 @@ used different settings and is not a matched speed comparison. See the
 
 ## Automatic H3 windows and head splitting
 
-Studio and Director now share measured duration recommendations based on usable
+Studio and Director now share versioned duration recommendations based on usable
 VRAM, system RAM, resolution and checkpoint. On the tested nominal 12-GB GPU /
 32-GB RAM tier, Auto recommends approximately **14.4 seconds for 720p Fused
 and Pruned** and **5.2 seconds for native 1080p**. The Pruned increase includes
 repeated successful user tests, rather than a controlled timing study. Reference
 and rolling-window policies can subtract a safety margin or include history in
 the actual pass. On the tested 24-GB / high-RAM tier, Fused References also uses
-the longer 720p recommendation. Unsupported combinations retain conservative
-limits. Manual durations remain available, including the separately enabled
-experimental range; a recommendation is not an OOM guarantee.
+the longer 720p recommendation. The October 14 refresh adds the tested
+24-GB / 128-GB Fused Frames native-1080p 14.4-second route and explicit estimated
+starting points for intermediate GPUs and lower host RAM. Studio and Director
+show tested, reported, estimated or conservative provenance. Above a starting
+recommendation means additional unverified load, rather than an automatic
+likely-OOM warning. Manual durations remain available, including the separately
+enabled experimental range. See the [resource matrix and evidence](Duration-recommendations.md).
 
 For eligible H3 video jobs on the 12-GB / at-least-30-GiB-usable-RAM tier, Auto
 chooses Off, Low or Medium head splitting from the actual generation workload.
@@ -207,7 +211,8 @@ Short 1080p and ordinary 720p jobs can retain the faster unsplit route; longer
 and does not rewrite the saved setting. Manual values remain in effect. The
 performance card and duration guidance explain the recommendation and flag
 unmeasured references/LoRAs and costly long Pruned jobs. One 10.1-second native
-1080p Pruned test took about 116 minutes; fitting in VRAM does not ensure an
+1080p Pruned dense-attention test took about 116 minutes; this older warning
+is not treated as a sparse-attention ETA for SLA or Veda. Fitting in VRAM does not ensure an
 acceptable render time. These observations do not establish comparable limits
 on 6/8/10-GB cards or 16-GB RAM systems.
 

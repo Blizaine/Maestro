@@ -63,7 +63,9 @@ export function h3PerformanceAdvice(input: H3PerformanceAdviceInput): H3Performa
   const fused = options.minimax_h3_fused_turbo === true
   const attention = input.attention === 'auto' || !input.attention
     ? options.sla_attention_default ? 'sla' : 'auto' : input.attention
-  const slow = !fused && input.steps >= 20 && frames >= 243 && area >= 1920 * 1088
+  const sparseAttention = attention === 'sla' || attention === 'veda'
+  const slow = !fused && !sparseAttention
+    && input.steps >= 20 && frames >= 243 && area >= 1920 * 1088
   const vedaAttention = attention === 'veda'
   const unverifiedRecipe = fused
     ? input.steps !== policy.benchmark.variants.fused_turbo.steps || attention !== 'sla'
@@ -71,7 +73,7 @@ export function h3PerformanceAdvice(input: H3PerformanceAdviceInput): H3Performa
   const hasExtraMedia = (input.referenceCount ?? 0) > 0 || input.videoGuide || (input.continuationFrames ?? 0) > 0
   const hasLoras = (input.loraCount ?? 0) > 0
   const experimental = beyondEvidence || (hasLoras && split > 0) || vedaAttention
-  if (slow) notes.push('Pruned at 20 steps took about 116 minutes at 1080p / 10.1s on the 12 GB test machine; the 15s test projected hours. Shorter 720p windows are recommended for speed.')
+  if (slow) notes.push('Dense/Sage2 Pruned at 20 steps took about 116 minutes at 1080p / 10.1s on the 12 GB test machine; the 15s test projected hours. This is a dense/Sage2 observation, not an SLA or Veda sparse-attention ETA. Shorter 720p windows are recommended for dense/Sage2 speed.')
   else if (fused && split > 0 && !unverifiedRecipe && !hasLoras && !beyondEvidence) {
     notes.push('Fused at 6 steps with SLA completed 1080p / 10.1s in about 18 minutes with Low, and 15.1s in about 32 minutes with Medium. These are individual test results, not an ETA.')
   }
