@@ -1437,40 +1437,20 @@ class LongFormDirectorPlanningTests(unittest.TestCase):
     def test_music_video_revalidates_resumed_padded_rows(self):
         scene_description = "A singer performs on a rooftop at dusk"
         clips = [{"start": 0, "end": 8, "label": "verse"}]
-        fingerprint_planner = MusicVideoPlanner()
-        fingerprint_planner._configure_planning_runtime(
-            {},
-            kind="music_video",
-            fingerprint_payload={
-                "planner_revision": 24,
-                "use_lyrics_context": False,
-                "scene_description": scene_description,
-                "clips": clips,
-                "lyrics": [],
-                "bpm": 120.0,
-                "reference_image_path": None,
-                "speaker_mappings": {},
-                "characters": [],
-                "video_model": "",
-                "image_model": "",
-                "shot_image_policy": "direct_references",
-                "vocal_activity": [],
-                "character_ref_labels": [],
-                "location_ref_labels": [],
-            },
+        fingerprint_checkpoints: list[dict] = []
+        MusicVideoPlanner(
+            llm_generate=lambda **_: json.dumps([_music_video_row(1, "seed")])
+        ).plan(
+            clips=clips,
+            scene_description=scene_description,
+            shot_image_policy="direct_references",
+            _planning_checkpoint_callback=fingerprint_checkpoints.append,
         )
-        checkpoint = {
-            "version": 2,
-            "kind": "music_video",
-            "fingerprint": fingerprint_planner._planning_checkpoint_fingerprint,
-            "complete": True,
-            "music_video_batches": {
-                "0": {
-                    "count": 1,
-                    "rows": [_music_video_fallback_row(scene_description)],
-                },
-            },
-        }
+        checkpoint = fingerprint_checkpoints[-1]
+        self.assertTrue(checkpoint["complete"])
+        checkpoint["music_video_batches"]["0"]["rows"] = [
+            _music_video_fallback_row(scene_description)
+        ]
         prompts: list[str] = []
 
         def generate(**kwargs):
