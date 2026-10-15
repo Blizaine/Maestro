@@ -7,6 +7,12 @@ import {
   normalizeModelVisibilityOverrides, type ModelVisibilityOverrides, type ModelVisibilityScope,
 } from '../lib/modelVisibility'
 import { isDirectorRenderChild } from '../lib/directorJobs'
+import {
+  directorGalleryGroupKey,
+  flattenDirectorGalleryOutputs,
+  removeDirectorGalleryTake,
+  type DirectorGalleryGroups,
+} from '../lib/directorGalleryGroups'
 import { directorH3SlaEnabled, directorH3VedaEnabled, normalizeH3Attention } from '../lib/h3Attention'
 import {
   modelOptionsForSelectedModel,
@@ -2079,6 +2085,12 @@ interface AppState {
   outputs: OutputFile[]
   outputsCursor: string | null
   outputsTotal: number
+  /** Expanded Director shot rows cached by workspace + pipeline id. */
+  directorGalleryGroups: DirectorGalleryGroups
+  setDirectorGalleryGroupExpanded: (parent: OutputFile, expanded: boolean, refresh?: boolean) => Promise<void>
+  refreshDirectorGalleryGroups: (pipelineId: string) => Promise<void>
+  setGalleryOutputFavorite: (name: string, workspace: string | undefined, favorite: boolean) => void
+  removeOutputFromGallery: (output: OutputFile, preferredIndex?: number) => void
   selectedOutput: number
   setSelectedOutput: (i: number) => void
   mediaFilter: MediaFilter
@@ -2838,12 +2850,16 @@ let _galleryMetadataRevision = 0
 let _galleryMorePending = false
 let _galleryRefreshRequest = 0
 let _galleryRefreshApplied = 0
+const _directorGalleryRequestTokens = new Map<string, number>()
 
 function galleryQuery(state: AppState) {
   return {
     workspace: state.browsingAllFolders ? '__all__' : state.browsingUploads ? '__uploads__' : state.activeWorkspace,
     mediaFilter: state.mediaFilter,
     search: state.outputSearchQuery.trim() || undefined,
+    // This option is only used by the gallery store. Editor asset discovery
+    // calls fetchOutputs directly and keeps the backend's default behavior.
+    groupDirectorClips: true,
   }
 }
 
@@ -2851,6 +2867,9 @@ function galleryQuery(state: AppState) {
 let _foCachedOutputs: OutputFile[] = []
 let _foCachedFilter: MediaFilter = 'all'
 let _foCachedResult: OutputFile[] = []
+let _foCachedDirectorGroups: DirectorGalleryGroups | null = null
+let _foCachedFlattenedInput: OutputFile[] | null = null
+let _foCachedFlattenedResult: OutputFile[] = []
 
 function computeFilteredOutputs(outputs: OutputFile[], mediaFilter: MediaFilter): OutputFile[] {
   if (outputs === _foCachedOutputs && mediaFilter === _foCachedFilter) {
@@ -2883,6 +2902,41 @@ function computeFilteredOutputs(outputs: OutputFile[], mediaFilter: MediaFilter)
     _foCachedResult = outputs
   }
   return _foCachedResult
+}
+
+function computeDirectorGalleryOutputs(outputs: OutputFile[], groups: DirectorGalleryGroups): OutputFile[] {
+  if (outputs === _foCachedFlattenedInput && groups === _foCachedDirectorGroups) {
+    return _foCachedFlattenedResult
+  }
+  _foCachedFlattenedInput = outputs
+  _foCachedDirectorGroups = groups
+  _foCachedFlattenedResult = flattenDirectorGalleryOutputs(outputs, groups)
+  return _foCachedFlattenedResult
+}
+
+function preserveGallerySelection(
+  get: () => AppState,
+  selectedId: string | null,
+  fallbackId?: string | null,
+): void {
+  const state = get()
+  const rows = state.filteredOutputs()
+  let nextIndex = selectedId
+    ? rows.findIndex(output => outputIdentity(output) === selectedId)
+    : -1
+  if (nextIndex < 0 && fallbackId) {
+    nextIndex = rows.findIndex(output => outputIdentity(output) === fallbackId)
+  }
+  if (nextIndex < 0 && rows.length > 0) {
+    nextIndex = Math.min(state.selectedOutput, rows.length - 1)
+  }
+  if (nextIndex < 0) {
+    ++_galleryMetadataRevision
+    get().setSelectedOutput(0)
+    return
+  }
+  const nextId = outputIdentity(rows[nextIndex])
+  if (state.selectedOutput !== nextIndex || selectedId !== nextId) state.setSelectedOutput(nextIndex)
 }
 
 /** Use the selected video model even when Studio last loaded an audio model. */
@@ -4639,9 +4693,9 @@ export const useStore = create<AppState>((set, get) => ({
       // Refresh the pipeline to get updated state
       const pipeline = await api.fetchSavedPipeline(pid)
       set({ dashboardSelectedPipeline: pipeline, dashboardLoading: false })
-      // New files (rerun clip / rejoin video) land in the outputs folder —
-      // refresh the gallery so they appear without a browser reload.
-      get().loadOutputs()
+      // New files land in the outputs folder — refresh the gallery without
+      // disturbing its current selected identity.
+      await get().refreshOutputs()
       return result
     } catch (e) {
       console.error('Re-run image failed:', e)
@@ -4655,9 +4709,10 @@ export const useStore = create<AppState>((set, get) => ({
       const result = await api.rerunClipVideo(pid, clipIndex, prompt)
       const pipeline = await api.fetchSavedPipeline(pid)
       set({ dashboardSelectedPipeline: pipeline, dashboardLoading: false })
-      // New files (rerun clip / rejoin video) land in the outputs folder —
-      // refresh the gallery so they appear without a browser reload.
-      get().loadOutputs()
+      // A rerun creates a new independently browsable take. Preserve the
+      // selected gallery identity and refresh the expanded group members.
+      await get().refreshOutputs()
+      await get().refreshDirectorGalleryGroups(pid)
       return result
     } catch (e) {
       console.error('Re-run video failed:', e)
@@ -4673,7 +4728,8 @@ export const useStore = create<AppState>((set, get) => ({
       set({ dashboardSelectedPipeline: pipeline, dashboardLoading: false })
       // New files (rerun clip / rejoin video) land in the outputs folder —
       // refresh the gallery so they appear without a browser reload.
-      get().loadOutputs()
+      await get().refreshOutputs()
+      await get().refreshDirectorGalleryGroups(pid)
       return result
     } catch (e) {
       console.error('Rejoin failed:', e)
@@ -12208,6 +12264,180 @@ export const useStore = create<AppState>((set, get) => ({
   outputs: [],
   outputsCursor: null,
   outputsTotal: 0,
+  directorGalleryGroups: {},
+  setDirectorGalleryGroupExpanded: async (parent, expanded, refresh = false) => {
+    const directorGroup = parent.director_group
+    if (!directorGroup) return
+    const initial = get()
+    const workspace = parent.workspace || initial.activeWorkspace
+    const pipelineId = directorGroup.pipeline_id
+    const key = directorGalleryGroupKey(workspace, pipelineId)
+    const parentId = outputIdentity(parent)
+    const parentIsCurrent = (state: AppState) => state.outputs.some(output => (
+      outputIdentity(output) === parentId
+      && output.director_group?.pipeline_id === pipelineId
+      && (output.workspace || state.activeWorkspace) === workspace
+    ))
+    if (!parentIsCurrent(initial)) return
+
+    const rowsBefore = initial.filteredOutputs()
+    const selectedBefore = rowsBefore[initial.selectedOutput]
+    const selectedId = selectedBefore ? outputIdentity(selectedBefore) : null
+    const selectedChildOfGroup = !!selectedBefore
+      && selectedBefore.director_pipeline_id === pipelineId
+      && (selectedBefore.workspace || initial.activeWorkspace) === workspace
+    const currentGroup = initial.directorGalleryGroups[key] || {
+      pipelineId, workspace, expanded: false, loading: false, loaded: false,
+      clips: [], error: null,
+    }
+
+    if (!expanded && !refresh) {
+      set({ directorGalleryGroups: {
+        ...initial.directorGalleryGroups,
+        [key]: { ...currentGroup, expanded: false },
+      } })
+      preserveGallerySelection(get, selectedId, selectedChildOfGroup ? parentId : undefined)
+      return
+    }
+
+    set({ directorGalleryGroups: {
+      ...get().directorGalleryGroups,
+      [key]: { ...currentGroup, pipelineId, workspace, expanded, error: refresh ? null : currentGroup.error },
+    } })
+    preserveGallerySelection(get, selectedId)
+    const afterToggle = get().directorGalleryGroups[key]
+    if (!refresh && (afterToggle?.loaded || afterToggle?.loading)) return
+
+    const requestToken = (_directorGalleryRequestTokens.get(key) || 0) + 1
+    _directorGalleryRequestTokens.set(key, requestToken)
+    const scopeRevision = _galleryRevision
+    const queryKey = JSON.stringify(galleryQuery(get()))
+    set({ directorGalleryGroups: {
+      ...get().directorGalleryGroups,
+      [key]: {
+        ...(get().directorGalleryGroups[key] || currentGroup),
+        loading: true,
+        error: null,
+      },
+    } })
+
+    try {
+      const clips = (await api.fetchDirectorPipelineClips(pipelineId, workspace)).map(galleryOutput)
+      const current = get()
+      const requestIsCurrent = _directorGalleryRequestTokens.get(key) === requestToken
+      if (!requestIsCurrent) return
+      if (scopeRevision !== _galleryRevision
+        || JSON.stringify(galleryQuery(current)) !== queryKey
+        || !parentIsCurrent(current)) {
+        const latest = current.directorGalleryGroups[key]
+        if (latest) set({ directorGalleryGroups: {
+          ...current.directorGalleryGroups,
+          [key]: {
+            ...latest,
+            loading: false,
+            loaded: false,
+            error: 'The gallery scope changed while these clips were loading. Retry to load them.',
+          },
+        } })
+        return
+      }
+
+      const rowsBeforeResult = current.filteredOutputs()
+      const selectedBeforeResult = rowsBeforeResult[current.selectedOutput]
+      const selectedResultId = selectedBeforeResult ? outputIdentity(selectedBeforeResult) : null
+      const selectedResultChild = !!selectedBeforeResult
+        && selectedBeforeResult.director_pipeline_id === pipelineId
+        && (selectedBeforeResult.workspace || current.activeWorkspace) === workspace
+      const latest = current.directorGalleryGroups[key] || currentGroup
+      set({ directorGalleryGroups: {
+        ...current.directorGalleryGroups,
+        [key]: { ...latest, loading: false, loaded: true, clips, error: null },
+      } })
+      preserveGallerySelection(get, selectedResultId, selectedResultChild ? parentId : undefined)
+    } catch (error) {
+      if (_directorGalleryRequestTokens.get(key) !== requestToken) return
+      const current = get()
+      const latest = current.directorGalleryGroups[key]
+      if (!latest) return
+      set({ directorGalleryGroups: {
+        ...current.directorGalleryGroups,
+        [key]: {
+          ...latest,
+          loading: false,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      } })
+    }
+  },
+  refreshDirectorGalleryGroups: async (pipelineId) => {
+    const groups = Object.values(get().directorGalleryGroups).filter(group => group.pipelineId === pipelineId)
+    const parents = groups.map(group => get().outputs.find(output => (
+      output.director_group?.pipeline_id === pipelineId
+      && (output.workspace || get().activeWorkspace) === group.workspace
+    ))).filter((parent): parent is OutputFile => !!parent)
+    await Promise.all(parents.map(parent => {
+      const state = get().directorGalleryGroups[directorGalleryGroupKey(parent.workspace || get().activeWorkspace, pipelineId)]
+      return get().setDirectorGalleryGroupExpanded(parent, state?.expanded ?? false, true)
+    }))
+  },
+  setGalleryOutputFavorite: (name, workspace, favorite) => {
+    const origin = workspace || get().activeWorkspace
+    set(state => ({
+      outputs: state.outputs.map(output => output.name === name
+        && (output.workspace || state.activeWorkspace) === origin
+        ? { ...output, favorite } : output),
+      directorGalleryGroups: Object.fromEntries(Object.entries(state.directorGalleryGroups).map(([key, group]) => [
+        key,
+        group.clips.some(clip => clip.name === name && (clip.workspace || group.workspace) === origin)
+          ? { ...group, clips: group.clips.map(clip => clip.name === name && (clip.workspace || group.workspace) === origin
+            ? { ...clip, favorite } : clip) }
+          : group,
+      ])),
+    }))
+  },
+  removeOutputFromGallery: (output, preferredIndex) => {
+    const before = get()
+    const rowsBefore = before.filteredOutputs()
+    const selected = rowsBefore[before.selectedOutput]
+    const selectedId = selected ? outputIdentity(selected) : null
+    const outputIndex = preferredIndex ?? rowsBefore.findIndex(item => outputIdentity(item) === outputIdentity(output))
+    const isRawOutput = before.outputs.some(item => outputIdentity(item) === outputIdentity(output))
+    const removedTake = removeDirectorGalleryTake(before.directorGalleryGroups, output)
+    let outputs = isRawOutput
+      ? before.outputs.filter(item => outputIdentity(item) !== outputIdentity(output))
+      : before.outputs
+    if (removedTake.wasCached && output.director_pipeline_id) {
+      outputs = outputs.map(item => (
+        item.director_group?.pipeline_id === output.director_pipeline_id
+        && (item.workspace || before.activeWorkspace) === (output.workspace || before.activeWorkspace)
+      ) ? {
+        ...item,
+        director_group: {
+          ...item.director_group!,
+          clip_count: Math.max(0, item.director_group!.clip_count - 1),
+        },
+      } : item)
+    }
+    set({
+      outputs,
+      directorGalleryGroups: removedTake.groups,
+      ...(isRawOutput ? { outputsTotal: Math.max(0, before.outputsTotal - 1) } : {}),
+    })
+    const rowsAfter = get().filteredOutputs()
+    const selectedIndex = selectedId
+      ? rowsAfter.findIndex(item => outputIdentity(item) === selectedId)
+      : -1
+    const fallbackIndex = Math.min(Math.max(0, outputIndex), Math.max(0, rowsAfter.length - 1))
+    const nextIndex = selectedIndex >= 0 ? selectedIndex : fallbackIndex
+    if (rowsAfter[nextIndex]) {
+      if (nextIndex !== before.selectedOutput || selectedId === outputIdentity(output)) {
+        get().setSelectedOutput(nextIndex)
+      }
+    } else {
+      ++_galleryMetadataRevision
+      set({ selectedOutput: 0, selectedOutputMeta: null, metadataLoading: false })
+    }
+  },
   selectedOutput: 0,
   setSelectedOutput: (i) => {
     set({ selectedOutput: i })
@@ -12232,7 +12462,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
   filteredOutputs: () => {
     const { outputs, mediaFilter } = get()
-    return computeFilteredOutputs(outputs, mediaFilter)
+    return computeDirectorGalleryOutputs(computeFilteredOutputs(outputs, mediaFilter), get().directorGalleryGroups)
   },
 
   outputsLoading: false,
@@ -12297,7 +12527,10 @@ export const useStore = create<AppState>((set, get) => ({
         ? current.filter(output => !freshIds.has(outputIdentity(output)) && galleryOutputIsOlder(output, boundary))
         : []
       const merged = [...fresh, ...retainedTail]
-      const filteredMerged = computeFilteredOutputs(merged, state.mediaFilter)
+      const filteredMerged = computeDirectorGalleryOutputs(
+        computeFilteredOutputs(merged, state.mediaFilter),
+        state.directorGalleryGroups,
+      )
       const selectedIndex = selected
         ? filteredMerged.findIndex(output => outputIdentity(output) === outputIdentity(selected))
         : -1
@@ -12313,6 +12546,21 @@ export const useStore = create<AppState>((set, get) => ({
         selectedOutput: selectedRemoved ? 0 : selectedIndex,
         ...(selectedRemoved ? { selectedOutputMeta: null, metadataLoading: false } : {}),
       })
+      // A rerun or another client can add a take without changing the parent
+      // identity. Refresh only loaded, idle caches whose authoritative file
+      // count has changed; regular gallery polling then stays inexpensive.
+      const staleGroups = merged.flatMap(parent => {
+        const directorGroup = parent.director_group
+        if (!directorGroup) return []
+        const key = directorGalleryGroupKey(parent.workspace || get().activeWorkspace, directorGroup.pipeline_id)
+        const cached = get().directorGalleryGroups[key]
+        return cached?.loaded && !cached.loading && cached.clips.length !== directorGroup.clip_count
+          ? [{ parent, expanded: cached.expanded }]
+          : []
+      })
+      for (const { parent, expanded } of staleGroups) {
+        void get().setDirectorGalleryGroupExpanded(parent, expanded, true)
+      }
     } catch {
       // A transient disconnect must not clear the current library.
     }
@@ -12322,10 +12570,7 @@ export const useStore = create<AppState>((set, get) => ({
     const origin = workspace || get().activeWorkspace
     try {
       const result = await api.toggleFavorite(name, origin)
-      set(s => ({
-        outputs: s.outputs.map(o => o.name === name && (o.workspace || s.activeWorkspace) === origin
-          ? { ...o, favorite: result.favorite } : o),
-      }))
+      get().setGalleryOutputFavorite(name, origin, result.favorite)
     } catch (e) {
       console.error('Failed to toggle favorite:', e)
     }
@@ -14131,19 +14376,9 @@ export const useStore = create<AppState>((set, get) => ({
 
     try {
       await api.deleteOutput(output.name, output.workspace)
-      // Remove from local state
-      const allOutputs = get().outputs.filter(o => outputIdentity(o) !== outputIdentity(output))
       const outputIndex = outputs.findIndex(o => outputIdentity(o) === outputIdentity(output))
-      const nextFiltered = computeFilteredOutputs(allOutputs, get().mediaFilter)
-      const newIdx = Math.min(outputIndex >= 0 ? outputIndex : idx, Math.max(0, nextFiltered.length - 1))
-      set({ outputs: allOutputs, outputsTotal: Math.max(0, get().outputsTotal - 1), selectedOutput: newIdx })
-      // Load metadata for new selection
-      const newFiltered = get().filteredOutputs()
-      if (newFiltered[newIdx]) {
-        get().loadOutputMetadata(newFiltered[newIdx].name, newFiltered[newIdx].workspace)
-      } else {
-        set({ selectedOutputMeta: null })
-      }
+      get().removeOutputFromGallery(output, outputIndex >= 0 ? outputIndex : idx)
+      if (output.director_group) await get().refreshOutputs()
       return { ok: true }
     } catch (e) {
       console.error('Failed to delete output:', e)

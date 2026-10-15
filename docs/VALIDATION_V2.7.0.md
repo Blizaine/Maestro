@@ -110,6 +110,34 @@ requests were mocked, with no live project writes or generation requests.
 No video generation, app restart, second-workstation update or Main publication
 was performed for this follow-up.
 
+### Collapsible Director groups
+
+The gallery now opts into grouping independent Director shot files beneath the
+latest joined output, collapsed by default. Groups are formed before pagination
+and their members load separately in clip order with workspace-qualified URLs.
+Search and Favorites retain direct matching shots; unjoined or interrupted runs
+retain their finished files. The default ungrouped output API and Editor import
+remain compatible. Older clip and rejoin ownership is recovered read-only from
+stat-cached saved plan records, without rewriting source sidecars.
+
+Rejoin uses the Director project's recorded current takes, writes ownership
+metadata for the new master, and avoids replacing a previous master when names
+collide. The gallery, Director cancellation/rejoin and API lifecycle suites
+passed 49, 70 and 28 CPU tests respectively. The actual nine-shot production
+resolved to one parent group and nine correctly ordered members. These checks
+used existing file facts and mocked concatenation; no user video was rejoined.
+The Editor also prefers the latest joined master when it must reconstruct
+editable ranges from a combined file. Four isolated real-store browser import
+cases passed, including retained older masters and a missing individual source.
+The mounted desktop/mobile group regression passed lazy loading, sorted takes,
+collapse selection, favorite/load-settings/delete/move actions, safe Director
+rejoin, parent deletion recovery and stale-scope retry. Stable bounds and pointer
+hit tests confirm the controls are visible with a normal gap before the next
+card. Existing desktop, StrictMode and mobile gallery navigation passed, as did
+clip-action menus at three viewport sizes. Frontend lint, TypeScript, production
+build and test-script syntax checks passed. All browser traffic was mocked;
+no live generation, rejoin, saved project edit or app restart was performed.
+
 ## Duration policy follow-up — October 14
 
 The shared matrix is now versioned `2026-10-14`. Studio and Director use the

@@ -612,6 +612,7 @@ export function MainContent() {
   const isMobile = useIsMobileSidecar()
   const outputs = useStore(s => s.filteredOutputs())
   const outputsTotal = useStore(s => s.outputsTotal)
+  const rootOutputsLoaded = useStore(s => s.outputs.length)
   const hasMoreOutputs = useStore(s => s.outputs.length < s.outputsTotal)
   const outputsLoading = useStore(s => s.outputsLoading)
   const jobs = useStore(s => s.jobs)
@@ -652,10 +653,7 @@ export function MainContent() {
     if (!viewerSession?.allowFavorite) return
     const origin = file.workspace || viewerSession.workspace
     const result = await saveFavorite(file.name, origin)
-    useStore.setState(state => ({outputs: state.outputs.map(item => (
-      item.name === file.name && (item.workspace || state.activeWorkspace) === origin
-        ? {...item, favorite: result.favorite} : item
-    ))}))
+    useStore.getState().setGalleryOutputFavorite(file.name, origin, result.favorite)
     // Keep this viewing session stable even when removing an item from Favorites.
     setViewerSession(current => current && current.id === viewerSession.id ? {...current,
       items: current.items.map(item => outputIdentity(item) === outputIdentity(file)
@@ -1071,9 +1069,10 @@ export function MainContent() {
         <TabFilter />
         <div className="flex items-center gap-2 shrink-0">
           <div className="hidden text-xs text-text-muted xl:block">
-            {outputsTotal > outputs.length
-              ? `${outputs.length} / ${outputsTotal} items`
-              : `${outputs.length} ${outputs.length === 1 ? 'item' : 'items'}`}
+            {outputsTotal > rootOutputsLoaded
+              ? `${rootOutputsLoaded} / ${outputsTotal} outputs`
+              : `${outputsTotal} ${outputsTotal === 1 ? 'output' : 'outputs'}`}
+            {outputs.length > rootOutputsLoaded && ` · ${outputs.length - rootOutputsLoaded} expanded`}
           </div>
           <button type="button" aria-label="Open full-screen gallery" title="Open full-screen gallery"
             disabled={!outputs.some(file => file.type !== 'audio')}

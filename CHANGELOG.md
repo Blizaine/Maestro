@@ -7,9 +7,10 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 Public Dev testing candidate; not promoted to Main. See the [full release notes](docs/RELEASE_NOTES_V2.7.0.md).
 
-- Keep independent Director shot files visible in the gallery after completion,
-  alongside the joined video. Preserve cumulative sequence filtering and import
-  cancelled runs into the Editor from their surviving shots.
+- Group Director shot files beneath the latest joined video, collapsed by
+  default. Expand clips on demand with their normal actions, edit Director shots
+  and rejoin current takes into a new final. Keep search, Favorites and unjoined
+  runs discoverable; import cancelled runs into the Editor from surviving shots.
 - Preserve explicit reciprocal combat in Director music-video concepts, including
   collective participants and requested power use. Recover an omitted fight at
   its assigned outline beat without replacing the other shots; allow continuing

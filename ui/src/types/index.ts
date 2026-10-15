@@ -578,6 +578,12 @@ export interface OutputFile {
   metadata_ready?: boolean
   /** Sidecar modification time used to invalidate an in-progress metadata view. */
   metadata_updated_at?: number | null
+  /** Joined Director final that owns the individual per-shot gallery rows. */
+  director_group?: { pipeline_id: string; clip_count: number } | null
+  /** Director project owning an individual shot take. */
+  director_pipeline_id?: string | null
+  /** Zero-based shot position for an individual Director take. */
+  director_clip_index?: number | null
 }
 
 export type AppMode = 'director' | 'studio' | 'editor'

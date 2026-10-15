@@ -77,8 +77,13 @@ can use the saved prompt unchanged. Its original duration and window geometry
 survive model/resolution hydration and attention changes, instead of Auto
 silently splitting a single native clip into multiple windows.
 
-Independent Director shots remain visible in the gallery after the final video
-is joined. Cumulative sequence intermediates retain their existing filtering.
+Completed Director productions show the latest joined video with **Show clips**,
+collapsed by default. Expand it to browse the individual shot files beneath the
+final, retaining their normal media actions. **Edit Director shots** opens the
+saved production for prompt edits and replacement reruns; **Rejoin** assembles
+its current takes into a new final and keeps the previous video. Search and
+Favorites still find individual shots, and runs without a final show their
+finished clips directly. Cumulative intermediates retain their existing filtering.
 To edit the full production as separate shots, open **Editor → Media → Director**
 and choose **Add run**. This imports the saved shot files, their Director prompts
 and the original soundtrack; adding the joined video as ordinary media imports

@@ -4115,6 +4115,9 @@ def _rejoin_clips_impl(out_dir: str, pid: str) -> dict:
     timestamp = _time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
     output_name = f"{timestamp}_rejoin_multiclip.mp4"
     output_path = os.path.join(clip_out_dir, output_name)
+    while os.path.exists(output_path):
+        output_name = f"{timestamp}_{uuid.uuid4().hex[:8]}_rejoin_multiclip.mp4"
+        output_path = os.path.join(clip_out_dir, output_name)
 
     try:
         # concatenate_multi_clip_videos is the join the original pipeline
@@ -4131,6 +4134,23 @@ def _rejoin_clips_impl(out_dir: str, pid: str) -> dict:
         if not ok or not os.path.isfile(output_path):
             raise RuntimeError("ffmpeg concatenation failed (see server log for the clip that broke it)")
         print(f"[Pipeline] Rejoined {len(video_files)} clips -> {output_name}")
+
+        # A rejoined master must retain Director ownership, just like the
+        # original output, for gallery grouping and full-project restoration.
+        # Keep the original masters and their metadata intact.
+        with _pipeline_file_lock:
+            _write_pipeline_json_unlocked(
+                os.path.splitext(output_path)[0] + ".meta.json",
+                {
+                    "params": {"_director_pipeline_id": pid},
+                    "director_pipeline_id": pid,
+                    "director_artifact_kind": "joined",
+                    "generation_mode": "video",
+                    "created_at": _time.time(),
+                    "output_filename": output_name,
+                    "director_source_clips": [clip["video_filename"] for clip in clips],
+                },
+            )
 
         # Update pipeline state
         def _update(s):

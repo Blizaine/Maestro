@@ -130,7 +130,7 @@ function makeProject(id) {
             return json({detail: 'Synthetic media unavailable'}, 404);
           }
           const isAudio = asset.name === masterAudioName;
-          const isJoined = asset.name === joinedName || asset.name === 'seamless-final.mp4';
+          const isJoined = asset.name.includes('_multiclip') || asset.name === 'seamless-final.mp4';
           return json({
             name: asset.name,
             type: isAudio ? 'audio' : 'video',
@@ -293,7 +293,15 @@ function makeProject(id) {
     assert.equal(cancelled.error, 'Imported 3 of 9 completed Director shots.');
     console.log('Cancelled Director import keeps its completed per-clip prefix without a joined master');
 
-    assert.equal(pipelineRequests.length, 3, 'Each import fetches only its saved pipeline state');
+    const rejoinedRun = makePipeline({id: 'run-latest-rejoin', joinFilename: 'latest_rejoin_multiclip.mp4'});
+    rejoinedRun.output_files.splice(-1, 0, joinedName);
+    const rejoined = await runImport(rejoinedRun, 'editor-latest-rejoin-test', [clipNames[1]]);
+    assert.equal(rejoined.videoTrack.items.length, 9, 'Missing shot sources fall back to editable master ranges');
+    assert.deepEqual(rejoined.assets.filter(asset => asset.type === 'video').map(asset => asset.name), ['latest_rejoin_multiclip.mp4']);
+    assert.equal(rejoined.error, null);
+    console.log('Joined-source fallback uses the latest rejoined master while retaining the older output');
+
+    assert.equal(pipelineRequests.length, 4, 'Each import fetches only its saved pipeline state');
     assert.equal(projectWrites.length, 0, 'No Editor project endpoint is written');
     assert.equal(unexpectedRequests.length, 0, `No unexpected requests escape the mocks: ${unexpectedRequests.join(', ')}`);
     assert.equal(probeRequests.every(request => request.assetWorkspace === workspace), true, 'All probes preserve the source workspace');

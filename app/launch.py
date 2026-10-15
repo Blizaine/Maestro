@@ -29793,7 +29793,8 @@ def _gallery_directory(workspace: str = "", *, writable: bool = False) -> str:
 @api.get("/api/v1/outputs")
 def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False,
                  multiclip_only: bool = False, search: str = "", workspace: str = "",
-                 media_filter: str = "all", cursor: str = ""):
+                 media_filter: str = "all", cursor: str = "",
+                 group_director_clips: bool = False, director_pipeline_id: str = ""):
     """Browse generated media without changing the generation destination.
 
     __all__ includes the default output folder and every named workspace.
@@ -29810,7 +29811,8 @@ def list_outputs(limit: int = 0, offset: int = 0, favorites_only: bool = False,
         return gallery_library.list(folders, favorites=_load_favorites, limit=limit,
                                     offset=offset, search=search, media_filter=media_filter,
                                     favorites_only=favorites_only, multiclip_only=multiclip_only,
-                                    cursor=cursor)
+                                    cursor=cursor, group_director_clips=group_director_clips,
+                                    director_pipeline_id=director_pipeline_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
