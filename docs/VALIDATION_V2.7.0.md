@@ -82,6 +82,34 @@ saved prompt or media file was modified; the second workstation was untouched.
 The release notes include this follow-up. Main, public Dev and release tags
 were not pushed by this change.
 
+## Director clip visibility follow-up — October 15
+
+Saving exact per-output Director settings exposed an older gallery rule that
+collapsed every `multi_clip_info` group. Standard independent Director shots
+were treated as superseded cumulative segments and disappeared from listings
+when the final shot completed. The files and saved pipeline were retained.
+The gallery now preserves independent Director clips, including older sidecars;
+cumulative sequence and Studio filtering retain their previous behavior.
+
+All 41 gallery CPU regressions and the Editor draft round-trip test passed,
+covering completion, pre-join visibility, late sidecar publication, pagination,
+favorites/search and cumulative filtering. A read-only check of the actual saved
+nine-shot production returned all nine shot files and its joined output using
+the corrected library. All nine files also passed the running Editor media-probe
+endpoint with valid dimensions, audio and measured durations. The existing
+Editor project was not modified by these checks.
+
+Frontend lint, TypeScript and the production build passed. The Editor's saved
+run import is independent of gallery visibility. Its partial-run fallback now
+distinguishes an actual joined or seamless master from the last individual clip,
+so a cancelled standard run imports only its surviving completed prefix.
+The isolated real-store browser regression passed for a final-only media library
+importing nine distinct clips, their prompts and master audio; seamless master
+source ranges; and an interrupted run with one missing completed file. All
+requests were mocked, with no live project writes or generation requests.
+No video generation, app restart, second-workstation update or Main publication
+was performed for this follow-up.
+
 ## Duration policy follow-up — October 14
 
 The shared matrix is now versioned `2026-10-14`. Studio and Director use the

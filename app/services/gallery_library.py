@@ -56,6 +56,16 @@ class GalleryLibrary:
             "mode": meta.get("generation_mode"),
             "edit_sub_mode": params.get("edit_sub_mode"),
             "multi_clip_info": mci,
+            # Standard Director shots are independent, editable outputs. Only
+            # cumulative sequence renders are superseded by a later segment.
+            # Older Director sidecars predate explicit artifact kinds, but
+            # still retain the pipeline id and sequence-continuity flag.
+            "keep_director_clip": bool(
+                (meta.get("director_pipeline_id") or params.get("_director_pipeline_id"))
+                and meta.get("director_artifact_kind") in (None, "clip")
+                and isinstance(mci, dict)
+                and not mci.get("omni_sequence_continuity")
+            ),
             "metadata_ready": stamp is not None,
             "metadata_updated_at": stamp[0] / 1e9 if stamp else None,
             "tokens": SearchIndex.searchable_tokens(os.path.basename(path), meta),
@@ -125,7 +135,7 @@ class GalleryLibrary:
                 visible = []
                 for name, path, ext, stat, meta in folder_items:
                     mci = meta.get("multi_clip_info")
-                    if isinstance(mci, dict) and mci.get("group_id"):
+                    if isinstance(mci, dict) and mci.get("group_id") and not meta["keep_director_clip"]:
                         highest, total = groups[str(mci["group_id"])]
                         if highest >= total - 1 or int(mci.get("index", 0)) < highest:
                             continue

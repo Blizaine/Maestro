@@ -77,6 +77,13 @@ can use the saved prompt unchanged. Its original duration and window geometry
 survive model/resolution hydration and attention changes, instead of Auto
 silently splitting a single native clip into multiple windows.
 
+Independent Director shots remain visible in the gallery after the final video
+is joined. Cumulative sequence intermediates retain their existing filtering.
+To edit the full production as separate shots, open **Editor → Media → Director**
+and choose **Add run**. This imports the saved shot files, their Director prompts
+and the original soundtrack; adding the joined video as ordinary media imports
+one file. Interrupted standard runs import their surviving completed shots.
+
 Video cards and the side thumbnail strip also show the actual clip duration
 before playback. Labels use measured file-header facts, rather than the requested
 generation duration, while retaining image posters and lazy video loading on

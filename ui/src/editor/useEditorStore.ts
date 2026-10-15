@@ -1031,7 +1031,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const outputVideos = (state.output_files || []).filter(isDirectorVideoFilename)
       const combinedFilename = outputVideos.find(filename => (
         filename.toLowerCase().includes('_multiclip')
-      )) || outputVideos.at(-1) || ''
+      )) || (state.seamless ? outputVideos.at(-1) : '') || ''
       const hasEveryIndividualClip = !state.seamless && clips.every(clip => (
         isDirectorVideoFilename(clip.video_filename)
       ))
