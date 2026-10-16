@@ -28,21 +28,22 @@ sys.path.insert(0, str(APP))
 # Import the Fish package without executing the broad TTS model registry, which
 # imports unrelated optional inference stacks. This test only exercises its
 # local CPU code; the real application imports the same package files normally.
-if "models.TTS" not in sys.modules:
+import models
+
+tts_package = sys.modules.get("models.TTS", getattr(models, "TTS", None))
+if tts_package is None:
     tts_package = types.ModuleType("models.TTS")
     tts_package.__path__ = [str(APP / "models" / "TTS")]
-    sys.modules["models.TTS"] = tts_package
+sys.modules["models.TTS"] = tts_package
+# Keep the package tree and sys.modules in sync. Python 3.10's
+# unittest.mock.patch("models.TTS....") resolves TTS through the parent module.
+models.TTS = tts_package
 
-# attention_kit imports MMGP's offload module. Keep that import lightweight in
-# this CPU unit test; no model loading or offload behavior is under test here.
+# Import MMGP as the application does. The CPU tests do not load models, and
+# keeping the real module available prevents this test import from masking
+# later tests that exercise MMGP's embedding and ConvRot support.
 import mmgp
-
-if "mmgp.offload" not in sys.modules:
-    offload_stub = types.ModuleType("mmgp.offload")
-    offload_stub.linear_rows_supported = lambda *args, **kwargs: False
-    offload_stub.load_model_data = lambda *args, **kwargs: None
-    sys.modules["mmgp.offload"] = offload_stub
-    mmgp.offload = offload_stub
+from mmgp import offload as mmgp_offload
 
 from mmgp.expert_compute import SwiGLUExperts
 from mmgp.experts import excluded_names
@@ -435,6 +436,13 @@ class FishExpertMathTests(unittest.TestCase):
 
 
 class FishScriptContractTests(unittest.TestCase):
+    def test_string_patch_resolves_fish_module_under_models_tts_parent(self):
+        self.assertIs(sys.modules["models"].TTS, sys.modules["models.TTS"])
+        self.assertTrue(callable(mmgp_offload.load_model_data))
+
+        with patch("models.TTS.fish_audio.prompt.dialogue_parts") as dialogue_parts:
+            self.assertIsNotNone(dialogue_parts)
+
     def test_vllm_capability_gate_reports_shared_runtime_failures(self):
         with patch.object(
             shared_vllm_support,

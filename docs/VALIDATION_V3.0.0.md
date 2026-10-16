@@ -91,9 +91,16 @@ Desktop/mobile mounted Prompt Helper tests passed drawing, source-region edits,
 removal, save/reopen and Y/X coordinate serialization. Frontend lint, TypeScript,
 production build, the existing Flux browser regression, 138 standalone media
 checks and the JSON grammar runner passed. Full backend discovery passed
-4,232 tests with 12 skips before the final Fish runtime repairs; all 26 focused
+4,232 tests with 12 skips before the final Fish runtime repairs; all 27 focused
 Fish tests passed afterward. The published Dev commit's CI verifies the final
-source. Release source excludes all weights,
+source. The first hosted Python 3.10 run found five music-test mock-resolution
+errors caused by the Fish fixture's unbound parent package. The fixture now
+keeps the package tree consistent, imports the real MMGP loader instead of
+leaving a global stub, and includes a string-patch regression. The failed run
+did not reveal a generation-path failure. After correction, 54 tests covering
+Fish, the affected music modules and real MMGP ConvRot embedding loading passed
+in one Python 3.10 process; the final Dev CI follows this repair.
+Release source excludes all weights,
 private reports and generated media. Main, workstation 02 and saved user
 settings are unchanged by this follow-up.
 
