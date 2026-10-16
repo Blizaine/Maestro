@@ -190,3 +190,20 @@ The upstream WanGP Community License 2.0 is preserved in
 retain their Apache-2.0 notices.
 
 Source: https://github.com/deepbeepmeep/Wan2GP/tree/6479db36bdc2619a904a852bba9c2d78e1a83f82/models/minimax_h3
+
+## Black Forest Labs FLUX 3 Image Klein
+
+The optional native FLUX 3 integration adapts Black Forest Labs' reference
+DiT, autoencoder, sampling and reference-preparation code from revision
+`45e57c9fb06f9751cdced29a65c5d2171003be05`. Its Apache-2.0 license is preserved
+in `app/models/flux3/LICENSE`, with adaptation details in
+`app/models/flux3/THIRD_PARTY_NOTICES.md`. Qwen3-VL model code is provided by
+the existing Transformers dependency.
+
+Source: https://github.com/black-forest-labs/flux-3-image-klein/tree/45e57c9fb06f9751cdced29a65c5d2171003be05
+
+Official model weights download on demand from the separately licensed,
+access-gated model repository and are not redistributed in Maestro's source.
+The pinned weight revision and download verification are documented in
+`docs/Flux-3-Klein.md`. The optional BFL prompt-upsampler weights are not
+installed by this integration.

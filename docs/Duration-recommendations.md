@@ -1,6 +1,7 @@
 # Automatic H3 clip and window durations
 
-The shared duration matrix was refreshed on October 14, 2026 for v2.7.0. Its
+The shared duration matrix was refreshed on October 14, 2026 and is included
+in the v3.0.0 candidate. Its
 previous update was October 12, when the 12 GB GPU / 32 GB RAM 720p Pruned and
 Fused recommendations were raised to 345 frames, displayed as 14.4 seconds.
 

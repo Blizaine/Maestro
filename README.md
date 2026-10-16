@@ -45,7 +45,7 @@ Detects your GPU, VRAM, and RAM on first launch and picks the right profile, qua
 Direct access to every model and every knob:
 - **Video** — create, extend, blend, retake, edit anything, outpaint, repaint, recast, upscale, and finish clips with MiniMax H3, LTX-2.5/2.3, SCAIL-2, Wan, Hunyuan, and many more.
 - **LongCat Avatar:** open **Studio → Video → Avatar**, choose Single or Multi, and add an anchor image plus **Voice audio #1**. Multi also needs **Voice audio #2**; use the preview and percentage-based speaker boxes to match each voice to a person. Swap exchanges the two speaker boxes, and Reset restores left/right assignments. Required inputs are checked for both Generate and Add to Queue. Load Settings restores voices and boxes, including older LongCat Frames outputs. These original Avatar checkpoints use **50 sampling steps**, **Auto** sampler, and text/audio guidance of **4** by default; one-step diagnostic renders do not establish visual quality. LongCat uses windows of up to 93 frames (about 5.8 seconds for Avatar), with 13 frames of overlap, and continues across windows for the full requested audio duration. **LongCat Video** remains in **Frames** for text/image-to-video generation.
-- **Image** — create, edit, upscale, or outpaint with Flux 2 Klein 9B, Krea 2 RAW/Turbo and Identity Edit, Qwen Image Edit, and more.
+- **Image** — create, edit, upscale, or outpaint with Flux 2 Klein 9B, Krea 2 RAW/Turbo and Identity Edit, Qwen Image Edit, and more. The optional [Flux 3 Klein](docs/Flux-3-Klein.md) adapter adds native 16-step generation and reference-image editing.
 - **Audio** — generate music with MiniMax-Music3, ACE-Step or **YuE2**, speech and cloned voices with H3 Voice Audio, Kugelaudio or Qwen3 TTS, sound effects with H3 or MMAudio, and revoice existing clips.
 - **YuE2 songs and personal styles:** 48 kHz stereo music with optional melody/chord planning, ABC scores and source-song covers. **My music (Experimental)** adds full-song transcription and voice-group review, resumable training, fixed auditions and portable styles. Choose AR song-style training or the author's tokenizer/decoder sound adaptation, with original/before/after listening comparisons. Check-only recordings help evaluate learning on another song. Training is optional; matching a specific singer's voice is not guaranteed. The exercised training GPU has 24 GB VRAM. YuE2 and the real-audio tokenizer weights have their own noncommercial model terms. [YuE2 music guide](docs/YuE2-music.md).
 - **Multi-clip generation** with per-clip prompts, seamless overlapping (sliding window) transitions, and shared LoRAs
@@ -126,7 +126,7 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
-### v2.7.0 (prepared 2026-10-13; pending Main publication)
+### v3.0.0 (Dev testing candidate, prepared 2026-10-15; pending Main publication)
 
 - **WanGP 17 memory engine:** bundled MMGP 4, optimized VRAM allocation, smart pinning, dynamic preload, optional RAM allocation and Windows read-ahead controls. Compatible attention, INT8 and VAE paths reduce memory overhead; saved manual preferences remain in control.
 - **Generation-aware Auto-tune:** uses the GPU, system RAM, resolution, window length and references to choose temporary H3 placement. Bounded local comparisons can teach it a faster safe placement. Includes conservative recommendations for smaller-memory machines.
@@ -134,6 +134,8 @@ The version you are running is shown next to the Maestro title in the UI. To upd
 - **Experimental H3 sparse attention:** opt-in SLA for Full/Pruned and Veda for Full/Pruned/Fused in Frames and References. Veda downloads verified learned predictors on first use; Fused retains its default SLA recipe. Compatible 3080 Ti SageAttention jobs also use shorter temporary-buffer lifetimes.
 - **Simpler model selection:** grouped Video, Image and Audio settings, workflow-specific model visibility, concise names, compact download controls and a reset that preserves downloaded files. New Director projects default to H3 Fused 4-Step References, and song analysis returns users to reference setup.
 - **Qwen Image 2.1 Turbo:** optional native eight-step image generation and editing with the official Turbo schedule, compatible LoRAs and verified BF16/INT8 assets. [Qwen guide](docs/Qwen-Image-2.1.md).
+- **Flux 3 Klein 5.6B:** native 16-step image generation and instruction-based editing with up to ten reference inputs, verified official downloads and MMGP offloading. Dedicated generation/edit enhancement guides preserve ordered reference bindings, roles and exact lettering. Initial BF16 support requires access to the official Hugging Face weights. [Flux 3 guide](docs/Flux-3-Klein.md).
+- **New local writer and experimental MTP:** Underdog Saluki 27B IQ2-Mix Uncensored with vision support, plus a default-off MTP acceleration option for compatible local writers.
 - **Fused checkpoint labels:** Frames and References now appear as **H3 Fused 4-Step**, without the Experimental suffix. Both continue to share the same verified upstream weights.
 - **H3 VAE 2×:** optional learned video decoding doubles both output dimensions while denoising at the selected resolution. Available in Studio and Director; its verified 2.8-GB decoder downloads on first use. [H3 VAE guide](docs/H3-VAE-x2.md).
 - **Faster H3 setup and repeated work:** download auxiliary tools when needed, reuse eligible plain-text conditioning, and batch compatible VAE tiles within memory limits. Director uses Studio's hardware-aware encoder recommendation, including Q2_K on constrained machines.
@@ -145,16 +147,18 @@ The version you are running is shown next to the Maestro title in the UI. To upd
 - **Whole-song direction and optional lyric context:** plan visual progression across the song, keep requested actions in order and repair repeated actions without replacing accepted neighboring shots. **Use lyrics to guide visuals** is off for new projects; soundtrack timing and assigned lip-sync remain available either way.
 - **Safer Director editing and clip comparisons:** retain per-shot prompt drafts through deselection and failed reruns, identify errors beside the affected shot, and prevent unambiguous reference aliases from creating duplicate subjects. An individual clip's pencil restores its own recipe into Studio, including its original window size; the joined video reopens the full Director project.
 - **Optional developer test bench:** manual diagnostics, prompt/render regressions, cold/warm comparisons and multi-machine report collection, plus Windows SSH setup and bounded diagnostics. Test results remain local; no recurring schedule is installed.
+- **YuE2 download repair:** verified replacement asset revision restores music generation after upstream repository-history changes.
 
-This is a prepared release candidate. Use **Update** in Pinokio after publication,
+This Dev candidate supersedes the unreleased v2.7.0 candidate. Use **Update**
+in Pinokio on the Dev branch while idle,
 restart Maestro and refresh the browser. Existing installations with Auto-tune
 enabled receive the revised recommendations once at startup; saved manual choices
 are preserved. **Settings → Performance → Re-detect** can explicitly reapply
 recommendations. Check the active allocator and restart if an allocator change
 is pending.
 
-See the [complete changes](docs/RELEASE_NOTES_V2.7.0.md),
-[validation and remaining checks](docs/VALIDATION_V2.7.0.md), and
+See the [complete changes](docs/RELEASE_NOTES_V3.0.0.md),
+[validation and remaining checks](docs/VALIDATION_V3.0.0.md), and
 [Auto-tune guide](docs/Performance-auto-tune.md). Measured improvements depend on
 the workload and hardware; 6/8/10 GB VRAM, 16 GB RAM and Linux CUDA generation
 remain unverified for this candidate.

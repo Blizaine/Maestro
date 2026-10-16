@@ -41,7 +41,7 @@ six steps, 540p, with an image and exact music produced 1920×1088 output in
 soundtrack passed complete media decoding. A matched short warm run added
 about 2.4 seconds compared with the normal decoder. These are individual
 measurements, not a speed or quality guarantee. RAM pressure and paging were
-still observed. See the [validation record](VALIDATION_V2.7.0.md) for settings,
+still observed. See the [validation record](VALIDATION_V3.0.0.md) for settings,
 comparison limits, earlier native transformer-memory failures and the separate
 verified native 1080p / 15.08-second follow-up. Native generation uses its own
 memory recipe; the x2 decoder does not provide that denoising memory saving.

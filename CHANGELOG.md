@@ -3,10 +3,20 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## [2.7.0] - Unreleased
+## [3.0.0] - Unreleased
 
-Public Dev testing candidate; not promoted to Main. See the [full release notes](docs/RELEASE_NOTES_V2.7.0.md).
+Public Dev testing candidate; not promoted to Main. Supersedes the unreleased
+v2.7.0 candidate. See the [full release notes](docs/RELEASE_NOTES_V3.0.0.md).
 
+- Add a native Flux 3 Klein 5.6B image adapter with its 16-step default,
+  reference-image editing, MMGP component offloading and verified on-demand
+  official downloads. Real-checkpoint text-to-image, single-reference editing
+  and two-reference composition passed on the RTX 4090 at 1024 × 1024. Clear
+  stale reference-mode flags on Flux 3 submission; a ten-reference 1280 × 720
+  runtime test also completed, with subject-retention limits documented.
+- Give Flux 3 separate generation and reference-edit enhancement guides, with
+  ordered native reference bindings, exact-text and subject-role preservation,
+  and cleanup that retains valid multi-reference captions.
 - Group Director shot files beneath the latest joined video, collapsed by
   default. Expand clips on demand with their normal actions, edit Director shots
   and rejoin current takes into a new final. Keep search, Favorites and unjoined
@@ -174,7 +184,7 @@ Public Dev testing candidate; not promoted to Main. See the [full release notes]
 The October 13 Dev candidate passes CI, and later music-video planning checks
 passed native preflight after the recorded repairs. Main promotion still awaits
 final Director media review, a fresh silent short-film check and an idle update
-smoke test; see the [current readiness record](docs/VALIDATION_V2.7.0.md#release-readiness--october-13).
+smoke test; see the [current readiness record](docs/VALIDATION_V3.0.0.md#release-readiness--october-13).
 
 ## [2.6.0] - 2026-10-04
 

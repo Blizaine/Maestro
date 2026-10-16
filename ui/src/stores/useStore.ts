@@ -922,6 +922,7 @@ function _applyModelDefaults(
 const familyModeMap: Record<string, GenerationMode> = {
   flux: 'image',
   flux2: 'image',
+  flux3: 'image',
   qwen: 'image',
   z_image: 'image',
   krea2: 'image',
@@ -1007,6 +1008,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
   // base RAW/Turbo generation and their identity-preserving Edit variants.
   // Other image models remain opt-in through Model Visibility.
   'flux2_klein_9b',
+  'flux3_klein',
   'qwen_image_21_7B',
   'qwen_image_21_7B_turbo',
   'krea2_raw',
@@ -1064,7 +1066,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 21
+const DEFAULTS_VERSION = 22
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -1102,6 +1104,8 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   20: [],
   // Official eight-step Qwen checkpoint; expose once without selecting it.
   21: ['qwen_image_21_7B_turbo'],
+  // Native FLUX 3 image generation/editing; retain the user's selected model.
+  22: ['flux3_klein'],
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 
@@ -8375,13 +8379,29 @@ export const useStore = create<AppState>((set, get) => ({
       || !!state.modelOptions?.image_ref_inpaint
     )
     const imageReferenceChoices = state.modelOptions?.image_ref_choices?.choices ?? []
-    const effectiveImageRefType = state.imageRefType || (
-      imageReferenceChoices.some(([, value]) => value.includes('K'))
-        ? 'KI'
-        : imageReferenceChoices.some(([, value]) => value === 'I')
-          ? 'I'
-          : imageReferenceChoices[0]?.[1] || ''
+    const isFlux3KleinImageGenerate = (
+      params.model_type === 'flux3_klein'
+      && state.generationMode === 'image'
+      && state.studioImageWorkflow === 'generate'
     )
+    if (isFlux3KleinImageGenerate && state.modelOptions?.model_type !== 'flux3_klein') {
+      set({ promptEnhanceError: 'FLUX 3 Klein settings are still loading. Try Generate again.' })
+      return
+    }
+    const flux3SupportsImageReferences = imageReferenceChoices.some(([, value]) => value === 'I')
+    if (isFlux3KleinImageGenerate && state.imageRefs.length > 0 && !flux3SupportsImageReferences) {
+      set({ promptEnhanceError: 'FLUX 3 Klein reference settings are still loading. Try Generate again.' })
+      return
+    }
+    const effectiveImageRefType = isFlux3KleinImageGenerate
+      ? (flux3SupportsImageReferences ? 'I' : '')
+      : state.imageRefType || (
+          imageReferenceChoices.some(([, value]) => value.includes('K'))
+            ? 'KI'
+            : imageReferenceChoices.some(([, value]) => value === 'I')
+              ? 'I'
+              : imageReferenceChoices[0]?.[1] || ''
+      )
     if (imageReferenceWorkflowActive && effectiveImageRefType && state.imageRefs.length > 0
       && !(state.studioVideoWorkflow === 'avatar' && params.image_start)) {
       const refPaths: string[] = []
@@ -8438,6 +8458,25 @@ export const useStore = create<AppState>((set, get) => ({
       // Make sure no stale image_refs path list rides along either.
       if (params.image_refs !== undefined && (!params.image_refs || (params.image_refs as string[]).length === 0)) {
         delete params.image_refs
+      }
+    }
+
+    if (isFlux3KleinImageGenerate) {
+      const referencePaths = Array.isArray(params.image_refs)
+        ? (params.image_refs as unknown[]).filter(
+            (path): path is string => typeof path === 'string' && path.trim().length > 0,
+          )
+        : []
+      if (referencePaths.length > 0 && !flux3SupportsImageReferences) {
+        set({ promptEnhanceError: 'FLUX 3 Klein reference settings are still loading. Try Generate again.' })
+        return
+      }
+      if (referencePaths.length > 0) {
+        params.image_refs = referencePaths
+        params.video_prompt_type = 'I'
+      } else {
+        delete params.image_refs
+        params.video_prompt_type = ''
       }
     }
 

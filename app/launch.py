@@ -9245,6 +9245,9 @@ async def _llm_enhance_prompt_payload(body: dict):
         model_type.lower().startswith("minimax_h3")
         and generation_mode in ("video", "avatar")
     )
+    needs_flux3_image_guide = (
+        model_type.lower().startswith("flux3") and generation_mode == "image"
+    )
     try:
         requested_window_count = max(1, int(body.get("window_count") or 1))
     except (TypeError, ValueError):
@@ -9260,11 +9263,13 @@ async def _llm_enhance_prompt_payload(body: dict):
     # The generic Wan2GP cinematic enhancer cannot produce MiniMax H3's
     # required Context-IR fields, speaker IDs, or <d> dialogue tags. Route H3
     # through Maestro's model-specific guide even when the legacy enhancer is
-    # enabled; all other model families retain the configured behavior.
+    # enabled. FLUX 3 also needs its own caption/edit dialect and ordered
+    # reference bindings rather than the generic cinematic enhancer.
     if (
         enhancer_enabled > 0
         and not needs_h3_context_ir
         and not needs_ltx_window_plan
+        and not needs_flux3_image_guide
     ):
         try:
             # Support both single image_path and array image_paths
@@ -9283,6 +9288,8 @@ async def _llm_enhance_prompt_payload(body: dict):
                 "[Enhance] LTX multi-window planning requires standalone "
                 "window prompts; using Maestro's model-specific LLM guide"
             )
+        elif needs_flux3_image_guide:
+            print("[Enhance] FLUX 3 uses native image captions and reference bindings; using Maestro's model-specific LLM guide")
 
     # Use our local LLM service
     from services import llm_service

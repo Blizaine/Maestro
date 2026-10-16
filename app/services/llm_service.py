@@ -3386,6 +3386,7 @@ def enhance_prompt(
         and not is_h3_ref2va
     )
     is_h3_structured = is_h3_context_ir or is_h3_ref2va
+    is_flux3_image = mode == "image" and (model_type or "").lower().startswith("flux3")
     audio_driven = is_h3_ref2va and has_h3_performance_audio(reference_context)
     needs_h3_dialogue = is_h3_structured and not audio_driven
     if needs_h3_dialogue:
@@ -3688,6 +3689,20 @@ def enhance_prompt(
                 "a general identity reference.\n\n"
                 f"{reference_context}\n\n{user_prompt}"
             )
+        elif is_flux3_image:
+            reference_map = "\n".join(
+                f"Image {index + 1} = <ref_image_{index}>"
+                for index in range(len(image_paths))
+            )
+            user_prompt = (
+                f"There are {len(image_paths)} attached FLUX 3 reference images in this exact order:\n"
+                f"{reference_map}\n\n"
+                "Use these native reference tokens when binding content to its source. "
+                "This is an input map, not the final subject count: an image may supply a character, "
+                "object, clothing, setting or style. Follow the user's roles and do not invent "
+                "unseen image content. Do not render the reference tokens as visible lettering.\n\n"
+                f"{user_prompt}"
+            )
         elif mode == "image":
             user_prompt = f"I have attached a reference image. Enhance this prompt based on what you see in the image:\n\n{user_prompt}"
         else:
@@ -3773,6 +3788,14 @@ def enhance_prompt(
             "display names. Exact creator-declared trainedWords tokens from "
             "active-LoRA guidance may appear when relevant."
         )
+    elif is_flux3_image:
+        system += (
+            "\n\nFLUX 3 OUTPUT CONTRACT: Return only the final still-image caption or editing "
+            "instruction. Native <ref_image_N> tokens identify attached inputs in order and are "
+            "allowed model syntax, not headings. Keep exact requested lettering in quotes. "
+            "Do not output the input map, commentary, Markdown, layout JSON, bounding boxes, "
+            "mask commands, negative-prompt fields or generation settings."
+        )
     else:
         system += "\n\nCRITICAL: Output ONLY the enhanced prompt text. No headers, no labels, no markdown, no explanation, no \"Enhancement Logic\", no \"Edit Prompt:\". No LoRA filenames or display names; exact creator-declared trainedWords tokens from active-LoRA guidance may appear when relevant. Just the raw prompt text."
 
@@ -3855,7 +3878,10 @@ def enhance_prompt(
     # labels and media tags. The old substring-loop cleaner could truncate a
     # valid Context-IR response at its first repeated <Picture>/<Audio> mapping.
     if result:
-        result = _clean_enhance_output(result, preserve_structure=is_h3_structured)
+        # Repeated source-binding phrases in a multi-reference caption are
+        # legitimate. The ordinary substring-loop heuristic can cut the
+        # caption halfway through a <ref_image_N> token and drop later subjects.
+        result = _clean_enhance_output(result, preserve_structure=is_h3_structured or is_flux3_image)
     if is_h3_context_ir and result:
         # Adaptive dialogue may compile named cues into tags. For ordinary
         # locked user dialogue, compile only when the writer already returned

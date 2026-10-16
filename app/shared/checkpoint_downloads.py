@@ -89,6 +89,16 @@ def _authenticated_request(url: str, hostname: str, api_key: str | None) -> tupl
         "Accept": "*/*",
         "Accept-Encoding": "gzip, deflate",
     }
+    if hostname == "huggingface.co":
+        # Named official checkpoints may have a generic upstream filename.
+        # Keep their verified local names while using the same cached Hub
+        # credentials as Maestro's regular hf_hub_download path. Requests
+        # strips Authorization on redirects to a different host.
+        from huggingface_hub import get_token
+        token = get_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return url, headers
     if not isinstance(api_key, str) or not api_key or hostname not in _CIVITAI_HOSTS:
         return url, headers
 
@@ -230,6 +240,12 @@ def download_named_checkpoint(
                 "Settings > Services > Civitai API key, then confirm your Civitai account "
                 "has authorized access to the official creator file, including any required "
                 "terms acceptance or download gate."
+            )
+        if response.status_code in (401, 403) and hostname == "huggingface.co":
+            raise CheckpointDownloadError(
+                "Hugging Face rejected this checkpoint download. Open the model's "
+                "official Hugging Face page and grant your account access, then "
+                "sign into that same account through Maestro's Hugging Face login."
             )
         if response.status_code >= 400:
             raise CheckpointDownloadError(

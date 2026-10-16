@@ -1,0 +1,30 @@
+{
+    "model": {
+        "name": "Flux 3 Klein 5.6B",
+        "architecture": "flux3_klein",
+        "description": "FLUX 3 Image Klein is Black Forest Labs' distilled 5.6B image model for text-to-image generation and editing with up to 10 reference images. Maestro uses its native 16-step flow-map schedule and MMGP component offloading.",
+        "selector_help": "Generate images or add reference images and describe an edit. Downloads about 20 GB on first use; Hugging Face access to black-forest-labs/flux-3-image-klein is required. BF16 weights use Maestro's memory manager. Layout boxes, masked inpainting and Flux 1/2 LoRAs are not supported by this adapter.",
+        "URLs": ["flux3_image_klein_sd_bf16.safetensors"],
+        "download_sources": {
+            "flux3_image_klein_sd_bf16.safetensors": {
+                "url": "https://huggingface.co/black-forest-labs/flux-3-image-klein/resolve/8454017f9ebaada30c998fccd9f67a80c7580f68/model.safetensors",
+                "sha256": "c3e9813cdd049c831c836b2e9db61150e49a93fc1a4c63b256494642fee0bd7c",
+                "size_bytes": 11097404512
+            }
+        },
+        "source_repo": "https://huggingface.co/black-forest-labs/flux-3-image-klein",
+        "license_name": "FLUX Kommunity License",
+        "license_url": "https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md",
+        "model_size_gb": 20
+    },
+    "prompt": "A tiny orange robot tending a rooftop garden at sunrise, cinematic natural light, intricate details, a sign reading MAESTRO",
+    "negative_prompt": "",
+    "resolution": "1024x1024",
+    "batch_size": 1,
+    "image_mode": 1,
+    "video_prompt_type": "I",
+    "num_inference_steps": 16,
+    "guidance_scale": 1.0,
+    "embedded_guidance_scale": 1.0,
+    "sample_solver": "default"
+}

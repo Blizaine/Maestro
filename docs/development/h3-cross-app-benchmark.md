@@ -90,7 +90,7 @@ and no upsampling. Lock a single approximately 15.08-second window with Allow
 
 Peak API-sampled VRAM was 11.75 GiB. RAM was nearly exhausted and paging occurred;
 free host memory and the Windows pagefile mattered. The ordinary 14.4-second
-recommendation has not been widened. See the [validation record](../VALIDATION_V2.7.0.md)
+recommendation has not been widened. See the [validation record](../VALIDATION_V3.0.0.md)
 for exact geometry, timing boundaries, runtime, independent host metrics and
 failed controls. The earlier 12-GiB-capped component probe remains separate from
 this physical-machine saved-video proof.

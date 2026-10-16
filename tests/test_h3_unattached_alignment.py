@@ -2,6 +2,7 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
@@ -25,7 +26,11 @@ class UnattachedAlignmentTests(unittest.TestCase):
             (None, "<Picture 1> supplies the opening frame.", True),
         ):
             with self.subTest(image_paths=image_paths, context=context):
-                with patch.object(llm_service, "generate", return_value=alignment + body):
+                # This tests alignment cleanup, not the engine's CLI startup.
+                # Guide lookup must not import WGP and parse unittest's args.
+                with patch.object(llm_service, "generate", return_value=alignment + body), patch.dict(
+                    sys.modules, {"wgp": SimpleNamespace(get_model_def=lambda _: {})}
+                ):
                     result = llm_service.enhance_prompt(
                         "A courier walks down a quiet hall.",
                         model_type="minimax_h3_fused_turbo",
