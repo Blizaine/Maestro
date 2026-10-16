@@ -389,7 +389,10 @@ retained, and ten ordered references remain supported.
 **Prompt Helper** adds a visual Flux 3 layout editor for output boxes, reference
 source regions and removals. Saved prompts retain the caption, element IDs,
 reference bindings and JSON together. Boxes guide composition rather than
-acting as exact masks. Reference IDs map Image 1 to `<ref_image_0>` through
+acting as exact masks. Uploaded references appear immediately on opening;
+the reference picker switches images, and new source elements bind to the
+displayed image. Portraits retain their natural proportions on desktop/mobile.
+Reference IDs map Image 1 to `<ref_image_0>` through
 Image 10 to `<ref_image_9>`. Enhance preserves supplied layout data and uses
 model-specific generation/edit guidance. See the [Flux 3 guide](Flux-3-Klein.md).
 

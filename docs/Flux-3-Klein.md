@@ -65,13 +65,20 @@ Reference IDs are zero-based even though UI labels start at Image 1.
 
 ## Prompt Helper
 
-Open **Prompt Helper** beside the image prompt. Write a complete scene caption,
-add an element, describe it and drag its output box. Drag inside to move it;
-drag the bottom-right corner to resize. Each element has an `<id>` caption tag.
-Choose an uploaded image as its content source and switch to **Source region**
-to identify the relevant area. **Remove this reference element** records a null
-target. **Save prompt** writes the caption and complete layout JSON together;
-reopening preserves extra fields and comments.
+Open **Prompt Helper** beside the image prompt. With uploaded references, it
+opens **Source region** with the reference image visible. Use **Reference image**
+to switch between uploads. **Add element**, describe the object or character,
+and draw around it; the element belongs to the image you are viewing. Switch
+to **Output layout** to choose its destination, or select **Remove this reference
+element** to request removal. Reopening an existing layout shows its selected
+reference, including a reference other than Image 1.
+
+For a new image without references, start on **Output layout**. Write a complete
+scene caption, add an element, describe it and drag its output box. Drag inside
+to move a box; drag its bottom-right corner to resize. Each element has an
+`<id>` caption tag. **Save prompt** writes the caption and complete layout JSON
+together; reopening preserves extra fields and comments. Generate then asks
+Flux 3 to produce the result; drawing does not modify your uploaded image.
 
 Boxes use `[top,left,bottom,right]`, integer corners on a 0–1000 grid. They guide
 composition rather than imposing exact pixel masks. Text-to-image elements

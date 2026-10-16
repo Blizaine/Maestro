@@ -104,6 +104,15 @@ Release source excludes all weights,
 private reports and generated media. Main, workstation 02 and saved user
 settings are unchanged by this follow-up.
 
+The subsequent reference-canvas follow-up opens Prompt Helper on an uploaded
+image even before any layout element exists. A reference picker and source-bound
+Add element flow retain independent reference ownership. Mounted desktop/mobile
+checks use decoded landscape and portrait PNGs to verify image visibility,
+natural aspect ratios, source coordinates, multiple references, removal and
+saved-layout reopening. Long filenames do not widen the mobile dialog. The
+generated-only workflow and layout serialization still pass. This UI change
+does not add model-generation or lower-VRAM hardware evidence.
+
 ## Dev preparation — October 15
 
 The v3.0.0 Dev candidate includes all changes since public v2.6.0 plus the
