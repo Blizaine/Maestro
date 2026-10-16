@@ -19,6 +19,7 @@ import {
 } from '../../lib/h3WindowTiming'
 import { ComposerContext, ComposerToolbarItem } from './SidebarPanels'
 import { SidebarMenu } from './SidebarMenu'
+import { Flux3PromptHelper } from './Flux3PromptHelper'
 
 const placeholders: Record<string, string> = {
   image: 'Describe your image...',
@@ -582,6 +583,7 @@ export function PromptInput() {
               : modePlaceholder}
           className={`studio-prompt-textarea block w-full resize-none px-3 py-2 text-base md:text-sm text-text-primary placeholder:text-text-muted focus:outline-none transition-colors ${compact ? 'min-h-[72px] bg-transparent border border-transparent rounded-lg focus:border-border-light' : `${composer?.expanded ? 'min-h-[260px]' : 'min-h-[104px]'} bg-bg-tertiary border border-border rounded-xl focus:border-accent-blue`}`}
         />
+        {generationMode === 'image' && modelType.startsWith('flux3') && <ComposerToolbarItem><Flux3PromptHelper /></ComposerToolbarItem>}
         <ComposerToolbarItem>{isAudioOnly ? (
           /* TTS: mode-aware split button. Main button uses default mode based
              on voice-slot count; dropdown exposes both Speech and Dialogue

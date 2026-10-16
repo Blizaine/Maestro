@@ -293,6 +293,8 @@ def _task_profile(task: Mapping[str, Any]) -> _TaskProfile:
         "window_overlap": overlap,
         "window_discard": window_discard,
         "text_encoder": str(params.get("minimax_h3_text_encoder") or ""),
+        **({"video_vae": str(params["minimax_h3_video_vae"])}
+           if params.get("minimax_h3_video_vae") not in (None, "", "auto") else {}),
         "transformer_quantization": str(
             params.get("transformer_quantization") or ""
         ),

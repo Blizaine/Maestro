@@ -1515,6 +1515,7 @@ class TestDirectorVideoExecutionProfile(unittest.TestCase):
             "video_params": {
                 "resolution": "1280x704",
                 "minimax_h3_text_encoder": "nvfp4_awq",
+                "minimax_h3_video_vae": "lightvae_int8",
             },
         }
         with patch.object(pipeline, "_wgp", registry):
@@ -1530,6 +1531,11 @@ class TestDirectorVideoExecutionProfile(unittest.TestCase):
                 profile,
             )
             self.assertEqual(child["minimax_h3_text_encoder"], "nvfp4_awq")
+            self.assertEqual(profile["minimax_h3_video_vae"], "lightvae_int8")
+            self.assertEqual(child["minimax_h3_video_vae"], "lightvae_int8")
+            recovered_child = {}
+            pipeline._apply_director_h3_optimizations(recovered_child, {}, profile)
+            self.assertEqual(recovered_child["minimax_h3_video_vae"], "lightvae_int8")
 
             invalid = {
                 "video_model": "minimax_h3",

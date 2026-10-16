@@ -109,6 +109,7 @@ from .pdd import (
     release_pdd_parallel_heads,
 )
 from .video_vae import AutoencoderKLMiniMaxH3
+from .video_vae_assets import is_light_video_vae_checkpoint
 
 
 VIDEO_LATENTS_MEAN = (
@@ -1147,7 +1148,13 @@ def _preprocess_h3_x2_decoder_state_dict(state_dict, quantization_map=None, tied
     )
 
 
-def _load_x2_video_vae_weights(vae, base_checkpoint, x2_checkpoint) -> None:
+def _load_x2_video_vae_weights(
+    vae,
+    base_checkpoint,
+    x2_checkpoint,
+    *,
+    base_dtype: torch.dtype = torch.float16,
+) -> None:
     """Load base conditioning modules and the learned decoder without meta leftovers."""
     encoder_modules = torch.nn.ModuleDict(
         {
@@ -1161,7 +1168,8 @@ def _load_x2_video_vae_weights(vae, base_checkpoint, x2_checkpoint) -> None:
         base_checkpoint,
         writable_tensors=False,
         preprocess_sd=_preprocess_h3_encoder_vae_state_dict,
-        default_dtype=torch.float16,
+        default_dtype=base_dtype,
+        fp32_dtype=base_dtype,
         ignore_missing_keys=True,
         ignore_unused_weights=True,
     )
@@ -1192,18 +1200,30 @@ def _load_video_vae(
     # decoder-only: keep the selected base checkpoint's encoder/quantization
     # path intact and overlay just its decoder modules.
     upsampling = x2_filename is not None
+    lightvae = is_light_video_vae_checkpoint(filename)
+    checkpoint_dtype = (
+        _video_vae_checkpoint_dtype(filename)
+        if lightvae
+        else torch.float16
+    )
     if upsampling and not x2_verified:
         verify_x2_vae_checkpoint(x2_filename)
     with init_empty_weights(include_buffers=False):
         vae = AutoencoderKLMiniMaxH3(
             out_channels=12 if upsampling else 3,
+            decoder_num_layers=12 if lightvae and not upsampling else 36,
             latents_mean=VIDEO_LATENTS_MEAN,
             latents_std=VIDEO_LATENTS_STD,
             native_checkpoint_layout=True,
         )
 
     if upsampling:
-        _load_x2_video_vae_weights(vae, filename, x2_filename)
+        _load_x2_video_vae_weights(
+            vae,
+            filename,
+            x2_filename,
+            base_dtype=checkpoint_dtype,
+        )
         vae.upsampling_set = X2_VAE_VALUE
         print(
             "[MiniMax H3 VAE] Loaded pinned x2 decoder over the selected native "
@@ -1215,13 +1235,54 @@ def _load_video_vae(
             filename,
             writable_tensors=False,
             preprocess_sd=preprocess_native_video_vae_state_dict,
-            default_dtype=torch.float16,
+            default_dtype=checkpoint_dtype,
+            fp32_dtype=checkpoint_dtype,
         )
         vae.upsampling_set = None
         print("[MiniMax H3 VAE] Native checkpoint layout; skipping decoder weight repacking in RAM.")
-    vae._model_dtype = torch.float16
+    vae._model_dtype = torch.float16 if upsampling else checkpoint_dtype
     vae._interrupt = False
     return vae.eval().requires_grad_(False)
+
+
+def _video_vae_checkpoint_dtype(filename: str) -> torch.dtype:
+    """Read the encoder storage dtype from the safetensors header only."""
+
+    state_dict, _metadata = quant_router.load_metadata_state_dict(filename)
+    encoder_weight = state_dict.get("encoder.conv_in.weight")
+    if encoder_weight is None:
+        raise ValueError(
+            f"MiniMax H3 video VAE is missing encoder.conv_in.weight: {filename}"
+        )
+    dtype = encoder_weight.dtype
+    del state_dict
+    if dtype == torch.float32:
+        return torch.float16
+    if dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError(
+            "MiniMax H3 LightVAE encoder weights must be FP16, BF16, or FP32; "
+            f"found {dtype} in {filename}."
+        )
+    return dtype
+
+
+def _locate_video_vae_file(assets_root: str, filename: str) -> str:
+    """Resolve Maestro and upstream LightVAE layouts through files_locator."""
+
+    candidates = [os.path.join(assets_root, "vae", filename)]
+    if is_light_video_vae_checkpoint(filename):
+        basename = os.path.basename(filename)
+        candidates.extend(
+            (
+                os.path.join(assets_root, "vae", "minimax_h3", basename),
+                os.path.join("minimax_h3", basename),
+            )
+        )
+    for candidate in candidates:
+        path = fl.locate_file(candidate, error_if_none=False)
+        if path:
+            return path
+    return fl.locate_file(candidates[0])
 
 
 def _load_audio_vae(filename: str) -> AutoencoderKLMiniMaxH3Audio:
@@ -1294,6 +1355,9 @@ class MiniMaxH3Model:
         self.device = torch.device("cuda")
         self.dtype = dtype
         self.model_def = model_def
+        self.video_vae_variant = str(
+            model_def.get("minimax_h3_video_vae_variant") or "auto"
+        )
         self.veda = bool(minimax_h3_veda)
         if self.veda and (not model_def.get("veda_attention") or dtype != torch.bfloat16):
             raise ValueError("Experimental H3 Veda requires a Veda-capable H3 model with BF16 activations.")
@@ -1338,8 +1402,9 @@ class MiniMaxH3Model:
             model_def.get("minimax_h3_video_vae_filename")
             or "minimax_h3_video_vae_fp16.safetensors"
         )
-        video_vae_path = fl.locate_file(
-            os.path.join(self.assets_root, "vae", video_vae_filename)
+        video_vae_path = _locate_video_vae_file(
+            self.assets_root,
+            video_vae_filename,
         )
         audio_vae_path = fl.locate_file(
             os.path.join(self.assets_root, "vae", "minimax_h3_audio_vae_fp32.safetensors")

@@ -717,6 +717,9 @@ def _check_model_downloaded(model_type: str) -> bool:
         for relative_path in model_def.get("required_model_assets", []):
             if wgp.fl.locate_file(relative_path, error_if_none=False) is None:
                 return False
+        for alternatives in model_def.get("required_model_asset_groups", []):
+            if not any(wgp.fl.locate_file(path, error_if_none=False) is not None for path in alternatives):
+                return False
         return True
     except Exception:
         return False
@@ -6619,6 +6622,9 @@ def get_model_options(model_type: str):
             for key, value in _h3_encoder_variants.items()
         ] or None,
         "minimax_h3_text_encoder_default": _h3_encoder_default,
+        "minimax_h3_video_vae_choices": md.get("minimax_h3_video_vae_choices"),
+        "minimax_h3_video_vae_default": "auto",
+        "flux3_prompt_helper": md.get("flux3_prompt_helper", False),
         "ltx25_video_vae_choices": md.get("ltx25_video_vae_choices"),
         "ltx25_video_vae_default": md.get(
             "ltx25_video_vae_default",

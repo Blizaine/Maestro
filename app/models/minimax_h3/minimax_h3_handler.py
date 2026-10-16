@@ -48,8 +48,6 @@ _TEXT_ENCODER_BF16 = "Qwen3-VL-32B-Instruct-layer50_bf16.safetensors"
 _TEXT_ENCODER_INT8 = "Qwen3-VL-32B-Instruct-layer50_quanto_bf16_int8.safetensors"
 _TEXT_ENCODER_GGUF_Q2 = "qwen3vl-32B-MiniMax-H3-Q2_K.gguf"
 _TEXT_ENCODER_GGUF_Q4 = "qwen3vl-32B-MiniMax-H3-Q4_K_M.gguf"
-_VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
-_VIDEO_VAE_INT8_CONVROT = "minimax_h3_video_vae_int8_convrot.safetensors"
 _AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 try:
     from .vae_upsampler import (
@@ -74,6 +72,26 @@ except ImportError:
         X2_VAE_VALUE,
         x2_vae_asset_candidates,
     )
+try:
+    from .video_vae_assets import (
+        LIGHT_VIDEO_VAE_FILES,
+        VIDEO_VAE_FULL_FILE,
+        VIDEO_VAE_FULL_INT8_FILE,
+        VIDEO_VAE_LIGHT_REVISION,
+        VIDEO_VAE_VARIANT_FILENAMES,
+        get_video_vae_variant_choices,
+    )
+except ImportError:
+    from models.minimax_h3.video_vae_assets import (
+        LIGHT_VIDEO_VAE_FILES,
+        VIDEO_VAE_FULL_FILE,
+        VIDEO_VAE_FULL_INT8_FILE,
+        VIDEO_VAE_LIGHT_REVISION,
+        VIDEO_VAE_VARIANT_FILENAMES,
+        get_video_vae_variant_choices,
+    )
+_VIDEO_VAE = VIDEO_VAE_FULL_FILE
+_VIDEO_VAE_INT8_CONVROT = VIDEO_VAE_FULL_INT8_FILE
 _WANGP_TEXT_ENCODER_FOLDER = "Qwen3-VL-32B-Instruct"
 _WANGP_FL2VA_PRUNED_TRANSFORMER = (
     "MiniMax-H3-FL2VA-pruned_rank8_int8_convrot.safetensors"
@@ -2146,7 +2164,20 @@ class family_handler:
             "supports_auto_aspect": True,
             "auto_resolution_budgets": _H3_AUTO_RESOLUTION_BUDGETS,
             "auto_resolution_fallbacks": _H3_AUTO_RESOLUTION_FALLBACKS,
-            "profiles_dir": ["minimax_h3"],
+            "profiles_dir": (
+                ["minimax_h3", "minimax_h3_fl2va"]
+                if not (
+                    audio_only
+                    or omni_reference
+                    or vdn
+                    or fused_turbo
+                    or singularity
+                    or dasiwa
+                    or baked_turbo
+                    or import_profile
+                )
+                else ["minimax_h3"]
+            ),
             "minimax_h3_assets_root": _ASSETS_ROOT,
             "text_encoder_folder": _ASSETS_ROOT,
             "text_encoder_quantization": "int8",
@@ -2291,6 +2322,19 @@ class family_handler:
             "minimax_h3_video_vae_auto": (
                 not explicit_video_vae and not fused_turbo
             ),
+            "minimax_h3_video_vae_variant": (
+                "auto"
+                if not explicit_video_vae
+                else next(
+                    (
+                        variant
+                        for variant, filename in VIDEO_VAE_VARIANT_FILENAMES.items()
+                        if os.path.basename(video_vae_filename)
+                        == os.path.basename(filename)
+                    ),
+                    "custom",
+                )
+            ),
             "loras_disabled": False,
             "minimax_h3_transformer_working_vram_gb": (
                 _TRANSFORMER_WORKING_VRAM_MB / 1024
@@ -2322,6 +2366,9 @@ class family_handler:
             # image_mode 0 is H3's native video-generation path. This local
             # model does not expose a single-frame image generation path.
             result["vae_upsamplers"] = {"h3_vae": [0]}
+            result["minimax_h3_video_vae_choices"] = (
+                get_video_vae_variant_choices()
+            )
         if omni_reference:
             sequence_memory_policy = window_memory_policy
             result.update(
@@ -2517,20 +2564,51 @@ class family_handler:
         return 32
 
     @staticmethod
+    def get_video_vae_variant_choices():
+        """Return UI-ready labels for the per-job H3 decoder selection."""
+
+        return get_video_vae_variant_choices()
+
+    @staticmethod
     def resolve_runtime_model_def(model_def, runtime_context=None):
-        """Select the default video VAE from the active transformer format.
+        """Resolve the per-job H3 VAE selection before asset discovery.
 
         Definitions that supply ``minimax_h3_video_vae_filename`` own that
         choice. Ordinary H3 definitions leave it automatic so an INT8
         transformer can use the matching compact ConvRot decoder while FP8,
         BF16, and unset runtime modes retain the established FP16 decoder.
+        ``minimax_h3_video_vae`` can explicitly choose a decoder for this job;
+        ``auto`` keeps the definition's existing quantization behavior.
         """
 
         if not isinstance(model_def, dict):
             return model_def
+        context = runtime_context if isinstance(runtime_context, dict) else {}
+        selection = context.get("minimax_h3_video_vae")
+        if selection is not None:
+            selection = str(selection).strip().lower()
+            if selection not in ("auto", *VIDEO_VAE_VARIANT_FILENAMES):
+                choices = ", ".join(("auto", *VIDEO_VAE_VARIANT_FILENAMES))
+                raise ValueError(
+                    "Unsupported MiniMax H3 video VAE variant "
+                    f"{selection!r}; choose one of: {choices}."
+                )
+            if selection != "auto":
+                filename = VIDEO_VAE_VARIANT_FILENAMES[selection]
+                if (
+                    model_def.get("minimax_h3_video_vae_filename") == filename
+                    and model_def.get("minimax_h3_video_vae_auto") is False
+                    and model_def.get("minimax_h3_video_vae_variant") == selection
+                ):
+                    return model_def
+                resolved = dict(model_def)
+                resolved["minimax_h3_video_vae_filename"] = filename
+                resolved["minimax_h3_video_vae_auto"] = False
+                resolved["minimax_h3_video_vae_variant"] = selection
+                return resolved
+
         if model_def.get("minimax_h3_video_vae_auto") is not True:
             return model_def
-        context = runtime_context if isinstance(runtime_context, dict) else {}
         quantization = str(
             context.get("transformer_quantization") or ""
         ).strip().lower()
@@ -2539,10 +2617,15 @@ class family_handler:
             if quantization == "int8"
             else _VIDEO_VAE
         )
-        if model_def.get("minimax_h3_video_vae_filename") == filename:
+        variant = "full_int8" if quantization == "int8" else "full"
+        if (
+            model_def.get("minimax_h3_video_vae_filename") == filename
+            and model_def.get("minimax_h3_video_vae_variant") == variant
+        ):
             return model_def
         resolved = dict(model_def)
         resolved["minimax_h3_video_vae_filename"] = filename
+        resolved["minimax_h3_video_vae_variant"] = variant
         return resolved
 
     @staticmethod
@@ -2564,14 +2647,19 @@ class family_handler:
             or (_VIDEO_VAE_INT8_CONVROT if fused_turbo else _VIDEO_VAE)
         )
         int8_video_vae = video_vae_filename == _VIDEO_VAE_INT8_CONVROT
-        vae_downloads = (
-            [
+        light_video_vae = video_vae_filename in LIGHT_VIDEO_VAE_FILES
+        if light_video_vae:
+            vae_downloads = [
                 {
-                    "repoId": _EXPERIMENTAL_VAE_REPO,
-                    "revision": _EXPERIMENTAL_VAE_REVISION,
-                    "sourceFolderList": [""],
-                    "targetFolderList": [os.path.join(_ASSETS_ROOT, "vae")],
-                    "fileList": [[_VIDEO_VAE_INT8_CONVROT]],
+                    "repoId": _DEEPBEEP_REPO,
+                    "revision": VIDEO_VAE_LIGHT_REVISION,
+                    "sourceFolderList": ["minimax_h3"],
+                    # The Hub stores this asset in minimax_h3/<filename>.
+                    # Leaving targetFolder empty makes process_files_def keep
+                    # that public path instead of nesting the source folder
+                    # under Maestro's vae directory.
+                    "targetFolderList": [None],
+                    "fileList": [[os.path.basename(video_vae_filename)]],
                 },
                 {
                     "repoId": _COMFY_REPO,
@@ -2581,17 +2669,35 @@ class family_handler:
                     "fileList": [[_AUDIO_VAE]],
                 },
             ]
-            if int8_video_vae
-            else [
-                {
-                    "repoId": _COMFY_REPO,
-                    "revision": _COMFY_REVISION,
-                    "sourceFolderList": ["vae"],
-                    "targetFolderList": [_ASSETS_ROOT],
-                    "fileList": [[_VIDEO_VAE, _AUDIO_VAE]],
-                }
-            ]
-        )
+        else:
+            vae_downloads = (
+                [
+                    {
+                        "repoId": _EXPERIMENTAL_VAE_REPO,
+                        "revision": _EXPERIMENTAL_VAE_REVISION,
+                        "sourceFolderList": [""],
+                        "targetFolderList": [os.path.join(_ASSETS_ROOT, "vae")],
+                        "fileList": [[_VIDEO_VAE_INT8_CONVROT]],
+                    },
+                    {
+                        "repoId": _COMFY_REPO,
+                        "revision": _COMFY_REVISION,
+                        "sourceFolderList": ["vae"],
+                        "targetFolderList": [_ASSETS_ROOT],
+                        "fileList": [[_AUDIO_VAE]],
+                    },
+                ]
+                if int8_video_vae
+                else [
+                    {
+                        "repoId": _COMFY_REPO,
+                        "revision": _COMFY_REVISION,
+                        "sourceFolderList": ["vae"],
+                        "targetFolderList": [_ASSETS_ROOT],
+                        "fileList": [[_VIDEO_VAE, _AUDIO_VAE]],
+                    }
+                ]
+            )
         attribution_downloads = (
             [
                 {

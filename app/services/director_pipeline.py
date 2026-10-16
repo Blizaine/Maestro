@@ -448,6 +448,9 @@ def _create_director_video_execution_profile(
         if text_encoder:
             video_params["minimax_h3_text_encoder"] = text_encoder
             profile["minimax_h3_text_encoder"] = text_encoder
+        video_vae = video_params.get("minimax_h3_video_vae")
+        if video_vae:
+            profile["minimax_h3_video_vae"] = video_vae
     normalized_resolution = profile.get("normalized_resolution")
     if normalized_resolution:
         video_params["resolution"] = normalized_resolution
@@ -508,6 +511,12 @@ def _apply_director_h3_optimizations(
     )
     if text_encoder:
         gen_params["minimax_h3_text_encoder"] = text_encoder
+    video_vae = (
+        execution_profile.get("minimax_h3_video_vae")
+        or video_params.get("minimax_h3_video_vae")
+    )
+    if video_vae:
+        gen_params["minimax_h3_video_vae"] = video_vae
     turbo_enabled = video_params.get("minimax_h3_turbo_mode") is True
     gen_params["minimax_h3_turbo_mode"] = turbo_enabled
     turbo_preset = str(

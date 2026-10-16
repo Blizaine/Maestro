@@ -164,11 +164,13 @@ class TestVedaIntegration(unittest.TestCase):
         scope = {"model_def": {"architecture": "minimax_h3", "veda_attention": True},
                  "model_type": "minimax_h3", "override_attention": "veda", "attention_mode": "sage2",
                  "get_overridden_attention": lambda _: None, "minimax_h3_text_encoder": "nvfp4_awq",
+                 "minimax_h3_video_vae": "auto",
+                 "get_runtime_model_def": lambda *a: {"minimax_h3_video_vae_variant": "auto"},
                  "wan_model": SimpleNamespace(veda=False, text_encoder_variant="nvfp4_awq"),
                  "send_cmd": mock.Mock()}
         exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "veda_job_gate", "exec"), scope)
         with mock.patch.object(attention, "get_veda_attention_status", return_value={"supported": True}):
-            self.assertEqual(scope["select"](), ({"minimax_h3_veda": True, "minimax_h3_text_encoder": "nvfp4_awq"}, True))
+            self.assertEqual(scope["select"](), ({"minimax_h3_veda": True, "minimax_h3_text_encoder": "nvfp4_awq", "minimax_h3_video_vae": "auto"}, True))
             scope["wan_model"].veda = True
             self.assertFalse(scope["select"]()[1])
             scope["override_attention"] = "sla"

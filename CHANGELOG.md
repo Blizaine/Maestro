@@ -8,9 +8,15 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 Public Dev testing candidate; not promoted to Main. Supersedes the unreleased
 v2.7.0 candidate. See the [full release notes](docs/RELEASE_NOTES_V3.0.0.md).
 
+- Incorporate WanGP v18.10: public ungated Flux 3 Distilled/Base sources with
+  BF16/INT8 and hardware-gated NVFP4 options; a visual layout/reference-region
+  Prompt Helper; Fish Drama 3 expressive speech with up to three references,
+  transcript completion and contextual chunks (native CPU experts, portable
+  fallback and a capability-gated graph-free vLLM path);
+  optional WGPKernels; H3 LightVAE BF16/INT8; and the dated FL2VA TaoMate recipe.
 - Add a native Flux 3 Klein 5.6B image adapter with its 16-step default,
   reference-image editing, MMGP component offloading and verified on-demand
-  official downloads. Real-checkpoint text-to-image, single-reference editing
+  downloads (now public WanGP mirrors). Real-checkpoint text-to-image, single-reference editing
   and two-reference composition passed on the RTX 4090 at 1024 × 1024. Clear
   stale reference-mode flags on Flux 3 submission; a ten-reference 1280 × 720
   runtime test also completed, with subject-retention limits documented.

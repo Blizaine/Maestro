@@ -2,6 +2,7 @@
 
 import os
 import re
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Callable
 
@@ -36,6 +37,21 @@ TEXT_ENCODER_SHARDS = (
     "model-00002-of-00002.safetensors",
 )
 VAE_CHECKPOINT = os.path.join(COMPONENT_ROOT, "ae.safetensors")
+
+
+def _normalize_qwen_rope_config(config):
+    """Read the public Transformers 5 rope schema on Maestro's pinned 4.x.
+
+    These are the released values, not new defaults. Keep official 4.x configs
+    untouched so their previously verified conditioning remains identical.
+    """
+    text = config.text_config
+    parameters = getattr(text, "rope_parameters", None)
+    if getattr(text, "rope_scaling", None) is None and isinstance(parameters, dict):
+        text.rope_scaling = {key: value for key, value in parameters.items() if key != "rope_theta"}
+        if "rope_theta" in parameters:
+            text.rope_theta = parameters["rope_theta"]
+    return config
 
 
 class GenerationCancelled(Exception):
@@ -169,17 +185,44 @@ def _qwen_checkpoint_key(raw_name: str, shape: tuple[int, ...], config) -> str |
     raise ValueError(f"Unexpected Qwen3-VL checkpoint key outside model./lm_head.weight: {raw_name}")
 
 
-def _strip_qwen_checkpoint_prefix(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Drop only the unused vocabulary head and remove the official `model.` prefix."""
-    mapped = {}
-    for raw_name, tensor in state_dict.items():
-        if raw_name.startswith("model."):
-            mapped[raw_name[len("model."):]] = tensor
-        elif raw_name == "lm_head.weight":
-            continue
-        else:
-            raise ValueError(f"Unexpected Qwen3-VL checkpoint key outside model./lm_head.weight: {raw_name}")
-    return mapped
+def _validate_public_checkpoint(module, paths, label, remap=None):
+    """Validate logical shapes of public BF16 and Comfy quantized checkpoints.
+
+    MMGP validates quantization descriptors and splits fused QKV tensors while
+    loading. Inspect their logical dimensions here without materializing weights.
+    """
+    expected = {name: tuple(value.shape) for name, value in module.state_dict().items()}
+    actual = {}
+    for path in paths:
+        with safe_open(path, framework="pt", device="cpu") as checkpoint:
+            for raw_name in checkpoint.keys():
+                if raw_name.endswith((".comfy_quant", ".comfy_attention.config", ".weight_scale", ".weight_scale_2", ".input_scale")):
+                    continue
+                shape = tuple(checkpoint.get_slice(raw_name).get_shape())
+                name = remap(raw_name, shape) if remap else raw_name
+                if name is None:
+                    continue
+                if name not in expected and name.endswith(".qkv.weight"):
+                    targets = [name.replace(".qkv.weight", f".{part}_proj.weight") for part in ("q", "k", "v")]
+                    target_shapes = [expected.get(key) for key in targets]
+                    if any(value is None for value in target_shapes) or len(shape) != 2 or shape[0] != sum(value[0] for value in target_shapes):
+                        raise ValueError(f"{label}: invalid fused QKV shape {shape}.")
+                    entries = [(key, (value[0], shape[1])) for key, value in zip(targets, target_shapes)]
+                else:
+                    entries = [(name, shape)]
+                for key, logical_shape in entries:
+                    if key in actual:
+                        raise ValueError(f"{label}: duplicate tensor {key}.")
+                    target = expected.get(key)
+                    # NVFP4 stores two four-bit values in each byte.
+                    if target and len(target) == 2 and logical_shape == (target[0], target[1] // 2) and "nvfp4" in str(path).lower():
+                        logical_shape = target
+                    actual[key] = logical_shape
+    if actual != expected:
+        missing = sorted(expected.keys() - actual.keys())[:5]
+        extra = sorted(actual.keys() - expected.keys())[:5]
+        wrong = [key for key in actual.keys() & expected.keys() if actual[key] != expected[key]][:5]
+        raise ValueError(f"{label} checkpoint does not match FLUX 3: missing {missing}; unexpected {extra}; shape mismatches {wrong}.")
 
 
 def _has_active_loras(value) -> bool:
@@ -212,7 +255,7 @@ def _as_pil(image) -> Image.Image:
 def _active_references(video_prompt_type: str, input_ref_images,
                        original_input_ref_images) -> list[Image.Image]:
     selector = str(video_prompt_type or "").strip()
-    if any(letter != "I" for letter in selector):
+    if selector not in ("", "I", "KI"):
         raise ValueError("FLUX 3 Image Klein supports reference-image editing only; select Reference images or None.")
     references = []
     if "I" in selector:
@@ -290,7 +333,7 @@ class model_factory:
 
     def __init__(self, model_filename, text_encoder_filename=None, model_def=None,
                  VAE_dtype=torch.float32, dtype=torch.bfloat16, **kwargs):
-        from transformers import Qwen3VLConfig, Qwen3VLModel, Qwen3VLProcessor
+        from transformers import AutoTokenizer, Qwen3VLConfig, Qwen3VLModel
 
         self._abort = False
         self.model_def = dict(model_def or {})
@@ -303,7 +346,7 @@ class model_factory:
         text_encoder_config = os.path.join(text_encoder_folder, "config.json")
         config_path = fl.locate_file(text_encoder_config)
         encoder_folder = Path(config_path).parent
-        qwen_config = Qwen3VLConfig.from_json_file(config_path)
+        qwen_config = _normalize_qwen_rope_config(Qwen3VLConfig.from_json_file(config_path))
         if qwen_config.model_type != "qwen3_vl":
             raise ValueError(f"Expected a Qwen3-VL config for FLUX 3, found {qwen_config.model_type!r}.")
         text_config = qwen_config.text_config
@@ -316,7 +359,7 @@ class model_factory:
             )
 
         with torch.device("cpu"), init_empty_weights(include_buffers=False):
-            self.transformer = DiT(flow_map=True)
+            self.transformer = DiT(flow_map=self.model_def.get("flux3_distilled", True))
             self.text_encoder = Qwen3VLModel(qwen_config)
             self.vae = AutoEncoder()
 
@@ -326,15 +369,11 @@ class model_factory:
         configure_encoder_attention(self.text_encoder)
         qwen_paths = self._resolve_text_encoder_paths(text_encoder_filename, text_encoder_folder)
         qwen_paths_for_validation = _expand_numbered_shards(qwen_paths, "FLUX 3 Qwen3-VL")
-        _validate_checkpoint_shapes(self.transformer, transformer_paths, "FLUX 3 DiT")
-        _validate_checkpoint_shapes(
-            self.text_encoder,
-            qwen_paths_for_validation,
-            "FLUX 3 Qwen3-VL",
-            remap=lambda name, shape: _qwen_checkpoint_key(name, shape, qwen_config),
-        )
+        _validate_public_checkpoint(self.transformer, transformer_paths, "FLUX 3 DiT")
+        _validate_public_checkpoint(self.text_encoder, qwen_paths_for_validation, "FLUX 3 Qwen3-VL",
+                                    remap=lambda name, shape: _qwen_checkpoint_key(name, shape, qwen_config))
 
-        vae_path = fl.locate_file(VAE_CHECKPOINT)
+        vae_path = fl.locate_file(VAE_CHECKPOINT, error_if_none=False) or fl.locate_file("flux3/flux2-vae.safetensors")
         _validate_checkpoint_shapes(self.vae, [vae_path], "FLUX 3 VAE")
 
         # The official reference uses a native FP32 VAE. Lock parameter and
@@ -345,11 +384,14 @@ class model_factory:
             transformer_paths,
             writable_tensors=False,
             default_dtype=torch.bfloat16,
+            fused_split_map={"qkv": {"mapped_modules": ["q_proj", "k_proj", "v_proj"], "split_sizes": [3072] * 3}},
         )
         _load_mmgp_checkpoint(
             self.text_encoder,
             qwen_paths,
-            preprocess_sd=_strip_qwen_checkpoint_prefix,
+            # MMGP must strip the prefix from the quantization and tied-weight
+            # maps too, after detecting the public checkpoint's quant format.
+            modelPrefix="model",
             writable_tensors=False,
             default_dtype=torch.bfloat16,
         )
@@ -366,13 +408,19 @@ class model_factory:
         for module in (self.transformer, self.text_encoder, self.vae):
             module.eval().requires_grad_(False)
 
-        self.processor = Qwen3VLProcessor.from_pretrained(str(encoder_folder), local_files_only=True)
-        self.processor.tokenizer.padding_side = "right"
+        # Transformers 5 serializes extra_special_tokens as a list. 4.x
+        # expects a role/name mapping; token IDs already live in tokenizer.json.
+        tokenizer = AutoTokenizer.from_pretrained(str(encoder_folder), local_files_only=True, padding_side="right", extra_special_tokens={})
+        self.processor = SimpleNamespace(tokenizer=tokenizer, apply_chat_template=tokenizer.apply_chat_template)
 
     @staticmethod
     def _resolve_text_encoder_paths(text_encoder_filename, text_encoder_folder: str) -> list[str]:
         if text_encoder_filename is not None:
             return _resolve_local_checkpoint(text_encoder_filename, "FLUX 3 Qwen3-VL")
+        for name in ("qwen3vl_4b_int8_convrot.safetensors", "qwen3vl_4b_bf16.safetensors"):
+            located = fl.locate_file(os.path.join(text_encoder_folder, name), error_if_none=False)
+            if located:
+                return [located]
         paths = []
         for filename in TEXT_ENCODER_SHARDS:
             paths.append(fl.locate_file(os.path.join(text_encoder_folder, filename)))
@@ -442,7 +490,9 @@ class model_factory:
             _report_batch_start(callback, batch_size, steps)
             if callable(set_progress_status):
                 set_progress_status("Encoding Prompt")
+            input_prompt = "\n".join(line for line in input_prompt.splitlines() if not line.lstrip().startswith("#"))
             text = encode_prompt(self.text_encoder, self.processor, input_prompt, self.device, check_cancel)
+            negative_text = encode_prompt(self.text_encoder, self.processor, n_prompt or "", self.device, check_cancel) if not getattr(self.transformer, "flow_map", True) and guide_scale != 1 else None
             check_cancel()
 
             cond_tokens, cond_ids = [], []
@@ -475,6 +525,8 @@ class model_factory:
                     self.transformer, packed, schedule,
                     on_step=_make_step_callback(callback, batch_index, steps, check_cancel),
                     check_cancel=check_cancel,
+                    negative_packed=pack([[negative_text, condition, image]]) if negative_text is not None else None,
+                    guidance_scale=guide_scale,
                 )
                 check_cancel()
                 if callable(set_progress_status):

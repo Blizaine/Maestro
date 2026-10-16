@@ -2191,7 +2191,7 @@ def update_generation_status(html_content):
     if(html_content):
         return gr.update(value=html_content)
 
-family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx25.ltx25_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.minimax_h3.minimax_h3_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.flux3.flux3_handler", "models.qwen.qwen_handler", "models.qwen21.qwen21_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.yue2.yue2_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.minimax_music3_handler", "models.TTS.index_tts2_handler"]
+family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx25.ltx25_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.minimax_h3.minimax_h3_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.flux3.flux3_handler", "models.qwen.qwen_handler", "models.qwen21.qwen21_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.yue2.yue2_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.minimax_music3_handler", "models.TTS.index_tts2_handler", "models.TTS.fish_audio.fish_audio_handler"]
 DEFAULT_LORA_ROOT = "loras"
 
 def register_family_lora_args(parser, lora_root):
@@ -2964,7 +2964,7 @@ def get_model_def(model_type):
     return models_def.get(model_type, None )
 
 
-def get_runtime_model_def(model_type):
+def get_runtime_model_def(model_type, runtime_options=None):
     """Resolve runtime-dependent assets without modifying the shared registry."""
     model_def = get_model_def(model_type)
     if not isinstance(model_def, dict):
@@ -2975,6 +2975,7 @@ def get_runtime_model_def(model_type):
         return model_def
     return resolver(dict(model_def), {
         "transformer_quantization": transformer_quantization,
+        **(runtime_options or {}),
     })
 
 
@@ -4045,7 +4046,7 @@ def download_file(url,filename):
 
 RIFE_V4_FILENAME = "rife4.26.pkl"
 RIFE_V3_FILENAME = "flownet.pkl"
-def download_models(model_filename = None, model_type= None, file_type = 0, submodel_no = 1, force_path = None, VAE_upsampling=None):
+def download_models(model_filename = None, model_type= None, file_type = 0, submodel_no = 1, force_path = None, VAE_upsampling=None, model_def_override=None):
     def computeList(filename):
         if filename == None:
             return []
@@ -4057,7 +4058,7 @@ def download_models(model_filename = None, model_type= None, file_type = 0, subm
     if model_filename is None: return
 
     base_model_type = get_base_model_type(model_type)
-    model_def = get_runtime_model_def(model_type)
+    model_def = model_def_override if model_def_override is not None else get_runtime_model_def(model_type)
 
     if file_type == 0:
         ensure_audio_condition_assets(base_model_type)
@@ -4519,7 +4520,7 @@ def load_models(model_type, override_profile = -1, output_type="video", preview_
     if server_config.get("int8_kernels", "triton") != _loaded_int8_setting:
         apply_int8_kernel_setting(server_config.get("int8_kernels", "triton"))
     base_model_type = get_base_model_type(model_type)
-    model_def = get_runtime_model_def(model_type)
+    model_def = get_runtime_model_def(model_type, model_kwargs)
     save_quantized = args.save_quantized and model_def != None
     model_filename = get_model_filename(model_type=model_type, quantization= "" if save_quantized else transformer_quantization, dtype_policy = transformer_dtype_policy) 
     if "URLs2" in model_def:
@@ -4601,7 +4602,8 @@ def load_models(model_type, override_profile = -1, output_type="video", preview_
     for filename, file_model_type, file_source_type, submodel_no in zip(model_file_list, model_type_list, source_type_list, model_submodel_no_list):
         if len(filename) == 0: continue 
         download_models(filename, file_model_type, file_source_type, submodel_no,
-                        VAE_upsampling=model_kwargs.get("VAE_upsampling"))
+                        VAE_upsampling=model_kwargs.get("VAE_upsampling"),
+                        model_def_override=model_def if file_model_type == model_type else None)
         local_file_name = get_compatible_local_model_filename(
             filename,
             file_model_type,
@@ -4609,7 +4611,7 @@ def load_models(model_type, override_profile = -1, output_type="video", preview_
         )
         local_model_file_list.append( os.path.basename(filename) if local_file_name is None else local_file_name )
     if len(local_model_file_list) == 0:
-        download_models("", model_type, 0, -1, VAE_upsampling=model_kwargs.get("VAE_upsampling"))
+        download_models("", model_type, 0, -1, VAE_upsampling=model_kwargs.get("VAE_upsampling"), model_def_override=model_def)
 
     VAE_dtype = torch.float16 if server_config.get("vae_precision","16") == "16" else torch.float
     mixed_precision_transformer =  server_config.get("mixed_precision","0") == "1"
@@ -7929,6 +7931,7 @@ def generate_video(
     minimax_h3_sequence_memory_override=False,
     minimax_h3_extended_duration=False,
     minimax_h3_text_encoder="nvfp4_awq",
+    minimax_h3_video_vae="auto",
     # LTX-2.5 defaults to the conventional fast ConvVAE. The optional NAD
     # diffusion decoder is model state and therefore triggers a model reload
     # when changed in Advanced settings.
@@ -8072,6 +8075,12 @@ def generate_video(
             send_cmd("exit")
             return True
     if str(model_def.get("architecture") or "").startswith("minimax_h3"):
+        requested_h3_video_vae = str(minimax_h3_video_vae or "auto")
+        model_kwargs["minimax_h3_video_vae"] = requested_h3_video_vae
+        expected_h3_video_vae = get_runtime_model_def(model_type, {"minimax_h3_video_vae": requested_h3_video_vae}).get("minimax_h3_video_vae_variant", "auto")
+        if wan_model is not None and getattr(wan_model, "video_vae_variant", "auto") != expected_h3_video_vae:
+            print(f"[MiniMax H3] Video VAE changed to {requested_h3_video_vae}; reloading the model profile.")
+            reload_needed = True
         model_kwargs["minimax_h3_veda"] = requested_h3_veda
         if wan_model is not None and bool(getattr(wan_model, "veda", False)) != requested_h3_veda:
             print("[MiniMax H3 Veda] Acceleration selection changed; reloading the model profile.")

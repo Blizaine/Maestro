@@ -690,6 +690,17 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
                 </div>
               ) : null}
 
+              {modelOptions?.minimax_h3_video_vae_choices?.length ? (
+                <div>
+                  <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">H3 Video Decoder</label>
+                  <select aria-label="H3 Video Decoder" value={params.minimax_h3_video_vae || 'auto'}
+                    onChange={event => setParam('minimax_h3_video_vae', event.target.value as NonNullable<typeof params.minimax_h3_video_vae>)}
+                    className="w-full bg-bg-tertiary border border-border rounded px-2.5 py-1.5 text-xs text-text-primary">
+                    {modelOptions.minimax_h3_video_vae_choices.map(choice => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+                  </select>
+                  <p className="text-[9px] text-text-muted mt-1">LightVAE uses a smaller 12-layer decoder; detail may differ. Start/end frames and references keep the original encoder. H3 VAE x2 uses its dedicated decoder. Changing this reloads the model.</p>
+                </div>
+              ) : null}
               {modelOptions?.ltx25_video_vae_choices?.length ? (
                 <div>
                   <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">

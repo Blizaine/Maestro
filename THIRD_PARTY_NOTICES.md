@@ -202,8 +202,27 @@ the existing Transformers dependency.
 
 Source: https://github.com/black-forest-labs/flux-3-image-klein/tree/45e57c9fb06f9751cdced29a65c5d2171003be05
 
-Official model weights download on demand from the separately licensed,
-access-gated model repository and are not redistributed in Maestro's source.
+Model weights download on demand from separately licensed public WanGP mirrors
+and are not redistributed in Maestro's source. The BFL model license and notice
+are preserved in `app/models/flux3/WEIGHTS_LICENSE.md` and `WEIGHTS_NOTICE.md`.
 The pinned weight revision and download verification are documented in
 `docs/Flux-3-Klein.md`. The optional BFL prompt-upsampler weights are not
 installed by this integration.
+
+## WanGP v18.10 options
+
+H3 LightVAE loading, the dated TaoMate FL2VA profile, optional WGPKernels
+dispatch, ConvRot embeddings and Fish Drama 3 integration adapt WanGP revision
+`de302eec64b692dc83949d687cadf7d60bd74091`. WanGP contributions retain its
+Community License 2.0 at `app/LICENSES/WanGP-Community-2.0.txt`. Fish Audio
+and codec source retain their separate license texts in
+`app/models/TTS/fish_audio/LICENSE_FISH_AUDIO` and `LICENSE_DAC`.
+The Fish port includes WanGP's small native CPU expert libraries and source,
+with their license and hashes in `app/models/TTS/fish_audio/native_cpu/`.
+Portable PyTorch expert math remains a fallback. The optional vLLM path is
+capability-gated and graph-free; it does not include upstream CUDA Graphs or
+partial expert GPU residency.
+WGPKernels is an optional separately downloaded package; its upstream package
+license applies. Model weights retain their respective model licenses.
+
+Source: https://github.com/deepbeepmeep/WanGP/tree/de302eec64b692dc83949d687cadf7d60bd74091

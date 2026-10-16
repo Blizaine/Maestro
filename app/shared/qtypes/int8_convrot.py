@@ -11,6 +11,7 @@ import json
 import math
 import os
 from collections.abc import Mapping
+from types import MethodType
 
 import torch
 from optimum.quanto import QModuleMixin
@@ -825,7 +826,44 @@ def apply_pre_quantization(
     ]
     for key in markers:
         state_dict.pop(key, None)
-    return quantization_map or {}, []
+    hooks = []
+    for name, module in model.named_modules():
+        if not isinstance(module, torch.nn.Embedding) or (quantization_map or {}).get(name, {}).get("weights") != _QTYPE_NAME:
+            continue
+        group = state_dict.pop(name + ".convrot_group_size")
+        group_size = int(group.item())
+        if group_size not in _SUPPORTED_HEADER_CONVROT_GROUPS or module.embedding_dim % group_size:
+            raise ValueError(f"Invalid ConvRot embedding group size {group_size} for {name!r}")
+        compute_dtype = default_dtype or module.weight.dtype
+
+        def install_embedding(model, name=name, group_size=group_size, compute_dtype=compute_dtype):
+            embedding = model.get_submodule(name)
+            embedding._convrot_group_size = group_size
+            embedding.weight = torch.nn.Parameter(_wrap_int8_convrot_weight(embedding.weight, compute_dtype), requires_grad=False)
+            embedding.forward = MethodType(_embedding_forward, embedding)
+
+        hooks.append(install_embedding)
+    return quantization_map or {}, hooks
+
+
+def _embedding_forward(module, input):
+    """Undo ConvRot on gathered vocabulary rows, without expanding the table.
+
+    Adapted from WanGP v18.10 (de302eec64b692dc83949d687cadf7d60bd74091).
+    Linear layers rotate their inputs; embeddings instead need to undo the
+    stored weight rotation on each selected output row.
+    """
+    weight = module.qweight
+    rows = torch.nn.functional.embedding(input, weight._data).float()
+    rows.mul_(torch.nn.functional.embedding(input, weight._scale))
+    output = _rotate_activation(rows, module._convrot_group_size).to(weight.dtype)
+    if module.max_norm is not None:
+        norms = output.float().norm(p=module.norm_type, dim=-1, keepdim=True)
+        output.mul_((module.max_norm / norms.clamp_min(1e-7)).clamp_max_(1).to(output))
+    embed_scale = getattr(module, "embed_scale", None)
+    if torch.is_tensor(embed_scale):
+        embed_scale = embed_scale.to(output)
+    return output if embed_scale is None else output * embed_scale
 
 
 def detect_quantization_label_from_filename(filename, verboseLevel=0):

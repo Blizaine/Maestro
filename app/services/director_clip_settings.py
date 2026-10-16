@@ -509,7 +509,7 @@ def _restore_saved_model_settings(recipe, state, provenance):
         "resolution", "override_attention", "denoising_strength",
         "guidance_scale", "flow_shift", "audio_flow_shift",
         "skip_steps_cache_type",
-        "minimax_h3_text_encoder", "minimax_h3_reference_detail",
+        "minimax_h3_text_encoder", "minimax_h3_video_vae", "minimax_h3_reference_detail",
     ):
         if (key not in params or params.get(key) is None) and key in saved:
             params[key] = copy.deepcopy(saved[key])

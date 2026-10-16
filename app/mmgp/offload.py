@@ -4888,6 +4888,8 @@ def _configure(self, pipe_or_dict_of_modules, pinnedMemory = False, pinnedPEFTLo
         if loading_callback is not None: loading_callback.check_abort()
         current_model: torch.nn.Module = models[model_id] 
         loading_phase("Preparing", model_id)
+        from .experts import excluded_names
+        externally_managed = excluded_names(current_model)
         model_convertWeightsFloatTo = getattr(current_model, "_convertWeightsFloatTo", convertWeightsFloatTo)
         # make sure that no RAM or GPU memory is not allocated for gradiant / training
         current_model.to("cpu").eval()
@@ -4903,7 +4905,9 @@ def _configure(self, pipe_or_dict_of_modules, pinnedMemory = False, pinnedPEFTLo
         model_dtype = getattr(current_model, "_model_dtype", None)
         # if model_dtype == None:
         #     model_dtype = getattr(current_model, "dtype", None)
-        for _ , m in current_model.named_modules():
+        for module_name , m in current_model.named_modules():
+            if module_name in externally_managed:
+                continue
             ignore_dtype = hasattr(m, "_lock_dtype")
             for n, p in m.named_parameters(recurse = False):
                 p.requires_grad = False
@@ -4929,7 +4933,9 @@ def _configure(self, pipe_or_dict_of_modules, pinnedMemory = False, pinnedPEFTLo
         if model_dtype is None:
             model_dtype = model_convertWeightsFloatTo if model_convertWeightsFloatTo is not None else torch.bfloat16
         current_model._dtype = model_dtype
-        for b in current_model.buffers():
+        for buffer_name, b in current_model.named_buffers():
+            if any(buffer_name.startswith(name + ".") for name in externally_managed):
+                continue
             # do not convert 32 bits float to 16 bits since buffers are few (and potential gain low) and usually they are needed for precision calculation (for instance Rope)
             current_model_size +=  torch.numel(b.data) * b.data.element_size()
 
@@ -4967,6 +4973,7 @@ def _configure(self, pipe_or_dict_of_modules, pinnedMemory = False, pinnedPEFTLo
     for model_id in models: 
         if loading_callback is not None: loading_callback.check_abort()
         current_model: torch.nn.Module = models[model_id] 
+        externally_managed = excluded_names(current_model)
         current_model._force_device= "cuda"
         towers_names, towers_modules = _detect_main_towers(current_model)
         compilationInThisOne = compileAllModels or model_id in modelsToCompile
@@ -4984,6 +4991,12 @@ def _configure(self, pipe_or_dict_of_modules, pinnedMemory = False, pinnedPEFTLo
         # modules that the model loads only while they run (e.g. an LLM's token embedding and output head, used for a prompt but not to denoise)
         separate_blocks = tuple(getattr(current_model, "_offload_separate_blocks", ())) if current_budget > 0 else ()
         for submodule_name, submodule in current_model.named_modules():
+            if submodule_name in externally_managed:
+                # Routed expert storage is owned by its CPU executor. Do not
+                # stage, pin, or count it as an ordinary CUDA weight block.
+                # Preserve the enclosing layer's block association for dense
+                # siblings visited after the bank.
+                continue
             # create a fake 'accelerate' parameter so that the _execution_device property returns always "cuda" 
             # (it is queried in many pipelines even if offloading is not properly implemented)  
             if not hasattr(submodule, "_hf_hook"):

@@ -5,7 +5,7 @@ OUTPUT_TYPES = ("video", "image", "audio")
 PRELOAD_MODES = ("default", "dynamic", "manual")
 VRAM_ALLOCATORS = ("default", "vmm", "vmm_spill")
 RAM_ALLOCATORS = ("default", "mmgp")
-INT8_BACKENDS = ("disabled", "auto", "triton", "kitchen")
+INT8_BACKENDS = ("disabled", "auto", "triton", "kitchen", "wgpkernels")
 MEMORY_DEFAULTS = {
     # Keep the installed allocator policy until the user chooses the new one.
     "vram_allocator": "default",

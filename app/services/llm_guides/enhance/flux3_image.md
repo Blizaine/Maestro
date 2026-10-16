@@ -33,4 +33,7 @@ do not replace precise relationships with a loose inventory of objects.
 OUTPUT
 Return only the finished prompt in plain prose. Use no heading, list, explanation,
 negative prompt, or generation settings. Describe composition in ordinary words;
-do not request boxes, masks, structured JSON, or other unsupported controls.
+do not invent layout boxes or masks. If the user already supplied Prompt Helper
+layout JSON, preserve it in full after the caption: keep element IDs, their
+caption tags, coordinates, extra fields, and reference bindings. Boxes are
+composition guidance, not exact pixel masks.

@@ -102,8 +102,9 @@ export function MemorySettingsPanel() {
           onChange={event => void update({ int8_kernels: event.target.value as SystemConfig['int8_kernels'] })}>
           <option value="disabled">PyTorch</option><option value="auto">Auto</option>
           <option value="triton">Triton</option><option value="kitchen">Comfy Kitchen</option>
+          <option value="wgpkernels">WGPKernels</option>
         </select>
-        <p className={helpClass}>Auto tries compatible Kitchen kernels, then Triton, then PyTorch. Kitchen enables grouped projections for compatible INT8 weights. Unsupported kernels fall back automatically; the terminal reports the active backend.</p>
+        <p className={helpClass}>Auto tries WGPKernels, Comfy Kitchen, Triton, then PyTorch. WGPKernels uses higher-precision INT8 math on supported RTX 30 series or newer GPUs. Run Pinokio Update to install the matching optional package. The terminal reports the active backend.</p>
       </div>
       <p className={helpClass}>Head splitting applies to the next generation. Pinning, read ahead, preload, and INT8 backend changes reload models on the next generation. Allocator changes require a restart.</p>
     </section>

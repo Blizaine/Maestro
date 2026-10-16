@@ -2,14 +2,24 @@
     "model": {
         "name": "Flux 3 Klein 5.6B",
         "architecture": "flux3_klein",
-        "description": "FLUX 3 Image Klein is Black Forest Labs' distilled 5.6B image model for text-to-image generation and editing with up to 10 reference images. Maestro uses its native 16-step flow-map schedule and MMGP component offloading.",
-        "selector_help": "Generate images or add reference images and describe an edit. Downloads about 20 GB on first use; Hugging Face access to black-forest-labs/flux-3-image-klein is required. BF16 weights use Maestro's memory manager. Layout boxes, masked inpainting and Flux 1/2 LoRAs are not supported by this adapter.",
-        "URLs": ["flux3_image_klein_sd_bf16.safetensors"],
+        "description": "Distilled: 16 steps without CFG. Generate or edit using up to 10 ordered references. Public WanGP model sources; no Hugging Face login required.",
+        "selector_help": "Generate images or add ordered references. Use Prompt Helper for layout boxes and reference-region edits. BF16 and INT8 ConvRot are available; NVFP4 requires a supported RTX 50 GPU and kernel. Downloads occur only on first use. FLUX Kommunity model license applies.",
+        "URLs": [
+            "flux3_image_klein_sd_bf16.safetensors",
+            "flux3_image_klein_sd_int8_convrot.safetensors"
+        ],
         "download_sources": {
             "flux3_image_klein_sd_bf16.safetensors": {
-                "url": "https://huggingface.co/black-forest-labs/flux-3-image-klein/resolve/8454017f9ebaada30c998fccd9f67a80c7580f68/model.safetensors",
+                "url": "https://huggingface.co/DeepBeepMeep/Flux3/resolve/1e7c96984937fef03326e3b297fb44a28c30736d/flux3_image_klein_sd_bf16.safetensors",
                 "sha256": "c3e9813cdd049c831c836b2e9db61150e49a93fc1a4c63b256494642fee0bd7c",
-                "size_bytes": 11097404512
+                "size_bytes": 11097404512,
+                "anonymous": true
+            },
+            "flux3_image_klein_sd_int8_convrot.safetensors": {
+                "url": "https://huggingface.co/DeepBeepMeep/Flux3/resolve/1e7c96984937fef03326e3b297fb44a28c30736d/flux3_image_klein_sd_int8_convrot.safetensors",
+                "sha256": "847d8933548afd93df4af2cac2498e70891bf28d9dae06d695f536992e168fe2",
+                "size_bytes": 5827874779,
+                "anonymous": true
             }
         },
         "source_repo": "https://huggingface.co/black-forest-labs/flux-3-image-klein",
@@ -26,5 +36,7 @@
     "num_inference_steps": 16,
     "guidance_scale": 1.0,
     "embedded_guidance_scale": 1.0,
-    "sample_solver": "default"
+    "sample_solver": "default",
+    "prompt_enhancer": "",
+    "multi_prompts_gen_type": "FG"
 }

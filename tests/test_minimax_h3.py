@@ -101,6 +101,33 @@ def _duration_recommendations_namespace():
             sys.path.remove(app_path)
 
 
+def _video_vae_assets_namespace():
+    app_path = str(_APP)
+    added_app_path = app_path not in sys.path
+    if added_app_path:
+        sys.path.insert(0, app_path)
+    try:
+        from models.minimax_h3.video_vae_assets import (
+            LIGHT_VIDEO_VAE_FILES,
+            VIDEO_VAE_FULL_FILE,
+            VIDEO_VAE_FULL_INT8_FILE,
+            VIDEO_VAE_LIGHT_REVISION,
+            VIDEO_VAE_VARIANT_FILENAMES,
+            get_video_vae_variant_choices,
+        )
+        return {
+            "LIGHT_VIDEO_VAE_FILES": LIGHT_VIDEO_VAE_FILES,
+            "VIDEO_VAE_FULL_FILE": VIDEO_VAE_FULL_FILE,
+            "VIDEO_VAE_FULL_INT8_FILE": VIDEO_VAE_FULL_INT8_FILE,
+            "VIDEO_VAE_LIGHT_REVISION": VIDEO_VAE_LIGHT_REVISION,
+            "VIDEO_VAE_VARIANT_FILENAMES": VIDEO_VAE_VARIANT_FILENAMES,
+            "get_video_vae_variant_choices": get_video_vae_variant_choices,
+        }
+    finally:
+        if added_app_path:
+            sys.path.remove(app_path)
+
+
 def _load_handler_class():
     app_path = str(_APP)
     added_app_path = app_path not in sys.path
@@ -116,6 +143,14 @@ def _load_handler_class():
             X2_VAE_REVISION,
             X2_VAE_VALUE,
             x2_vae_asset_candidates,
+        )
+        from models.minimax_h3.video_vae_assets import (
+            LIGHT_VIDEO_VAE_FILES,
+            VIDEO_VAE_FULL_FILE,
+            VIDEO_VAE_FULL_INT8_FILE,
+            VIDEO_VAE_LIGHT_REVISION,
+            VIDEO_VAE_VARIANT_FILENAMES,
+            get_video_vae_variant_choices,
         )
         from shared.utils import files_locator as fl
     finally:
@@ -156,6 +191,12 @@ def _load_handler_class():
         "X2_VAE_REVISION": X2_VAE_REVISION,
         "X2_VAE_VALUE": X2_VAE_VALUE,
         "x2_vae_asset_candidates": x2_vae_asset_candidates,
+        "LIGHT_VIDEO_VAE_FILES": LIGHT_VIDEO_VAE_FILES,
+        "VIDEO_VAE_FULL_FILE": VIDEO_VAE_FULL_FILE,
+        "VIDEO_VAE_FULL_INT8_FILE": VIDEO_VAE_FULL_INT8_FILE,
+        "VIDEO_VAE_LIGHT_REVISION": VIDEO_VAE_LIGHT_REVISION,
+        "VIDEO_VAE_VARIANT_FILENAMES": VIDEO_VAE_VARIANT_FILENAMES,
+        "get_video_vae_variant_choices": get_video_vae_variant_choices,
         "fl": fl,
         **_duration_recommendations_namespace(),
     }
@@ -174,6 +215,8 @@ def _load_source_function(path: Path, name: str, *, include_private_assignments:
     namespace = {}
     body = []
     if include_private_assignments:
+        if path.resolve() == _HANDLER_PATH.resolve():
+            namespace.update(_video_vae_assets_namespace())
         for node in tree.body:
             if not isinstance(node, ast.Assign):
                 continue
@@ -217,6 +260,7 @@ def _load_h3_memory_helpers():
         elif isinstance(node, ast.FunctionDef) and node.name in names:
             selected.append(node)
     namespace = _duration_recommendations_namespace()
+    namespace.update(_video_vae_assets_namespace())
     module = ast.Module(body=selected, type_ignores=[])
     exec(
         compile(ast.fix_missing_locations(module), str(_HANDLER_PATH), "exec"),

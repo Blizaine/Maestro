@@ -7841,6 +7841,9 @@ export const useStore = create<AppState>((set, get) => ({
     if (!state.modelOptions?.minimax_h3_text_encoder_choices?.length) {
       delete params.minimax_h3_text_encoder
     }
+    if (state.modelOptions?.minimax_h3_video_vae_choices?.length) {
+      if (!state.modelOptions.minimax_h3_video_vae_choices.some(choice => choice.value === params.minimax_h3_video_vae)) params.minimax_h3_video_vae = 'auto'
+    } else delete params.minimax_h3_video_vae
     if (state.modelOptions?.ltx25_video_vae_choices?.length) {
       const validLtx25VideoVae = state.modelOptions.ltx25_video_vae_choices.some(
         choice => choice.value === params.ltx25_video_vae
@@ -8380,11 +8383,11 @@ export const useStore = create<AppState>((set, get) => ({
     )
     const imageReferenceChoices = state.modelOptions?.image_ref_choices?.choices ?? []
     const isFlux3KleinImageGenerate = (
-      params.model_type === 'flux3_klein'
+      String(params.model_type || '').startsWith('flux3_klein')
       && state.generationMode === 'image'
       && state.studioImageWorkflow === 'generate'
     )
-    if (isFlux3KleinImageGenerate && state.modelOptions?.model_type !== 'flux3_klein') {
+    if (isFlux3KleinImageGenerate && state.modelOptions?.model_type !== params.model_type) {
       set({ promptEnhanceError: 'FLUX 3 Klein settings are still loading. Try Generate again.' })
       return
     }
@@ -8394,7 +8397,7 @@ export const useStore = create<AppState>((set, get) => ({
       return
     }
     const effectiveImageRefType = isFlux3KleinImageGenerate
-      ? (flux3SupportsImageReferences ? 'I' : '')
+      ? (flux3SupportsImageReferences ? (state.imageRefType === 'KI' ? 'KI' : 'I') : '')
       : state.imageRefType || (
           imageReferenceChoices.some(([, value]) => value.includes('K'))
             ? 'KI'
@@ -9692,6 +9695,9 @@ export const useStore = create<AppState>((set, get) => ({
             || options.minimax_h3_text_encoder_choices[0].value
           )
         }
+      }
+      if (options.minimax_h3_video_vae_choices?.length && !options.minimax_h3_video_vae_choices.some(choice => choice.value === get().params.minimax_h3_video_vae)) {
+        paramUpdates.minimax_h3_video_vae = 'auto'
       }
       if (options.ltx25_video_vae_choices?.length) {
         const currentVideoVae = get().params.ltx25_video_vae
@@ -13067,6 +13073,8 @@ export const useStore = create<AppState>((set, get) => ({
     ) ? savedTextEncoder : undefined
     const restoredLtx25VideoVae = restoredModelOptions?.ltx25_video_vae_choices
       ?.find(choice => choice.value === p.ltx25_video_vae)?.value
+    const restoredH3VideoVae = restoredModelOptions?.minimax_h3_video_vae_choices
+      ?.find(choice => choice.value === p.minimax_h3_video_vae)?.value
 
     // TTS restores names before Speaker 1/2 substitution. Edit workflows
     // restore the user's text rather than internal conditioning guidance.
@@ -13310,6 +13318,7 @@ export const useStore = create<AppState>((set, get) => ({
     )
     newParams.minimax_h3_turbo_preset = restoredTurboPreset?.id
     newParams.minimax_h3_text_encoder = restoredTextEncoder
+    newParams.minimax_h3_video_vae = restoredH3VideoVae
     newParams.ltx25_video_vae = restoredLtx25VideoVae
     if (restoredModelOptions?.minimax_h3_fused_turbo || restoredModelOptions?.minimax_h3_baked_turbo) {
       const minSteps = Math.max(

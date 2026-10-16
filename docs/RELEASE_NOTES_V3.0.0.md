@@ -377,39 +377,53 @@ Fresh-install video defaults are:
 visibility after explaining that no model files are deleted. Hidden models can
 be enabled again. Existing saved choices are preserved on update.
 
-## Flux 3 Klein
+## WanGP v18.10 additions
 
-**Flux 3 Klein 5.6B** adds native image generation and editing with up to ten
-references in Image → Generate. Its recommended default is 16 steps without CFG
-or a negative prompt. The model appears as an additional option while retaining
-the user's selected image model. Downloads use a pinned official checkpoint,
-verified checksum and separate component folders; the optional BFL prompt
-upsampler is not installed.
+**Flux 3 Klein** offers Distilled (16 steps, no CFG) and Base (50 steps, CFG 3.5)
+with BF16 and INT8 ConvRot checkpoint choices. Separate NVFP4 entries require
+supported RTX 50 hardware and kernels. All components now download on demand
+from pinned public WanGP sources, so a Hugging Face login or prior gate approval
+is not required. Model license notices remain included. Existing weights are
+retained, and ten ordered references remain supported.
 
-This initial adapter uses BF16 with MMGP offloading. Masked inpainting, layout
-boxes, Flux 1/2 LoRAs and other quantized formats are outside its verified scope.
-Real-checkpoint tests on the RTX 4090 passed for 1024 × 1024 text-to-image,
-single-reference editing and two-reference composition at 16 steps. Measured
-API completion times were 44.5 seconds including initial loading, then 25.6
-and 35.9 seconds with the model loaded. A ten-reference 1280 × 720 run also
-completed in 75.2 seconds. Stale reference-mode flags from another model are
-cleared when submitting Flux 3 edits. The ten-reference group image omitted
-one requested person; accepting ten inputs does not guarantee perfect subject
-retention. A separate 1088 × 1920 text-to-image audit matched all sixteen
-denoising steps and every final pixel to BFL's pinned reference when using the
-same cuDNN attention backend. The default efficient-attention route produced
-small numerical differences. Both paths retained the native FP32 VAE. These
-checks do not establish performance on lower-memory machines or general
-subject-retention quality. Hugging Face access is required
-for the official weights. See the [Flux 3 guide](Flux-3-Klein.md).
+**Prompt Helper** adds a visual Flux 3 layout editor for output boxes, reference
+source regions and removals. Saved prompts retain the caption, element IDs,
+reference bindings and JSON together. Boxes guide composition rather than
+acting as exact masks. Reference IDs map Image 1 to `<ref_image_0>` through
+Image 10 to `<ref_image_9>`. Enhance preserves supplied layout data and uses
+model-specific generation/edit guidance. See the [Flux 3 guide](Flux-3-Klein.md).
 
-Prompt enhancement now uses Flux 3 generation/edit guides instead of the older
-Flux 2 rules. The LLM receives exact upload-order bindings from the first
-`<ref_image_0>` through the tenth `<ref_image_9>`. It distinguishes a bounded
-edit from a new scene, preserves explicit subject roles, counts, species and
-lettering, and avoids unsupported layout controls. Valid repeated reference
-phrases survive prompt cleanup. This uses the selected enhancement LLM without
-installing BFL's separate prompt upsampler.
+**Fish Audio Drama 3** adds expressive multi-speaker speech, up to three cloned
+voice references, automatic transcription for missing reference transcripts,
+and line-based long-script chunks with recent speech as context. FP8 and INT4
+expert variants are optional model choices. Legacy uses the native CPU expert
+kernel on supported systems, with a portable PyTorch fallback. The graph-free
+vLLM path is offered only when Triton, FlashAttention 2 and the required FLA
+kernels are usable; expert GPU staging also checks profile and free VRAM.
+CUDA Graphs and partial expert GPU residency are not enabled in this port.
+The INT4 expert file is about 16.6 GB; FP8 is about 32 GB before the ordinary
+layers and codec. See [Fish Drama 3](Fish-Drama-3.md) for resource requirements.
+
+**WGPKernels** is an optional INT8 backend in RAM / VRAM Management. Normal
+Install/Update attempts to install the pinned wheel matching CUDA 12.8 or 13
+on supported Windows/Linux x64 RTX 30-series or newer systems. Auto verifies
+available kernels and tries WGPKernels, Kitchen, Triton, then PyTorch. Explicit
+selection reports an unavailable backend rather than pretending to use it.
+
+**H3 LightVAE** adds BF16 and INT8 ConvRot 12-layer decoder choices under
+Advanced → H3 Video Decoder. Start/end frames and references retain the original
+H3 encoder. Auto retains the established full decoder behavior; LightVAE can
+change decoded detail. H3 VAE x2 selects the dedicated x2 decoder.
+
+**TaoMate FL2VA 3-step, 2026-10-15** is a separate dated accelerator recipe for
+Frames models. Its LoRA downloads only when selected. Existing recipes remain
+available; the new FL2VA adapter is excluded from References models.
+
+The earlier official BF16 Flux 3 adapter passed real 4090 text-to-image,
+single/two-reference and ten-reference capacity tests, plus a full-resolution
+numerical comparison against BFL. Those results apply to their recorded
+workloads; new variant and lower-memory evidence is tracked in the
+[validation record](VALIDATION_V3.0.0.md).
 
 ## Qwen Image 2.1 Turbo
 

@@ -252,6 +252,7 @@ export interface GenerateParams {
   /** Add bounded generated look/blocking references between sequence clips. */
   minimax_h3_sequence_continuity?: boolean
   minimax_h3_text_encoder?: 'nvfp4_awq' | 'gguf_q2_k' | 'gguf_q4_k_m' | 'int8' | 'bf16'
+  minimax_h3_video_vae?: 'auto' | 'full' | 'full_int8' | 'lightvae' | 'lightvae_int8'
   /** LTX-2.5 video decoder. Fast ConvVAE is recommended; NAD is experimental. */
   ltx25_video_vae?: 'fast' | 'nad'
   /** One-click managed H3 Turbo recipe for Full or Pruned H3. */
@@ -1034,6 +1035,8 @@ export interface ModelOptions {
     recommended?: boolean
   }[] | null
   minimax_h3_text_encoder_default?: string
+  minimax_h3_video_vae_choices?: { value: 'auto' | 'full' | 'full_int8' | 'lightvae' | 'lightvae_int8'; label: string; description?: string }[] | null
+  minimax_h3_video_vae_default?: 'auto'
   ltx25_video_vae_choices?: {
     value: 'fast' | 'nad'
     label: string
@@ -1192,7 +1195,7 @@ export interface SystemConfig {
   ram_allocator_restart_required?: boolean
   ram_allocator_cli_override?: string | null
   vram_allocator?: 'default' | 'vmm' | 'vmm_spill'
-  int8_kernels?: 'disabled' | 'auto' | 'triton' | 'kitchen'
+  int8_kernels?: 'disabled' | 'auto' | 'triton' | 'kitchen' | 'wgpkernels'
   vram_allocator_active?: 'default' | 'vmm' | 'vmm_spill'
   vram_allocator_fallback_reason?: string | null
   vram_allocator_restart_required?: boolean

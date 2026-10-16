@@ -283,6 +283,16 @@ class TestCheckpointDownloads(unittest.TestCase):
             _, headers = _authenticated_request(url, "huggingface.co", None)
             self.assertNotIn("Authorization", headers)
 
+    def test_public_source_does_not_consult_or_send_cached_huggingface_token(self):
+        from app.shared.checkpoint_downloads import _authenticated_request
+        with patch("huggingface_hub.get_token", side_effect=AssertionError("must remain anonymous")):
+            url, headers = _authenticated_request(
+                "https://huggingface.co/DeepBeepMeep/Flux3/resolve/pinned/model.safetensors",
+                "huggingface.co", None, use_hf_token=False,
+            )
+        self.assertNotIn("Authorization", headers)
+        self.assertNotIn("token=", url)
+
     def test_huggingface_gate_preserves_existing_file_and_redacts_tokens(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "flux3.safetensors"

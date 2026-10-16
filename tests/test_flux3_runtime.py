@@ -133,6 +133,48 @@ def _runtime_for_cpu_test():
 
 
 class Flux3RuntimeTests(unittest.TestCase):
+    def test_quantized_checkpoint_validation_preserves_native_vision_qkv(self):
+        module = torch.nn.Module()
+        module.visual = torch.nn.Module()
+        module.visual.qkv = torch.nn.Linear(4, 12, bias=False)
+        with tempfile.TemporaryDirectory() as directory:
+            filename = str(Path(directory) / "encoder.safetensors")
+            save_file({"visual.qkv.weight": torch.zeros((12, 4), dtype=torch.int8)}, filename)
+            runtime_module._validate_public_checkpoint(module, [filename], "Qwen vision")
+
+    def test_quantized_checkpoint_validation_splits_only_separate_destination_qkv(self):
+        module = torch.nn.Module()
+        module.attn = torch.nn.Module()
+        for name in ("q", "k", "v"):
+            setattr(module.attn, name + "_proj", torch.nn.Linear(4, 2, bias=False))
+        with tempfile.TemporaryDirectory() as directory:
+            filename = str(Path(directory) / "dit.safetensors")
+            save_file({"attn.qkv.weight": torch.zeros((6, 4), dtype=torch.int8)}, filename)
+            runtime_module._validate_public_checkpoint(module, [filename], "DiT")
+
+    def test_public_transformers5_rope_schema_preserves_released_values_on_4x(self):
+        parameters = {"rope_type": "default", "rope_theta": 5000000, "mrope_interleaved": True, "mrope_section": [24, 20, 20]}
+        config = SimpleNamespace(text_config=SimpleNamespace(rope_scaling=None, rope_parameters=parameters, rope_theta=10000))
+        runtime_module._normalize_qwen_rope_config(config)
+        self.assertEqual(config.text_config.rope_theta, 5000000)
+        self.assertEqual(config.text_config.rope_scaling["mrope_section"], [24, 20, 20])
+        self.assertNotIn("rope_theta", config.text_config.rope_scaling)
+        original = dict(config.text_config.rope_scaling)
+        runtime_module._normalize_qwen_rope_config(config)
+        self.assertEqual(config.text_config.rope_scaling, original)
+
+    def test_base_sampler_uses_cfg_without_a_flow_map_target(self):
+        packed = Packed(data={"image": torch.zeros((1, 2))}, ids={}, timesteps={"image": torch.zeros(1)}, mode_indices={})
+        negative = Packed(data={"image": packed.data["image"]}, ids={}, timesteps={"image": torch.zeros(1)}, mode_indices={})
+        class BaseDiT:
+            flow_map = False
+            def __call__(self, value, timesteps_ref=None):
+                self_test.assertIsNone(timesteps_ref)
+                return torch.full_like(value.data["image"], 1 if value is negative else 3)
+        self_test = self
+        result = denoise_flow_map(BaseDiT(), packed, torch.tensor([1.0, 0.0]), negative_packed=negative, guidance_scale=3.5)
+        torch.testing.assert_close(result, torch.full((1, 2), -8.0))
+
     def test_mmgp_test_shim_does_not_leak_into_import_state(self):
         self.assertIsNot(sys.modules.get("mmgp"), mmgp_stub)
         self.assertNotIn("models.flux3.runtime", sys.modules)
@@ -225,6 +267,23 @@ class Flux3RuntimeTests(unittest.TestCase):
             )
         self.assertEqual(loader.call_args.args[1], first)
         self.assertEqual(loader.call_args.kwargs["default_dtype"], torch.bfloat16)
+
+    def test_qwen_checkpoint_prefix_uses_mmgp_prefix_filter_for_quantization_metadata(self):
+        checkpoint = "C:/models/text/qwen3vl_4b_int8_convrot.safetensors"
+        with patch.object(runtime_module.offload, "load_model_data") as loader:
+            runtime_module._load_mmgp_checkpoint(
+                torch.nn.Linear(2, 2), [checkpoint],
+                modelPrefix="model", writable_tensors=False,
+                default_dtype=torch.bfloat16,
+            )
+
+        # MMGP applies modelPrefix to state_dict, quantization_map, and
+        # tied_weights_map after reading safetensors metadata. The old
+        # state-only preprocess_sd path left the quantization map prefixed,
+        # so INT8 descriptors were silently dropped for the bare Qwen model.
+        self.assertEqual(loader.call_args.args[1], checkpoint)
+        self.assertEqual(loader.call_args.kwargs["modelPrefix"], "model")
+        self.assertNotIn("preprocess_sd", loader.call_args.kwargs)
 
     def test_checkpoint_validation_requires_exact_names_and_shapes(self):
         module = torch.nn.Linear(3, 2)

@@ -3793,8 +3793,12 @@ def enhance_prompt(
             "\n\nFLUX 3 OUTPUT CONTRACT: Return only the final still-image caption or editing "
             "instruction. Native <ref_image_N> tokens identify attached inputs in order and are "
             "allowed model syntax, not headings. Keep exact requested lettering in quotes. "
-            "Do not output the input map, commentary, Markdown, layout JSON, bounding boxes, "
-            "mask commands, negative-prompt fields or generation settings."
+            "Do not output the input map, commentary, Markdown, mask commands, "
+            "negative-prompt fields or generation settings. Normally return prose without layout JSON. "
+            "If the user supplied Prompt Helper layout JSON, preserve its complete element list, "
+            "IDs, reference bindings and all coordinates after the caption. Retain each <id> tag. "
+            "Only clarify the caption and descriptions; never change, omit or invent layout boxes. "
+            "Boxes use [top,left,bottom,right], integers from 0 to 1000, and guide composition rather than exact pixel masks."
         )
     else:
         system += "\n\nCRITICAL: Output ONLY the enhanced prompt text. No headers, no labels, no markdown, no explanation, no \"Enhancement Logic\", no \"Edit Prompt:\". No LoRA filenames or display names; exact creator-declared trainedWords tokens from active-LoRA guidance may appear when relevant. Just the raw prompt text."

@@ -30,6 +30,8 @@ def denoise_flow_map(
     schedule: Tensor,
     on_step: Callable[[int], None] | None = None,
     check_cancel: Callable[[], None] | None = None,
+    negative_packed: Packed | None = None,
+    guidance_scale: float = 1.0,
 ) -> Tensor:
     """Integrate one sample's packed latent tokens with the distilled flow map.
 
@@ -45,10 +47,15 @@ def denoise_flow_map(
         t = schedule[step].item()
         dt = (schedule[step + 1] - schedule[step]).item()
         packed.timesteps["image"].fill_(t)
-        target = schedule[step + 1].reshape(1).to(packed.data["image"].device)
+        target = schedule[step + 1].reshape(1).to(packed.data["image"].device) if getattr(dit, "flow_map", True) else None
         autocast = torch.autocast("cuda", dtype=torch.bfloat16) if use_bf16 else nullcontext()
         with autocast:
             velocity = dit(packed, timesteps_ref=target)
+            if negative_packed is not None:
+                negative_packed.data["image"] = packed.data["image"]
+                negative_packed.timesteps["image"].fill_(t)
+                unconditional = dit(negative_packed, timesteps_ref=None)
+                velocity = unconditional + guidance_scale * (velocity - unconditional)
         if check_cancel is not None:
             check_cancel()
         packed.data["image"] = packed.data["image"] + dt * velocity

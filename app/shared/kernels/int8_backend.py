@@ -1,3 +1,5 @@
+# WGPKernels dispatch adapted from deepbeepmeep/Wan2GP at de302eec64b692dc83949d687cadf7d60bd74091.
+# The upstream implementation is distributed under the WanGP Community License 2.0 (see the upstream LICENSE.txt).
 """Optional INT8 backends shared by Quanto and ConvRot linear layers."""
 from __future__ import annotations
 
@@ -9,13 +11,26 @@ from types import MethodType
 
 import torch
 
-from shared.kernels import quanto_int8_inject as triton
+from shared.kernels import kernel_policy, quanto_int8_inject as triton
 
 
-CHOICES = [("Disabled (PyTorch)", "disabled"), ("Auto", "auto"),
+def _wgp_installed():
+    """Check the optional WGPKernels wheel without probing or initializing a GPU."""
+    try:
+        from wgpkernels import int8 as wgpkernels_int8
+
+        return wgpkernels_int8.default_library_path().is_file()
+    except Exception:
+        return False
+
+
+CHOICES = [("Disabled: PyTorch (most precise)", "disabled"), ("Auto (best available)", "auto"),
+           (f"WGPKernels ({'installed' if _wgp_installed() else 'not installed'}, higher precision)", "wgpkernels"),
            ("Triton", "triton"), ("Comfy Kitchen Kernels", "kitchen")]
+_LABELS = {"wgpkernels": "WGPKernels", "kitchen": "Comfy Kitchen", "triton": "Triton"}
 _backend = "pytorch"
 revision = 0
+_wgp = None
 _kitchen = None
 _kitchen_hip = False
 _direct_cutlass = False
@@ -30,7 +45,7 @@ _blockwise_triton = None
 _blockwise_required = False
 _kitchen_dlpack_export = None  # (Kitchen module, its own DLPack exporter) while the direct exporter replaces it
 # Bump when changes to INT8 custom operators invalidate compiled graphs.
-_COMPILE_CACHE_VERSION = 3
+_COMPILE_CACHE_VERSION = 4
 # Includes row quantization, a possible INT32 GEMM result, and a temporary output.
 # Never allocate an activation-sized quantization buffer for a whole video.
 _SCRATCH_BYTES = 16 * 1024 * 1024
@@ -93,24 +108,84 @@ def _probe_kitchen():
         return None, str(exc)
 
 
+def _probe_wgpkernels():
+    """Load and exercise the optional higher-precision INT8 backend at selection time."""
+    if not torch.cuda.is_available():
+        return None, "requires a supported GPU"
+    try:
+        device = torch.cuda.current_device()
+        if torch.version.hip is not None:
+            architecture = torch.cuda.get_device_properties(device).gcnArchName
+            if not str(architecture).startswith("gfx1201"):
+                return None, "requires an AMD RDNA4 GPU (gfx1201) with ROCm"
+        elif torch.cuda.get_device_capability(device) < (8, 0):
+            return None, "requires an NVIDIA GPU with compute capability 8.0 or newer"
+        module = importlib.import_module("wgpkernels.int8")
+        if getattr(module, "_lib", None) is None:
+            module.load_library()
+        # Run the package's small kernel checks outside graph capture before selecting it.
+        with torch.inference_mode():
+            failure = module.selftest()
+        return (None, failure) if failure else (module, "available")
+    except Exception as exc:
+        return None, str(exc)
+
+
 def resolve_backend(selection):
     """Validate user selection before changing the active runtime or config."""
     if selection not in {value for _, value in CHOICES}:
         raise ValueError(f"Unknown INT8 kernel backend: {selection!r}")
     if selection == "disabled":
         return "pytorch", None
-    if selection in ("auto", "kitchen"):
-        module, reason = _probe_kitchen()
+    probes = {
+        "wgpkernels": _probe_wgpkernels,
+        "kitchen": _probe_kitchen,
+        "triton": triton._probe_triton_backend,
+    }
+    if selection != "auto":
+        module, reason = probes[selection]()
         if module is not None:
-            return "kitchen", module
-    module, reason = triton._probe_triton_backend()
-    if module is not None:
-        return "triton", module
+            return selection, module
+        print(f"[INT8] {_LABELS[selection]} unavailable: {reason}. Using the Auto choice.")
+    for backend in kernel_policy.RANKING[:3]:
+        if backend != selection:
+            module, _reason = probes[backend]()
+            if module is not None:
+                return backend, module
     return "pytorch", None
 
 
 def kitchen_enabled():
     return _backend == "kitchen"
+
+
+def wgp_enabled():
+    return _backend == "wgpkernels"
+
+
+def require_int8_residual(model, reason):
+    """Mark INT8 linears that need full-precision activations under WGPKernels.
+
+    Install before MMGP profiling so its wrappers retain the marked forward.
+    Other backends and weight formats keep their existing module forward.
+    """
+    from optimum.quanto import qint8
+
+    count = 0
+    for module in model.modules():
+        if (isinstance(module, torch.nn.Linear) and getattr(module, "weight_qtype", None) == qint8
+                and not hasattr(module, "_int8_residual_forward")):
+            module._int8_residual_forward = module.forward
+            module.forward = MethodType(_residual_module_forward, module)
+            count += 1
+    if count:
+        print(f"[INT8] Full Precision Activations Required for {count} Linear Layers - {reason}.")
+
+
+def _residual_module_forward(module, input):
+    if _backend == "wgpkernels" and _wgp_supports(input, module.qweight):
+        return wgp_linear(input, module.qweight, module.bias, precise=True)
+    return module._int8_residual_forward(input)
 
 
 def require_blockwise_int8(model, reason, module_patterns=("*",)):
@@ -173,6 +248,67 @@ def _weight_scale(weight, n, device):
     return scale
 
 
+def _wgp_supports(input, weight):
+    """WGPKernels accepts CUDA BF16/FP16 activations and INT8 weights with K divisible by 16."""
+    fake = triton._is_fake_tensor(input)
+    if fake and triton._is_qbytes_tensor(input):
+        return False
+    data = getattr(weight, "_data", None)
+    return ((type(input) is torch.Tensor or fake) and input.is_cuda
+            and input.dtype in (torch.bfloat16, torch.float16)
+            and data is not None and data.is_cuda and data.dtype == torch.int8
+            and input.shape[-1] % 16 == 0)
+
+
+def _wgp_aligned(x):
+    """WGPKernels loads activation rows by 16 bytes."""
+    return x.clone(memory_format=torch.contiguous_format) if x.stride(-1) != 1 or x.stride(0) % 8 or x.data_ptr() % 16 else x
+
+
+def _wgp_run(x, weight, scale, bias, group, precise):
+    return _wgp.linear(_wgp_aligned(x), weight, scale, bias, group, precise)
+
+
+def _wgp_path(module, x, group, precise=False):
+    weight = module.qweight
+    return _wgp.choose_path(x, weight._data, _weight_scale(weight, weight._data.shape[0], x.device), None, group, precise)
+
+
+def wgp_linear(input, weight, bias=None, group=0, precise=False, act=None, act_weight=None, act_eps=0.0,
+               residual=None, residual_scale=None, out=None):
+    """Run a higher-precision WGPKernels INT8 projection, optionally with its fused operands."""
+    n = weight._data.shape[0]
+    scale = _weight_scale(weight, n, input.device)
+    x = input.reshape(-1, input.shape[-1])
+    if bias is not None and bias.dtype != x.dtype:
+        bias = bias.to(x.dtype)
+    if torch.compiler.is_compiling() or triton._is_fake_tensor(input):
+        if act is not None or residual is not None or out is not None:
+            raise RuntimeError("Fused WGPKernels operands are available only outside torch.compile")
+        result = torch.ops.wan2gp_wgp.linear(x, weight._data, scale, bias, group, precise)
+        return result.reshape(*input.shape[:-1], n)
+    if act is None and residual is None and out is None:
+        return _wgp_run(x, weight._data, scale, bias, group, precise).reshape(*input.shape[:-1], n)
+    if act_weight is not None and act_weight.dtype != x.dtype:
+        act_weight = act_weight.to(x.dtype)
+    if residual is not None:
+        residual = residual.reshape(-1, n)
+        if residual_scale is not None:
+            residual_scale = residual_scale.reshape(-1).to(x.dtype)
+    result_out = None
+    if out is not None:
+        if (out.shape != (*input.shape[:-1], n) or out.dtype != x.dtype or not out.is_contiguous()
+                or out.data_ptr() % 16):
+            raise ValueError("Fused WGPKernels output must match the output shape and dtype, be contiguous and 16-byte aligned")
+        result_out = out.view(-1, n)
+    result = _wgp.linear(
+        _wgp_aligned(x), weight._data, scale, bias, group, precise,
+        act=act, act_weight=act_weight, eps=act_eps, residual=residual,
+        residual_scale=residual_scale, out=result_out,
+    )
+    return out if out is not None else result.reshape(*input.shape[:-1], n)
+
+
 def _wide_convrot_linear(input, weight, bias=None):
     """Use Triton for ConvRot rows beyond Kitchen's graph-safe CUTLASS width."""
     from shared.qtypes.int8_convrot import _rotate_activation
@@ -216,8 +352,51 @@ def linear_with_fusion(module, x, *, input_act=None, act_weight=None, act_eps=0.
             module._wangp_linear_fusion = previous
 
 
+def _call_prepared(module, x, prepared):
+    """Call a projection with prepared input while preserving its MMGP and module hooks."""
+    missing = object()
+    previous = getattr(module, "_wangp_prequantized_input", missing)
+    module._wangp_prequantized_input = prepared
+    try:
+        return module(x)
+    finally:
+        if previous is missing:
+            del module._wangp_prequantized_input
+        else:
+            module._wangp_prequantized_input = previous
+
+
 def linear_multi(modules, x):
     """Reuse one bounded ConvRot input tile across projections, retaining MMGP hooks."""
+    modules = tuple(modules)
+    if not modules:
+        return []
+    if _backend == "wgpkernels":
+        group = getattr(modules[0], "_convrot_group_size", 0)
+        same_format = (
+            group in (16, 64, 256)
+            and all(getattr(module, "_convrot_group_size", 0) == group
+                    and getattr(getattr(module, "weight_qtype", None), "name", None) == "qint8_convrot"
+                    and getattr(module, "out_features", None) == getattr(modules[0], "out_features", None)
+                    and hasattr(module, "_int8_residual_forward") == hasattr(modules[0], "_int8_residual_forward")
+                    and hasattr(module, "qweight") for module in modules)
+        )
+        if not same_format or x.ndim != 2 or x.shape[-1] % group:
+            return [module(x) for module in modules]
+        x = _wgp_aligned(x)
+        outputs = [x.new_empty((x.shape[0], module.out_features)) for module in modules]
+        rows = max(128, (_SCRATCH_BYTES // (2 * x.shape[-1] + 4)) // 128 * 128)
+        precise = all(hasattr(module, "_int8_residual_forward") for module in modules)
+        for start in range(0, x.shape[0], rows):
+            stop = min(start + rows, x.shape[0])
+            tile = x[start:stop]
+            prepared = _wgp.prepare(tile, group, _wgp_path(modules[0], tile, group, precise))
+            for module, output in zip(modules, outputs):
+                _call_prepared(module, tile, (prepared, None, output[start:stop]))
+            del prepared
+        return outputs
+    if _backend != "kitchen":
+        return [module(x) for module in modules]
     outputs = [x.new_empty((x.shape[0], module.out_features)) for module in modules]
     rows = max(32, (_SCRATCH_BYTES // (x.shape[-1] + 4)) // 32 * 32)
     for start in range(0, x.shape[0], rows):
@@ -239,6 +418,13 @@ def linear_multi(modules, x):
 
 
 def kitchen_linear_prequantized(weight, bias, q, scales, out):
+    if _backend == "wgpkernels":
+        if scales is not None:
+            raise ValueError("WGPKernels prequantized input must be a prepared WGPKernels activation")
+        scale = _weight_scale(weight, weight._data.shape[0], out.device)
+        return _wgp.linear_prepared(
+            q, weight._data, scale, None if bias is None else bias.to(out.dtype), out=out,
+        )
     data = getattr(weight, "_data", None)
     weight_scales = getattr(weight, "_scale", None)
     if (not torch.is_tensor(data) or data.ndim != 2 or not data.is_cuda
@@ -350,6 +536,34 @@ def linear_grouped(modules, x):
         raise ValueError("Grouped linear requires at least one projection")
     if not torch.is_tensor(x) or x.ndim != 3 or len(modules) != x.shape[0]:
         raise ValueError("Grouped linear input must have shape [modules, rows, features]")
+    group = getattr(modules[0], "_convrot_group_size", 0)
+    if (_backend == "wgpkernels" and group in (16, 64, 256)
+            and torch.is_inference_mode_enabled() and not torch.compiler.is_compiling()
+            and not triton._is_fake_tensor(x) and x.is_cuda and x.dtype in (torch.bfloat16, torch.float16)
+            and x.is_contiguous() and x.shape[2] % 16 == 0 and x.data_ptr() % 16 == 0
+            and x.numel() * x.element_size() <= _SCRATCH_BYTES and x.shape[1] > 0
+            and all(getattr(module, "_convrot_group_size", 0) == group
+                    and getattr(getattr(module, "weight_qtype", None), "name", None) == "qint8_convrot"
+                    and getattr(module, "in_features", None) == x.shape[2]
+                    and getattr(module, "out_features", None) == getattr(modules[0], "out_features", None)
+                    and not getattr(module, "_wangp_linear_fusion", None)
+                    and not getattr(module, "_wangp_prequantized_input", None)
+                    and hasattr(module, "_int8_residual_forward") == hasattr(modules[0], "_int8_residual_forward")
+                    and (not getattr(module, "_mm_lora_old_forward", None)
+                         or getattr(module, "_mm_lora_data", None) == {}) for module in modules)):
+        tokens = x.shape[1]
+        flat = x.reshape(-1, x.shape[2])
+        precise = all(hasattr(module, "_int8_residual_forward") for module in modules)
+        prepared = _wgp.prepare(flat, group, _wgp_path(modules[0], x[0], group, precise))
+        output = x.new_empty((x.shape[0], tokens, modules[0].out_features))
+        for index, (module, part, out) in enumerate(zip(modules, x.unbind(0), output.unbind(0))):
+            input_rows = prepared.rows(index * tokens, (index + 1) * tokens)
+            result = _call_prepared(module, part, (input_rows, None, out))
+            if result.shape != out.shape or result.dtype != out.dtype:
+                raise RuntimeError("Grouped WGPKernels projection returned an incompatible output")
+            if result.data_ptr() != out.data_ptr():
+                out.copy_(result)
+        return output
     if not _linear_grouped_supported(modules, x):
         return torch.stack([module(part) for module, part in zip(modules, x.unbind(0))])
 
@@ -526,6 +740,15 @@ def _register_ops():
     def blockwise_fake(x, weight, scale, bias):
         return x.new_empty((x.shape[0], weight.shape[0]))
 
+    @torch.library.custom_op("wan2gp_wgp::linear", mutates_args=())
+    def wgp_linear_op(x: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor,
+                      bias: torch.Tensor | None, group: int, precise: bool) -> torch.Tensor:
+        return _wgp_run(x, weight, scale, bias, group, precise)
+
+    @wgp_linear_op.register_fake
+    def wgp_linear_fake(x, weight, scale, bias, group, precise):
+        return x.new_empty((x.shape[0], weight.shape[0]))
+
     _ops_registered = True
 
 
@@ -557,6 +780,59 @@ def _quanto_forward(ctx, input, weight, bias=None):
         ctx.save_for_backward(input, weight)
         return kitchen_linear(input, weight, bias)
     return _original_forward(ctx, input, weight, bias)
+
+
+def _wgp_quanto_forward(ctx, input, weight, bias=None):
+    if _wgp_supports(input, weight):
+        ctx.save_for_backward(input, weight)
+        return wgp_linear(input, weight, bias)
+    return _original_forward(ctx, input, weight, bias)
+
+
+class _WgpRowProjection:
+    """MMGP output-row projection provider for compatible WGPKernels INT8 linears."""
+
+    @staticmethod
+    def supports(module, x):
+        qtype = getattr(module, "weight_qtype", None)
+        if (not wgp_enabled() or qtype is None or getattr(qtype, "name", None) not in ("qint8", "qint8_convrot")
+                or torch.compiler.is_compiling() or triton._is_fake_tensor(x)
+                or getattr(module, "activation_qtype", None) is not None):
+            return False
+        if qtype.name == "qint8" and getattr(module, "_router_forward_impl", None) is not None:
+            return False
+        weight = getattr(module, "qweight", None)
+        group = getattr(module, "_convrot_group_size", 0) if qtype.name == "qint8_convrot" else 0
+        return (_wgp_supports(x, weight) and x.ndim == 2 and x.is_contiguous() and x.data_ptr() % 16 == 0
+                and weight._data.is_contiguous()
+                and (qtype.name == "qint8" or group in (16, 64, 256) and x.shape[-1] % group == 0))
+
+    @staticmethod
+    def key(module):
+        group = getattr(module, "_convrot_group_size", 0) if module.weight_qtype.name == "qint8_convrot" else 0
+        return "wgpkernels_rows", group, hasattr(module, "_int8_residual_forward")
+
+    @staticmethod
+    def prepare(module, x):
+        _, group, precise = _WGP_ROW_PROJECTION.key(module)
+        return _wgp.prepare(x, group, _wgp_path(module, x, group, precise))
+
+    @staticmethod
+    def rows(module, prepared, start, stop):
+        weight = module.qweight
+        scale = _weight_scale(weight, weight._data.shape[0], weight._data.device)[start:stop]
+        bias = None if module.bias is None else module.bias[start:stop].to(prepared.dtype)
+        return _wgp.linear_prepared(prepared, weight._data[start:stop], scale, bias)
+
+
+_WGP_ROW_PROJECTION = _WgpRowProjection()
+
+
+def _mmgp_row_projection_api_compatible(offload):
+    """Register optimized row paths only with MMGP's complete row-projection contract."""
+    required = ("register_row_projection", "unregister_row_projection", "linear_rows_supported",
+                "prepare_linear_input", "linear_rows")
+    return all(callable(getattr(offload, name, None)) for name in required)
 
 
 class _KitchenRowProjection:
@@ -816,8 +1092,9 @@ _TRITON_ROW_PROJECTION = _TritonConvRotRowProjection()
 
 def configure(selection, verbose_level=0, *, resolved=None):
     global _backend, _kitchen, _kitchen_hip, _original_forward, _direct_cutlass, _sm120_cutlass, _wide_convrot_triton, revision
-    global _blockwise_triton, _kitchen_dlpack_export
+    global _blockwise_triton, _kitchen_dlpack_export, _wgp
     backend, module = resolve_backend(selection) if resolved is None else resolved
+    kernel_policy.configure_families(selection)
     previous_backend = _backend
     if _kitchen_dlpack_export is not None:
         _kitchen_dlpack_export[0]._wrap_for_dlpack = _kitchen_dlpack_export[1]
@@ -828,7 +1105,7 @@ def configure(selection, verbose_level=0, *, resolved=None):
         _original_forward = None
     triton.disable_quanto_int8_kernel()
     os.environ["WAN2GP_QUANTO_INT8_KERNEL"] = "1" if backend == "triton" else "0"
-    _backend, _kitchen = "pytorch", None
+    _backend, _kitchen, _wgp = "pytorch", None, None
     _kitchen_hip = False
     _direct_cutlass = False
     _sm120_cutlass = False
@@ -836,6 +1113,12 @@ def configure(selection, verbose_level=0, *, resolved=None):
     if backend == "triton":
         if not triton.maybe_enable_quanto_int8_kernel(verbose_level):
             raise RuntimeError("Failed to enable Triton INT8 kernels")
+    elif backend == "wgpkernels":
+        from optimum.quanto.tensor.weights import qbytes
+        _register_ops()
+        _wgp = module
+        _original_forward = qbytes.WeightQBytesLinearFunction.forward
+        qbytes.WeightQBytesLinearFunction.forward = staticmethod(_wgp_quanto_forward)
     elif backend == "kitchen":
         from optimum.quanto.tensor.weights import qbytes
         _register_ops()
@@ -857,18 +1140,28 @@ def configure(selection, verbose_level=0, *, resolved=None):
         _original_forward = qbytes.WeightQBytesLinearFunction.forward
         qbytes.WeightQBytesLinearFunction.forward = staticmethod(_quanto_forward)
     _backend = backend
-    from mmgp import offload
-    if backend == "kitchen":
-        offload.register_row_projection(_KITCHEN_ROW_PROJECTION)
-        offload.unregister_row_projection(_TRITON_ROW_PROJECTION)
-    elif backend == "triton":
-        offload.unregister_row_projection(_KITCHEN_ROW_PROJECTION)
-        offload.register_row_projection(_TRITON_ROW_PROJECTION)
+    try:
+        from mmgp import offload
+    except Exception as exc:
+        print(f"[INT8] MMGP row projections unavailable: {exc}.")
     else:
-        offload.unregister_row_projection(_KITCHEN_ROW_PROJECTION)
-        offload.unregister_row_projection(_TRITON_ROW_PROJECTION)
+        if _mmgp_row_projection_api_compatible(offload):
+            providers = (_WGP_ROW_PROJECTION, _KITCHEN_ROW_PROJECTION, _TRITON_ROW_PROJECTION)
+            selected_provider = {
+                "wgpkernels": _WGP_ROW_PROJECTION,
+                "kitchen": _KITCHEN_ROW_PROJECTION,
+                "triton": _TRITON_ROW_PROJECTION,
+            }.get(backend)
+            for provider in providers:
+                if provider is selected_provider:
+                    offload.register_row_projection(provider)
+                else:
+                    offload.unregister_row_projection(provider)
+        elif backend in ("wgpkernels", "kitchen", "triton"):
+            print("[INT8] MMGP row projections unavailable in this MMGP version; using normal module forwards.")
     if backend != previous_backend:
         revision += 1
-    label = {"kitchen": "Comfy Kitchen HIP" if _kitchen_hip else "Comfy Kitchen CUDA", "triton": "Triton", "pytorch": "PyTorch"}[backend]
+    label = {"wgpkernels": "WGPKernels", "kitchen": "Comfy Kitchen HIP" if _kitchen_hip else "Comfy Kitchen CUDA",
+             "triton": "Triton", "pytorch": "PyTorch"}[backend]
     print(f"[INT8] Backend: {label} (setting: {selection}).")
     return backend != "pytorch"

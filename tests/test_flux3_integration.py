@@ -14,10 +14,14 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app"))
 from models.flux3.flux3_handler import (  # noqa: E402
-    COMPONENT_FOLDER, ENCODER_FILES, MODEL_TYPE, REPO, REVISION, ROOT_FILES, family_handler,
+    COMPONENT_FOLDER, ENCODER_FILES, MODEL_TYPE, REPO, REVISION, ROOT_FILES, TEXT_FOLDER,
+    family_handler,
 )
 
 DEFINITION = json.loads((ROOT / "app/defaults/flux3_klein.json").read_text(encoding="utf-8"))
+BASE_DEFINITION = json.loads((ROOT / "app/defaults/flux3_klein_base.json").read_text(encoding="utf-8"))
+DISTILLED_NVFP4_DEFINITION = json.loads((ROOT / "app/defaults/flux3_klein_nvfp4.json").read_text(encoding="utf-8"))
+BASE_NVFP4_DEFINITION = json.loads((ROOT / "app/defaults/flux3_klein_base_nvfp4.json").read_text(encoding="utf-8"))
 
 
 def production_function(file, name, namespace):
@@ -33,9 +37,12 @@ class Flux3IntegrationTests(unittest.TestCase):
         handlers = next(n.value for n in tree.body if isinstance(n, ast.Assign)
                         and any(isinstance(t, ast.Name) and t.id == "family_handlers" for t in n.targets))
         self.assertIn("models.flux3.flux3_handler", ast.literal_eval(handlers))
-        self.assertEqual(family_handler.query_supported_types(), [MODEL_TYPE])
+        self.assertEqual(family_handler.query_supported_types(), [MODEL_TYPE, "flux3_klein_base"])
         self.assertEqual(family_handler.query_family_maps(), ({}, {}))
         self.assertEqual(DEFINITION["model"]["architecture"], MODEL_TYPE)
+        self.assertEqual(BASE_DEFINITION["model"]["architecture"], "flux3_klein_base")
+        self.assertEqual(REPO, "DeepBeepMeep/Flux3")
+        self.assertEqual(REVISION, "1e7c96984937fef03326e3b297fb44a28c30736d")
 
     def test_distilled_recipe_and_active_capabilities(self):
         settings = {}
@@ -50,15 +57,73 @@ class Flux3IntegrationTests(unittest.TestCase):
         self.assertEqual(spec["max_image_refs"], 10)
         self.assertEqual(spec["image_ref_choices"]["default"], "I")
 
+    def test_base_recipe_uses_fifty_cfg_steps(self):
+        settings = {}
+        model_type = "flux3_klein_base"
+        family_handler.update_default_settings(model_type, {}, settings)
+        self.assertEqual((settings["num_inference_steps"], settings["guidance_scale"]), (50, 3.5))
+        spec = family_handler.query_model_def(model_type, {})
+        self.assertEqual(spec["guidance_max_phases"], 1)
+        self.assertFalse(spec["lock_guidance_scale"])
+        self.assertFalse(spec["no_negative_prompt"])
+        self.assertEqual(BASE_DEFINITION["num_inference_steps"], 50)
+        self.assertEqual(BASE_DEFINITION["guidance_scale"], 3.5)
+
     def test_named_checkpoint_pins_exact_official_flow_map_bytes(self):
         from shared.checkpoint_downloads import find_named_checkpoint_source
         model = DEFINITION["model"]
         filename = model["URLs"][0]
         self.assertNotEqual(filename, "model.safetensors")
         source = find_named_checkpoint_source(model, filename)
-        self.assertEqual(source["url"], f"https://huggingface.co/{REPO}/resolve/{REVISION}/model.safetensors")
+        self.assertEqual(source["url"], f"https://huggingface.co/{REPO}/resolve/{REVISION}/{filename}")
         self.assertEqual(source["size_bytes"], 11097404512)
         self.assertEqual(source["sha256"], "c3e9813cdd049c831c836b2e9db61150e49a93fc1a4c63b256494642fee0bd7c")
+
+    def test_bf16_int8_and_nvfp4_sources_are_pinned_and_named(self):
+        catalogs = (
+            DEFINITION,
+            BASE_DEFINITION,
+            DISTILLED_NVFP4_DEFINITION,
+            BASE_NVFP4_DEFINITION,
+        )
+        for catalog in catalogs:
+            model = catalog["model"]
+            sources = model["download_sources"]
+            for filename in model["URLs"]:
+                with self.subTest(filename=filename):
+                    source = sources[filename]
+                    self.assertEqual(
+                        source["url"],
+                        f"https://huggingface.co/{REPO}/resolve/{REVISION}/{filename}",
+                    )
+                    self.assertRegex(source["sha256"], r"^[0-9a-f]{64}$")
+                    self.assertGreater(source["size_bytes"], 0)
+        self.assertIn("flux3_image_klein_sd_bf16.safetensors", DEFINITION["model"]["URLs"])
+        self.assertIn("flux3_image_klein_sd_int8_convrot.safetensors", DEFINITION["model"]["URLs"])
+        self.assertIn("flux3_image_klein_sd_nvfp4.safetensors", DISTILLED_NVFP4_DEFINITION["model"]["URLs"])
+        self.assertIn("flux3_image_klein_bf16.safetensors", BASE_DEFINITION["model"]["URLs"])
+        self.assertIn("flux3_image_klein_int8_convrot.safetensors", BASE_DEFINITION["model"]["URLs"])
+        self.assertIn("flux3_image_klein_nvfp4.safetensors", BASE_NVFP4_DEFINITION["model"]["URLs"])
+
+    def test_public_tokenizer_vae_and_text_encoder_weight_groups_are_separate(self):
+        spec = family_handler.query_model_def(MODEL_TYPE, {})
+        self.assertEqual(spec["text_encoder_folder"], f"{COMPONENT_FOLDER}/{TEXT_FOLDER}")
+        self.assertEqual(
+            spec["text_encoder_URLs"],
+            [f"https://huggingface.co/{REPO}/resolve/{REVISION}/{TEXT_FOLDER}/qwen3vl_4b_{fmt}.safetensors"
+             for fmt in ("bf16", "int8_convrot")],
+        )
+        definition = family_handler.query_model_files(None, MODEL_TYPE)[0]
+        self.assertEqual(definition["sourceFolderList"], ["flux3", TEXT_FOLDER])
+        self.assertEqual(definition["targetFolderList"], [None, COMPONENT_FOLDER])
+        self.assertEqual(definition["fileList"], [ROOT_FILES, ENCODER_FILES])
+        self.assertNotIn("qwen3vl_4b_bf16.safetensors", sum(definition["fileList"], []))
+        self.assertNotIn("qwen3vl_4b_int8_convrot.safetensors", sum(definition["fileList"], []))
+        required = set(spec["required_model_assets"])
+        self.assertEqual(required, {
+            "flux3/flux2-vae.safetensors",
+            *(f"{COMPONENT_FOLDER}/{TEXT_FOLDER}/{filename}" for filename in ENCODER_FILES),
+        })
 
     def test_guard_rejects_inert_controls_and_foreign_adapters(self):
         def validate(values):
@@ -75,7 +140,7 @@ class Flux3IntegrationTests(unittest.TestCase):
     def test_production_download_dispatch_is_scoped_complete_and_resumable(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            allowed = set(ROOT_FILES) | {f"text_encoder/{f}" for f in ENCODER_FILES}
+            allowed = {f"flux3/{f}" for f in ROOT_FILES} | {f"{TEXT_FOLDER}/{f}" for f in ENCODER_FILES}
             def download(*, repo_id, revision, filename, local_dir, subfolder=""):
                 self.assertEqual((repo_id, revision), (REPO, REVISION))
                 remote = "/".join(x for x in (subfolder, filename) if x)
@@ -93,13 +158,16 @@ class Flux3IntegrationTests(unittest.TestCase):
             definition = family_handler.query_model_files(None, MODEL_TYPE)[0]
             dispatcher(**definition)
             actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
-            self.assertEqual(actual, {f"{COMPONENT_FOLDER}/{f}" for f in allowed})
+            expected = {f"flux3/{f}" for f in ROOT_FILES} | {
+                f"{COMPONENT_FOLDER}/{TEXT_FOLDER}/{f}" for f in ENCODER_FILES
+            }
+            self.assertEqual(actual, expected)
             required = set(family_handler.query_model_def(MODEL_TYPE, {})["required_model_assets"])
             self.assertEqual(actual, required)
             downloader.reset_mock()
             dispatcher(**definition)
             downloader.assert_not_called()
-            missing = root / COMPONENT_FOLDER / "text_encoder/tokenizer.json"
+            missing = root / COMPONENT_FOLDER / TEXT_FOLDER / "tokenizer.json"
             missing.unlink()
             dispatcher(**definition)
             self.assertEqual(downloader.call_count, 1)
@@ -108,6 +176,7 @@ class Flux3IntegrationTests(unittest.TestCase):
     def test_ready_status_requires_every_component(self):
         model = {**DEFINITION["model"], **family_handler.query_model_def(MODEL_TYPE, {})}
         existing = set(model["required_model_assets"])
+        text_encoder_variants = model["required_model_asset_groups"][0]
         ready = production_function("app/launch.py", "_check_model_downloaded", {
             "_model_weight_groups": lambda _: [model["URLs"]],
             "_variant_group_downloaded": lambda *a, **kw: True,
@@ -116,8 +185,14 @@ class Flux3IntegrationTests(unittest.TestCase):
                                    get_model_recursive_prop=lambda *a, **kw: [],
                                    fl=SimpleNamespace(locate_file=lambda p, **kw: p if p in existing else None)),
         })
+        self.assertFalse(ready(MODEL_TYPE))  # Both separately downloaded text-encoder variants are absent.
+        existing.add(text_encoder_variants[0])
         self.assertTrue(ready(MODEL_TYPE))
-        existing.remove(f"{COMPONENT_FOLDER}/text_encoder/model-00002-of-00002.safetensors")
+        existing.remove(text_encoder_variants[0])
+        existing.add(text_encoder_variants[1])
+        self.assertTrue(ready(MODEL_TYPE))
+        existing.remove(text_encoder_variants[1])
+        existing.remove(f"{COMPONENT_FOLDER}/{TEXT_FOLDER}/tokenizer.json")
         self.assertFalse(ready(MODEL_TYPE))
 
     def test_engine_downloads_verified_named_weights_then_component_set(self):

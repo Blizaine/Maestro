@@ -7,6 +7,96 @@ their original candidate versions and describe the evidence available then.
 The latest candidate includes the Flux 3 integration and prompting guides.
 RTX 3080 Ti Flux 3 generation remains a user test, not an established result.
 
+## WanGP v18.10 follow-up — October 15
+
+The source port is pinned to WanGP `de302eec64b692dc83949d687cadf7d60bd74091`.
+Flux 3 uses the public `DeepBeepMeep/Flux3` snapshot
+`1e7c96984937fef03326e3b297fb44a28c30736d`; anonymous downloads verified the
+Distilled INT8, Base INT8 and Qwen INT8 files against their published size and
+SHA-256. Gate acceptance or a Hugging Face token was not needed. Model licenses
+and source notices are retained.
+
+Initial INT8 renders loaded and decoded but failed visual prompt adherence.
+The audit found that the new encoder requires quantization-map prefix remapping
+and inverse rotation of gathered ConvRot word embeddings. Both were corrected;
+a real tiny MMGP embedding regression checks the latter without expanding the
+vocabulary table. Fresh public INT8 Qwen features have cosine 0.999967 against
+the original BF16 encoder for the tested prompt, with identical token IDs.
+
+The following isolated production-adapter checks ran on RTX 4090, Torch
+2.10/CUDA 13, vendored MMGP 4.0, Profile 4 and Auto resolving to Kitchen. Each
+checked API/Director idleness, finite RGB pixels, geometry and its output image.
+Times are rendering only; allocated memory excludes other device use.
+
+| Flux 3 check | Render time | Peak allocated | Result |
+| --- | ---: | ---: | --- |
+| Distilled INT8, 512 square, 16 steps | 8.49 s | 1,746 MiB | Requested red paper airplane |
+| Distilled INT8, 1024 square, 16 steps | 8.72 s | 4,442 MiB | Requested red paper airplane |
+| Distilled INT8, two explicit references, 512 square | 8.56 s | 1,750 MiB | Supplied red/blue shapes in requested left/right positions |
+| Base INT8, 512 square, 50 steps, CFG 3.5 | 45.48 s | 1,734 MiB | Requested teapot and two lemons |
+
+The earlier vague two-reference still-life request changed the supplied objects;
+it is recorded as execution-only evidence, not reference-fidelity acceptance.
+The original BF16/BFL parity audit below remains scoped to its original workload.
+New NVFP4 variants, physical RTX 3080 Ti Flux generation and larger reference
+workloads still require their own tests.
+
+WGPKernels 1.1.0 installed through the pinned optional helper on both local
+CUDA 13/Torch 2.10 and CUDA 12.8/Torch 2.7.1 runtimes. Real MMGP ConvRot layers
+passed normal forward and output-row projection against dequantized FP32 math
+(relative L2 0.001673). A separate CUDA 12.8 check with M=1, K=6144 and N=2048
+passed both paths with relative L2 0.001636 and 0.003253. This is kernel
+compatibility evidence, not a generation speed comparison. The ACE-Step 1.5 LM
+also receives upstream's activation-outlier precision marker. No package was
+installed on workstation 02.
+
+The pinned H3 LightVAE INT8 checkpoint loaded through the production loader on
+Torch 2.7.1/CUDA 12.8. It retained the original encoder and all 12 decoder layers.
+A real CUDA decode converted a `(1,24,7,1,1)` latent to finite RGB
+`(1,3,22,16,16)` in 4.02 seconds, peaking at 1,205 MiB allocated. Auto resolved
+to Triton. This small decoder check does not establish full-video image quality
+or a long-resolution memory ceiling. CPU decoding hit a Quanto scale-dtype
+limitation; no production workaround was added for that unsupported H3 path.
+The selected decoder is preserved through Director child jobs and restoration.
+The dated TaoMate recipe passed eligibility, configuration and pinned-download
+checks; a full generation with that new three-step recipe remains untested.
+
+Fish Drama 3's pinned INT4 assets passed a real CPU pipeline load on Python
+3.10/Torch 2.7.1. Native FP8/INT4 expert math and rotated portable fallback
+parity passed. All three bundled CPU source/library hashes were verified.
+Fresh INT4 generations also passed on the RTX 4090 with Torch 2.7.1/CUDA 12.8:
+
+| Fish engine | Generation time | Audio duration | Peak allocated / reserved |
+| --- | ---: | ---: | ---: |
+| Legacy, native CPU experts | 63.11 s | 4.46 s | 3.74 / 4.06 GiB |
+| vLLM, complete GPU expert bank | 51.29 s | 4.97 s | 19.43 / 19.77 GiB |
+
+Both produced finite mono audio. CPU Whisper-small independently transcribed
+both as the requested “Good morning, this is a short fish audio drama 3 smoke
+test.” Timing includes first-use staging and kernel work; differing output
+lengths also prevent treating these two runs as a speed comparison. During
+these runs, an unsupported Triton INT8 launch safely fell back to Quanto.
+The later WGPKernels CUDA 12.8 shape check passed, but the speech runs were not
+repeated with that backend. MMGP-managed embeddings, native KV-head caching,
+two/three-dimensional attention shapes and explicit CUDA-device handling were
+corrected during the real engine checks and have focused regressions.
+
+The accelerated engine requires Triton, FlashAttention 2 and both FLA kernels;
+unsupported runtimes expose Legacy only. Low-memory profiles keep experts on
+the CPU. CUDA Graphs and partial expert GPU residency are outside this port's
+scope. Physical 12-GB Fish generation and full three-voice or long-script media
+fidelity remain untested.
+
+Desktop/mobile mounted Prompt Helper tests passed drawing, source-region edits,
+removal, save/reopen and Y/X coordinate serialization. Frontend lint, TypeScript,
+production build, the existing Flux browser regression, 138 standalone media
+checks and the JSON grammar runner passed. Full backend discovery passed
+4,232 tests with 12 skips before the final Fish runtime repairs; all 26 focused
+Fish tests passed afterward. The published Dev commit's CI verifies the final
+source. Release source excludes all weights,
+private reports and generated media. Main, workstation 02 and saved user
+settings are unchanged by this follow-up.
+
 ## Dev preparation — October 15
 
 The v3.0.0 Dev candidate includes all changes since public v2.6.0 plus the

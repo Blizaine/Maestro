@@ -86,7 +86,8 @@ class Flux3EnhanceGuideTests(unittest.TestCase):
             "preserve quoted lettering exactly",
             "do not guess a person's",
             "do not force photorealism",
-            "do not request boxes, masks, structured json",
+            "do not invent boxes or hard masks",
+            "preserve its complete element list",
             "only the finished edit instruction or scene description in plain prose",
         ):
             with self.subTest(required=required):
