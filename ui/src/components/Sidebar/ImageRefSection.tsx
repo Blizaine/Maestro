@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react'
-import { Image as ImageIcon, X } from 'lucide-react'
+import { X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { CharacterImagePickerButton } from '../Characters/CharacterImagePicker'
@@ -22,13 +22,7 @@ export function ImageRefSection() {
   const reorderImageRefs = useStore(s => s.reorderImageRefs)
   const setImageRefType = useStore(s => s.setImageRefType)
   const setRemoveBackgroundRefs = useStore(s => s.setRemoveBackgroundRefs)
-  const outputs = useStore(s => s.outputs)
-  const selectedOutput = useStore(s => s.selectedOutput)
-  const selectedGalleryImage = outputs[selectedOutput]?.type === 'image'
-    ? outputs[selectedOutput]
-    : null
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
-  const [copyingGalleryImage, setCopyingGalleryImage] = useState(false)
 
   const config = modelOptions?.image_ref_choices
   const isAdaptiveImageGenerate = generationMode === 'image' && imageWorkflow === 'generate'
@@ -64,27 +58,6 @@ export function ImageRefSection() {
       setImageRefType('')
     }
   }, [config, defaultRefType, imageRefs.length, imageRefType, setImageRefType])
-
-  const addSelectedGalleryImage = useCallback(async () => {
-    if (!selectedGalleryImage || !canAddMore) return
-    setCopyingGalleryImage(true)
-    try {
-      const response = await fetch(selectedGalleryImage.url)
-      if (!response.ok) throw new Error(`Gallery image returned ${response.status}`)
-      const blob = await response.blob()
-      addFiles([
-        new File(
-          [blob],
-          selectedGalleryImage.name,
-          { type: blob.type || 'image/png' },
-        ),
-      ])
-    } catch (error) {
-      console.error('Could not add selected gallery image:', error)
-    } finally {
-      setCopyingGalleryImage(false)
-    }
-  }, [addFiles, canAddMore, selectedGalleryImage])
 
   // Image Generate must always expose its optional source picker. Starting
   // from a T2I model is valid; adding the first image immediately filters and
@@ -169,22 +142,6 @@ export function ImageRefSection() {
           const files = await Promise.all(images.map(image => api.characterImageFile(character, image)))
           addFiles(files)
         }}/></CharacterToolbarItem>}
-
-      {isAdaptiveImageGenerate && (
-        <button
-          type="button"
-          onClick={() => void addSelectedGalleryImage()}
-          disabled={!selectedGalleryImage || !canAddMore || copyingGalleryImage}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-bg-tertiary py-1.5 text-[11px] text-text-secondary transition-colors hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          <ImageIcon size={12} />
-          {copyingGalleryImage
-            ? 'Adding selected image…'
-            : selectedGalleryImage
-              ? 'Add selected gallery image'
-              : 'Select an image in the gallery to add it'}
-        </button>
-      )}
 
       {maxRefs != null && (
         <p className={`text-[9px] ${imageRefs.length > maxRefs ? 'text-indicator-warning' : 'text-text-muted'}`}>
