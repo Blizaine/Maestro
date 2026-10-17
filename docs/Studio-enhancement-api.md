@@ -91,9 +91,11 @@ Reference sequences retain the complete journey in planning context, while
 native window prompts omit global setting and lighting itineraries that would
 preview future locations. Stable shared settings, visual style and effect
 mechanics remain available in every window.
-The compiler uses accepted `native_closing_state` snapshots for visual
-continuation; authoritative action-completion receipts remain unchanged in
-the planning checkpoint. Legacy receipts without a concrete snapshot use
+Native continuation camera writing and compilation use accepted
+`native_closing_state` snapshots for visual continuity. The camera writer
+receives local shared context rather than the global location/lighting route;
+authoritative action-completion receipts remain unchanged in the planning
+checkpoint. Legacy receipts without a concrete snapshot use
 the preceding visible composition rather than repeating an action recap.
 Source-supported complementary object views can share a persistent object
 relationship without creating new Subject IDs. Fallback coverage separates

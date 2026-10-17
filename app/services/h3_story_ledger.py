@@ -98,7 +98,7 @@ from services.director.long_form_story import (
 )
 
 
-H3_STORY_LEDGER_VERSION = 118
+H3_STORY_LEDGER_VERSION = 119
 
 
 _H3_WINDOW_BOOKKEEPING_RE = re.compile(
@@ -14677,14 +14677,41 @@ def _render_h3_story_segments(
             segments[-1].get("achieved_state") or {},
         ) if segments else ""
         stable_subjects = shared_camera_context["subject_continuity"] or "Use only the active principals required by the assigned events."
-        stable_setting = shared_camera_context["setting_continuity"] or "Keep the user-requested location and geography coherent."
-        stable_visual_language = shared_camera_context["visual_continuity"]
+        setting_context = shared_camera_context["setting_continuity"]
+        visual_context = shared_camera_context["visual_continuity"]
+        if mode == "reference_sequence_continuation":
+            from services.h3_window_context import stable_h3_window_context
+
+            setting_context = stable_h3_window_context(setting_context)
+            visual_context = stable_h3_window_context(visual_context, visual_style=True)
+        stable_setting = setting_context or "Keep the user-requested location and geography coherent."
+        stable_visual_language = visual_context
         stable_editing_style = shared_camera_context["editing_style"] or "Use motivated camera coverage for the requested action."
         stable_mechanics = sanitize_h3_prompt_text(ledger.get("motion_mechanics"))
         stable_previous_geography = (
             _h3_stable_camera_context(segments[-1].get("coverage"), source_events)
             if segments else ""
         )
+        accepted_visual_endpoint = ""
+        previous_accepted_closing = (
+            sanitize_h3_prompt_text(segments[-1].get("closing_state"))
+            if segments and isinstance(segments[-1], dict) else ""
+        )
+        if (
+            mode == "reference_sequence_continuation"
+            and segments
+            and previous_accepted_closing
+            and sanitize_h3_prompt_text(previous_closing) == previous_accepted_closing
+        ):
+            last_accepted = segments[-1] if isinstance(segments[-1], dict) else {}
+            accepted_snapshot = last_accepted.get("achieved_state")
+            if not isinstance(accepted_snapshot, dict):
+                accepted_snapshot = {}
+            accepted_visual_endpoint = _usable_h3_native_closing_state(
+                last_accepted.get("native_closing_state"),
+                last_action=accepted_snapshot.get("last_accepted_visible_action"),
+            )
+        writer_opening_state = accepted_visual_endpoint or previous_closing
         segment_prompt = (
             f"Segment {segment_number} of {segment_count}; local duration 0.000 to {duration:.3f} seconds.\n"
             f"{mode_instruction}\n\n"
@@ -14698,7 +14725,13 @@ def _render_h3_story_segments(
             + (f"Previous camera landmarks and screen axis only: {stable_previous_geography}\n"
                if stable_previous_geography else "")
             + f"Required pacing and performance energy: {source_intent.get('pacing_contract')}\n"
-            f"Required opening state: {previous_closing}\n"
+            f"Required opening state: {writer_opening_state}\n"
+            + (f"Accepted visual endpoint from the previous accepted segment: {accepted_visual_endpoint}\n"
+               "Treat this as the current visible entry state, including positions, location, and ongoing motion. "
+               "When framing changes, make inherited location, movement, and contact observable through "
+               "source-supported cues in the surroundings; labels alone are not visual evidence. This endpoint "
+               "is already achieved, not a lead-in action to perform again.\n"
+               if accepted_visual_endpoint else "")
             + (f"accepted_prior_action_context: {accepted_history}\n"
                "Use this earlier evidence to retain source prop identity and continuity. "
                "Scenery objects cannot replace the user's established prop. This is history "

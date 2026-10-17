@@ -13,9 +13,10 @@ and Flux 3 follow-ups passed focused backend and browser checks. Main
 publication awaits the remaining review and update checks in the
 [readiness record](VALIDATION_V3.0.0.md#release-readiness--october-13).
 
-H3 Studio enhancement now carries concrete accepted visual endpoints between
-reference windows, keeps global location/lighting itineraries out of local
-window direction, and links complementary object views when the source
+H3 Studio enhancement now carries concrete accepted visual endpoints into
+camera writing and rendering between reference windows, keeps global
+location/lighting itineraries out of local window direction, and links
+complementary object views when the source
 establishes that relationship. Fallback camera switches receive distinct
 coverage. Single-window multi-shot enhancement can make one bounded advisory
 continuity review, preserving dialogue, timing and reference contracts. These

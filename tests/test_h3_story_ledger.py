@@ -2698,6 +2698,180 @@ class H3StoryLedgerTests(unittest.TestCase):
             camera_plan["closing_state"],
         )
 
+    def test_continuation_writer_uses_native_endpoint_without_changing_authoritative_handoff(self):
+        prompt = (
+            "Nora lifts a sealed parcel from the floor in the lower hall. "
+            "Nora carries the parcel upstairs through the stairwell."
+        )
+        durations = [6.0, 6.0]
+        native_endpoint = (
+            "Nora stands in the lower hall holding the sealed parcel she lifted from the floor."
+        )
+        ledger = _deterministic_ledger(
+            prompt, segment_count=2, segment_durations=durations,
+            locked_dialogue=[], camera_coverage="multi_shot", reference_context="",
+        )
+        ledger["setting_continuity"] = (
+            "One residential interior remains coherent. The setting travels from "
+            "LOWER_HALL_ROUTE to UPPER_LANDING_ROUTE."
+        )
+        ledger["visual_continuity"] = (
+            "Grounded naturalistic realism. Lighting transitions from "
+            "OLD_HALL_LIGHT to UPPER_LANDING_LIGHT."
+        )
+        ledger["motion_mechanics"] = "The parcel's sealed clasp stays closed while it is carried."
+        calls: list[dict] = []
+        writer_prompts: list[str] = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            properties = kwargs["json_schema"]["properties"]
+            if "event_cards" not in properties:
+                return json.dumps(ledger)
+
+            number = properties["segment"]["minimum"]
+            event_action = (
+                "Nora lifts a sealed parcel from the floor in the lower hall"
+                if number == 1 else
+                "Nora carries the parcel upstairs through the stairwell"
+            )
+            event_cards = {}
+            for event_key, event_schema in properties["event_cards"]["properties"].items():
+                event_properties = event_schema["properties"]
+                phase_properties = event_properties["phases"]["items"]["properties"]
+                event_cards[event_key] = {"phases": [{
+                    field: (
+                        event_action if field == "action" else
+                        "Readable view of Nora and the sealed parcel" if field == "framing" else
+                        "a restrained camera follow" if field == "camera" else
+                        "opening composition" if field == "transition" else
+                        "quiet parcel and footstep sounds"
+                    )
+                    for field in phase_properties
+                }]}
+            enum = properties["closing_state"].get("enum") or []
+            closing_state = enum[0] if enum else (
+                native_endpoint if number == 1 else
+                "Nora has reached the upper landing with the sealed parcel."
+            )
+            writer_prompts.append(kwargs["prompt"])
+            return json.dumps({
+                "segment": number,
+                "title": f"Hallway movement {number}",
+                "coverage": "Readable motivated coverage of the hall and stairwell",
+                "pacing": "Natural real-time pacing",
+                "event_cards": event_cards,
+                "closing_state": closing_state,
+            })
+
+        result = plan_h3_story_segments(
+            prompt,
+            segment_durations=durations,
+            mode="reference_sequence_continuation",
+            camera_coverage="multi_shot",
+            expect_dialogue=False,
+            planning_style="faithful",
+            llm_generate=generate,
+        )
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(writer_prompts), 2)
+        first = result["segments"][0]
+        second = result["segments"][1]
+        authoritative_handoff = first["closing_state"]
+        self.assertTrue(authoritative_handoff.startswith("Continue from the visible result of:"))
+        self.assertEqual(first["native_closing_state"], native_endpoint)
+        self.assertEqual(
+            result["camera_checkpoint"]["segments"][0]["closing_state"],
+            authoritative_handoff,
+        )
+        self.assertEqual(
+            result["camera_checkpoint"]["segments"][0]["native_closing_state"],
+            native_endpoint,
+        )
+        self.assertEqual(second["opening_state"], authoritative_handoff)
+
+        second_prompt = writer_prompts[1]
+        self.assertIn(f"Required opening state: {native_endpoint}", second_prompt)
+        self.assertIn(f"Accepted visual endpoint from the previous accepted segment: {native_endpoint}", second_prompt)
+        self.assertIn("source-supported cues in the surroundings", second_prompt)
+        self.assertIn("already achieved, not a lead-in action to perform again", second_prompt)
+        self.assertIn("One residential interior remains coherent", second_prompt)
+        self.assertIn("Grounded naturalistic realism", second_prompt)
+        self.assertIn("parcel's sealed clasp stays closed", second_prompt)
+        for itinerary_marker in (
+            "LOWER_HALL_ROUTE", "UPPER_LANDING_ROUTE", "OLD_HALL_LIGHT", "UPPER_LANDING_LIGHT",
+        ):
+            self.assertNotIn(itinerary_marker, second_prompt)
+
+        checkpoint = result["camera_checkpoint"]
+
+        def resumed_prompt(*, mismatched_opening: str = "", without_snapshot: bool = False) -> str:
+            saved_segments = json.loads(json.dumps(checkpoint["segments"]))
+            if without_snapshot:
+                saved_segments[0]["native_closing_state"] = ""
+            if mismatched_opening:
+                saved_segments[1]["opening_state"] = mismatched_opening
+            captured: list[str] = []
+
+            def retry_writer(**kwargs):
+                properties = kwargs["json_schema"]["properties"]
+                self.assertIn("event_cards", properties)
+                captured.append(kwargs["prompt"])
+                number = properties["segment"]["minimum"]
+                event_cards = {}
+                for event_key, event_schema in properties["event_cards"]["properties"].items():
+                    phase_properties = event_schema["properties"]["phases"]["items"]["properties"]
+                    event_cards[event_key] = {"phases": [{
+                        field: (
+                            "Nora carries the parcel upstairs through the stairwell"
+                            if field == "action" else
+                            "Readable view of Nora and the sealed parcel" if field == "framing" else
+                            "a restrained camera follow" if field == "camera" else
+                            "opening composition" if field == "transition" else
+                            "quiet parcel and footstep sounds"
+                        )
+                        for field in phase_properties
+                    }]}
+                return json.dumps({
+                    "segment": number,
+                    "title": "Retried hallway movement",
+                    "coverage": "Readable motivated coverage of the stairwell",
+                    "pacing": "Natural real-time pacing",
+                    "event_cards": event_cards,
+                    "closing_state": (properties["closing_state"].get("enum") or [""])[0],
+                })
+
+            plan_h3_story_segments(
+                prompt,
+                segment_durations=durations,
+                mode="reference_sequence_continuation",
+                camera_coverage="multi_shot",
+                expect_dialogue=False,
+                planning_style="faithful",
+                llm_generate=retry_writer,
+                resume={
+                    "context": checkpoint["context"],
+                    "segments": saved_segments,
+                    "retry_windows": [2],
+                },
+            )
+            self.assertEqual(len(captured), 1)
+            return captured[0]
+
+        matching_retry_prompt = resumed_prompt()
+        self.assertIn(f"Required opening state: {native_endpoint}", matching_retry_prompt)
+        self.assertIn("Accepted visual endpoint from the previous accepted segment", matching_retry_prompt)
+
+        mismatched_retry_state = "Nora is back in the lower hall without the parcel."
+        mismatched_retry_prompt = resumed_prompt(mismatched_opening=mismatched_retry_state)
+        self.assertIn(f"Required opening state: {mismatched_retry_state}", mismatched_retry_prompt)
+        self.assertNotIn("Accepted visual endpoint from the previous accepted segment", mismatched_retry_prompt)
+
+        no_snapshot_retry_prompt = resumed_prompt(without_snapshot=True)
+        self.assertIn(f"Required opening state: {authoritative_handoff}", no_snapshot_retry_prompt)
+        self.assertNotIn("Accepted visual endpoint from the previous accepted segment", no_snapshot_retry_prompt)
+
     def test_coarse_dialogue_beat_binds_each_line_to_its_matching_camera_phase(self):
         prompt = (
             "Yoda is in Dagobah. "

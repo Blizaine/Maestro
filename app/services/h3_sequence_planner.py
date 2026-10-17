@@ -1339,26 +1339,10 @@ def _ref2va_recap_handoff(value: str) -> bool:
     ))
 
 
-_REF2VA_ITINERARY_RE = re.compile(
-    r"(?i)\b(?:transitions?|travels?|moves?|progresses?|changes?)\b.{0,120}\b(?:from|to|through)\b"
-    r"|^\s*from\b.{1,160}\bto\b|\b(?:then|followed by|subsequently|eventually)\b"
-    r"|\b(?:starts?|begins?)\b.{1,160}\b(?:ends?|finishes?)\b"
-)
-
-
 def _ref2va_stable_context(value: str, *, visual_style: bool = False) -> str:
     """Keep static shared direction without replaying a global journey."""
-    # Visual language can also encode power/effect sources. A light beam
-    # travelling from eyes to a target is a persistent mechanic, not a route.
-    style_itinerary = re.compile(
-        r"(?i)\b(?:lighting|setting|location|scene|environment|background|color palette)\b"
-        r".{0,90}\b(?:transitions?|changes?|moves?)\b.{0,120}\b(?:from|to|through)\b"
-    )
-    itinerary = style_itinerary if visual_style else _REF2VA_ITINERARY_RE
-    return " ".join(
-        sentence for sentence in re.split(r"(?<=[.!?])\s+", value)
-        if not itinerary.search(sentence)
-    ).rstrip('.')
+    from services.h3_window_context import stable_h3_window_context
+    return stable_h3_window_context(value, visual_style=visual_style)
 
 
 def _ref2va_local_setting(global_setting: str, item: dict[str, Any], *, multiple: bool) -> str:
