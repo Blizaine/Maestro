@@ -15,18 +15,17 @@ sys.path.insert(0, str(ROOT / "app"))
 from models.qwen21.qwen21_handler import MODEL_TYPE, family_handler
 
 
-# Relevant files verified against the public repositories on 2026-09-20.
-# The current image-model revision no longer contains the processor folder;
-# its pinned pre-migration export retains the Transformers 4.x tokenizer.
+# Relevant files verified against the public repositories on 2026-10-17.
+# Qwen_image_2 squashed its history and no longer has the processor folder;
+# Ideogram4 keeps the Transformers 4.x export under *_legacy names.
 PROCESSOR_FILES = (
-    "added_tokens.json", "chat_template.jinja", "config.json", "merges.txt",
-    "preprocessor_config.json", "special_tokens_map.json", "tokenizer.json",
-    "tokenizer_config.json", "video_preprocessor_config.json", "vocab.json",
+    "added_tokens.json", "chat_template.jinja", "config_legacy.json", "merges.txt",
+    "preprocessor_config.json", "special_tokens_map.json", "tokenizer_legacy.json",
+    "tokenizer_config_legacy.json", "video_preprocessor_config.json", "vocab.json",
 )
 REMOTE_FILES = {
     ("DeepBeepMeep/Qwen_image_2", None): {"qwen_image_21/qwen_image_21_vae.safetensors"},
-    ("DeepBeepMeep/Qwen_image_2", "55ab7995df218d8f759c6c283ef4c3be66111345"):
-        {f"Qwen3-VL-8B-Instruct/{name}" for name in PROCESSOR_FILES},
+    ("DeepBeepMeep/Ideogram4", None): {f"Qwen3-VL-8B-Instruct/{name}" for name in PROCESSOR_FILES},
 }
 
 
@@ -79,11 +78,11 @@ class Qwen21DownloadTests(unittest.TestCase):
         self.download_manifest()
         self.download.assert_not_called()
 
-        (encoder / "tokenizer.json").unlink()
+        (encoder / "tokenizer_legacy.json").unlink()
         self.download_manifest()
         self.download.assert_called_once_with(
-            repo_id="DeepBeepMeep/Qwen_image_2", revision="55ab7995df218d8f759c6c283ef4c3be66111345",
-            filename="tokenizer.json",
+            repo_id="DeepBeepMeep/Ideogram4", revision=None,
+            filename="tokenizer_legacy.json",
             local_dir=str(self.root), subfolder="Qwen3-VL-8B-Instruct")
         self.assertEqual(weights.read_bytes(), b"existing weights")
 
