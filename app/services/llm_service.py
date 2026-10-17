@@ -4209,6 +4209,58 @@ def enhance_prompt(
                 "MiniMax H3 prompt budgeting could not preserve the requested "
                 "dialogue timing. Shorten the visual request or use more windows."
             )
+    # Review the final compacted prose so budgeting cannot erase state cues.
+    if (
+        is_h3_structured and mode == "video" and not system_override
+        and window_count in (None, 1)
+    ):
+        from services.studio_enhancement import (
+            check_cancelled, fidelity_retry_limit, record_continuity_review,
+        )
+        if fidelity_retry_limit() > 0:
+            from services.h3_single_window_continuity import review_single_window_continuity
+
+            def valid_continuity_candidate(candidate: str) -> bool:
+                if is_h3_ref2va:
+                    valid = (
+                        _has_complete_h3_ref2va_structure(candidate)
+                        and _h3_ref2va_reference_contract_satisfied(candidate, reference_context)
+                        and _h3_voice_binding_contract_satisfied(candidate, reference_context)
+                        and (audio_driven or _h3_ref2va_dialogue_binding_contract_satisfied(
+                            prompt, candidate, reference_context
+                        ))
+                    )
+                else:
+                    valid = (
+                        _has_complete_h3_context_structure(candidate)
+                        and _h3_context_dialogue_binding_contract_satisfied(prompt, candidate)
+                    )
+                return bool(valid and (not needs_h3_dialogue or (
+                    _h3_dialogue_contract_satisfied(prompt, candidate)
+                    and _h3_speech_timing_satisfied(
+                        prompt, candidate, duration_seconds, planning_style
+                    )
+                )))
+
+            from services.llm_sampling import caller_sampling
+            with caller_sampling(True):
+                review = review_single_window_continuity(
+                    source_prompt=prompt, draft_prompt=result,
+                    reference_context=reference_context or "",
+                    duration_seconds=duration_seconds,
+                    generate=generate, validate_candidate=valid_continuity_candidate,
+                    check_cancelled=check_cancelled,
+                    max_new_tokens=max(3072, min(4096, effective_max_tokens)),
+                )
+            result = review["prompt"]
+            if review.get("checked"):
+                record_continuity_review(review)
+                print(
+                    f"[Enhance] Single-window continuity: {review['status']}; "
+                    f"{len(review.get('issues') or [])} issue(s), "
+                    f"{len(review.get('state_handoffs') or [])} visible state handoff(s), "
+                    f"{len(review.get('reference_groups') or [])} shared-object group(s)."
+                )
     if planning_style == "adaptive" and is_h3_structured:
         result = _preserve_adaptive_h3_literals(prompt, result)
     if audio_driven:

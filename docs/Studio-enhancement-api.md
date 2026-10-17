@@ -69,4 +69,36 @@ For interactive planning, send the saved plan as `retry_plan` alongside the same
 
 Enhancement states are `pending`, `enhancing`, `complete`, `review`, or `failed`. A cancelled job is identified by its job status. The server checkpoints the completed enhancement before generation. A writer failure or fallback requiring review does not silently proceed into generation. Other eligible jobs can continue.
 
+Single-window H3 enhancement can make one additional advisory continuity call
+when the native visual field contains multiple consecutive shots and fidelity
+repairs are enabled. It reviews the final compacted prose for source event order,
+persistent physical state across camera cuts, observable state cues and
+source-supported relationships between object reference views. It preserves
+exact dialogue, shot markers, timestamp values, explicit cuts and nonvisual
+fields, and checks the candidate through the existing H3 validators. It does
+not run for Director's custom writing instructions or multi-window planning.
+
+The saved enhancement exposes `continuity_reviews`, with `status`, `checked`,
+`repaired`, `issues`, `state_handoffs`, `reference_groups` and `diagnostic`.
+These are writing diagnostics, not rendered-quality approval. Malformed or
+rejected advisory responses retain the preceding valid prompt and do not add a
+new review gate. Setting `enhance_fidelity_retries` to zero skips this extra
+call. Cancellation still stops the job. A valid timeline does not guarantee
+that H3 will execute every transition or avoid repetition, particularly in
+experimental extended-duration generations.
+
+Reference sequences retain the complete journey in planning context, while
+native window prompts omit global setting and lighting itineraries that would
+preview future locations. Stable shared settings, visual style and effect
+mechanics remain available in every window.
+The compiler uses accepted `native_closing_state` snapshots for visual
+continuation; authoritative action-completion receipts remain unchanged in
+the planning checkpoint. Legacy receipts without a concrete snapshot use
+the preceding visible composition rather than repeating an action recap.
+Source-supported complementary object views can share a persistent object
+relationship without creating new Subject IDs. Fallback coverage separates
+explicit camera changes while preserving source action order and continuous
+shot constraints. These controls improve the instructions; rendered
+continuity still needs review.
+
 After a server restart, interrupted enhanced jobs return as held. Resume them explicitly; Maestro does not automatically repeat a possibly completed generation. Browser closure does not stop server execution.

@@ -90,6 +90,18 @@ class H3ObjectReferenceTests(unittest.TestCase):
         self.assertNotIn("<Subject", prompt)
         self.assertNotIn("voice-timbre", prompt)
 
+    def test_object_views_preserve_source_relationships_without_merging_distinct_instances(self):
+        references = [self.object, {**self.object, "role": "AT-AT interior"}]
+        source = "Two AT-ATs cross the desert. Picture 2 shows the interior design used by both."
+        prompt = ensure_ref2va_prompt_relationships(source, references)
+        self.assertIn(source, prompt)
+        self.assertIn("<Picture 1> is an object / prop reference for AT-AT", prompt)
+        self.assertIn("<Picture 2> is an object / prop reference for AT-AT interior", prompt)
+        self.assertIn("source-established relationships", prompt)
+        self.assertIn("another image alone does not add a physical instance", prompt)
+        self.assertIn("requested counts distinct", prompt)
+        self.assertNotIn("<Subject", prompt)
+
     def test_object_position_does_not_renumber_characters_or_cross_wire_voice(self):
         for references, picture in (
             ([self.object, self.character, self.voice], 2),

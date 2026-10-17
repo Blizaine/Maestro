@@ -8,6 +8,12 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 Public Dev testing candidate; not promoted to Main. Supersedes the unreleased
 v2.7.0 candidate. See the [full release notes](docs/RELEASE_NOTES_V3.0.0.md).
 
+- Improve H3 Studio continuity instructions across camera cuts and reference
+  windows: preserve concrete accepted visual endpoints, omit shared location
+  itineraries from individual windows, link source-established object views,
+  and give fallback camera changes distinct coverage. Add a bounded advisory
+  continuity review for single-window multi-shot enhancement; preserve valid
+  drafts when a proposed repair cannot pass the existing contracts.
 - Incorporate WanGP v18.10: public ungated Flux 3 Distilled/Base sources with
   BF16/INT8 and hardware-gated NVFP4 options; a visual layout/reference-region
   Prompt Helper; Fish Drama 3 expressive speech with up to three references,

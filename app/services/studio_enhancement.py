@@ -82,6 +82,21 @@ def enhancement_warnings() -> list[str]:
     return list(context["warnings"]) if context else []
 
 
+def record_continuity_review(review: dict) -> None:
+    """Keep advisory diagnostics without turning them into a review gate."""
+    context = _request_context.get()
+    if context:
+        context["continuity_reviews"].append(deepcopy({
+            key: review.get(key)
+            for key in ("status", "checked", "repaired", "issues", "reference_groups", "state_handoffs", "diagnostic")
+        }))
+
+
+def enhancement_continuity_reviews() -> list[dict]:
+    context = _request_context.get()
+    return deepcopy(context["continuity_reviews"]) if context else []
+
+
 def cancellable_lines(response, **kwargs):
     """Keep cancellation responsive even before a server emits its first token.
 
@@ -155,7 +170,8 @@ def close_response(response) -> None:
 
 @contextmanager
 def enhancement_context(settings: dict, cancelled: Callable[[], bool]):
-    token = _request_context.set({"settings": settings, "cancelled": cancelled, "warnings": []})
+    token = _request_context.set({"settings": settings, "cancelled": cancelled,
+                                  "warnings": [], "continuity_reviews": []})
     try:
         check_cancelled()
         yield
@@ -178,7 +194,7 @@ def new_enhancement(params: dict, services: dict) -> dict:
 def public_enhancement(record: dict | None, *, summary: bool = False) -> dict | None:
     if not record:
         return None
-    keys = ["version", "state", "warnings", "error"]
+    keys = ["version", "state", "warnings", "error", "continuity_reviews"]
     if not summary:
         keys.extend(["original_prompt", "enhanced_prompt"])
     return {key: deepcopy(record.get(key)) for key in keys}
@@ -282,6 +298,7 @@ async def prepare_enhanced_job(params: dict, model: dict, enhance, prepare, *, p
         if auto_continue:
             prepared["enhancement_review_bypassed"] = True
     prepared["enhancement_warnings"] = warnings
+    prepared["enhancement_continuity_reviews"] = enhancement_continuity_reviews()
     return prepared
 
 

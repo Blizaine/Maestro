@@ -98,7 +98,7 @@ from services.director.long_form_story import (
 )
 
 
-H3_STORY_LEDGER_VERSION = 116
+H3_STORY_LEDGER_VERSION = 117
 
 
 _H3_WINDOW_BOOKKEEPING_RE = re.compile(
@@ -9692,6 +9692,31 @@ def _is_generated_h3_state_placeholder(value: Any) -> bool:
     ))
 
 
+def _usable_h3_native_closing_state(value: Any, *, last_action: Any = "") -> str:
+    """Keep a concrete camera-authored endpoint apart from the action handoff."""
+
+    text = sanitize_h3_prompt_text(value)
+    if not text or _is_generated_h3_state_placeholder(text):
+        return ""
+    if re.match(
+        r"^continue\s+from\s+(?:the\s+)?visible\s+result\s+of\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return ""
+    if re.match(
+        r"^(?:the\s+)?(?:visible\s+)?(?:result|state)\s+(?:after|following)\b"
+        r".*\baction\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return ""
+    action = sanitize_h3_prompt_text(last_action)
+    if action and _normalize_key(text) == _normalize_key(action):
+        return ""
+    return text
+
+
 def _h3_generated_state_payload(value: Any) -> str:
     text = sanitize_h3_prompt_text(value)
     match = re.match(
@@ -11633,6 +11658,302 @@ def _cap_h3_opening_dialogue_lead(
         shot["end_seconds"] = round(cursor, 3)
 
 
+_H3_FALLBACK_CAMERA_CUE_RE = re.compile(
+    r"\b(?P<descriptor>"
+    r"(?:(?:inside|interior|outside|exterior|external)"
+    r"(?:\s+(?:(?:the|a|an)\s+)?(?:car|vehicle|cabin|cockpit|room|studio|house|building))?"
+    r"(?:\s+(?:tracking|wide|medium|close[-\s]?up|low[-\s]?angle|high[-\s]?angle))?"
+    r"|(?:high[-\s]?speed\s+)?(?:external\s+)?tracking"
+    r"|(?:close[-\s]?up|closeup|wide|medium|aerial|overhead|low[-\s]?angle|high[-\s]?angle|establishing)"
+    r"))\s+(?:shot|view|angle|perspective|composition)\b",
+    flags=re.IGNORECASE,
+)
+_H3_FALLBACK_CAMERA_SEQUENCE_RE = re.compile(
+    r"\b(?:then|and\s+then|followed\s+by|afterward|after\s+that|next|"
+    r"switch(?:es|ed)?\s+to|cut(?:s|ting)?\s+to|change(?:s|d)?\s+to|"
+    r"move(?:s|d)?\s+to|transition(?:s|ed)?\s+to|and)\b",
+    flags=re.IGNORECASE,
+)
+_H3_FALLBACK_CAMERA_SWITCH_RE = re.compile(
+    r"\b(?:camera|view|framing)\s+(?:smoothly\s+|quickly\s+|immediately\s+)?"
+    r"(?:switch(?:es|ed)?|cut(?:s|ting)?|change(?:s|d)?|move(?:s|d)?|"
+    r"transition(?:s|ed)?)\s+to\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _fallback_camera_spec(descriptor: Any, source_text: Any = "") -> dict[str, str]:
+    """Turn a source camera phrase into a compact, distinct fallback view."""
+
+    label = sanitize_h3_prompt_text(descriptor).casefold()
+    source = sanitize_h3_prompt_text(source_text)
+    vehicle = bool(re.search(
+        r"\b(?:car|vehicle|cabin|cockpit|driver|driving|passenger|steering wheel)\b",
+        source,
+        flags=re.IGNORECASE,
+    ))
+    interior = bool(re.search(r"\b(?:inside|interior)\b", label))
+    exterior = bool(re.search(r"\b(?:outside|exterior|external)\b", label))
+    tracking = "tracking" in label
+    if interior:
+        view = "interior_tracking" if tracking else "interior"
+        place = "the vehicle" if vehicle else "the established interior"
+        framing = f"interior view from within {place}"
+        camera = f"an interior camera remains inside {place}, keeping the visible subject and action in frame"
+    elif exterior:
+        view = "exterior_tracking" if tracking else "exterior"
+        framing = "exterior tracking view against the surrounding setting" if tracking else "exterior view of the visible subject and surrounding setting"
+        camera = (
+            "an external tracking camera follows the vehicle from outside the cabin"
+            if vehicle and tracking else
+            "an exterior camera tracks the visible subject through the established setting"
+            if tracking else
+            "an exterior camera keeps the visible subject and surrounding setting in view"
+        )
+    elif tracking:
+        view = "tracking"
+        framing = "tracking shot following the visible subject"
+        camera = (
+            "an external tracking camera follows the vehicle from outside the cabin"
+            if vehicle else
+            "a tracking camera follows the visible subject through the established setting"
+        )
+    elif re.search(r"\b(?:close[-\s]?up|closeup)\b", label):
+        view = "close_up"
+        framing = "close-up view of the visible subject and its immediate action"
+        camera = "a steady close camera holds on the visible subject and action"
+    elif "wide" in label or "establishing" in label:
+        view = "wide"
+        framing = "wide view of the visible subject within the established setting"
+        camera = "a steady wide camera keeps the subject and setting readable"
+    elif "medium" in label:
+        view = "medium"
+        framing = "medium view of the visible subject and action"
+        camera = "a steady medium camera follows the visible action"
+    elif "aerial" in label or "overhead" in label:
+        view = "overhead"
+        framing = "overhead view of the visible subject and surrounding layout"
+        camera = "an overhead camera follows the visible action"
+    elif re.search(r"\blow[-\s]?angle\b", label):
+        view = "low_angle"
+        framing = "low-angle view of the visible subject"
+        camera = "a low camera tracks the visible action"
+    else:
+        view = "high_angle"
+        framing = "high-angle view of the visible subject"
+        camera = "a high camera tracks the visible action"
+    return {"view": view, "framing": framing, "camera": camera}
+
+
+def _fallback_camera_specs(
+    text: Any, *, context: Any = "",
+) -> tuple[list[dict[str, str]], bool]:
+    """Read explicit source shot changes without treating ordinary action as camera direction."""
+
+    value = sanitize_h3_prompt_text(text)
+    context_text = sanitize_h3_prompt_text(context)
+    scene_context = " ".join(part for part in (value, context_text) if part)
+    matches = list(_H3_FALLBACK_CAMERA_CUE_RE.finditer(value))
+    if not matches:
+        return [], False
+    specs: list[dict[str, str]] = []
+    for match in matches:
+        spec = _fallback_camera_spec(match.group("descriptor"), scene_context)
+        if (
+            spec["view"] == "tracking" and specs
+            and specs[-1]["view"].startswith("interior")
+        ):
+            spec = _fallback_camera_spec("external tracking", scene_context)
+        if specs and spec["view"] == specs[-1]["view"]:
+            continue
+        specs.append(spec)
+    if len(specs) < 2:
+        return specs, bool(_H3_FALLBACK_CAMERA_SWITCH_RE.search(value))
+    linked = all(
+        _H3_FALLBACK_CAMERA_SEQUENCE_RE.search(
+            value[matches[index].end():matches[index + 1].start()]
+        )
+        for index in range(len(matches) - 1)
+        if _fallback_camera_spec(matches[index].group("descriptor"), scene_context)["view"]
+        != _fallback_camera_spec(matches[index + 1].group("descriptor"), scene_context)["view"]
+    )
+    if linked or _H3_FALLBACK_CAMERA_SWITCH_RE.search(value):
+        return specs, True
+    return specs[:1], False
+
+
+def _fallback_camera_phase_units(
+    beats: list[dict[str, Any]],
+    *,
+    source_events: list[dict[str, Any]],
+    expected_dialogue_events: dict[str, str] | None,
+) -> list[dict[str, Any]] | None:
+    """Split explicit source camera changes, keeping every event in one phase."""
+
+    source_text = {
+        str(item.get("event_id") or "").upper(): sanitize_h3_prompt_text(item.get("text"))
+        for item in source_events
+    }
+    expected = {
+        str(dialogue_id or "").upper(): str(event_id or "").upper()
+        for dialogue_id, event_id in (expected_dialogue_events or {}).items()
+    }
+    prepared: list[tuple[dict[str, Any], list[tuple[dict[str, str] | None, list[str]]]]] = []
+    found_transition = False
+    prior_view = ""
+    prior_vehicle_context = False
+    special_beat_keys = (
+        "_spaced_recurrence", "_source_enabler_groups",
+        "_scheduled_recurrence_source_event_ids", "_recurrence_continues_in_schedule",
+        "_grouped_source_event_ids",
+    )
+    for original in beats:
+        if not isinstance(original, dict):
+            continue
+        beat = deepcopy(original)
+        event_ids = [
+            str(event_id or "").upper()
+            for event_id in (beat.get("source_event_ids") or [])
+        ]
+        if not event_ids or any(beat.get(key) for key in special_beat_keys):
+            prepared.append((beat, [(None, event_ids)]))
+            continue
+        beat_context = " ".join([
+            sanitize_h3_prompt_text(beat.get("_canonical_action") or beat.get("description")),
+            *(source_text.get(event_id, "") for event_id in event_ids),
+        ])
+        if prior_vehicle_context:
+            beat_context += " vehicle"
+        event_specs = [
+            (event_id, *_fallback_camera_specs(
+                source_text.get(event_id, ""), context=beat_context,
+            ))
+            for event_id in event_ids
+        ]
+        if not any(specs for _event_id, specs, _switch in event_specs):
+            beat_specs, beat_switch = _fallback_camera_specs(
+                beat.get("_canonical_action") or beat.get("description"),
+                context=beat_context,
+            )
+            if len(beat_specs) < 2 or not beat_switch:
+                prepared.append((beat, [(None, event_ids)]))
+                continue
+            phases = [(spec, event_ids if index == 0 else [])
+                      for index, spec in enumerate(beat_specs)]
+            found_transition = True
+            prior_view = phases[-1][0]["view"]
+            prepared.append((beat, phases))
+            continue
+
+        phases: list[tuple[dict[str, str] | None, list[str]]] = []
+        current_spec: dict[str, str] | None = None
+        current_ids: list[str] = []
+
+        def flush_phase() -> None:
+            nonlocal current_spec, current_ids
+            if current_spec is not None or current_ids:
+                phases.append((current_spec, current_ids))
+            current_spec = None
+            current_ids = []
+
+        for event_index, (event_id, specs, explicit_switch) in enumerate(event_specs):
+            if not specs:
+                current_ids.append(event_id)
+                continue
+            first_spec = specs[0]
+            if current_spec is not None and current_spec["view"] != first_spec["view"]:
+                if first_spec["view"] == "tracking" and current_spec["view"].startswith("interior"):
+                    first_spec = _fallback_camera_spec("external tracking", beat_context)
+                flush_phase()
+            elif current_spec is None and current_ids:
+                flush_phase()
+            current_spec = first_spec
+            current_ids.append(event_id)
+            for spec in specs[1:]:
+                if spec["view"] == "tracking" and (current_spec or {}).get("view", "").startswith("interior"):
+                    spec = _fallback_camera_spec("external tracking", beat_context)
+                if spec["view"] != (current_spec or {}).get("view"):
+                    flush_phase()
+                    current_spec = spec
+            if explicit_switch:
+                found_transition = True
+        flush_phase()
+        if len(phases) > 1:
+            found_transition = True
+        elif phases and phases[0][0] is not None and prior_view:
+            if phases[0][0]["view"] == "tracking" and prior_view.startswith("interior"):
+                phases[0] = (
+                    _fallback_camera_spec("external tracking", beat_context),
+                    phases[0][1],
+                )
+            if phases[0][0]["view"] != prior_view:
+                # Camera directions may be separate source events in adjacent
+                # semantic beats; retain both views as separate fallback cards.
+                found_transition = True
+        if phases and phases[-1][0] is not None:
+            prior_view = phases[-1][0]["view"]
+        prior_vehicle_context = prior_vehicle_context or bool(re.search(
+            r"\b(?:car|vehicle|cabin|cockpit|driver|driving|passenger|steering wheel)\b",
+            beat_context,
+            flags=re.IGNORECASE,
+        ))
+        prepared.append((beat, phases or [(None, event_ids)]))
+
+    if not found_transition:
+        return None
+
+    expanded: list[dict[str, Any]] = []
+    active_spec: dict[str, str] | None = None
+    for beat, phases in prepared:
+        dialogue_ids = [
+            str(dialogue_id or "").upper()
+            for dialogue_id in (beat.get("dialogue_ids") or [])
+        ]
+        dialogue_phase: dict[str, int] = {}
+        for dialogue_id in dialogue_ids:
+            expected_event_id = expected.get(dialogue_id, "")
+            dialogue_phase[dialogue_id] = next((
+                index for index, (_spec, ids) in enumerate(phases)
+                if expected_event_id and expected_event_id in ids
+            ), 0)
+        for index, (spec, ids) in enumerate(phases):
+            if spec:
+                active_spec = spec
+            elif active_spec:
+                spec = active_spec
+            phase = deepcopy(beat)
+            phase["source_event_ids"] = list(ids)
+            phase_action = ". Then ".join(
+                _filmable_source_event(source_text[event_id])
+                for event_id in ids if source_text.get(event_id)
+            )
+            if phase_action:
+                phase["_canonical_action"] = phase_action
+                phase["description"] = phase_action
+            elif not ids:
+                phase["_canonical_action"] = ""
+                phase["description"] = (
+                    "The camera maintains the established composition before the requested change"
+                    if spec is None else
+                    "The same visible source event continues in this camera view"
+                )
+            phase["dialogue_ids"] = [
+                dialogue_id for dialogue_id in dialogue_ids
+                if dialogue_phase.get(dialogue_id, 0) == index
+            ]
+            phase["_fallback_source_event_ids"] = list(ids)
+            phase["_fallback_camera_continuation"] = index > 0 and not ids
+            if spec:
+                phase["_fallback_camera_spec"] = spec
+            if index + 1 < len(phases):
+                phase["state_after"] = ""
+                phase["_final_state_texts"] = []
+            if index > 0:
+                phase["sound_effects"] = ""
+            expanded.append(phase)
+    return expanded
+
+
 def _fallback_segment(
     segment_number: int,
     *,
@@ -11642,6 +11963,8 @@ def _fallback_segment(
     camera_coverage: str,
     dialogue_catalog: list[dict[str, Any]] | None = None,
     source_intent: dict[str, Any] | None = None,
+    source_events: list[dict[str, Any]] | None = None,
+    expected_dialogue_events: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     intent = source_intent or {}
     locked_pov = bool(intent.get("first_person_pov"))
@@ -11649,10 +11972,22 @@ def _fallback_segment(
     # beats into one giant shot caused the compiler's safety compaction to cut
     # off launch and travel actions at the end of a busy window. Keep separate
     # phases, but describe each transition as an in-viewpoint reframe.
-    shot_count = min(_segment_shot_limit(beats), max(1, len(beats)))
-    buckets: list[list[dict[str, Any]]] = [[] for _ in range(shot_count)]
-    for index, beat in enumerate(beats):
-        buckets[min(shot_count - 1, index)].append(beat)
+    phase_beats = (
+        None if locked_pov else _fallback_camera_phase_units(
+            beats,
+            source_events=source_events or [],
+            expected_dialogue_events=expected_dialogue_events,
+        )
+    )
+    if phase_beats:
+        # An explicit source camera switch is a card boundary, even in the
+        # deterministic fallback. Other fallback windows keep their old buckets.
+        buckets = [[beat] for beat in phase_beats]
+    else:
+        shot_count = min(_segment_shot_limit(beats), max(1, len(beats)))
+        buckets = [[] for _ in range(shot_count)]
+        for index, beat in enumerate(beats):
+            buckets[min(shot_count - 1, index)].append(beat)
     dialogue_map = {
         str(item.get("dialogue_id") or "").upper(): item
         for item in (dialogue_catalog or [])
@@ -11668,7 +12003,7 @@ def _fallback_segment(
         start = cursor
         end = duration if index + 1 == len(buckets) else cursor + durations[index]
         cursor = end
-        beat_ids = [str(item.get("beat_id") or "") for item in bucket]
+        beat_ids = list(dict.fromkeys(str(item.get("beat_id") or "") for item in bucket))
         dialogue_ids = [
             str(dialogue_id or "")
             for beat in bucket
@@ -11690,7 +12025,14 @@ def _fallback_segment(
             for condition in (item.get("_final_state_texts") or [])
             if sanitize_h3_prompt_text(condition)
         ]
-        action = ". Then ".join(advancing_actions)
+        camera_continuation = any(
+            item.get("_fallback_camera_continuation") for item in bucket
+        )
+        action = (
+            "The same visible source event continues in this camera view"
+            if camera_continuation else
+            ". Then ".join(advancing_actions)
+        )
         if endpoint_conditions:
             endpoint_text = "; ".join(
                 sanitize_h3_prompt_text(condition)
@@ -11700,6 +12042,26 @@ def _fallback_segment(
                 action.rstrip(" .") + "\nFinal visible condition: " + endpoint_text
                 if action else "Final visible condition: " + endpoint_text
             )
+        camera_spec = next((
+            item.get("_fallback_camera_spec")
+            for item in bucket
+            if isinstance(item.get("_fallback_camera_spec"), dict)
+        ), {})
+        framing = camera_spec.get("framing") or (
+            "the locked first-person POV with the requested foreground hands and held object"
+            if locked_pov and intent.get("hands_visible") else
+            "the locked first-person POV from the viewpoint character"
+            if locked_pov else
+            "a readable wide or medium-wide establishing view"
+            if index == 0 else "a motivated medium or close reaction angle"
+        )
+        camera = camera_spec.get("camera") or (
+            "a continuous kinetic first-person camera follows the requested motion without cutting outside the viewpoint"
+            if locked_pov else
+            "a dynamic camera follows the visible action in real time"
+            if camera_coverage == "multi_shot"
+            else "a coherent motivated camera follows the visible action"
+        )
         shots.append({
             "shot": index + 1,
             "start_seconds": round(start, 3),
@@ -11713,21 +12075,8 @@ def _fallback_segment(
                 if locked_pov and camera_coverage != "multi_shot" else
                 "hard cut"
             ),
-            "framing": (
-                "the locked first-person POV with the requested foreground hands and held object"
-                if locked_pov and intent.get("hands_visible") else
-                "the locked first-person POV from the viewpoint character"
-                if locked_pov else
-                "a readable wide or medium-wide establishing view"
-                if index == 0 else "a motivated medium or close reaction angle"
-            ),
-            "camera": (
-                "a continuous kinetic first-person camera follows the requested motion without cutting outside the viewpoint"
-                if locked_pov else
-                "a dynamic camera follows the visible action in real time"
-                if camera_coverage == "multi_shot"
-                else "a coherent motivated camera follows the visible action"
-            ),
+            "framing": framing,
+            "camera": camera,
             "beat_ids": beat_ids,
             "action": action or "The requested event advances visibly",
             "dialogue": [
@@ -11745,10 +12094,16 @@ def _fallback_segment(
                 }
                 for dialogue_id in dialogue_ids
             ],
-            "sound_effects": "; ".join(
+            "sound_effects": (
+                "Continue the existing synchronized source sound without restarting it"
+                if camera_continuation else "; ".join(
                 sanitize_h3_prompt_text(item.get("sound_effects")) for item in bucket
                 if sanitize_h3_prompt_text(item.get("sound_effects")).casefold() not in {"", "n/a", "none"}
-            ) or "Natural synchronized effects for the visible action",
+                ) or "Natural synchronized effects for the visible action"
+            ),
+            **({"_fallback_source_event_ids": list(bucket[0].get("_fallback_source_event_ids"))}
+               if len(bucket) == 1 and isinstance(bucket[0].get("_fallback_source_event_ids"), list)
+               else {}),
         })
     if segment_number == 1 and intent.get("opening_dialogue_id"):
         _cap_h3_opening_dialogue_lead(
@@ -12379,14 +12734,22 @@ def _materialize_segment(
                 "text": sanitize_h3_prompt_text(source.get("text")),
                 "dialogue_id": dialogue_id,
             })
-        required_event_ids = [
-            str(event_id or "").upper()
-            for beat_id in (shot.get("beat_ids") or [])
-            for event_id in (
-                beat_map.get(str(beat_id or "").upper(), {}).get("source_event_ids") or []
-            )
-            if str(event_id or "").upper() in event_map
-        ]
+        fallback_event_override = shot.get("_fallback_source_event_ids")
+        if isinstance(fallback_event_override, list):
+            required_event_ids = [
+                str(event_id or "").upper()
+                for event_id in fallback_event_override
+                if str(event_id or "").upper() in event_map
+            ]
+        else:
+            required_event_ids = [
+                str(event_id or "").upper()
+                for beat_id in (shot.get("beat_ids") or [])
+                for event_id in (
+                    beat_map.get(str(beat_id or "").upper(), {}).get("source_event_ids") or []
+                )
+                if str(event_id or "").upper() in event_map
+            ]
         assigned_speakers = {
             sanitize_h3_prompt_text(item.get("speaker")).casefold()
             for item in dialogue_sources
@@ -13906,6 +14269,14 @@ def _render_h3_story_segments(
         ), "")
         snapshot["last_accepted_visible_action"] = last_action
         materialized["achieved_state"] = snapshot
+        native_closing_state = _usable_h3_native_closing_state(
+            materialized.get("closing_state"),
+            last_action=last_action,
+        )
+        if native_closing_state:
+            materialized["native_closing_state"] = native_closing_state
+        else:
+            materialized.pop("native_closing_state", None)
         materialized["closing_state"] = format_h3_authoritative_handoff(
             snapshot, latest_accepted_visible_camera_action=last_action,
         ) or materialized["opening_state"]
@@ -14489,6 +14860,8 @@ def _render_h3_story_segments(
                 camera_coverage=camera_coverage,
                 dialogue_catalog=catalog,
                 source_intent=source_intent,
+                source_events=source_events,
+                expected_dialogue_events=render_dialogue_events,
             )
             materialized = _materialize_segment(
                 segment,
@@ -14851,6 +15224,8 @@ def _render_h3_story_segments(
                 camera_coverage=camera_coverage,
                 dialogue_catalog=catalog,
                 source_intent=source_intent,
+                source_events=source_events,
+                expected_dialogue_events=render_dialogue_events,
             )
         if any(shot.get("dialogue") for shot in segment.get("shots", [])):
             from services.h3_dialogue_writing import fit_camera_dialogue

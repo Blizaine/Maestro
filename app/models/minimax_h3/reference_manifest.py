@@ -200,7 +200,10 @@ def object_reference_prompt_contract(picture_label: str, role: str = "") -> tupl
         f"{picture_label} is an object / prop reference for {name}; preserve its design, "
         "shape, proportions, materials, colors, and distinguishing details. The target "
         "prompt determines its count, scale, placement, and action; the reference "
-        "background, camera, composition, and pose do not define the target scene.",
+        "background, camera, composition, and pose do not define the target scene. "
+        "Preserve source-established relationships when other references show views or "
+        "features of this same object; another image alone does not add a physical "
+        "instance. Keep source-distinct objects and their requested counts distinct.",
         f"{picture_label}: fully_preserved - preserve the requested object's design "
         "and appearance while rendering it naturally inside the target scene.",
     )

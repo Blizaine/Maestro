@@ -230,6 +230,11 @@ class EvidenceTests(unittest.TestCase):
         manual = {**frames, "sliding_window_size": 260, "sliding_window_overlap": 18,
                   "sliding_window_memory_override": True}
         self.assertEqual(validate_params(manual), manual)
+        extended = {**frames, "video_length": 719, "sliding_window_size": 719,
+                    "minimax_h3_extended_duration": True}
+        self.assertEqual(validate_params(extended), extended)
+        with self.assertRaisesRegex(ValueError, "must be a boolean"):
+            validate_params({**extended, "minimax_h3_extended_duration": "true"})
         reference = {**frames, "model_type": "minimax_h3_ref2va_fused_turbo"}
         with self.assertRaisesRegex(ValueError, "at least one image or video"):
             validate_params(reference)

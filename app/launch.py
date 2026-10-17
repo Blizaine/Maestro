@@ -25785,6 +25785,7 @@ def _prepare_job_enhancement(job: dict) -> None:
             raise InterruptedError("Prompt enhancement cancelled.")
         plan = prepared.get("h3_window_plan") or prepared.get("ltx_window_plan")
         record.update(prepared=prepared, warnings=prepared.get("enhancement_warnings", []),
+                      continuity_reviews=prepared.get("enhancement_continuity_reviews", []),
                       enhanced_prompt="\n\n".join(plan.get("window_prompts") or []) if plan else prepared["params"]["prompt"])
         if prepared.get("enhancement_review_required"):
             record["state"] = "review"
