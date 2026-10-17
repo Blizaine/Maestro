@@ -3,6 +3,8 @@
 import itertools
 import json
 import math
+import shutil
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +40,19 @@ def _pil(image):
         with Image.open(image) as source:
             return source.copy()
     return Image.fromarray(np.asarray(image))
+
+
+def _load_processor():
+    from .qwen21_handler import ENCODER_FOLDER, PROCESSOR_FILES, PROCESSOR_LEGACY_FILES
+
+    source = Path(fl.locate_file(f"{ENCODER_FOLDER}/{PROCESSOR_LEGACY_FILES['tokenizer_config.json']}")).parent
+    standard_names = {legacy: name for name, legacy in PROCESSOR_LEGACY_FILES.items()}
+    # Stage under the standard names Transformers expects instead of renaming
+    # in place, which keeps linked read-only checkpoint roots untouched.
+    with tempfile.TemporaryDirectory(prefix="qwen21_processor_") as staged:
+        for name in PROCESSOR_FILES:
+            shutil.copyfile(source / name, Path(staged) / standard_names.get(name, name))
+        return Qwen3VLProcessor.from_pretrained(staged, local_files_only=True)
 
 
 class GenerationCancelled(Exception):
@@ -92,8 +107,7 @@ class model_factory:
             from wgp import save_quantized_model
             save_quantized_model(self.transformer, model_type, filename, torch.bfloat16,
                                  str(CONFIGS / "transformer_config.json"))
-        processor_dir = Path(fl.locate_file("Qwen3-VL-8B-Instruct/tokenizer_config.json")).parent
-        self.processor = Qwen3VLProcessor.from_pretrained(str(processor_dir), local_files_only=True)
+        self.processor = _load_processor()
         self.tokenizer = self.processor.tokenizer
         self.pipeline = MaestroQwenImage21Pipeline(
             FlowMatchEulerDiscreteScheduler.from_config(_config("scheduler_scheduler_config.json")),

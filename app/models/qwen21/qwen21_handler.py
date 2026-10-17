@@ -8,10 +8,22 @@ from shared.utils.hf import build_hf_url
 
 MODEL_TYPE = "qwen_image_21_7B"
 REPO = "DeepBeepMeep/Qwen_image_2"
+ENCODER_REPO = "DeepBeepMeep/Ideogram4"
 ENCODER_FOLDER = "Qwen3-VL-8B-Instruct"
-# Complete Transformers 4.57-compatible processor export before the upstream
-# folder was removed and its legacy tokenizer files renamed in Ideogram4.
-PROCESSOR_REVISION = "55ab7995df218d8f759c6c283ef4c3be66111345"
+# Qwen_image_2 squashed its history (dropping the pinned processor export), so
+# the processor comes from Ideogram4, which keeps the Transformers 4.57 export
+# under *_legacy names next to its Transformers 5 files. The runtime maps them
+# back to the standard names; the Transformers 5 versions fail to load on 4.57.
+PROCESSOR_LEGACY_FILES = {
+    "config.json": "config_legacy.json",
+    "tokenizer.json": "tokenizer_legacy.json",
+    "tokenizer_config.json": "tokenizer_config_legacy.json",
+}
+PROCESSOR_FILES = [
+    "added_tokens.json", "chat_template.jinja", "merges.txt", "preprocessor_config.json",
+    "special_tokens_map.json", "video_preprocessor_config.json", "vocab.json",
+    *PROCESSOR_LEGACY_FILES.values(),
+]
 
 _VIGGLE_PROFILES = {
     "viggle_v01": {
@@ -239,21 +251,16 @@ class family_handler:
 
     @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):
-        # Pin only processor metadata; existing local files and model-weight
-        # downloads keep their paths and normal caching behavior.
+        # Processor files share the encoder-weight folder; existing local files
+        # and model-weight downloads keep their paths and caching behavior.
         return [{
             "repoId": REPO,
             "sourceFolderList": ["qwen_image_21"],
             "fileList": [["qwen_image_21_vae.safetensors"]],
         }, {
-            "repoId": REPO,
-            "revision": PROCESSOR_REVISION,
+            "repoId": ENCODER_REPO,
             "sourceFolderList": [ENCODER_FOLDER],
-            "fileList": [
-                ["added_tokens.json", "chat_template.jinja", "config.json", "merges.txt",
-                 "preprocessor_config.json", "special_tokens_map.json", "tokenizer.json",
-                 "tokenizer_config.json", "video_preprocessor_config.json", "vocab.json"],
-            ],
+            "fileList": [PROCESSOR_FILES],
         }]
 
     @staticmethod

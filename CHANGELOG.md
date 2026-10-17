@@ -3,6 +3,15 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [Unreleased]
+
+- **Hotfix:** Fix Qwen Image 2.1's first-use download failing with a 404 for
+  `Qwen3-VL-8B-Instruct/added_tokens.json` after the upstream
+  `DeepBeepMeep/Qwen_image_2` history squash removed the pinned processor
+  revision. Download the Transformers 4.57-compatible processor export from
+  `DeepBeepMeep/Ideogram4`, alongside the encoder weights. Existing downloaded
+  models are reused.
+
 ## [2.6.0] - 2026-10-04
 
 Live previews, community H3 checkpoint imports, more model workflows, long
