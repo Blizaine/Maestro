@@ -98,7 +98,7 @@ from services.director.long_form_story import (
 )
 
 
-H3_STORY_LEDGER_VERSION = 119
+H3_STORY_LEDGER_VERSION = 120
 
 
 _H3_WINDOW_BOOKKEEPING_RE = re.compile(

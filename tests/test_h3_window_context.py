@@ -3,6 +3,7 @@ from copy import deepcopy
 import unittest
 
 from services.h3_sequence_planner import compile_h3_reference_sequence_prompts
+from services.h3_window_context import stable_h3_window_context
 
 
 class H3WindowContextTests(unittest.TestCase):
@@ -55,6 +56,65 @@ class H3WindowContextTests(unittest.TestCase):
         self.assertIn('Composition emphasizes readable movement', windows[1]['prompt'])
         self.assertNotIn('museum', windows[1]['prompt'])
         self.assertIn('Lighting transitions', plan['visual_style'])
+
+    def test_generic_opening_place_cues_are_removed_but_static_setting_is_kept(self):
+        opening_cues = (
+            'The sequence begins at a quiet rail terminal.',
+            'The story starts inside a glass atrium.',
+            'The journey opens beside a mountain lodge.',
+            'The video begins on a stone courtyard.',
+            'The initial setting is an underground archive.',
+            'The opening location: a riverside workshop.',
+            'The first setting is a sunlit conservatory.',
+            'The location at the start is the lower hall.',
+        )
+        for opening in opening_cues:
+            with self.subTest(opening=opening):
+                stable = stable_h3_window_context(
+                    opening + ' A shared architectural style remains consistent.'
+                )
+                self.assertNotIn(opening, stable)
+                self.assertIn('A shared architectural style remains consistent', stable)
+
+    def test_shift_routes_are_removed_while_static_aesthetics_and_effect_origins_remain(self):
+        setting = stable_h3_window_context(
+            'A consistent interior remains. The location shifts from the entry hall to the upper landing.'
+        )
+        self.assertIn('A consistent interior remains', setting)
+        self.assertNotIn('entry hall', setting)
+        self.assertNotIn('upper landing', setting)
+
+        visual = stable_h3_window_context(
+            'Lighting is bright and dynamic, shifting from cool studio illumination at the opening '
+            'to clear daylight later. Naturalistic textures and restrained colors remain consistent. '
+            'A beam travels from the emitter to the target.',
+            visual_style=True,
+        )
+        self.assertIn('Lighting is bright and dynamic', visual)
+        self.assertIn('Naturalistic textures and restrained colors remain consistent', visual)
+        self.assertIn('A beam travels from the emitter to the target', visual)
+        self.assertNotIn('cool studio illumination', visual)
+        self.assertNotIn('clear daylight later', visual)
+
+    def test_native_compiler_filters_global_opening_place_and_lighting_route(self):
+        plan = self.plan()
+        plan['setting_continuity'] = (
+            'The journey opens at a central rail terminal. '
+            'A shared transit hub remains consistent throughout.'
+        )
+        plan['visual_style'] = (
+            'Lighting is bright and dynamic, shifting from warm interior illumination in opening shots '
+            'to natural daylight in later exterior shots. Soft film grain remains constant.'
+        )
+        windows = self.compile(plan)
+        for window in windows:
+            with self.subTest(window=window['index']):
+                self.assertNotIn('central rail terminal', window['prompt'])
+                self.assertNotIn('warm interior illumination', window['prompt'])
+                self.assertNotIn('natural daylight in later exterior shots', window['prompt'])
+                self.assertIn('a shared transit hub remains consistent throughout', window['prompt'].casefold())
+                self.assertIn('lighting is bright and dynamic', window['prompt'].casefold())
+                self.assertIn('soft film grain remains constant', window['prompt'].casefold())
 
     def test_native_snapshot_replaces_action_recap_without_rewriting_receipts(self):
         plan=self.plan(); windows=self.compile(plan)
