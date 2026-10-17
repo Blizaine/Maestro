@@ -98,7 +98,7 @@ from services.director.long_form_story import (
 )
 
 
-H3_STORY_LEDGER_VERSION = 117
+H3_STORY_LEDGER_VERSION = 118
 
 
 _H3_WINDOW_BOOKKEEPING_RE = re.compile(
@@ -11807,6 +11807,32 @@ def _fallback_camera_phase_units(
         "_scheduled_recurrence_source_event_ids", "_recurrence_continues_in_schedule",
         "_grouped_source_event_ids",
     )
+
+    def unambiguous_group_camera_spec(
+        beat: dict[str, Any], event_ids: list[str], beat_context: str,
+    ) -> dict[str, str] | None:
+        """Resolve one explicit view without splitting a protected source group."""
+
+        grouped_ids = [
+            str(event_id or "").upper()
+            for event_id in (beat.get("_grouped_source_event_ids") or [])
+        ]
+        if grouped_ids and grouped_ids != event_ids:
+            return None
+        specs = [
+            spec
+            for event_id in event_ids
+            for spec in _fallback_camera_specs(
+                source_text.get(event_id, ""), context=beat_context,
+            )[0]
+        ]
+        views = list(dict.fromkeys(spec["view"] for spec in specs))
+        if len(views) != 1:
+            return None
+        # The final matching direction is the latest source-authored view;
+        # it still describes the group as one phase and does not move events.
+        return next(spec for spec in reversed(specs) if spec["view"] == views[0])
+
     for original in beats:
         if not isinstance(original, dict):
             continue
@@ -11815,7 +11841,7 @@ def _fallback_camera_phase_units(
             str(event_id or "").upper()
             for event_id in (beat.get("source_event_ids") or [])
         ]
-        if not event_ids or any(beat.get(key) for key in special_beat_keys):
+        if not event_ids:
             prepared.append((beat, [(None, event_ids)]))
             continue
         beat_context = " ".join([
@@ -11824,6 +11850,27 @@ def _fallback_camera_phase_units(
         ])
         if prior_vehicle_context:
             beat_context += " vehicle"
+        if any(beat.get(key) for key in special_beat_keys):
+            # Protected groups stay intact: only attach a single unambiguous
+            # source view to the whole group. Never split or reorder its IDs,
+            # dialogue, recurrence, or enabler relationships.
+            spec = unambiguous_group_camera_spec(beat, event_ids, beat_context)
+            if spec and spec["view"] == "tracking" and prior_view.startswith("interior"):
+                spec = _fallback_camera_spec("external tracking", beat_context)
+            if spec:
+                if (prior_view and spec["view"] != prior_view) or any(
+                    _fallback_camera_specs(source_text.get(event_id, ""), context=beat_context)[1]
+                    for event_id in event_ids
+                ):
+                    found_transition = True
+                prior_view = spec["view"]
+                prior_vehicle_context = prior_vehicle_context or bool(re.search(
+                    r"\b(?:car|vehicle|cabin|cockpit|driver|driving|passenger|steering wheel)\b",
+                    beat_context,
+                    flags=re.IGNORECASE,
+                ))
+            prepared.append((beat, [(spec, event_ids)]))
+            continue
         event_specs = [
             (event_id, *_fallback_camera_specs(
                 source_text.get(event_id, ""), context=beat_context,

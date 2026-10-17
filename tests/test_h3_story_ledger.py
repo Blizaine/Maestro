@@ -637,6 +637,66 @@ class H3StoryLedgerTests(unittest.TestCase):
         self.assertNotIn("vehicle", json.dumps(segment).casefold())
         self.assertNotIn("hard cut", json.dumps(segment).casefold())
 
+    def test_grouped_source_events_keep_one_unit_with_external_tracking_view(self):
+        source_events = [
+            {"event_id": "E1", "text": "The camera switches to an interior shot inside the vehicle."},
+            {"event_id": "E2", "text": "Then a high-speed tracking shot follows the vehicle."},
+            {"event_id": "E3", "text": "It accelerates along the road."},
+        ]
+        beats = [
+            {
+                "beat_id": "B1", "segment": 2, "source_event_ids": ["E1"],
+                "dialogue_ids": ["D1"],
+                "description": "The camera switches to an interior shot inside the vehicle.",
+                "state_after": "The driver is inside the vehicle.",
+            },
+            {
+                "beat_id": "B2", "segment": 2, "source_event_ids": ["E2", "E3"],
+                "dialogue_ids": [],
+                "description": "A high-speed tracking shot follows as the vehicle accelerates.",
+                "state_after": "The vehicle moves quickly along the road.",
+            },
+        ]
+        catalog = [{
+            "dialogue_id": "D1", "speaker": "Rae", "text": "Ready?",
+            "delivery": "quietly",
+        }]
+        phases = _camera_phase_beats(
+            beats,
+            source_events=source_events,
+            expected_dialogue_events={"D1": "E1"},
+            preserve_adaptation=True,
+        )
+
+        self.assertEqual(phases[1]["_grouped_source_event_ids"], ["E2", "E3"])
+        self.assertEqual(phases[1]["source_event_ids"], ["E2", "E3"])
+
+        fallback = _fallback_segment(
+            2, duration=8.0, beats=phases,
+            opening_state="The vehicle is lifting off with the driver inside.",
+            camera_coverage="multi_shot", dialogue_catalog=catalog,
+            source_events=source_events,
+            expected_dialogue_events={"D1": "E1"},
+        )
+        rendered = _materialize_segment(
+            fallback, beats=phases, dialogue_catalog=catalog,
+            source_events=source_events,
+        )
+
+        self.assertEqual(len(rendered["shots"]), 2)
+        self.assertIn("interior", rendered["shots"][0]["framing"])
+        self.assertIn("exterior tracking", rendered["shots"][1]["framing"])
+        self.assertIn("outside the cabin", rendered["shots"][1]["camera"])
+        self.assertEqual(rendered["shots"][0]["dialogue"][0]["dialogue_id"], "D1")
+        self.assertEqual(rendered["shots"][1]["dialogue"], [])
+        self.assertEqual(
+            [shot["_source_event_ids"] for shot in rendered["shots"]],
+            [["E1"], ["E2", "E3"]],
+        )
+        group_action = rendered["shots"][1]["action"].casefold()
+        self.assertEqual(group_action.count("tracking shot follows the vehicle"), 1)
+        self.assertEqual(group_action.count("accelerates along the road"), 1)
+
     def test_native_closing_state_keeps_concrete_camera_state_only(self):
         self.assertEqual(
             _usable_h3_native_closing_state(
