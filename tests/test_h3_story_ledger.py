@@ -697,6 +697,76 @@ class H3StoryLedgerTests(unittest.TestCase):
         self.assertEqual(group_action.count("tracking shot follows the vehicle"), 1)
         self.assertEqual(group_action.count("accelerates along the road"), 1)
 
+    def test_ordinary_grouped_camera_views_split_in_order_before_following_motion(self):
+        source_events = [
+            {
+                "event_id": "E1",
+                "text": (
+                    "The camera switches to an interior shot inside the vehicle, "
+                    "with the driver at the wheel."
+                ),
+            },
+            {
+                "event_id": "E2",
+                "text": "Then a high-speed tracking shot follows the vehicle.",
+            },
+            {
+                "event_id": "E3",
+                "text": "The vehicle accelerates along the road at high speed.",
+            },
+        ]
+        beats = [
+            {
+                "beat_id": "B3",
+                "segment": 2,
+                "source_event_ids": ["E1", "E2"],
+                "_grouped_source_event_ids": ["E1", "E2"],
+                "dialogue_ids": [],
+                "description": (
+                    "The camera switches to an interior view with the driver at the wheel, "
+                    "then a high-speed tracking shot follows the vehicle."
+                ),
+                "state_after": "The vehicle is moving along the road with the driver inside.",
+            },
+            {
+                "beat_id": "B4",
+                "segment": 2,
+                "source_event_ids": ["E3"],
+                "dialogue_ids": [],
+                "description": "The vehicle accelerates along the road at high speed.",
+                "state_after": "The vehicle continues down the road at high speed.",
+            },
+        ]
+        fallback = _fallback_segment(
+            2,
+            duration=9.0,
+            beats=beats,
+            opening_state="The vehicle is on the road with its driver at the wheel.",
+            camera_coverage="multi_shot",
+            dialogue_catalog=[],
+            source_events=source_events,
+        )
+        rendered = _materialize_segment(
+            fallback, beats=beats, dialogue_catalog=[], source_events=source_events,
+        )
+
+        self.assertEqual(len(rendered["shots"]), 3)
+        self.assertIn("interior", rendered["shots"][0]["framing"])
+        self.assertIn("exterior tracking", rendered["shots"][1]["framing"])
+        self.assertIn("exterior tracking", rendered["shots"][2]["framing"])
+        self.assertEqual(
+            [shot["_source_event_ids"] for shot in rendered["shots"]],
+            [["E1"], ["E2"], ["E3"]],
+        )
+        self.assertEqual(
+            [shot["beat_ids"] for shot in fallback["shots"]],
+            [["B3"], ["B3"], ["B4"]],
+        )
+        action_text = " ".join(shot["action"] for shot in rendered["shots"]).casefold()
+        self.assertEqual(action_text.count("camera switches to an interior shot"), 1)
+        self.assertEqual(action_text.count("high-speed tracking shot follows the vehicle"), 1)
+        self.assertEqual(action_text.count("accelerates along the road at high speed"), 1)
+
     def test_native_closing_state_keeps_concrete_camera_state_only(self):
         self.assertEqual(
             _usable_h3_native_closing_state(

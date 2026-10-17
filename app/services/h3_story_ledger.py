@@ -98,7 +98,7 @@ from services.director.long_form_story import (
 )
 
 
-H3_STORY_LEDGER_VERSION = 120
+H3_STORY_LEDGER_VERSION = 121
 
 
 _H3_WINDOW_BOOKKEEPING_RE = re.compile(
@@ -11807,6 +11807,9 @@ def _fallback_camera_phase_units(
         "_scheduled_recurrence_source_event_ids", "_recurrence_continues_in_schedule",
         "_grouped_source_event_ids",
     )
+    protected_group_keys = tuple(
+        key for key in special_beat_keys if key != "_grouped_source_event_ids"
+    )
 
     def unambiguous_group_camera_spec(
         beat: dict[str, Any], event_ids: list[str], beat_context: str,
@@ -11833,6 +11836,45 @@ def _fallback_camera_phase_units(
         # it still describes the group as one phase and does not move events.
         return next(spec for spec in reversed(specs) if spec["view"] == views[0])
 
+    def ordinary_group_has_ordered_camera_switch(
+        beat: dict[str, Any], event_ids: list[str], beat_context: str,
+    ) -> bool:
+        """Allow an ordinary, silent source group to split only at explicit view changes."""
+        grouped_ids = [
+            str(event_id or "").upper()
+            for event_id in (beat.get("_grouped_source_event_ids") or [])
+        ]
+        if (
+            len(grouped_ids) < 2
+            or grouped_ids != event_ids
+            or beat.get("dialogue_ids")
+            or any(beat.get(key) for key in protected_group_keys)
+            or any(event_id in expected.values() for event_id in event_ids)
+        ):
+            return False
+        event_specs = [
+            (
+                event_id,
+                _fallback_camera_specs(
+                    source_text.get(event_id, ""), context=beat_context,
+                )[0],
+            )
+            for event_id in event_ids
+        ]
+        ordered_views = [
+            (event_id, spec["view"])
+            for event_id, specs in event_specs
+            for spec in specs
+        ]
+        return (
+            len({event_id for event_id, _view in ordered_views}) >= 2
+            and any(
+                left_id != right_id and left_view != right_view
+                for index, (left_id, left_view) in enumerate(ordered_views)
+                for right_id, right_view in ordered_views[index + 1:]
+            )
+        )
+
     for original in beats:
         if not isinstance(original, dict):
             continue
@@ -11850,7 +11892,10 @@ def _fallback_camera_phase_units(
         ])
         if prior_vehicle_context:
             beat_context += " vehicle"
-        if any(beat.get(key) for key in special_beat_keys):
+        grouped_camera_split = ordinary_group_has_ordered_camera_switch(
+            beat, event_ids, beat_context,
+        )
+        if any(beat.get(key) for key in special_beat_keys) and not grouped_camera_split:
             # Protected groups stay intact: only attach a single unambiguous
             # source view to the whole group. Never split or reorder its IDs,
             # dialogue, recurrence, or enabler relationships.
