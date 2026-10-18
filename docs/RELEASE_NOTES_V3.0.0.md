@@ -1,17 +1,17 @@
 # Maestro v3.0.0
 
-Prepared October 15, 2026. Supersedes the unreleased v2.7.0 candidate.
-Public Dev testing candidate; not promoted to Main.
+Released October 18, 2026 on public Main and Dev.
+Supersedes the unreleased v2.7.0 candidate.
 Changes since the public v2.6.0 Main release.
 
 This update brings the adapted WanGP 17 / MMGP 4 memory engine, workload-aware
 Auto-tune, longer recommended 720p H3 clips on the tested 12-GB tier, experimental
 SLA/Veda choices, H3 VAE 2× decoding, Director planning and editing fixes, a simpler
 model picker, Flux 3 Klein, Qwen Image 2.1 Turbo, and experimental MTP for
-compatible local writers. Earlier Dev baselines passed CI; the later gallery
-and Flux 3 follow-ups passed focused backend and browser checks. Main
-publication awaits the remaining review and update checks in the
-[readiness record](VALIDATION_V3.0.0.md#release-readiness--october-13).
+compatible local writers. The release also includes a tested 10.1-second
+720p Fused starting recommendation for 8-GB VRAM / 32-GB RAM systems.
+See the [release validation](VALIDATION_V3.0.0.md#public-release--october-18)
+and [three-system benchmarks](BENCHMARKS_V3.0.0.md) for measured scope and limits.
 
 H3 Studio enhancement now carries concrete accepted visual endpoints into
 camera writing and rendering between reference windows, keeps global
@@ -166,6 +166,16 @@ record](../app/mmgp/PROVENANCE.json).
 
 ### What the available measurements show
 
+The final release pilot compared public v2.6.0 Main with v3.0.0 Dev using
+matched 720p H3 Fused References inputs on three Windows systems. Warm active
+generation time fell by 37–39% on the 24-GB RTX 4090 and 52–72% on the 12-GB
+RTX 3080 Ti. The 8-GB RTX 5070 Laptop completed all six Dev trials. A separately
+requested Main 5.2-second reload completed in 24m36s versus the earlier Dev
+reload's 4m48s; that 5.13× observed time ratio is one sample per version, not
+a warm median. The original bounded Main cancellation remains in the report.
+See [methods, timings and limitations](BENCHMARKS_V3.0.0.md). These measurements
+do not establish every checkpoint, long Director render or a 16-GB-RAM limit.
+
 The documented screening used one RTX 4090 with 24 GiB VRAM and 128 GB system
 RAM. In matched warm Fused H3 runs, Auto INT8 measured 24.8% lower total time
 and 32.1% lower denoising time than Triton. A separate longer reload comparison
@@ -234,6 +244,12 @@ show tested, reported, estimated or conservative provenance. Above a starting
 recommendation means additional unverified load, rather than an automatic
 likely-OOM warning. Manual durations remain available, including the separately
 enabled experimental range. See the [resource matrix and evidence](Duration-recommendations.md).
+
+The October 16 laptop follow-up raises 720p Fused Frames and Fused References
+to 243 frames (10.1 seconds) on the tested 8-GB / 32-GB class. Pruned remains
+at 5.2 seconds at that resolution. There is no automatic native-1080p profile
+for this tier; 540p is suggested. A 16-GB-RAM host retains the estimated
+480p / 5.2-second starting point.
 
 For eligible H3 video jobs on the 12-GB / at-least-30-GiB-usable-RAM tier, Auto
 chooses Off, Low or Medium head splitting from the actual generation workload.
@@ -529,7 +545,7 @@ upstream TTS repository consolidated its history. The required files and recorde
 weight hashes match the previous manifest; existing weights and saved artist
 styles remain compatible. Missing companion assets still download on first use.
 
-To test v3.0.0 on Dev, use **Update** in Pinokio while idle, restart Maestro
+To update to v3.0.0 on Main or Dev, use **Update** in Pinokio while idle, restart Maestro
 to load the new backend, and refresh the browser. When Performance Auto is
 enabled, revised recommendations apply once at startup while preserving manual
 customizations. **Settings → Performance → Re-detect** remains available to
@@ -552,14 +568,14 @@ lint, TypeScript and the production build. Local browser regressions cover the
 latest Editor and clip-restore behavior. Selected earlier installed video,
 image, audio and x2-decoder smokes also passed.
 
-The remaining Main gates are human review of the latest Director motion,
-lip-sync and scene progression; a fresh silent/action-only short-film check
-against the earlier speech/music, prop and transition findings; and an idle
-v2.6.0-to-candidate update/restart smoke. Veda remains experimental, and the
+Remaining validation limits include human review of Director motion,
+lip-sync and scene progression, a fresh silent/action-only short-film check
+against the earlier speech/music, prop and transition findings, and a dedicated
+v2.6.0-to-v3.0.0 update/restart preservation smoke. Veda remains experimental, and the
 reported flash/motion change still needs a matched attention comparison.
 Creative enhancement can still need source fallback or fail validation on a
 particular draft. Full media decoding and passing text tests do not establish
-story fidelity. See the [readiness record](VALIDATION_V3.0.0.md#release-readiness--october-13)
+story fidelity. See the [release record](VALIDATION_V3.0.0.md#public-release--october-18)
 for the evidence and remaining installation/device limits.
 
 [Validation and limitations](VALIDATION_V3.0.0.md) · [Changelog](../CHANGELOG.md)

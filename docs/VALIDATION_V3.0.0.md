@@ -1,11 +1,57 @@
 # Maestro v3.0.0 validation
 
 The unreleased v2.7.0 candidate was renamed v3.0.0 on October 15, 2026.
-Publication targets the public Dev branch only; Main remains public v2.6.0
+The maintainer authorized publication to public Dev and Main on October 18.
+The preceding public Main baseline was v2.6.0
 at `31d7396eb3b5586c1828fc69a6af5eb2a9e83bff`. Earlier dated entries below retain
 their original candidate versions and describe the evidence available then.
-The latest candidate includes the Flux 3 integration and prompting guides.
+This release includes the Flux 3 integration and prompting guides.
 RTX 3080 Ti Flux 3 generation remains a user test, not an established result.
+
+## Public release — October 18
+
+v3.0.0 promotes the reviewed Dev implementation plus the final laptop duration
+matrix, its Studio/Director regressions and optional Windows SSH setup fixes.
+The resource matrix is dated October 16. The tested 8-GB / 32-GB Fused Frames
+and References 720p recipes now start at 243 frames (10.1s); Pruned, smaller-RAM
+and larger-canvas rows retain their conservative limits. VERSION is 3.0.0;
+Pinokio's script schema and the private UI package version are unchanged.
+
+The [final benchmark pilot](BENCHMARKS_V3.0.0.md) documents all three systems,
+the original 30 completed videos, bounded laptop Main cancellation and five
+not-run rows, plus the separately completed Main 60-minute-cap follow-up.
+Actual loaded component paths, output settings and media geometry were verified;
+all completed outputs passed full CPU decoding. Warm speedups are limited to
+verified matched pairs. The completed laptop follow-up is one sample per
+release and does not replace its earlier cancellation or prove an 8s+ Main
+limit on the 8-GB laptop configuration.
+
+Historical “Main held” and “Dev only” entries below describe earlier decisions.
+The maintainer's publication instruction supersedes that hold, but does not
+turn unperformed acceptance checks into passes. Remaining coverage includes a
+dedicated v2.6.0-to-v3.0.0 Update/restart preservation smoke, a fresh silent/action
+short-film acceptance run, Linux CUDA and 16GB system RAM. Director motion,
+flashes, scene progression and lip-sync remain workload-dependent; Veda and MTP
+retain their experimental labels. No new GPU run or workstation restart is
+part of this publication.
+
+Final local release checks on October 18 passed:
+
+- Full Python unittest discovery: 4,312 tests run, 13 skipped, no failures.
+- Standalone preview, media, source-camera and convolution regressions: 138 passed.
+- JSON grammar: five checks passed; first-party syntax and undefined-name checks passed.
+- Frontend ESLint, TypeScript/Vite production build and the mounted Studio/Director
+  duration-default browser suite passed, including the 8-GB / 32-GB Fused tier.
+- Optional SSH diagnostics: 14 focused CPU tests and PowerShell parsing passed.
+- Source-boundary guard: 3,037 tracked files clean. All 169 checked relative
+  documentation links and 14 bundled allocator binary hashes verified.
+
+The Python release checks ran with CUDA hidden; they are CPU regressions, not
+additional generation benchmarks. Existing build chunk-size warnings remain
+non-fatal. Public [Dev/Main CI](https://github.com/Blizaine/Maestro/actions/workflows/ci.yml)
+runs on each push; publication promotes the same commit to Main after Dev passes.
+Earlier Dev commit `6fa4f1b` passed
+[CI run 38998999140](https://github.com/Blizaine/Maestro/actions/runs/38998999140).
 
 ## WanGP v18.10 follow-up — October 15
 

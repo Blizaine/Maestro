@@ -57,7 +57,7 @@ const model=(reference=false,pruned=false)=>({model_type:reference?(pruned?'mini
     fn(p,'1280x704',8,32).frames,fn(p,'1920x1088',12,31.76).frames,
     fn(p,'1280x704',24,128).frames,fn(p,'auto_720p',12,31.76).frames];
   },{memory:memory('fused_4step_references'),measured});
-  assert.deepEqual(unit,[345,124,124,124,124,345,345]);
+  assert.deepEqual(unit,[345,124,124,243,124,345,345]);
   await page.evaluate(selected=>{const s=window.store.getState();window.store.setState({generationMode:'video',studioVideoWorkflow:'frames',
    modelOptions:selected,systemStats:{gpu:{vram_total_gb:12},ram:{total_gb:0}},durationSeconds:124/24,slidingWindowSeconds:124/24,
    slidingWindowLocked:false,h3WindowOverrides:{},resolutionPreset:'720p',aspectRatio:'16:9',
@@ -93,6 +93,23 @@ const model=(reference=false,pruned=false)=>({model_type:reference?(pruned?'mini
   assert.equal(referenceProfiles[0].frames,345);
   assert.equal(referenceProfiles[0].referenceMarginFrames,0);
   assert.equal(referenceProfiles[1].frames,124,'Low RAM stays on the conservative fallback');
+  // The 8 GB laptop completed 10.125s Fused Frames and References clips.
+  // Exercise the real Studio Auto controls, not just a direct matrix lookup.
+  for (const reference of [false,true]) {
+   selected=model(reference);
+   await page.evaluate(async ({selected,reference})=>{const s=window.store.getState();window.store.setState({
+    generationMode:'video',studioVideoWorkflow:reference?'references':'frames',modelOptions:null,
+    systemStats:{gpu:{vram_total_gb:7.96},ram:{total_gb:31.02}},
+    durationSeconds:124/24,slidingWindowSeconds:124/24,slidingWindowLocked:false,h3WindowOverrides:{},
+    resolutionPreset:'720p',aspectRatio:'16:9',params:{...s.params,model_type:selected.model_type,
+     resolution:'1280x704',video_length:124,sliding_window_size:124,_duration_planning_mode:'auto',
+     minimax_h3_multi_window:false,minimax_h3_extended_duration:false},
+   });await window.store.getState().loadModelOptions(selected.model_type);}, {selected,reference});
+   await page.waitForFunction(()=>window.store.getState().params.video_length===243);
+   assert.equal(await page.evaluate(()=>window.store.getState().params.sliding_window_size),243,
+    `8 GB / 32 GB Fused ${reference?'References':'Frames'} Auto uses the verified 10.1s window`);
+  }
+  await page.evaluate(()=>window.store.setState({systemStats:{gpu:{vram_total_gb:12},ram:{total_gb:31.76}}}));
   selected=model(true);
   await page.evaluate(selected=>{const s=window.store.getState();s.directorReset();window.store.setState({selectedModelPerMode:{video:selected.model_type},
    directorSkill:'music_video',directorResolution:'720p',directorAspectRatio:'16:9',directorSeamless:false,directorStep:'structure',
@@ -105,6 +122,12 @@ const model=(reference=false,pruned=false)=>({model_type:reference?(pruned?'mini
   await musicRecommendation.locator('summary').click();
   assert.match(await musicRecommendation.innerText(),/reported 720p runs provide a starting point/);
   assert.match(await musicRecommendation.innerText(),/Guidance updated director-fixture-v1/);
+  const laptopLimits=page.waitForResponse(response=>response.url().includes('music-clip-limits')&&response.request().method()==='POST');
+  await page.evaluate(()=>window.store.setState({systemStats:{gpu:{vram_total_gb:7.96},ram:{total_gb:31.02}}}));
+  await laptopLimits;
+  await page.waitForFunction(()=>document.querySelector('[aria-label="Music video clip length"] input[type=range]')?.value==='243');
+  assert.equal(Number(await music.getByRole('slider').inputValue()),243,
+   'Director music Auto uses the same verified 10.1s Fused recommendation on the 8 GB laptop');
   const musicSlider=music.getByRole('slider');await musicSlider.focus();await musicSlider.press('End');
   const manualMusicSeconds=await page.evaluate(()=>window.store.getState().directorMusicClipSeconds);
   assert.ok(manualMusicSeconds>0,'moving the music clip slider stores a manual choice');

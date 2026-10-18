@@ -30,7 +30,7 @@ Detects your GPU, VRAM, and RAM on first launch and picks the right profile, qua
 
 - **Recommendations stay current:** while Auto is enabled, revised recommendations apply once at startup. Manual mode and customized values are preserved. See [Performance Auto-Tune](docs/Performance-auto-tune.md) for memory profiles and controlled performance comparisons.
 - **Generation-aware memory:** Auto-tune manages compatible INT8/allocator controls, sizes H3 weight residency within model workspace guards, and learns from repeated matching local comparisons. On nominal 12-GB GPUs with at least 30 GiB usable RAM, it also chooses H3 head splitting for each generation; duration guidance flags costly Pruned workloads. The performance card explains its last choice. Smaller RAM/VRAM systems retain conservative placement; [RTX 3080 test steps](docs/Performance-auto-tune.md#testing-a-32-gb-ram--rtx-3080-machine) include a bounded comparison matrix.
-- **Resource-aware duration defaults:** Studio and Director Auto share RAM, VRAM, canvas and checkpoint recommendations. The 12-GB / 32-GB class starts at about 14.4 seconds for 720p H3 Pruned and Fused; the 24-GB / 128-GB class also gets 14.4-second Fused Frames at native 1080p. Smaller and intermediate classes have explicit estimated starting points. The UI distinguishes tested, reported and estimated guidance; exceeding a starting point does not predict an OOM. Saved manual choices remain in control. [Duration recommendations](docs/Duration-recommendations.md).
+- **Resource-aware duration defaults:** Studio and Director Auto share RAM, VRAM, canvas and checkpoint recommendations. The tested 8-GB / 32-GB Fused tier starts at 10.1 seconds at 720p. The 12-GB / 32-GB class starts at about 14.4 seconds for 720p H3 Pruned and Fused; the 24-GB / 128-GB class also gets 14.4-second Fused Frames at native 1080p. Other smaller and intermediate classes have explicit estimated starting points. The UI distinguishes tested, reported and estimated guidance; exceeding a starting point does not predict an OOM. Saved manual choices remain in control. [Duration recommendations](docs/Duration-recommendations.md).
 - **WanGP v18.10 options:** Flux 3 Distilled/Base with public on-demand BF16/INT8 downloads, a visual Flux 3 Prompt Helper, optional Fish Audio Drama 3 speech, WGPKernels INT8, H3 LightVAE and the dated TaoMate Frames accelerator. [Release notes](docs/RELEASE_NOTES_V3.0.0.md).
 - **WanGP 17 memory engine:** bundled MMGP 4 adds faster weight streaming and shared RAM pinning. **Settings → System → RAM / VRAM Management** provides optional MMGP allocators, dynamic preload, Windows read ahead, attention head splitting and INT8 backend selection. Saved manual settings are preserved; changing the allocator requires a restart. Gains depend on the model, checkpoint format, attention backend and hardware. See the [port review and testing guide](docs/development/wan2gp-17-port.md).
   The [serial memory test bench](docs/development/memory-benchmark.md) compares fixed generations, records timings and physical VRAM, and restores the tested settings afterward.
@@ -127,11 +127,12 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
-### v3.0.0 (Dev testing candidate, prepared 2026-10-15; pending Main publication)
+### v3.0.0 (2026-10-18)
 
 - **WanGP 17 memory engine:** bundled MMGP 4, optimized VRAM allocation, smart pinning, dynamic preload, optional RAM allocation and Windows read-ahead controls. Compatible attention, INT8 and VAE paths reduce memory overhead; saved manual preferences remain in control.
 - **Generation-aware Auto-tune:** uses the GPU, system RAM, resolution, window length and references to choose temporary H3 placement. Bounded local comparisons can teach it a faster safe placement. Includes conservative recommendations for smaller-memory machines.
-- **Hardware-aware clip defaults:** Studio and Director share H3 duration recommendations. Tested 12-GB / 32-GB systems now default to approximately 14.4-second 720p Pruned and Fused clips; native 1080p remains conservative. Saved manual durations stay in control.
+- **Hardware-aware clip defaults:** Studio and Director share H3 duration recommendations. The tested 8-GB / 32-GB Fused tier starts at 10.1 seconds at 720p; the 12-GB / 32-GB Pruned and Fused tier starts at approximately 14.4 seconds. Native 1080p remains conservative on smaller cards. Saved manual durations stay in control.
+- **Measured release improvements:** matched short 720p H3 Fused References tests used 37–39% less active generation time on the 4090 and 52–72% less on the 3080 Ti. All six Dev laptop tests completed; a separate 5.2s Main/Dev reload comparison took 24m36s versus 4m48s. [Benchmark methods and limits](docs/BENCHMARKS_V3.0.0.md).
 - **Experimental H3 sparse attention:** opt-in SLA for Full/Pruned and Veda for Full/Pruned/Fused in Frames and References. Veda downloads verified learned predictors on first use; Fused retains its default SLA recipe. Compatible 3080 Ti SageAttention jobs also use shorter temporary-buffer lifetimes.
 - **Simpler model selection:** grouped Video, Image and Audio settings, workflow-specific model visibility, concise names, compact download controls and a reset that preserves downloaded files. New Director projects default to H3 Fused 4-Step References, and song analysis returns users to reference setup.
 - **Qwen Image 2.1 Turbo:** optional native eight-step image generation and editing with the official Turbo schedule, compatible LoRAs and verified BF16/INT8 assets. [Qwen guide](docs/Qwen-Image-2.1.md).
@@ -150,8 +151,8 @@ The version you are running is shown next to the Maestro title in the UI. To upd
 - **Optional developer test bench:** manual diagnostics, prompt/render regressions, cold/warm comparisons and multi-machine report collection, plus Windows SSH setup and bounded diagnostics. Test results remain local; no recurring schedule is installed.
 - **YuE2 download repair:** verified replacement asset revision restores music generation after upstream repository-history changes.
 
-This Dev candidate supersedes the unreleased v2.7.0 candidate. Use **Update**
-in Pinokio on the Dev branch while idle,
+This release supersedes the unreleased v2.7.0 candidate. Use **Update**
+in Pinokio on Main or Dev while idle,
 restart Maestro and refresh the browser. Existing installations with Auto-tune
 enabled receive the revised recommendations once at startup; saved manual choices
 are preserved. **Settings → Performance → Re-detect** can explicitly reapply
@@ -161,8 +162,8 @@ is pending.
 See the [complete changes](docs/RELEASE_NOTES_V3.0.0.md),
 [validation and remaining checks](docs/VALIDATION_V3.0.0.md), and
 [Auto-tune guide](docs/Performance-auto-tune.md). Measured improvements depend on
-the workload and hardware; 6/8/10 GB VRAM, 16 GB RAM and Linux CUDA generation
-remain unverified for this candidate.
+the workload and hardware. The 8-GB laptop results cover selected workflows with
+32 GB RAM; 6/10-GB GPUs, 16 GB RAM and Linux CUDA generation remain unverified.
 
 ### v2.6.0 (2026-10-04)
 

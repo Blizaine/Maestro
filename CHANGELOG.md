@@ -3,11 +3,18 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## [3.0.0] - Unreleased
+## [3.0.0] - 2026-10-18
 
-Public Dev testing candidate; not promoted to Main. Supersedes the unreleased
+Public Main and Dev release. Supersedes the unreleased
 v2.7.0 candidate. See the [full release notes](docs/RELEASE_NOTES_V3.0.0.md).
 
+- Promote the tested 8-GB / 32-GB H3 Fused Frames and References 720p starting
+  recommendation to 10.1 seconds in Studio and Director. Keep Pruned, lower-RAM
+  and larger-canvas defaults conservative and preserve saved manual choices.
+- Document the three-system Main/Dev release benchmark pilot, including the
+  separate completed laptop Main rerun, memory pressure and untested workloads.
+- Harden optional Windows test SSH setup and diagnostics for a dedicated local
+  account, explicit host-key ownership and paths containing spaces.
 - Improve H3 Studio continuity instructions across camera cuts and reference
   windows: preserve concrete accepted visual endpoints, omit shared location
   itineraries from individual windows, link source-established object views,

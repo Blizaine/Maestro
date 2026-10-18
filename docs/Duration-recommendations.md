@@ -1,7 +1,7 @@
 # Automatic H3 clip and window durations
 
-The shared duration matrix was refreshed on October 14, 2026 and is included
-in the v3.0.0 candidate. Its
+The shared duration matrix was refreshed on October 16, 2026 and is included
+in v3.0.0. Its
 previous update was October 12, when the 12 GB GPU / 32 GB RAM 720p Pruned and
 Fused recommendations were raised to 345 frames, displayed as 14.4 seconds.
 
@@ -15,14 +15,14 @@ control. Return the duration or clip limit to Auto to adopt the current policy.
 ## Starting points
 
 This table covers built-in **H3 Pruned and H3 Fused**, with the noted Fused
-Frames exception at 1080p. Durations are per generated pass, not the total
+exceptions at 720p and 1080p. Durations are per generated pass, not the total
 video or song. Longer projects use consecutive windows or clips.
 
 | GPU VRAM / system RAM | 480p | 540p | 720p | Native 1080p | Basis |
 | --- | ---: | ---: | ---: | ---: | --- |
 | 6 GB / 32 GB | 5.2s | 5.2s | Choose a smaller canvas | Choose a smaller canvas | Estimated |
 | 8 GB / 16 GB | 5.2s | Start at 480p | Start at 480p | Start at 480p | Estimated; host RAM is a limitation |
-| 8 GB / 32 GB | 10.1s | 10.1s | 5.2s | Choose a smaller canvas | Estimated |
+| 8 GB / 32 GB | 10.1s | 10.1s | Fused Frames/References: **10.1s**; Pruned: **5.2s** | Start at 540p | Tested Fused 720p recipe; other entries estimated |
 | 10 GB / 32 GB | 14.4s | 14.4s | 10.1s | Choose a smaller canvas | Estimated |
 | 12 GB / 32 GB | 14.4s | 14.4s | 14.4s | 5.2s | Repeated reported 720p successes; conservative 1080p start |
 | 16 GB / 32 GB | 14.4s | 14.4s | 14.4s | 6.6s | Estimated |
@@ -47,6 +47,13 @@ the UI suggests a smaller canvas and retains the explicit manual override.
 
 ## What is measured
 
+- The 8 GB RTX 5070 Laptop / 31.02 GiB usable RAM completed 243-frame
+  1280×704 Fused Frames and References clips with four steps, Profile 5 and
+  the Q2_K encoder. Frames took 379 seconds; the four-reference run took
+  630 seconds. Host RAM headroom was nearly exhausted. These support a
+  10.1-second starting recommendation for these recipes, not 14.4 seconds,
+  extra LoRAs or a 16-GB host. The later [release benchmarks](BENCHMARKS_V3.0.0.md)
+  verified repeated shorter Fused References runs; they do not raise this limit.
 - The 12 GB RTX 3080 Ti / approximately 31.76 GiB usable RAM completed measured
   shorter 720p Pruned/Fused workloads, and the user repeatedly completed
   345-frame 720p Pruned/Fused generations. The exact 345-frame row is reported

@@ -190,6 +190,8 @@ and checkpoint family, independently of the performance profile number.
 | 24 GB VRAM, at least 63 GiB RAM, native 1080p | Pruned or Fused References | 243 frames, about 10.1 s; estimated |
 | 16 GB VRAM, at least 30 GiB RAM, 720p | Pruned or Fused | 345 frames, about 14.4 s; estimated |
 | 10 GB VRAM, at least 30 GiB RAM, 720p | Pruned or Fused | 243 frames, about 10.1 s; estimated |
+| 8 GB VRAM, at least 30 GiB RAM, 720p | Fused Frames or Fused References | 243 frames, about 10.1 s; tested laptop recipes |
+| 8 GB VRAM, at least 30 GiB RAM, 720p | Pruned Frames or Pruned References | 124 frames, about 5.2 s; estimated |
 | 8 GB VRAM, nominal 16 GB RAM, 480p | Pruned or Fused | 124 frames, about 5.2 s; estimated |
 
 Measured rows are anchored to the tested Windows configurations; intermediate
@@ -200,7 +202,12 @@ The 14.4-second Pruned tier includes repeated successful user tests on the
 That tier explicitly removes the older Pruned reference-duration margin.
 The October 14 refresh fills intermediate GPU, RAM and canvas tiers with
 explicit estimates and adds the measured 24-GB / 128-GB Fused Frames 1080p
-route. The UI distinguishes tested, reported, estimated and conservative
+route. The October 16 follow-up adds the RTX 5070 Laptop / 32-GB-RAM 720p
+Fused 10.1-second starting point, retaining the more conservative Pruned and
+16-GB-RAM recommendations. The [release benchmarks](BENCHMARKS_V3.0.0.md)
+verify shorter repeated Fused References workloads; they do not establish a
+longer duration or a 16-GB-RAM limit.
+The UI distinguishes tested, reported, estimated and conservative
 recommendations. Exceeding a recommendation is additional unverified load;
 it is not automatically a likely OOM. Longer 12-GB native-1080p passes remain
 manual because some tested recipes failed or became impractically slow.

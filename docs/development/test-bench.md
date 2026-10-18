@@ -138,6 +138,15 @@ Use the returned source-machine path as `public_key_file`. Then run:
 pterm start test_ssh_setup.js --ref YOUR_TEST_PC_REF -- --public_key_file=RETURNED_PUBLIC_KEY_PATH --client_address=CONTROLLER_PRIVATE_IP --account_name=EXISTING_LOCAL_WINDOWS_USER
 ```
 
+For an Active Directory sign-in, pass the full `domain\username` identity
+as `account_name`, rather than dropping the domain. The helper resolves its
+Windows SID and existing profile before changing services or firewall rules.
+Run elevation as that same user where possible so Windows can determine
+nested administrator-group membership from the current token. If membership
+cannot be determined safely, setup stops with instructions rather than
+guessing the authorized-keys location. Microsoft Entra-only accounts still
+need a suitable local account.
+
 The helper installs the Windows OpenSSH capability if needed, appends the
 public key for the selected existing local account, applies Windows authorized
 key ACLs, starts sshd, and creates a Private/Domain firewall rule limited to
@@ -163,6 +172,28 @@ This verifies the pinned server key and collects only the selected process
 metadata and last 250 lines of Maestro/LLM logs. The result is
 `ssh-diagnostics.json` in the controller's Test-Bench workspace. A changed
 host key is rejected for manual review.
+
+For additional test machines, keep each setup receipt in its own ignored
+settings file instead of replacing the original server configuration. From
+the controller's managed `app` environment, select a receipt explicitly:
+
+```powershell
+python scripts/test_ssh_client.py --action=diagnose --server-config=settings/test_ssh_laptop.json
+```
+
+An explicitly selected receipt uses a separate `known_hosts-HOST` file and
+`ssh-diagnostics-HOST.json` artifact. The original machine's pin and diagnostic
+artifact remain intact. Domain account names are sent as one SSH argument;
+password prompts and changed host keys remain rejected.
+
+If key authentication succeeds but a Windows server refuses commands without
+a terminal, first verify a harmless command with `ssh -tt` using the same
+pinned key and account. For that machine only, set `"request_pty": true` in its
+private receipt configuration. The diagnostic client then requests a terminal
+and transfers JSON in framed, short base64 lines so terminal escape sequences
+and line wrapping do not corrupt log collection. Other machines keep their
+existing connection mode. This does not change server permissions or Windows
+security policy.
 
 SSH sessions should inspect diagnostics and run bounded test commands.
 Continue using the normal Pinokio Start/Stop/Update actions for Maestro's

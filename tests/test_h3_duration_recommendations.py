@@ -23,7 +23,10 @@ from models.minimax_h3.minimax_h3_handler import (
 )
 from services.director_video_strategy import build_director_video_execution_profile
 from services.director_music_timing import resolve_clip_limits
-from services.h3_duration_recommendations import load_h3_duration_recommendations
+from services.h3_duration_recommendations import (
+    load_h3_duration_recommendations,
+    match_h3_duration_recommendation,
+)
 
 
 class TestH3DurationRecommendations(unittest.TestCase):
@@ -172,6 +175,28 @@ class TestH3DurationRecommendations(unittest.TestCase):
             "fused_4step",
         ),
         (
+            "8 GB / 31.02 GiB fused frames at 720p",
+            "minimax_h3",
+            {"minimax_h3_fused_turbo": True},
+            7.96,
+            31.02,
+            "1280x704",
+            243,
+            "tested",
+            "fused_4step",
+        ),
+        (
+            "8 GB / 31.02 GiB fused references at 720p",
+            "minimax_h3_ref2va",
+            {"minimax_h3_fused_turbo": True},
+            7.96,
+            31.02,
+            "1280x704",
+            243,
+            "tested",
+            "fused_4step_references",
+        ),
+        (
             "8 GB / 15.8 GB fused at 480p",
             "minimax_h3",
             {"minimax_h3_fused_turbo": True},
@@ -208,11 +233,15 @@ class TestH3DurationRecommendations(unittest.TestCase):
         recommendations = model["sliding_window_memory_policy"][
             "resource_recommendations"
         ]
-        self.assertEqual(recommendations["version"], "2026-10-14")
+        self.assertEqual(recommendations["version"], "2026-10-16")
         self.assertTrue(recommendations["tiers"])
         self.assertTrue(recommendations["evidence"])
         self.assertIn(
             "rtx3080ti-12gb-32gb-720p-repeated-345-user-report",
+            {item["id"] for item in recommendations["evidence"]},
+        )
+        self.assertIn(
+            "h3-rtx5070-laptop-8gb-31_02gib-fused-4step-243-20261016",
             {item["id"] for item in recommendations["evidence"]},
         )
         self.assertEqual(
@@ -252,6 +281,72 @@ class TestH3DurationRecommendations(unittest.TestCase):
                 else:
                     self.assertIs(type(frames), int)
                     self.assertIn(frames, legal_frames)
+
+    def test_8gb_720p_fused_evidence_respects_model_canvas_and_ram_boundaries(self):
+        recommendations = load_h3_duration_recommendations()
+        evidence_id = "h3-rtx5070-laptop-8gb-31_02gib-fused-4step-243-20261016"
+        verified_edges = (
+            ("fused_4step", 7, 30, 600001),
+            ("fused_4step", 8.5, 31.02, 901120),
+            ("fused_4step_references", 7, 30, 600001),
+            ("fused_4step_references", 8.5, 31.02, 901120),
+        )
+        for checkpoint, vram, ram, pixels in verified_edges:
+            with self.subTest(checkpoint=checkpoint, vram=vram, ram=ram, pixels=pixels):
+                tier = match_h3_duration_recommendation(
+                    recommendations,
+                    checkpoint=checkpoint,
+                    total_vram_gb=vram,
+                    total_ram_gb=ram,
+                    pixels=pixels,
+                )
+                self.assertEqual(
+                    (tier["frames"], tier["basis"], tier["evidence"]),
+                    (243, "tested", [evidence_id]),
+                )
+
+        unaffected_edges = (
+            ("fused_4step", 7.96, 31.02, 600000, 243, None),
+            ("fused_4step_references", 7.96, 31.02, 901121, None, "960x544"),
+            ("pruned", 7.96, 31.02, 600001, 124, None),
+        )
+        for checkpoint, vram, ram, pixels, frames, fallback in unaffected_edges:
+            with self.subTest(checkpoint=checkpoint, pixels=pixels):
+                tier = match_h3_duration_recommendation(
+                    recommendations,
+                    checkpoint=checkpoint,
+                    total_vram_gb=vram,
+                    total_ram_gb=ram,
+                    pixels=pixels,
+                )
+                self.assertEqual(
+                    (tier["frames"], tier["basis"], tier["evidence"]),
+                    (frames, "estimated", ["resource-interpolation-20261014"]),
+                )
+                self.assertEqual(tier.get("fallback_resolution"), fallback)
+
+        adjacent_tiers = (
+            (6.99, 31.02, None, "864x480"),
+            (8.51, 31.02, 243, None),
+            (7.96, 29.99, None, "864x480"),
+        )
+        for checkpoint in ("fused_4step", "fused_4step_references"):
+            for vram, ram, frames, fallback in adjacent_tiers:
+                with self.subTest(checkpoint=checkpoint, vram=vram, ram=ram):
+                    tier = match_h3_duration_recommendation(
+                        recommendations,
+                        checkpoint=checkpoint,
+                        total_vram_gb=vram,
+                        total_ram_gb=ram,
+                        pixels=700000,
+                    )
+                    self.assertEqual(tier["frames"], frames)
+                    self.assertEqual(tier["basis"], "estimated")
+                    self.assertEqual(
+                        tier["evidence"],
+                        ["resource-interpolation-20261014"],
+                    )
+                    self.assertEqual(tier.get("fallback_resolution"), fallback)
 
     def test_resource_grid_profiles_match_their_evidence_basis(self):
         for (
