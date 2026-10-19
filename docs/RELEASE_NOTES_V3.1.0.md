@@ -22,6 +22,20 @@ v3.0.0 while the new features and fixes receive wider testing.
 
 See the [MOSS usage and validation guide](MOSS-Image.md).
 
+## H3 community checkpoint imports
+
+- Accept retained FP32 input/output and compressed AdaLN projection weights in
+  compatible BF16 and INT8 ConvRot exports, with FP32 preservation during model
+  loading. Existing shape, finite-curve, quantization and checksum checks remain.
+- Ask for the creator's QKV row order when a SafeTensors header omits it,
+  matching the existing explicit selection workflow for GGUF imports.
+- Keep optional Turbo LoRAs separate from baked checkpoint acceleration.
+  Read the base model's “steps without the LoRA” count and avoid interpreting
+  “not res_multistep” as sampler advice.
+
+See the [H3 import guide](H3-checkpoint-import.md). Structural import verification
+and tiny CPU loader tests do not establish full checkpoint generation quality.
+
 ## H3 References speaker compatibility
 
 - Restore support for unambiguous older `(S1) says ...` prompts when an explicit
@@ -112,6 +126,14 @@ on CPU, verifying zero/nonzero scheduled weights across CFG branches and batches
 An authenticated, bounded header read confirmed the Krea NVFP4 packing and scale
 descriptors used by the import check; full generation with that community
 checkpoint has not been tested.
+
+The H3 mixed-precision follow-up passed 292 focused CPU regressions, the import
+UI/API-client checks, frontend lint and production build. Tiny real SafeTensor
+loads through MMGP preserve FP32 AdaLN weights and the stock FP16 path. Both
+reported community file headers and bounded quantization markers passed
+verification; the BF16 export requires explicit QKV layout selection. Full
+generation with these newly admitted files and arbitrary Turbo adapters remains
+untested.
 
 Workstation 01 (RTX 4090 / 24 GB VRAM / 128 GB RAM) completed normal-API MOSS
 Base/SFT caption, layout and batch smoke tests, a Viggle video, compatible

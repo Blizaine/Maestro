@@ -171,7 +171,8 @@ class SingularityIntegrationTests(unittest.TestCase):
                      "MiniMaxH3Transformer": lambda **_kwargs: transformer,
                      "get_linear_split_map": lambda *_args, **_kwargs: {"qkv": "split"},
                      "offload": offload, "partial": partial,
-                     "_strip_transformer_wrappers": lambda state, **_kwargs: state},
+                     "_strip_transformer_wrappers": lambda state, **_kwargs: state,
+                     "_lock_fp32_adaln_modules": lambda transformer, module_names: None},
                 )
                 result = load("shared.safetensors", "bf16", qkv_layout="grouped", singularity=singularity)
                 self.assertIs(result, transformer)

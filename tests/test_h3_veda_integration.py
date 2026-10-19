@@ -140,7 +140,8 @@ class TestVedaIntegration(unittest.TestCase):
                     "adaln_curve_grid": 2, "time_embed_dim": 8, "compressed_modulation": True},
                  "_first_path": lambda value: value, "init_empty_weights": init_empty_weights,
                  "MiniMaxH3Transformer": factory, "get_linear_split_map": lambda *a, **k: {"qkv": "split"},
-                 "offload": offload, "partial": partial, "_strip_transformer_wrappers": lambda *a, **k: None}
+                 "offload": offload, "partial": partial, "_strip_transformer_wrappers": lambda *a, **k: None,
+                 "_lock_fp32_adaln_modules": lambda transformer, module_names: None}
         module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
                                   function], type_ignores=[])
         exec(compile(ast.fix_missing_locations(module), "veda_loader", "exec"), scope)

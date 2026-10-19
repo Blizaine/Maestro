@@ -8,6 +8,10 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 Public Dev testing update. Main remains on v3.0.0. See the
 [v3.1.0 testing notes](docs/RELEASE_NOTES_V3.1.0.md).
 
+- Support mixed-precision H3 checkpoint exports with retained FP32 I/O and
+  compressed AdaLN weights, preserving their precision during loading. Missing
+  SafeTensors QKV metadata now requests an explicit layout choice. Keep optional
+  Turbo LoRA schedules separate from the base recipe and respect negated sampler advice.
 - Restore H3 References compatibility with explicitly declared legacy speaker labels
   and repeated speakers within a clip, sharing ownership rules between generation
   and prompt enhancement. Keep independent Subject/voice numbering and reject

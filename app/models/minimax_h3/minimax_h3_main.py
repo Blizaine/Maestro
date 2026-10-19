@@ -881,7 +881,9 @@ def _normalize_conditioner_checkpoint_namespaces(
     )
 
 
-def probe_h3_checkpoint(filename: str) -> dict[str, int | bool | str | tuple | None]:
+def probe_h3_checkpoint(
+    filename: str,
+) -> dict[str, int | bool | str | tuple | list[str] | None]:
     """Inspect H3 tensor headers before allocating its 20B/33B network."""
 
     state_dict, metadata = quant_router.load_metadata_state_dict(filename)
@@ -892,14 +894,16 @@ def probe_h3_checkpoint(filename: str) -> dict[str, int | bool | str | tuple | N
         "convrot" in metadata_quantization_format
         or has_convrot_layout(state_dict)
     )
+    # Apply the same SafeTensor namespace cleanup used by the full loader,
+    # without reordering QKV rows. The metadata-only tensors retain dtype and
+    # shape, so this can distinguish FP32 compressed AdaLN projections before
+    # building the very large transformer.
+    state_dict, _, _ = _strip_transformer_wrappers(
+        state_dict,
+        interleave_qkv=False,
+    )
     table = None
     for key, tensor in state_dict.items():
-        prefixes = ("model.diffusion_model.", "diffusion_model.", "module.")
-        while any(key.startswith(prefix) for prefix in prefixes):
-            for prefix in prefixes:
-                if key.startswith(prefix):
-                    key = key[len(prefix) :]
-                    break
         if key == "adaln_t_table":
             table = tensor
             break
@@ -911,11 +915,28 @@ def probe_h3_checkpoint(filename: str) -> dict[str, int | bool | str | tuple | N
             "convrot": convrot,
             "quantization_format": metadata_quantization_format,
             "convrot_group_size": None,
+            "fp32_adaln_modules": [],
         }
     if len(table.shape) != 2 or int(table.shape[0]) < 2:
         raise ValueError(f"Invalid H3 AdaLN curve table shape: {tuple(table.shape)}")
     if not table.dtype.is_floating_point:
         raise ValueError("The H3 AdaLN curve must use unquantized floating-point storage.")
+    adaln_weight_suffix = ".adaln_proj.linear.weight"
+    fp32_adaln_modules = []
+    for name, tensor in state_dict.items():
+        if not name.endswith(adaln_weight_suffix) or tensor.dtype != torch.float32:
+            continue
+        module_name = name[: -len(".weight")]
+        if module_name == "final_layer.adaln_proj.linear":
+            fp32_adaln_modules.append(module_name)
+        elif module_name.startswith("blocks."):
+            block_index = module_name[len("blocks.") :].split(".", 1)[0]
+            if (
+                block_index.isdecimal()
+                and int(block_index) < 50
+                and module_name == f"blocks.{block_index}.adaln_proj.linear"
+            ):
+                fp32_adaln_modules.append(module_name)
     return {
         "compressed_modulation": True,
         "adaln_curve_grid": int(table.shape[0]),
@@ -923,7 +944,22 @@ def probe_h3_checkpoint(filename: str) -> dict[str, int | bool | str | tuple | N
         "convrot": convrot,
         "quantization_format": metadata_quantization_format,
         "convrot_group_size": None,
+        "fp32_adaln_modules": sorted(fp32_adaln_modules),
     }
+
+
+def _lock_fp32_adaln_modules(transformer, module_names) -> None:
+    """Keep checkpoint-FP32 compressed AdaLN projections at their source dtype."""
+
+    if not getattr(transformer, "use_adaln_curves", False):
+        return
+    for module_name in module_names or ():
+        projection = transformer.get_submodule(module_name)
+        if not isinstance(projection, torch.nn.Linear):
+            raise ValueError(
+                f"MiniMax H3 FP32 AdaLN target {module_name!r} is not a Linear projection."
+            )
+        projection._lock_dtype = torch.float32
 
 
 def _load_transformer(
@@ -980,6 +1016,10 @@ def _load_transformer(
             dtype=dtype,
             sla_config=sla_config,
             vdn=vdn,
+        )
+        _lock_fp32_adaln_modules(
+            transformer,
+            checkpoint.get("fp32_adaln_modules", ()),
         )
         if veda_policy is not None:
             transformer.veda_attention = veda_policy

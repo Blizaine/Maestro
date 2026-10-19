@@ -77,6 +77,36 @@ class H3MixedCheckpointRecipeTests(unittest.TestCase):
         with self.assertRaises(H3CheckpointError):
             self.inspect("standard", source=source)
 
+    def test_optional_accelerator_is_not_baked_and_does_not_supply_base_step_count(self):
+        source = {
+            "name": "Example H3 Hybrid", "versionName": "v1.8 hybrid",
+            "versionDescription": (
+                "<p>Ref2VA. Scheduler/Sampler: <b>Euler/simple</b> (not beta, not res_multistep).</p>"
+                "<p>Steps: I use 12 steps with Lightx2v Turbo or full 30 steps without it.</p>"
+                "<p>Turbo: I use the Lightx2v LoRA, but it is not required.</p>"
+            ),
+        }
+        profile = self.inspect(source=source)
+        self.assertEqual(profile["status"], "verified")
+        self.assertEqual(profile["sampling_profile"], "standard")
+        self.assertEqual((profile["sampler"], profile["default_steps"]), ("euler", 30))
+        self.assertFalse(profile["baked_turbo"])
+        self.assertFalse(profile["fused_turbo"])
+        self.assertIn("optional accelerator", profile["settings_evidence"]["default_steps"])
+        concrete = self.inspect(source={**source, "versionName": "Ref2VA Turbo"})
+        self.assertEqual(concrete["sampling_profile"], "turbo")
+        self.assertNotEqual(concrete["default_steps"], 30)
+        header, payloads = make_header(quantization="int8")
+        header["__metadata__"]["modelspec.description"] = "Standard checkpoint. Steps: 24. Sampler: euler."
+        concrete_steps = inspect_h3_header(header, tensor_reader=payloads.__getitem__, source=source)
+        self.assertEqual(concrete_steps["default_steps"], 24)
+
+    def test_negated_res_multistep_does_not_override_euler(self):
+        source = {"name": "Example H3 standard", "versionName": "Ref2VA",
+                  "versionDescription": "Use Euler. Avoid res_multistep. Recommended 30 steps."}
+        profile = self.inspect(source=source)
+        self.assertEqual((profile["sampler"], profile["default_steps"]), ("euler", 30))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ opens or materializes transformer weight tensors.
 from __future__ import annotations
 
 import json
+import html
 import math
 import re
 import struct
@@ -298,6 +299,29 @@ def _recipe_from_text(value: str):
     return "standard" if standard else None
 
 
+def _optional_accelerator_text(source):
+    text = _source_text(source, ("versionDescription", "description"))
+    return html.unescape(re.sub(r"<[^>]*>", " ", text)).lower()
+
+
+def _source_has_optional_accelerator(source):
+    text = _optional_accelerator_text(source)
+    return bool(
+        re.search(r"\b(?:turbo|lightx2v)\b", text)
+        and re.search(r"\blora\b", text)
+        and (re.search(r"\b(?:optional|not required)\b", text)
+             or re.search(r"\b\d+\s+steps?\s+without\b", text))
+    )
+
+
+def _standard_steps_without_accelerator(source):
+    if not _source_has_optional_accelerator(source):
+        return None
+    text = _optional_accelerator_text(source)
+    counts = {int(value) for value in re.findall(r"\b(?:full\s+)?(\d+)\s+steps?\s+without\b", text)}
+    return next(iter(counts)) if len(counts) == 1 else None
+
+
 def _source_has_mixed_recipes(source):
     # One CivitAI version can contain Turbo and non-Turbo files with generic
     # numeric filenames. Page-wide acceleration instructions cannot identify
@@ -305,7 +329,7 @@ def _source_has_mixed_recipes(source):
     text = _source_text(source, ("description",)).lower().replace("_", " ")
     non_turbo = re.search(r"\bnon[- ]?turbo\b", text)
     other_text = re.sub(r"\bnon[- ]?turbo\b", "", text)
-    return bool(non_turbo and re.search(r"\bturbo\b", other_text))
+    return bool(non_turbo and re.search(r"\bturbo\b", other_text)) or _source_has_optional_accelerator(source)
 
 
 def _explicit_header_workflow(metadata):
@@ -403,6 +427,8 @@ def _sampling_profile_from_source(metadata, source, pinned):
         # treat it as a baked recipe when it says Turbo is baked/merged or
         # gives an explicit Turbo step schedule.
         source_recipe_profile = None
+        if not header_profile and not source_name_profile and _source_has_optional_accelerator(source):
+            source_recipe_profile = "standard"
         if (
             not _source_has_mixed_recipes(source)
             and re.search(r"\bturbo\b", source_description)
@@ -919,16 +945,15 @@ def _validate_shape_groups(tensors, *, compressed, quantization_format):
             # RoPE multiplies it by FP32 positions, promoting BF16/FP16
             # storage back to FP32; quantized frequencies remain unsupported.
             allowed = {"F32", "BF16", "F16"}
-        elif quantization_format in {"int8_tensorwise", "scaled_fp8", "asym_w4a8_int8"} and name in {
+        elif name in {
             "video_patch_proj.weight",
             "audio_patch_proj.weight",
             "final_layer.video_out.weight",
             "final_layer.audio_out.weight",
         }:
-            # Comfy's supported INT8 and FP8 exports keep these small I/O
-            # projections in FP32 while quantizing only the 200 block
-            # linears.  Keep FP32 disallowed for the large condition/time,
-            # modulation, norm, and plain transformer parameters.
+            # H3's loader preserves these small I/O projections in FP32,
+            # including mixed-precision BF16 community exports. This does not
+            # admit FP32 for large condition/time, norm or block linears.
             allowed = retained_projection_dtypes
         else:
             allowed = dense_dtypes
@@ -950,7 +975,8 @@ def _validate_shape_groups(tensors, *, compressed, quantization_format):
         ("final_layer.adaln_proj.linear.weight", (2 * _HIDDEN, modulation_dim)),
         ("final_layer.adaln_proj.linear.bias", (2 * _HIDDEN,)),
     ):
-        require(name, shape, dense_dtypes)
+        allowed = dense_dtypes | {"F32"} if compressed and name.endswith(".weight") else dense_dtypes
+        require(name, shape, allowed)
 
     if compressed:
         time_embedder = [name for name in tensors if name.startswith("time_embedder.")]
@@ -982,6 +1008,10 @@ def _validate_shape_groups(tensors, *, compressed, quantization_format):
         ):
             quantized_linear = relative.startswith(("attn.qkv_proj.", "attn.out_proj.", "mlp."))
             weight_dtypes = main_weight_dtypes if relative.endswith(".weight") and quantized_linear else dense_dtypes
+            if compressed and relative == "adaln_proj.linear.weight":
+                # Compressed curve projections are evaluated in FP32. Some
+                # exporters retain FP32 master weights with FP16 biases.
+                weight_dtypes = dense_dtypes | {"F32"}
             require(prefix + relative, shape, weight_dtypes)
         if quantization_format == "int8_tensorwise":
             for relative, rows in (
@@ -1219,14 +1249,16 @@ def _settings_for_profile(profile, source, metadata, pinned, *, explicit_selecti
         _source_text(source, source_fields),
         _metadata_text(metadata, ("modelspec.title", "modelspec.description", "sampler", "scheduler")),
     ]
-    text = "\n".join(texts).lower().replace("：", ":").replace("–", "-").replace("—", "-")
+    text = html.unescape(re.sub(r"<[^>]*>", " ", "\n".join(texts)))
+    text = text.lower().replace("：", ":").replace("–", "-").replace("—", "-")
     sampler = None
     sampler_match = re.search(r"\b(?:sampler|sampling method)\s*[:=]\s*([a-z][a-z0-9_ -]*)", text)
     if sampler_match:
         candidate = sampler_match.group(1).strip().split()[0].strip(".,;:")
         if candidate in {"euler", "res_multistep"}:
             sampler = candidate
-    if sampler is None and "res_multistep" in text:
+    positive_sampler_text = re.sub(r"\b(?:not|never|avoid|without)\s+(?:(?:use|using)\s+)?res_multistep\b", "", text)
+    if sampler is None and "res_multistep" in positive_sampler_text:
         sampler = "res_multistep"
     if sampler is None and re.search(r"\beuler\b", text) and re.search(r"\b(?:use|using|sampler|sampling)\s+euler\b", text):
         sampler = "euler"
@@ -1278,6 +1310,7 @@ def _settings_for_profile(profile, source, metadata, pinned, *, explicit_selecti
     if not single_step:
         single_step = re.search(r"\b(\d+)\s+steps?\b", text)
     default_steps = int(single_step.group(1)) if single_step else None
+    base_steps = _standard_steps_without_accelerator(source) if profile == "standard" else None
     if default_steps is None and max_steps is not None:
         # When the creator documents only an accepted range, start from its
         # highest quality evaluation count and keep the full range available.
@@ -1287,6 +1320,9 @@ def _settings_for_profile(profile, source, metadata, pinned, *, explicit_selecti
         if exact:
             default_steps = int(exact.group(1))
             min_steps = max_steps = default_steps
+    used_base_steps = default_steps is None and base_steps is not None and 1 <= base_steps <= 50
+    if used_base_steps:
+        default_steps = base_steps
 
     settings = {
         "sampler": sampler,
@@ -1299,6 +1335,8 @@ def _settings_for_profile(profile, source, metadata, pinned, *, explicit_selecti
         "fused_turbo": profile == "fused",
     }
     evidence = {"source": "explicit CivitAI version/header recipe text"}
+    if used_base_steps:
+        evidence["default_steps"] = "creator-published count without the optional accelerator LoRA"
     if video_shift_range:
         settings["video_shift_range"] = video_shift_range
         evidence["video_shift"] = "midpoint of the creator-published range"
@@ -1424,7 +1462,7 @@ def inspect_h3_header(
     try:
         qkv_layout, qkv_evidence = _qkv_layout(tensors, metadata, quantization, source_pin)
     except H3CheckpointError as exc:
-        if file_format != "gguf" or exc.code != "qkv_layout_ambiguous":
+        if exc.code != "qkv_layout_ambiguous":
             raise
         qkv_layout, qkv_evidence = normalized_qkv, ("creator's QKV layout explicitly selected at import" if normalized_qkv else None)
     if normalized_qkv and qkv_layout != normalized_qkv:

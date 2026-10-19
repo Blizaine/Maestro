@@ -396,15 +396,55 @@ class H3CheckpointImportTests(unittest.TestCase):
 
     def test_plain_pruned_checkpoint_requires_explicit_qkv_evidence(self):
         header, payloads = make_header(native="ref2va", qkv=None)
-        with self.assertRaises(H3CheckpointError) as caught:
-            inspect_h3_header(
-                header,
-                tensor_reader=lambda key: payloads[key],
-                sampling_profile="standard",
-                native_workflow="ref2va",
+        profile = inspect_h3_header(
+            header, tensor_reader=payloads.__getitem__,
+            sampling_profile="standard", native_workflow="ref2va",
+        )
+        self.assertEqual(profile["status"], "needs_selection")
+        self.assertEqual(profile["needs_selection"], ["qkv_layout"])
+        self.assertIsNone(profile["qkv_layout"])
+        for layout in ("grouped", "interleaved"):
+            selected = inspect_h3_header(
+                header, tensor_reader=payloads.__getitem__, sampling_profile="standard",
+                native_workflow="ref2va", qkv_layout=layout,
             )
-        self.assertEqual(caught.exception.code, "qkv_layout_ambiguous")
-        self.assertIn("qkv_layout", str(caught.exception))
+            self.assertEqual(selected["status"], "verified")
+            self.assertEqual(selected["qkv_layout_selection"], layout)
+
+    def test_mixed_float_pruned_exports_allow_only_retained_fp32_islands(self):
+        for quantization in ("plain", "int8"):
+            with self.subTest(quantization=quantization):
+                header, payloads = make_header(quantization=quantization, qkv="grouped")
+                for name in ("video_patch_proj.weight", "audio_patch_proj.weight",
+                             "final_layer.video_out.weight", "final_layer.audio_out.weight"):
+                    header[name]["dtype"] = "F32"
+                for name, descriptor in header.items():
+                    if name.endswith("adaln_proj.linear.weight"):
+                        descriptor["dtype"] = "F32"
+                    elif name.endswith("adaln_proj.linear.bias"):
+                        descriptor["dtype"] = "F16"
+                # Exporter training metadata does not override concrete tensor widths.
+                header["__metadata__"]["ss_h3_adaln_rank"] = "16"
+                profile = inspect_h3_header(header, tensor_reader=payloads.__getitem__, sampling_profile="standard")
+                self.assertEqual(profile["status"], "verified")
+                self.assertEqual(profile["time_embed_dim"], 8)
+                for invalid_name in ("condition_proj.weight", "blocks.0.norm1.weight",
+                                     "blocks.0.adaln_proj.linear.bias", "token_refiner.blocks.0.mlp.fc1.weight"):
+                    old_dtype = header[invalid_name]["dtype"]
+                    header[invalid_name]["dtype"] = "F32"
+                    with self.assertRaises(H3CheckpointError):
+                        inspect_h3_header(header, tensor_reader=payloads.__getitem__, sampling_profile="standard")
+                    header[invalid_name]["dtype"] = old_dtype
+
+    def test_fp32_full_modulation_and_real_rank16_curve_remain_blocked(self):
+        header, payloads = make_header(compressed=False)
+        header["final_layer.adaln_proj.linear.weight"]["dtype"] = "F32"
+        with self.assertRaises(H3CheckpointError):
+            inspect_h3_header(header, sampling_profile="standard")
+        header, payloads = make_header(qkv="grouped")
+        header["adaln_t_table"]["shape"] = [1025, 16]
+        with self.assertRaises(H3CheckpointError):
+            inspect_h3_header(header, tensor_reader=payloads.__getitem__, sampling_profile="standard")
 
     def test_full_official_bf16_checkpoint_uses_official_interleaved_layout(self):
         header, payloads = make_header(compressed=False, native="ref2va", qkv=None)
@@ -477,10 +517,10 @@ class H3CheckpointImportTests(unittest.TestCase):
         self.assertEqual(actual["qkv_layout"], "grouped")
         self.assertEqual(actual["architectures"], ["minimax_h3"])
         self.assertEqual(actual["default_steps"], 20)
-        with self.assertRaises(H3CheckpointError) as caught:
-            inspect_h3_header(header, tensor_reader=lambda key: payloads[key],
-                              source={**source, "sha256": "a" * 64}, sampling_profile="standard")
-        self.assertEqual(caught.exception.code, "qkv_layout_ambiguous")
+        pending = inspect_h3_header(header, tensor_reader=lambda key: payloads[key],
+                                    source={**source, "sha256": "a" * 64}, sampling_profile="standard")
+        self.assertEqual(pending["status"], "needs_selection")
+        self.assertIn("qkv_layout", pending["needs_selection"])
 
     def test_fp8_inverse_scales_are_not_accepted_as_direct_scales(self):
         header, payloads = make_header(quantization="fp8", native="fl2va", qkv="grouped")
