@@ -99,7 +99,10 @@ class SettingsRoundTripTests(unittest.TestCase):
 
     def test_regular_restore_clears_cross_output_state(self):
         self.assertIn("multi_prompts_gen_type: Number(p.multi_prompts_gen_type) || 0", STORE)
-        self.assertIn("h3_window_prompts = restoredH3WindowPrompts", STORE)
+        self.assertTrue(
+            "h3_window_prompts = !isDirectorClip && restoredH3WindowPrompts.length > 0" in STORE,
+            "ordinary restores retain saved window prompts; Director clips use their exact scoped prompt",
+        )
         self.assertIn("h3_window_plan_signature", STORE)
         self.assertIn("removeBackgroundRefs", STORE)
         self.assertIn("outputCount: newParams.repeat_generation || 1", STORE)

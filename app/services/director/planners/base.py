@@ -174,13 +174,20 @@ class BasePlanner(ABC):
         progress_label: str,
         call_batch: Callable[[int, int, list[Any], Optional[dict]], list[dict]],
         fallback_factory: Optional[Callable[[int, Any], dict]] = None,
+        repair_batch: Optional[
+            Callable[[int, int, list[Any], Optional[dict]], list[dict]]
+        ] = None,
+        row_validator: Optional[
+            Callable[[int, dict, list[dict]], Optional[str]]
+        ] = None,
+        repair_batch_size: Optional[int] = None,
+        repair_attempts: int = 2,
     ) -> list[dict]:
         """Run a long structured plan in small, durable JSON batches.
 
-        Each completed batch is published immediately through the Director
-        pipeline checkpoint callback.  A resumed run reuses only batches whose
-        recorded item count still matches the current timeline.  One malformed
-        batch therefore cannot erase minutes of already validated planning.
+        Callers may opt into strict row validation and bounded tail repair.
+        Without a validator, the historical bounded-fallback behavior remains
+        unchanged for planners that have their own recovery contracts.
         """
 
         source = list(items or [])
@@ -195,6 +202,48 @@ class BasePlanner(ABC):
             stored_batches = {}
             checkpoint[checkpoint_key] = stored_batches
 
+        strict_validation = callable(row_validator)
+        repair_call = repair_batch if callable(repair_batch) else call_batch
+        max_repair_attempts = max(1, int(repair_attempts or 1))
+        repair_size = max(
+            1,
+            min(
+                int(repair_batch_size or size),
+                size,
+            ),
+        )
+
+        def validated_prefix(
+            candidate: Any,
+            *,
+            global_start: int,
+            expected_count: int,
+            prior_rows: list[dict],
+        ) -> tuple[list[dict], str]:
+            candidates = candidate if isinstance(candidate, list) else []
+            valid: list[dict] = []
+            for offset, raw in enumerate(candidates[:expected_count]):
+                if not isinstance(raw, dict):
+                    return valid, f"row {offset + 1} is not a JSON object"
+                try:
+                    issue = row_validator(
+                        global_start + offset,
+                        raw,
+                        [*prior_rows, *valid],
+                    )
+                except Exception as exc:
+                    issue = f"row validation failed ({exc})"
+                if issue:
+                    return valid, str(issue)
+                valid.append(dict(raw))
+            if len(valid) < expected_count:
+                return (
+                    valid,
+                    f"the model returned {len(candidates)} of "
+                    f"{expected_count} requested rows",
+                )
+            return valid, ""
+
         output: list[dict] = []
         for batch_index, start in enumerate(range(0, total, size), start=1):
             self._raise_if_planning_cancelled()
@@ -203,65 +252,180 @@ class BasePlanner(ABC):
             key = str(start)
             saved = stored_batches.get(key)
             saved_rows = saved.get("rows") if isinstance(saved, dict) else None
-            if (
-                isinstance(saved_rows, list)
-                and int(saved.get("count") or 0) == expected
-            ):
-                rows = [dict(row) for row in saved_rows if isinstance(row, dict)]
-                if len(rows) != expected:
-                    rows = []
-            else:
-                rows = []
 
-            if not rows:
-                self._emit_planning_progress(
-                    message=(
-                        f"Planning {progress_label} batch "
-                        f"{batch_index}/{batch_total}..."
-                    ),
-                    current=start,
-                    total=total,
-                    stage=stage,
-                    batch=batch_index,
-                    batch_count=batch_total,
+            if strict_validation:
+                def publish_strict_prefix(prefix: list[dict]) -> None:
+                    stored_batches[key] = {
+                        "count": len(prefix),
+                        "expected_count": expected,
+                        "rows": copy.deepcopy(prefix),
+                    }
+                    checkpoint.update({
+                        "stage": stage,
+                        "batch_size": size,
+                        "completed_items": start + len(prefix),
+                        "total_items": total,
+                        "complete": False,
+                    })
+                    self._publish_planning_checkpoint(checkpoint)
+
+                candidate_rows = None
+                if isinstance(saved_rows, list) and isinstance(saved, dict):
+                    saved_count = int(saved.get("count") or 0)
+                    saved_expected = int(
+                        saved.get("expected_count")
+                        or saved.get("count")
+                        or 0
+                    )
+                    if (
+                        saved_expected == expected
+                        and saved_count == len(saved_rows)
+                        and 0 <= saved_count <= expected
+                    ):
+                        # Partial prefixes are intentional in strict checkpoints:
+                        # a failed repair can resume from the last usable row.
+                        candidate_rows = saved_rows
+
+                if candidate_rows is None:
+                    self._emit_planning_progress(
+                        message=(
+                            f"Planning {progress_label} batch "
+                            f"{batch_index}/{batch_total}..."
+                        ),
+                        current=start,
+                        total=total,
+                        stage=stage,
+                        batch=batch_index,
+                        batch_count=batch_total,
+                    )
+                    previous = output[-1] if output else None
+                    try:
+                        candidate_rows = call_batch(
+                            batch_index,
+                            start,
+                            batch_items,
+                            previous,
+                        )
+                    except InterruptedError:
+                        raise
+                    except Exception as exc:
+                        print(
+                            f"[DirectorPlanner] {progress_label} batch "
+                            f"{batch_index}/{batch_total} failed before repair "
+                            f"({exc})."
+                        )
+                        candidate_rows = []
+                        repair_reason = f"the initial request failed ({exc})"
+                    else:
+                        repair_reason = ""
+                else:
+                    repair_reason = ""
+
+                rows, validation_issue = validated_prefix(
+                    candidate_rows,
+                    global_start=start,
+                    expected_count=expected,
+                    prior_rows=output,
                 )
-                previous = output[-1] if output else None
-                try:
-                    candidate = call_batch(
-                        batch_index,
-                        start,
-                        batch_items,
-                        previous,
-                    )
-                    rows = [
-                        dict(row) for row in (candidate or [])
-                        if isinstance(row, dict)
-                    ][:expected]
-                except InterruptedError:
-                    # Cancellation is a control-flow signal, not a malformed
-                    # planner response. Never convert an interrupted batch
-                    # into completed fallback rows or resume would skip work
-                    # the user explicitly stopped.
-                    raise
-                except Exception as exc:
-                    print(
-                        f"[DirectorPlanner] {progress_label} batch "
-                        f"{batch_index}/{batch_total} failed; preserving prior "
-                        f"batches and using bounded fallbacks for this batch "
-                        f"({exc})."
-                    )
-                    rows = []
+                if validation_issue:
+                    repair_reason = validation_issue
 
-                while len(rows) < expected:
-                    item_index = start + len(rows)
-                    fallback = (
-                        fallback_factory(item_index, source[item_index])
-                        if callable(fallback_factory) else {}
-                    )
-                    rows.append(dict(fallback or {}))
+                repair_offset = len(rows)
+                if repair_offset < expected:
+                    publish_strict_prefix(rows)
+                while repair_offset < expected:
+                    requested = min(repair_size, expected - repair_offset)
+                    repair_start = start + repair_offset
+                    repair_items = source[
+                        repair_start:repair_start + requested
+                    ]
+                    attempt = 0
+                    while True:
+                        self._emit_planning_progress(
+                            message=(
+                                f"Repairing {progress_label} clips "
+                                f"{repair_start + 1}-"
+                                f"{repair_start + requested} "
+                                f"(attempt {attempt + 1}/"
+                                f"{max_repair_attempts})..."
+                            ),
+                            current=repair_start,
+                            total=total,
+                            stage=f"{stage}_repair",
+                            batch=batch_index,
+                            batch_count=batch_total,
+                            repair_attempt=attempt + 1,
+                        )
+                        previous = (
+                            rows[-1]
+                            if rows
+                            else output[-1] if output else None
+                        )
+                        try:
+                            repaired = repair_call(
+                                batch_index,
+                                repair_start,
+                                repair_items,
+                                previous,
+                            )
+                        except InterruptedError:
+                            raise
+                        except Exception as exc:
+                            repaired = []
+                            repair_reason = f"the repair request failed ({exc})"
+                        repaired_rows, repair_issue = validated_prefix(
+                            repaired,
+                            global_start=repair_start,
+                            expected_count=requested,
+                            prior_rows=[*output, *rows],
+                        )
+                        if repaired_rows:
+                            rows.extend(repaired_rows)
+                            repair_offset += len(repaired_rows)
+                            if len(rows) < expected:
+                                publish_strict_prefix(rows)
+                            if len(repaired_rows) < requested:
+                                repair_reason = repair_issue
+                            break
 
+                        repair_reason = repair_issue or repair_reason
+                        attempt += 1
+                        if attempt >= max_repair_attempts:
+                            missing_start = start + len(rows) + 1
+                            missing_end = start + expected
+                            recovery = (
+                                "Accepted shot plans were saved. Retry planning "
+                                "to continue from the saved checkpoint and repair "
+                                "this clip's physical continuity."
+                                if "compact physical-state proposal could not be materialized"
+                                in repair_reason
+                                else "Accepted shot plans were saved. Retry planning "
+                                "to continue from the saved checkpoint and repair "
+                                "this clip's story order."
+                                if "music narrative" in repair_reason
+                                or "assigned source event" in repair_reason
+                                else "Retry with a shorter or simpler scene "
+                                "description, or use a model with a larger "
+                                "output limit."
+                            )
+                            raise RuntimeError(
+                                f"{progress_label.capitalize()} planning "
+                                f"could not produce usable shot plans for "
+                                f"global clips {missing_start}-{missing_end} "
+                                f"of {total} after "
+                                f"{max_repair_attempts} failed repair "
+                                f"attempts. Last issue: {repair_reason}. "
+                                f"{recovery}"
+                            )
+
+                if len(rows) != expected:
+                    raise RuntimeError(
+                        f"{progress_label.capitalize()} planning produced "
+                        f"{len(rows)} usable rows for {expected} items."
+                    )
                 stored_batches[key] = {
                     "count": expected,
+                    "expected_count": expected,
                     "rows": copy.deepcopy(rows),
                 }
                 checkpoint.update({
@@ -272,6 +436,77 @@ class BasePlanner(ABC):
                     "complete": False,
                 })
                 self._publish_planning_checkpoint(checkpoint)
+
+            else:
+                if (
+                    isinstance(saved_rows, list)
+                    and int(saved.get("count") or 0) == expected
+                ):
+                    rows = [dict(row) for row in saved_rows if isinstance(row, dict)]
+                    if len(rows) != expected:
+                        rows = []
+                else:
+                    rows = []
+
+                if not rows:
+                    self._emit_planning_progress(
+                        message=(
+                            f"Planning {progress_label} batch "
+                            f"{batch_index}/{batch_total}..."
+                        ),
+                        current=start,
+                        total=total,
+                        stage=stage,
+                        batch=batch_index,
+                        batch_count=batch_total,
+                    )
+                    previous = output[-1] if output else None
+                    try:
+                        candidate = call_batch(
+                            batch_index,
+                            start,
+                            batch_items,
+                            previous,
+                        )
+                        rows = [
+                            dict(row) for row in (candidate or [])
+                            if isinstance(row, dict)
+                        ][:expected]
+                    except InterruptedError:
+                        # Cancellation is a control-flow signal, not a malformed
+                        # planner response. Never convert an interrupted batch
+                        # into completed fallback rows or resume would skip work
+                        # the user explicitly stopped.
+                        raise
+                    except Exception as exc:
+                        print(
+                            f"[DirectorPlanner] {progress_label} batch "
+                            f"{batch_index}/{batch_total} failed; preserving prior "
+                            f"batches and using bounded fallbacks for this batch "
+                            f"({exc})."
+                        )
+                        rows = []
+
+                    while len(rows) < expected:
+                        item_index = start + len(rows)
+                        fallback = (
+                            fallback_factory(item_index, source[item_index])
+                            if callable(fallback_factory) else {}
+                        )
+                        rows.append(dict(fallback or {}))
+
+                    stored_batches[key] = {
+                        "count": expected,
+                        "rows": copy.deepcopy(rows),
+                    }
+                    checkpoint.update({
+                        "stage": stage,
+                        "batch_size": size,
+                        "completed_items": start + expected,
+                        "total_items": total,
+                        "complete": False,
+                    })
+                    self._publish_planning_checkpoint(checkpoint)
 
             output.extend(rows)
             self._emit_planning_progress(

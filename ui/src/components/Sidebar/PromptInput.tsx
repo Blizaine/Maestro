@@ -19,6 +19,7 @@ import {
 } from '../../lib/h3WindowTiming'
 import { ComposerContext, ComposerToolbarItem } from './SidebarPanels'
 import { SidebarMenu } from './SidebarMenu'
+import { Flux3PromptHelper } from './Flux3PromptHelper'
 
 const placeholders: Record<string, string> = {
   image: 'Describe your image...',
@@ -582,7 +583,10 @@ export function PromptInput() {
               : modePlaceholder}
           className={`studio-prompt-textarea block w-full resize-none px-3 py-2 text-base md:text-sm text-text-primary placeholder:text-text-muted focus:outline-none transition-colors ${compact ? 'min-h-[72px] bg-transparent border border-transparent rounded-lg focus:border-border-light' : `${composer?.expanded ? 'min-h-[260px]' : 'min-h-[104px]'} bg-bg-tertiary border border-border rounded-xl focus:border-accent-blue`}`}
         />
-        <ComposerToolbarItem>{isAudioOnly ? (
+        {/* One portal keeps conditional helpers before the existing enhancer after model switches. */}
+        <ComposerToolbarItem><div className={`${composer ? 'relative' : 'absolute right-2 bottom-2'} flex items-center justify-end gap-2`}>
+        {generationMode === 'image' && modelType.startsWith('flux3') && <Flux3PromptHelper />}
+        {isAudioOnly ? (
           /* TTS: mode-aware split button. Main button uses default mode based
              on voice-slot count; dropdown exposes both Speech and Dialogue
              explicitly so the user can override regardless of voice count.
@@ -591,7 +595,7 @@ export function PromptInput() {
              slots — bad UX trap especially with audio_mode_from_voice_count
              models like Scenema where the user may want a generated-voice
              dialogue script as a starting point. */
-          <div ref={menuRef} className={composer ? 'relative' : 'absolute right-2 bottom-2'}>
+          <div ref={menuRef} className="relative">
             <div className="flex items-center">
               <button
                 onClick={() => enhancePrompt(defaultMode)}
@@ -651,7 +655,7 @@ export function PromptInput() {
             )}
           </div>
         ) : (
-          <div ref={setEnhanceAnchor} className={`${composer ? 'relative' : 'absolute right-2 bottom-2'} flex items-center`}>
+          <div ref={setEnhanceAnchor} className="relative flex items-center">
             <button type="button" onClick={() => enhancePrompt()}
               disabled={isEnhancing || !prompt.trim()} aria-label="Enhance prompt" title="Enhance now — preserve your requirements and develop your idea"
               className="min-h-8 rounded-l-md p-2 text-text-muted hover:text-accent-blue hover:bg-bg-hover disabled:opacity-40">
@@ -678,7 +682,7 @@ export function PromptInput() {
               </button>}
             </SidebarMenu>
           </div>
-        )}</ComposerToolbarItem>
+        )}</div></ComposerToolbarItem>
       </div>
     </div>
   )

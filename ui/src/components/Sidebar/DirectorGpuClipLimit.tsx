@@ -2,16 +2,19 @@ import { useEffect, useState } from 'react'
 import { fetchDirectorMusicClipLimits, type DirectorMusicClipLimits } from '../../api/client'
 import { resolveResolution, useStore } from '../../stores/useStore'
 import type { ModelOptions } from '../../types'
+import { h3RecommendationLabel } from '../../lib/h3Memory'
 import { formatSeconds } from './DurationSlider'
 
 export function DirectorGpuClipLimit({model, options}: {model: string; options: ModelOptions | null}) {
   const resolution = useStore(s => s.directorResolution)
   const aspect = useStore(s => s.directorAspectRatio)
+  const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
+  const totalRamGb = useStore(s => s.systemStats?.ram?.total_gb ?? 0)
   const frames = useStore(s => s.directorVideoMaxShotFramesByModel[model])
   const setFrames = useStore(s => s.setDirectorVideoMaxShotFrames)
   const [result, setResult] = useState<{key: string; limits?: DirectorMusicClipLimits; error?: string} | null>(null)
   const canvas = resolveResolution(options, resolution, aspect)
-  const key = JSON.stringify([model, canvas, frames])
+  const key = JSON.stringify([model, canvas, frames, totalVramGb, totalRamGb])
   const bounded = Boolean(options?.frames_maximum && (options?.architecture?.startsWith('minimax_h3') || options?.omni_reference
     || options?.director_memory_policy || options?.sliding_window_memory_policy))
   useEffect(() => {
@@ -31,6 +34,7 @@ export function DirectorGpuClipLimit({model, options}: {model: string; options: 
   const step = Math.max(1, limits?.frame_step || options.frames_steps || 1)
   const choices = Array.from({length: Math.floor((maximum - minimum) / step) + 1}, (_, i) => minimum + i * step)
   const recommended = limits?.recommended_frames
+  const recommendationLabel = h3RecommendationLabel(limits?.recommendation_basis)
   return <div role="group" aria-label="GPU clip limit" className="space-y-1">
     <div className="flex items-center justify-between gap-2">
       <label htmlFor="director-gpu-clip-limit" className="text-[11px] text-text-secondary">GPU clip limit</label>
@@ -43,7 +47,14 @@ export function DirectorGpuClipLimit({model, options}: {model: string; options: 
     </div>
     <p className="text-[10px] leading-relaxed text-text-muted">Maximum generated duration per shot. Music-led cuts can be shorter. Your choice is remembered for this model.</p>
     {frames && recommended && frames > recommended
-      ? <p className="text-[10px] text-amber-400">Above Auto’s {formatSeconds(recommended / fps)} recommendation; uses more GPU memory.</p>
+      ? <p className="text-[10px] text-amber-400">Above recommended starting point; actual memory fit depends on hardware and generation inputs.</p>
       : result?.key === key && result.error && <p className="text-[10px] text-amber-400">{result.error}</p>}
+    {limits && <details className="text-[10px] text-text-muted" data-testid="director-gpu-recommendation">
+      <summary className="cursor-pointer">{recommendationLabel} · {formatSeconds(limits.recommended_seconds)}</summary>
+      <div className="pt-1">
+        <p>{limits.recommendation_note || 'Use this duration as a starting point for these model and resource conditions; actual fit depends on generation inputs.'}</p>
+        {limits.recommendation_version != null && <p>Guidance updated {limits.recommendation_version}.</p>}
+      </div>
+    </details>}
   </div>
 }

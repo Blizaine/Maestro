@@ -47,7 +47,7 @@ class ModelVisibilityDefaultsTests(unittest.TestCase):
             source,
         )
         self.assertIn(
-            "enabledModels.has(savedModel)",
+            "bootEnabled.has(savedModel)",
             source,
         )
 

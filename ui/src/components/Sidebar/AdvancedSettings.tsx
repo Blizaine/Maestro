@@ -13,6 +13,7 @@ import { WindowSettings } from './DurationSlider'
 import { DirectorH3Optimizations } from './DirectorH3Optimizations'
 import { H3MediaControls } from './H3MediaControls'
 import { MiniMaxH3Optimizations } from './MiniMaxH3Optimizations'
+import { directorH3SlaEnabled } from '../../lib/h3Attention'
 import { AutomaticFaceRefiner } from '../Characters/FaceRefiner'
 import { SidebarDialog } from './SidebarPanels'
 import type { GenerateParams } from '../../types'
@@ -259,6 +260,8 @@ function useAdvancedActiveSections(): Record<AdvancedSectionKey, string[]> {
   const directorVideoModel = useStore(s => s.selectedModelPerMode.video || '')
   const directorTurboMode = useStore(s => s.directorH3TurboModeByModel)
   const directorSolMode = useStore(s => s.directorH3SolModeByModel)
+  const directorSlaMode = useStore(s => s.directorH3SlaModeByModel)
+  const directorVedaMode = useStore(s => s.directorH3VedaModeByModel)
   const directorFirstBlockCache = useStore(s => s.directorH3FirstBlockCacheByModel)
   const spatialUpsampling = useStore(s => s.spatialUpsampling)
   const filmGrainIntensity = useStore(s => s.filmGrainIntensity)
@@ -284,12 +287,16 @@ function useAdvancedActiveSections(): Record<AdvancedSectionKey, string[]> {
   const items: Record<AdvancedSectionKey, string[]> = { performance: [], finishing: [], loras: [], generation: [] }
   if (sidebarMode === 'director') {
     if (directorTurboMode[directorVideoModel] === true) items.performance.push('H3 Turbo')
-    if (directorSolMode[directorVideoModel] === true) {
-      items.performance.push(
-        directorVideoModel.includes('fused_turbo')
-          ? 'H3 SLA'
-          : 'H3 Sol Engine',
-      )
+    const fused = directorVideoModel.includes('fused_turbo')
+    if (directorVedaMode[directorVideoModel] === true) {
+      items.performance.push('H3 Veda')
+    } else if (directorH3SlaEnabled(
+      { sla_attention: true, sla_attention_default: fused },
+      directorVideoModel, directorSlaMode, directorSolMode,
+    )) {
+      items.performance.push('H3 SLA')
+    } else if (!fused && directorSolMode[directorVideoModel] === true) {
+      items.performance.push('H3 Sol Engine')
     }
     if (directorFirstBlockCache[directorVideoModel] === true) items.performance.push('First Block Cache')
     return items
@@ -299,6 +306,7 @@ function useAdvancedActiveSections(): Record<AdvancedSectionKey, string[]> {
     if (params.minimax_h3_turbo_mode && modelOptions?.minimax_h3_turbo) items.performance.push('H3 Turbo')
     if (params.override_attention === 'sol') items.performance.push('H3 Sol Engine')
     if (params.override_attention === 'sla') items.performance.push('H3 SLA')
+    if (params.override_attention === 'veda') items.performance.push('H3 Veda')
     if (params.skip_steps_cache_type === 'first_block') items.performance.push('First Block Cache')
     if (generationMode !== 'audio' && params.custom_settings?.audio_refinement === 'enabled') items.finishing.push('Audio refinement')
   }
@@ -682,6 +690,17 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
                 </div>
               ) : null}
 
+              {modelOptions?.minimax_h3_video_vae_choices?.length ? (
+                <div>
+                  <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">H3 Video Decoder</label>
+                  <select aria-label="H3 Video Decoder" value={params.minimax_h3_video_vae || 'auto'}
+                    onChange={event => setParam('minimax_h3_video_vae', event.target.value as NonNullable<typeof params.minimax_h3_video_vae>)}
+                    className="w-full bg-bg-tertiary border border-border rounded px-2.5 py-1.5 text-xs text-text-primary">
+                    {modelOptions.minimax_h3_video_vae_choices.map(choice => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+                  </select>
+                  <p className="text-[9px] text-text-muted mt-1">LightVAE uses a smaller 12-layer decoder; detail may differ. Start/end frames and references keep the original encoder. H3 VAE x2 uses its dedicated decoder. Changing this reloads the model.</p>
+                </div>
+              ) : null}
               {modelOptions?.ltx25_video_vae_choices?.length ? (
                 <div>
                   <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">

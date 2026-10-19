@@ -10,9 +10,16 @@ Maestro changes: pinned downloads, optional score-model acquisition, handler
 signatures, cancellation/progress compatible with MMGP 3.7.12, audio/score
 provenance, and release of retained acoustic latents after each song.
 
-Optimized checkpoints: DeepBeepMeep/TTS revision
-`864a479cbf3e810e1b2c1993b438510750e383b2`. Weights use CC BY-NC 4.0;
-see MODEL_LICENSE. This is separate from the code licenses.
+Optimized checkpoints: DeepBeepMeep/TTS download snapshot
+`6e87e439357e25ebb563628a2ea6e93a46a8c4b1`, pinned in `assets.json`.
+On October 14, the upstream repository's consolidated history no longer exposed
+the original snapshot `864a479cbf3e810e1b2c1993b438510750e383b2`. The replacement
+snapshot matches all 23 manifest entries' sizes and recorded weight hashes.
+Existing artist styles and generated metadata retain the original base-weight
+compatibility identity because the weights themselves are unchanged. Inference
+and optional training acquisition share the replacement download pin; installed
+matching assets remain reusable. Weights use CC BY-NC 4.0; see MODEL_LICENSE.
+This is separate from the code licenses.
 
 Integration and hardware validation are tracked in the v2.2.0 work log.
 

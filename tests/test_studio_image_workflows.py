@@ -60,7 +60,6 @@ class StudioImageWorkflowUiTests(unittest.TestCase):
         self.assertIn("Edit Mask", controls)
         self.assertIn("Expand Canvas", controls)
         self.assertIn("White areas are regenerated", controls)
-        self.assertIn("Use selected gallery image", controls)
 
     def test_image_upscale_has_still_safe_methods(self):
         tools = _read(TOOLS_PATH)

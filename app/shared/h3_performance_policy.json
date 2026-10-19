@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "revision": 2,
+  "scope": {
+    "architecture_prefix": "minimax_h3",
+    "full_checkpoint_flag": "minimax_h3_full_checkpoint",
+    "excluded_architectures": [
+      "minimax_h3_voice_audio"
+    ],
+    "excluded_flags": [
+      "audio_only",
+      "minimax_h3_viggle"
+    ],
+    "excluded_params": [
+      "image_mode"
+    ],
+    "output_type": "video",
+    "gpu_vram_gb_min": 11.0,
+    "gpu_vram_gb_max": 12.5,
+    "ram_gb_min": 30.0
+  },
+  "geometry": {
+    "fps": 24,
+    "video_latent_frame_offset": 5,
+    "video_latent_frame_divisor": 17,
+    "video_latent_multiplier": 5,
+    "video_latent_bias": 2,
+    "area_divisor": 1024,
+    "audio_latent_fps": 24,
+    "audio_latent_rate": 40,
+    "audio_latent_multiplier": 2,
+    "resolution_pixels_field": "auto_resolution_pixels",
+    "canvas_alignment": 32,
+    "medium_max_frames": 362,
+    "medium_max_area_pixels": 2088960
+  },
+  "bands": {
+    "off_max_target_rows": 100000,
+    "low_max_target_rows": 165000,
+    "medium_max_target_rows": 220000
+  },
+  "benchmark": {
+    "gpu_name_contains": "RTX 3080 Ti",
+    "gpu_vram_gb": 12.0,
+    "ram_gb": 31.76,
+    "profile": 4,
+    "quantization": "INT8 ConvRot",
+    "allocator": "vmm",
+    "smart_memory_pinning": true,
+    "read_ahead": false,
+    "variants": {
+      "fused_turbo": {
+        "steps": 6,
+        "attention": "sla"
+      },
+      "pruned": {
+        "steps": 20,
+        "attention": "sage2"
+      }
+    },
+    "completed_points": [
+      {
+        "frames": 124,
+        "width": 1280,
+        "height": 704,
+        "split": 0
+      },
+      {
+        "frames": 243,
+        "width": 1280,
+        "height": 704,
+        "split": 0
+      },
+      {
+        "frames": 362,
+        "width": 1280,
+        "height": 704,
+        "split": 0
+      },
+      {
+        "frames": 124,
+        "width": 1920,
+        "height": 1088,
+        "split": 0
+      },
+      {
+        "frames": 243,
+        "width": 1920,
+        "height": 1088,
+        "split": 1,
+        "fused_turbo_minutes": 18,
+        "pruned_minutes": 116
+      },
+      {
+        "frames": 362,
+        "width": 1920,
+        "height": 1088,
+        "split": 2,
+        "fused_turbo_minutes": 32,
+        "pruned_cancelled_projected_hours": true
+      }
+    ],
+    "limitations": [
+      "Targets are estimated row bands, not the full packed transformer sequence length.",
+      "The evidence covers the recorded RTX 3080 Ti 12 GB / 31.76 GB RAM setup and listed model settings only.",
+      "References and LoRAs were not included in the row estimate.",
+      "No completed large 1080p LoRA run or H3 Full benchmark is available."
+    ],
+    "text_encoder": "gguf_q2_k"
+  }
+}

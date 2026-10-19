@@ -111,6 +111,48 @@ class TestDirectorMusicTimeline(unittest.TestCase):
                 source = plan["_director_source_clip_indices"][0]
                 self.assertEqual(os.path.basename(image), f"shot-{source}.png")
 
+    def test_planning_failure_finishes_stream_without_queuing_media(self):
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            record = {"id": "failed-plan", "status": "running",
+                      "params": copy.deepcopy(self.params), "out_dir": directory,
+                      "clip_plans": [], "clip_images": [], "output_files": [],
+                      "progress": {}, "llm_streaming": False,
+                      "_llm_passes": [{"pass": "generate_1", "response_text": "Rejected plan"}]}
+            stack.enter_context(mock.patch.dict(pipeline._pipelines, {"failed-plan": record}))
+            save = stack.enter_context(mock.patch.object(pipeline, "_save_pipeline_state"))
+            stack.enter_context(mock.patch.object(pipeline, "_validate_director_models"))
+            stack.enter_context(mock.patch.object(pipeline, "_wait_for_gpu", return_value=True))
+            stack.enter_context(mock.patch.object(pipeline, "_run_planning",
+                                                 side_effect=RuntimeError("Invalid source-action plan")))
+            render = stack.enter_context(mock.patch.object(pipeline, "_run_video_generation"))
+            # Error cleanup uses the already-loaded engine in production.
+            stack.enter_context(mock.patch.dict(sys.modules, {"wgp": pipeline._wgp}))
+            pipeline._run_pipeline("failed-plan")
+            self.assertEqual(record["status"], "failed")
+            self.assertFalse(record["llm_streaming"])
+            self.assertEqual(record["output_files"], [])
+            self.assertTrue(record["_llm_log"]["incomplete"])
+            self.assertEqual(record["_llm_log"]["passes"][0]["response_text"], "Rejected plan")
+            self.assertIsNot(record["_llm_log"]["passes"], record["_llm_passes"])
+            render.assert_not_called()
+            self.assertTrue(save.called)
+
+    def test_cancelled_rehydrated_run_can_retain_calls_before_params_are_loaded(self):
+        record = {
+            "id": "cancelled-plan", "status": "cancelled",
+            "params": {"llm_provider": "local", "llm_model_id": "installed-writer"},
+            "llm_streaming": True,
+            "_llm_passes": [{"pass": "generate_1", "response_text": "Rejected plan"}],
+        }
+        with mock.patch.dict(pipeline._pipelines, {"cancelled-plan": record}), \
+                mock.patch.object(pipeline, "_save_pipeline_state") as save:
+            pipeline._run_pipeline("cancelled-plan")
+        self.assertEqual(record["status"], "cancelled")
+        self.assertFalse(record["llm_streaming"])
+        self.assertEqual(record["_llm_log"]["model_id"], "installed-writer")
+        self.assertTrue(record["_llm_log"]["incomplete"])
+        save.assert_called_once_with("cancelled-plan")
+
 
 if __name__ == "__main__":
     unittest.main()

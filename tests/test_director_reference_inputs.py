@@ -71,6 +71,12 @@ class TestDirectorReferenceInputs(unittest.TestCase):
             return json.dumps([{
                 "scene_goal": "A solo view of the drummer from the band photo",
                 "scene_type": "performance",
+                "continuity_strategy": "continuous",
+                "physical_state": {
+                    "opening": [],
+                    "transitions": [],
+                    "continuity": "continuous",
+                },
                 "subjects_on_screen": [{"character_id": "drummer", "speaker_name": "Drummer",
                     "visual_description": "The long-haired drummer from the reference image",
                     "location_in_frame": "center", "facing_direction": "front"}],
@@ -102,7 +108,7 @@ class TestDirectorReferenceInputs(unittest.TestCase):
         self.assertTrue(calls)
         self.assertEqual(calls[0]["image_paths"], [self.paths[0]])
         self.assertIn("VISUAL REFERENCE IDENTITY", calls[0]["system_prompt"])
-        self.assertIn("group photo", calls[0]["system_prompt"])
+        self.assertIn("group image", calls[0]["system_prompt"])
         self.assertIn("long-haired drummer", plans[0]["video_prompt"])
         self.assertEqual(params["minimax_h3_references"][0]["path"], self.paths[0])
 

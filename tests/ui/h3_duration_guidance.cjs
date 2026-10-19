@@ -12,7 +12,14 @@ const modelOptions = {
   sliding_window_defaults: {window_min: 124, window_max: 345, window_step: 17,
     window_default: 243, overlap_min:1, overlap_step:17, overlap_offset:1,
     overlap_default: 18, discard_last_frames: 0},
-  sliding_window_memory_policy: {resolution_bands: [{min_pixels: 0, vram_tiers: [
+  sliding_window_memory_policy: {checkpoint:'fused_4step', resource_recommendations:{version:'fixture-2026-10-14',tiers:[
+    {checkpoint:'fused_4step',min_vram_gb:12,max_vram_gb:12,min_ram_gb:32,max_ram_gb:48,
+      min_pixels:800000,max_pixels:901120,frames:345,basis:'tested',
+      note:'Repeated 720p passes through 345 frames completed.',evidence:['ui-fixture-run']},
+    {checkpoint:'fused_4step',min_vram_gb:8,max_vram_gb:8,min_ram_gb:16,max_ram_gb:32,
+      min_pixels:800000,max_pixels:901120,frames:243,basis:'estimated',
+      note:'Estimated starting point for 8 GB VRAM and 16 GB system RAM.'},
+  ]}, resolution_bands: [{min_pixels: 0, vram_tiers: [
     {max_vram_gb: 16, frames: 243}, {frames: 345}]}]},
 };
 (async () => {
@@ -60,11 +67,12 @@ const modelOptions = {
     const guidance=dialog.getByTestId('h3-duration-guidance');
     await guidance.waitFor();
     assert.equal(await guidance.getAttribute('data-speed-path'),'fast');
-    assert.equal(await guidance.getAttribute('data-memory-risk'),'within-profile');
-    assert.match(await guidance.innerText(),/Faster path expected/);
+    assert.equal(await guidance.getAttribute('data-memory-risk'),'caution');
+    assert.match(await guidance.innerText(),/Conservative starting point/);
+    assert.match(await guidance.innerText(),/Native normalization path/);
     const initialPopup=await dialog.boundingBox();
-    for (const label of [guidance.getByText('Faster path expected',{exact:true}),
-      guidance.getByText(/Within GPU recommendation/)]) {
+    for (const label of [guidance.getByText('Native normalization path',{exact:true}),
+      guidance.getByText(/Conservative starting point/)]) {
       const box=await label.boundingBox();
       assert.ok(box.y>=initialPopup.y && box.y+box.height<=initialPopup.y+initialPopup.height,
         'Speed and VRAM guidance are visible when Duration first opens');
@@ -75,15 +83,38 @@ const modelOptions = {
     const popupBefore=await dialog.boundingBox();
     await page.evaluate(()=>{const s=window.store.getState();s.setSlidingWindowSeconds(345/24);s.setDurationSeconds(345/24);});
     await page.waitForFunction(()=>document.querySelector('[data-speed-path="chunked"]'));
-    assert.equal(await guidance.getAttribute('data-memory-risk'),'within-profile');
+    assert.equal(await slider.inputValue(),'345','the manual window length remains selected');
+    assert.equal(await guidance.getAttribute('data-memory-risk'),'caution');
+    await page.evaluate(()=>window.store.setState({systemStats:{gpu:{vram_total_gb:12},ram:{total_gb:32}}}));
+    await page.waitForFunction(()=>document.querySelector('[data-memory-risk="within-profile"]'));
+    assert.equal((await slider.boundingBox()).y,sliderBefore.y,'recommendation updates do not move the slider');
+    assert.equal(await slider.inputValue(),'345','recommendation updates preserve the manual window length');
+    assert.match(await guidance.innerText(),/Tested recommendation · 12 GB GPU · 14.4s/);
+    assert.doesNotMatch(await guidance.innerText(),/Potential out of memory/);
+    await guidance.getByText('Why this estimate?',{exact:true}).click();
+    assert.match(await guidance.innerText(),/Repeated 720p passes through 345 frames completed/);
+    assert.match(await guidance.innerText(),/Guidance updated fixture-2026-10-14/);
+    assert.doesNotMatch(await guidance.innerText(),/ui-fixture-run/);
+    await guidance.getByText('Why this estimate?',{exact:true}).click();
     assert.equal((await dialog.boundingBox()).height,popupBefore.height,'Guidance keeps popup height stable');
-    assert.equal((await slider.boundingBox()).y,sliderBefore.y,'Guidance changes do not move the slider');
     await page.evaluate(()=>window.store.setState({systemStats:{gpu:{vram_total_gb:16}}}));
-    await page.waitForFunction(()=>document.querySelector('[data-memory-risk="high"]'));
+    await page.waitForFunction(()=>document.querySelector('[data-memory-risk="caution"]'));
     assert.match(await guidance.innerText(),/16 GB GPU/);
     await page.evaluate(()=>window.store.setState({systemStats:null}));
     await page.waitForFunction(()=>document.querySelector('[data-memory-risk="unknown"]'));
-    assert.match(await guidance.innerText(),/VRAM assessment unavailable/);
+    assert.match(await guidance.innerText(),/No automatic memory recommendation · VRAM unavailable/);
+
+    await page.evaluate(()=>{
+      const s=window.store.getState();window.store.setState({systemStats:{gpu:{vram_total_gb:8},ram:{total_gb:16}}});
+      s.setSlidingWindowSeconds(328/24);s.setDurationSeconds(328/24);
+    });
+    await page.waitForFunction(()=>document.querySelector('[data-testid="h3-duration-guidance"]')?.innerText.includes('Estimated starting point'));
+    assert.match(await guidance.innerText(),/Estimated starting point · 8 GB GPU · 10.1s/);
+    assert.match(await guidance.innerText(),/Above recommended starting point/);
+    assert.doesNotMatch(await guidance.innerText(),/Potential out of memory/);
+    assert.equal(await guidance.getAttribute('data-memory-risk'),'caution');
+    assert.equal(await page.evaluate(()=>window.store.getState().params.sliding_window_size),328,
+      'the estimate does not replace the selected manual duration');
 
     await page.evaluate(()=>{
       const s=window.store.getState();window.store.setState({systemStats:{gpu:{vram_total_gb:24}},
@@ -94,7 +125,7 @@ const modelOptions = {
       s.setSlidingWindowSeconds(243/24);s.setDurationSeconds(243/24);
     });
     await page.waitForFunction(()=>document.querySelector('[data-speed-path]')?.dataset.speedPath!=='fast');
-    assert.notEqual(await guidance.getAttribute('data-speed-path'),'fast','Video reference removes confident faster advice');
+    assert.notEqual(await guidance.getAttribute('data-speed-path'),'fast','Video reference removes a confident native normalization estimate');
     await page.evaluate(()=>{
       const s=window.store.getState();window.store.setState({studioVideoWorkflow:'frames',
         modelOptions:{...s.modelOptions,omni_reference:false},params:{...s.params,minimax_h3_references:[]}});
@@ -108,6 +139,8 @@ const modelOptions = {
     await page.waitForFunction(()=>document.querySelector('[data-memory-risk="high"]'));
     assert.equal(await guidance.getAttribute('data-speed-path'),'chunked');
     assert.match(await guidance.getByTestId('h3-extended-warning').innerText(),/This pass exceeds.*14.4s/);
+    assert.match(await guidance.innerText(),/Chunked normalization path/);
+    assert.doesNotMatch(await guidance.innerText(),/Slower path expected/);
     assert.match(await guidance.innerText(),/30s experimental/);
     assert.equal(await page.evaluate(()=>window.store.getState().params.sliding_window_size),719);
 

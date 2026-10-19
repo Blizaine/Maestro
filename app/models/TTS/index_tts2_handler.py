@@ -207,7 +207,10 @@ class family_handler:
 
     @staticmethod
     def query_model_def(base_model_type, model_def):
-        return _get_index_tts2_model_def()
+        return {
+            **_get_index_tts2_model_def(),
+            "device_explicit": base_model_type == "index_tts2",
+        }
 
     @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):

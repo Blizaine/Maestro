@@ -211,15 +211,15 @@ export function ToolsPanel({
                 onChange={e => { const f = e.target.files?.[0]; if (f) handleSourceUpload(f) }}
               />
             </div>
-            <button
+            {mediaKind === 'video' && <button
               onClick={useCurrentClip}
               disabled={!currentMatchesMedia}
               className="w-full text-[11px] py-1.5 rounded-md border border-border bg-bg-tertiary text-text-secondary hover:text-text-primary disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
               {currentMatchesMedia
-                ? `Use selected gallery ${mediaKind}`
-                : `Select ${mediaKind === 'image' ? 'an image' : 'a video'} in the gallery first`}
-            </button>
+                ? 'Use selected gallery video'
+                : 'Select a video in the gallery first'}
+            </button>}
           </div>
         )}
       </div>

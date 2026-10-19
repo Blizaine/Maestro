@@ -187,6 +187,31 @@ function mockIcons() {
   return new Proxy({}, {get: (_target, name) => `icon:${String(name)}`});
 }
 
+const visibilityMediaLabels = {video: 'Video', image: 'Image', audio: 'Audio'};
+const visibilityScopeLabels = {'image:generate': 'Image · Generate'};
+
+function settingsButton(tree, ariaLabel) {
+  return findAll(tree, node => node.type === 'button' && node.props?.['aria-label'] === ariaLabel)[0];
+}
+
+async function expandSettingsScope(harness, scope) {
+  const [media] = scope.split(':');
+  let tree = await renderUntilSettled(harness.hooks, harness.render);
+  const mediaButton = settingsButton(tree, visibilityMediaLabels[media]);
+  assert.ok(mediaButton, `${media} visibility section is available`);
+  if (!mediaButton.props['aria-expanded']) {
+    mediaButton.props.onClick();
+    tree = await renderUntilSettled(harness.hooks, harness.render);
+  }
+  const workflowButton = settingsButton(tree, visibilityScopeLabels[scope]);
+  assert.ok(workflowButton, `${scope} visibility workflow is available under ${media}`);
+  if (!workflowButton.props['aria-expanded']) {
+    workflowButton.props.onClick();
+    tree = await renderUntilSettled(harness.hooks, harness.render);
+  }
+  return tree;
+}
+
 function createSettingsHarness(initialStatus, options = {}) {
   const hooks = createHookRuntime();
   const model = {
@@ -229,7 +254,7 @@ function createSettingsHarness(initialStatus, options = {}) {
     },
   };
   const store = {
-    models: [model], families: [family], enabledModels: new Set(), servicesConfig: {nsfw_mode: false},
+    models: [model], families: [family], enabledModels: new Set(), modelVisibilityOverrides: {}, servicesConfig: {nsfw_mode: false},
     modelVisibilityFocus: null,
     toggleModelEnabled: () => { calls.toggle += 1; },
     resetEnabledModels: () => {}, setAllModelsEnabled: () => {}, setModelsEnabled: () => {},
@@ -244,9 +269,13 @@ function createSettingsHarness(initialStatus, options = {}) {
     '../../types': {},
     '../../stores/useStore': {
       useStore,
+      getModelGroupsForVisibilityScope: scope => scope === 'image:generate' ? [{family, models: [model]}] : [],
       getFamiliesForMode: mode => mode === 'image' ? [family] : [],
       getModelsForFamily: (_familyId, models, mode) => mode === 'image' ? models : [],
     },
+    '../../lib/modelVisibility': loadTypeScript('ui/src/lib/modelVisibility.ts', () => ({})),
+    '../../lib/modelDisplay': loadTypeScript('ui/src/lib/modelDisplay.ts', () => ({})),
+    './MemorySettingsPanel': {MemorySettingsPanel: () => null},
     '../../api/client': modelApi,
     '../../lib/theme': {FAMILIES: [], resolveVariant: () => null, onOsThemeChange: () => () => {}},
   };
@@ -289,13 +318,11 @@ async function testClientUsesOpaqueCancellationContracts() {
 
 async function testSettingsRetryCancelAcknowledgementAndReopen() {
   const harness = createSettingsHarness({status: 'cancelled', error: null, cancellable: false});
-  let tree = await renderUntilSettled(harness.hooks, harness.render);
-  const imageMode = findAll(tree, node => node.type === 'button' && textContent(node).includes('Image'))[0];
-  imageMode.props.onClick();
-  tree = await renderUntilSettled(harness.hooks, harness.render);
+  let tree = await expandSettingsScope(harness, 'image:generate');
 
-  let downloadButton = findAll(tree, node => node.type === 'button' && textContent(node).trim() === 'Retry')[0];
+  let downloadButton = settingsButton(tree, 'Retry download model files for Flux Model');
   assert.ok(downloadButton, 'Cancelled downloads can be retried');
+  assert.equal(textContent(downloadButton), '', 'Retry is an icon-only action with an accessible label');
   const modelLabel = findAll(tree, node => node.type === 'label' && textContent(node).includes('Flux Model'))[0];
   assert.ok(modelLabel, 'The enable checkbox keeps a separate label');
   assert.equal(containsNode(modelLabel, downloadButton), false, 'Download is outside the checkbox label');
@@ -303,8 +330,9 @@ async function testSettingsRetryCancelAcknowledgementAndReopen() {
   harness.setStatus({status: 'downloading', error: null, cancel_id: 'opaque-model-cancel', cancellable: true});
   await downloadButton.props.onClick();
   tree = await renderUntilSettled(harness.hooks, harness.render);
-  let cancelButton = findAll(tree, node => node.type === 'button' && textContent(node).trim() === 'Cancel')[0];
+  let cancelButton = settingsButton(tree, 'Cancel download for Flux Model');
   assert.ok(cancelButton, 'The active, server-cancellable model shows Cancel');
+  assert.equal(textContent(cancelButton), '', 'Cancel is an icon-only action with an accessible label');
   assert.equal(harness.calls.toggle, 0, 'Download did not activate the model checkbox');
 
   const cancelPromise = cancelButton.props.onClick();
@@ -320,7 +348,7 @@ async function testSettingsRetryCancelAcknowledgementAndReopen() {
   harness.setStatus({status: 'cancelled', error: null, cancellable: false});
   await harness.hooks.runNextInterval();
   tree = await renderUntilSettled(harness.hooks, harness.render);
-  downloadButton = findAll(tree, node => node.type === 'button' && textContent(node).trim() === 'Retry')[0];
+  downloadButton = settingsButton(tree, 'Retry download model files for Flux Model');
   assert.ok(downloadButton, 'The row becomes retryable after the backend acknowledges cancellation');
   assert.match(textContent(tree), /Cancelled/, 'Acknowledged cancellation gets a neutral status beside retry');
   assert.equal(findAll(tree, node => node.props?.role === 'alert').length, 0, 'Cancellation is not shown as a failed download');
@@ -328,37 +356,35 @@ async function testSettingsRetryCancelAcknowledgementAndReopen() {
   tree = await renderUntilSettled(harness.hooks, harness.render);
   assert.deepEqual(harness.calls.download, ['flux_model', 'flux_model'], 'Retry after cancellation starts the model download again');
   assert.equal(harness.calls.toggle, 0, 'Retry still does not toggle model visibility');
-  assert.equal(downloadButton.props.className.includes('min-h-[40px]'), true, 'The Settings download target is sized for touch');
+  assert.equal(downloadButton.props.className.includes('h-7'), true, 'The Settings retry action uses the compact 28px height');
+  assert.equal(downloadButton.props.className.includes('w-7'), true, 'The Settings retry action uses a compact square target');
 
   const reopened = createSettingsHarness({
     status: 'downloading', error: null, cancel_id: 'reopened-model-cancel', cancellable: true,
   });
   reopened.model.is_downloaded = true;
-  let reopenedTree = await renderUntilSettled(reopened.hooks, reopened.render);
-  const reopenedImageMode = findAll(reopenedTree, node => node.type === 'button' && textContent(node).includes('Image'))[0];
-  reopenedImageMode.props.onClick();
-  reopenedTree = await renderUntilSettled(reopened.hooks, reopened.render);
-  const reopenedCancelButton = findAll(reopenedTree, node => node.type === 'button' && textContent(node).trim() === 'Cancel')[0];
+  let reopenedTree = await expandSettingsScope(reopened, 'image:generate');
+  const reopenedCancelButton = settingsButton(reopenedTree, 'Cancel download for Flux Model');
   assert.ok(reopenedCancelButton,
     'An active transfer takes precedence over is_downloaded when Settings reopens');
-  assert.equal(reopenedCancelButton.props.className.includes('min-h-[40px]'), true, 'The Settings cancel target is sized for touch');
+  assert.equal(textContent(reopenedCancelButton), '', 'Reopened Cancel remains an icon-only accessible action');
+  assert.equal(reopenedCancelButton.props.className.includes('h-7'), true, 'The Settings cancel action uses the compact 28px height');
+  assert.equal(reopenedCancelButton.props.className.includes('w-7'), true, 'The Settings cancel action uses a compact square target');
   const reopenedDelete = findAll(reopenedTree, node => node.type === 'button' && node.props?.title === 'Delete model files')[0];
   assert.equal(reopenedDelete.props.disabled, true, 'Delete cannot race an active transfer');
 
   reopened.rejectCancel();
-  const reopenedCancel = findAll(reopenedTree, node => node.type === 'button' && textContent(node).trim() === 'Cancel')[0];
+  const reopenedCancel = settingsButton(reopenedTree, 'Cancel download for Flux Model');
   reopenedCancel.props.onClick();
   reopenedTree = await renderUntilSettled(reopened.hooks, reopened.render);
   assert.match(textContent(reopenedTree), /Cancel failed/);
-  assert.ok(findAll(reopenedTree, node => node.type === 'button' && textContent(node).trim() === 'Cancel')[0],
+  assert.ok(settingsButton(reopenedTree, 'Cancel download for Flux Model'),
     'A cancellation error leaves only that model row retryable');
 }
 
 async function testSettingsRefreshesOnlyCatalogAfterCompletion() {
   const harness = createSettingsHarness({status: 'completed', error: null, cancellable: false});
-  let tree = await renderUntilSettled(harness.hooks, harness.render);
-  findAll(tree, node => node.type === 'button' && textContent(node).includes('Image'))[0].props.onClick();
-  tree = await renderUntilSettled(harness.hooks, harness.render);
+  const tree = await expandSettingsScope(harness, 'image:generate');
   assert.match(textContent(tree), /Complete/);
   assert.equal(harness.calls.loadModelOptions.length, 1);
   assert.equal(harness.calls.loadModelOptions[0]?.catalogOnly, true,
@@ -368,9 +394,7 @@ async function testSettingsRefreshesOnlyCatalogAfterCompletion() {
 async function testDownloadedTransformerCanResumeCancelledCompanionFiles() {
   const harness = createSettingsHarness({status: 'cancelled', error: null, cancellable: false});
   harness.model.is_downloaded = true;
-  let tree = await renderUntilSettled(harness.hooks, harness.render);
-  findAll(tree, node => node.type === 'button' && textContent(node).includes('Image'))[0].props.onClick();
-  tree = await renderUntilSettled(harness.hooks, harness.render);
+  let tree = await expandSettingsScope(harness, 'image:generate');
 
   assert.match(textContent(tree), /Cancelled/);
   assert.doesNotMatch(textContent(tree), /Downloaded/,
@@ -387,9 +411,7 @@ async function testDownloadedTransformerCanResumeCancelledCompanionFiles() {
 
   const failed = createSettingsHarness({status: 'failed', error: 'companion asset failed', cancellable: false});
   failed.model.is_downloaded = true;
-  let failedTree = await renderUntilSettled(failed.hooks, failed.render);
-  findAll(failedTree, node => node.type === 'button' && textContent(node).includes('Image'))[0].props.onClick();
-  failedTree = await renderUntilSettled(failed.hooks, failed.render);
+  let failedTree = await expandSettingsScope(failed, 'image:generate');
   assert.ok(findAll(failedTree, node => node.type === 'button'
     && node.props?.['aria-label'] === 'Retry download model files for Flux Model')[0],
   'A failed companion transfer remains retryable even when transformer weights are already downloaded');
@@ -400,17 +422,19 @@ async function testSettingsRearmsPollingAfterDownloadAcknowledgement() {
     {status: 'cancelled', error: null, cancellable: false},
     {deferFirstStatusPoll: true, deferDownloadStart: true},
   );
-  let tree = await renderUntilSettled(harness.hooks, harness.render);
-  findAll(tree, node => node.type === 'button' && textContent(node).includes('Image'))[0].props.onClick();
-  tree = await renderUntilSettled(harness.hooks, harness.render);
-  const downloadButton = findAll(tree, node => node.type === 'button' && textContent(node).trim() === 'Download')[0];
+  let tree = await expandSettingsScope(harness, 'image:generate');
+  const downloadButton = settingsButton(tree, 'Download model files for Flux Model');
+  assert.ok(downloadButton, 'A model without downloaded files can be pre-downloaded');
+  assert.equal(textContent(downloadButton), '', 'Download is an icon-only action with an accessible label');
+  assert.equal(downloadButton.props.className.includes('h-7'), true, 'The Settings download action uses the compact 28px height');
+  assert.equal(downloadButton.props.className.includes('w-7'), true, 'The Settings download action uses a compact square target');
   const startPromise = downloadButton.props.onClick();
 
   // The mount poll began before the POST and can still return its stale empty snapshot.
   harness.resolveFirstStatusPoll({downloads: {}});
   await flush();
   tree = await renderUntilSettled(harness.hooks, harness.render);
-  assert.ok(findAll(tree, node => node.type === 'button' && textContent(node).trim() === 'Download')[0],
+  assert.ok(settingsButton(tree, 'Download model files for Flux Model'),
     'A stale empty status snapshot can temporarily clear the optimistic row');
 
   harness.resolveDownloadStart();

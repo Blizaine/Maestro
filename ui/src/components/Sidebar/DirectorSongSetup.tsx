@@ -1,3 +1,4 @@
+import { isModelEnabledInScope } from '../../lib/modelVisibility'
 import { useEffect } from 'react'
 import { Music } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
@@ -18,6 +19,7 @@ const DIRECTOR_MUSIC_MODEL_ORDER = [
 export function DirectorSongSetup() {
   const models = useStore(s => s.models)
   const enabledModels = useStore(s => s.enabledModels)
+  const visibilityOverrides = useStore(s => s.modelVisibilityOverrides)
   const nsfwMode = useStore(s => s.servicesConfig?.nsfw_mode ?? false)
   const musicModel = useStore(s => s.directorMusicModel)
   const setMusicModel = useStore(s => s.setDirectorMusicModel)
@@ -29,7 +31,7 @@ export function DirectorSongSetup() {
   const musicModels = DIRECTOR_MUSIC_MODEL_ORDER
     .map(modelType => models.find(model => model.model_type === modelType))
     .filter(model => model != null)
-    .filter(model => enabledModels.has(model.model_type))
+    .filter(model => isModelEnabledInScope(model.model_type, enabledModels, visibilityOverrides, 'audio:music'))
     .filter(model => !model.nsfw_only || nsfwMode)
   const effectiveModel = musicModels.some(model => model.model_type === musicModel)
     ? musicModel

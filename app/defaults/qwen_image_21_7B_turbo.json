@@ -1,0 +1,21 @@
+{
+    "model": {
+        "name": "Qwen Image 2.1 Turbo 7B",
+        "architecture": "qwen_image_21_7B",
+        "description": "Official Qwen-Image-2.1-Turbo checkpoint for image generation and editing with up to 10 reference images. Uses its published 8-step schedule at CFG 1; no acceleration LoRA is needed. Shares the Qwen Image 2.1 text encoder, processor and VAE. BF16 and INT8 ConvRot download on demand. Qwen Research License: non-commercial research/evaluation only; commercial use requires a separate license from Qwen.",
+        "URLs": [
+            "https://huggingface.co/DeepBeepMeep/Qwen_image_2/resolve/main/qwen_image_21_turbo_7B_bf16.safetensors",
+            "https://huggingface.co/DeepBeepMeep/Qwen_image_2/resolve/main/qwen_image_21_turbo_7B_int8_convrot.safetensors"
+        ],
+        "qwen21_turbo_checkpoint": true,
+        "image_outputs": true
+    },
+    "prompt": "",
+    "resolution": "1024x1024",
+    "num_inference_steps": 8,
+    "guidance_scale": 1.0,
+    "sample_solver": "qwen21_turbo",
+    "batch_size": 1,
+    "image_mode": 1,
+    "video_prompt_type": "I"
+}

@@ -54,7 +54,7 @@ from services.h3_window_planner import (
 # is persisted with reviewed/generated window prompts, so this prevents a run
 # restored from gallery metadata from silently reusing pre-fix dialogue and
 # reference bindings.
-_H3_SEQUENCE_PLANNER_VERSION = 8 + H3_STORY_LEDGER_VERSION
+_H3_SEQUENCE_PLANNER_VERSION = 9 + H3_STORY_LEDGER_VERSION
 _H3_CLIP_BOUNDARY = "\n---CLIP_BOUNDARY---\n"
 
 
@@ -1330,6 +1330,29 @@ def _plan_violations(
     return violations
 
 
+def _ref2va_recap_handoff(value: str) -> bool:
+    """Internal completion receipts describe history, not a new visual action."""
+    return bool(re.match(
+        r"(?i)^\s*(?:continue from the visible result of|visible result after the final "
+        r"assigned action|the immediate visible state is the result of this event)\s*:",
+        str(value or ""),
+    ))
+
+
+def _ref2va_stable_context(value: str, *, visual_style: bool = False) -> str:
+    """Keep static shared direction without replaying a global journey."""
+    from services.h3_window_context import stable_h3_window_context
+    return stable_h3_window_context(value, visual_style=visual_style)
+
+
+def _ref2va_local_setting(global_setting: str, item: dict[str, Any], *, multiple: bool) -> str:
+    """Keep a stable setting, but leave a whole itinerary in planner context."""
+    local = sanitize_h3_prompt_text(item.get("setting_continuity") or item.get("setting"))
+    if local:
+        return local.rstrip('.')
+    return _ref2va_stable_context(global_setting) if multiple else global_setting
+
+
 def compile_h3_reference_sequence_prompts(
     plan: dict[str, Any],
     clips: list[dict[str, Any]],
@@ -1415,8 +1438,18 @@ def compile_h3_reference_sequence_prompts(
             retention_clauses.append(clause.strip())
             seen_retention.add(key)
     retention = "\n".join(retention_clauses) or "N/A"
-    setting = sanitize_h3_prompt_text(plan.get("setting_continuity")).rstrip('.')
+    global_setting = sanitize_h3_prompt_text(plan.get("setting_continuity")).rstrip('.')
+    from services.h3_reference_view_groups import extract_h3_reference_view_groups
+    reference_view_groups = extract_h3_reference_view_groups(source_prompt, subjects)
+    object_continuity = " ".join(
+        f"{' and '.join(f'<Picture {number}>' for number in group['picture_indices'])} "
+        f"describe views of one persistent {group['entity']}; use each design view "
+        "for its matching shot. The current shot determines this object's position and viewpoint."
+        for group in reference_view_groups
+    )
     style = sanitize_h3_prompt_text(plan.get("visual_style")).rstrip('.')
+    if len(clips) > 1:
+        style = _ref2va_stable_context(style, visual_style=True)
     ambient = sanitize_h3_prompt_text(plan.get("ambient_audio") or "Natural location ambience").rstrip('.')
     music = sanitize_h3_prompt_text(plan.get("music") or "N/A")
     source_intent = (
@@ -1435,6 +1468,7 @@ def compile_h3_reference_sequence_prompts(
         if not isinstance(item, dict):
             raise ValueError(f"H3 Omni sequence clip {geometry['index']} is invalid.")
         duration = float(geometry["duration_seconds"])
+        setting = _ref2va_local_setting(global_setting, item, multiple=len(clips) > 1)
         shots = _normalized_window_shots(item, duration)
         if not shots:
             raise ValueError(f"H3 Omni sequence clip {geometry['index']} has no shots.")
@@ -1499,21 +1533,29 @@ def compile_h3_reference_sequence_prompts(
             blocking_contract = ""
         coverage = sanitize_h3_prompt_text(item.get("coverage") or "cinematic editorial coverage")
         pacing = _compact(item.get("pacing") or "natural real-time pacing", 180)
-        opening = sanitize_h3_prompt_text(
-            _clean_ref2va_state(
-                item.get("opening_state") or "The scene begins in a clear composition"
-            ),
-        )
-        closing = sanitize_h3_prompt_text(
-            _clean_ref2va_state(
-                item.get("closing_state") or "The beat settles in a clear final composition"
-            ),
-        )
+        raw_opening = str(item.get("opening_state") or "")
+        raw_closing = str(item.get("native_closing_state") or item.get("closing_state") or "")
+        # Completion receipts remain intact in the planner/checkpoint. Render
+        # an accepted concrete endpoint instead of reciting the prior action.
+        if _ref2va_recap_handoff(raw_opening):
+            raw_opening = (
+                compiled[-1]["closing_state"] if compiled else
+                "The supplied opening composition establishes the current physical state"
+            )
+        if _ref2va_recap_handoff(raw_closing):
+            raw_closing = "The final composition preserves the visible outcome reached in this window"
+        opening = sanitize_h3_prompt_text(_clean_ref2va_state(
+            raw_opening or "The scene begins in a clear composition"
+        ))
+        closing = sanitize_h3_prompt_text(_clean_ref2va_state(
+            raw_closing or "The beat settles in a clear final composition"
+        ))
         pacing_sentence = f"Coverage is {coverage}; pacing is {pacing}."
         if "slow motion" not in pacing.casefold():
             pacing_sentence += " Slow motion occurs only when explicitly requested."
         preamble = " ".join(part for part in (
             f"{setting}." if setting else "",
+            object_continuity,
             f"Cast contract: {cast_contract}." if cast_contract else "",
             f"Blocking contract: {blocking_contract}." if blocking_contract else "",
             f"Opening state: {opening}.",
@@ -1618,6 +1660,8 @@ def compile_h3_reference_sequence_prompts(
             "active_cast": active_cast,
             "cast_contract": cast_contract,
             "blocking_contract": blocking_contract,
+            "setting_continuity": setting,
+            "reference_view_groups": reference_view_groups,
             "shot_count": len(shots),
             "shots": shots,
             "prompt": prompt,

@@ -1,0 +1,6 @@
+{
+  "targets": [
+    {"label": "Primary PC", "ref": "pinokio://127.0.0.1:42000/api/Maestro-dev"},
+    {"label": "Second PC — replace hostname", "ref": "pinokio://test-pc:42000/api/Maestro.git"}
+  ]
+}

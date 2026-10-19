@@ -80,7 +80,83 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _duration_recommendations_namespace():
+    app_path = str(_APP)
+    added_app_path = app_path not in sys.path
+    if added_app_path:
+        sys.path.insert(0, app_path)
+    try:
+        from services import h3_duration_recommendations
+        return {
+            name: getattr(h3_duration_recommendations, name)
+            for name in (
+                "attach_h3_duration_recommendations",
+                "h3_duration_recommendations_enabled",
+                "load_h3_duration_recommendations",
+                "match_h3_duration_recommendation",
+            )
+        }
+    finally:
+        if added_app_path:
+            sys.path.remove(app_path)
+
+
+def _video_vae_assets_namespace():
+    app_path = str(_APP)
+    added_app_path = app_path not in sys.path
+    if added_app_path:
+        sys.path.insert(0, app_path)
+    try:
+        from models.minimax_h3.video_vae_assets import (
+            LIGHT_VIDEO_VAE_FILES,
+            VIDEO_VAE_FULL_FILE,
+            VIDEO_VAE_FULL_INT8_FILE,
+            VIDEO_VAE_LIGHT_REVISION,
+            VIDEO_VAE_VARIANT_FILENAMES,
+            get_video_vae_variant_choices,
+        )
+        return {
+            "LIGHT_VIDEO_VAE_FILES": LIGHT_VIDEO_VAE_FILES,
+            "VIDEO_VAE_FULL_FILE": VIDEO_VAE_FULL_FILE,
+            "VIDEO_VAE_FULL_INT8_FILE": VIDEO_VAE_FULL_INT8_FILE,
+            "VIDEO_VAE_LIGHT_REVISION": VIDEO_VAE_LIGHT_REVISION,
+            "VIDEO_VAE_VARIANT_FILENAMES": VIDEO_VAE_VARIANT_FILENAMES,
+            "get_video_vae_variant_choices": get_video_vae_variant_choices,
+        }
+    finally:
+        if added_app_path:
+            sys.path.remove(app_path)
+
+
 def _load_handler_class():
+    app_path = str(_APP)
+    added_app_path = app_path not in sys.path
+    if added_app_path:
+        sys.path.insert(0, app_path)
+    try:
+        from models.minimax_h3.vae_upsampler import (
+            X2_VAE_FILE,
+            X2_VAE_LICENSE_FILE,
+            X2_VAE_NOTICE_FILE,
+            X2_VAE_REPO,
+            X2_VAE_REPO_SUBFOLDER,
+            X2_VAE_REVISION,
+            X2_VAE_VALUE,
+            x2_vae_asset_candidates,
+        )
+        from models.minimax_h3.video_vae_assets import (
+            LIGHT_VIDEO_VAE_FILES,
+            VIDEO_VAE_FULL_FILE,
+            VIDEO_VAE_FULL_INT8_FILE,
+            VIDEO_VAE_LIGHT_REVISION,
+            VIDEO_VAE_VARIANT_FILENAMES,
+            get_video_vae_variant_choices,
+        )
+        from shared.utils import files_locator as fl
+    finally:
+        if added_app_path:
+            sys.path.remove(app_path)
+
     tree = ast.parse(_read(_HANDLER_PATH), filename=str(_HANDLER_PATH))
     selected = []
     for node in tree.body:
@@ -107,6 +183,22 @@ def _load_handler_class():
     namespace = {
         "os": os,
         "torch": types.SimpleNamespace(bfloat16="bfloat16"),
+        "X2_VAE_FILE": X2_VAE_FILE,
+        "X2_VAE_LICENSE_FILE": X2_VAE_LICENSE_FILE,
+        "X2_VAE_NOTICE_FILE": X2_VAE_NOTICE_FILE,
+        "X2_VAE_REPO": X2_VAE_REPO,
+        "X2_VAE_REPO_SUBFOLDER": X2_VAE_REPO_SUBFOLDER,
+        "X2_VAE_REVISION": X2_VAE_REVISION,
+        "X2_VAE_VALUE": X2_VAE_VALUE,
+        "x2_vae_asset_candidates": x2_vae_asset_candidates,
+        "LIGHT_VIDEO_VAE_FILES": LIGHT_VIDEO_VAE_FILES,
+        "VIDEO_VAE_FULL_FILE": VIDEO_VAE_FULL_FILE,
+        "VIDEO_VAE_FULL_INT8_FILE": VIDEO_VAE_FULL_INT8_FILE,
+        "VIDEO_VAE_LIGHT_REVISION": VIDEO_VAE_LIGHT_REVISION,
+        "VIDEO_VAE_VARIANT_FILENAMES": VIDEO_VAE_VARIANT_FILENAMES,
+        "get_video_vae_variant_choices": get_video_vae_variant_choices,
+        "fl": fl,
+        **_duration_recommendations_namespace(),
     }
     module = ast.Module(body=selected, type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), str(_HANDLER_PATH), "exec"), namespace)
@@ -123,6 +215,8 @@ def _load_source_function(path: Path, name: str, *, include_private_assignments:
     namespace = {}
     body = []
     if include_private_assignments:
+        if path.resolve() == _HANDLER_PATH.resolve():
+            namespace.update(_video_vae_assets_namespace())
         for node in tree.body:
             if not isinstance(node, ast.Assign):
                 continue
@@ -165,7 +259,8 @@ def _load_h3_memory_helpers():
                 selected.append(node)
         elif isinstance(node, ast.FunctionDef) and node.name in names:
             selected.append(node)
-    namespace = {}
+    namespace = _duration_recommendations_namespace()
+    namespace.update(_video_vae_assets_namespace())
     module = ast.Module(body=selected, type_ignores=[])
     exec(
         compile(ast.fix_missing_locations(module), str(_HANDLER_PATH), "exec"),
@@ -528,8 +623,36 @@ class TestMiniMaxH3Definition(unittest.TestCase):
     def test_text_encoder_recommendation_is_hardware_aware(self):
         model_def = self.handler.query_model_def("minimax_h3", {})
         recommend = self.handler.recommend_text_encoder
+        # RTX 50 native NVFP4 does not remove the host-RAM pressure of loading
+        # the encoder beside H3's transformer and VAEs.
         self.assertEqual(
-            recommend({"supports_nvfp4": True, "ram_gb": 32}, model_def),
+            recommend(
+                {"supports_nvfp4": True, "ram_gb": 31.8, "gpu_vram_gb": 24},
+                model_def,
+            ),
+            "gguf_q2_k",
+        )
+        self.assertEqual(
+            recommend(
+                {"supports_nvfp4": True, "ram_gb": 32, "gpu_vram_gb": 24},
+                model_def,
+            ),
+            "gguf_q2_k",
+        )
+        # Match the detector's half-GiB tolerance around nominal tier edges:
+        # clearly below 48 GiB is low-RAM; the tolerated edge retains NVFP4.
+        self.assertEqual(
+            recommend(
+                {"supports_nvfp4": True, "ram_gb": 47.4, "gpu_vram_gb": 24},
+                model_def,
+            ),
+            "gguf_q2_k",
+        )
+        self.assertEqual(
+            recommend(
+                {"supports_nvfp4": True, "ram_gb": 47.5, "gpu_vram_gb": 24},
+                model_def,
+            ),
             "nvfp4_awq",
         )
         self.assertEqual(
@@ -538,22 +661,71 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         )
         self.assertEqual(
             recommend(
+                {"supports_nvfp4": True, "ram_gb": 64, "gpu_vram_gb": 24},
+                model_def,
+            ),
+            "nvfp4_awq",
+        )
+        self.assertEqual(
+            recommend(
                 {
-                    "supports_nvfp4": False,
+                    "supports_nvfp4": True,
                     "ram_gb": 64,
-                    "gpu_vram_gb": 16,
+                    "gpu_vram_gb": 12,
                 },
                 model_def,
             ),
             "gguf_q2_k",
         )
         self.assertEqual(
-            recommend({"supports_nvfp4": False, "ram_gb": 32}, model_def),
-            "nvfp4_awq",
+            recommend(
+                {"supports_nvfp4": True, "ram_gb": 64, "gpu_vram_gb": 16},
+                model_def,
+            ),
+            "gguf_q2_k",
+        )
+        self.assertEqual(
+            recommend(
+                {"supports_nvfp4": False, "ram_gb": 32, "gpu_vram_gb": 24},
+                model_def,
+            ),
+            "gguf_q2_k",
         )
         self.assertEqual(
             recommend({"supports_nvfp4": False, "ram_gb": 16}, model_def),
             "gguf_q2_k",
+        )
+
+    def test_text_encoder_recommendation_handles_unknown_hardware_and_variants(self):
+        model_def = self.handler.query_model_def("minimax_h3", {})
+        recommend = self.handler.recommend_text_encoder
+
+        # Missing RAM is unknown, not zero: native support plus known 24 GiB
+        # VRAM keeps the native choice instead of triggering low-RAM Q2.
+        self.assertEqual(
+            recommend({"supports_nvfp4": True, "gpu_vram_gb": 24}, model_def),
+            "nvfp4_awq",
+        )
+        # With no probe data, use the smallest generally available fallback
+        # without treating the missing RAM measurement as a low-RAM result.
+        self.assertEqual(recommend(None, model_def), "gguf_q2_k")
+
+        # The recommendation must stay within the model's available variants.
+        reduced = {"minimax_h3_text_encoder_variants": {"gguf_q4_k_m": {}}}
+        self.assertEqual(
+            recommend(
+                {"supports_nvfp4": True, "ram_gb": 32, "gpu_vram_gb": 24},
+                reduced,
+            ),
+            "gguf_q4_k_m",
+        )
+        only_native = {"minimax_h3_text_encoder_variants": {"nvfp4_awq": {}}}
+        self.assertEqual(
+            recommend(
+                {"supports_nvfp4": True, "ram_gb": 32, "gpu_vram_gb": 24},
+                only_native,
+            ),
+            "nvfp4_awq",
         )
 
     def test_all_h3_variants_expose_native_portrait_and_auto_aspect(self):
@@ -1477,9 +1649,13 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("const restoredH3SequencePromptMode", store)
         self.assertIn("p.minimax_h3_sequence_prompt_mode === 'creative'", store)
         self.assertIn("p.minimax_h3_window_storyboard === false ? 'manual' : 'auto'", store)
-        self.assertIn(
-            "newParams.minimax_h3_sequence_prompt_mode = restoredH3SequencePromptMode",
-            store,
+        self.assertTrue(
+            re.search(
+                r"newParams\.minimax_h3_sequence_prompt_mode\s*=\s*isDirectorClip"
+                r"\s*\?\s*'manual'\s*:\s*restoredH3SequencePromptMode",
+                store,
+            ),
+            "Director clips retain their exact prompt; ordinary Studio clips restore their saved writer mode",
         )
         non_omni_cleanup = store.split("if (isOmniReference) {", 1)[1].split(
             "if (!isH3Model) {", 1
@@ -1524,7 +1700,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn('<H3MultiWindowControls section="continuity"/>', output_controls)
         self.assertNotIn("Plan Prompt Across Windows", advanced)
         self.assertIn("Window Length", duration)
-        self.assertIn("Recommended", duration)
+        self.assertIn("h3RecommendationLabel(windowRecommendation.basis)", duration)
         self.assertIn("saveH3WindowOverride", duration)
         self.assertIn("h3MaximumFrames(modelOptions, extendedDuration) ?? 345", duration)
         self.assertIn("h3WindowOverrideKey", store)
@@ -1559,7 +1735,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         )
         self.assertLess(
             worker.index("_apply_deferred_prompt_enhancement(job, raw_params)"),
-            worker.index("_apply_per_job_coefficient(job)"),
+            worker.index("_apply_per_job_coefficient(job, defer_h3_residency_reload=True)"),
         )
 
     def test_automatic_multi_window_planners_share_the_generation_lock(self):
@@ -1865,7 +2041,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("h3_reference_activation_gb", launch)
         self.assertIn("compute_h3_weight_budget", launch)
         self.assertIn("h3_weight_budget_gb", launch)
-        self.assertIn("resident H3 profile will reload with packed-sequence headroom", launch)
+        self.assertIn("resident H3 profile will reload with packed-sequence ", launch)
+        self.assertIn("activation headroom", launch)
         self.assertIn("_maestro_profile_vram_coefficient", wgp)
         self.assertIn("get_linear_split_map", transformer)
         self.assertIn("MINIMAX_H3_ACTIVATION_CHUNK_TOKENS", transformer)
@@ -1941,13 +2118,14 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             launch,
         )
 
-    def test_h3_is_enabled_for_existing_and_fresh_installs(self):
+    def test_h3_defaults_and_existing_install_migrations(self):
         store = _read(_STORE_PATH)
         default_block = store.split("const DEFAULT_ENABLED_MODELS = new Set([", 1)[1].split("])\n", 1)[0]
         self.assertIn("'minimax_h3'", default_block)
         self.assertIn("'minimax_h3_full'", default_block)
         self.assertIn("'minimax_h3_ref2va'", default_block)
-        self.assertIn("'minimax_h3_ref2va_full'", default_block)
+        self.assertIn("'minimax_h3_ref2va_fused_turbo'", default_block)
+        self.assertNotIn("'minimax_h3_ref2va_full'", default_block)
         defaults_version = int(
             store.split("const DEFAULTS_VERSION = ", 1)[1].splitlines()[0]
         )
@@ -2607,7 +2785,7 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         video_vae = _read(_VIDEO_VAE_PATH)
         self.assertIn("settings_version < 2.58", handler)
         self.assertIn("normalize_h3_overlap_frames", handler)
-        self.assertIn("Decode one tile at a time", video_vae)
+        self.assertIn("_h3_vae_decode_tile_batch_size", video_vae)
         self.assertIn("new_tails.append", video_vae)
         self.assertIn("keep_all_latents", video_vae)
 

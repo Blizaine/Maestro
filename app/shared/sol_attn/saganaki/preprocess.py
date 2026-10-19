@@ -427,6 +427,18 @@ def _compute_exact_threshold(
     return global_threshold
 
 
+def prepare_int8_kv(k: torch.Tensor, v: torch.Tensor) -> tuple:
+    """Prepare summaries and residual-INT8 keys without allocating Q outputs."""
+
+    kc, vc = _reduce_kv(k, v)
+    ki, ks = quantize_k(k, kc)
+    kv = kc.float().permute(0, 2, 1, 3)
+    stat_mean = kv.mean(dim=2).contiguous()
+    stat_var = (kv - stat_mean.unsqueeze(2)).pow(2).mean(dim=2).contiguous()
+    del kv
+    return kc, vc, stat_mean, stat_var, ki, ks
+
+
 def prepare(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -458,4 +470,4 @@ def prepare(
     return kc, vc, threshold, qi, qs, ki, ks
 
 
-__all__ = ["prepare"]
+__all__ = ["prepare", "prepare_int8_kv"]

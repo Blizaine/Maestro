@@ -72,6 +72,33 @@ percussion estimates, not separated drum stems or exact instrument recognition;
 other transient sounds can resemble drums. Unknown timing stays unknown.
 Re-analyze the soundtrack and create a new plan to add these cues to an older project.
 
+## Lyrics and visual direction
+
+After music analysis, **Use lyrics to guide visuals** appears beside the analysis
+summary when a transcript is available. It is off for new projects and saved with
+each project. Enable it for thematic inspiration from the words; leave it off
+when your visual concept should develop independently of the song's meaning.
+The supplied soundtrack, section/beat timing, vocal activity and assigned
+lip-sync remain available either way. Changing the choice clears cached visual
+plans and generated-shot selections while retaining audio analysis and the
+timeline, so you can plan the visuals again.
+
+Music videos with four or more clips receive a compact whole-song outline before
+detailed shot writing. It supports narrative, performance and abstract concepts,
+including fixed-camera requests and deliberate chorus reprises. Continuing
+physical facts do not force the same staging into every shot: cutaways and
+performance inserts can develop the concept without replaying an enabling
+action. Review checks actual visual instructions; focused repairs retain good
+neighboring clips and revalidate their boundaries. Final H3 compilation also
+checks reference-picture ownership. These checks guide prompts; review the
+planned shots and rendered video for creative quality.
+
+API clients can send the JSON boolean `use_lyrics_context` to
+`POST /api/v1/director/v2/plan` or
+`POST /api/v1/director/plan-prompts-and-images`. Missing or non-boolean values
+do not enable lyric context. Include the same flag in music-video pipeline
+parameters when saving or launching a project.
+
 ## Shared prompt writing
 
 Director uses the adaptive writing rules from Studio inside its existing planning

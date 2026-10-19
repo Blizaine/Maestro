@@ -7,7 +7,7 @@ from typing import Any
 _DIALOGUE_TAG_RE = re.compile(r"<d(?:\s+[^>]*)?>(.*?)</d>", re.IGNORECASE | re.DOTALL)
 _SPEECH_VERB_RE = re.compile(
     r"\b(?:say|says|said|ask|asks|asked|reply|replies|replied|respond|responds|"
-    r"responded|answer|answers|answered|speak|speaks|spoke|shout|shouts|shouted|"
+    r"responded|responding|answer|answers|answered|speak|speaks|spoke|shout|shouts|shouted|"
     r"yell|yells|yelled|whisper|whispers|whispered|exclaim|exclaims|exclaimed|"
     r"murmur|murmurs|murmured|call|calls|called|cry|cries|cried|add|adds|added|"
     r"remark|remarks|remarked|state|states|stated|declare|declares|declared|"
@@ -18,13 +18,27 @@ _SPEECH_VERB_RE = re.compile(
     r"sings?|singing|sang|raps?|rapping|narrat(?:es?|ed|ing))\b",
     re.IGNORECASE,
 )
+_POSSESSIVE_SPEECH_LABEL_RE = re.compile(
+    r"['’]s\s+(?:voice|reply|whisper|answer|response)\s*[:,\-–—]\s*$",
+    re.IGNORECASE,
+)
+_POSSESSIVE_BODY_SPEECH_RE = re.compile(
+    rf"['’]s\s+(?:mouth\s+opens?|lips?\s+move)\s+(?:as|while)\s+"
+    rf"(?:he|she|they)\s+(?:\w+ly\s+)?{_SPEECH_VERB_RE.pattern}\s*[:\-–—]\s*$",
+    re.IGNORECASE,
+)
+_POSSESSIVE_EYES_ACTION_RE = re.compile(
+    r"['’]s\s+eyes\s+(?:narrow|widen)(?:s|ed)?"
+    r"(?:\s+(?:suddenly|slightly|briefly|wide|wider|narrower))*",
+    re.IGNORECASE,
+)
 _DIALOGUE_OWNER_NAME_RE = re.compile(
     r"(?<!\w)([A-Z][A-Za-z0-9_'’-]*(?:\s+[A-Z][A-Za-z0-9_'’-]*){0,3})(?!\w)"
 )
 _DIALOGUE_OWNER_LEADING_WORDS = {
     "a", "after", "an", "and", "as", "at", "both", "during", "from",
     "he", "her", "his", "immediately", "in", "inside", "it", "later",
-    "next", "only", "outside", "she", "the", "their", "then", "they",
+    "next", "now", "only", "outside", "she", "the", "their", "then", "they",
     "this", "while", "with",
 }
 
@@ -234,6 +248,113 @@ def _ref2va_alias_values(item: dict, fallback_role: str = "") -> list[str]:
     return values
 
 
+def _has_unintroduced_possessive_cue_name(value: str) -> bool:
+    """Return whether a proper name appears as a new subject in a cue."""
+    object_preposition = re.compile(
+        r"(?:\bto|\bat|\btoward|\btowards|\bwith|\bbeside|\bnear|\bbehind)\s+$",
+        re.IGNORECASE,
+    )
+    for match in _DIALOGUE_OWNER_NAME_RE.finditer(value):
+        raw_name = match.group(1)
+        if (
+            re.fullmatch(r"S\d+", raw_name, re.IGNORECASE)
+            and re.search(r"\(\s*$", value[:match.start()])
+            and re.match(r"\s*\)", value[match.end():])
+        ):
+            continue
+        leading = value[max(0, match.start() - 32):match.start()]
+        if not object_preposition.search(leading):
+            return True
+    return False
+
+
+def _is_leading_possessive_eyes_speech_cue(tail: str) -> bool:
+    """Recognize a leading eye cue only when its same-subject pronoun speaks."""
+    eyes = _POSSESSIVE_EYES_ACTION_RE.match(tail)
+    if not eyes:
+        return False
+    remainder = tail[eyes.end():]
+    leading = re.match(
+        r"\s*(?:(?:,\s*(?:and\s+)?)|(?:and\s+))?"
+        r"(?:(?:as|while)\s+)?(he|she|they)\b",
+        remainder,
+        re.IGNORECASE,
+    )
+    if not leading:
+        return False
+    pronoun = leading.group(1).casefold()
+    possessive = {"he": "his", "she": "her", "they": "their"}[pronoun]
+
+    voice_cue = re.match(
+        rf"\s*(?:(?:,\s*(?:and\s+)?)|(?:and\s+))?"
+        rf"(?:as|while)\s+{pronoun}\b"
+        rf"[^.!?;:\r\n]{{0,120}}\b{possessive}\s+voice\s+"
+        rf"(?:rising|rises|rose|raises|raised|softening|softens|"
+        rf"shaking|shakes|quivering|quivers|cracking|cracks|"
+        rf"breaking|breaks|falling|falls)\b"
+        rf"(?:\s+(?:in|with)\s+(?:a|an|the|[a-z][a-z'-]*)"
+        rf"(?:\s+[a-z][a-z'-]*){{0,4}})?\s*[:\-–—]\s*(?:\(S\d+\))?\s*$",
+        tail[eyes.end():],
+        re.IGNORECASE,
+    )
+    if voice_cue:
+        cue_body = tail[eyes.end():eyes.end() + voice_cue.end()]
+        if not _has_unintroduced_possessive_cue_name(cue_body):
+            return True
+
+    suffix = (
+        r"(?:\s+(?:with|in)\s+(?:a|an|the|[a-z][a-z'-]*)"
+        r"(?:\s+[a-z][a-z'-]*){0,4})?\s*[:\-–—]\s*(?:\(S\d+\))?\s*$"
+    )
+    speech_cue = re.search(
+        rf"\b(?:as|while)\s+{pronoun}\s+(?:\w+ly\s+)?"
+        rf"(?:{_SPEECH_VERB_RE.pattern}){suffix}",
+        remainder,
+        re.IGNORECASE,
+    )
+    if speech_cue:
+        cue_body = remainder[leading.end():speech_cue.start()]
+        if not _has_unintroduced_possessive_cue_name(cue_body):
+            return True
+
+    direct_speech_cue = re.match(
+        rf"\s*(?:(?:,\s*(?:and\s+)?)|(?:and\s+))?{pronoun}\s+"
+        rf"(?:\w+ly\s+)?(?:{_SPEECH_VERB_RE.pattern}){suffix}",
+        remainder,
+        re.IGNORECASE,
+    )
+    return bool(direct_speech_cue)
+
+
+def _is_ref2va_possessive_speech_attribution(
+    value: str,
+    name_start: int,
+    name_end: int,
+) -> bool:
+    """Accept only bounded, explicit possessive speech ownership cues.
+
+    A speech noun followed by a screenplay delimiter is an explicit label
+    ("Ana's response:"). A body-part cue is accepted only when the named
+    character leads the clause and the same clause ends with that character's
+    pronoun plus a speech verb ("Ana's mouth opens as she says:"). This keeps
+    object mentions such as "Bea looks at Ana's mouth and says" with Bea.
+    """
+    tail = value[name_end:]
+    if _POSSESSIVE_SPEECH_LABEL_RE.fullmatch(tail):
+        return True
+    prefix = value[:name_start]
+    if not re.fullmatch(
+        r"\s*(?:</d>\s*)?(?:(?:then|now)\s+)?",
+        prefix,
+        re.IGNORECASE,
+    ):
+        return False
+    return bool(
+        _POSSESSIVE_BODY_SPEECH_RE.fullmatch(tail)
+        or _is_leading_possessive_eyes_speech_cue(tail)
+    )
+
+
 def _ref2va_alias_occurrences(source: str, aliases: dict[str, int]):
     occurrences: list[tuple[int, int, str, int]] = []
     for alias, subject in aliases.items():
@@ -243,6 +364,15 @@ def _ref2va_alias_occurrences(source: str, aliases: dict[str, int]):
             source,
             re.IGNORECASE,
         ):
+            following = source[match.end():]
+            if re.match(r"['’]s\b", following, re.IGNORECASE) and not (
+                _is_ref2va_possessive_speech_attribution(
+                    source, match.start(), match.end(),
+                )
+            ):
+                # A possessive is an owner cue only for explicitly labeled
+                # speech or a bounded direct body-part speech construction.
+                continue
             occurrences.append((match.start(), match.end(), alias, subject))
     return sorted(occurrences, key=lambda row: (row[0], -(row[1] - row[0])))
 
@@ -259,6 +389,72 @@ def _clean_ref2va_dialogue_owner_name(value: str) -> str:
         return ""
     return candidate
 
+
+def _responding_gerund_object_spans(clause: str, occurrences, verb: re.Match) -> set[tuple[int, int]]:
+    """Exclude prepositional object lists only for a responding gerund."""
+    if verb.group(0).casefold() != "responding":
+        return set()
+    spans = sorted({
+        (occurrence[0], occurrence[1])
+        for occurrence in occurrences
+        if occurrence[1] <= verb.start()
+    })
+    object_preposition = re.compile(
+        r"(?:\bto|\bat|\btoward|\btowards|\bwith|\bbeside|\bnear|\bbehind)\s+$",
+        re.IGNORECASE,
+    )
+    direct_objects = set()
+    for index, (start, _end) in enumerate(spans):
+        leading = clause[max(0, start - 32):start]
+        if object_preposition.search(leading):
+            direct_objects.add(index)
+
+    object_indexes = set(direct_objects)
+    separators = re.compile(r"\s*(?:(?:,|and|or|&)\s*)+", re.IGNORECASE)
+    for direct_index in sorted(direct_objects):
+        previous_index = direct_index
+        for index in range(direct_index + 1, len(spans)):
+            gap = re.sub(r"\(\s*S\d+\s*\)", "", clause[spans[previous_index][1]:spans[index][0]], flags=re.IGNORECASE)
+            if not separators.fullmatch(gap):
+                break
+            object_indexes.add(index)
+            previous_index = index
+    return {spans[index] for index in object_indexes}
+
+
+def _has_coordinated_responding_subject(
+    clause: str,
+    occurrences,
+    verb: re.Match,
+    object_spans: set[tuple[int, int]] | None = None,
+) -> bool:
+    """Do not guess one speaker when a responding gerund follows a compound subject."""
+    if verb.group(0).casefold() != "responding":
+        return False
+    object_spans = object_spans or set()
+    candidates = []
+    for occurrence in occurrences:
+        start, end = occurrence[0], occurrence[1]
+        if end > verb.start() or (start, end) in object_spans:
+            continue
+        leading = clause[max(0, start - 32):start]
+        if re.search(
+            r"(?:\bto|\bat|\btoward|\btowards|\bwith|\bbeside|\bnear|\bbehind)\s+$",
+            leading,
+            re.IGNORECASE,
+        ):
+            continue
+        candidates.append((start, end))
+    if len(candidates) < 2:
+        return False
+    candidates.sort()
+    left, right = candidates[-2:]
+    gap = re.sub(
+        r"\(\s*S\d+\s*\)", "", clause[left[1]:right[0]], flags=re.IGNORECASE,
+    )
+    return bool(re.fullmatch(
+        r"\s*(?:,\s*)?(?:and|&)\s*", gap, re.IGNORECASE,
+    ))
 
 def _resolve_ref2va_dialogue_owner_name(
     source: str,
@@ -285,18 +481,51 @@ def _resolve_ref2va_dialogue_owner_name(
     clause = before[clause_start:]
 
     def occurrences(value: str):
-        return [
-            (match.start(), match.end(), _clean_ref2va_dialogue_owner_name(match.group(1)))
-            for match in _DIALOGUE_OWNER_NAME_RE.finditer(value)
-            if _clean_ref2va_dialogue_owner_name(match.group(1))
-        ]
+        found = []
+        for match in _DIALOGUE_OWNER_NAME_RE.finditer(value):
+            raw_name = match.group(1)
+            end = match.end()
+            if (
+                re.fullmatch(r"S\d+", raw_name, re.IGNORECASE)
+                and re.search(r"\(\s*$", value[:match.start()])
+                and re.match(r"\s*\)", value[match.end():])
+            ):
+                # Parenthesized S-number tokens are H3 voice markers, not names.
+                continue
+            if re.search(r"['’]s$", raw_name, re.IGNORECASE):
+                base_end = end - 2
+                if not _is_ref2va_possessive_speech_attribution(
+                    value, match.start(), base_end,
+                ):
+                    continue
+                # Retain explicit possessive ownership while returning the
+                # character name without its grammatical suffix.
+                raw_name = raw_name[:-2]
+                end = base_end
+            name = _clean_ref2va_dialogue_owner_name(raw_name)
+            if name:
+                found.append((match.start(), end, name))
+        return found
+
+    # A leading same-subject eyes cue can attribute the line even when its
+    # voice is described by a rising tone instead of a finite speech verb.
+    for start, end, name in occurrences(clause):
+        if (
+            _is_ref2va_possessive_speech_attribution(clause, start, end)
+            and _is_leading_possessive_eyes_speech_cue(clause[end:])
+        ):
+            return name
 
     # Direct screenplay syntax: ``Rachel: <d>...</d>``.
     for start, end, name in reversed(occurrences(clause)):
         tail = clause[end:]
         leading = clause[:start]
         if (
-            re.fullmatch(r"\s*(?:'s\s+voice\s*)?[:,\-–—]\s*", tail, re.IGNORECASE)
+            re.fullmatch(
+                r"\s*(?:['’]s\s+(?:voice|reply|whisper|answer|response)\s*)?[:,\-–—]\s*",
+                tail,
+                re.IGNORECASE,
+            )
             and not _SPEECH_VERB_RE.search(leading)
         ):
             return name
@@ -330,9 +559,17 @@ def _resolve_ref2va_dialogue_owner_name(
     verbs = list(_SPEECH_VERB_RE.finditer(clause))
     if verbs:
         verb = verbs[-1]
+        owner_occurrences = occurrences(clause)
+        responding_objects = _responding_gerund_object_spans(
+            clause, owner_occurrences, verb,
+        )
+        if _has_coordinated_responding_subject(
+            clause, owner_occurrences, verb, responding_objects,
+        ):
+            return ""
         candidates = []
-        for start, end, name in occurrences(clause):
-            if end > verb.start():
+        for start, end, name in owner_occurrences:
+            if end > verb.start() or (start, end) in responding_objects:
                 continue
             leading = clause[max(0, start - 32):start]
             is_object = bool(re.search(
@@ -398,7 +635,11 @@ def _resolve_ref2va_dialogue_speaker(
         tail = clause[end:]
         leading = clause[:start]
         if (
-            re.fullmatch(r"\s*(?:'s\s+voice\s*)?[:,\-–—]\s*", tail, re.IGNORECASE)
+            re.fullmatch(
+                r"\s*(?:['’]s\s+(?:voice|reply|whisper|answer|response)\s*)?[:,\-–—]\s*",
+                tail,
+                re.IGNORECASE,
+            )
             and not _SPEECH_VERB_RE.search(leading)
         ):
             return subject
@@ -432,9 +673,16 @@ def _resolve_ref2va_dialogue_speaker(
     verbs = list(_SPEECH_VERB_RE.finditer(clause))
     if verbs:
         verb = verbs[-1]
+        responding_objects = _responding_gerund_object_spans(
+            clause, occurrences, verb,
+        )
+        if _has_coordinated_responding_subject(
+            clause, occurrences, verb, responding_objects,
+        ):
+            return None
         candidates = []
         for start, end, alias, subject in occurrences:
-            if end > verb.start():
+            if end > verb.start() or (start, end) in responding_objects:
                 continue
             leading = clause[max(0, start - 28):start]
             is_object = bool(re.search(

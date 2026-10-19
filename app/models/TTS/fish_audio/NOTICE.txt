@@ -1,0 +1,9 @@
+These Fish Audio Materials are licensed under the Fish Audio Community License, Version 1.0. Copyright © 39 AI, INC. All Rights Reserved.
+
+Built with Fish Audio. This derivative includes code adapted from fishaudio/fish-speech revision 1ff3c3ed2f80d3106a83909dd25b83129c3d816f and WanGP revision de302eec64b692dc83949d687cadf7d60bd74091. The Fish Audio license is included as LICENSE_FISH_AUDIO.
+
+Changes made for Maestro: integrated Drama 3 into Maestro's TTS handler; added a portable PyTorch CPU expert implementation (including ConvRot), with an optional separately licensed native CPU kernel; retained an optional graph-free vLLM decoder path, gated on the installed Triton, FlashAttention 2 and FLA kernels; added optional GPU-resident Triton experts only when the selected memory profile and measured free VRAM leave the configured reserve, otherwise keeping the bank on CPU; connected missing reference transcripts to Maestro's optional faster-whisper service; added bounded long-script chunk history; and disabled silence-probe behavior because that auxiliary file is not included in the published assets.
+
+The audio codec primitives include code derived from Descript Audio Codec, released under the MIT License; its license text is included as LICENSE_DAC.
+
+The adapted source retains its WanGP Community License 2.0 notices. The project license is included at app/LICENSE.txt. The optional native CPU source and binaries are included under native_cpu/ with their own copy of the WanGP Community License 2.0 and exact source/binary hashes.

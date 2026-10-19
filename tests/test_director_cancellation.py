@@ -804,6 +804,7 @@ class TestDirectorCancellation(unittest.TestCase):
 
         saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
         self.assertEqual(saved["clips"][0]["video_filename"], "new-video.mp4")
+        self.assertEqual(saved["clips"][0]["_director_rendered_prompt"], saved["clips"][0]["video_prompt"])
         self.assertFalse(saved["clips"][0]["video_stale"])
         self.assertEqual(
             saved["output_files"],
@@ -1503,8 +1504,18 @@ class TestDirectorCancellation(unittest.TestCase):
         pipeline._wgp.concatenate_multi_clip_videos = Mock(
             side_effect=concatenate,
         )
-        result = pipeline.rejoin_clips(self.temp_dir.name, pid)
+        with patch('time.strftime', return_value='2026-10-15-08h00m00s'):
+            result = pipeline.rejoin_clips(self.temp_dir.name, pid)
+            repeated = pipeline.rejoin_clips(self.temp_dir.name, pid)
+        self.assertNotEqual(result['filename'], repeated['filename'], 'Rejoining must preserve the previous master')
+        self.assertTrue(os.path.isfile(os.path.join(self.temp_dir.name, result['filename'])))
         self.assertTrue(result["filename"].endswith("_rejoin_multiclip.mp4"))
+        with open(os.path.join(self.temp_dir.name, os.path.splitext(result["filename"])[0] + ".meta.json"), encoding="utf-8") as handle:
+            metadata = json.load(handle)
+        self.assertEqual(metadata["director_pipeline_id"], pid)
+        self.assertEqual(metadata["director_artifact_kind"], "joined")
+        self.assertEqual(metadata["director_source_clips"], ["one.mp4", "two.mp4"])
+        self.assertEqual(metadata["params"]["_director_pipeline_id"], pid)
 
     def test_prompt_only_repair_ignores_intentionally_missing_images(self):
         pid = "pipe-prompt-only-repair"

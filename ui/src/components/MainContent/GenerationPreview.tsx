@@ -4,10 +4,14 @@ import type { GenerationPreview as GenerationPreviewData } from '../../types'
 
 export function GenerationPreview({
   preview,
+  infoVisible,
+  onToggleInfo,
   initiallyPaused = false,
   onPausedChange,
 }: {
   preview: GenerationPreviewData
+  infoVisible: boolean
+  onToggleInfo: () => void
   initiallyPaused?: boolean
   onPausedChange?: (paused: boolean) => void
 }) {
@@ -118,7 +122,7 @@ export function GenerationPreview({
         <img
           src={preview.url}
           alt={`Generation preview, clip ${preview.clip}, window ${preview.window}`}
-          className="h-full w-full object-contain"
+          className="pointer-events-none h-full w-full object-contain"
           onError={() => setFailedPreview(previewIdentity)}
         />
       )}
@@ -132,29 +136,38 @@ export function GenerationPreview({
           autoPlay={!playbackPaused}
           preload="auto"
           aria-label={`Generation preview, clip ${preview.clip}, window ${preview.window}`}
-          title={playbackPaused ? 'Click to resume live preview' : 'Click to pause live preview'}
-          className="h-full w-full cursor-pointer object-contain"
-          onClick={togglePlayback}
+          className="pointer-events-none h-full w-full object-contain"
           onError={() => setFailedPreview(previewIdentity)}
         />
       )}
 
+      <button
+        type="button"
+        onClick={onToggleInfo}
+        aria-label={infoVisible ? 'Hide generation information' : 'Show generation information'}
+        aria-pressed={infoVisible}
+        title={infoVisible ? 'Hide generation information' : 'Show generation information'}
+        className="absolute inset-0 z-10 cursor-pointer bg-transparent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white"
+      />
+
       {mediaError ? (
-        <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-xs text-text-muted" role="status">
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-4 text-center text-xs text-text-muted" role="status">
           Preview unavailable
         </div>
       ) : (
         <>
-          <div className="absolute left-2 top-2 rounded bg-black/65 px-2 py-1 text-[10px] text-white">
-            Clip {preview.clip}/{preview.total_clips} · Window {preview.window}/{preview.total_windows}
-          </div>
+          {infoVisible && (
+            <div className="pointer-events-none absolute left-2 top-2 z-20 rounded bg-black/65 px-2 py-1 text-[10px] text-white">
+              Clip {preview.clip}/{preview.total_clips} · Window {preview.window}/{preview.total_windows}
+            </div>
+          )}
           {preview.kind === 'video' && (
             <button
               type="button"
               onClick={event => { event.stopPropagation(); togglePlayback() }}
               aria-label={playbackPaused ? 'Play live preview' : 'Pause live preview'}
               title={playbackPaused ? 'Play live preview' : 'Pause live preview'}
-              className="absolute right-2 top-2 rounded-full bg-black/70 p-2 text-white hover:bg-black/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-white"
+              className="absolute right-2 top-2 z-20 rounded-full bg-black/70 p-2 text-white hover:bg-black/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-white"
             >
               {playbackPaused ? <Play size={14} /> : <Pause size={14} />}
             </button>

@@ -178,3 +178,51 @@ Source: https://huggingface.co/Kijai/MiniMax-H3-experimental/blob/a3e7d8da4ae7ba
 Users must review the linked model license and NOTICE before downloading or
 using this optional checkpoint; its terms and geographic scope differ from
 Maestro's application license.
+
+## Wan2GP v17.17 H3 performance patterns
+
+The bounded H3 plain-text embedding cache and two-tile VAE decode path adapt
+performance patterns from **deepbeepmeep/Wan2GP** v17.17, commit
+`6479db36bdc2619a904a852bba9c2d78e1a83f82` (8 October 2026). Maestro retains
+its model loader, reference conditioning, tiled blending and memory guards.
+The upstream WanGP Community License 2.0 is preserved in
+`app/LICENSES/WanGP-Community-2.0.txt`; older Diffusers-derived VAE components
+retain their Apache-2.0 notices.
+
+Source: https://github.com/deepbeepmeep/Wan2GP/tree/6479db36bdc2619a904a852bba9c2d78e1a83f82/models/minimax_h3
+
+## Black Forest Labs FLUX 3 Image Klein
+
+The optional native FLUX 3 integration adapts Black Forest Labs' reference
+DiT, autoencoder, sampling and reference-preparation code from revision
+`45e57c9fb06f9751cdced29a65c5d2171003be05`. Its Apache-2.0 license is preserved
+in `app/models/flux3/LICENSE`, with adaptation details in
+`app/models/flux3/THIRD_PARTY_NOTICES.md`. Qwen3-VL model code is provided by
+the existing Transformers dependency.
+
+Source: https://github.com/black-forest-labs/flux-3-image-klein/tree/45e57c9fb06f9751cdced29a65c5d2171003be05
+
+Model weights download on demand from separately licensed public WanGP mirrors
+and are not redistributed in Maestro's source. The BFL model license and notice
+are preserved in `app/models/flux3/WEIGHTS_LICENSE.md` and `WEIGHTS_NOTICE.md`.
+The pinned weight revision and download verification are documented in
+`docs/Flux-3-Klein.md`. The optional BFL prompt-upsampler weights are not
+installed by this integration.
+
+## WanGP v18.10 options
+
+H3 LightVAE loading, the dated TaoMate FL2VA profile, optional WGPKernels
+dispatch, ConvRot embeddings and Fish Drama 3 integration adapt WanGP revision
+`de302eec64b692dc83949d687cadf7d60bd74091`. WanGP contributions retain its
+Community License 2.0 at `app/LICENSES/WanGP-Community-2.0.txt`. Fish Audio
+and codec source retain their separate license texts in
+`app/models/TTS/fish_audio/LICENSE_FISH_AUDIO` and `LICENSE_DAC`.
+The Fish port includes WanGP's small native CPU expert libraries and source,
+with their license and hashes in `app/models/TTS/fish_audio/native_cpu/`.
+Portable PyTorch expert math remains a fallback. The optional vLLM path is
+capability-gated and graph-free; it does not include upstream CUDA Graphs or
+partial expert GPU residency.
+WGPKernels is an optional separately downloaded package; its upstream package
+license applies. Model weights retain their respective model licenses.
+
+Source: https://github.com/deepbeepmeep/WanGP/tree/de302eec64b692dc83949d687cadf7d60bd74091

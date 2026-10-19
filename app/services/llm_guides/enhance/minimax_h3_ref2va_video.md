@@ -17,6 +17,9 @@ non_diegetic_music: ...
 REFERENCE BINDINGS
 - The ordered reference inventory is authoritative. Use only its existing <Subject N>,
   <Picture N>, <Video N>, and <Audio N> labels. Never invent, renumber, or emit a placeholder.
+- Subject and media indices are independent: copy each relationship from the inventory.
+  An environment's Subject number never determines its Picture number. Keep the correct
+  image binding when referring to that location, identity, object, or object view.
 - <Subject N> is a stable visible identity. Define each subject once using its supplied visual
   reference. An identity picture or video supplies appearance, not its source pose, framing,
   background, dialogue, or opening frame.
@@ -49,9 +52,35 @@ FIELD CONTENT
   Establish location, composition, subjects, lighting, action, motivated camera coverage, cuts,
   dialogue, reactions, and a concrete final state. Put `[Shot 1]` before the opening shot, with
   no timestamp. Later shots use `[Shot N] At MM:SS.mmm, ...`. Keep every event inside Duration.
+- Give each requested camera cut or switch its own shot marker; do not bury a separate view
+  inside the preceding shot. Continuous camera movement stays in one shot when requested.
+  Spread the requested action chain through Duration, with time for transitions and a clear
+  ending. Preserve authored timings and deliberate holds; otherwise avoid completing the
+  entire chain early and leaving a long interval that could restart its final action.
 - Preserve blocking through every cut. A later angle starts from the physical result of the
   preceding shot; it cannot make a character re-enter, re-approach, or re-sit after that action
   has already completed.
+- Carry the achieved state of characters, creatures, objects, and environments through every
+  angle: location, motion, surface contact, occupants, attachments, possession, and open/closed
+  states persist until an action visibly changes them. A camera cut changes the view, not the
+  physical result. Keep source-required intermediate states before the departure or transition
+  that ends them. Complete one-time actions once; later coverage shows their continuing result.
+  Preserve intentional flashbacks, independent cuts, transformations, and repetitions requested
+  by the user rather than forcing them into continuous action.
+- Make carried state visible in the new framing. Merely naming an established state is not
+  enough: describe the observable contact, separation, relative surroundings, or motion cues
+  that support it. A tighter view must show the same world state through its available visual
+  evidence. Rebuild reference backgrounds and views for the current action rather than letting
+  their familiar composition silently return an object or character to an earlier state.
+  For lost surface contact, show separation or the supporting surface beneath the object.
+  In an attached, tight, or interior view, use relative surroundings seen through openings
+  to convey the established height or movement. After a room transition, show destination
+  features; for possession, show the appropriate hand or attachment contact. Use qualitative
+  evidence supported by the source without inventing numerical positions or new destinations.
+- When the source establishes that several object references show complementary views or
+  features of one object, say so in the opening shot and carry that same object through later
+  views. Keep its surroundings appropriate to its current story state. Similar-looking
+  references alone do not establish a shared object; preserve distinct objects and counts.
 - overall_soundscape: concise target-scene ambience and synchronized physical effects.
 - non_diegetic_music: audience-only music when requested; otherwise N/A.
 

@@ -159,6 +159,21 @@ class H3ResidencyBudgetTests(unittest.TestCase):
         self.plan()
         self.assertFalse(self.wgp.reload_needed)
 
+    def test_per_output_manual_preload_is_applied_without_false_residency_override(self):
+        self.wgp.server_config.update(video_preload_mode="manual", video_preload_in_VRAM=5000,
+                                      image_preload_mode="dynamic", image_preload_in_VRAM=6000)
+        job = self.plan()
+        self.assertNotIn("h3_residency_mb", job["vram_adjustment"])
+        self.assertFalse(hasattr(self.wgp.args, "transformer_budget"))
+        self.assertEqual(self.configure()["budgets"]["transformer"], 5000)
+        self.record_loaded_model()
+        self.restore()
+        self.plan()
+        self.assertFalse(self.wgp.reload_needed)
+        self.restore()
+        image = self.plan(image_mode=1)
+        self.assertIn("h3_residency_mb", image["vram_adjustment"])
+
     def test_changed_residency_reloads_for_heavier_and_lighter_jobs(self):
         self.plan()
         self.record_loaded_model()
@@ -212,13 +227,15 @@ class H3ResidencyBudgetTests(unittest.TestCase):
         self.assertEqual(self.wgp.args.vram_safety_coefficient, 0.8)
         self.model_def = {"architecture": "wan"}
         self.plan(model_type="wan")
-        self.assertEqual(self.configure()["budgets"]["transformer"], 100)
+        self.assertEqual(self.configure()["budgets"]["transformer"], 400)
 
     def test_restore_preserves_prior_value_and_captures_each_jobs_base(self):
         for prior in (512, 1024):
             with self.subTest(prior=prior):
                 self.wgp.args.transformer_budget = prior
                 self.plan()
+                self.assertEqual(self.wgp.args.transformer_budget, prior)
+                self.assertEqual(self.configure()["budgets"]["transformer"], prior)
                 self.restore()
                 self.assertEqual(self.wgp.args.transformer_budget, prior)
 

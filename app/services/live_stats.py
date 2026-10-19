@@ -57,8 +57,10 @@ def get_live_stats() -> dict:
         ram_percent = float(vm.percent)
         ram_used_gb = vm.used / (1024 ** 3)
         ram_total_gb = vm.total / (1024 ** 3)
+        ram_available_gb = vm.available / (1024 ** 3)
     except Exception:
         ram_percent = ram_used_gb = ram_total_gb = 0.0
+        ram_available_gb = None
 
     # ---- GPU (NVIDIA / NVML) -----------------------------------------
     gpu_available = False
@@ -91,6 +93,7 @@ def get_live_stats() -> dict:
             "percent": round(ram_percent, 1),
             "used_gb": round(ram_used_gb, 2),
             "total_gb": round(ram_total_gb, 2),
+            "available_gb": round(ram_available_gb, 2) if ram_available_gb is not None else None,
         },
         "gpu": {
             "available": gpu_available,

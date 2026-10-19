@@ -122,7 +122,7 @@ const request = { prompt: 'Blaine: Hello.\nYoda: Welcome.' };
 applyTtsVoices(request, state.ttsVoices, 2, h3);
 const text = source.text;
 const start = text.indexOf('    const restoredSpeakerName1 =');
-const end = text.indexOf('    set(s => ({', start);
+const end = text.indexOf('    const fps = restoredModelOptions?.fps', start);
 assert.ok(start > 0 && end > start);
 const restore = ts.transpile(text.slice(start, end) + '\n({restoredVoiceCount,restoredVoices})', { target: ts.ScriptTarget.ES2022 });
 const context = { p: request, uploadFilenames: { audio_guide: 'voice.wav' }, _deriveBase: path => path?.split('/').pop() ?? null };

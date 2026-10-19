@@ -2,7 +2,7 @@
 
 In **Settings → Performance → Generation Preview**, choose:
 
-| Option | What appears in Studio |
+| Option | What appears during generation |
 | --- | --- |
 | Off | The usual generating card; no preview decoder or capture work. |
 | Fast Frames | A small set of approximate RGB frames sampled during denoising. |
@@ -12,9 +12,9 @@ In **Settings → Performance → Generation Preview**, choose:
 Live Video is the default when no choice has been saved. Existing saved choices,
 including Off, are preserved. Choose Off here to disable previews.
 
-The setting takes effect when the next generation begins, including queued jobs. It remains available with Performance Auto enabled. The preview stays inside the Studio generating card, alongside progress and ETA, and labels its clip and window. Click the video or its pause/play button to control playback without pausing generation.
+The setting takes effect when the next generation begins, including queued jobs. It remains available with Performance Auto enabled. The preview stays inside the Studio generating card or active Director pipeline tile, alongside progress and ETA, and labels its clip and window. Click or tap the preview to hide its information overlay; click or tap again to restore it. Use the separate pause/play button to control playback without pausing generation. Director previews appear without refreshing the page and advance with the active clip without creating duplicate gallery tiles.
 
-On phones, live previews play inline. If the browser blocks automatic playback, the preview remains available with a **Play live preview** button. Tap that button or the video to start playback; generation continues while the preview is paused.
+On phones, live previews play inline. If the browser blocks automatic playback, the preview remains available with a **Play live preview** button. Tap that button to start playback; generation continues while the preview is paused.
 
 Below the setting, Maestro lists native preview support for the selected Studio model. The labels follow the exact model variant and update when the model changes. The preference remains selectable across models; unsupported Tiny VAE modes use Fast Frames where available. Image generations show still previews, including when Live Video is selected. Audio generations have no visual previews.
 

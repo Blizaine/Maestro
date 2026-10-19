@@ -2,12 +2,13 @@ import os
 from pathlib import Path
 
 from shared.utils import files_locator as fl
+from .asset_sources import DOWNLOAD_REVISION
 from .prompt_enhancers import LYRICS_SYSTEM_PROMPT, STYLE_SYSTEM_PROMPT
 
 
 ARCHITECTURE = "yue2"
 REPO_ID = "DeepBeepMeep/TTS"
-REVISION = "864a479cbf3e810e1b2c1993b438510750e383b2"
+REVISION = DOWNLOAD_REVISION
 TEXT_ENCODER_FOLDER = "YuE2_AR"
 ASSETS = ["vae_config.json", "YuE2_VAE_bf16.safetensors"]
 SCORING_CHECKPOINT = "SheetSage2_MERT2_bf16.safetensors"
@@ -95,7 +96,7 @@ class family_handler:
     @staticmethod
     def query_model_def(base_model_type, model_def):
         return {
-            "group": "music", "audio_only": True, "image_outputs": False, "sliding_window": False, "supports_early_stop": True,
+            "group": "music", "audio_only": True, "image_outputs": False, "sliding_window": False, "supports_early_stop": True, "device_explicit": True,
             "duration_is_maximum": True, "yue2_composition": True,
             "runtime_custom_settings": ["artist_id", "artist_strength", "artist_loras", "instrumental"],
             "music_caption_label": "Music style",

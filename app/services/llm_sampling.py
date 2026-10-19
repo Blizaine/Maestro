@@ -1,4 +1,4 @@
-"""Request-scoped sampling overrides for bounded fidelity-repair experiments."""
+"""Request-scoped sampling overrides for focused writing and fidelity repairs."""
 from contextlib import contextmanager
 from contextvars import ContextVar
 

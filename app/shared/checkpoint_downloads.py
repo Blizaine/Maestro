@@ -79,7 +79,7 @@ def _validate_source(source: object) -> tuple[str, str, int, str]:
     return url, expected_sha256, expected_size, hostname
 
 
-def _authenticated_request(url: str, hostname: str, api_key: str | None) -> tuple[str, dict[str, str]]:
+def _authenticated_request(url: str, hostname: str, api_key: str | None, *, use_hf_token: bool = True) -> tuple[str, dict[str, str]]:
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -89,6 +89,18 @@ def _authenticated_request(url: str, hostname: str, api_key: str | None) -> tupl
         "Accept": "*/*",
         "Accept-Encoding": "gzip, deflate",
     }
+    if hostname == "huggingface.co":
+        if not use_hf_token:
+            return url, headers
+        # Named official checkpoints may have a generic upstream filename.
+        # Keep their verified local names while using the same cached Hub
+        # credentials as Maestro's regular hf_hub_download path. Requests
+        # strips Authorization on redirects to a different host.
+        from huggingface_hub import get_token
+        token = get_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return url, headers
     if not isinstance(api_key, str) or not api_key or hostname not in _CIVITAI_HOSTS:
         return url, headers
 
@@ -204,7 +216,7 @@ def download_named_checkpoint(
     except ModuleNotFoundError:
         from app.services.download_control import DownloadCancelled, check_download_cancelled, download_publication
 
-    request_url, headers = _authenticated_request(url, hostname, civitai_api_key)
+    request_url, headers = _authenticated_request(url, hostname, civitai_api_key, use_hf_token=source.get("anonymous") is not True)
     temp_path: Path | None = None
     response = None
     progress_bar = None
@@ -230,6 +242,12 @@ def download_named_checkpoint(
                 "Settings > Services > Civitai API key, then confirm your Civitai account "
                 "has authorized access to the official creator file, including any required "
                 "terms acceptance or download gate."
+            )
+        if response.status_code in (401, 403) and hostname == "huggingface.co":
+            raise CheckpointDownloadError(
+                "Hugging Face rejected this checkpoint download. Open the model's "
+                "official Hugging Face page and grant your account access, then "
+                "sign into that same account through Maestro's Hugging Face login."
             )
         if response.status_code >= 400:
             raise CheckpointDownloadError(

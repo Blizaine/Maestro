@@ -51,6 +51,7 @@ export function DirectorPanel() {
   const analysis = useStore(s => s.directorAnalysis)
   const plannedClips = useStore(s => s.directorPlannedClips)
   const energyBias = useStore(s => s.directorEnergyBias)
+  const autoBias = useStore(s => s.selectedModelPerMode.video?.startsWith('minimax_h3') ? -2 : 0)
   const clipPlans = useStore(s => s.directorClipPlans)
   const sceneDescription = useStore(s => s.directorSceneDescription)
   const audioFile = useStore(s => s.directorAudioFile)
@@ -99,6 +100,7 @@ export function DirectorPanel() {
 
   const [dragOver, setDragOver] = useState(false)
   const [localBias, setLocalBias] = useState<number | null>(null)
+  const displayedBias = localBias ?? energyBias ?? autoBias
   const [showAnalysisDetails, setShowAnalysisDetails] = useState(false)
   const sliderRef = useRef<number | null>(null)
 
@@ -311,8 +313,11 @@ export function DirectorPanel() {
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <label className="text-[11px] text-text-muted uppercase tracking-wider">Cut Speed</label>
+              <button type="button" aria-label="Automatic cut speed" aria-pressed={energyBias === null}
+                disabled={loading} onClick={() => { setLocalBias(null); sliderRef.current = null; void setEnergyBias(null) }}
+                className="text-[11px] text-accent-blue disabled:opacity-50">Auto</button>
               <span className="text-xs text-text-secondary">
-                {(localBias ?? energyBias) > 0 ? '+' : ''}{localBias ?? energyBias}
+                {energyBias === null && localBias === null ? 'Auto' : `${displayedBias > 0 ? '+' : ''}${displayedBias}`}
               </span>
             </div>
             <input
@@ -320,11 +325,17 @@ export function DirectorPanel() {
               min={-2}
               max={2}
               step={1}
-              value={localBias ?? energyBias}
+              value={displayedBias}
               onChange={e => {
                 const v = Number(e.target.value)
                 setLocalBias(v)
                 sliderRef.current = v
+              }}
+              onKeyUp={event => {
+                if (!['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) return
+                if (sliderRef.current !== null && sliderRef.current !== energyBias) void setEnergyBias(sliderRef.current)
+                setLocalBias(null)
+                sliderRef.current = null
               }}
               onMouseUp={() => {
                 if (sliderRef.current !== null && sliderRef.current !== energyBias) {

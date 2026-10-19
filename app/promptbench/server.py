@@ -18,7 +18,7 @@ PARAM_KEYS = frozenset({
     "minimax_h3_reference_sequence", "minimax_h3_sequence_clip_frames",
     "minimax_h3_sequence_memory_override", "minimax_h3_sequence_continuity",
     "sliding_window_size", "sliding_window_overlap", "sliding_window_memory_override",
-    "minimax_h3_multi_window",
+    "minimax_h3_multi_window", "minimax_h3_extended_duration",
 })
 
 # These are the built-in Reference entries available to the standalone suite
@@ -67,6 +67,8 @@ def validate_params(params, model=None):
     frames = params.get("video_length", 0)
     if isinstance(frames, bool) or not isinstance(frames, int) or not 1 <= frames <= 2880:
         raise ValueError("Pilot video_length must be 1-2880 frames.")
+    if "minimax_h3_extended_duration" in params and type(params["minimax_h3_extended_duration"]) is not bool:
+        raise ValueError("minimax_h3_extended_duration must be a boolean.")
     for path in [params.get("image_start"), params.get("image_end")]:
         if path and not Path(path).is_file():
             raise ValueError(f"Missing reference asset: {path}")

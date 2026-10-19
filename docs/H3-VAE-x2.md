@@ -1,0 +1,58 @@
+# H3 VAE 2×
+
+For a supported H3 video model, choose **H3 VAE 2×** in Studio’s
+**Advanced → Finishing → Spatial Upsampling**, or Director’s
+**Advanced → Video → Upsampling**. The option is off by default.
+
+Denoising and references use the selected base canvas. The learned decoder
+doubles both output dimensions: 960×544 becomes 1920×1088. Live previews
+retain their lightweight decoder and can have different detail from the final
+video. This selection replaces the normal decoder; Maestro does not apply a
+second 2× resize afterward.
+
+The pinned INT8 ConvRot checkpoint is about 2.8 GB and downloads on first
+selection. It is separate from transformer checkpoints and LoRAs. Saved
+outputs retain the selected method and actual final dimensions. Switching the
+decoder reloads the model profile while preserving the selected text encoder.
+
+Maestro recognizes both the direct VAE folder and the nested folder retained
+by Hugging Face downloads. Existing files, including those in linked model
+folders, are reused in place and verified against the pinned SHA-256 before
+loading. A completed download does not need to be deleted or downloaded
+again; missing license or notice files are fetched separately.
+
+Current support covers standard H3 video generation, including Frames and
+References, in Studio and Director. It excludes image mode, audio-only,
+Viggle, and Audio from Control Video, which preserves the source frames.
+The checkpoint’s source-image B32 detail branch is not used for generated
+latents. Extra pixels do not establish the same detail as native higher
+resolution denoising.
+
+Both normal and x2 H3 decoding blend temporal chunks in the native decoder
+grid and write finalized frames to CPU bytes. This avoids retaining the
+complete floating-point decoded video on the GPU. The x2 decoder still adds
+work and output memory, especially for long clips or further finishing.
+
+## Measured 12-GB Windows results
+
+On the RTX 3080 Ti with 32 GB RAM, a 14.375-second Fused References test at
+six steps, 540p, with an image and exact music produced 1920×1088 output in
+260.735 seconds. Sampled peak VRAM was 8.94 GiB; all 345 frames and the
+soundtrack passed complete media decoding. A matched short warm run added
+about 2.4 seconds compared with the normal decoder. These are individual
+measurements, not a speed or quality guarantee. RAM pressure and paging were
+still observed. See the [validation record](VALIDATION_V3.0.0.md) for settings,
+comparison limits, earlier native transformer-memory failures and the separate
+verified native 1080p / 15.08-second follow-up. Native generation uses its own
+memory recipe; the x2 decoder does not provide that denoising memory saving.
+
+## Model terms and provenance
+
+The optional weights retain the [MiniMax H3 Community License](../app/models/minimax_h3/MiniMax-H3-X2-Detail-v1.LICENSE)
+and [NOTICE](../app/models/minimax_h3/MiniMax-H3-X2-Detail-v1.NOTICE).
+The license’s territory excludes the United States, EU, UK and South Korea
+and directs interested deployers there to contact MiniMax. Review those terms
+and any applicable authorization before use or deployment.
+[Source revisions and the verified asset hash](../app/models/minimax_h3/UPSTREAM.md)
+are recorded with the implementation. No model weights are distributed in the
+Maestro source repository.

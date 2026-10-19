@@ -1,4 +1,5 @@
 import { outputIdentity } from '../../lib/galleryIdentity'
+import { directorGalleryGroupKey } from '../../lib/directorGalleryGroups'
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { Play, Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Heart, ArrowLeftToLine, Download, FolderInput, Scissors, FastForward, BookMarked, Info, ChevronDown, ChevronUp, MoreHorizontal, ScanFace, Maximize2, Columns2 } from 'lucide-react'
@@ -15,8 +16,10 @@ import { modelDisplayName } from '../../lib/modelDisplay'
 import { sendToGalleryInput, useGalleryInputs, type GalleryInputTarget } from '../../lib/galleryInputs'
 import { getVideoPosterUrl } from '../../lib/thumbnailCache'
 import { useVideoPosterSize } from '../../lib/useVideoPosterSize'
+import { useMediaDuration } from '../../lib/mediaDuration'
 import { getMediaTimestamp } from '../../lib/mediaTimestamp'
 import { MediaMetadataDetails } from './MediaMetadataDetails'
+import { MediaDurationBadge } from './MediaDurationBadge'
 
 interface Props {
   file: OutputFile
@@ -89,6 +92,11 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const rerollGeneration = useStore(s => s.rerollGeneration)
   const deleteOutput = useStore(s => s.deleteSelectedOutput)
   const rejoinClipGroup = useStore(s => s.rejoinClipGroup)
+  const rejoinPipelineClips = useStore(s => s.rejoinPipelineClips)
+  const setDirectorGalleryGroupExpanded = useStore(s => s.setDirectorGalleryGroupExpanded)
+  const loadSavedPipeline = useStore(s => s.loadSavedPipeline)
+  const setDashboardOpen = useStore(s => s.setDashboardOpen)
+  const removeOutputFromGallery = useStore(s => s.removeOutputFromGallery)
   const toggleFavorite = useStore(s => s.toggleFavorite)
   const setContinueVideo = useStore(s => s.setContinueVideo)
   const setStudioVideoWorkflow = useStore(s => s.setStudioVideoWorkflow)
@@ -99,6 +107,13 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const receivingGalleryInput = useGalleryInputs(s => s.receiving)
   const workspaces = useStore(s => s.workspaces)
   const activeWorkspace = useStore(s => s.activeWorkspace)
+  const directorGroup = file.director_group
+  const directorGroupState = useStore(s => directorGroup
+    ? s.directorGalleryGroups[directorGalleryGroupKey(file.workspace || s.activeWorkspace, directorGroup.pipeline_id)]
+    : undefined)
+  const isDirectorChild = file.type === 'video'
+    && !!file.director_pipeline_id
+    && file.director_clip_index != null
   // Uploads stay outside workspace move/favorite actions. Their dedicated
   // delete endpoint is safe for this virtual folder.
   const browsingUploads = useStore(s => s.browsingUploads)
@@ -124,6 +139,9 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const [copied, setCopied] = useState(false)
   const [copiedOriginalPrompt, setCopiedOriginalPrompt] = useState(false)
   const [rejoining, setRejoining] = useState(false)
+  const [directorGroupAction, setDirectorGroupAction] = useState<'edit' | 'rejoin' | null>(null)
+  const [directorGroupFeedback, setDirectorGroupFeedback] = useState('')
+  const [childRejoinError, setChildRejoinError] = useState('')
   const [sentToInput, setSentToInput] = useState('')
   const sentToInputTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const [sendingToInput, setSendingToInput] = useState('')
@@ -139,6 +157,11 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const itemRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const posterSize = useVideoPosterSize(videoRef, file.type === 'video' ? file.url : '')
+  const measuredMediaInfo = meta?.media_info
+  const durationSeed = measuredMediaInfo?.size_bytes === file.size
+    ? measuredMediaInfo.duration_seconds
+    : undefined
+  const mediaDuration = useMediaDuration(itemRef, file, durationSeed)
   const audioRef = useRef<HTMLAudioElement>(null)
 
   useEffect(() => () => {
@@ -315,6 +338,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const firstBlockEnabled = params?.skip_steps_cache_type === 'first_block'
   const solEnabled = String(params?.override_attention || '').toLowerCase() === 'sol'
   const slaEnabled = String(params?.override_attention || '').toLowerCase() === 'sla'
+  const vedaEnabled = String(params?.override_attention || '').toLowerCase() === 'veda'
   const fusedFourStep = modelType.includes('fused_turbo')
   const h3Workflow = modelType.includes('minimax_h3')
     ? (modelType.includes('ref2va') ? 'Omni / Ref2VA' : 'First / Last / FL2VA')
@@ -325,6 +349,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     ...(pddEnabled ? ['PDD'] : []),
     ...(solEnabled ? ['Sol Engine'] : []),
     ...(slaEnabled ? ['SLA'] : []),
+    ...(vedaEnabled ? ['Veda'] : []),
     ...(firstBlockEnabled ? ['First Block Cache'] : []),
   ]
 
@@ -510,13 +535,55 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     }
   }
 
-  const handleRejoin = async () => {
-    if (!groupId) return
+  const handleRejoin = async (): Promise<boolean> => {
+    if (!groupId && !file.director_pipeline_id) return false
     setRejoining(true)
+    setChildRejoinError('')
     try {
-      await rejoinClipGroup(groupId, file.workspace)
+      if (file.director_pipeline_id) {
+        await rejoinPipelineClips(file.director_pipeline_id)
+      } else if (groupId) {
+        await rejoinClipGroup(groupId, file.workspace)
+      }
+      return true
+    } catch (error) {
+      setChildRejoinError(error instanceof Error ? error.message : String(error))
+      return false
     } finally {
       setRejoining(false)
+    }
+  }
+
+  const handleEditDirectorShots = async () => {
+    if (!directorGroup) return
+    setDirectorGroupAction('edit')
+    setDirectorGroupFeedback('Loading saved Director shots…')
+    try {
+      await loadSavedPipeline(directorGroup.pipeline_id)
+      const selected = useStore.getState().dashboardSelectedPipeline
+      if (selected?.pipeline_id !== directorGroup.pipeline_id) {
+        throw new Error('Could not load the saved Director project.')
+      }
+      setDashboardOpen(true)
+      setDirectorGroupFeedback('Saved Director shots opened in the Dashboard.')
+    } catch (error) {
+      setDirectorGroupFeedback(error instanceof Error ? error.message : String(error))
+    } finally {
+      setDirectorGroupAction(null)
+    }
+  }
+
+  const handleRejoinDirectorGroup = async () => {
+    if (!directorGroup) return
+    setDirectorGroupAction('rejoin')
+    setDirectorGroupFeedback('Rejoining current Director shots…')
+    try {
+      await rejoinPipelineClips(directorGroup.pipeline_id)
+      setDirectorGroupFeedback('A new joined video was created from the current shots.')
+    } catch (error) {
+      setDirectorGroupFeedback(error instanceof Error ? error.message : String(error))
+    } finally {
+      setDirectorGroupAction(null)
     }
   }
 
@@ -598,10 +665,8 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     setShowMoveMenu(false)
     try {
       await moveOutput(file.name, targetWs, file.workspace)
-      // Immediately remove from local state (source may still exist during deferred cleanup)
-      const store = useStore.getState()
-      const filtered = store.outputs.filter(o => outputIdentity(o) !== outputIdentity(file))
-      useStore.setState({ outputs: filtered, selectedOutput: Math.min(store.selectedOutput, Math.max(0, filtered.length - 1)) })
+      // Remove the output from both the raw page and any expanded Director cache.
+      removeOutputFromGallery(file, index)
       setShowActionMenu(false)
     } catch (e) {
       console.error('Move failed:', e)
@@ -755,6 +820,9 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     <div
       ref={itemRef}
       data-feed-index={index}
+      data-output-name={file.name}
+      data-director-pipeline-id={file.director_pipeline_id || undefined}
+      data-director-clip-index={file.director_clip_index ?? undefined}
       style={style}
       className={`rounded-xl border-2 overflow-visible transition-colors ${showActionMenu ? 'z-40' : 'z-0'} ${
         // Active frame: theme-aware bezel via frame-active-gradient.
@@ -777,7 +845,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
         isActive
           ? 'border-transparent frame-active-gradient shadow-active-ring'
           : 'border-border bg-bg-tertiary'
-      }`}
+      } ${isDirectorChild ? 'ml-2 md:ml-4 ring-1 ring-inset ring-accent-blue/20' : ''}`}
       onClick={handleSelect}
     >
       {/* Media player — bg-media-canvas keeps the letterbox dark even on light themes */}
@@ -821,6 +889,14 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
           </button>
         ) : (
           <RetryImage key={file.url} url={file.url} alt={file.name} />
+        )}
+        {file.type === 'video' && (
+          <MediaDurationBadge seconds={mediaDuration} className="left-2 top-2 px-1.5 py-1 text-[10px]" />
+        )}
+        {isDirectorChild && (
+          <span className="absolute bottom-2 left-2 rounded-md border border-accent-blue/35 bg-black/70 px-2 py-1 text-[10px] font-medium text-blue-100">
+            Clip {(file.director_clip_index ?? 0) + 1}
+          </span>
         )}
         {file.type === 'video' && onOpenViewer && (
           <button type="button" className="absolute top-2 right-2 rounded-lg bg-black/65 p-2 text-white hover:bg-black/85"
@@ -1060,19 +1136,19 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                   <span>Extend this video</span>
                 </button>
               )}
-              {groupId && (
+              {(groupId || file.director_pipeline_id) && file.type === 'video' && (
                 <button
                   role="menuitem"
-                  onClick={async () => {
-                    await handleRejoin()
-                    setShowActionMenu(false)
-                  }}
+                  onClick={async () => { if (await handleRejoin()) setShowActionMenu(false) }}
                   disabled={rejoining}
                   className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-accent-blue transition-colors hover:bg-bg-hover disabled:opacity-50"
                 >
                   {rejoining ? <Loader2 size={14} className="animate-spin" /> : <Combine size={14} />}
-                  <span>Rejoin all {clipTotal} clips</span>
+                  <span>{file.director_pipeline_id ? 'Rejoin Director shots' : `Rejoin all ${clipTotal} clips`}</span>
                 </button>
+              )}
+              {childRejoinError && (
+                <p role="alert" className="px-2.5 py-2 text-xs text-red-400">{childRejoinError}</p>
               )}
               {params && prompt && (
                 <button
@@ -1172,6 +1248,67 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
           )}
         </div>
       </div>
+      {directorGroup && (
+        <div
+          className="flex flex-wrap items-center gap-2 border-t border-border/80 bg-accent-blue/[0.035] px-3 py-2"
+          data-director-group-id={directorGroup.pipeline_id}
+          onClick={event => event.stopPropagation()}
+        >
+          <div className="flex min-w-0 flex-1 items-center gap-2 text-[11px] text-text-muted">
+            <Combine size={13} className="shrink-0 text-accent-blue" />
+            <span className="truncate">Director project · {directorGroup.clip_count} clips</span>
+          </div>
+          <button
+            type="button"
+            aria-expanded={!!directorGroupState?.expanded}
+            onClick={() => void setDirectorGalleryGroupExpanded(
+              file,
+              directorGroupState?.error ? true : !directorGroupState?.expanded,
+              !!directorGroupState?.error,
+            )}
+            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-accent-blue transition-colors hover:bg-accent-blue/10 disabled:opacity-50"
+            disabled={!!directorGroupState?.loading}
+          >
+            {directorGroupState?.loading
+              ? <Loader2 size={12} className="animate-spin" />
+              : directorGroupState?.expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+            {directorGroupState?.loading
+              ? 'Loading clips…'
+              : directorGroupState?.error
+                ? 'Retry loading clips'
+                : directorGroupState?.expanded
+                ? 'Hide clips'
+                : `Show ${directorGroup.clip_count} clips`}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleEditDirectorShots()}
+            disabled={directorGroupAction !== null}
+            className="rounded-md px-2 py-1 text-[11px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary disabled:opacity-50"
+          >
+            {directorGroupAction === 'edit' ? 'Opening…' : 'Edit Director shots'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleRejoinDirectorGroup()}
+            disabled={directorGroupAction !== null}
+            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-accent-blue disabled:opacity-50"
+          >
+            {directorGroupAction === 'rejoin'
+              ? <Loader2 size={12} className="animate-spin" />
+              : <Combine size={12} />}
+            {directorGroupAction === 'rejoin' ? 'Rejoining…' : 'Rejoin'}
+          </button>
+          {directorGroupState?.error && (
+            <p className="basis-full text-[10px] text-red-400" role="alert">{directorGroupState.error}</p>
+          )}
+          {directorGroupFeedback && (
+            <p className="basis-full text-[10px] text-text-muted" role="status" aria-live="polite">
+              {directorGroupFeedback}
+            </p>
+          )}
+        </div>
+      )}
       {showDetails && (
         <div
           className="rounded-b-[10px] border-t border-border bg-bg-secondary/70 px-3 py-3"

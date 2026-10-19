@@ -4,7 +4,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const root = path.resolve(__dirname, '../..');
 const esbuild = require(path.join(root, 'ui/node_modules/esbuild'));
-const playwright = require(process.env.MAESTRO_PLAYWRIGHT || 'C:/Users/bliza/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const playwright = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
 
 (async () => {
   const bundle = await esbuild.build({stdin: {contents: `
@@ -41,7 +41,7 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT || 'C:/Users/bliza/.ca
     await page.goto('http://image-details.test');
     for (const id of ['queued', 'immediate', 'plain']) {
       await page.evaluate(id => window.showImage(id), id);
-      const details = page.getByRole('button', {name: 'Show generation details', exact: true});
+      const details = page.getByRole('button', {name: 'Show media details', exact: true});
       await details.click();
       await page.getByText('A detailed blue vase on a wooden table.', {exact: true}).last().waitFor();
       if (id === 'plain') assert.equal(await page.getByText('Original prompt', {exact: true}).count(), 0);

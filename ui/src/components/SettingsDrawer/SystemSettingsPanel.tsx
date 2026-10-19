@@ -1,19 +1,22 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { ChevronDown, ChevronRight, RotateCcw, Check, Download, Trash2, Cpu, RefreshCw, Loader2, FolderOpen, Plus, HardDrive } from 'lucide-react'
+import { ChevronDown, ChevronRight, RotateCcw, Check, Download, Trash2, Cpu, RefreshCw, Loader2, FolderOpen, Plus, HardDrive, X } from 'lucide-react'
 import type { ModelFolderCandidate } from '../../types'
-import { useStore, getFamiliesForMode, getModelsForFamily } from '../../stores/useStore'
+import { MemorySettingsPanel } from './MemorySettingsPanel'
+import { useStore, getModelGroupsForVisibilityScope } from '../../stores/useStore'
+import { MODEL_VISIBILITY_GROUPS, isModelEnabledInScope, type ModelVisibilityScope } from '../../lib/modelVisibility'
+import { modelNameForContext } from '../../lib/modelDisplay'
 import * as api from '../../api/client'
-import type { GenerationMode, GenerationPreviewMode, GenerationPreviewSupport } from '../../types'
+import type { ModelDef, GenerationPreviewMode, GenerationPreviewSupport } from '../../types'
 import { FAMILIES, resolveVariant, onOsThemeChange, type FamilyId, type ThemeMode } from '../../lib/theme'
 
 const profileLabels: Record<string, string> = {
-  '1': 'Profile 1: High RAM + High VRAM',
-  '2': 'Profile 2: High RAM + Low VRAM',
-  '3': 'Profile 3: Low RAM + High VRAM',
-  '3.5': 'Profile 3.5: Very Low RAM + High VRAM',
-  '4': 'Profile 4: Low RAM + Low VRAM',
-  '4.5': 'Profile 4.5: Low RAM + Low VRAM (saves ~1GB)',
-  '5': 'Profile 5: Very Low RAM + Low VRAM',
+  '1': 'Profile 1: Prefer VRAM residency',
+  '2': 'Profile 2: Pin host models, stream GPU weights',
+  '3': 'Profile 3: Prefer VRAM, pin main model',
+  '3.5': 'Profile 3.5: Prefer VRAM, limit host pinning',
+  '4': 'Profile 4: Partial residency and host pinning',
+  '4.5': 'Profile 4.5: Partial residency, serial transfers',
+  '5': 'Profile 5: Stream weights, minimal host pinning',
 }
 
 const quantizationOptions = [
@@ -52,22 +55,23 @@ const imageCodecOptions = [
   { value: 'webp_lossless', label: 'WebP Lossless' },
 ]
 
-const MODE_LABELS: { mode: GenerationMode; label: string }[] = [
-  { mode: 'image', label: 'Image' },
-  { mode: 'video', label: 'Video' },
-  { mode: 'audio', label: 'Audio' },
-  { mode: 'avatar', label: 'Video Transforms' },
-]
-
 // Family collapse state persists so "collapse the families I never use"
 // (issue #14) sticks across sessions — unlike the mode groups, which are
 // navigational and reset each visit.
 const COLLAPSED_FAMILIES_KEY = 'maestro-collapsed-model-families'
+const MODEL_MEDIA_GROUPS = [
+  { id: 'video', label: 'Video' },
+  { id: 'image', label: 'Image' },
+  { id: 'audio', label: 'Audio' },
+] as const
+type ModelMedia = typeof MODEL_MEDIA_GROUPS[number]['id']
 
 function ModelVisibilitySection() {
   const models = useStore(s => s.models)
   const families = useStore(s => s.families)
   const enabledModels = useStore(s => s.enabledModels)
+  const overrides = useStore(s => s.modelVisibilityOverrides)
+  const showExperimental = useStore(s => s.servicesConfig?.show_experimental ?? false)
   const toggleModelEnabled = useStore(s => s.toggleModelEnabled)
   const resetEnabledModels = useStore(s => s.resetEnabledModels)
   const setAllModelsEnabled = useStore(s => s.setAllModelsEnabled)
@@ -80,10 +84,10 @@ function ModelVisibilitySection() {
   const nsfwMode = useStore(s => s.servicesConfig?.nsfw_mode ?? false)
   const modelVisibilityFocus = useStore(s => s.modelVisibilityFocus)
   const clearModelVisibilityFocus = useStore(s => s.clearModelVisibilityFocus)
-  // Root open by default so the section is discoverable; mode groups
-  // (Image/Video/Audio/Video Transforms) start collapsed to keep the list scannable.
+  // Root stays discoverable; media and workflow groups start collapsed.
   const [open, setOpen] = useState(true)
-  const [expandedModes, setExpandedModes] = useState<Set<GenerationMode>>(new Set())
+  const [expandedMedia, setExpandedMedia] = useState<Set<ModelMedia>>(new Set())
+  const [expandedModes, setExpandedModes] = useState<Set<ModelVisibilityScope>>(new Set())
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
   // Model pre-downloads in flight (click on the download icon). Byte-level
@@ -211,17 +215,29 @@ function ModelVisibilitySection() {
     }
   }, [loadModels])
 
-  // When the ModelSelector "+N more" hint fires, open this section, expand
-  // the requested mode, and scroll it into view — then clear the request.
+  // The picker opens both levels so its requested workflow is visible.
   useEffect(() => {
     if (!modelVisibilityFocus) return
     setOpen(true)
+    setExpandedMedia(prev => new Set(prev).add(modelVisibilityFocus.split(':')[0] as ModelMedia))
     setExpandedModes(prev => new Set(prev).add(modelVisibilityFocus))
-    requestAnimationFrame(() => sectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+    requestAnimationFrame(() => {
+      const group = sectionRef.current?.querySelector(`[data-model-visibility-scope="${modelVisibilityFocus}"]`)
+      ;(group ?? sectionRef.current)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
     clearModelVisibilityFocus()
   }, [modelVisibilityFocus, clearModelVisibilityFocus])
 
-  const toggleMode = (mode: GenerationMode) => {
+  const toggleMedia = (media: ModelMedia) => {
+    setExpandedMedia(prev => {
+      const next = new Set(prev)
+      if (next.has(media)) next.delete(media)
+      else next.add(media)
+      return next
+    })
+  }
+
+  const toggleMode = (mode: ModelVisibilityScope) => {
     setExpandedModes(prev => {
       const next = new Set(prev)
       if (next.has(mode)) next.delete(mode)
@@ -266,28 +282,21 @@ function ModelVisibilitySection() {
     }
   }, [confirmDelete, loadModels])
 
-  // Group models by generation mode, hiding nsfw_only entries when
-  // Mature Mode is off (they reappear instantly when the toggle flips).
   const visibleModels = models.filter(m => !m.nsfw_only || nsfwMode)
-  const modelsByMode = new Map<GenerationMode, { familyId: string; familyLabel: string; models: { model_type: string; name: string; is_downloaded?: boolean; architecture?: string }[] }[]>()
-  for (const { mode } of MODE_LABELS) {
-    const modeFamilies = getFamiliesForMode(mode, families)
-    const groups: { familyId: string; familyLabel: string; models: { model_type: string; name: string; is_downloaded?: boolean; architecture?: string }[] }[] = []
-    for (const fam of modeFamilies) {
-      const familyModels = getModelsForFamily(fam.id, visibleModels, mode)
-      if (familyModels.length > 0) {
-        groups.push({
-          familyId: fam.id,
-          familyLabel: fam.label,
-          models: familyModels.map(m => ({ model_type: m.model_type, name: m.name, is_downloaded: m.is_downloaded, architecture: m.architecture })),
-        })
-      }
-    }
-    modelsByMode.set(mode, groups)
-  }
-
-  const enabledCount = enabledModels.size
-  const totalCount = visibleModels.length
+  const modeLabels = MODEL_VISIBILITY_GROUPS.filter(group => group.scope !== 'video:inpaint' || showExperimental)
+  const modelsByMode = new Map(modeLabels.map(({ scope }) => [scope,
+    getModelGroupsForVisibilityScope(scope, families, visibleModels).map(({ family, models: familyModels }) => ({
+      familyId: family.id, familyLabel: family.label, models: familyModels,
+    })),
+  ]))
+  const enabledInMode = (model: ModelDef, mode: ModelVisibilityScope) => (
+    isModelEnabledInScope(model.model_type, enabledModels, overrides, mode)
+  )
+  const enabledIds = new Set(modeLabels.flatMap(({ scope }) => (
+    (modelsByMode.get(scope) ?? []).flatMap(group => group.models.filter(model => enabledInMode(model, scope)).map(model => model.model_type))
+  )))
+  const enabledCount = enabledIds.size
+  const totalCount = new Set([...modelsByMode.values()].flatMap(groups => groups.flatMap(group => group.models.map(model => model.model_type)))).size
   const downloadedCount = visibleModels.filter(m => m.is_downloaded).length
 
   return (
@@ -310,9 +319,11 @@ function ModelVisibilitySection() {
 
       {open && (
       <div className="mt-3 space-y-3">
+      <p className="text-[11px] leading-relaxed text-text-muted">Choose the models shown in each mode. Visibility is separate for each mode; downloads are shared.</p>
       <div className="flex gap-2">
         <button
-          onClick={resetEnabledModels}
+          onClick={() => resetEnabledModels()}
+          title="Reset all model choices to defaults. No model files are deleted."
           className="flex items-center gap-1 px-2 py-1 text-[10px] border border-border rounded text-text-secondary hover:text-text-primary hover:border-border-light transition-colors"
         >
           <RotateCcw size={10} />
@@ -332,196 +343,240 @@ function ModelVisibilitySection() {
         </button>
       </div>
 
-      {MODE_LABELS.map(({ mode, label }) => {
-        const groups = modelsByMode.get(mode) ?? []
-        const modeModels = groups.flatMap(g => g.models)
-        const modeEnabled = modeModels.filter(m => enabledModels.has(m.model_type)).length
-        const modeDownloaded = modeModels.filter(m => m.is_downloaded).length
-        const isExpanded = expandedModes.has(mode)
-
+      {MODEL_MEDIA_GROUPS.map(media => {
+        const mediaModes = modeLabels.filter(({ scope }) => (
+          scope.startsWith(`${media.id}:`) && (modelsByMode.get(scope)?.length ?? 0) > 0
+        ))
+        if (mediaModes.length === 0) return null
+        // A checkpoint shared by workflows counts only once at the media level.
+        const mediaModels = new Map(mediaModes.flatMap(({ scope }) => (
+          (modelsByMode.get(scope) ?? []).flatMap(group => group.models.map(model => [model.model_type, model] as const))
+        )))
+        const mediaEnabled = new Set(mediaModes.flatMap(({ scope }) => (
+          (modelsByMode.get(scope) ?? []).flatMap(group => group.models.filter(model => enabledInMode(model, scope)).map(model => model.model_type))
+        ))).size
+        const mediaDownloaded = [...mediaModels.values()].filter(model => model.is_downloaded).length
+        const mediaExpanded = expandedMedia.has(media.id)
         return (
-          <div key={mode}>
+          <div key={media.id} data-model-visibility-media={media.id}>
             <button
-              onClick={() => toggleMode(mode)}
+              aria-label={media.label}
+              aria-expanded={mediaExpanded}
+              onClick={() => toggleMedia(media.id)}
               className="flex items-center gap-1.5 w-full text-left"
             >
-              {isExpanded ? <ChevronDown size={11} className="text-text-muted shrink-0" /> : <ChevronRight size={11} className="text-text-muted shrink-0" />}
-              <span className="text-xs text-text-primary font-medium">{label}</span>
+              {mediaExpanded ? <ChevronDown size={12} className="text-text-muted shrink-0" /> : <ChevronRight size={12} className="text-text-muted shrink-0" />}
+              <span className="text-xs text-text-primary font-medium">{media.label}</span>
               <span className="text-[10px] text-text-muted ml-auto">
-                {modeEnabled}/{modeModels.length}
-                {modeDownloaded > 0 && (
+                {mediaEnabled}/{mediaModels.size}
+                {mediaDownloaded > 0 && (
                   <span className="ml-1 text-indicator-success">
-                    ({modeDownloaded} <Download size={8} className="inline -mt-0.5" />)
+                    ({mediaDownloaded} <Download size={8} className="inline -mt-0.5" />)
                   </span>
                 )}
               </span>
             </button>
+            {mediaExpanded && (
+              <div className="mt-2 ml-3 space-y-3">
+                {mediaModes.map(({ scope: mode, label }) => {
+                  const groups = modelsByMode.get(mode) ?? []
+                  if (groups.length === 0) return null
+                  const modeModels = groups.flatMap(g => g.models)
+                  const modeEnabled = modeModels.filter(m => enabledInMode(m, mode)).length
+                  const modeDownloaded = modeModels.filter(m => m.is_downloaded).length
+                  const isExpanded = expandedModes.has(mode)
 
-            {isExpanded && (
-              <div className="mt-1.5 ml-4 space-y-0.5">
-                {groups.map(group => {
-                  const famKey = `${mode}:${group.familyId}`
-                  const famCollapsed = collapsedFamilies.has(famKey)
-                  const famEnabled = group.models.filter(m => enabledModels.has(m.model_type)).length
-                  const famAllEnabled = famEnabled === group.models.length && group.models.length > 0
-                  // Single-family modes render flat — a header would be noise.
-                  const showFamilyHeader = groups.length > 1
                   return (
-                  <div key={group.familyId}>
-                    {showFamilyHeader && (
-                      <div className="flex items-center gap-1.5 mt-2 mb-1">
-                        {/* Tri-state family toggle: checked = all enabled,
-                            indeterminate = some. Click enables the rest,
-                            or disables the whole family when all are on. */}
-                        <input
-                          type="checkbox"
-                          checked={famAllEnabled}
-                          ref={el => { if (el) el.indeterminate = famEnabled > 0 && !famAllEnabled }}
-                          onChange={() => setModelsEnabled(group.models.map(m => m.model_type), !famAllEnabled)}
-                          className="w-3 h-3 rounded border-border bg-bg-tertiary accent-accent-blue shrink-0"
-                          title={famAllEnabled ? `Disable all ${group.familyLabel} models` : `Enable all ${group.familyLabel} models`}
-                        />
-                        <button
-                          onClick={() => toggleFamily(famKey)}
-                          className="flex items-center gap-1 flex-1 min-w-0 text-left"
-                        >
-                          {famCollapsed
-                            ? <ChevronRight size={10} className="text-text-muted shrink-0" />
-                            : <ChevronDown size={10} className="text-text-muted shrink-0" />}
-                          <span className="text-[10px] text-text-muted uppercase tracking-wider truncate">{group.familyLabel}</span>
-                          <span className="text-[9px] text-text-muted ml-auto shrink-0 tabular-nums">{famEnabled}/{group.models.length}</span>
-                        </button>
-                      </div>
-                    )}
-                    {(!showFamilyHeader || !famCollapsed) && group.models.map(m => (
-                      <div
-                        key={m.model_type}
-                        className="flex items-center gap-2 py-0.5 group"
+                    <div key={mode} data-model-visibility-scope={mode} className="scroll-mt-2">
+                      <button
+                        aria-label={label}
+                        aria-expanded={isExpanded}
+                        onClick={() => toggleMode(mode)}
+                        className="flex items-center gap-1.5 w-full text-left"
                       >
-                        <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={enabledModels.has(m.model_type)}
-                            onChange={() => toggleModelEnabled(m.model_type)}
-                            className="w-3.5 h-3.5 rounded border-border bg-bg-tertiary accent-accent-blue shrink-0"
-                          />
-                          <span className={`text-xs truncate ${
-                            m.is_downloaded
-                              ? 'text-text-primary'
-                              : 'text-text-muted group-hover:text-text-secondary'
-                          }`}>
-                            {m.name}
-                          </span>
-                        </label>
-                        {/* Keep download controls outside the checkbox label so
-                            a download click can never toggle model visibility. */}
-                        <div className="flex items-center gap-1 shrink-0">
-                          {cancelErrors[m.model_type]
-                            && downloadStatuses[m.model_type]?.status === 'downloading'
-                            && !cancellingModels.has(m.model_type) && (
-                              <span className="text-[9px] text-red-400" role="alert" title={cancelErrors[m.model_type]}>
-                                Cancel failed
-                              </span>
-                            )}
-                          {downloading.has(m.model_type) ? (
-                            cancellingModels.has(m.model_type) || downloadStatuses[m.model_type]?.status === 'cancelling' ? (
-                              <span className="inline-flex items-center gap-1 text-[10px] text-text-secondary" role="status" aria-live="polite">
-                                <Loader2 size={10} className="animate-spin" /> Cancelling
-                              </span>
-                            ) : downloadStatuses[m.model_type]?.cancellable === true ? (
-                              <button
-                                type="button"
-                                onClick={() => handleCancelDownload(m.model_type)}
-                                className="min-h-[40px] min-w-[72px] px-3 py-2 text-[11px] leading-tight border border-border rounded text-text-secondary hover:text-red-300 hover:border-red-400/60 transition-colors"
-                                title={cancelErrors[m.model_type] || `Cancel download for ${m.name}`}
-                                aria-label={`Cancel download for ${m.name}`}
-                              >
-                                Cancel
-                              </button>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 text-[10px] text-text-muted" role="status" aria-label={`Downloading ${m.name}`}>
-                                <Loader2 size={10} className="text-accent-blue animate-spin" /> Downloading
-                              </span>
-                            )
-                          ) : downloadStatuses[m.model_type]?.status === 'cancelled'
-                            || downloadStatuses[m.model_type]?.status === 'failed' ? (
-                            <>
-                              {downloadStatuses[m.model_type]?.status === 'cancelled' ? (
-                                <span className="text-[10px] text-text-muted shrink-0" role="status">Cancelled</span>
-                              ) : (
-                                <span className="text-[9px] text-red-400" role="alert" title={downloadErrors[m.model_type]}>
-                                  Download failed
-                                </span>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => handleDownload(m.model_type)}
-                                className="min-h-[40px] min-w-[80px] px-3 py-2 text-[11px] leading-tight border border-border rounded text-text-secondary hover:text-accent-blue hover:border-accent-blue/60 transition-colors shrink-0"
-                                title={downloadErrors[m.model_type]
-                                  ? `Retry download: ${downloadErrors[m.model_type]}`
-                                  : `Retry download for ${m.name}`}
-                                aria-label={`Retry download model files for ${m.name}`}
-                              >
-                                Retry
-                              </button>
-                            </>
-                          ) : m.is_downloaded ? (
-                            <span className="inline-flex items-center gap-1 text-[10px] text-indicator-success" title="Model files are downloaded">
-                              <Check size={10} /> Downloaded
+                        {isExpanded ? <ChevronDown size={11} className="text-text-muted shrink-0" /> : <ChevronRight size={11} className="text-text-muted shrink-0" />}
+                        <span className="text-xs text-text-primary font-medium">{label.split(' · ')[1]}</span>
+                        <span className="text-[10px] text-text-muted ml-auto">
+                          {modeEnabled}/{modeModels.length}
+                          {modeDownloaded > 0 && (
+                            <span className="ml-1 text-indicator-success">
+                              ({modeDownloaded} <Download size={8} className="inline -mt-0.5" />)
                             </span>
-                          ) : downloadStatuses[m.model_type]?.status === 'completed' ? (
-                            <span className="inline-flex items-center gap-1 text-[10px] text-indicator-success" role="status">
-                              <Check size={10} /> Complete
-                            </span>
-                          ) : m.architecture === 'mmaudio' ? (
-                            <span className="inline-flex items-center gap-1 text-[10px] text-text-muted" title="Files download when first used">
-                              <Download size={10} /> On first use
-                            </span>
-                          ) : (
-                            <>
-                              {downloadErrors[m.model_type] && (
-                                <span className="text-[9px] text-red-400" role="alert" title={downloadErrors[m.model_type]}>
-                                  Download failed
-                                </span>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => handleDownload(m.model_type)}
-                                className={`min-h-[40px] min-w-[80px] px-3 py-2 text-[11px] leading-tight border border-border rounded transition-colors shrink-0 ${
-                                  downloadErrors[m.model_type]
-                                    ? 'text-red-300 hover:border-red-400/60'
-                                    : 'text-text-secondary hover:text-accent-blue hover:border-accent-blue/60'
-                                }`}
-                                title={downloadErrors[m.model_type]
-                                  ? `Retry download: ${downloadErrors[m.model_type]}`
-                                  : `Download model files for ${m.name}`}
-                                aria-label={`${downloadErrors[m.model_type] ? 'Retry' : 'Download'} model files for ${m.name}`}
-                              >
-                                {downloadErrors[m.model_type] ? 'Retry' : 'Download'}
-                              </button>
-                            </>
                           )}
+                        </span>
+                      </button>
+
+                      {isExpanded && (
+                        <div className="mt-1.5 ml-4 space-y-0.5">
+                          {groups.map(group => {
+                            const famKey = `${mode}:${group.familyId}`
+                            const famCollapsed = collapsedFamilies.has(famKey)
+                            const famEnabled = group.models.filter(m => enabledInMode(m, mode)).length
+                            const famAllEnabled = famEnabled === group.models.length && group.models.length > 0
+                            // Single-family modes render flat — a header would be noise.
+                            const showFamilyHeader = groups.length > 1
+                            return (
+                            <div key={group.familyId}>
+                              {showFamilyHeader && (
+                                <div className="flex items-center gap-1.5 mt-2 mb-1">
+                                  {/* Tri-state family toggle: checked = all enabled,
+                                      indeterminate = some. Click enables the rest,
+                                      or disables the whole family when all are on. */}
+                                  <input
+                                    type="checkbox"
+                                    checked={famAllEnabled}
+                                    ref={el => { if (el) el.indeterminate = famEnabled > 0 && !famAllEnabled }}
+                                    onChange={() => setModelsEnabled(group.models.map(m => m.model_type), !famAllEnabled, mode)}
+                                    className="w-3 h-3 rounded border-border bg-bg-tertiary accent-accent-blue shrink-0"
+                                    title={famAllEnabled ? `Disable all ${group.familyLabel} models` : `Enable all ${group.familyLabel} models`}
+                                  />
+                                  <button
+                                    onClick={() => toggleFamily(famKey)}
+                                    className="flex items-center gap-1 flex-1 min-w-0 text-left"
+                                  >
+                                    {famCollapsed
+                                      ? <ChevronRight size={10} className="text-text-muted shrink-0" />
+                                      : <ChevronDown size={10} className="text-text-muted shrink-0" />}
+                                    <span className="text-[10px] text-text-muted uppercase tracking-wider truncate">{group.familyLabel}</span>
+                                    <span className="text-[9px] text-text-muted ml-auto shrink-0 tabular-nums">{famEnabled}/{group.models.length}</span>
+                                  </button>
+                                </div>
+                              )}
+                              {(!showFamilyHeader || !famCollapsed) && group.models.map(m => (
+                                <div
+                                  key={m.model_type}
+                                  className="flex items-center gap-2 min-h-7 group"
+                                >
+                                  <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
+                                    <input
+                                      type="checkbox"
+                                      checked={enabledInMode(m, mode)}
+                                      aria-label={`${modelNameForContext(m, mode)} in ${label}`}
+                                      onChange={() => toggleModelEnabled(m.model_type, mode)}
+                                      className="w-3.5 h-3.5 rounded border-border bg-bg-tertiary accent-accent-blue shrink-0"
+                                    />
+                                    <span className={`text-xs truncate ${
+                                      m.is_downloaded
+                                        ? 'text-text-primary'
+                                        : 'text-text-muted group-hover:text-text-secondary'
+                                    }`}>
+                                      {modelNameForContext(m, mode)}
+                                    </span>
+                                  </label>
+                                  {/* Keep download controls outside the checkbox label so
+                                      a download click can never toggle model visibility. */}
+                                  <div className="flex items-center gap-1 min-h-7 shrink-0">
+                                    {cancelErrors[m.model_type]
+                                      && downloadStatuses[m.model_type]?.status === 'downloading'
+                                      && !cancellingModels.has(m.model_type) && (
+                                        <span className="text-[9px] text-red-400" role="alert" title={cancelErrors[m.model_type]}>
+                                          Cancel failed
+                                        </span>
+                                      )}
+                                    {downloading.has(m.model_type) ? (
+                                      cancellingModels.has(m.model_type) || downloadStatuses[m.model_type]?.status === 'cancelling' ? (
+                                        <span className="inline-flex items-center gap-1 text-[10px] text-text-secondary" role="status" aria-live="polite">
+                                          <Loader2 size={10} className="animate-spin" /> Cancelling
+                                        </span>
+                                      ) : downloadStatuses[m.model_type]?.cancellable === true ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleCancelDownload(m.model_type)}
+                                          className="inline-flex items-center justify-center h-7 w-7 shrink-0 border border-border rounded text-text-secondary hover:text-red-300 hover:border-red-400/60 transition-colors"
+                                          title={cancelErrors[m.model_type] || `Cancel download for ${m.name}`}
+                                          aria-label={`Cancel download for ${m.name}`}
+                                        >
+                                          <X size={13} />
+                                        </button>
+                                      ) : (
+                                        <span className="inline-flex items-center gap-1 text-[10px] text-text-muted" role="status" aria-label={`Downloading ${m.name}`}>
+                                          <Loader2 size={10} className="text-accent-blue animate-spin" /> Downloading
+                                        </span>
+                                      )
+                                    ) : downloadStatuses[m.model_type]?.status === 'cancelled'
+                                      || downloadStatuses[m.model_type]?.status === 'failed' ? (
+                                      <>
+                                        {downloadStatuses[m.model_type]?.status === 'cancelled' ? (
+                                          <span className="text-[10px] text-text-muted shrink-0" role="status">Cancelled</span>
+                                        ) : (
+                                          <span className="text-[9px] text-red-400" role="alert" title={downloadErrors[m.model_type]}>
+                                            Download failed
+                                          </span>
+                                        )}
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDownload(m.model_type)}
+                                          className="inline-flex items-center justify-center h-7 w-7 border border-border rounded text-text-secondary hover:text-accent-blue hover:border-accent-blue/60 transition-colors shrink-0"
+                                          title={downloadErrors[m.model_type]
+                                            ? `Retry download: ${downloadErrors[m.model_type]}`
+                                            : `Retry download for ${m.name}`}
+                                          aria-label={`Retry download model files for ${m.name}`}
+                                        >
+                                          <RefreshCw size={13} />
+                                        </button>
+                                      </>
+                                    ) : m.is_downloaded ? (
+                                      <span className="inline-flex items-center gap-1 text-[10px] text-indicator-success" title="Model files are downloaded">
+                                        <Check size={10} /> Downloaded
+                                      </span>
+                                    ) : downloadStatuses[m.model_type]?.status === 'completed' ? (
+                                      <span className="inline-flex items-center gap-1 text-[10px] text-indicator-success" role="status">
+                                        <Check size={10} /> Complete
+                                      </span>
+                                    ) : m.architecture === 'mmaudio' ? (
+                                      <span className="inline-flex items-center gap-1 text-[10px] text-text-muted" title="Files download when first used">
+                                        <Download size={10} /> On first use
+                                      </span>
+                                    ) : (
+                                      <>
+                                        {downloadErrors[m.model_type] && (
+                                          <span className="text-[9px] text-red-400" role="alert" title={downloadErrors[m.model_type]}>
+                                            Download failed
+                                          </span>
+                                        )}
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDownload(m.model_type)}
+                                          className={`inline-flex items-center justify-center h-7 w-7 border border-border rounded transition-colors shrink-0 ${
+                                            downloadErrors[m.model_type]
+                                              ? 'text-red-300 hover:border-red-400/60'
+                                              : 'text-text-secondary hover:text-accent-blue hover:border-accent-blue/60'
+                                          }`}
+                                          title={downloadErrors[m.model_type]
+                                            ? `Retry download: ${downloadErrors[m.model_type]}`
+                                            : `Download model files for ${m.name}`}
+                                          aria-label={`${downloadErrors[m.model_type] ? 'Retry' : 'Download'} model files for ${m.name}`}
+                                        >
+                                          {downloadErrors[m.model_type] ? <RefreshCw size={13} /> : <Download size={13} />}
+                                        </button>
+                                      </>
+                                    )}
+                                  </div>
+                                  {/* Delete button — only for downloaded models */}
+                                  {m.is_downloaded && (
+                                    <button
+                                      onClick={() => handleDelete(m.model_type)}
+                                      disabled={deleting === m.model_type || downloading.has(m.model_type)}
+                                      className={`p-0.5 rounded transition-colors shrink-0 ${
+                                        confirmDelete === m.model_type
+                                          ? 'bg-red-500/20 text-red-400'
+                                          : deleting === m.model_type || downloading.has(m.model_type)
+                                            ? 'text-text-muted cursor-wait'
+                                            : 'text-text-muted opacity-0 group-hover:opacity-100 hover:text-red-400'
+                                      }`}
+                                      title={confirmDelete === m.model_type ? 'Click again to confirm delete' : 'Delete model files'}
+                                    >
+                                      <Trash2 size={11} />
+                                    </button>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                            )
+                          })}
                         </div>
-                        {/* Delete button — only for downloaded models */}
-                        {m.is_downloaded && (
-                          <button
-                            onClick={() => handleDelete(m.model_type)}
-                            disabled={deleting === m.model_type || downloading.has(m.model_type)}
-                            className={`p-0.5 rounded transition-colors shrink-0 ${
-                              confirmDelete === m.model_type
-                                ? 'bg-red-500/20 text-red-400'
-                                : deleting === m.model_type || downloading.has(m.model_type)
-                                  ? 'text-text-muted cursor-wait'
-                                  : 'text-text-muted opacity-0 group-hover:opacity-100 hover:text-red-400'
-                            }`}
-                            title={confirmDelete === m.model_type ? 'Click again to confirm delete' : 'Delete model files'}
-                          >
-                            <Trash2 size={11} />
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
+                      )}
+                    </div>
                   )
                 })}
               </div>
@@ -816,7 +871,7 @@ function ThemeSection() {
  *   - Re-detect  → POST /api/v1/system-detect/apply (re-runs detection,
  *                  applies fresh recommendation. Only enabled when auto is on)
  */
-function AutoPerformanceCard() {
+export function AutoPerformanceCard() {
   const servicesConfig = useStore(s => s.servicesConfig)
   const updateServicesConfig = useStore(s => s.updateServicesConfig)
   const loadServicesConfig = useStore(s => s.loadServicesConfig)
@@ -838,14 +893,10 @@ function AutoPerformanceCard() {
   // another mount of the panel already loaded detect into the store,
   // skip the fetch.
   useEffect(() => {
-    if (detect) {
-      setLoading(false)
-      return
-    }
     let alive = true
     loadSystemDetect().finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
-  }, [detect, loadSystemDetect])
+  }, [loadSystemDetect])
 
   const showToast = (msg: string) => {
     setToast(msg)
@@ -859,19 +910,21 @@ function AutoPerformanceCard() {
     setApplying(true)
     try {
       const res = await api.applySystemDetect()
-      await Promise.all([loadServicesConfig(), loadSystemConfig()])
-      if (res.profile_changed) {
+      await Promise.all([loadServicesConfig(), loadSystemConfig(), loadSystemDetect()])
+      if (res.vram_allocator_restart_required) {
+        showToast('Auto-tune applied — restart Maestro to activate the memory allocator')
+      } else if (res.settings_reload || res.profile_changed) {
         showToast('Auto-tune applied — profile changes take effect on next model load')
       } else {
         showToast('Auto-tune applied')
       }
     } catch (e) {
       console.error('apply failed:', e)
-      showToast('Failed to apply auto-tune')
+      showToast(e instanceof Error ? e.message : 'Failed to apply auto-tune')
     } finally {
       setApplying(false)
     }
-  }, [loadServicesConfig, loadSystemConfig])
+  }, [loadServicesConfig, loadSystemConfig, loadSystemDetect])
 
   // Toggle OFF → just flip the flag. Preserves current settings so
   // the user has the same config they were just running, just no
@@ -899,14 +952,16 @@ function AutoPerformanceCard() {
       // services + system configs so the rest of the panel reflects
       // the newly-applied recommendation.
       await Promise.all([loadSystemDetect(), loadServicesConfig(), loadSystemConfig()])
-      if (res.profile_changed) {
+      if (res.vram_allocator_restart_required) {
+        showToast('Auto-tune applied — restart Maestro to activate the memory allocator')
+      } else if (res.settings_reload || res.profile_changed) {
         showToast('Re-detected — profile changes take effect on next model load')
       } else {
         showToast('Re-detected — no settings changed')
       }
     } catch (e) {
       console.error('re-detect failed:', e)
-      showToast('Failed to re-detect hardware')
+      showToast(e instanceof Error ? e.message : 'Failed to re-detect hardware')
     } finally {
       setApplying(false)
     }
@@ -953,6 +1008,49 @@ function AutoPerformanceCard() {
             {autoOn ? '✨ ' : ''}{rec._recommendation_label}
           </div>
         )}
+
+        {rec?._recommendation_details && (
+          <details className="text-[11px] text-text-muted pl-6">
+            <summary className="cursor-pointer text-text-secondary">What Auto-tune manages</summary>
+            <ul className="list-disc pl-4 pt-1 space-y-1">
+              {rec._recommendation_details.map(detail => <li key={detail}>{detail}</li>)}
+            </ul>
+          </details>
+        )}
+
+        <div className="text-[11px] text-text-muted leading-relaxed pl-6 space-y-1">
+          <p>Profiles describe where model weights live. Each generation can use a different placement based on its checkpoint, window, resolution and references.</p>
+          <p>Local learning: {detect?.learning?.completed_renders ?? 0} completed renders across {detect?.learning?.workloads ?? 0} workloads. Choices need repeated matching comparisons with memory headroom.</p>
+          {detect?.learning?.last_plan && (
+            <details>
+              <summary className="cursor-pointer text-text-secondary">
+                Last generation: Profile {detect.learning.last_plan.profile}
+                {detect.learning.last_plan.transformer_budget_mb > 0
+                  ? ` · ${(detect.learning.last_plan.transformer_budget_mb / 1024).toFixed(1)} GB transformer allowance`
+                  : ' · model budget defaults'}
+              </summary>
+              {detect.learning.last_plan.attention_head_split != null && <p>
+                Head splitting: {['Off', 'Low', 'Medium', 'High'][detect.learning.last_plan.attention_head_split] ?? 'Unknown'}
+                {detect.learning.last_plan.override_attention_head_split ? ' (Auto, for this generation)' : ' (saved setting)'}
+              </p>}
+              <p>{detect.learning.last_plan.reasons.join(' ')}</p>
+              {detect.learning.last_plan.warnings.map(warning => <p className="text-indicator-warning" key={warning}>{warning}</p>)}
+              <p>This allowance covers transformer weights. Total VRAM also includes activations, references, decoding and other models.</p>
+            </details>
+          )}
+          <div className="flex gap-3">
+            <button className="hover:text-text-primary underline" onClick={() => void loadSystemDetect()}>Refresh learning</button>
+            {(detect?.learning?.completed_renders ?? 0) > 0 && (
+              <button className="hover:text-text-primary underline" onClick={async () => {
+                try {
+                  await api.resetPerformanceLearning()
+                  await loadSystemDetect()
+                  showToast('Local performance comparisons cleared for this hardware')
+                } catch { showToast('Could not clear local comparisons') }
+              }}>Clear comparisons</button>
+            )}
+          </div>
+        </div>
 
         {/* Toggle + Re-detect button row */}
         <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-border/40">
@@ -1200,6 +1298,7 @@ export function SystemSettingsPanel() {
       <AutoPerformanceCard />
 
       <GenerationPreviewSetting />
+      <MemorySettingsPanel />
 
       {/* Auto ON: collapse the advanced fields under an expander.
           The expander defaults closed — power users who want to peek

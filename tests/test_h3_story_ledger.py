@@ -27,6 +27,7 @@ from services.h3_story_ledger import (  # noqa: E402
     _dialogue_word_count,
     _expected_dialogue_events,
     _expand_camera_event_cards,
+    _fallback_camera_spec,
     _fallback_segment,
     _h3_contract_clauses,
     _h3_preview_action_frames,
@@ -35,6 +36,7 @@ from services.h3_story_ledger import (  # noqa: E402
     _materialized_segment_violations,
     _only_supplied_dialogue_requested,
     _apply_faithful_treatment,
+    _usable_h3_native_closing_state,
     _prepare_render_dialogue_schedule,
     _repair_materialized_segment_staging,
     _split_h3_shots_at_speaker_changes,
@@ -554,6 +556,239 @@ class H3StoryLedgerTests(unittest.TestCase):
         self.assertNotIn("holds the frame above", segment["closing_state"])
         self.assertEqual(segment["coverage"], "single continuous shot")
         self.assertEqual(segment["shots"][1]["transition"], "continuous reframe without a cut")
+
+    def test_fallback_camera_switch_creates_distinct_vehicle_views_once(self):
+        source_action = (
+            "The camera switches to an interior shot inside the vehicle, then cuts "
+            "to an exterior tracking shot as the vehicle moves across the field."
+        )
+        source_events = [{"event_id": "E1", "text": source_action}]
+        beat = {
+            "beat_id": "B1", "source_event_ids": ["E1"], "dialogue_ids": ["D1"],
+            "description": source_action,
+            "state_after": "The vehicle remains beyond the field.",
+        }
+        catalog = [{
+            "dialogue_id": "D1", "speaker": "Rae", "text": "Ready?",
+            "delivery": "quietly",
+        }]
+        fallback = _fallback_segment(
+            1, duration=8.0, beats=[beat],
+            opening_state="The vehicle waits at the field entrance.",
+            camera_coverage="multi_shot", dialogue_catalog=catalog,
+            source_events=source_events, expected_dialogue_events={"D1": "E1"},
+        )
+
+        self.assertEqual(len(fallback["shots"]), 2)
+        self.assertIn("interior", fallback["shots"][0]["framing"])
+        self.assertIn("exterior tracking", fallback["shots"][1]["framing"])
+        self.assertEqual(fallback["shots"][1]["transition"], "hard cut")
+        self.assertEqual(fallback["shots"][0]["dialogue"][0]["dialogue_id"], "D1")
+        self.assertEqual(fallback["shots"][1]["dialogue"], [])
+
+        rendered = _materialize_segment(
+            fallback, beats=[beat], dialogue_catalog=catalog,
+            source_events=source_events,
+        )
+        action_text = " ".join(shot["action"] for shot in rendered["shots"])
+        self.assertEqual(action_text.count("camera switches to an interior shot"), 1)
+        self.assertEqual(
+            [event_id for shot in rendered["shots"] for event_id in shot["_source_event_ids"]],
+            ["E1"],
+        )
+        self.assertEqual(
+            [line["dialogue_id"] for shot in rendered["shots"] for line in shot["dialogue"]],
+            ["D1"],
+        )
+
+    def test_fallback_camera_spec_recognizes_spaced_low_angle(self):
+        spaced = _fallback_camera_spec("low angle", "A person walks outside")
+        hyphenated = _fallback_camera_spec("low-angle", "A person walks outside")
+
+        self.assertEqual(spaced, hyphenated)
+        self.assertEqual(spaced["view"], "low_angle")
+
+    def test_fallback_camera_switch_is_scene_generic_and_continuous_stays_unbroken(self):
+        source_action = (
+            "The camera switches to an interior shot of the potter at the workbench, "
+            "then changes to an exterior tracking shot following the potter into the courtyard."
+        )
+        source_events = [{"event_id": "E1", "text": source_action}]
+        beat = {
+            "beat_id": "B1", "source_event_ids": ["E1"], "dialogue_ids": [],
+            "description": source_action,
+            "state_after": "The potter stands in the courtyard.",
+        }
+        segment = _fallback_segment(
+            1, duration=8.0, beats=[beat],
+            opening_state="The potter stands at the workbench.",
+            camera_coverage="continuous", dialogue_catalog=[], source_intent={},
+            source_events=source_events,
+        )
+
+        self.assertEqual(len(segment["shots"]), 2)
+        self.assertIn("interior", segment["shots"][0]["framing"])
+        self.assertIn("exterior tracking", segment["shots"][1]["framing"])
+        self.assertEqual(segment["coverage"], "single continuous shot")
+        self.assertEqual(
+            segment["shots"][1]["transition"],
+            "continuous reframe without a cut",
+        )
+        self.assertNotIn("vehicle", json.dumps(segment).casefold())
+        self.assertNotIn("hard cut", json.dumps(segment).casefold())
+
+    def test_grouped_source_events_keep_one_unit_with_external_tracking_view(self):
+        source_events = [
+            {"event_id": "E1", "text": "The camera switches to an interior shot inside the vehicle."},
+            {"event_id": "E2", "text": "Then a high-speed tracking shot follows the vehicle."},
+            {"event_id": "E3", "text": "It accelerates along the road."},
+        ]
+        beats = [
+            {
+                "beat_id": "B1", "segment": 2, "source_event_ids": ["E1"],
+                "dialogue_ids": ["D1"],
+                "description": "The camera switches to an interior shot inside the vehicle.",
+                "state_after": "The driver is inside the vehicle.",
+            },
+            {
+                "beat_id": "B2", "segment": 2, "source_event_ids": ["E2", "E3"],
+                "dialogue_ids": [],
+                "description": "A high-speed tracking shot follows as the vehicle accelerates.",
+                "state_after": "The vehicle moves quickly along the road.",
+            },
+        ]
+        catalog = [{
+            "dialogue_id": "D1", "speaker": "Rae", "text": "Ready?",
+            "delivery": "quietly",
+        }]
+        phases = _camera_phase_beats(
+            beats,
+            source_events=source_events,
+            expected_dialogue_events={"D1": "E1"},
+            preserve_adaptation=True,
+        )
+
+        self.assertEqual(phases[1]["_grouped_source_event_ids"], ["E2", "E3"])
+        self.assertEqual(phases[1]["source_event_ids"], ["E2", "E3"])
+
+        fallback = _fallback_segment(
+            2, duration=8.0, beats=phases,
+            opening_state="The vehicle is lifting off with the driver inside.",
+            camera_coverage="multi_shot", dialogue_catalog=catalog,
+            source_events=source_events,
+            expected_dialogue_events={"D1": "E1"},
+        )
+        rendered = _materialize_segment(
+            fallback, beats=phases, dialogue_catalog=catalog,
+            source_events=source_events,
+        )
+
+        self.assertEqual(len(rendered["shots"]), 2)
+        self.assertIn("interior", rendered["shots"][0]["framing"])
+        self.assertIn("exterior tracking", rendered["shots"][1]["framing"])
+        self.assertIn("outside the cabin", rendered["shots"][1]["camera"])
+        self.assertEqual(rendered["shots"][0]["dialogue"][0]["dialogue_id"], "D1")
+        self.assertEqual(rendered["shots"][1]["dialogue"], [])
+        self.assertEqual(
+            [shot["_source_event_ids"] for shot in rendered["shots"]],
+            [["E1"], ["E2", "E3"]],
+        )
+        group_action = rendered["shots"][1]["action"].casefold()
+        self.assertEqual(group_action.count("tracking shot follows the vehicle"), 1)
+        self.assertEqual(group_action.count("accelerates along the road"), 1)
+
+    def test_ordinary_grouped_camera_views_split_in_order_before_following_motion(self):
+        source_events = [
+            {
+                "event_id": "E1",
+                "text": (
+                    "The camera switches to an interior shot inside the vehicle, "
+                    "with the driver at the wheel."
+                ),
+            },
+            {
+                "event_id": "E2",
+                "text": "Then a high-speed tracking shot follows the vehicle.",
+            },
+            {
+                "event_id": "E3",
+                "text": "The vehicle accelerates along the road at high speed.",
+            },
+        ]
+        beats = [
+            {
+                "beat_id": "B3",
+                "segment": 2,
+                "source_event_ids": ["E1", "E2"],
+                "_grouped_source_event_ids": ["E1", "E2"],
+                "dialogue_ids": [],
+                "description": (
+                    "The camera switches to an interior view with the driver at the wheel, "
+                    "then a high-speed tracking shot follows the vehicle."
+                ),
+                "state_after": "The vehicle is moving along the road with the driver inside.",
+            },
+            {
+                "beat_id": "B4",
+                "segment": 2,
+                "source_event_ids": ["E3"],
+                "dialogue_ids": [],
+                "description": "The vehicle accelerates along the road at high speed.",
+                "state_after": "The vehicle continues down the road at high speed.",
+            },
+        ]
+        fallback = _fallback_segment(
+            2,
+            duration=9.0,
+            beats=beats,
+            opening_state="The vehicle is on the road with its driver at the wheel.",
+            camera_coverage="multi_shot",
+            dialogue_catalog=[],
+            source_events=source_events,
+        )
+        rendered = _materialize_segment(
+            fallback, beats=beats, dialogue_catalog=[], source_events=source_events,
+        )
+
+        self.assertEqual(len(rendered["shots"]), 3)
+        self.assertIn("interior", rendered["shots"][0]["framing"])
+        self.assertIn("exterior tracking", rendered["shots"][1]["framing"])
+        self.assertIn("exterior tracking", rendered["shots"][2]["framing"])
+        self.assertEqual(
+            [shot["_source_event_ids"] for shot in rendered["shots"]],
+            [["E1"], ["E2"], ["E3"]],
+        )
+        self.assertEqual(
+            [shot["beat_ids"] for shot in fallback["shots"]],
+            [["B3"], ["B3"], ["B4"]],
+        )
+        action_text = " ".join(shot["action"] for shot in rendered["shots"]).casefold()
+        self.assertEqual(action_text.count("camera switches to an interior shot"), 1)
+        self.assertEqual(action_text.count("high-speed tracking shot follows the vehicle"), 1)
+        self.assertEqual(action_text.count("accelerates along the road at high speed"), 1)
+
+    def test_native_closing_state_keeps_concrete_camera_state_only(self):
+        self.assertEqual(
+            _usable_h3_native_closing_state(
+                "The blue packet rests on the upper shelf.",
+                last_action="Nora sets the blue packet on the shelf.",
+            ),
+            "The blue packet rests on the upper shelf.",
+        )
+        self.assertEqual(
+            _usable_h3_native_closing_state(
+                "Visible result after the final assigned action: Nora sets the blue packet on the shelf.",
+                last_action="Nora sets the blue packet on the shelf.",
+            ),
+            "",
+        )
+        self.assertEqual(
+            _usable_h3_native_closing_state(
+                "Continue from the visible result of: Nora sets the blue packet on the shelf. Do not repeat it",
+                last_action="Nora sets the blue packet on the shelf.",
+            ),
+            "",
+        )
 
     def test_long_exact_turn_is_fragmented_across_adjacent_windows(self):
         prompt = (
@@ -2500,6 +2735,212 @@ class H3StoryLedgerTests(unittest.TestCase):
         self.assertIn("opens the wooden door", action)
         self.assertIn("crosses the dark room", action)
         self.assertIn("picks up the red book", action)
+
+    def test_accepted_camera_close_survives_authoritative_handoff_and_checkpoint(self):
+        prompt = "Nora places the blue packet on the upper shelf."
+        durations = [6.0]
+        ledger = _deterministic_ledger(
+            prompt, segment_count=1, segment_durations=durations,
+            locked_dialogue=[], camera_coverage="multi_shot", reference_context="",
+        )
+        camera_plan = _segment(1, duration=durations[0])
+        camera_plan["closing_state"] = "The blue packet rests on the upper shelf."
+        camera_plan["shots"][0]["action"] = prompt
+        calls: list[dict] = []
+        responses = iter([json.dumps(ledger), json.dumps(camera_plan)])
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            return next(responses)
+
+        result = plan_h3_story_segments(
+            prompt, segment_durations=durations, mode="reference_sequence",
+            camera_coverage="multi_shot", expect_dialogue=False,
+            llm_generate=generate,
+        )
+        segment = result["segments"][0]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(segment["native_closing_state"], camera_plan["closing_state"])
+        self.assertTrue(segment["closing_state"].startswith("Continue from the visible result of:"))
+        self.assertIn("Nora places the blue packet", segment["closing_state"])
+        self.assertEqual(
+            result["camera_checkpoint"]["segments"][0]["native_closing_state"],
+            camera_plan["closing_state"],
+        )
+
+    def test_continuation_writer_uses_native_endpoint_without_changing_authoritative_handoff(self):
+        prompt = (
+            "Nora lifts a sealed parcel from the floor in the lower hall. "
+            "Nora carries the parcel upstairs through the stairwell."
+        )
+        durations = [6.0, 6.0]
+        native_endpoint = (
+            "Nora stands in the lower hall holding the sealed parcel she lifted from the floor."
+        )
+        ledger = _deterministic_ledger(
+            prompt, segment_count=2, segment_durations=durations,
+            locked_dialogue=[], camera_coverage="multi_shot", reference_context="",
+        )
+        ledger["setting_continuity"] = (
+            "One residential interior remains coherent. The setting travels from "
+            "LOWER_HALL_ROUTE to UPPER_LANDING_ROUTE."
+        )
+        ledger["visual_continuity"] = (
+            "Grounded naturalistic realism. Lighting transitions from "
+            "OLD_HALL_LIGHT to UPPER_LANDING_LIGHT."
+        )
+        ledger["motion_mechanics"] = "The parcel's sealed clasp stays closed while it is carried."
+        calls: list[dict] = []
+        writer_prompts: list[str] = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            properties = kwargs["json_schema"]["properties"]
+            if "event_cards" not in properties:
+                return json.dumps(ledger)
+
+            number = properties["segment"]["minimum"]
+            event_action = (
+                "Nora lifts a sealed parcel from the floor in the lower hall"
+                if number == 1 else
+                "Nora carries the parcel upstairs through the stairwell"
+            )
+            event_cards = {}
+            for event_key, event_schema in properties["event_cards"]["properties"].items():
+                event_properties = event_schema["properties"]
+                phase_properties = event_properties["phases"]["items"]["properties"]
+                event_cards[event_key] = {"phases": [{
+                    field: (
+                        event_action if field == "action" else
+                        "Readable view of Nora and the sealed parcel" if field == "framing" else
+                        "a restrained camera follow" if field == "camera" else
+                        "opening composition" if field == "transition" else
+                        "quiet parcel and footstep sounds"
+                    )
+                    for field in phase_properties
+                }]}
+            enum = properties["closing_state"].get("enum") or []
+            closing_state = enum[0] if enum else (
+                native_endpoint if number == 1 else
+                "Nora has reached the upper landing with the sealed parcel."
+            )
+            writer_prompts.append(kwargs["prompt"])
+            return json.dumps({
+                "segment": number,
+                "title": f"Hallway movement {number}",
+                "coverage": "Readable motivated coverage of the hall and stairwell",
+                "pacing": "Natural real-time pacing",
+                "event_cards": event_cards,
+                "closing_state": closing_state,
+            })
+
+        result = plan_h3_story_segments(
+            prompt,
+            segment_durations=durations,
+            mode="reference_sequence_continuation",
+            camera_coverage="multi_shot",
+            expect_dialogue=False,
+            planning_style="faithful",
+            llm_generate=generate,
+        )
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(writer_prompts), 2)
+        first = result["segments"][0]
+        second = result["segments"][1]
+        authoritative_handoff = first["closing_state"]
+        self.assertTrue(authoritative_handoff.startswith("Continue from the visible result of:"))
+        self.assertEqual(first["native_closing_state"], native_endpoint)
+        self.assertEqual(
+            result["camera_checkpoint"]["segments"][0]["closing_state"],
+            authoritative_handoff,
+        )
+        self.assertEqual(
+            result["camera_checkpoint"]["segments"][0]["native_closing_state"],
+            native_endpoint,
+        )
+        self.assertEqual(second["opening_state"], authoritative_handoff)
+
+        second_prompt = writer_prompts[1]
+        self.assertIn(f"Required opening state: {native_endpoint}", second_prompt)
+        self.assertIn(f"Accepted visual endpoint from the previous accepted segment: {native_endpoint}", second_prompt)
+        self.assertIn("source-supported cues in the surroundings", second_prompt)
+        self.assertIn("already achieved, not a lead-in action to perform again", second_prompt)
+        self.assertIn("One residential interior remains coherent", second_prompt)
+        self.assertIn("Grounded naturalistic realism", second_prompt)
+        self.assertIn("parcel's sealed clasp stays closed", second_prompt)
+        for itinerary_marker in (
+            "LOWER_HALL_ROUTE", "UPPER_LANDING_ROUTE", "OLD_HALL_LIGHT", "UPPER_LANDING_LIGHT",
+        ):
+            self.assertNotIn(itinerary_marker, second_prompt)
+
+        checkpoint = result["camera_checkpoint"]
+
+        def resumed_prompt(*, mismatched_opening: str = "", without_snapshot: bool = False) -> str:
+            saved_segments = json.loads(json.dumps(checkpoint["segments"]))
+            if without_snapshot:
+                saved_segments[0]["native_closing_state"] = ""
+            if mismatched_opening:
+                saved_segments[1]["opening_state"] = mismatched_opening
+            captured: list[str] = []
+
+            def retry_writer(**kwargs):
+                properties = kwargs["json_schema"]["properties"]
+                self.assertIn("event_cards", properties)
+                captured.append(kwargs["prompt"])
+                number = properties["segment"]["minimum"]
+                event_cards = {}
+                for event_key, event_schema in properties["event_cards"]["properties"].items():
+                    phase_properties = event_schema["properties"]["phases"]["items"]["properties"]
+                    event_cards[event_key] = {"phases": [{
+                        field: (
+                            "Nora carries the parcel upstairs through the stairwell"
+                            if field == "action" else
+                            "Readable view of Nora and the sealed parcel" if field == "framing" else
+                            "a restrained camera follow" if field == "camera" else
+                            "opening composition" if field == "transition" else
+                            "quiet parcel and footstep sounds"
+                        )
+                        for field in phase_properties
+                    }]}
+                return json.dumps({
+                    "segment": number,
+                    "title": "Retried hallway movement",
+                    "coverage": "Readable motivated coverage of the stairwell",
+                    "pacing": "Natural real-time pacing",
+                    "event_cards": event_cards,
+                    "closing_state": (properties["closing_state"].get("enum") or [""])[0],
+                })
+
+            plan_h3_story_segments(
+                prompt,
+                segment_durations=durations,
+                mode="reference_sequence_continuation",
+                camera_coverage="multi_shot",
+                expect_dialogue=False,
+                planning_style="faithful",
+                llm_generate=retry_writer,
+                resume={
+                    "context": checkpoint["context"],
+                    "segments": saved_segments,
+                    "retry_windows": [2],
+                },
+            )
+            self.assertEqual(len(captured), 1)
+            return captured[0]
+
+        matching_retry_prompt = resumed_prompt()
+        self.assertIn(f"Required opening state: {native_endpoint}", matching_retry_prompt)
+        self.assertIn("Accepted visual endpoint from the previous accepted segment", matching_retry_prompt)
+
+        mismatched_retry_state = "Nora is back in the lower hall without the parcel."
+        mismatched_retry_prompt = resumed_prompt(mismatched_opening=mismatched_retry_state)
+        self.assertIn(f"Required opening state: {mismatched_retry_state}", mismatched_retry_prompt)
+        self.assertNotIn("Accepted visual endpoint from the previous accepted segment", mismatched_retry_prompt)
+
+        no_snapshot_retry_prompt = resumed_prompt(without_snapshot=True)
+        self.assertIn(f"Required opening state: {authoritative_handoff}", no_snapshot_retry_prompt)
+        self.assertNotIn("Accepted visual endpoint from the previous accepted segment", no_snapshot_retry_prompt)
 
     def test_coarse_dialogue_beat_binds_each_line_to_its_matching_camera_phase(self):
         prompt = (

@@ -347,7 +347,7 @@ class LongCatCapabilityTests(unittest.TestCase):
         builder = next(node for node in ast.walk(main_tree) if isinstance(node, ast.FunctionDef)
                        and node.name == "_build_ref_target_masks")
         torch_arrays = types.SimpleNamespace(
-            zeros=np.zeros, tensor=np.array, where=np.where,
+            zeros=np.zeros, tensor=lambda values, **_kwargs: np.array(values), where=np.where,
             stack=lambda values, dim: np.stack(values, axis=dim),
         )
         namespace = {"torch": torch_arrays}

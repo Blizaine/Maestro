@@ -5,6 +5,224 @@ and system RAM. Changing a performance setting manually turns Auto off;
 the system-config API does the same. Explicitly applying Auto again replaces
 the performance settings with the current recommendations.
 
+## Generation-aware tuning and local learning
+
+Auto-tune now includes **Auto INT8 kernels**, a supported **MMGP optimized
+allocator**, **Smart Memory Pinning**, a RAM-dependent **Read Ahead** preference,
+and automatic pinning ceilings. It retains Auto attention, disabled compilation
+and disabled head splitting as the saved starting point. On a nominal 12-GB
+GPU with at least 30 GiB usable RAM, Auto can temporarily select Off, Low or
+Medium head splitting for each H3 video. Sol and head splitting remain
+workload-specific choices, rather than universal speed improvements.
+
+On existing installs, use **Settings → Performance → Re-detect** to explicitly
+apply these controls. Startup preserves existing controls whose ownership is
+unknown, even when they look like defaults. Changes to model loading take
+effect at the next generation. An allocator change requires a restart; the
+UI reports the active allocator and any fallback.
+
+The saved profile is the starting recommendation. Inside a generation, Auto
+can choose a temporary H3 placement and transformer allowance. With at least
+96 GB detected RAM and 20 GB VRAM, the starting H3 placement is Profile 2 with
+roughly one-third of VRAM available for transformer weights, subject to the
+existing model guard. This incorporates the 24 GB workstation comparisons;
+it does not claim to be fastest on every GPU or checkpoint. The guard accounts
+for window size, resolution, references and LoRAs. If the requested activation
+reserve cannot fit alongside the minimum weight slice, profile-default
+streaming remains in place and the plan warns about the workload.
+
+Smaller RAM machines retain conservative host placement. Nominal 32/64-GiB
+tiers allow 0.5 GiB for firmware reservations; actual usable capacity still
+governs memory budgets. Read Ahead is recommended only on Windows in the
+nominal 64-GB RAM tier and is suppressed when
+available RAM is insufficient. Pinning ceilings leave room for the OS and
+media preparation and account for reusable MMGP-owned pinned model buffers.
+These ceilings do not bound total process memory. Cold-model planning also
+accounts for VRAM already occupied by other applications. Temporary choices
+are restored after completion, cancellation or failure; saved settings and
+generation content parameters remain unchanged.
+
+The card shows the last generation's plan and local learning count. Ordinary
+completed generations, including manual profile comparisons, collect sampled
+device-wide NVML peak VRAM, minimum available RAM, and denoising time. Loading
+and encoding time are excluded from speed comparisons. Polling can miss short
+memory spikes, and other GPU programs can influence measurements.
+
+Evidence is stored locally in ignored `app/settings/performance_tuning.sqlite3`
+(maximum 500 records). Hardware, driver, runtime code, active allocator,
+checkpoint/file revision, quantization, attention, preview, LoRAs, references,
+resolution, frames and repeated-generation workload are scoped by hashes.
+Each output family's preload mode/amount and the bundled MMGP AutoPreload
+implementation also scope the evidence. Dynamic or manual preload comparisons
+do not train a default-preload plan.
+Prompts and local file paths are not stored in the learning database. Changes
+invalidate matching evidence. Cancelled or failed runs and missing telemetry
+do not teach a placement choice.
+
+A choice needs **at least two successful renders of each of two compatible
+candidates**, adequate RAM/VRAM headroom, and compliance with the current model
+guard. Within a 3% denoising-time difference, lower measured VRAM wins. A single
+profile's repeated runs are observations, not proof that it beats another.
+Auto does not start background searches, retry failures, or run speculative
+generations. Use controlled manual comparisons or the existing
+[memory benchmark](development/memory-benchmark.md) to supply alternatives.
+**Refresh learning** updates the readout; **Clear comparisons** discards this
+hardware/runtime's evidence without changing settings.
+
+## H3 window guidance on 12-GB GPUs
+
+Auto chooses head splitting at the generation boundary, independently of
+placement. It leaves the saved selector unchanged and releases the override
+on completion, failure or cancellation. An explicit per-job memory profile
+can coexist with Auto-owned head splitting. Manual head splitting and Auto-off
+remain in control. Settings shows the effective choice in **Last generation**;
+the duration panel shows the suggested grouping and workload cautions.
+
+The starting bands were checked on an RTX 3080 Ti with 12 GiB VRAM and
+31.76 GiB usable RAM, using Profile 4, MMGP Optimized, Smart Memory Pinning,
+Read Ahead off, an INT8 ConvRot H3 checkpoint and Q2_K encoder:
+
+| Target workload | Starting split | Observed outcome |
+| --- | --- | --- |
+| 720p through 15.08s | Off | Pruned 20-step cases completed |
+| 1080p at 5.17s | Off | Completed |
+| 1080p at 10.125s | Low | Fused/SLA/6-step completed in about 18 minutes; Pruned/Sage2/20-step took about 116 minutes |
+| 1080p at 15.08s | Medium | Fused/SLA/6-step completed in about 32 minutes; Pruned projected hours and was stopped |
+
+The Pruned 1080p/10.1s output was valid but too slow for the test's practical
+speed budget. A cancelled 15s test is not proof of fit. These are individual
+observations, not guaranteed ETAs or a matched Fused-versus-Pruned speed test.
+The duration panel flags long 20-step Pruned workloads and recommends shorter
+720p windows for speed. It does not silently change the model, steps, attention,
+resolution or requested duration, and does not automatically cancel jobs.
+
+Grouping uses the largest generated pass, not the entire song or sequence.
+The shared backend/UI bands use target video/audio load; they are separate
+from the 75,000 packed-row RMSNorm cutoff. References, history and LoRAs can
+add memory pressure. Large or numerous references, long 1080p LoRA jobs,
+other checkpoint/attention recipes and requests beyond the tested 15.08s
+1080p envelope remain unverified. Full H3, other VRAM tiers and systems below
+30 GiB usable RAM retain their existing policy. Other nominal 12-GB GPUs
+receive a conservative starting choice, with a caution that hardware differs.
+Head-split changes do not require a restart or a model reload by themselves.
+
+## Experimental SLA for Full and Pruned H3
+
+Full and Pruned H3 now offer **SLA Sparse Attention — Experimental** for both
+Frames and References. In Studio, open **Advanced → Performance → H3
+Optimizations**. In Director, open **Advanced → H3 Optimizations**. The option
+defaults off for these checkpoints; Fused keeps its published default-on recipe.
+Studio and Director keep independent choices, and Director saves its choice with
+the project for resume and regeneration. SLA and Sol are separate, mutually
+exclusive attention choices.
+
+SLA uses approximate 90% block-sparse attention with protected reference/audio
+prefix rows. It changes attention only: enabling it does not select Turbo,
+reduce steps, or change the sampler or checkpoint. Disabling it returns ordinary
+Full/Pruned to the saved Auto/attention backend; disabling Fused's default SLA
+selects SDPA. Auto-tune does not enable experimental SLA for Full/Pruned.
+Specialty H3 recipes, including VDN, Singularity, Viggle, audio-only and imported
+checkpoints, retain their existing attention options.
+
+For an A/B comparison, fix the checkpoint, seed, resolution, duration, steps and
+references, turn First Block Cache off, and compare SLA off versus on. The first
+SLA use compiles Triton kernels, so compare warmed runs and inspect motion,
+reference fidelity and audio alongside timing. The console's H3 performance line
+reports `attention=sla`; the SLA run summary reports sparse calls and any dense
+fall-throughs. Unsupported runtimes or kernel failures use the existing dense
+fallback and log the reason. Enabling SLA is not a guarantee of memory fit or
+equivalent output quality.
+
+## Testing a 32 GB RAM / RTX 3080 machine
+
+1. In Pinokio, choose **Download from URL**, enter
+   `https://github.com/Blizaine/Maestro`, and select the **dev** branch before
+   downloading. Install, start Maestro, and select **Re-detect** under
+   **Settings → Performance**. Verify actual detected
+   VRAM (10 or 12 GB), RAM and active allocator. Restart if requested.
+2. Start with a pruned/fused H3 checkpoint, 480p, one 124-frame window, eight
+   steps, no references or LoRAs, and a fixed seed. Run it twice. Inspect the
+   last plan and warnings; do not copy the 4090's 8192 MB allowance.
+3. For a bounded comparison, run
+   `app/scripts/benchmark_memory.3080.example.json` with the benchmark runner.
+   It compares Profile 4.5 and Profile 5 with Auto INT8, default preload,
+   Read Ahead off and two repetitions per candidate. The runner restores the
+   previous settings and Auto flag. Review output quality as well as speed.
+4. Return to Auto, repeat the same workload, and refresh the learning readout.
+   Then increase duration or resolution separately and add references/LoRAs
+   one at a time. Larger workloads start with a fresh matching-evidence set.
+
+The 10 GB and 12 GB cards are detected separately. A nominal 32-GB machine
+reporting at least 31.5 GiB uses the 32-GB tier; materially smaller machines
+retain the conservative Profile 5 starting point. Auto-Tune revision 6
+refreshes settings it still owns while preserving manual changes.
+
+H3 recommends Q2_K when known RAM is below 47.5 GiB or known VRAM is at most
+16 GiB, including GPUs with native NVFP4 support. Explicit encoder selections
+remain in control. H3's Qwen text/vision encoder is a required generation
+component, separate from an optional prompt writer.
+
+Full H3 checkpoints may still exceed host memory; an allocator or placement
+change cannot make every
+checkpoint/window fit. Windows RTX 3080 Ti measurements compare settings in
+the current Dev build; they do not establish performance on Linux or the
+commenters' exact workloads.
+
+RTX 3080 installs use Maestro's Python 3.10 / CUDA 12.8 compatibility runtime.
+Comfy Kitchen's CUDA backend requires CUDA 13; **Auto INT8** checks backend
+availability and falls back to Triton or PyTorch when it is unavailable.
+Compare the backend reported in the terminal with the 4090 benchmark before
+expecting the same speed improvement.
+
+## Automatic clip and window durations
+
+Studio's Auto duration/window and Director's Auto clip maximum share a
+versioned resource policy. It uses total usable system RAM, VRAM, resolution
+and checkpoint family, independently of the performance profile number.
+
+| Resource class | H3 workflow | Automatic maximum per pass |
+| --- | --- | --- |
+| 12 GB VRAM, at least 30 GiB RAM, up to 1280×704 | Fused Frames or Fused References | 345 frames, about 14.4 s |
+| 12 GB VRAM, at least 30 GiB RAM, up to 1280×704 | Pruned Frames or Pruned References | 345 frames, about 14.4 s |
+| 12 GB VRAM, at least 30 GiB RAM, native 1080p | Fused or Pruned | 124 frames, about 5.2 s |
+| 24 GB VRAM, at least 63 GiB RAM, up to 1280×704 | Fused References | 345 frames, about 14.4 s |
+| 24 GB VRAM, at least 120 GiB RAM, native 1080p | Fused Frames | 345 frames, about 14.4 s |
+| 24 GB VRAM, at least 63 GiB RAM, native 1080p | Pruned or Fused References | 243 frames, about 10.1 s; estimated |
+| 16 GB VRAM, at least 30 GiB RAM, 720p | Pruned or Fused | 345 frames, about 14.4 s; estimated |
+| 10 GB VRAM, at least 30 GiB RAM, 720p | Pruned or Fused | 243 frames, about 10.1 s; estimated |
+| 8 GB VRAM, at least 30 GiB RAM, 720p | Fused Frames or Fused References | 243 frames, about 10.1 s; tested laptop recipes |
+| 8 GB VRAM, at least 30 GiB RAM, 720p | Pruned Frames or Pruned References | 124 frames, about 5.2 s; estimated |
+| 8 GB VRAM, nominal 16 GB RAM, 480p | Pruned or Fused | 124 frames, about 5.2 s; estimated |
+
+Measured rows are anchored to the tested Windows configurations; intermediate
+and smaller classes are estimates, not physical compatibility tests. None
+promises that every reference/LoRA workload will fit or finish equally quickly.
+The 14.4-second Pruned tier includes repeated successful user tests on the
+12-GB RTX 3080 Ti / 32-GB RAM machine, rather than a controlled timing study.
+That tier explicitly removes the older Pruned reference-duration margin.
+The October 14 refresh fills intermediate GPU, RAM and canvas tiers with
+explicit estimates and adds the measured 24-GB / 128-GB Fused Frames 1080p
+route. The October 16 follow-up adds the RTX 5070 Laptop / 32-GB-RAM 720p
+Fused 10.1-second starting point, retaining the more conservative Pruned and
+16-GB-RAM recommendations. The [release benchmarks](BENCHMARKS_V3.0.0.md)
+verify shorter repeated Fused References workloads; they do not establish a
+longer duration or a 16-GB-RAM limit.
+The UI distinguishes tested, reported, estimated and conservative
+recommendations. Exceeding a recommendation is additional unverified load;
+it is not automatically a likely OOM. Longer 12-GB native-1080p passes remain
+manual because some tested recipes failed or became impractically slow.
+Full, imported, alternate and audio-only H3 models retain their existing
+recommendations. Unknown RAM retains the conservative fallback. The native
+14.4-second recommendation does not enable the experimental 30-second mode.
+See the [full resource matrix, evidence and assumptions](Duration-recommendations.md).
+
+New Director music projects use **Auto cut speed**, which favors fewer, longer
+H3 clips while preserving the full song and its timing. The slider still offers
+explicit pacing choices; other model families retain neutral Auto pacing.
+Existing projects keep their saved pacing and clip limits. Studio keeps manually
+selected total times and locked window lengths; resource detection updates only
+automatic recommendations. Switching back to Auto adopts the current policy.
+
 ## Per-job H3 transformer residency
 
 H3 and Viggle jobs reserve space for their packed video/audio sequence, then

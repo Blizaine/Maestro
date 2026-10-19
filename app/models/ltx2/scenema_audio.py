@@ -1105,7 +1105,7 @@ class ScenemaAudioPipeline:
                 waveform = waveform[:, :target_channels, :]
                 if waveform.shape[1] < target_channels:
                     pad_shape = (waveform.shape[0], target_channels - waveform.shape[1], waveform.shape[2])
-                    waveform = torch.cat([waveform, torch.zeros(pad_shape, dtype=waveform.dtype)], dim=1)
+                    waveform = torch.cat([waveform, waveform.new_zeros(pad_shape)], dim=1)
 
         max_samples = int(round(float(sample_rate) * SCENEMA_MAX_REF_SECONDS))
         waveform = waveform[:, :, :max_samples].to(dtype=torch.float32)
@@ -1114,6 +1114,7 @@ class ScenemaAudioPipeline:
             mel_bins=self.audio_encoder.mel_bins,
             mel_hop_length=self.audio_encoder.mel_hop_length,
             n_fft=self.audio_encoder.n_fft,
+            device=waveform.device,
         ).to(waveform.device)
         mel = audio_processor.waveform_to_mel(waveform, sample_rate)
         audio_device, audio_dtype = _model_device_dtype(self.audio_encoder, self.device, self.dtype)

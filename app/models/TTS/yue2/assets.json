@@ -1,6 +1,6 @@
 {
   "repo_id": "DeepBeepMeep/TTS",
-  "revision": "864a479cbf3e810e1b2c1993b438510750e383b2",
+  "revision": "6e87e439357e25ebb563628a2ea6e93a46a8c4b1",
   "files": {
     "YuE2_AR/YuE2_AR_bf16.safetensors": {
       "size": 4331951160,

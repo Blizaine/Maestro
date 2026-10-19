@@ -190,6 +190,7 @@ class RetakePipeline:
                     mel_bins=audio_encoder.mel_bins,
                     mel_hop_length=audio_encoder.mel_hop_length,
                     n_fft=audio_encoder.n_fft,
+                    device=torch.device("cpu"),
                 )
                 waveform_cpu = waveform.to(device="cpu", dtype=torch.float32)
                 audio_processor = audio_processor.to("cpu")

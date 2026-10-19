@@ -73,11 +73,16 @@ except ImportError:
             pass
 
 try:
-    from .sage2_core import sageattn as sageattn2, is_sage2_supported
+    from .sage2_core import (
+        sageattn as sageattn2,
+        is_sage2_supported,
+        staged_settings as _sage2_staged_settings,
+    )
     sage2_supported =  is_sage2_supported()
 except ImportError:
     sageattn2 = None
     sage2_supported = False
+    _sage2_staged_settings = None
     if not triton_installed: 
         try:
             sg2_version = version("sageattention")
@@ -91,9 +96,6 @@ def sageattn2_wrapper(
         attention_length,
         recycle_q = False,
     ):
-    q,k, v = qkv_list
-    qkv_list = [q,k,v]
-    del q, k ,v
     o = sageattn2(qkv_list, tensor_layout="NHD", recycle_q = recycle_q)
     qkv_list.clear()
 
@@ -392,6 +394,27 @@ def get_sla_attention_status():
     }
 
 
+def get_veda_attention_status():
+    """Check eligibility without importing sparse kernels or probing the GPU."""
+    capability = _cuda_capability()
+    installed = bool(triton_installed and _triton_version_tuple() >= (3, 0))
+    if not installed:
+        reason = "H3 Veda requires Triton 3.0 or newer."
+    elif getattr(torch.version, "hip", None):
+        reason = "H3 Veda currently requires an NVIDIA CUDA GPU."
+    elif capability < (8, 0):
+        reason = "H3 Veda requires BF16 on an NVIDIA Ampere-or-newer GPU (SM80+)."
+    else:
+        reason = None
+    return {
+        "installed": installed, "supported": installed and reason is None,
+        "reason": reason, "capability": f"SM{capability[0]}{capability[1]}",
+        "triton_version": str(getattr(triton, "__version__", "")) if triton_installed else None,
+        "minimum_triton": "3.0", "first_run_compiles_kernels": True,
+        "safe_dense_fallback": False,
+    }
+
+
 def get_override_attention_modes():
     """Generation overrides include model-specific backends such as Sol."""
 
@@ -400,6 +423,8 @@ def get_override_attention_modes():
         modes.append("sol")
     if get_sla_attention_status()["installed"]:
         modes.append("sla")
+    if get_veda_attention_status()["installed"]:
+        modes.append("veda")
     return modes
 
 
@@ -409,6 +434,8 @@ def get_supported_override_attention_modes():
         modes.append("sol")
     if get_sla_attention_status()["supported"]:
         modes.append("sla")
+    if get_veda_attention_status()["supported"]:
+        modes.append("veda")
     return modes
 
 
@@ -417,6 +444,23 @@ def get_default_attention_mode():
         if mode in get_supported_attention_modes():
             return mode
     return "sdpa"
+
+
+def sage2_staged_settings(device, force_attention=None):
+    """Return staged SageAttention settings when this call would use unmasked Sage2."""
+
+    if _sage2_staged_settings is None or sageattn2 is None:
+        return None
+    attention_mode = (
+        force_attention
+        if force_attention is not None
+        else offload.shared_state.get("_attention")
+    )
+    if attention_mode in {"sol", "sla", "veda", "auto"}:
+        attention_mode = get_default_attention_mode()
+    if attention_mode not in {"sage2", "radial"}:
+        return None
+    return _sage2_staged_settings(device)
 
 __all__ = [
     'pay_attention',
@@ -427,7 +471,9 @@ __all__ = [
     'get_supported_override_attention_modes',
     'get_sol_attention_status',
     'get_sla_attention_status',
+    'get_veda_attention_status',
     'get_default_attention_mode',
+    'sage2_staged_settings',
 ]
 
 def get_cu_seqlens(batch_size, lens, max_len):
@@ -464,12 +510,12 @@ def pay_attention(
         force_attention = "sdpa"
         if  attention_mask.dtype == torch.bfloat16 and not bfloat16_supported:
             attention_mask = attention_mask.to(torch.float16)
-    attn = offload.shared_state["_attention"] if force_attention== None else force_attention
+    attn = offload.shared_state.get("_attention", "sdpa") if force_attention== None else force_attention
 
     # Sol is a MiniMax-H3 main-DiT override, not a general attention mode.
     # H3's short token-refiner calls and any fail-safe recovery come through
     # this shared function and should use the fastest supported dense backend.
-    if attn in {"sol", "sla"}:
+    if attn in {"sol", "sla", "veda", "auto"}:
         attn = get_default_attention_mode()
 
     q,k,v = qkv_list

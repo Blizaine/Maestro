@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 
 import torch
@@ -140,8 +141,48 @@ def _normalize_scaled_mm_scale(scale):
     return scale.reshape(())
 
 
+def _decode_comfy_quant(tensor):
+    if tensor is None:
+        return {}
+    try:
+        payload = bytes(tensor.to(device="cpu", dtype=torch.uint8).tolist())
+        decoded = json.loads(payload.decode("utf-8"))
+    except (AttributeError, TypeError, ValueError, UnicodeDecodeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _scaled_mm_weight_scale(scale, weight):
+    scale = scale if scale.device == weight.device else scale.to(weight.device)
+    tensor_scale = _normalize_scaled_mm_scale(scale)
+    if tensor_scale is not None:
+        return tensor_scale, None
+    if scale.ndim == 1 and scale.shape[0] == weight.shape[0]:
+        return torch.ones((), device=weight.device, dtype=torch.float32), scale
+    if scale.ndim == 2 and scale.shape[0] == weight.shape[0] and scale.shape[1] == 1:
+        return torch.ones((), device=weight.device, dtype=torch.float32), scale.reshape(weight.shape[0])
+    return None, None
+
+
+_activation_kernel = None
+
+
+def _get_activation_kernel():
+    global _activation_kernel
+    if _activation_kernel is None:
+        try:
+            from shared.kernels import fp8_activation_triton as kernel
+        except Exception:  # Triton is optional; retain the PyTorch implementation if its runtime cannot load.
+            kernel = False
+        _activation_kernel = kernel
+    return _activation_kernel
+
+
 def _quantize_activation(x, fp8_dtype):
     minv, maxv = _FP8_RANGE[fp8_dtype]
+    kernel = _get_activation_kernel()
+    if kernel and kernel.supports(x, fp8_dtype):
+        return kernel.quantize_activation(x, fp8_dtype, minv, maxv)
     absmax = x.abs().max().float()
     scale = absmax / maxv
     scale = torch.where(absmax > 0, scale, torch.ones_like(scale))
@@ -161,9 +202,8 @@ def _scaled_mm_static_ok(weight, scale):
         return False
     if weight.shape[0] % 16 != 0 or weight.shape[1] % 16 != 0:
         return False
-    if scale.numel() != 1:
-        return False
-    return True
+    scale_b, output_scale = _scaled_mm_weight_scale(scale, weight)
+    return scale_b is not None or output_scale is not None
 
 
 
@@ -202,7 +242,7 @@ def _scaled_fp8_qfallback(callable, *args, **kwargs):
 
 class ScaledFP8WeightTensor(QTensor):
     @staticmethod
-    def create(weight, scale, size, stride, dtype, device=None, requires_grad=False):
+    def create(weight, scale, size, stride, dtype, device=None, requires_grad=False, force_full_precision_mm=False):
         if scale is None:
             scale = torch.ones((), device=weight.device, dtype=torch.float32)
         qtype = _get_fp8_qtype(weight.dtype)
@@ -218,10 +258,11 @@ class ScaledFP8WeightTensor(QTensor):
             scale=scale,
             dtype=dtype,
             requires_grad=requires_grad,
+            force_full_precision_mm=force_full_precision_mm,
         )
 
     @staticmethod
-    def __new__(cls, qtype, axis, size, stride, weight, scale, dtype, requires_grad=False):
+    def __new__(cls, qtype, axis, size, stride, weight, scale, dtype, requires_grad=False, force_full_precision_mm=False):
         return torch.Tensor._make_wrapper_subclass(
             cls,
             size,
@@ -231,10 +272,11 @@ class ScaledFP8WeightTensor(QTensor):
             requires_grad=requires_grad,
         )
 
-    def __init__(self, qtype, axis, size, stride, weight, scale, dtype, requires_grad=False):
+    def __init__(self, qtype, axis, size, stride, weight, scale, dtype, requires_grad=False, force_full_precision_mm=False):
         super().__init__(qtype, axis)
         self._data = weight
         self._scale = scale
+        self._force_full_precision_mm = force_full_precision_mm
         self._scaled_mm_static_ok = _scaled_mm_static_ok(self._data, self._scale)
         self._set_linear_impl()
 
@@ -259,7 +301,7 @@ class ScaledFP8WeightTensor(QTensor):
     __str__ = __repr__
 
     def _set_linear_impl(self):
-        if self._scaled_mm_static_ok and _scaled_mm_available(self._data.dtype):
+        if not self._force_full_precision_mm and self._scaled_mm_static_ok and _scaled_mm_available(self._data.dtype):
             self._linear_impl = ScaledFP8WeightTensor._linear_scaled
         else:
             self._linear_impl = ScaledFP8WeightTensor._linear_fallback
@@ -293,6 +335,7 @@ class ScaledFP8WeightTensor(QTensor):
         out_features = weights.shape[0]
         output_shape = input.shape[:-1] + (out_features,)
         weights = weights.to(target_type)
+        output_scales = _reshape_scale(output_scales, weights)
         weights *= output_scales
         out = torch.matmul(input.reshape(-1, in_features), weights.t())
         out = out.reshape(output_shape)
@@ -313,7 +356,7 @@ class ScaledFP8WeightTensor(QTensor):
         ):
             return torch.nn.functional.linear(input, self.dequantize(dtype=input.dtype, device=input.device), bias)
 
-        scale_b = _normalize_scaled_mm_scale(self._scale)
+        scale_b, output_scale = _scaled_mm_weight_scale(self._scale, self._data)
         if scale_b is None:
             return torch.nn.functional.linear(input, self.dequantize(dtype=input.dtype, device=input.device), bias)
 
@@ -338,26 +381,33 @@ class ScaledFP8WeightTensor(QTensor):
             if bias_arg.dtype != input.dtype:
                 bias_arg = bias_arg.to(dtype=input.dtype)
 
+        fused_bias = bias_arg if output_scale is None and input.dtype != torch.float32 else None
+
         out = torch._scaled_mm(
             x_fp8,
             self._data.t(),
             scale_a,
             scale_b,
-            bias=bias_arg,
+            bias=fused_bias,
             out_dtype=input.dtype,
         )
+
+        if output_scale is not None:
+            out *= output_scale.to(device=out.device, dtype=out.dtype).view(1, -1)
+        if bias_arg is not None and fused_bias is None:
+            out += bias_arg.view(1, -1)
 
         return out.reshape(*input.shape[:-1], self._data.shape[0])
 
     def get_quantized_subtensors(self):
-        return [("scale", self._scale), ("data", self._data)]
+        return [("weight", self._data), ("scale", self._scale)]
 
     def set_quantized_subtensors(self, sub_tensors):
         if isinstance(sub_tensors, dict):
             sub_map = sub_tensors
         else:
             sub_map = {name: tensor for name, tensor in sub_tensors}
-        data = sub_map.get("data", None)
+        data = sub_map.get("weight", sub_map.get("data", None))
         if data is not None:
             self._data = data
         scale = sub_map.get("scale", None)
@@ -374,6 +424,7 @@ class ScaledFP8WeightTensor(QTensor):
             "size": str(list(self.size())),
             "stride": str(list(self.stride())),
             "dtype": str(self.dtype),
+            "force_full_precision_mm": str(self._force_full_precision_mm),
         }
         return inner_tensors, meta
 
@@ -398,6 +449,7 @@ class ScaledFP8WeightTensor(QTensor):
             weight=inner_tensors["_data"],
             scale=inner_tensors["_scale"],
             dtype=dtype,
+            force_full_precision_mm=meta.get("force_full_precision_mm", "False") == "True",
         )
 
     @classmethod
@@ -432,6 +484,7 @@ class ScaledFP8WeightTensor(QTensor):
                 dtype=t.dtype,
                 device=t.device,
                 requires_grad=t.requires_grad,
+                force_full_precision_mm=t._force_full_precision_mm,
             )
         if op in (torch.ops.aten._to_copy, torch.ops.aten.to):
             t = args[0]
@@ -449,6 +502,7 @@ class ScaledFP8WeightTensor(QTensor):
                 dtype=t.dtype,
                 device=device,
                 requires_grad=t.requires_grad,
+                force_full_precision_mm=t._force_full_precision_mm,
             )
         return _scaled_fp8_qfallback(op, *args, **(kwargs or {}))
 
@@ -513,6 +567,7 @@ class QLinearScaledFP8(QModuleMixin, torch.nn.Linear):
         qweight = self.qweight
         if (
             getattr(qweight, "_scaled_mm_static_ok", False)
+            and not getattr(qweight, "_force_full_precision_mm", False)
             and _scaled_mm_available(qweight._data.dtype)
             and torch.is_tensor(input)
             and input.is_floating_point()
@@ -536,6 +591,7 @@ class QLinearScaledFP8(QModuleMixin, torch.nn.Linear):
         weight_key = prefix + "weight"
         scale_key = prefix + "scale_weight"
         alt_scale_key = prefix + "weight_scale"
+        comfy_quant_key = prefix + "comfy_quant"
         bias_key = prefix + "bias"
         input_scale_key = prefix + "input_scale"
         output_scale_key = prefix + "output_scale"
@@ -543,6 +599,7 @@ class QLinearScaledFP8(QModuleMixin, torch.nn.Linear):
         weight = state_dict.pop(weight_key, None)
         scale = state_dict.pop(scale_key, None)
         alt_scale = state_dict.pop(alt_scale_key, None)
+        comfy_quant = _decode_comfy_quant(state_dict.pop(comfy_quant_key, None))
         if scale is None:
             scale = alt_scale
         bias = state_dict.pop(bias_key, None)
@@ -564,6 +621,7 @@ class QLinearScaledFP8(QModuleMixin, torch.nn.Linear):
                 dtype=target_dtype,
                 device=weight.device,
                 requires_grad=False,
+                force_full_precision_mm=comfy_quant.get("full_precision_matrix_mult", False),
             )
             self.weight = torch.nn.Parameter(qweight, requires_grad=False)
 

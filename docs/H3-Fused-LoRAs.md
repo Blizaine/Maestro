@@ -12,7 +12,7 @@ it. These are starting points for testing, not validated settings for every
 adapter. Quality, runtime and VRAM depend on the adapter and scene.
 
 The checkpoint keeps its four-step default, RES sampler, no-CFG recipe and
-optional 4–8 Total Steps. Adding a LoRA does not automatically increase steps.
+optional 4–12 Total Steps. Adding a LoRA does not automatically increase steps.
 Mystic is already fused at 0.7; the LoRA strength controls cannot remove it.
 
 Extra Turbo/PDD acceleration adapters and VDN adapters are excluded from the

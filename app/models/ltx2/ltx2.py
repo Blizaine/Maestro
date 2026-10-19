@@ -2359,10 +2359,7 @@ class LTX2:
                         waveform = waveform[:, :target_channels, :]
                         if waveform.shape[1] < target_channels:
                             pad_channels = target_channels - waveform.shape[1]
-                            pad = torch.zeros(
-                                (waveform.shape[0], pad_channels, waveform.shape[2]),
-                                dtype=waveform.dtype,
-                            )
+                            pad = waveform.new_zeros((waveform.shape[0], pad_channels, waveform.shape[2]))
                             waveform = torch.cat([waveform, pad], dim=1)
 
                 audio_processor = AudioProcessor(
@@ -2370,6 +2367,7 @@ class LTX2:
                     mel_bins=self.audio_encoder.mel_bins,
                     mel_hop_length=self.audio_encoder.mel_hop_length,
                     n_fft=self.audio_encoder.n_fft,
+                    device=torch.device("cpu"),
                 )
                 waveform = waveform.to(device="cpu", dtype=torch.float32)
                 audio_processor = audio_processor.to(waveform.device)
@@ -2484,6 +2482,7 @@ class LTX2:
                     mel_bins=self.audio_encoder.mel_bins,
                     mel_hop_length=self.audio_encoder.mel_hop_length,
                     n_fft=self.audio_encoder.n_fft,
+                    device=torch.device("cpu"),
                 )
                 # Force the mel computation onto CPU. MelSpectrogram creates its
                 # internal `window` tensor lazily inside waveform_to_mel; an active

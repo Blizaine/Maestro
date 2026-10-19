@@ -264,6 +264,48 @@ class TestCheckpointDownloads(unittest.TestCase):
             self.assertNotIn("secret-api-key", str(raised.exception))
             self.assertNotIn("token=", str(raised.exception))
 
+    def test_huggingface_named_source_uses_cached_hub_auth_only(self):
+        from app.shared.checkpoint_downloads import _authenticated_request
+        with patch("huggingface_hub.get_token", return_value="cached-hub-token"):
+            url, headers = _authenticated_request(
+                "https://huggingface.co/owner/model/resolve/main/model.safetensors",
+                "huggingface.co", "civitai-secret",
+            )
+            self.assertEqual(headers["Authorization"], "Bearer cached-hub-token")
+            self.assertNotIn("cached-hub-token", url)
+            self.assertNotIn("civitai-secret", str(headers))
+            _, other = _authenticated_request("https://example.com/model", "example.com", "civitai-secret")
+            self.assertNotIn("Authorization", other)
+            _, lookalike = _authenticated_request(
+                "https://huggingface.co.example.com/model", "huggingface.co.example.com", None)
+            self.assertNotIn("Authorization", lookalike)
+        with patch("huggingface_hub.get_token", return_value=None):
+            _, headers = _authenticated_request(url, "huggingface.co", None)
+            self.assertNotIn("Authorization", headers)
+
+    def test_public_source_does_not_consult_or_send_cached_huggingface_token(self):
+        from app.shared.checkpoint_downloads import _authenticated_request
+        with patch("huggingface_hub.get_token", side_effect=AssertionError("must remain anonymous")):
+            url, headers = _authenticated_request(
+                "https://huggingface.co/DeepBeepMeep/Flux3/resolve/pinned/model.safetensors",
+                "huggingface.co", None, use_hf_token=False,
+            )
+        self.assertNotIn("Authorization", headers)
+        self.assertNotIn("token=", url)
+
+    def test_huggingface_gate_preserves_existing_file_and_redacts_tokens(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "flux3.safetensors"
+            target.write_bytes(b"existing checkpoint")
+            source = _source("https://huggingface.co/owner/model/resolve/main/model.safetensors", b"new")
+            with patch("huggingface_hub.get_token", return_value="secret-hub-token"), \
+                    patch("requests.get", return_value=FakeResponse(b"secret-hub-token", 403)):
+                with self.assertRaisesRegex(CheckpointDownloadError, "grant your account access") as raised:
+                    download_named_checkpoint(source, target)
+            self.assertNotIn("secret-hub-token", str(raised.exception))
+            self.assertEqual(target.read_bytes(), b"existing checkpoint")
+            self.assertEqual(list(Path(directory).iterdir()), [target])
+
     def test_target_filename_cannot_escape_the_passed_directory(self):
         content = _safetensors_bytes()
         with tempfile.TemporaryDirectory() as directory:

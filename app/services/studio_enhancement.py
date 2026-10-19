@@ -18,6 +18,7 @@ _request_context: ContextVar[dict | None] = ContextVar("studio_enhancement", def
 _disk_lock = threading.RLock()
 SETTING_KEYS = (
     "llm_provider", "llm_model_id", "llm_device", "llm_remote_url",
+    "llm_mtp_acceleration",
     "enhance_llm_model_id", "enhance_llm_device", "nsfw_mode",
     "enhance_fidelity_retries", "enhance_fidelity_auto_continue",
 )
@@ -26,10 +27,12 @@ SETTING_KEYS = (
 def captured_settings(services: dict) -> dict:
     # Credentials are resolved at execution, never copied into jobs/sidecars.
     defaults = {"llm_provider": "local", "llm_remote_url": "", "llm_device": "cuda",
+                "llm_mtp_acceleration": False,
                 "enhance_llm_model_id": "", "enhance_llm_device": "cuda", "nsfw_mode": False,
                 "enhance_fidelity_retries": 1, "enhance_fidelity_auto_continue": False}
     result = {key: deepcopy(services.get(key, defaults.get(key))) for key in SETTING_KEYS}
     result["nsfw_mode"] = bool(result["nsfw_mode"])
+    result["llm_mtp_acceleration"] = result["llm_mtp_acceleration"] is True
     result["enhance_fidelity_retries"] = fidelity_retry_limit(result)
     result["enhance_fidelity_auto_continue"] = result["enhance_fidelity_auto_continue"] is True
     if result["enhance_llm_model_id"]:
@@ -40,7 +43,15 @@ def captured_settings(services: dict) -> dict:
 
 def current_settings(services: dict) -> dict:
     context = _request_context.get()
-    return {**services, **{key: value for key, value in context["settings"].items() if value is not None}} if context else services
+    if context:
+        return {
+            **services,
+            **{key: value for key, value in context["settings"].items() if value is not None},
+            # Legacy snapshots predate the experimental toggle and retain
+            # ordinary decoding even if the live preference changes later.
+            "llm_mtp_acceleration": context["settings"].get("llm_mtp_acceleration") is True,
+        }
+    return services
 
 
 def fidelity_retry_limit(settings: dict | None = None) -> int:
@@ -69,6 +80,21 @@ def record_review_warning(message: str) -> None:
 def enhancement_warnings() -> list[str]:
     context = _request_context.get()
     return list(context["warnings"]) if context else []
+
+
+def record_continuity_review(review: dict) -> None:
+    """Keep advisory diagnostics without turning them into a review gate."""
+    context = _request_context.get()
+    if context:
+        context["continuity_reviews"].append(deepcopy({
+            key: review.get(key)
+            for key in ("status", "checked", "repaired", "issues", "reference_groups", "state_handoffs", "diagnostic")
+        }))
+
+
+def enhancement_continuity_reviews() -> list[dict]:
+    context = _request_context.get()
+    return deepcopy(context["continuity_reviews"]) if context else []
 
 
 def cancellable_lines(response, **kwargs):
@@ -144,7 +170,8 @@ def close_response(response) -> None:
 
 @contextmanager
 def enhancement_context(settings: dict, cancelled: Callable[[], bool]):
-    token = _request_context.set({"settings": settings, "cancelled": cancelled, "warnings": []})
+    token = _request_context.set({"settings": settings, "cancelled": cancelled,
+                                  "warnings": [], "continuity_reviews": []})
     try:
         check_cancelled()
         yield
@@ -167,7 +194,7 @@ def new_enhancement(params: dict, services: dict) -> dict:
 def public_enhancement(record: dict | None, *, summary: bool = False) -> dict | None:
     if not record:
         return None
-    keys = ["version", "state", "warnings", "error"]
+    keys = ["version", "state", "warnings", "error", "continuity_reviews"]
     if not summary:
         keys.extend(["original_prompt", "enhanced_prompt"])
     return {key: deepcopy(record.get(key)) for key in keys}
@@ -271,6 +298,7 @@ async def prepare_enhanced_job(params: dict, model: dict, enhance, prepare, *, p
         if auto_continue:
             prepared["enhancement_review_bypassed"] = True
     prepared["enhancement_warnings"] = warnings
+    prepared["enhancement_continuity_reviews"] = enhancement_continuity_reviews()
     return prepared
 
 

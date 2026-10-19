@@ -43,6 +43,7 @@ const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
           '<meta name="viewport" content="width=device-width,initial-scale=1"><div id="root" style="display:flex;flex-direction:column;height:100dvh"></div>'});
         if(url.pathname.endsWith('/metadata')) return route.fulfill({json:{source:'sidecar',params:{
           prompt:'A silent scene.',seed:42,model_type:'minimax_h3_fused_turbo'}}});
+        if(url.pathname.startsWith('/api/v1/media-info/')) return route.fulfill({json:{duration_seconds:14.375}});
         if(url.pathname.startsWith('/api/v1/thumbnail/')) return route.fulfill({contentType:'image/svg+xml',body:
           '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="640" height="360" fill="green"/></svg>'});
         if(url.pathname.startsWith('/api/v1/file/')) return route.fulfill({contentType:'video/mp4',body:''});

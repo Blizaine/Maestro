@@ -1,5 +1,5 @@
 import { useRef, useState, type RefObject } from 'react'
-import { Image as ImageIcon, Upload, X } from 'lucide-react'
+import { Upload, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { GalleryInput } from '../shared/GalleryInput'
@@ -23,10 +23,6 @@ export function ImageWorkflowControls() {
   const setMask = useStore(state => state.setImageWorkflowMask)
   const padding = useStore(state => state.imageOutpaintPadding)
   const setPadding = useStore(state => state.setImageOutpaintPadding)
-  const outputs = useStore(state => state.outputs)
-  const selectedOutput = useStore(state => state.selectedOutput)
-  const current = outputs[selectedOutput]
-  const currentIsImage = current?.type === 'image'
   const sourceInput = useRef<HTMLInputElement>(null)
   const maskInput = useRef<HTMLInputElement>(null)
   const [uploading, setUploading] = useState<SourceKind | null>(null)
@@ -46,28 +42,6 @@ export function ImageWorkflowControls() {
       console.error('Image workflow upload failed:', uploadError)
       setError(`Could not upload the ${kind} image.`)
       return false
-    } finally {
-      setUploading(null)
-    }
-  }
-
-  const applySelectedImage = async () => {
-    if (!currentIsImage || !current) return
-    setUploading('source')
-    setError(null)
-    try {
-      // Gallery outputs live in workspace folders, whereas the generic image
-      // generation loader consumes upload paths. Copy through the upload API
-      // so the same source contract works for default and named workspaces.
-      const response = await fetch(current.url)
-      if (!response.ok) throw new Error(`Gallery image returned ${response.status}`)
-      const blob = await response.blob()
-      const file = new File([blob], current.name, { type: blob.type || 'image/png' })
-      const result = await api.uploadImage(file)
-      setSource({ file, path: result.path, url: result.url || current.url })
-    } catch (galleryError) {
-      console.error('Could not copy gallery image into Image workflow:', galleryError)
-      setError('Could not use the selected gallery image.')
     } finally {
       setUploading(null)
     }
@@ -127,17 +101,6 @@ export function ImageWorkflowControls() {
                 event.currentTarget.value = ''
               }}
             />
-            {!isMask && (
-              <button
-                type="button"
-                disabled={!currentIsImage}
-                onClick={() => void applySelectedImage()}
-                className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border bg-bg-tertiary py-1.5 text-[11px] text-text-secondary transition-colors hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <ImageIcon size={12} />
-                {currentIsImage ? 'Use selected gallery image' : 'Select an image in the gallery first'}
-              </button>
-            )}
           </div>
         )}
       </div>

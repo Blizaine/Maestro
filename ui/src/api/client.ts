@@ -64,6 +64,9 @@ export interface ApiOutput {
    *  introduced it. Optional so the type compiles even when the
    *  backend hasn't been updated to emit this yet. */
   edit_sub_mode?: string | null
+  director_group?: { pipeline_id: string; clip_count: number } | null
+  director_pipeline_id?: string | null
+  director_clip_index?: number | null
 }
 
 export interface ApiJobStatus {
@@ -73,6 +76,10 @@ export interface ApiJobStatus {
   client_submission_id?: string | null
   /** Direct submits remain visible while queued for deferred AI planning. */
   show_in_gallery?: boolean
+  /** Owning Director pipeline; null for ordinary Studio jobs. */
+  director_pipeline_id?: string | null
+  /** True for repair/rerun operations that should keep their own job card. */
+  director_detached_operation?: boolean
   kind?: 'generation' | 'editor_export' | string
   status: 'held' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress: number
@@ -122,6 +129,7 @@ export async function fetchModels(): Promise<{ families: ApiFamily[]; models: Ap
 export interface ModelVisibilitySettings {
   configured: boolean
   enabled_models: string[]
+  mode_overrides?: import('../lib/modelVisibility').ModelVisibilityOverrides
   initialized_mature_models: string[]
   defaults_version: number
 }
@@ -134,6 +142,7 @@ export async function fetchModelVisibility(): Promise<ModelVisibilitySettings> {
 
 export async function updateModelVisibility(params: {
   enabled_models: string[]
+  mode_overrides?: import('../lib/modelVisibility').ModelVisibilityOverrides
   initialized_mature_models: string[]
   defaults_version: number
 }): Promise<ModelVisibilitySettings> {
@@ -310,7 +319,7 @@ export interface StudioPreferenceSettings {
   music_defaults_version?: number
   director_music_model?: string
   h3_optimizations?: {
-    override_attention?: '' | 'sol' | 'sla' | 'sdpa'
+    override_attention?: '' | 'sol' | 'sla' | 'veda' | 'sdpa'
     skip_steps_cache_type?: '' | 'first_block'
     skip_steps_multiplier?: number
     skip_steps_start_step_perc?: number
@@ -758,10 +767,10 @@ export async function toggleFavorite(name: string, workspace?: string): Promise<
 
 // --- Outputs ---
 
-export async function fetchOutputs(limit = 0, offset = 0, opts?: { favoritesOnly?: boolean; multiclipOnly?: boolean; search?: string; workspace?: string; mediaFilter?: string; cursor?: string }): Promise<{ outputs: ApiOutput[]; total: number; next_cursor?: string | null }> {
+export async function fetchOutputs(limit = 0, offset = 0, opts?: { favoritesOnly?: boolean; multiclipOnly?: boolean; search?: string; workspace?: string; mediaFilter?: string; cursor?: string; groupDirectorClips?: boolean; directorPipelineId?: string }): Promise<{ outputs: ApiOutput[]; total: number; next_cursor?: string | null }> {
   const params = new URLSearchParams()
   if (limit > 0) params.set('limit', String(limit))
-  if (offset > 0) params.set('offset', String(offset))
+  if (!opts?.cursor && (offset > 0 || opts?.directorPipelineId)) params.set('offset', String(offset))
   if (opts?.favoritesOnly) params.set('favorites_only', 'true')
   if (opts?.multiclipOnly) params.set('multiclip_only', 'true')
   if (opts?.search) params.set('search', opts.search)
@@ -769,11 +778,53 @@ export async function fetchOutputs(limit = 0, offset = 0, opts?: { favoritesOnly
   if (opts?.workspace) params.set('workspace', opts.workspace)
   if (opts?.mediaFilter) params.set('media_filter', opts.mediaFilter)
   if (opts?.cursor) params.set('cursor', opts.cursor)
+  if (opts?.groupDirectorClips) params.set('group_director_clips', 'true')
+  if (opts?.directorPipelineId) params.set('director_pipeline_id', opts.directorPipelineId)
   const qs = params.toString()
   const res = await fetch(`${BASE}/api/v1/outputs${qs ? '?' + qs : ''}`)
   if (!res.ok) throw new Error('Failed to fetch outputs')
   const data = await res.json()
   return { outputs: data.outputs, total: data.total ?? data.outputs.length, next_cursor: data.next_cursor }
+}
+
+/** Fetch all independent Director shot takes in backend clip-index order. */
+export async function fetchDirectorPipelineClips(pipelineId: string, workspace?: string): Promise<ApiOutput[]> {
+  const outputs: ApiOutput[] = []
+  const seenOutputs = new Set<string>()
+  const seenCursors = new Set<string>()
+  let offset = 0
+  let total = Number.POSITIVE_INFINITY
+  let cursor: string | undefined
+  let pageCount = 0
+  while (outputs.length < total && pageCount < 1000) {
+    const page = await fetchOutputs(100, offset, { workspace, directorPipelineId: pipelineId, cursor })
+    total = page.total
+    if (page.outputs.length === 0) break
+    pageCount += 1
+    let added = 0
+    for (const output of page.outputs) {
+      const key = output.id || `${output.workspace || workspace || 'default'}/${output.name}`
+      if (seenOutputs.has(key)) continue
+      seenOutputs.add(key)
+      outputs.push(output)
+      added += 1
+    }
+    if (added === 0) break
+    if (page.next_cursor) {
+      if (seenCursors.has(page.next_cursor)) break
+      seenCursors.add(page.next_cursor)
+      cursor = page.next_cursor
+    } else {
+      cursor = undefined
+      offset += page.outputs.length
+    }
+  }
+  return outputs.sort((left, right) => {
+    if (left.director_clip_index == null) return right.director_clip_index == null ? 0 : 1
+    if (right.director_clip_index == null) return -1
+    return left.director_clip_index - right.director_clip_index
+      || right.created_at - left.created_at
+  })
 }
 
 function workspaceQuery(workspace?: string): string {
@@ -1268,6 +1319,9 @@ export interface DirectorMusicClipLimits {
   max_seconds: number
   recommended_seconds: number
   auto: boolean
+  recommendation_basis?: 'tested' | 'reported' | 'estimated' | 'conservative'
+  recommendation_note?: string | null
+  recommendation_version?: string | number | null
 }
 
 export async function fetchDirectorMusicClipLimits(params: DirectorTimelineOptions): Promise<DirectorMusicClipLimits> {
@@ -1283,6 +1337,8 @@ export async function fetchDirectorMusicClipLimits(params: DirectorTimelineOptio
 
 export interface DirectorV2PlanRequest extends DirectorTimelineOptions {
   skill_type: string
+  /** Let lyrics influence music-video scenes and story; timing/lip-sync are separate. */
+  use_lyrics_context?: boolean
   scene_description?: string
   story_description?: string
   clips?: unknown[]
@@ -1877,7 +1933,9 @@ export async function scanModelFolders(): Promise<{ candidates: import('../types
 
 export async function updateSystemConfig(
   partial: Partial<import('../types').SystemConfig>
-): Promise<{ status: string; updated: Record<string, unknown> }> {
+): Promise<{ status: string; updated: Record<string, unknown> } & Pick<import('../types').SystemConfig,
+  'vram_allocator_active' | 'vram_allocator_restart_required' | 'vram_allocator_fallback_reason' | 'vram_allocator_cli_override' |
+  'ram_allocator_active' | 'ram_allocator_restart_required' | 'ram_allocator_fallback_reason' | 'ram_allocator_cli_override'>> {
   const res = await fetch(`${BASE}/api/v1/system-config`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -2231,6 +2289,12 @@ export interface RemoteLoadedModel {
   display_name: string
 }
 
+export async function resetPerformanceLearning(): Promise<{ status: string }> {
+  const res = await fetch(`${BASE}/api/v1/system-detect/reset-learning`, { method: 'POST' })
+  if (!res.ok) throw new Error('Could not clear local comparisons')
+  return res.json()
+}
+
 export interface RemoteLoadedModels {
   server_url: string
   instances: RemoteLoadedModel[]
@@ -2392,6 +2456,7 @@ export async function planClipPrompts(params: {
   clips: import('../types').SuggestedClip[]
   style_prompt: string
   lyrics?: import('../types').LyricSegment[]
+  use_lyrics_context?: boolean
   bpm: number
 }): Promise<{ prompts: string[] }> {
   const res = await fetch(`${BASE}/api/v1/director/plan-prompts`, {
@@ -2408,7 +2473,7 @@ export async function planClipPrompts(params: {
 
 export async function planClipStructure(params: DirectorTimelineOptions & {
   analysis: import('../types').AudioAnalysisResult
-  energy_bias?: number
+  energy_bias?: number | null
   fps?: number
   frames_steps?: number
   frames_minimum?: number
@@ -2454,6 +2519,7 @@ export async function planClipPromptsAndImages(params: DirectorTimelineOptions &
   clips: import('../types').PlannedClip[]
   scene_description: string
   lyrics?: import('../types').LyricSegment[]
+  use_lyrics_context?: boolean
   bpm: number
   reference_image_path?: string | null
   speaker_mappings?: Record<string, { name: string; role: string }>

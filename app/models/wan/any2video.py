@@ -381,7 +381,7 @@ class WanAny2V:
     def encode_reference_images(self, ref_images, ref_prompt="image of a face", any_guidance= False, tile_size = None, enable_loras = True):
         ref_images = [convert_image_to_tensor(img).unsqueeze(1).to(device=self.device, dtype=self.dtype) for img in ref_images]
         shape = ref_images[0].shape
-        freqs = get_rotary_pos_embed( (len(ref_images) , shape[-2] // 8, shape[-1] // 8 )) 
+        freqs = get_rotary_pos_embed( (len(ref_images) , shape[-2] // 8, shape[-1] // 8 ), device=self.device)
         # batch_ref_image: [B, C, F, H, W]
         vae_feat = self.vae.encode(ref_images, tile_size = tile_size)
         vae_feat = torch.cat( vae_feat, dim=1).unsqueeze(0)
@@ -403,7 +403,7 @@ class WanAny2V:
             x = [vae_feat, vae_feat_uncond] if any_guidance else [vae_feat],
             context = [context, context] if any_guidance else [context], 
             freqs= freqs,
-            t=torch.stack([torch.tensor(0, dtype=torch.float)]).to(self.device),
+            t=torch.zeros(1, dtype=torch.float, device=self.device),
             lynx_feature_extractor = True,
         )
         if _loras_active_adapters is not None:
@@ -427,7 +427,7 @@ class WanAny2V:
         cos_parts, sin_parts = [], []
 
         def append_freq(start_t, length, h_offset=1, w_offset=1):
-            cos, sin = get_nd_rotary_pos_embed( (start_t, h_offset, w_offset), (start_t + length, h_offset + lat_h // 2, w_offset + lat_w // 2))
+            cos, sin = get_nd_rotary_pos_embed( (start_t, h_offset, w_offset), (start_t + length, h_offset + lat_h // 2, w_offset + lat_w // 2), device=self.device)
             cos_parts.append(cos)
             sin_parts.append(sin)
             
@@ -597,10 +597,12 @@ class WanAny2V:
             from .kiwi.embedders import build_kiwi_conditions
             kiwi_ref_images = original_input_ref_images[0] if original_input_ref_images is not None and len(original_input_ref_images) else None
             kiwi_state = build_kiwi_conditions(vae=self.vae, source_frames=input_frames, ref_images=kiwi_ref_images, width=width, height=height, batch_size=batch_size, device=self.device, dtype=self.dtype, source_embedder_file=self.kiwi_source_embedder_file, ref_embedder_file=self.kiwi_ref_embedder_file, vae_tile_size=VAE_tile_size)
-            context = self.kiwi_mllm.encode_from_inputs(input_prompt, input_frames, kiwi_ref_images, use_ref_image=self.kiwi_ref_embedder_file is not None, max_frames=16)
+            with torch.device(self.device):
+                context = self.kiwi_mllm.encode_from_inputs(input_prompt, input_frames, kiwi_ref_images, use_ref_image=self.kiwi_ref_embedder_file is not None, max_frames=16)
             context = [context]
             if any_guidance_at_all or NAG_scale > 1:
-                context_null = self.kiwi_mllm.encode_from_inputs(n_prompt, input_frames, kiwi_ref_images, use_ref_image=self.kiwi_ref_embedder_file is not None, max_frames=16)
+                with torch.device(self.device):
+                    context_null = self.kiwi_mllm.encode_from_inputs(n_prompt, input_frames, kiwi_ref_images, use_ref_image=self.kiwi_ref_embedder_file is not None, max_frames=16)
                 context_null = [context_null]
         else:
             text_len = self.model.text_len
@@ -833,7 +835,7 @@ class WanAny2V:
         # Chrono Edit
         if chrono_edit:
             if frame_num == 5:
-                freq0, freq7 = get_nd_rotary_pos_embed( (0, 0, 0), (1, lat_h // 2, lat_w // 2)), get_nd_rotary_pos_embed( (7, 0, 0), (8, lat_h // 2, lat_w // 2))
+                freq0, freq7 = get_nd_rotary_pos_embed( (0, 0, 0), (1, lat_h // 2, lat_w // 2), device=self.device), get_nd_rotary_pos_embed( (7, 0, 0), (8, lat_h // 2, lat_w // 2), device=self.device)
                 freqs = ( torch.cat([freq0[0], freq7[0]]), torch.cat([freq0[1],freq7[1]]))
                 freq0 = freq7 = None
             last_latent_preview = image_outputs
@@ -904,7 +906,7 @@ class WanAny2V:
             pose_grid_t = pose_latents.shape[2] // ps_t
             pose_rope_h = lat_h // ps_h
             pose_rope_w = lat_w // ps_w
-            pose_freqs_cos, pose_freqs_sin = get_nd_rotary_pos_embed( (ref_images_count, 0, 120), (ref_images_count + pose_grid_t, pose_rope_h, 120 + pose_rope_w), (pose_grid_t, pose_rope_h, pose_rope_w), L_test = lat_t, enable_riflex = enable_RIFLEx)
+            pose_freqs_cos, pose_freqs_sin = get_nd_rotary_pos_embed( (ref_images_count, 0, 120), (ref_images_count + pose_grid_t, pose_rope_h, 120 + pose_rope_w), (pose_grid_t, pose_rope_h, pose_rope_w), L_test = lat_t, enable_riflex = enable_RIFLEx, device=self.device)
 
             head_dim = pose_freqs_cos.shape[1]
             pose_freqs_cos = pose_freqs_cos.view(pose_grid_t, pose_rope_h, pose_rope_w, head_dim).permute(0, 3, 1, 2)
@@ -1047,11 +1049,10 @@ class WanAny2V:
                 lynx = False
             else:
                 from  .lynx.resampler import Resampler
-                from accelerate import init_empty_weights
                 lynx_lite = model_type in ["lynx_lite", "vace_lynx_lite_14B"]
                 ip_hidden_states = ip_hidden_states_uncond = None
                 if True:
-                    with init_empty_weights():
+                    with torch.device("meta"):
                         arc_resampler = Resampler( depth=4, dim=1280, dim_head=64, embedding_dim=512, ff_mult=4, heads=20, num_queries=16, output_dim=2048 if lynx_lite else 5120 )
                     offload.load_model_data(arc_resampler, fl.locate_file("wan2.1_lynx_lite_arc_resampler.safetensors" if lynx_lite else "wan2.1_lynx_full_arc_resampler.safetensors"), writable_tensors=False)
                     arc_resampler.to(self.device)
@@ -1086,7 +1087,7 @@ class WanAny2V:
                 face_processor = None
                 gc.collect()
                 torch.cuda.empty_cache()
-                standin_freqs = get_nd_rotary_pos_embed((-1, int(height/16), int(width/16) ), (-1, int(height/16 + standin_ref.height/16), int(width/16 + standin_ref.width/16) )) 
+                standin_freqs = get_nd_rotary_pos_embed((-1, int(height/16), int(width/16) ), (-1, int(height/16 + standin_ref.height/16), int(width/16 + standin_ref.width/16) ), device=self.device)
                 standin_ref = self.vae.encode([ convert_image_to_tensor(standin_ref).unsqueeze(1) ], VAE_tile_size)[0].unsqueeze(0)
                 kwargs.update({ "standin_freqs": standin_freqs, "standin_ref": standin_ref, }) 
 
@@ -1151,9 +1152,9 @@ class WanAny2V:
         elif extended_input_dim>=2:
             shape = list(target_shape[1:])
             shape[extended_input_dim-2] *= 2
-            freqs = get_rotary_pos_embed(shape, enable_RIFLEx= False) 
+            freqs = get_rotary_pos_embed(shape, enable_RIFLEx= False, device=self.device)
         else:
-            freqs = get_rotary_pos_embed( (target_shape[1]+ inner_latent_frames ,) + target_shape[2:] , enable_RIFLEx= enable_RIFLEx) 
+            freqs = get_rotary_pos_embed( (target_shape[1]+ inner_latent_frames ,) + target_shape[2:] , enable_RIFLEx= enable_RIFLEx, device=self.device)
 
         if post_freqs is not None:
             freqs = ( torch.cat([freqs[0], post_freqs[0]]), torch.cat([freqs[1], post_freqs[1]]) )

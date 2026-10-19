@@ -56,6 +56,7 @@ def load_routes():
         "wgp": SimpleNamespace(
             get_model_def=Mock(return_value={"architecture": "minimax_h3_ref2va"}),
             get_base_model_type=Mock(return_value="minimax_h3_ref2va"),
+            apply_model_acceleration_profile=Mock(return_value={}),
         ),
     }
     exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), str(path), "exec"), namespace)

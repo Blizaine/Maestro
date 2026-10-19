@@ -316,7 +316,7 @@ class TI2VidTwoStagesPipeline:
             except Exception as _amp_err:
                 print(f"[10S TextAmp] install failed (continuing without amplifier): {_amp_err}")
                 _amp_handles = []
-        sigmas = LTX2Scheduler().execute(steps=num_inference_steps).to(dtype=torch.float32, device=self.device)
+        sigmas = LTX2Scheduler().execute(steps=num_inference_steps, device=self.device)
         if loras_slists is not None:
             stage_1_steps = len(sigmas) - 1
             update_loras_slists(

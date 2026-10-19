@@ -62,6 +62,7 @@ function input(overrides = {}) {
   } = loadTypeScript(path.join(root, 'ui/src/lib/h3DurationGuidance.ts'), {
     './h3Memory': h3Memory,
   });
+  const {h3RecommendationLabel, recommendedH3PassProfile} = h3Memory;
   const h3OutputMaxPixels = 768 * 1344
 
   const transformer = fs.readFileSync(
@@ -77,9 +78,10 @@ function input(overrides = {}) {
   assert.equal(shortPass.rowsLow, 64178, 'target video is 72 latents × 40 × 22 rows plus 810 stereo audio rows and text');
   assert.ok(shortPass.rowsHigh >= shortPass.rowsLow);
   assert.equal(shortPass.recommendationFrames, 345);
+  assert.equal(shortPass.recommendationBasis, 'conservative', 'legacy VRAM rows are conservative starting points');
   assert.equal(shortPass.fastMaxFrames, 277);
   assert.equal(shortPass.beyondRecommended, false);
-  assert.equal(shortPass.risk, 'within-profile');
+  assert.equal(shortPass.risk, 'caution', 'legacy fallback is not presented as verified fit');
 
   const staleOmniPolicy = estimateH3DurationGuidance(input({
     options: options({
@@ -100,16 +102,18 @@ function input(overrides = {}) {
   assert.equal(nativeLimit.path, 'chunked', '345 frames exceed the native RMSNorm row cutoff at 1280x704');
   assert.equal(nativeLimit.recommendationFrames, 345);
   assert.equal(nativeLimit.beyondRecommended, false, '345 frames are the native duration boundary');
-  assert.equal(nativeLimit.risk, 'within-profile', 'the 24 GB profile explicitly supports this native pass');
+  assert.equal(nativeLimit.risk, 'caution', 'the legacy 24 GB profile is not a tested fit claim');
 
   const lowVram = estimateH3DurationGuidance(input({ frames: 345, totalVramGb: 16 }));
   assert.equal(lowVram.recommendationFrames, 243);
   assert.equal(lowVram.beyondRecommended, false, 'memory recommendation exceedance is separate from the native duration boundary');
-  assert.equal(lowVram.risk, 'high');
+  assert.equal(lowVram.risk, 'caution', 'exceeding a conservative recommendation is advisory');
+  assert.equal(lowVram.exceedsRecommendation, true);
 
   const withinNativeButOverProfile = estimateH3DurationGuidance(input({ frames: 328, totalVramGb: 16 }));
   assert.equal(withinNativeButOverProfile.beyondRecommended, false);
-  assert.equal(withinNativeButOverProfile.risk, 'high');
+  assert.equal(withinNativeButOverProfile.risk, 'caution');
+  assert.equal(withinNativeButOverProfile.exceedsRecommendation, true);
 
   const extended = estimateH3DurationGuidance(input({ frames: 346 }));
   assert.equal(extended.beyondRecommended, true, 'the first frame count above 345 crosses the native envelope');
@@ -118,7 +122,60 @@ function input(overrides = {}) {
 
   const unknownVram = estimateH3DurationGuidance(input({ totalVramGb: 0 }));
   assert.equal(unknownVram.recommendationFrames, null);
+  assert.equal(unknownVram.recommendationBasis, null);
   assert.equal(unknownVram.risk, 'unknown');
+
+  const recommendationPolicy = {
+    checkpoint: 'fused_4step',
+    resource_recommendations: {version: '2026-10-14', tiers: [
+      {checkpoint: 'fused_4step', min_vram_gb: 12, max_vram_gb: 12,
+        min_ram_gb: 32, max_ram_gb: 40, min_pixels: 0, max_pixels: 901120,
+        frames: 345, basis: 'tested', note: 'Repeated 720p runs completed.', evidence: ['run-14']},
+      {checkpoint: 'fused_4step', min_vram_gb: 8, max_vram_gb: 8,
+        min_ram_gb: 16, max_ram_gb: 32, min_pixels: 0, max_pixels: 901120,
+        frames: 243, basis: 'estimated', note: 'Starting estimate for 8 GB VRAM.'},
+      {checkpoint: 'fused_4step', min_vram_gb: 8, max_vram_gb: 8,
+        min_ram_gb: 0, max_ram_gb: 15.99, min_pixels: 1800000, max_pixels: 2088960,
+        frames: null, fallback_resolution: '1280x704', basis: 'conservative',
+        note: 'No automatic high-resolution duration is recommended at this RAM level.'},
+    ]},
+    resolution_bands: [{min_pixels: 0, vram_tiers: [{frames: 345}]}],
+  };
+  const tested = recommendedH3PassProfile(recommendationPolicy, '1280x704', 12, 32);
+  assert.deepEqual({frames: tested.frames, basis: tested.basis, note: tested.note,
+    evidence: tested.evidence, version: tested.version}, {
+    frames: 345, basis: 'tested', note: 'Repeated 720p runs completed.',
+    evidence: ['run-14'], version: '2026-10-14',
+  }, 'tested provenance and evidence flow through the memory recommendation');
+  const estimated = recommendedH3PassProfile(recommendationPolicy, '1280x704', 8, 16);
+  assert.equal(estimated.basis, 'estimated');
+  assert.equal(h3RecommendationLabel(estimated.basis), 'Estimated starting point');
+  const estimatedWithin = estimateH3DurationGuidance(input({
+    frames: 243,
+    totalVramGb: 8,
+    totalRamGb: 16,
+    options: options({sliding_window_memory_policy: recommendationPolicy}),
+  }));
+  assert.equal(estimatedWithin.exceedsRecommendation, false);
+  assert.equal(estimatedWithin.risk, 'caution', 'an estimate inside its starting point is not shown as verified');
+  const estimatedAbove = estimateH3DurationGuidance(input({
+    frames: 328,
+    totalVramGb: 8,
+    totalRamGb: 16,
+    options: options({sliding_window_memory_policy: recommendationPolicy}),
+  }));
+  assert.equal(estimatedAbove.recommendationFrames, 243);
+  assert.equal(estimatedAbove.recommendationBasis, 'estimated');
+  assert.equal(estimatedAbove.exceedsRecommendation, true);
+  assert.equal(estimatedAbove.risk, 'caution', 'estimated tiers remain caution even above their starting point');
+  assert.ok(estimatedAbove.notes.some(note => /does not predict a memory failure/.test(note)));
+  const conservativeTier = recommendedH3PassProfile(recommendationPolicy, '1920x1088', 8, 8);
+  assert.deepEqual({supported: conservativeTier.supported, frames: conservativeTier.frames,
+    fallbackResolution: conservativeTier.fallbackResolution}, {
+    supported: false, frames: null, fallbackResolution: '1280x704',
+  }, 'an explicit conservative null tier prevents falling through to the larger VRAM-only table');
+  const overMaxRam = recommendedH3PassProfile(recommendationPolicy, '1280x704', 12, 48);
+  assert.equal(overMaxRam.basis, 'conservative', 'max_ram_gb excludes a measured tier outside its declared range');
 
   const unsupportedTierOptions = options({
     sliding_window_memory_policy: {

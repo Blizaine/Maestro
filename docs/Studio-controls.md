@@ -48,6 +48,21 @@ Click a thumbnail on the right to bring that asset into the gallery and keep it
 selected while media details load or new results arrive. Scroll the main gallery
 to resume selecting the card being browsed.
 
+Completed Director runs show **Show clips** beneath the latest joined video in
+**All**, **Video** and **Multi-clip**. The shots start collapsed; expand them to
+browse their individual cards and normal media actions, then **Hide clips** to
+close the group. **Edit Director shots** opens the saved production, where a
+shot can be edited and rerun as a replacement. **Rejoin** uses the current saved
+takes and creates a new final video, retaining the previous output. Search and
+Favorites find individual clips directly. Runs without a final show completed
+clips normally. Clips load on demand and stay associated with their source folder.
+
+In **Editor → Media**, choose the **Director** clapperboard filter and
+**Add run** to import the production as separate timeline shots with their
+Director prompts and original soundtrack. Adding the joined video as ordinary
+media adds one video file. Interrupted standard runs can import their completed
+shots; seamless runs use separate source ranges from the cumulative render.
+
 Gallery cards show a local date and time. Open **Info** for the exact timestamp,
 file size, measured resolution, and video/audio duration. Videos also show their
 frame rate and frame count when recorded in the file. Dates are labeled Generated,

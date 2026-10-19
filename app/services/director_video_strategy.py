@@ -17,6 +17,13 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from services.h3_duration_recommendations import (
+    h3_recommendation_metadata,
+    h3_duration_recommendations_enabled,
+    load_h3_duration_recommendations,
+    match_h3_duration_recommendation,
+)
+
 
 ROLLING_WINDOW = "rolling_window"
 BOUNDED_START_END = "bounded_start_end"
@@ -110,6 +117,7 @@ def _recommended_director_h3_profile(
     total_vram_gb: Any,
     resolution: Any,
     model_def: Mapping[str, Any],
+    total_ram_gb: Any = None,
 ) -> dict[str, Any]:
     """Evaluate the lightweight memory policy published by the H3 handler."""
 
@@ -128,6 +136,12 @@ def _recommended_director_h3_profile(
         total_vram_gb = float(total_vram_gb)
     except (TypeError, ValueError):
         total_vram_gb = 0.0
+    try:
+        total_ram_gb = float(total_ram_gb)
+        if not math.isfinite(total_ram_gb) or total_ram_gb <= 0:
+            total_ram_gb = None
+    except (TypeError, ValueError, OverflowError):
+        total_ram_gb = None
 
     full_checkpoint = bool(model_def.get("minimax_h3_full_checkpoint", False))
     policy = (
@@ -135,7 +149,100 @@ def _recommended_director_h3_profile(
         or model_def.get("sliding_window_memory_policy")
         or {}
     )
-    architectural_maximum = int(model_def.get("frames_maximum") or 345)
+    architectural_maximum = min(
+        345,
+        int(model_def.get("frames_maximum") or 345),
+    )
+    fused_turbo = bool(model_def.get("minimax_h3_fused_turbo", False))
+    omni_reference = bool(
+        model_def.get("omni_reference", False)
+        or model_def.get("architecture") == "minimax_h3_ref2va"
+    )
+    checkpoint = str(
+        policy.get("checkpoint")
+        or (
+            "fused_4step_references"
+            if fused_turbo and omni_reference
+            else "fused_4step"
+            if fused_turbo
+            else "full"
+            if full_checkpoint
+            else "pruned"
+        )
+    )
+    resource_recommendations = (
+        policy.get("resource_recommendations")
+        or load_h3_duration_recommendations()
+    )
+    resource_tier = None
+    if h3_duration_recommendations_enabled(model_def):
+        resource_tier = match_h3_duration_recommendation(
+            resource_recommendations,
+            checkpoint=checkpoint,
+            total_vram_gb=total_vram_gb,
+            total_ram_gb=total_ram_gb,
+            pixels=pixels,
+        )
+    if resource_tier is not None:
+        if resource_tier.get("frames") is None:
+            return {
+                "supported": False,
+                "frames": None,
+                "fallback_resolution": resource_tier.get("fallback_resolution"),
+                "gpu_vram_gb": total_vram_gb,
+                "system_ram_gb": total_ram_gb,
+                "resolution": normalized_resolution,
+                "pixels": pixels,
+                "checkpoint": checkpoint,
+                "resource_recommendation": dict(resource_tier),
+                "resource_recommendation_version": resource_recommendations.get("version"),
+            }
+        try:
+            minimum = max(1, int(model_def.get("frames_minimum") or 124))
+            frame_step = max(1, int(model_def.get("frames_steps") or 17))
+            frames = min(
+                architectural_maximum,
+                max(minimum, int(resource_tier.get("frames"))),
+            )
+            frames = minimum + ((frames - minimum) // frame_step) * frame_step
+        except (TypeError, ValueError, OverflowError):
+            frames = None
+        if frames is not None:
+            base_frames = frames
+            reference_margin_frames = 0
+            if omni_reference:
+                sequence_policy = model_def.get("omni_sequence_memory_policy") or {}
+                margin_steps_value = resource_tier.get(
+                    "reference_margin_steps",
+                    sequence_policy.get("reference_margin_steps", 0),
+                )
+                try:
+                    margin_steps = max(0, int(margin_steps_value))
+                except (TypeError, ValueError, OverflowError):
+                    margin_steps = 0
+                reference_margin_frames = min(
+                    max(0, base_frames - minimum),
+                    margin_steps * frame_step,
+                )
+                frames = max(minimum, base_frames - reference_margin_frames)
+                frames = minimum + ((frames - minimum) // frame_step) * frame_step
+            return {
+                "supported": True,
+                "frames": frames,
+                "base_frames": base_frames,
+                "reference_margin_frames": reference_margin_frames,
+                "fallback_resolution": None,
+                "gpu_vram_gb": total_vram_gb,
+                "system_ram_gb": total_ram_gb,
+                "resolution": normalized_resolution,
+                "pixels": pixels,
+                "checkpoint": checkpoint,
+                "resource_recommendation": dict(resource_tier),
+                "resource_recommendation_version": resource_recommendations.get(
+                    "version"
+                ),
+            }
+
     if total_vram_gb <= 0 or not policy:
         return {
             "supported": True,
@@ -144,7 +251,7 @@ def _recommended_director_h3_profile(
             "gpu_vram_gb": total_vram_gb,
             "resolution": normalized_resolution,
             "pixels": pixels,
-            "checkpoint": "full" if full_checkpoint else "pruned",
+            "checkpoint": checkpoint,
         }
 
     for band in policy.get("resolution_bands") or []:
@@ -162,7 +269,7 @@ def _recommended_director_h3_profile(
                     "gpu_vram_gb": total_vram_gb,
                     "resolution": normalized_resolution,
                     "pixels": pixels,
-                    "checkpoint": "full" if full_checkpoint else "pruned",
+                    "checkpoint": checkpoint,
                 }
         break
     return {
@@ -172,7 +279,7 @@ def _recommended_director_h3_profile(
         "gpu_vram_gb": total_vram_gb,
         "resolution": normalized_resolution,
         "pixels": pixels,
-        "checkpoint": "full" if full_checkpoint else "pruned",
+        "checkpoint": checkpoint,
     }
 
 
@@ -250,7 +357,9 @@ def build_director_video_execution_profile(
             hardware.get("gpu_vram_gb", 0.0),
             requested_resolution,
             model_def,
+            hardware.get("ram_gb"),
         )
+        checkpoint = str(recommendation.get("checkpoint") or checkpoint)
         normalized_resolution = str(
             recommendation.get("resolution") or requested_resolution
         )
@@ -308,6 +417,12 @@ def build_director_video_execution_profile(
         detected_vram = float(hardware.get("gpu_vram_gb") or 0.0)
     except (TypeError, ValueError):
         detected_vram = 0.0
+    try:
+        detected_ram = float(hardware.get("ram_gb") or 0.0)
+        if not math.isfinite(detected_ram) or detected_ram <= 0:
+            detected_ram = None
+    except (TypeError, ValueError, OverflowError):
+        detected_ram = None
 
     return {
         "version": DIRECTOR_VIDEO_EXECUTION_PROFILE_VERSION,
@@ -333,6 +448,11 @@ def build_director_video_execution_profile(
             if effective_maximum is not None else None
         ),
         "gpu_vram_gb": detected_vram,
+        "system_ram_gb": detected_ram,
+        "resource_recommendation_version": (
+            (recommendation or {}).get("resource_recommendation_version")
+        ),
+        **(h3_recommendation_metadata(recommendation) if is_h3 else {}),
         "manual_override": override_frames is not None,
         "manual_max_frames": override_frames,
         "hardware_supported": bool(
@@ -347,6 +467,7 @@ def build_director_video_execution_profile(
         ),
         "sol_attention": video_params.get("override_attention") == "sol",
         "sla_attention": video_params.get("override_attention") == "sla",
+        "veda_attention": video_params.get("override_attention") == "veda",
         "fused_turbo": bool(model_def.get("minimax_h3_fused_turbo")),
         "first_block_cache": (
             video_params.get("skip_steps_cache_type") == "first_block"

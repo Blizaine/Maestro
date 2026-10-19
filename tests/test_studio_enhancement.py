@@ -2,6 +2,7 @@
 import asyncio
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from services.studio_enhancement import (
     StudioJobArchive, captured_settings, current_settings, enhancement_context,
     enhancement_request, new_enhancement, prepare_enhanced_job, public_enhancement, fidelity_retry_limit,
     enhancement_warnings,
+    record_continuity_review, enhancement_continuity_reviews,
 )
 
 
@@ -57,6 +59,78 @@ class SingleWindowFidelityTests(unittest.TestCase):
             llm_service.enhance_prompt('A gardener lifts one pot. No dialogue.', mode='video',
                 model_type='minimax_h3_fused_turbo', duration_seconds=8)
         self.assertEqual(writer.call_count, 1)
+
+    def test_single_window_continuity_preserves_native_contract_and_records_advisory(self):
+        from services import llm_service
+        from services.llm_sampling import caller_sampling_enabled
+        draft = self.valid.replace('No dialogue.', '[Shot 2] At 00:04.000, The gardener sets the pot down. No dialogue.')
+        repaired = draft.replace('The gardener sets the pot down.', 'The gardener holds the raised pot while the camera moves closer.')
+
+        def review(**kwargs):
+            self.assertTrue(caller_sampling_enabled())
+            self.assertTrue(kwargs['validate_candidate'](repaired))
+            self.assertFalse(kwargs['validate_candidate']('A broken native prompt.'))
+            return {'prompt': repaired, 'status': 'repaired', 'checked': True,
+                    'repaired': True, 'issues': ['An angle reset the prop state.'], 'reference_groups': [],
+                    'state_handoffs': [{'from_shot': 1, 'to_shot': 2, 'carried_state': 'pot remains raised',
+                                        'visible_cue': 'holds the raised pot'}]}
+
+        with enhancement_context({}, lambda: False), \
+                patch.object(llm_service, 'generate', return_value=draft), \
+                patch('services.enhance_guides.get_enhance_guide', return_value='H3 guide'), \
+                patch('services.h3_single_window_continuity.review_single_window_continuity', side_effect=review):
+            result = llm_service.enhance_prompt(
+                'A gardener lifts one pot and holds it while the camera cuts closer. No dialogue.',
+                mode='video', model_type='minimax_h3_fused_turbo', duration_seconds=8,
+                window_count=1, max_new_tokens=1024)
+            self.assertIn('holds the raised pot', result)
+            self.assertEqual(enhancement_warnings(), [])
+            self.assertEqual(enhancement_continuity_reviews()[0]['status'], 'repaired')
+            self.assertEqual(enhancement_continuity_reviews()[0]['state_handoffs'][0]['to_shot'], 2)
+        self.assertEqual(enhancement_continuity_reviews(), [])
+        self.assertFalse(caller_sampling_enabled())
+
+    def test_zero_fidelity_repairs_skips_additional_continuity_call(self):
+        from services import llm_service
+        with enhancement_context({'enhance_fidelity_retries': 0}, lambda: False), \
+                patch.object(llm_service, 'generate', return_value=self.valid), \
+                patch('services.enhance_guides.get_enhance_guide', return_value='H3 guide'), \
+                patch('services.h3_single_window_continuity.review_single_window_continuity') as review:
+            llm_service.enhance_prompt('A gardener lifts one pot. No dialogue.', mode='video',
+                model_type='minimax_h3_fused_turbo', duration_seconds=8)
+        review.assert_not_called()
+
+    def test_continuity_review_runs_after_frames_prompt_compaction(self):
+        from services import llm_service
+        draft = self.valid.replace('No dialogue.', '[Shot 2] The gardener sets the pot down. No dialogue.')
+        compacted = draft.replace('The camera follows the pot upward. ', '')
+        repaired = compacted.replace('sets the pot down', 'keeps the pot raised in both hands')
+        calls = []
+
+        def fit(prompt):
+            calls.append('fit')
+            self.assertEqual(prompt, draft)
+            return SimpleNamespace(prompt=compacted, compacted=True,
+                                   original_token_count=500, token_count=450)
+
+        def review(**kwargs):
+            calls.append('review')
+            self.assertEqual(kwargs['draft_prompt'], compacted)
+            self.assertTrue(kwargs['validate_candidate'](repaired))
+            return {'prompt': repaired, 'status': 'repaired', 'checked': True,
+                    'repaired': True, 'issues': [], 'reference_groups': [], 'state_handoffs': []}
+
+        with enhancement_context({}, lambda: False), \
+                patch.object(llm_service, 'generate', return_value=draft), \
+                patch('services.enhance_guides.get_enhance_guide', return_value='H3 guide'), \
+                patch('services.h3_prompt_budget.fit_h3_base_prompt', side_effect=fit), \
+                patch('services.h3_single_window_continuity.review_single_window_continuity', side_effect=review):
+            result = llm_service.enhance_prompt(
+                'A gardener lifts one pot and holds it while the camera cuts closer. No dialogue.',
+                mode='video', model_type='minimax_h3_fused_turbo', duration_seconds=8,
+                window_count=1, max_new_tokens=1024)
+        self.assertEqual(calls, ['fit', 'review'])
+        self.assertIn('keeps the pot raised in both hands', result)
 
 
 class QueuedEnhancementTests(unittest.TestCase):
@@ -150,6 +224,21 @@ class QueuedEnhancementTests(unittest.TestCase):
                     'planned_by': planned_by, 'planning_warnings': warnings, 'planning_notes': ['Timing adjusted']}}
                 self.assertEqual(bool(self.run_prepare().get('enhancement_review_required')), expected)
 
+    def test_continuity_diagnostics_are_saved_without_a_new_review_gate(self):
+        diagnostic = {'status': 'validator_rejected', 'checked': True, 'repaired': False,
+                      'issues': ['Review could not safely improve the timeline.'], 'reference_groups': []}
+        async def enhance(payload):
+            record_continuity_review(diagnostic)
+            return self.enhance.return_value
+        self.enhance.side_effect = enhance
+        with enhancement_context({}, lambda: False):
+            prepared = self.run_prepare()
+            diagnostic['issues'].append('Later mutation')
+            self.assertEqual(prepared['enhancement_continuity_reviews'][0]['issues'],
+                             ['Review could not safely improve the timeline.'])
+            self.assertFalse(prepared.get('enhancement_review_required'))
+            self.assertEqual(prepared['enhancement_warnings'], [])
+
     def test_frozen_settings_assets_and_source_do_not_follow_later_edits(self):
         self.params['minimax_h3_references'] = [{'path': 'identity.png', 'role': 'Actor'}]
         record = new_enhancement(self.params, {'llm_model_id': 'writer-a', 'nsfw_mode': False, 'openai_api_key': 'secret'})
@@ -178,6 +267,16 @@ class QueuedEnhancementTests(unittest.TestCase):
         self.assertEqual(fidelity_retry_limit({'enhance_fidelity_retries': 0}), 0)
         self.assertEqual(fidelity_retry_limit({'enhance_fidelity_retries': 100}), 5)
         self.assertEqual(fidelity_retry_limit({'enhance_fidelity_retries': 'bad'}), 1)
+
+    def test_mtp_preference_is_frozen_and_legacy_snapshots_stay_off(self):
+        self.assertIs(captured_settings({})['llm_mtp_acceleration'], False)
+        for captured, live in ((True, False), (False, True)):
+            record = new_enhancement(self.params, {'llm_mtp_acceleration': captured})
+            with enhancement_context(record['settings'], lambda: False):
+                self.assertIs(current_settings({'llm_mtp_acceleration': live})['llm_mtp_acceleration'], captured)
+        with enhancement_context({'llm_model_id': 'legacy-writer'}, lambda: False):
+            self.assertIs(current_settings({'llm_mtp_acceleration': True})['llm_mtp_acceleration'], False)
+        self.assertIs(current_settings({'llm_mtp_acceleration': True})['llm_mtp_acceleration'], True)
 
     def test_auto_continue_keeps_warnings_and_fallback_without_review_pause(self):
         self.prepare.side_effect = None

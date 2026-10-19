@@ -175,6 +175,276 @@ class GeneratedDialoguePlacementTests(unittest.TestCase):
                 _shorten_generated_dialogue(BRIEF, lines, target_words=32,
                     generate=Mock(return_value=json.dumps(response)), system_prompt="Write dialogue.")
 
+    def test_whole_exchange_maximum_retries_only_over_cap_lines_to_target_remainder(self):
+        lines = [
+            line("We nearly missed launch, but everyone kept moving when the schedule slipped badly twice.", speaker="Kai"),
+            line("I fixed the payment bug after Nora spotted how our holiday orders doubled overnight.", speaker="Mina"),
+            line("I want everyone back next year; let's make our launch easier from day one.", speaker="Nora"),
+        ]
+        before = deepcopy(lines)
+        first_edit = {
+            "L1": "We nearly missed launch when the schedule slipped twice late again.",
+            "L2": "Mina fixed our payment bug before holiday orders doubled overnight.",
+            "L3": "The launch felt impossible, yet our team delivered everything on time.",
+        }
+        focused_edit = {
+            "L1": "We nearly missed launch, but stayed united.",
+            "L3": "Come back next year; we'll plan better.",
+        }
+        writer = Mock(side_effect=[json.dumps(first_edit), json.dumps(focused_edit)])
+
+        revised = _shorten_generated_dialogue(
+            BRIEF, lines, target_words=24, maximum_words=30,
+            generate=writer, system_prompt="Copyedit speech.",
+        )
+
+        self.assertEqual([item["text"] for item in revised], [
+            focused_edit["L1"], first_edit["L2"], focused_edit["L3"],
+        ])
+        self.assertEqual(sum(len(item["text"].split()) for item in revised), 24)
+        self.assertEqual(lines, before)
+        self.assertEqual(writer.call_count, 2)
+        initial_turns = json.loads(
+            writer.call_args_list[0].kwargs["prompt"].split("AI draft to shorten:\n", 1)[1]
+            .split("\nThe maximum_words values", 1)[0]
+        )
+        self.assertEqual([turn["maximum_words"] for turn in initial_turns.values()], [10, 10, 10])
+        self.assertEqual(sum(turn["maximum_words"] for turn in initial_turns.values()), 30)
+        retry_prompt = writer.call_args_list[1].kwargs["prompt"]
+        retry_turns = json.loads(retry_prompt.split("Editable turns:\n", 1)[1])
+        unchanged = json.loads(
+            retry_prompt.split("Unchanged lines (do not rewrite):\n", 1)[1].split("\nEditable turns:", 1)[0]
+        )
+        self.assertEqual(set(retry_turns), {"L1", "L3"})
+        self.assertEqual(sum(turn["target_words"] for turn in retry_turns.values()), 14)
+        self.assertEqual(unchanged, {"L2": first_edit["L2"]})
+        self.assertIn('"speaker": "Kai"', retry_prompt)
+        self.assertIn('"speaker": "Nora"', retry_prompt)
+        self.assertIn('"original_text"', retry_prompt)
+        self.assertIn("HARD maximum_words cap", retry_prompt)
+
+    def test_whole_exchange_remeasures_two_focused_passes_and_ignores_context_echoes(self):
+        lines = [
+            line("We nearly missed launch, but everyone kept moving when the schedule slipped badly twice.", speaker="Kai"),
+            line("I fixed the payment bug after Nora spotted how our holiday orders doubled overnight.", speaker="Mina"),
+            line("I want everyone back next year; let's make our launch easier from day one.", speaker="Nora"),
+        ]
+        first_edit = {
+            "L1": "Launch nearly slipped, but the team kept moving through the delay.",
+            "L2": "I fixed payment bug after Nora spotted holiday orders doubling overnight.",
+            "L3": "Come back next year; let's plan much sooner for launch.",
+        }
+        first_focus = {
+            "L1": "Launch nearly slipped, but our whole team moved through holiday delays.",
+            "L2": "Nora caught a payment bug before holiday orders doubled overnight.",
+        }
+        final_focus = {
+            "L1": "We nearly missed launch.",
+            "L2": first_focus["L2"],
+            "L3": first_edit["L3"],
+        }
+        writer = Mock(side_effect=[
+            json.dumps(first_edit), json.dumps(first_focus), json.dumps(final_focus),
+        ])
+
+        revised = _shorten_generated_dialogue(
+            BRIEF, lines, target_words=24, maximum_words=30,
+            generate=writer, system_prompt="Copyedit speech.",
+        )
+
+        self.assertEqual([item["text"] for item in revised], [
+            final_focus["L1"], first_focus["L2"], first_edit["L3"],
+        ])
+        self.assertEqual(sum(len(item["text"].split()) for item in revised), 24)
+        self.assertEqual(writer.call_count, 3)
+        initial_call = writer.call_args_list[0]
+        schema = initial_call.kwargs["json_schema"]
+        self.assertEqual(schema["required"], ["L1", "L2", "L3"])
+        self.assertEqual(set(schema["properties"]), {"L1", "L2", "L3"})
+        self.assertEqual(schema["additionalProperties"], False)
+        self.assertTrue(all(value == {"type": "string"} for value in schema["properties"].values()))
+        self.assertFalse(initial_call.kwargs["enable_thinking"])
+        self.assertEqual(initial_call.kwargs["thinking_budget"], 0)
+        self.assertIsNone(initial_call.kwargs["reasoning_effort"])
+        self.assertEqual(initial_call.kwargs["max_new_tokens"], 768)
+        self.assertNotRegex(json.dumps(schema), r"minLength|maxLength|pattern|maximum|minimum")
+        for call in writer.call_args_list[1:]:
+            self.assertIsNone(call.kwargs["json_schema"])
+            self.assertTrue(call.kwargs["enable_thinking"])
+            self.assertEqual(call.kwargs["thinking_budget"], 2048)
+            self.assertEqual(call.kwargs["reasoning_effort"], "low")
+            self.assertEqual(call.kwargs["max_new_tokens"], 768)
+        first_retry = writer.call_args_list[1].kwargs["prompt"]
+        second_retry = writer.call_args_list[2].kwargs["prompt"]
+        self.assertIn("previous_words=32", first_retry)
+        self.assertIn("target_words=24", first_retry)
+        self.assertIn("needed_reduction_words=8", first_retry)
+        self.assertIn('"current_words": 11', first_retry)
+        first_editable = json.loads(first_retry.split("Editable turns:\n", 1)[1])
+        self.assertEqual([turn["maximum_words"] for turn in first_editable.values()], [10, 10])
+        self.assertIn("previous_words=31", second_retry)
+        self.assertIn("needed_reduction_words=7", second_retry)
+        second_editable = json.loads(second_retry.split("Editable turns:\n", 1)[1])
+        self.assertEqual(set(second_editable), {"L1"})
+        self.assertEqual(second_editable["L1"]["current_words"], 11)
+        self.assertEqual(second_editable["L1"]["target_words"], 4)
+        self.assertEqual(second_editable["L1"]["maximum_words"], 10)
+
+    def test_whole_exchange_copyedit_accepts_valid_total_even_if_one_share_is_over(self):
+        lines = [
+            line("We nearly missed launch, but everyone kept moving when the schedule slipped badly twice.", speaker="Kai"),
+            line("I fixed the payment bug after Nora spotted how our holiday orders doubled overnight.", speaker="Mina"),
+            line("I want everyone back next year; let's make our launch easier from day one.", speaker="Nora"),
+        ]
+        valid_total = {
+            "L1": "This launch nearly failed when the schedule slipped twice without warning.",
+            "L2": "Mina fixed the serious payment bug.",
+            "L3": "Come back next year; we'll plan sooner.",
+        }
+        writer = Mock(return_value=json.dumps(valid_total))
+
+        revised = _shorten_generated_dialogue(
+            BRIEF, lines, target_words=24, maximum_words=30,
+            generate=writer, system_prompt="Copyedit speech.",
+        )
+
+        self.assertEqual([item["text"] for item in revised], list(valid_total.values()))
+        self.assertEqual(sum(len(item["text"].split()) for item in revised), 24)
+        self.assertEqual(writer.call_count, 1)
+
+    def test_focused_target_shares_are_clamped_to_hard_line_caps(self):
+        lines = [line("One two three.", speaker="Kai"),
+                 line("word " * 31, speaker="Nora")]
+        first_edit = {"L1": "word " * 20, "L2": "word " * 28}
+        focused_edit = {
+            "L1": "We stayed united.",
+            "L2": "Nora kept our team moving through holiday rush, found the payment bug, fixed it, and helped us plan a stronger launch.",
+        }
+        writer = Mock(side_effect=[json.dumps(first_edit), json.dumps(focused_edit)])
+
+        revised = _shorten_generated_dialogue(
+            BRIEF, lines, target_words=24, maximum_words=30,
+            generate=writer, system_prompt="Copyedit speech.",
+        )
+
+        initial_turns = json.loads(
+            writer.call_args_list[0].kwargs["prompt"].split("AI draft to shorten:\n", 1)[1]
+            .split("\nThe maximum_words values", 1)[0]
+        )
+        self.assertEqual([turn["maximum_words"] for turn in initial_turns.values()], [3, 27])
+        self.assertEqual([turn["target_words"] for turn in initial_turns.values()], [3, 21])
+        focused_turns = json.loads(
+            writer.call_args_list[1].kwargs["prompt"].split("Editable turns:\n", 1)[1]
+        )
+        self.assertEqual([turn["target_words"] for turn in focused_turns.values()], [3, 21])
+        self.assertTrue(all(
+            turn["target_words"] <= turn["maximum_words"] for turn in focused_turns.values()
+        ))
+        self.assertEqual(sum(len(item["text"].split()) for item in revised), 24)
+
+    def test_whole_exchange_focus_ignores_echoed_or_rewritten_context_keys(self):
+        lines = [line('word ' * 14, speaker=speaker)
+                 for speaker in ('Kai', 'Mina', 'Nora')]
+        first_edit = {
+            'L1': 'We nearly missed launch when the schedule slipped twice late again.',
+            'L2': 'Mina fixed our payment bug before holiday orders doubled overnight.',
+            'L3': 'The launch felt impossible, yet our team delivered everything on time.',
+        }
+        focused_edit = {
+            'L1': 'We stayed united when our schedule slipped.',
+            'L2': 'Discard this attempted rewrite of unchanged speech.',
+            'L3': 'Come back next year; we will improve.',
+            'new_speaker': 'Discard this extra invented turn.',
+        }
+        writer = Mock(side_effect=[json.dumps(first_edit), json.dumps(focused_edit)])
+        revised = _shorten_generated_dialogue(
+            BRIEF, lines, target_words=24, maximum_words=30,
+            generate=writer, system_prompt='Copyedit speech.',
+        )
+        self.assertEqual([item['text'] for item in revised],
+                         [focused_edit['L1'], first_edit['L2'], focused_edit['L3']])
+        self.assertEqual([item['speaker'] for item in revised], ['Kai', 'Mina', 'Nora'])
+        self.assertEqual(sum(len(item['text'].split()) for item in revised), 24)
+        self.assertEqual(writer.call_count, 2)
+
+    def test_whole_exchange_malformed_focus_retry_keeps_first_edit(self):
+        lines = [
+            line("We nearly missed launch, but everyone kept moving when the schedule slipped badly twice.", speaker="Kai"),
+            line("I fixed the payment bug after Nora spotted how our holiday orders doubled overnight.", speaker="Mina"),
+            line("I want everyone back next year; let's make our launch easier from day one.", speaker="Nora"),
+        ]
+        first_edit = {
+            "L1": "We nearly missed launch when the schedule slipped twice late again.",
+            "L2": "Mina fixed our payment bug before holiday orders doubled overnight.",
+            "L3": "The launch felt impossible, yet our team delivered everything on time.",
+        }
+        writer = Mock(side_effect=[json.dumps(first_edit), json.dumps({"L1": "We stayed united."})])
+
+        revised = _shorten_generated_dialogue(
+            BRIEF, lines, target_words=24, maximum_words=30,
+            generate=writer, system_prompt="Copyedit speech.",
+        )
+
+        self.assertEqual([item["text"] for item in revised], list(first_edit.values()))
+        self.assertEqual(writer.call_count, 2)
+
+    def test_malformed_second_focus_keeps_first_valid_focus_and_stops(self):
+        lines = [
+            line("We nearly missed launch, but everyone kept moving when the schedule slipped badly twice.", speaker="Kai"),
+            line("I fixed the payment bug after Nora spotted how our holiday orders doubled overnight.", speaker="Mina"),
+            line("I want everyone back next year; let's make our launch easier from day one.", speaker="Nora"),
+        ]
+        first_edit = {
+            "L1": "Launch nearly slipped, but the team kept moving through the delay.",
+            "L2": "I fixed payment bug after Nora spotted holiday orders doubling overnight.",
+            "L3": "Come back next year; let's plan much sooner for launch.",
+        }
+        first_focus = {
+            "L1": "Launch nearly slipped, but our whole team moved through holiday delays.",
+            "L2": "Nora caught a payment bug before holiday orders doubled overnight.",
+        }
+        writer = Mock(side_effect=[
+            json.dumps(first_edit), json.dumps(first_focus),
+            json.dumps({"L1": "We nearly missed\nlaunch."}),
+        ])
+
+        revised = _shorten_generated_dialogue(
+            BRIEF, lines, target_words=24, maximum_words=30,
+            generate=writer, system_prompt="Copyedit speech.",
+        )
+
+        self.assertEqual([item["text"] for item in revised], [
+            first_focus["L1"], first_focus["L2"], first_edit["L3"],
+        ])
+        self.assertEqual(sum(len(item["text"].split()) for item in revised), 31)
+        self.assertEqual(writer.call_count, 3)
+
+    def test_whole_exchange_focused_retry_propagates_writer_errors(self):
+        lines = [
+            line("We nearly missed launch, but everyone kept moving when the schedule slipped badly twice.", speaker="Kai"),
+            line("I fixed the payment bug after Nora spotted how our holiday orders doubled overnight.", speaker="Mina"),
+            line("I want everyone back next year; let's make our launch easier from day one.", speaker="Nora"),
+        ]
+        first_edit = {
+            "L1": "We nearly missed launch when the schedule slipped twice late again.",
+            "L2": "Mina fixed our payment bug before holiday orders doubled overnight.",
+            "L3": "The launch felt impossible, yet our team delivered everything on time.",
+        }
+        for error in (
+            ValueError("provider rejected request"),
+            RuntimeError("provider unavailable"),
+            InterruptedError("cancelled"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                writer = Mock(side_effect=[json.dumps(first_edit), error])
+                with self.assertRaises(type(error)) as caught:
+                    _shorten_generated_dialogue(
+                        BRIEF, lines, target_words=24, maximum_words=30,
+                        generate=writer, system_prompt="Copyedit speech.",
+                    )
+                self.assertIs(caught.exception, error)
+                self.assertEqual(writer.call_count, 2)
+
     def test_overlength_copyedit_keeps_latest_draft_and_locked_quote_intact(self):
         prompt = 'Eva and Nora discuss their film project. Eva says "Welcome!"'
         locked = extract_locked_dialogue(prompt)
@@ -227,6 +497,41 @@ class GeneratedDialoguePlacementTests(unittest.TestCase):
             generate=writer, system_prompt="Write dialogue.")
         self.assertEqual(revised[0]["text"], "Would you take a seat here?")
 
+    def test_camera_copyedit_ignores_extra_retry_keys_and_propagates_cancellation(self):
+        lines = [line("Would you please take a seat over here?"), line("Thank you very much.", speaker="Nora")]
+        writer = Mock(side_effect=[
+            json.dumps({"L1": "Would you take a seat here?", "L2": "Thank you."}),
+            json.dumps({"L1": "Please sit here.", "L2": "Thanks.", "L3": "Ignore this."}),
+        ])
+        revised = _shorten_generated_dialogue(
+            BRIEF, lines, target_words=6, per_line_targets=[4, 2],
+            generate=writer, system_prompt="Write dialogue.",
+        )
+        self.assertEqual([item["text"] for item in revised], ["Please sit here.", "Thank you."])
+
+        two_overlong = [line("The guest should please take this seat over here, if that is all right?"),
+                        line("I am very grateful, thank you so much.", speaker="Nora")]
+        writer = Mock(side_effect=[
+            json.dumps({"L1": "Would you take a seat here please?", "L2": "Thank you so much."}),
+            json.dumps({"L1": "Please sit here.", "L3": "Ignore this."}),
+        ])
+        revised = _shorten_generated_dialogue(
+            BRIEF, two_overlong, target_words=6, per_line_targets=[4, 2],
+            generate=writer, system_prompt="Write dialogue.",
+        )
+        self.assertEqual([item["text"] for item in revised], ["Please sit here.", "Thank you so much."])
+
+        cancellation = InterruptedError("cancelled")
+        writer = Mock(side_effect=[
+            json.dumps({"L1": "Would you take a seat here?", "L2": "Thank you."}), cancellation,
+        ])
+        with self.assertRaises(InterruptedError) as caught:
+            _shorten_generated_dialogue(
+                BRIEF, lines, target_words=6, per_line_targets=[4, 2],
+                generate=writer, system_prompt="Write dialogue.",
+            )
+        self.assertIs(caught.exception, cancellation)
+
     def test_copyedit_reasoning_has_separate_budget_and_preserves_ownership(self):
         lines = [line('Would you please sit over here?', event='E2')]
         writer = Mock(return_value=json.dumps({'L1': 'Please sit here.'}))
@@ -236,7 +541,9 @@ class GeneratedDialoguePlacementTests(unittest.TestCase):
         self.assertEqual(result[0]['source_event_id'], 'E2')
         self.assertTrue(writer.call_args.kwargs['enable_thinking'])
         self.assertEqual(writer.call_args.kwargs['thinking_budget'], 512)
+        self.assertEqual(writer.call_args.kwargs['reasoning_effort'], 'low')
         self.assertEqual(writer.call_args.kwargs['max_new_tokens'], 768)
+        self.assertIsNone(writer.call_args.kwargs['json_schema'])
         self.assertEqual(lines[0]['text'], 'Would you please sit over here?')
 
     def test_an_unsuccessful_editor_retains_its_best_shorter_draft(self):

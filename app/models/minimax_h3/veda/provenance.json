@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "repository": "https://github.com/deepbeepmeep/WanGP",
+    "commit": "af2ed29a83dbccc7f1c0571a73005648436b392e"
+  },
+  "files": [
+    {
+      "local_path": "app/models/minimax_h3/veda/__init__.py",
+      "source_path": "models/minimax_h3/veda/__init__.py",
+      "source_git_blob_sha1": "d040b88a3267f88fc9206e642fe733b51cccd167",
+      "local_sha256": "c1fc48c1244865d8ecde0219a8cb66d19f5de6c0b51882ea495b5a8fc8e563ad"
+    },
+    {
+      "local_path": "app/models/minimax_h3/veda/attention.py",
+      "source_path": "models/minimax_h3/veda/attention.py",
+      "source_git_blob_sha1": "2e5a1c71c8a9924595e6fd1fe217ba70bc916409",
+      "local_sha256": "dc0179a212184483eeff18f06d5da3ae7f0678efdceb09e24c31d06a3bee728d",
+      "local_changes": "Validates plan structure and finite budgets; normalizes incomplete predictor geometry errors."
+    },
+    {
+      "local_path": "app/models/minimax_h3/veda/plans.py",
+      "source_path": "models/minimax_h3/veda/plans.py",
+      "source_git_blob_sha1": "d66679086198c2a5c10430276d4755813494535c",
+      "local_sha256": "6606630cb2e5f99a610d58cb44edf9e4b063898ad541d7d95ad3ef391acdfc73"
+    },
+    {
+      "local_path": "app/models/minimax_h3/veda/preprocess.py",
+      "source_path": "models/minimax_h3/veda/preprocess.py",
+      "source_git_blob_sha1": "16ddf7c96bf9d31167c570d423f366c03b62d823",
+      "local_sha256": "b54557272fcf5fd49a4f3476841a9ace45759ab10d66b81b47cbe6ab3c7fc706"
+    },
+    {
+      "local_path": "app/models/minimax_h3/veda/selection.py",
+      "source_path": "models/minimax_h3/veda/selection.py",
+      "source_git_blob_sha1": "9b3b6d78ebb733dfc77e0c553b914fbcde0336c2",
+      "local_sha256": "871755b38f025067f39603561e2094be2fd455c2c50a894ce25afb4687263605"
+    },
+    {
+      "local_path": "app/models/minimax_h3/veda/sparse_int8.py",
+      "source_path": "models/minimax_h3/veda/sparse_int8.py",
+      "source_git_blob_sha1": "1eb0c7d84569ce66dfd3bff3ff8992a7fea62e82",
+      "local_sha256": "827af5697a85ae653be6d49756b74ec8a37a1ded09cb57ae01fa180864c844fc"
+    },
+    {
+      "local_path": "app/models/minimax_h3/veda/tiling.py",
+      "source_path": "models/minimax_h3/veda/tiling.py",
+      "source_git_blob_sha1": "f599db75cf4f9b02dd4b5c0b8a7191594c8515b2",
+      "local_sha256": "01f48942d7938d19c7365e3bdcd6b821ea6f9b4c8b6a59c857120c97433e1076"
+    },
+    {
+      "local_path": "app/models/minimax_h3/veda/LICENSE",
+      "source_path": "models/minimax_h3/veda/LICENSE",
+      "source_git_blob_sha1": "6f7876b8708e6c24f51f3930a32907a248c51029",
+      "local_sha256": "6a651fd959d3457a390cf75e4abadc30801c4e5cdad3cb3ccf7ca0a1725a789d"
+    },
+    {
+      "local_path": "app/models/minimax_h3/veda/NOTICE",
+      "source_path": "models/minimax_h3/veda/NOTICE",
+      "source_git_blob_sha1": "7246b0b876583bcc760f2ae95bab99e0dfefbad5",
+      "local_sha256": "976ee4bd2c800ecdda93c2cef54a335032fa17e8ac4197b3a1b613404aeb3166"
+    },
+    {
+      "local_path": "app/models/minimax_h3/veda/SAGE_LICENSE",
+      "source_path": "models/minimax_h3/veda/SAGE_LICENSE",
+      "source_git_blob_sha1": "985b095c723f9e5fbc61be9474a42829fe885a84",
+      "local_sha256": "2bd311f16410bc96f0de900084963dda7544f71fd9146d68356b16d29df7a8f3"
+    },
+    {
+      "local_path": "app/models/minimax_h3/veda/LICENSE.txt",
+      "source_path": "LICENSE.txt",
+      "source_git_blob_sha1": "8e51ce4143ab472e3835ccc5e5f3e71e385f8770",
+      "local_sha256": "67c8e68389c945423c560c13936f0a960e5d2ffdcc5bb2ded4122fe1b095960f",
+      "license_scope": "WanGP Community License 2.0 for WanGP-derived files carrying that source header."
+    }
+  ],
+  "related_adaptations": [
+    {
+      "local_path": "app/shared/kernels/triton_tuner.py",
+      "source_path": "shared/kernels/triton_tuner.py",
+      "source_git_blob_sha1": "96600e8afeae7061fb8e04588d666e262a3cb0ff",
+      "local_sha256": "1fdeb1838b1ef9f8d1f6f4b6804c6beea72e1414177d7cffe06d5e8e42666ffb",
+      "local_changes": "Adjusted the license reference to the vendored Veda LICENSE.txt path and retained only Maestro's available idempotent logger installer."
+    },
+    {
+      "local_path": "app/shared/kernels/int8_backend.py",
+      "source_path": "shared/kernels/int8_backend.py",
+      "source_git_blob_sha1": "b4a20baa7bcbc4502ef9ef4d33db566e021391e3",
+      "local_sha256": "99d5cabb4f8ee11918211b2c04423b4f7b6578ddc1f094619da3044950de82eb",
+      "ported_symbols": [
+        "linear_grouped",
+        "kitchen_linear_prequantized"
+      ],
+      "local_changes": "Kept Maestro's existing backend; added validated paired-input consumption and a hook/LoRA-safe grouped path that preserves verified MMGP delegators."
+    },
+    {
+      "local_path": "app/shared/qtypes/int8_convrot.py",
+      "local_sha256": "7bcfc47eed01a28f8c082f4b294312cb919f6225d5d4475fccac88709c3eca2d",
+      "ported_symbols": [
+        "QLinearInt8ConvRot.forward"
+      ],
+      "local_changes": "Consumes the temporary paired input through the shared Kitchen backend, after Maestro's existing prequantized-input path. Also restores the truncated dtype diagnostic helper present in HEAD."
+    }
+  ],
+  "license_files": {
+    "wanGP_community_license": "app/models/minimax_h3/veda/LICENSE.txt",
+    "veda_mit_license": "app/models/minimax_h3/veda/LICENSE",
+    "veda_notice": "app/models/minimax_h3/veda/NOTICE",
+    "sageattention_license": "app/models/minimax_h3/veda/SAGE_LICENSE"
+  },
+  "local_hash_normalization": "SHA-256 of repository text with CRLF normalized to LF"
+}

@@ -117,8 +117,8 @@ export interface GenerateParams {
   skip_steps_multiplier?: number
   /** Percentage of denoising steps to run before caching may begin. */
   skip_steps_start_step_perc?: number
-  /** Per-generation attention override. Sol is H3-only and experimental. */
-  override_attention?: '' | 'sol' | 'sla' | 'sdpa'
+  /** Per-generation attention override. Sol and Veda are H3-only experiments. */
+  override_attention?: '' | 'sol' | 'sla' | 'veda' | 'sdpa'
   guidance_phases?: number
   video_prompt_type?: string
   audio_prompt_type?: string
@@ -254,6 +254,7 @@ export interface GenerateParams {
   /** Add bounded generated look/blocking references between sequence clips. */
   minimax_h3_sequence_continuity?: boolean
   minimax_h3_text_encoder?: 'nvfp4_awq' | 'gguf_q2_k' | 'gguf_q4_k_m' | 'int8' | 'bf16'
+  minimax_h3_video_vae?: 'auto' | 'full' | 'full_int8' | 'lightvae' | 'lightvae_int8'
   /** LTX-2.5 video decoder. Fast ConvVAE is recommended; NAD is experimental. */
   ltx25_video_vae?: 'fast' | 'nad'
   /** One-click managed H3 Turbo recipe for Full or Pruned H3. */
@@ -521,6 +522,10 @@ export interface GenerationJob {
   restoredFromHistory?: boolean
   /** Direct submissions stay visible while the backend is queued/planning. */
   showInGallery?: boolean
+  /** Owning Director pipeline when this job is one of its render children. */
+  directorPipelineId?: string | null
+  /** Detached Director repairs/reruns keep an independent progress card. */
+  directorDetachedOperation?: boolean
   kind?: 'generation' | 'editor_export' | string
   status: 'held' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress: number
@@ -576,6 +581,12 @@ export interface OutputFile {
   metadata_ready?: boolean
   /** Sidecar modification time used to invalidate an in-progress metadata view. */
   metadata_updated_at?: number | null
+  /** Joined Director final that owns the individual per-shot gallery rows. */
+  director_group?: { pipeline_id: string; clip_count: number } | null
+  /** Director project owning an individual shot take. */
+  director_pipeline_id?: string | null
+  /** Zero-based shot position for an individual Director take. */
+  director_clip_index?: number | null
 }
 
 export type AppMode = 'director' | 'studio' | 'editor'
@@ -657,6 +668,8 @@ export interface EditorDirectorClipSource {
   clip_index: number
   pipeline_type: string
   workspace: string
+  /** Prompt being prepared for a future rerun; kept separate from the last rendered prompt below. */
+  draft_video_prompt?: string
   video_prompt: string
   window_prompts?: string[]
 }
@@ -891,7 +904,27 @@ export interface ChoiceConfig {
 }
 
 export interface SlidingWindowMemoryPolicy {
-  checkpoint?: 'full' | 'pruned'
+  checkpoint?: 'full' | 'pruned' | 'fused_4step' | 'fused_4step_references'
+  /** RAM/VRAM/canvas recommendations shared with the backend. */
+  resource_recommendations?: {
+    version: string | number
+    tiers: Array<{
+      checkpoint: string
+      min_vram_gb: number
+      max_vram_gb: number
+      min_ram_gb: number
+      max_ram_gb?: number
+      min_pixels?: number
+      max_pixels: number
+      frames: number | null
+      fallback_resolution?: string
+      basis?: 'tested' | 'reported' | 'estimated' | 'conservative'
+      note?: string
+      evidence?: string[]
+      /** Reference headroom already accounted for in this tested tier. */
+      reference_margin_steps?: number
+    }>
+  }
   manual_override?: boolean
   /** Legal H3 frame steps reserved for Ref2VA reference-context headroom. */
   reference_margin_steps?: number
@@ -927,8 +960,20 @@ export interface ModelOptions {
     minimum_triton?: string
     first_run_compiles_kernels?: boolean
   } | null
+  veda_attention?: boolean
+  veda_attention_experimental?: boolean
+  veda_attention_status?: {
+    installed: boolean
+    supported: boolean
+    reason?: string | null
+    capability?: string
+    triton_version?: string | null
+    first_run_compiles_kernels?: boolean
+    safe_dense_fallback?: boolean
+  } | null
   sla_attention?: boolean
   sla_attention_default?: boolean
+  sla_attention_experimental?: boolean
   sla_attention_status?: {
     installed: boolean
     supported: boolean
@@ -947,6 +992,7 @@ export interface ModelOptions {
     protect_audio: boolean
   } | null
   minimax_h3_fused_turbo?: boolean
+  minimax_h3_full_checkpoint?: boolean
   minimax_h3_baked_turbo?: boolean
   loras_disabled?: boolean
   skip_steps_multiplier_choices?: [string, number][] | null
@@ -991,6 +1037,8 @@ export interface ModelOptions {
     recommended?: boolean
   }[] | null
   minimax_h3_text_encoder_default?: string
+  minimax_h3_video_vae_choices?: { value: 'auto' | 'full' | 'full_int8' | 'lightvae' | 'lightvae_int8'; label: string; description?: string }[] | null
+  minimax_h3_video_vae_default?: 'auto'
   ltx25_video_vae_choices?: {
     value: 'fast' | 'nad'
     label: string
@@ -1070,6 +1118,7 @@ export interface ModelOptions {
     steps: number
     guidance: number
   }> | null
+  qwen21_turbo_checkpoint?: boolean
   image_ref_inpaint?: boolean
   model_modes?: {
     choices: [string, number | string][]
@@ -1108,6 +1157,8 @@ export interface ModelOptions {
   hide_resolution_presets: boolean
   input_video_strength_label: string
   vae_upsampler_modes: number[]
+  /** Per-method image modes supported by optional VAE spatial upsamplers. */
+  vae_upsamplers?: Record<string, number[]> | null
   // TTS-specific
   audio_only: boolean
   duration_slider: { label: string; min: number; max: number; increment: number; default: number } | null
@@ -1140,6 +1191,27 @@ export interface SystemConfig {
   prompt_enhancer_quantization: string
   attention_modes_available: string[]
   vram_safety_coefficient: number
+  ram_allocator?: 'default' | 'mmgp'
+  ram_allocator_active?: 'default' | 'mmgp'
+  ram_allocator_fallback_reason?: string | null
+  ram_allocator_restart_required?: boolean
+  ram_allocator_cli_override?: string | null
+  vram_allocator?: 'default' | 'vmm' | 'vmm_spill'
+  int8_kernels?: 'disabled' | 'auto' | 'triton' | 'kitchen' | 'wgpkernels'
+  vram_allocator_active?: 'default' | 'vmm' | 'vmm_spill'
+  vram_allocator_fallback_reason?: string | null
+  vram_allocator_restart_required?: boolean
+  vram_allocator_cli_override?: string | null
+  smart_memory_pinning?: boolean
+  read_ahead?: boolean
+  perc_reserved_mem_max?: number
+  attention_head_split?: number
+  video_preload_mode?: 'default' | 'dynamic' | 'manual'
+  image_preload_mode?: 'default' | 'dynamic' | 'manual'
+  audio_preload_mode?: 'default' | 'dynamic' | 'manual'
+  video_preload_in_VRAM?: number
+  image_preload_in_VRAM?: number
+  audio_preload_in_VRAM?: number
   /** Opt-in low-resolution preview generation; older backends omit it. */
   generation_preview?: GenerationPreviewMode
   /** Plays once on the computer hosting Maestro, independent of browser
@@ -1222,11 +1294,22 @@ export interface OutputMetadata {
   tool_source?: string
   upload_filenames?: Record<string, string | string[]>
   job_id?: string
-  /** Director revision that produced this artifact. Gallery "Load settings"
-   *  uses it to reopen the complete Director project instead of flattening
-   *  the clip into an unrelated Studio job. */
+  /** Director revision that produced this artifact. Joined outputs reopen the
+   *  complete Director project; individual clips restore their scoped Studio
+   *  recipe using director_clip_index. */
   director_pipeline_id?: string
+  /** Distinguishes a single rendered clip from the joined Director artifact. */
+  director_artifact_kind?: 'clip' | 'joined'
+  /** Zero-based index of an individual Director clip; index 0 is valid. */
   director_clip_index?: number
+  /** Version of the scope-normalized settings recipe for a Director clip. */
+  director_clip_settings_version?: number
+  /** Unsafe or unavailable individual clip recipe; displayed to the user. */
+  director_clip_settings_error?: string
+  /** Read-time source used to identify a clip in its saved Director pipeline. */
+  director_clip_settings_provenance?: string
+  /** Workspace-qualified file URLs for archived assets in a clip recipe. */
+  director_clip_asset_urls?: Record<string, string | string[]>
   generation_time?: number
   generation_time_basis?: 'active' | 'elapsed'
   /** Exact native-window render timings captured after each successfully
@@ -1282,6 +1365,7 @@ export interface ServicesConfig {
   llm_model_id: string
   llm_device: string
   llm_provider: string
+  llm_mtp_acceleration?: boolean
   llm_remote_url: string
   llm_remote_api_key: string
   llm_remote_api_key_set: boolean
@@ -1360,6 +1444,11 @@ export interface HardwareInfo {
   supports_sage2: boolean
   supports_flash: boolean
   supports_triton: boolean
+  ram_available_gb?: number
+  driver_version?: string
+  torch_version?: string
+  runtime_version?: string
+  supports_mmgp_allocator?: boolean
 }
 
 /** Recommended settings the auto-tune engine produced for the detected
@@ -1378,6 +1467,32 @@ export interface RecommendedSettings {
   _recommendation_label: string
   /** Verbose reason string for tooltips and debug logs */
   _recommendation_reason: string
+  _recommendation_details?: string[]
+  int8_kernels?: SystemConfig['int8_kernels']
+  vram_allocator?: SystemConfig['vram_allocator']
+  read_ahead?: boolean
+  smart_memory_pinning?: boolean
+}
+
+export interface PerformancePlan {
+  attention_head_split?: number
+  override_attention_head_split?: boolean
+  applied: boolean
+  profile: number
+  transformer_budget_mb: number
+  source: 'hardware' | 'manual' | 'local_history'
+  matching_renders: number
+  reasons: string[]
+  warnings: string[]
+}
+
+export interface PerformanceLearning {
+  completed_renders: number
+  workloads: number
+  minimum_samples?: number
+  scope?: string
+  unavailable?: boolean
+  last_plan?: PerformancePlan | null
 }
 
 /** Response shape from GET /api/v1/system-detect. */
@@ -1385,6 +1500,7 @@ export interface SystemDetectResponse {
   hardware: HardwareInfo
   recommended: RecommendedSettings
   auto_enabled: boolean
+  learning?: PerformanceLearning
 }
 
 /** Response shape from POST /api/v1/system-detect/apply. */
@@ -1397,6 +1513,8 @@ export interface SystemDetectApplyResponse {
   /** True when one of the *_profile keys changed — UI should show
    *  "changes take effect on next model load" toast. */
   profile_changed: boolean
+  settings_reload?: boolean
+  vram_allocator_restart_required?: boolean
 }
 
 // CivitAI Browser types
@@ -1555,6 +1673,7 @@ export interface LlmStatus {
   model_id: string | null
   device: string | null
   provider: string
+  mtp_acceleration?: boolean
 }
 
 /** Live hardware telemetry for the sidebar status indicators.
@@ -1582,6 +1701,7 @@ export interface LlmModelOption {
   id: string
   label: string
   size_hint: string
+  supports_mtp?: boolean
 }
 
 export interface AudioBeat {
@@ -1874,6 +1994,7 @@ export interface SavedPipelineState {
   completed_at: number | null
   status: string
   pipeline_type: string
+  use_lyrics_context?: boolean
   workspace?: string
   scene_description: string
   reference_image_path: string | null

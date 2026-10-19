@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
@@ -20,6 +20,40 @@ class TestEnhancementProviderRouting(unittest.TestCase):
         for node in nodes:
             node.decorator_list = []
         cls.code = compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec")
+
+    def test_flux3_uses_native_guide_when_legacy_cinematic_enhancer_is_enabled(self):
+        from services import llm_service
+
+        namespace = {
+            "wgp": SimpleNamespace(server_config={"enhancer_enabled": 1, "services": {}},
+                                   get_model_def=lambda _: {}),
+            "enhancement_settings": lambda settings: settings,
+            "enhancement_warnings": lambda: [],
+            "_PUBLIC_LLM_PROVIDERS": {"openai", "anthropic"},
+        }
+        exec(self.code, namespace)
+        loader = Mock()
+        legacy = AsyncMock(return_value={"enhanced": "Legacy draft"})
+        namespace.update(_ensure_llm_loaded=loader, _active_lora_hint=lambda *args: "",
+                         _enhance_with_wangp=legacy)
+        with patch.object(llm_service, 'enhance_prompt', return_value='Native caption') as writer:
+            result = asyncio.run(namespace['_llm_enhance_prompt_payload']({
+                'prompt': 'A woodcut fox.', 'mode': 'image', 'model_type': 'flux3_klein',
+                'image_paths': ['first.png', 'second.png'],
+            }))
+        self.assertEqual(result['enhanced'], 'Native caption')
+        self.assertEqual(writer.call_args.kwargs['model_type'], 'flux3_klein')
+        self.assertEqual(writer.call_args.kwargs['image_paths'], ['first.png', 'second.png'])
+        loader.assert_called_once_with()
+        legacy.assert_not_called()
+
+        loader.reset_mock()
+        result = asyncio.run(namespace['_llm_enhance_prompt_payload']({
+            'prompt': 'A woodcut fox.', 'mode': 'image', 'model_type': 'flux2_klein_9b',
+        }))
+        self.assertEqual(result['enhanced'], 'Legacy draft')
+        legacy.assert_awaited_once()
+        loader.assert_not_called()
 
     def test_override_keeps_each_remote_provider_and_its_key(self):
         for provider in ("remote", "openai", "anthropic"):
@@ -37,7 +71,8 @@ class TestEnhancementProviderRouting(unittest.TestCase):
                 with patch.dict(sys.modules, {"services": package}):
                     namespace["_ensure_llm_loaded"](model_id="writer:27b", device="cuda")
                 loader.assert_called_once_with(model_id="writer:27b", device="cuda", provider=provider,
-                                               remote_url=config["llm_remote_url"], api_key=f"key-for-{provider}")
+                                               remote_url=config["llm_remote_url"], api_key=f"key-for-{provider}",
+                                               mtp_acceleration=False)
 
     def test_queue_snapshot_and_local_defaults_are_respected(self):
         loader = Mock()
@@ -52,7 +87,7 @@ class TestEnhancementProviderRouting(unittest.TestCase):
         with patch.dict(sys.modules, {"services": package}):
             namespace["_ensure_llm_loaded"]()
         loader.assert_called_once_with(model_id="queued-local-model", device="cpu", provider="local",
-                                       remote_url="", api_key="")
+                                       remote_url="", api_key="", mtp_acceleration=False)
 
     def test_enhance_endpoint_keeps_remote_override_and_skips_local_dedicated_model(self):
         from services import llm_service
@@ -80,7 +115,8 @@ class TestEnhancementProviderRouting(unittest.TestCase):
                         }))
                 lookup.assert_not_called()
                 loader.assert_called_once_with(model_id="remote-writer", device="cpu", provider=provider,
-                                               remote_url=config["llm_remote_url"], api_key=f"{provider}-key")
+                                               remote_url=config["llm_remote_url"], api_key=f"{provider}-key",
+                                               mtp_acceleration=False)
 
 
 if __name__ == "__main__":

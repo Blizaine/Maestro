@@ -66,6 +66,10 @@ SLIDING-WINDOW SAFETY
   one globally timed screenplay followed by one shared sound or music footer.
 
 VISUAL TIMELINE
+- Give each requested camera cut or switch a separate `[Shot N]` marker; continuous camera
+  movement remains one shot when requested. Pace the action chain through Duration, allowing
+  transitions and a clear ending, while preserving authored timings and deliberate holds.
+  Avoid finishing all requested events early and leaving the final action to replay.
 - Establish the visible subjects, setting, composition, lighting, action, and
   specific camera behavior. Describe observable motion rather than abstract
   emotion.
@@ -78,6 +82,19 @@ VISUAL TIMELINE
   then describe how motion develops forward from it.
 - Keep each person's visual descriptor and spatial role stable. Reuse the same
   descriptor and speaker ID whenever that person appears again.
+- Across requested cuts, retain the achieved location, motion, contact, attachments,
+  occupancy, possession, and open/closed state of every character, creature, and prop.
+  A new angle changes the view; actions visibly change state. Keep required intermediate
+  states before the transition that ends them, and show completed actions' results
+  instead of replaying them. Respect source-requested flashbacks, independent cuts,
+  transformations, and repeated actions.
+- In each new framing, make that carried state observable through contact, separation,
+  relative surroundings, or motion cues. A state label alone is insufficient when the visible
+  composition suggests a different state; describe evidence appropriate to the current view.
+  Lost surface contact needs visible separation or the surface beneath the object. Attached,
+  tight, or interior views use relative surroundings to convey established height or movement;
+  changed rooms use destination features, and possession uses visible contact. Keep these
+  cues qualitative and source-supported rather than inventing positions or destinations.
 - Synchronize physical sounds with their visible causes.
 
 SPEAKERS AND DIALOGUE

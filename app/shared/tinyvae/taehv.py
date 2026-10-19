@@ -4,6 +4,10 @@ Source revision: 62f7591f59dfbb4c3c02b7a621d180a9eeaba26c
 The implementation keeps the upstream module names and state-dict layout so
 strict safetensors loading remains possible, while omitting unused streaming
 and encoder runtime helpers.
+
+Bounded sequential decoding adapted from WanGP 17.01 (2026-10-05), revision
+0e58385fbde7ff102d276e4a9e490845de76b4ea. The original TAEHV MIT notice is
+preserved in this directory; WanGP modifications retain their upstream terms.
 """
 
 from __future__ import annotations
@@ -54,6 +58,54 @@ class TGrow(nn.Module):
         return x.reshape(-1, x.shape[1] // self.stride, x.shape[2], x.shape[3])
 
 
+SEQUENTIAL_PIECE_ELEMENTS = 2**23
+
+
+def _apply_bounded_decoder(model, x, output_indices, abort_check, output_transform):
+    """Batch frames after temporal expansion without retaining whole pieces.
+
+    Every MemBlock still receives its immediate predecessor, including across
+    piece boundaries. Only selected preview frames run the final spatial layers.
+    """
+    last_temporal = max((i for i, block in enumerate(model) if isinstance(block, (MemBlock, TGrow))), default=len(model) - 1)
+    memory = [None] * len(model)
+    output = []
+    output_no = 0
+
+    def run(value, start):
+        nonlocal output_no
+        for index in range(start, len(model)):
+            if abort_check is not None and abort_check():
+                return False
+            if value.shape[0] > 1 and value.numel() > SEQUENTIAL_PIECE_ELEMENTS:
+                for piece in value.split(max(1, SEQUENTIAL_PIECE_ELEMENTS // value[0].numel())):
+                    if not run(piece, index):
+                        return False
+                return True
+            block = model[index]
+            if isinstance(block, MemBlock):
+                previous = torch.zeros_like(value[:1]) if memory[index] is None else memory[index]
+                past = previous if value.shape[0] == 1 else torch.cat([previous, value[:-1]])
+                memory[index] = value if value.shape[0] == 1 else value[-1:].clone()
+                value = block(value, past)
+            else:
+                value = block(value)
+            if index == last_temporal:
+                frames = range(output_no, output_no + value.shape[0])
+                output_no += value.shape[0]
+                if output_indices is not None:
+                    value = value[[frame - frames.start for frame in frames if frame in output_indices]]
+                    if value.shape[0] == 0:
+                        return True
+        output.extend((frame if output_transform is None else output_transform(frame)).unsqueeze(1) for frame in value.split(1))
+        return True
+
+    for value in x[0].split(1):
+        if not run(value, 0):
+            return None
+    return torch.cat(output, 1) if output else x.new_empty((1, 0, 0, 0, 0))
+
+
 def _apply(model, x, parallel, output_indices=None, abort_check=None, output_transform=None):
     if parallel:
         n, t, c, h, w = x.shape
@@ -68,6 +120,9 @@ def _apply(model, x, parallel, output_indices=None, abort_check=None, output_tra
             else:
                 flat = block(flat)
         return flat.reshape(n, flat.shape[0] // n, flat.shape[1], flat.shape[2], flat.shape[3])
+
+    if x.shape[0] == 1 and not any(isinstance(block, TPool) for block in model):
+        return _apply_bounded_decoder(model, x, output_indices, abort_check, output_transform)
 
     queues = [(frame, 0) for frame in x.unbind(1)]
     memory = [None] * len(model)

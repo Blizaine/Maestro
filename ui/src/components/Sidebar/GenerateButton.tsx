@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { AlertTriangle, ListPlus, Loader2, Play } from 'lucide-react'
+import { getModelVisibilityScope, isModelEnabledInScope } from '../../lib/modelVisibility'
 import { isLongCatAvatarModel } from '../../lib/avatarWorkflow'
 import {
   studioAvatarInputError,
@@ -21,6 +22,10 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
   const studioVideoEffectiveCreateRoute = useStore(s => s.studioVideoEffectiveCreateRoute)
   const currentModel = useStore(s => s.models.find(model => model.model_type === s.params.model_type))
   const modelOptions = useStore(s => s.modelOptions)
+  const needsEnabledModel = useStore(s => s.generationMode !== 'tools'
+    && !(s.generationMode === 'audio' && ['mixer', 'revoice'].includes(s.audioSubMode))
+    && ((!s.servicesConfig?.nsfw_mode && s.models.find(model => model.model_type === s.params.model_type)?.nsfw_only === true)
+      || !isModelEnabledInScope(s.params.model_type, s.enabledModels, s.modelVisibilityOverrides, getModelVisibilityScope(s))))
   const imageMode = useStore(s => Number(s.params.image_mode || 0))
   const isPrimaryCreate = generationMode === 'video'
     && ['frames', 'references', 'avatar'].includes(studioVideoWorkflow)
@@ -125,7 +130,7 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
     && Object.values(imagePadding).every(value => value === 0)
   const incompatibleImageModel = generationMode === 'image'
     && !modelSupportsImageWorkflow(currentModel, imageWorkflow, imageRefs.length > 0)
-  const blocked = viggleMissing || needsCreateModel || needsWorkflowModel || !!avatarInputError
+  const blocked = needsEnabledModel || viggleMissing || needsCreateModel || needsWorkflowModel || !!avatarInputError
     || needsGuidance || needsImage || needsReference || needsOutpaintSource || needsOutpaintArea
     || needsImageGenerateSource || needsImageWorkflowSource || needsImageMask
     || needsImageOutpaintArea || incompatibleImageModel
@@ -148,7 +153,7 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
   }
 
   if (blocked) {
-    const label = viggleMissing ? 'Need inputs' : needsCreateModel || needsWorkflowModel
+    const label = needsEnabledModel ? 'Need model' : viggleMissing ? 'Need inputs' : needsCreateModel || needsWorkflowModel
       ? 'Need model'
       : avatarInputError
         ? avatarInputError.startsWith('Choose') ? 'Choose speakers' : 'Need inputs'
@@ -169,7 +174,9 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
       : needsOutpaintSource
         ? 'Need source'
         : 'Choose canvas'
-    const title = needsOutpaintArea
+    const title = needsEnabledModel
+      ? 'Enable or select a model for this mode using Manage models.'
+      : needsOutpaintArea
       ? 'Choose a larger output aspect or resize the source to create an area for Outpaint to generate.'
       : avatarInputError
         ? avatarInputError

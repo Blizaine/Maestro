@@ -4,6 +4,13 @@ import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { MediaFinishingControls } from './MediaFinishingControls'
 import { dlssSpatialOptions, useDlssAvailability } from '../../lib/mediaFlow'
+import {
+  H3_VAE_UPSAMPLER,
+  H3_VAE_UPSAMPLER_LABEL,
+  h3VaeUpsamplingHelp,
+  modelOptionsForSelectedModel,
+  supportsH3VaeUpsampling,
+} from '../../lib/h3VaeUpsampling'
 import { GalleryInput } from '../shared/GalleryInput'
 
 const baseOptions = [
@@ -51,6 +58,8 @@ export function PostProcessing({ expanded = false }: { expanded?: boolean }) {
   const voiceCloneRefs = useStore(s => s.voiceCloneRefs)
   const setVoiceCloneRef = useStore(s => s.setVoiceCloneRef)
   const generationMode = useStore(s => s.generationMode)
+  const currentResolution = useStore(s => String(s.params.resolution || ''))
+  const modelOptionsLoading = useStore(s => s.modelOptionsLoading)
   const showVoiceClone = generationMode === 'video' || generationMode === 'avatar'
   const [vcUploading, setVcUploading] = useState<number | null>(null)
   const vcFileRefs = [useRef<HTMLInputElement>(null), useRef<HTMLInputElement>(null)]
@@ -69,15 +78,40 @@ export function PostProcessing({ expanded = false }: { expanded?: boolean }) {
   // Compute showVae as a primitive boolean directly in the selector to avoid
   // unstable array references that cause infinite re-renders (React error #185)
   const showVae = useStore(s => {
-    const modes = s.modelOptions?.vae_upsampler_modes
+    const options = modelOptionsForSelectedModel(s.modelOptions, s.params.model_type)
+    const modes = options?.vae_upsampler_modes
     if (!modes?.length) return false
     const effectiveMode = s.generationMode === 'image' ? 1 : s.params.image_mode
     return modes.includes(effectiveMode)
   })
+  const showH3Vae = useStore(s => {
+    const options = modelOptionsForSelectedModel(s.modelOptions, s.params.model_type)
+    const effectiveMode = s.generationMode === 'image'
+      ? 1
+      : s.generationMode === 'video' || s.generationMode === 'avatar'
+        ? Number(s.params.image_mode ?? 0)
+        : -1
+    return supportsH3VaeUpsampling(options, effectiveMode)
+  })
 
   const upsamplingOptions = useMemo(
-    () => [...baseOptions, ...flashvsrOptions, ...dlssSpatialOptions, ...(showVae ? vaeOptions : [])],
-    [showVae],
+    () => [
+      ...baseOptions,
+      ...flashvsrOptions,
+      ...dlssSpatialOptions,
+      ...(showVae ? vaeOptions : []),
+      ...(showH3Vae
+        ? [{ value: H3_VAE_UPSAMPLER, label: H3_VAE_UPSAMPLER_LABEL }]
+        : spatialUpsampling === H3_VAE_UPSAMPLER
+          ? [{
+              value: H3_VAE_UPSAMPLER,
+              label: H3_VAE_UPSAMPLER_LABEL + (modelOptionsLoading
+                ? ' (checking selected model…)'
+                : ' (unavailable for this model or mode)'),
+            }]
+          : []),
+    ],
+    [showVae, showH3Vae, spatialUpsampling, modelOptionsLoading],
   )
 
   const hasVoiceClone = voiceCloneEnabled && voiceCloneRefs.some(r => r && r.path)
@@ -107,9 +141,21 @@ export function PostProcessing({ expanded = false }: { expanded?: boolean }) {
               className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
             >
               {upsamplingOptions.map(opt => (
-                <option key={opt.value} value={opt.value} disabled={dlss.disabled(opt.value)}>{dlss.label(opt.value, opt.label)}</option>
+                <option key={opt.value} value={opt.value} disabled={
+                  dlss.disabled(opt.value) || (opt.value === H3_VAE_UPSAMPLER && !showH3Vae)
+                }>{dlss.label(opt.value, opt.label)}</option>
               ))}
             </select>
+            {showH3Vae && (
+              <p className="text-[10px] text-text-muted leading-relaxed mt-1">
+                {h3VaeUpsamplingHelp(currentResolution)}
+              </p>
+            )}
+            {!showH3Vae && spatialUpsampling === H3_VAE_UPSAMPLER && !modelOptionsLoading && (
+              <p className="text-[10px] text-amber-400 leading-relaxed mt-1">
+                This saved upsampling method is unavailable for the selected model or mode and will not be sent.
+              </p>
+            )}
           </div>
 
           <MediaFinishingControls spatial={spatialUpsampling} temporal={params.temporal_upsampling || ''}

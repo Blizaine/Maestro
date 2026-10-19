@@ -1,0 +1,35 @@
+{
+    "model": {
+        "name": "Flux 3 Klein Base NVFP4 5.6B",
+        "architecture": "flux3_klein_base",
+        "description": "Base: 50 steps with classifier-free guidance. Generate or edit using up to 10 ordered references. Public WanGP model sources; no Hugging Face login required.",
+        "selector_help": "Generate images or add ordered references. Use Prompt Helper for layout boxes and reference-region edits. BF16 and INT8 ConvRot are available; NVFP4 requires a supported RTX 50 GPU and kernel. Downloads occur only on first use. FLUX Kommunity model license applies.",
+        "URLs": [
+            "flux3_image_klein_nvfp4.safetensors"
+        ],
+        "download_sources": {
+            "flux3_image_klein_nvfp4.safetensors": {
+                "url": "https://huggingface.co/DeepBeepMeep/Flux3/resolve/1e7c96984937fef03326e3b297fb44a28c30736d/flux3_image_klein_nvfp4.safetensors",
+                "sha256": "f99714a57ada7b7f39ebb7d916a1b842324c8ec483943816f5b3ea5c062b08a9",
+                "size_bytes": 5257238192,
+                "anonymous": true
+            }
+        },
+        "source_repo": "https://huggingface.co/black-forest-labs/flux-3-image-klein",
+        "license_name": "FLUX Kommunity License",
+        "license_url": "https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md",
+        "model_size_gb": 10
+    },
+    "prompt": "A tiny orange robot tending a rooftop garden at sunrise, cinematic natural light, intricate details, a sign reading MAESTRO",
+    "negative_prompt": "",
+    "resolution": "1024x1024",
+    "batch_size": 1,
+    "image_mode": 1,
+    "video_prompt_type": "I",
+    "num_inference_steps": 50,
+    "guidance_scale": 3.5,
+    "embedded_guidance_scale": 1.0,
+    "sample_solver": "default",
+    "prompt_enhancer": "",
+    "multi_prompts_gen_type": "FG"
+}

@@ -7,6 +7,8 @@ from shared.utils.hf import build_hf_url
 
 
 MODEL_TYPE = "qwen_image_21_7B"
+TURBO_PROFILE = "qwen21_turbo"
+TURBO_LABEL = "Qwen-Image-2.1-Turbo (8 steps)"
 REPO = "DeepBeepMeep/Qwen_image_2"
 ENCODER_FOLDER = "Qwen3-VL-8B-Instruct"
 # Complete Transformers 4.57-compatible processor export before the upstream
@@ -54,6 +56,16 @@ _QWEN21_RESOLUTION_PRESETS = {
 _QWEN21_2K_PIXELS = 2048 * 2048
 
 
+def _is_turbo_checkpoint(model_def):
+    """Read the explicit checkpoint identity from a resolved or nested model definition."""
+    if not isinstance(model_def, dict):
+        return False
+    if model_def.get("qwen21_turbo_checkpoint"):
+        return True
+    nested = model_def.get("model")
+    return _is_turbo_checkpoint(nested) if isinstance(nested, dict) else False
+
+
 def _lora_filename(value):
     raw = str(value or "").replace("\\", "/")
     path = urlsplit(raw).path if raw.startswith(("http://", "https://")) else raw
@@ -82,8 +94,8 @@ def _image_slots(value):
     return [value]
 
 
-def apply_acceleration_profile(settings, *, selected_profile=None):
-    """Normalize one managed Turbo adapter while preserving user LoRAs.
+def apply_acceleration_profile(settings, *, selected_profile=None, model_def=None):
+    """Normalize the selected checkpoint profile while preserving user LoRAs.
 
     The returned settings are safe to pass through validation repeatedly:
     only the three named Viggle files are managed, and all other adapter
@@ -92,6 +104,9 @@ def apply_acceleration_profile(settings, *, selected_profile=None):
     normalized = dict(settings)
     solver = selected_profile or normalized.get("sample_solver") or "default"
     solver = str(solver).strip().lower()
+    turbo_checkpoint = _is_turbo_checkpoint(model_def) if model_def is not None else None
+    if turbo_checkpoint and solver in ("viggle", *_VIGGLE_PROFILES):
+        raise ValueError("The official Qwen Image 2.1 Turbo checkpoint cannot use a Viggle profile.")
     if solver == "viggle":
         try:
             solver = {4: "viggle_v01", 5: "viggle_v02", 6: "viggle_v021"}[
@@ -101,7 +116,11 @@ def apply_acceleration_profile(settings, *, selected_profile=None):
             raise ValueError("Choose a Viggle Turbo profile with 4, 5, or 6 steps.")
     if solver in ("", "euler"):
         solver = "default"
-    if solver not in ("default", *_VIGGLE_PROFILES):
+    if turbo_checkpoint and solver == "default":
+        solver = TURBO_PROFILE
+    if solver == TURBO_PROFILE and turbo_checkpoint is False:
+        raise ValueError("The Qwen Image 2.1 Turbo schedule requires the official Turbo checkpoint.")
+    if solver not in ("default", TURBO_PROFILE, *_VIGGLE_PROFILES):
         raise ValueError(f"Unsupported Qwen Image 2.1 acceleration profile: {solver!r}.")
 
     raw_loras = normalized.get("activated_loras") or []
@@ -126,6 +145,13 @@ def apply_acceleration_profile(settings, *, selected_profile=None):
             normalized["loras_multipliers"] = " ".join(kept_multipliers)
         return normalized
 
+    if solver == TURBO_PROFILE:
+        normalized["num_inference_steps"] = 8
+        normalized["guidance_scale"] = 1.0
+        normalized["activated_loras"] = kept_loras
+        normalized["loras_multipliers"] = " ".join(kept_multipliers)
+        return normalized
+
     profile = _VIGGLE_PROFILES[solver]
     normalized["num_inference_steps"] = profile["steps"]
     normalized["guidance_scale"] = profile["guidance"]
@@ -139,23 +165,35 @@ def apply_acceleration_profile(settings, *, selected_profile=None):
 class family_handler:
     @staticmethod
     def query_model_def(base_model_type, model_def):
+        turbo_checkpoint = _is_turbo_checkpoint(model_def)
+        viggle_profiles = {
+            solver: {
+                "label": profile["label"],
+                "steps": profile["steps"],
+                "guidance": profile["guidance"],
+                "lora_url": profile["lora_url"],
+                "lora_weight": 1.0,
+            }
+            for solver, profile in _VIGGLE_PROFILES.items()
+        }
+        acceleration_profiles = (
+            {TURBO_PROFILE: {"label": TURBO_LABEL, "steps": 8, "guidance": 1.0}}
+            if turbo_checkpoint else viggle_profiles
+        )
         return {
             "image_outputs": True,
+            "device_explicit": True,
             "dtype": "bf16",
             "guidance_max_phases": 1,
-            "sample_solvers": [("FlowMatch Euler", "default")] + [
-                (profile["label"], solver) for solver, profile in _VIGGLE_PROFILES.items()
-            ],
-            "qwen21_acceleration_profiles": {
-                solver: {
-                    "label": profile["label"],
-                    "steps": profile["steps"],
-                    "guidance": profile["guidance"],
-                    "lora_url": profile["lora_url"],
-                    "lora_weight": 1.0,
-                }
-                for solver, profile in _VIGGLE_PROFILES.items()
-            },
+            "sample_solvers": (
+                [(TURBO_LABEL, TURBO_PROFILE)]
+                if turbo_checkpoint else
+                [("FlowMatch Euler", "default")] + [
+                    (profile["label"], solver) for solver, profile in _VIGGLE_PROFILES.items()
+                ]
+            ),
+            "qwen21_acceleration_profiles": acceleration_profiles,
+            "qwen21_turbo_checkpoint": turbo_checkpoint,
             "compile": False,
             "fit_into_canvas_image_refs": 0,
             "vae_block_size": 32,
@@ -267,17 +305,24 @@ class family_handler:
 
     @staticmethod
     def update_default_settings(base_model_type, model_def, ui_defaults):
+        turbo_checkpoint = _is_turbo_checkpoint(model_def)
         ui_defaults.update(image_mode=1, video_prompt_type="I", batch_size=1,
-                           num_inference_steps=40, guidance_scale=4.0, sample_solver="default",
+                           num_inference_steps=8 if turbo_checkpoint else 40,
+                           guidance_scale=1.0 if turbo_checkpoint else 4.0,
+                           sample_solver=TURBO_PROFILE if turbo_checkpoint else "default",
                            resolution="1024x1024", remove_background_images_ref=0)
 
     @staticmethod
     def fix_settings(base_model_type, settings_version, model_def, ui_defaults):
         ui_defaults.setdefault("image_mode", 1)
+        if _is_turbo_checkpoint(model_def):
+            ui_defaults.update(num_inference_steps=8, guidance_scale=1.0, sample_solver=TURBO_PROFILE)
 
     @staticmethod
-    def apply_acceleration_profile(settings, *, selected_profile=None):
-        return apply_acceleration_profile(settings, selected_profile=selected_profile)
+    def apply_acceleration_profile(settings, *, selected_profile=None, model_def=None):
+        return apply_acceleration_profile(
+            settings, selected_profile=selected_profile, model_def=model_def
+        )
 
     @staticmethod
     def validate_generative_settings(base_model_type, model_def, inputs):

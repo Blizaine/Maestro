@@ -117,6 +117,8 @@ for (const model of models.slice(1)) {
 function seedAvatar({modelType = 'longcat_avatar', startImage = null, endImage = null, imageRefs = [], params = {}} = {}) {
   useStore.setState({
     models, families, enabledModels: new Set(models.map(model => model.model_type)),
+    // This fixture supplies explicit visibility so routing checks are independent of fresh defaults.
+    modelVisibilityOverrides: {},
     modelOptions: optionsFor(modelType), modelOptionsLoading: false,
     generationMode: 'video', studioVideoWorkflow: 'avatar',
     studioVideoCreateRoute: 'auto', studioVideoEffectiveCreateRoute: 'avatar',

@@ -7,6 +7,7 @@ import threading
 from services.managed_assets import managed_asset_matches, write_managed_asset_receipt
 from services.music_styles import file_digest
 from services.music_contracts import TOKENIZER_REVISION, V9_REVISION
+from .asset_sources import DOWNLOAD_REVISION
 
 ROOT = Path("ckpts/yue2_music_training")
 MERT_REVISION = "d8ba1c745e733b3908ce6ad16ebeb17ac7600a42"
@@ -22,15 +23,15 @@ ASSETS = {
                       "file": "mms_fa.pt", "size": 1262047414, "sha256": "20ef12963ab4924bef49ac4fc7f58ad5da2ee43b2c11bc8c853c9b90ecdbc680"},
     "vocal_separator": {"url": "https://download.pytorch.org/torchaudio/models/hdemucs_high_trained.pt",
                         "file": "hdemucs_high_trained.pt", "size": 334697255, "sha256": "a004b2790d73ffeaa535db458a1a79b539dfdbafbccc31f275d07e632ebd7816"},
-    "nar_training": {"repo_id": "DeepBeepMeep/TTS", "revision": "864a479cbf3e810e1b2c1993b438510750e383b2",
+    "nar_training": {"repo_id": "DeepBeepMeep/TTS", "revision": DOWNLOAD_REVISION,
                      "remote_path": "YuE2_Acoustic_bf16.safetensors", "file": "nar_training_bf16.safetensors",
                      "size": 2929494672, "sha256": "975253f29d0f9d3229fa96e92234ab8c82221c6e511f0c8b68ad3a3f3fee151e"},
     "vae_training": {"repo_id": "m-a-p/YuE2-Vae", "revision": VAE_REVISION,
                      "remote_path": "model.safetensors", "file": "vae_training.safetensors",
                      "size": 530512720, "sha256": "807ce9d5149fa27c5ad3e6582058469852e908f6c5acc8c8aa338e7ab7751346"},
-    "text_tokenizer": {"repo_id": "DeepBeepMeep/TTS", "revision": "864a479cbf3e810e1b2c1993b438510750e383b2",
+    "text_tokenizer": {"repo_id": "DeepBeepMeep/TTS", "revision": DOWNLOAD_REVISION,
                        "remote_path": "YuE2_AR/qwen.tiktoken", "file": "qwen.tiktoken", "size": 2561218},
-    "ar_training": {"repo_id": "DeepBeepMeep/TTS", "revision": "864a479cbf3e810e1b2c1993b438510750e383b2",
+    "ar_training": {"repo_id": "DeepBeepMeep/TTS", "revision": DOWNLOAD_REVISION,
                     "remote_path": "YuE2_AR/YuE2_AR_bf16.safetensors", "file": "ar_training_bf16.safetensors",
                     "size": 4331951160, "sha256": "59ce30757ae3960405dc6116c3a919541d61e5e55b28c4927dbb879870209366"},
     "mert": {"repo_id": "m-a-p/MERT-v2-FullSong", "revision": MERT_REVISION,

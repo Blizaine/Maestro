@@ -110,7 +110,9 @@ def normalize_fused_h3_request(body: dict, *, resolve_lora=None) -> None:
         body.get("override_attention") or ""
     ).strip().lower()
     body["override_attention"] = (
-        "sdpa" if requested_attention == "sdpa" else "sla"
+        requested_attention
+        if requested_attention in {"sla", "veda", "sdpa"}
+        else "sla"
     )
 
 

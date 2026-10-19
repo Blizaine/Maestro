@@ -433,6 +433,7 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
                                 raw_director.get("workspace") or normalized["workspace"]
                             )
                             window_prompts = raw_director.get("window_prompts")
+                            draft_video_prompt = raw_director.get("draft_video_prompt")
                             item["director"] = {
                                 "pipeline_id": pipeline_id,
                                 "clip_index": clip_index,
@@ -448,6 +449,8 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
                                     for prompt in window_prompts[:100]
                                     if str(prompt).strip()
                                 ] if isinstance(window_prompts, list) else [],
+                                **({"draft_video_prompt": str(draft_video_prompt)[:200000]}
+                                   if draft_video_prompt is not None else {}),
                             }
                         else:
                             item.pop("director", None)

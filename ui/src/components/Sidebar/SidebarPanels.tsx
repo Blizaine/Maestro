@@ -171,7 +171,7 @@ export function PromptDock({ children }: { children: ReactNode }) {
         {expanded && <div className="mb-2 shrink-0 text-xs font-medium text-text-primary">H3 window prompts</div>}
         <div className={expanded ? 'min-h-0 flex-1 overflow-y-auto overscroll-contain' : 'studio-composer-content flex grow shrink-0 basis-auto flex-col'}>{children}</div>
         <div role="group" aria-label="Prompt controls" className="studio-prompt-toolbar mt-2 flex shrink-0 items-center justify-end gap-2">
-          <div ref={setEnhanceSlot} className="relative empty:hidden"/>
+          <div ref={setEnhanceSlot} className="relative flex items-center justify-end gap-2 empty:hidden"/>
         </div>
         {expanded && <div className="flex shrink-0 justify-end border-t border-border pt-3 mt-3">
           <button type="button" onClick={() => setExpanded(false)} className="min-h-10 rounded-xl bg-accent-blue px-5 text-xs text-white">Done</button>

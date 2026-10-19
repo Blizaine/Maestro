@@ -1,0 +1,1575 @@
+{
+  "version": "2026-10-16",
+  "evidence": [
+    {
+      "id": "rtx3080ti-12gb-31_76gib-profile4-pruned",
+      "summary": "RTX 3080 Ti 12 GB, 31.76 GiB system RAM, MMGP Profile 4, optimized Q2 encoder: 720p Pruned passes completed at 124, 243, and 362 frames; 1080p base 124 completed while longer Pruned runs were impractical or stopped."
+    },
+    {
+      "id": "rtx3080ti-12gb-31_76gib-profile4-fused-references",
+      "summary": "The same system completed a 243-frame 720p Fused References run with image and song guidance; longer 720p runs around 14.4\u201315 seconds also succeeded."
+    },
+    {
+      "id": "rtx3080ti-12gb-32gb-720p-repeated-345-user-report",
+      "summary": "User reports repeated successful 345-frame (14.375 seconds at 24 fps, displayed as 14.4 seconds) 720p MiniMax H3 Pruned and Fused generations on an RTX 3080 Ti 12 GB system with 32 GB RAM. These are reported outcomes; no controlled benchmark timings or peak-memory measurements were provided."
+    },
+    {
+      "id": "h3-24gb-high-ram-reference-music-envelope",
+      "basis": "tested",
+      "summary": "RTX 4090 / 128 GiB RAM completed 345-frame Fused References music and image-reference clips at 1280x704 and 1792x768; saved output metadata includes measured peak VRAM. This does not establish every reference or LoRA combination."
+    },
+    {
+      "id": "h3-24gb-128gib-native1080-fused6",
+      "basis": "tested",
+      "summary": "October 9 native1080 report: RTX 4090 24 GiB / 128 GiB RAM completed a 1920x1088, 362-frame Fused 6-step control in 969.8 seconds with an 18.47 GiB device peak. Grouped projection variants also completed. This supports the shorter 345-frame native envelope for the tested Fused route, not Full or Pruned checkpoints."
+    },
+    {
+      "id": "h3-12gb-native1080-conditional",
+      "basis": "tested",
+      "summary": "12 GiB / 31.76 GiB system RAM: short native1080 clips completed. Fused 6-step 10.1s/Low and 15.1s/Medium runs completed in individual tests; other 15.1s attempts failed, and Pruned 20-step 10.1s took about 116 minutes. Longer native1080 clips are conditional experiments, not fast or generally verified defaults."
+    },
+    {
+      "id": "h3-12gb-720p-extended-conditional",
+      "basis": "tested",
+      "summary": "October 11 headroom tests completed Fused References 396-frame 720p clips with manual Low/Medium grouping. Host RAM headroom was nearly exhausted. These runs support capability, not a default above the native 345-frame envelope."
+    },
+    {
+      "id": "h3-4090-20261014-reference-preload",
+      "basis": "tested",
+      "summary": "October 14: eight verified 704x1280, 243-frame Fused References tests with an image, video and character-swap LoRA on RTX 4090 / 128 GiB RAM completed and fully decoded. Auto INT8 reduced warm denoising by 10.7%; larger fixed preload and Dynamic did not improve speed."
+    },
+    {
+      "id": "h3-rtx5070-laptop-8gb-31_02gib-fused-4step-243-20261016",
+      "basis": "tested",
+      "summary": "October 16: one 243-frame (10.125 s at 24 fps), 1280x704 Fused Frames run and one matching Fused References run completed on an RTX 5070 Laptop with 7.96 GiB VRAM and 31.02 GiB RAM. Both used MMGP Profile 5, INT8 ConvRot, a Q2_K encoder, four steps, and no extra LoRAs. Saved generation_time was 379 s for Frames (7.48 GiB sampled peak device memory; 0.07 GiB minimum available RAM) and 630 s for References (7.83 GiB peak; 0.38 GiB minimum available RAM). References used four inputs and logged 69,685 packed rows with SLA attention and split 9x8192 QKV/MLP groups. These recipe-specific completions support a 10.1 s starting recommendation, not a universal memory guarantee; longer or more-conditioned runs may page or slow because host headroom was nearly exhausted. A separate 345-frame, six-step run with six references was still at step 0 when observed and is not completion or failure evidence."
+    },
+    {
+      "id": "resource-interpolation-20261014",
+      "basis": "estimated",
+      "summary": "Untested 6/10/14/16/20 GiB GPU classes and intermediate host RAM/canvas sizes are conservative starting estimates anchored to the 12 and 24 GiB observations. One 8 GiB-class RTX 5070 Laptop with 31.02 GiB RAM completed the specific 720p Fused recipes recorded separately; this does not validate other checkpoints, canvases, or a 16 GiB RAM host. Estimated rows must not be described as tested or guaranteed."
+    }
+  ],
+  "tiers": [
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 120,
+      "min_pixels": 0,
+      "max_pixels": 1400000,
+      "frames": 345,
+      "basis": "tested",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "h3-24gb-high-ram-reference-music-envelope"
+      ],
+      "note": "345-frame Fused References clips completed on the 24 GB / 128 GB test machine. Larger video references and additional LoRAs can change memory use."
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 120,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 345,
+      "basis": "tested",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "h3-24gb-128gib-native1080-fused6"
+      ],
+      "note": "Native 1080p Fused Frames completed with SLA, a Q2_K encoder, Profile 4 and 6 steps on the 24 GB / 128 GB machine, without references or LoRAs. Other recipes can change fit and speed."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 11,
+      "max_vram_gb": 12.5,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 901120,
+      "frames": 345,
+      "basis": "reported",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "rtx3080ti-12gb-31_76gib-profile4-pruned",
+        "rtx3080ti-12gb-31_76gib-profile4-fused-references",
+        "rtx3080ti-12gb-32gb-720p-repeated-345-user-report"
+      ],
+      "note": "Repeated 720p / 14.4s Pruned and Fused runs succeeded on the 12 GB / 32 GB test machine. Optimized offloading and a memory-appropriate encoder are assumed; large conditioning inputs remain workload-dependent."
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 11,
+      "max_vram_gb": 12.5,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 901120,
+      "frames": 345,
+      "basis": "reported",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "rtx3080ti-12gb-31_76gib-profile4-pruned",
+        "rtx3080ti-12gb-31_76gib-profile4-fused-references",
+        "rtx3080ti-12gb-32gb-720p-repeated-345-user-report"
+      ],
+      "note": "Repeated 720p / 14.4s Pruned and Fused runs succeeded on the 12 GB / 32 GB test machine. Optimized offloading and a memory-appropriate encoder are assumed; large conditioning inputs remain workload-dependent."
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 11,
+      "max_vram_gb": 12.5,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 901120,
+      "frames": 345,
+      "basis": "reported",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "rtx3080ti-12gb-31_76gib-profile4-pruned",
+        "rtx3080ti-12gb-31_76gib-profile4-fused-references",
+        "rtx3080ti-12gb-32gb-720p-repeated-345-user-report"
+      ],
+      "note": "Repeated 720p / 14.4s Pruned and Fused runs succeeded on the 12 GB / 32 GB test machine. Optimized offloading and a memory-appropriate encoder are assumed; large conditioning inputs remain workload-dependent."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 11,
+      "max_vram_gb": 12.5,
+      "min_ram_gb": 30,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 124,
+      "basis": "conservative",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "h3-12gb-native1080-conditional"
+      ],
+      "note": "5.2s is the conservative native-1080p starting point. Longer Fused clips have completed with suitable memory settings; they are conditional experiments, not known OOMs. Long Pruned runs can be very slow."
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 11,
+      "max_vram_gb": 12.5,
+      "min_ram_gb": 30,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 124,
+      "basis": "conservative",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "h3-12gb-native1080-conditional"
+      ],
+      "note": "5.2s is the conservative native-1080p starting point. Longer Fused clips have completed with suitable memory settings; they are conditional experiments, not known OOMs. Long Pruned runs can be very slow."
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 11,
+      "max_vram_gb": 12.5,
+      "min_ram_gb": 30,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 124,
+      "basis": "conservative",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "h3-12gb-native1080-conditional"
+      ],
+      "note": "5.2s is the conservative native-1080p starting point. Longer Fused clips have completed with suitable memory settings; they are conditional experiments, not known OOMs. Long Pruned runs can be very slow."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 63,
+      "min_pixels": 0,
+      "max_pixels": 1400000,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated from completed 12 GB / 32 GB and 24 GB / 128 GB workloads. Host RAM and conditioning still affect fit."
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 63,
+      "min_pixels": 0,
+      "max_pixels": 1400000,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated from completed 12 GB / 32 GB and 24 GB / 128 GB workloads. Host RAM and conditioning still affect fit."
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 63,
+      "min_pixels": 0,
+      "max_pixels": 1400000,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated from completed 12 GB / 32 GB and 24 GB / 128 GB workloads. Host RAM and conditioning still affect fit."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 63,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "A conservative 10.1s native-1080p starting point for this checkpoint and RAM class. Longer Fused control clips completed on 128 GB RAM; reference-heavy and Pruned recipes are not equally verified."
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 63,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "A conservative 10.1s native-1080p starting point for this checkpoint and RAM class. Longer Fused control clips completed on 128 GB RAM; reference-heavy and Pruned recipes are not equally verified."
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 63,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "A conservative 10.1s native-1080p starting point for this checkpoint and RAM class. Longer Fused control clips completed on 128 GB RAM; reference-heavy and Pruned recipes are not equally verified."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 1048576,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 63,
+      "note": "Estimated native-duration starting point. This host has less RAM than the 4090 test machine, so encoder and offload pressure may reduce performance."
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 1048576,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 63,
+      "note": "Estimated native-duration starting point. This host has less RAM than the 4090 test machine, so encoder and offload pressure may reduce performance."
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 1048576,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 63,
+      "note": "Estimated native-duration starting point. This host has less RAM than the 4090 test machine, so encoder and offload pressure may reduce performance."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 1400000,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 63
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 1400000,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 63
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 1400000,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 63
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 30,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 158,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 63,
+      "note": "Host-RAM-limited estimate; native 1080p on this RAM class has not been physically benchmarked."
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 30,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 158,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 63,
+      "note": "Host-RAM-limited estimate; native 1080p on this RAM class has not been physically benchmarked."
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 23.5,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 30,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 158,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 63,
+      "note": "Host-RAM-limited estimate; native 1080p on this RAM class has not been physically benchmarked."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 19.5,
+      "max_vram_gb": 23.49,
+      "min_ram_gb": 63,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 19.5,
+      "max_vram_gb": 23.49,
+      "min_ram_gb": 63,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 19.5,
+      "max_vram_gb": 23.49,
+      "min_ram_gb": 63,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 19.5,
+      "max_vram_gb": 23.49,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 1048576,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated from the successful 12 GB / 32 GB 720p envelope; this exact GPU/RAM class has not been benchmarked."
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 19.5,
+      "max_vram_gb": 23.49,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 1048576,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated from the successful 12 GB / 32 GB 720p envelope; this exact GPU/RAM class has not been benchmarked."
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 19.5,
+      "max_vram_gb": 23.49,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 1048576,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated from the successful 12 GB / 32 GB 720p envelope; this exact GPU/RAM class has not been benchmarked."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 19.5,
+      "max_vram_gb": 23.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 1400000,
+      "frames": 294,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 19.5,
+      "max_vram_gb": 23.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 1400000,
+      "frames": 294,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 19.5,
+      "max_vram_gb": 23.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 1400000,
+      "frames": 294,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 19.5,
+      "max_vram_gb": 23.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 192,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated native-1080p starting point, not a measured fit. Use Auto-tune and review actual memory use before increasing duration."
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 19.5,
+      "max_vram_gb": 23.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 192,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated native-1080p starting point, not a measured fit. Use Auto-tune and review actual memory use before increasing duration."
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 19.5,
+      "max_vram_gb": 23.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 192,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated native-1080p starting point, not a measured fit. Use Auto-tune and review actual memory use before increasing duration."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 15.5,
+      "max_vram_gb": 19.49,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 1048576,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated from the successful 12 GB / 32 GB 720p envelope; this exact GPU/RAM class has not been benchmarked."
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 15.5,
+      "max_vram_gb": 19.49,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 1048576,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated from the successful 12 GB / 32 GB 720p envelope; this exact GPU/RAM class has not been benchmarked."
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 15.5,
+      "max_vram_gb": 19.49,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 1048576,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated from the successful 12 GB / 32 GB 720p envelope; this exact GPU/RAM class has not been benchmarked."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 15.5,
+      "max_vram_gb": 19.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 1400000,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 15.5,
+      "max_vram_gb": 19.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 1400000,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 15.5,
+      "max_vram_gb": 19.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 1400000,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 15.5,
+      "max_vram_gb": 19.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 158,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated native-1080p starting point, not a measured fit. Use Auto-tune and review actual memory use before increasing duration."
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 15.5,
+      "max_vram_gb": 19.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 158,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated native-1080p starting point, not a measured fit. Use Auto-tune and review actual memory use before increasing duration."
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 15.5,
+      "max_vram_gb": 19.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 158,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated native-1080p starting point, not a measured fit. Use Auto-tune and review actual memory use before increasing duration."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 11,
+      "max_vram_gb": 12.5,
+      "min_ram_gb": 30,
+      "min_pixels": 901121,
+      "max_pixels": 1048576,
+      "frames": 294,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated for a canvas slightly larger than the tested 1280x704 anchor; the shorter pass preserves headroom."
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 11,
+      "max_vram_gb": 12.5,
+      "min_ram_gb": 30,
+      "min_pixels": 901121,
+      "max_pixels": 1048576,
+      "frames": 294,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated for a canvas slightly larger than the tested 1280x704 anchor; the shorter pass preserves headroom."
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 11,
+      "max_vram_gb": 12.5,
+      "min_ram_gb": 30,
+      "min_pixels": 901121,
+      "max_pixels": 1048576,
+      "frames": 294,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated for a canvas slightly larger than the tested 1280x704 anchor; the shorter pass preserves headroom."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 11,
+      "max_vram_gb": 12.5,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 1400000,
+      "frames": 209,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 11,
+      "max_vram_gb": 12.5,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 1400000,
+      "frames": 209,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 11,
+      "max_vram_gb": 12.5,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 1400000,
+      "frames": 209,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 12.51,
+      "max_vram_gb": 15.49,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 901120,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 12.51,
+      "max_vram_gb": 15.49,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 901120,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 12.51,
+      "max_vram_gb": 15.49,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 901120,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 12.51,
+      "max_vram_gb": 15.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 124,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Native 1080p uses a short conservative starting point; longer clips need workload-specific testing."
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 12.51,
+      "max_vram_gb": 15.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 124,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Native 1080p uses a short conservative starting point; longer clips need workload-specific testing."
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 12.51,
+      "max_vram_gb": 15.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1400001,
+      "max_pixels": 2088960,
+      "frames": 124,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Native 1080p uses a short conservative starting point; longer clips need workload-specific testing."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 12.51,
+      "max_vram_gb": 15.49,
+      "min_ram_gb": 30,
+      "min_pixels": 901121,
+      "max_pixels": 1048576,
+      "frames": 294,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated for a canvas slightly larger than the tested 1280x704 anchor; the shorter pass preserves headroom."
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 12.51,
+      "max_vram_gb": 15.49,
+      "min_ram_gb": 30,
+      "min_pixels": 901121,
+      "max_pixels": 1048576,
+      "frames": 294,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated for a canvas slightly larger than the tested 1280x704 anchor; the shorter pass preserves headroom."
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 12.51,
+      "max_vram_gb": 15.49,
+      "min_ram_gb": 30,
+      "min_pixels": 901121,
+      "max_pixels": 1048576,
+      "frames": 294,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "Estimated for a canvas slightly larger than the tested 1280x704 anchor; the shorter pass preserves headroom."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 12.51,
+      "max_vram_gb": 15.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 1400000,
+      "frames": 209,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 12.51,
+      "max_vram_gb": 15.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 1400000,
+      "frames": 209,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 12.51,
+      "max_vram_gb": 15.49,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 1400000,
+      "frames": 209,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 10.99,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 600000,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 10.99,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 600000,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 10.99,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 600000,
+      "frames": 345,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 10.99,
+      "min_ram_gb": 30,
+      "min_pixels": 600001,
+      "max_pixels": 901120,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 10.99,
+      "min_ram_gb": 30,
+      "min_pixels": 600001,
+      "max_pixels": 901120,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 10.99,
+      "min_ram_gb": 30,
+      "min_pixels": 600001,
+      "max_pixels": 901120,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 10.99,
+      "min_ram_gb": 30,
+      "min_pixels": 901121,
+      "max_pixels": 1048576,
+      "frames": 158,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 10.99,
+      "min_ram_gb": 30,
+      "min_pixels": 901121,
+      "max_pixels": 1048576,
+      "frames": 158,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 10.99,
+      "min_ram_gb": 30,
+      "min_pixels": 901121,
+      "max_pixels": 1048576,
+      "frames": 158,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 10.99,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 2088960,
+      "frames": null,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "No tested automatic profile for this larger canvas. Start at 540p, or use a manual duration to test it.",
+      "fallback_resolution": "960x544"
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 10.99,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 2088960,
+      "frames": null,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "No tested automatic profile for this larger canvas. Start at 540p, or use a manual duration to test it.",
+      "fallback_resolution": "960x544"
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 10.99,
+      "min_ram_gb": 30,
+      "min_pixels": 1048577,
+      "max_pixels": 2088960,
+      "frames": null,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "note": "No tested automatic profile for this larger canvas. Start at 540p, or use a manual duration to test it.",
+      "fallback_resolution": "960x544"
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 7,
+      "max_vram_gb": 8.5,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 600000,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 7,
+      "max_vram_gb": 8.5,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 600000,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 7,
+      "max_vram_gb": 8.5,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 600000,
+      "frames": 243,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 7,
+      "max_vram_gb": 8.5,
+      "min_ram_gb": 30,
+      "min_pixels": 600001,
+      "max_pixels": 901120,
+      "frames": 124,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 7,
+      "max_vram_gb": 8.5,
+      "min_ram_gb": 30,
+      "min_pixels": 600001,
+      "max_pixels": 901120,
+      "frames": 243,
+      "basis": "tested",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "h3-rtx5070-laptop-8gb-31_02gib-fused-4step-243-20261016"
+      ],
+      "note": "Tested on an RTX 5070 Laptop (7.96 GiB VRAM, 31.02 GiB RAM) at 1280x704 with MMGP Profile 5 and four steps. Use 10.1 s as a starting point for this recipe. Host RAM headroom was very low; longer clips, extra conditioning, or LoRAs may use more memory or run slower."
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 7,
+      "max_vram_gb": 8.5,
+      "min_ram_gb": 30,
+      "min_pixels": 600001,
+      "max_pixels": 901120,
+      "frames": 243,
+      "basis": "tested",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "h3-rtx5070-laptop-8gb-31_02gib-fused-4step-243-20261016"
+      ],
+      "note": "Tested on an RTX 5070 Laptop (7.96 GiB VRAM, 31.02 GiB RAM) at 1280x704 with four references, MMGP Profile 5, and four steps. Use 10.1 s as a starting point for this recipe. Host RAM headroom was very low; longer clips, more conditioning, or extra LoRAs may use more memory or run slower."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 7,
+      "max_vram_gb": 8.5,
+      "min_ram_gb": 30,
+      "min_pixels": 901121,
+      "max_pixels": 2088960,
+      "frames": null,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "fallback_resolution": "960x544"
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 7,
+      "max_vram_gb": 8.5,
+      "min_ram_gb": 30,
+      "min_pixels": 901121,
+      "max_pixels": 2088960,
+      "frames": null,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "fallback_resolution": "960x544"
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 7,
+      "max_vram_gb": 8.5,
+      "min_ram_gb": 30,
+      "min_pixels": 901121,
+      "max_pixels": 2088960,
+      "frames": null,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "fallback_resolution": "960x544"
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 5.5,
+      "max_vram_gb": 6.99,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 600000,
+      "frames": 124,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 5.5,
+      "max_vram_gb": 6.99,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 600000,
+      "frames": 124,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 5.5,
+      "max_vram_gb": 6.99,
+      "min_ram_gb": 30,
+      "min_pixels": 0,
+      "max_pixels": 600000,
+      "frames": 124,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ]
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 5.5,
+      "max_vram_gb": 6.99,
+      "min_ram_gb": 30,
+      "min_pixels": 600001,
+      "max_pixels": 2088960,
+      "frames": null,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "fallback_resolution": "864x480"
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 5.5,
+      "max_vram_gb": 6.99,
+      "min_ram_gb": 30,
+      "min_pixels": 600001,
+      "max_pixels": 2088960,
+      "frames": null,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "fallback_resolution": "864x480"
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 5.5,
+      "max_vram_gb": 6.99,
+      "min_ram_gb": 30,
+      "min_pixels": 600001,
+      "max_pixels": 2088960,
+      "frames": null,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "fallback_resolution": "864x480"
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 5.5,
+      "max_vram_gb": 8.5,
+      "min_ram_gb": 15,
+      "min_pixels": 0,
+      "max_pixels": 450000,
+      "frames": 124,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 30,
+      "note": "Untested low-RAM starting estimate. H3 model and encoder offload may require disk paging; available RAM, not just VRAM, can limit speed or completion."
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 5.5,
+      "max_vram_gb": 8.5,
+      "min_ram_gb": 15,
+      "min_pixels": 0,
+      "max_pixels": 450000,
+      "frames": 124,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 30,
+      "note": "Untested low-RAM starting estimate. H3 model and encoder offload may require disk paging; available RAM, not just VRAM, can limit speed or completion."
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 5.5,
+      "max_vram_gb": 8.5,
+      "min_ram_gb": 15,
+      "min_pixels": 0,
+      "max_pixels": 450000,
+      "frames": 124,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 30,
+      "note": "Untested low-RAM starting estimate. H3 model and encoder offload may require disk paging; available RAM, not just VRAM, can limit speed or completion."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 5.5,
+      "max_vram_gb": 8.5,
+      "min_ram_gb": 15,
+      "min_pixels": 450001,
+      "max_pixels": 2088960,
+      "frames": null,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 30,
+      "note": "For 16\u201324 GB host RAM with this GPU, start at 480p / 5.2s. Larger canvases are unverified; a manual override remains available.",
+      "fallback_resolution": "864x480"
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 5.5,
+      "max_vram_gb": 8.5,
+      "min_ram_gb": 15,
+      "min_pixels": 450001,
+      "max_pixels": 2088960,
+      "frames": null,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 30,
+      "note": "For 16\u201324 GB host RAM with this GPU, start at 480p / 5.2s. Larger canvases are unverified; a manual override remains available.",
+      "fallback_resolution": "864x480"
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 5.5,
+      "max_vram_gb": 8.5,
+      "min_ram_gb": 15,
+      "min_pixels": 450001,
+      "max_pixels": 2088960,
+      "frames": null,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 30,
+      "note": "For 16\u201324 GB host RAM with this GPU, start at 480p / 5.2s. Larger canvases are unverified; a manual override remains available.",
+      "fallback_resolution": "864x480"
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 15,
+      "min_pixels": 0,
+      "max_pixels": 901120,
+      "frames": 124,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 30,
+      "note": "Untested low-RAM starting estimate. H3 model and encoder offload may require disk paging; available RAM, not just VRAM, can limit speed or completion."
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 15,
+      "min_pixels": 0,
+      "max_pixels": 901120,
+      "frames": 124,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 30,
+      "note": "Untested low-RAM starting estimate. H3 model and encoder offload may require disk paging; available RAM, not just VRAM, can limit speed or completion."
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 15,
+      "min_pixels": 0,
+      "max_pixels": 901120,
+      "frames": 124,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 30,
+      "note": "Untested low-RAM starting estimate. H3 model and encoder offload may require disk paging; available RAM, not just VRAM, can limit speed or completion."
+    },
+    {
+      "checkpoint": "pruned",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 15,
+      "min_pixels": 901121,
+      "max_pixels": 2088960,
+      "frames": null,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 30,
+      "note": "High-resolution H3 with this amount of host RAM has not been validated. Start at 480p or test an explicit manual duration.",
+      "fallback_resolution": "864x480"
+    },
+    {
+      "checkpoint": "fused_4step",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 15,
+      "min_pixels": 901121,
+      "max_pixels": 2088960,
+      "frames": null,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 30,
+      "note": "High-resolution H3 with this amount of host RAM has not been validated. Start at 480p or test an explicit manual duration.",
+      "fallback_resolution": "864x480"
+    },
+    {
+      "checkpoint": "fused_4step_references",
+      "min_vram_gb": 8.51,
+      "max_vram_gb": 24.5,
+      "min_ram_gb": 15,
+      "min_pixels": 901121,
+      "max_pixels": 2088960,
+      "frames": null,
+      "basis": "estimated",
+      "reference_margin_steps": 0,
+      "evidence": [
+        "resource-interpolation-20261014"
+      ],
+      "max_ram_gb": 30,
+      "note": "High-resolution H3 with this amount of host RAM has not been validated. Start at 480p or test an explicit manual duration.",
+      "fallback_resolution": "864x480"
+    }
+  ],
+  "assumptions": {
+    "native_max_frames": 345,
+    "scope": "Built-in Pruned and Fused H3 video workflows. Alternate imported and Full checkpoints keep their own conservative profiles.",
+    "estimated_tiers": "Starting points inferred from tested workloads and host-memory capacity, not measured fit guarantees. Larger canvases use shorter passes; 16 GB host RAM stays conservative because model and encoder offload also need RAM.",
+    "recipe": "Memory-appropriate quantized encoder and optimized memory management. References, LoRAs, attention choice, other applications and drivers can change fit or speed.",
+    "manual_overrides": "Keep explicit user durations. Above a starting recommendation means unverified additional load, not a prediction that the job will OOM."
+  }
+}
