@@ -15,8 +15,9 @@ const definition = JSON.parse(fs.readFileSync(path.join(root, 'app/defaults', `$
     import {useStore, modelSupportsImageWorkflow} from './src/stores/useStore';
     import {ModelSelector} from './src/components/Sidebar/ModelSelector';
     import {ImageRefSection} from './src/components/Sidebar/ImageRefSection';
+    import {AdvancedSettings} from './src/components/Sidebar/AdvancedSettings';
     window.store=useStore; window.supports=modelSupportsImageWorkflow;
-    createRoot(document.getElementById('root')).render(<><ModelSelector/><ImageRefSection/></>);
+    createRoot(document.getElementById('root')).render(<><ModelSelector/><ImageRefSection/><AdvancedSettings compact/></>);
     window.boot=useStore.getState().loadModels();`,resolveDir:path.join(root,'ui'),loader:'tsx'},
     bundle:true,write:false,jsx:'automatic',logLevel:'silent',define:{'process.env.NODE_ENV':'"development"'}});
   const browser = await chromium.launch({headless:true,...(process.platform==='win32' ? {
@@ -63,8 +64,9 @@ const definition = JSON.parse(fs.readFileSync(path.join(root, 'app/defaults', `$
               : {choices:[['None',''],['Subject / landscape and people / objects','KI']],default:'KI'},
           image_ref_inpaint:modelType===qwenId,inpaint_video_prompt_type:modelType===qwenId?'VAG':undefined,
           no_background_removal:true,preserve_image_ref_native_size:true,no_negative_prompt:true,
-          guidance_max_phases:0,lock_guidance_scale:true,vae_block_size:16};
+          loras_disabled:modelType!==id,guidance_max_phases:0,lock_guidance_scale:true,vae_block_size:16};
         }
+        if(key===`/api/v1/loras/${id}`) result={loras:['flux3-style.safetensors'],guidance_max_phases:0};
         if(key==='/api/v1/jobs') result={jobs:[]};
         if(key==='/api/v1/upload' && method==='POST') {
           const path=`uploads/ref-${uploadedPaths.length+1}.png`;
@@ -93,6 +95,19 @@ const definition = JSON.parse(fs.readFileSync(path.join(root, 'app/defaults', `$
     await page.getByRole('button',{name:/^Flux 3 Klein 5.6B/}).click();
     await page.waitForFunction(id=>window.store.getState().params.model_type===id && !window.store.getState().modelOptionsLoading,id);
     assert.equal(await page.evaluate(()=>window.store.getState().params.num_inference_steps),16);
+    await page.getByRole('button',{name:'Advanced settings'}).click();
+    const loraSection=page.getByTestId('advanced-loras');
+    assert.equal(await loraSection.locator('summary').innerText(),'LoRAs & presets',
+      'Enable the FLUX 3 adapter section when the backend confirms LoRA support');
+    await loraSection.locator('summary').click();
+    await page.getByText('flux3-style',{exact:true}).waitFor();
+    const flux3Lora=page.getByRole('button',{name:'flux3-style',exact:true});
+    await flux3Lora.click();
+    assert.deepEqual(await page.evaluate(()=>window.store.getState().params.activated_loras),['flux3-style.safetensors'],
+      'Allow a compatible FLUX 3 adapter to be selected');
+    await flux3Lora.click();
+    assert.deepEqual(await page.evaluate(()=>window.store.getState().params.activated_loras),[],
+      'Allow the selected FLUX 3 adapter to be cleared');
     assert.deepEqual(await page.evaluate(id=>{
       const model=window.store.getState().models.find(m=>m.model_type===id);
       return ['generate','inpaint','outpaint'].map(w=>window.supports(model,w,true));
@@ -175,6 +190,6 @@ const definition = JSON.parse(fs.readFileSync(path.join(root, 'app/defaults', `$
     assert.equal(await page.evaluate(id=>window.store.getState().enabledModels.has(id),id),false,'Keep explicit opt-out');
     assert.equal(errors.length,0,errors.join('\n'));
     await context.close();
-    console.log('FLUX 3 UI selection, ten-reference submission, stale-selector cleanup, Flux 2 KI and Qwen inpaint preservation, workflow filtering and opt-out passed.');
+    console.log('FLUX 3 LoRA picker visibility and selection, ten-reference submission, stale-selector cleanup, Flux 2 KI and Qwen inpaint preservation, workflow filtering and opt-out passed.');
   } finally {await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

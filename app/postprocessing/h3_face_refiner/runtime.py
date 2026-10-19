@@ -11,7 +11,7 @@ from contextlib import contextmanager
 import numpy as np
 import torch
 
-ASSET_REVISION = "304d34f7751f8ba9ca0eb55d5d10044234cdbfe2"
+ASSET_REVISION = "630975da14fd3c84169d6cd5092da3ce1287d137"
 ASSET_REPO = "DeepBeepMeep/MiniMax-H3"
 ASSET_FOLDER = "buffalo_l"
 DETECTOR = "face_yolov8m.pt"
@@ -160,6 +160,14 @@ def refine_window(model, crop, reference_path, *, fps, audio, audio_rate, option
         _check_abort(abort)
         if result is None:
             raise RuntimeError("H3 face refinement returned no video")
-        return result["x"][:, :count].detach().float().cpu().add_(1).mul_(127.5).round_().clamp_(0, 255).byte()
+        refined = result["x"][:, :count].detach()
+        if refined.dtype == torch.uint8:
+            # H3's VAE decoder already returns byte RGB frames. Scaling those
+            # values as if they were signed floats destroys their colour range.
+            return refined.to(device="cpu").contiguous()
+        if not refined.is_floating_point():
+            raise TypeError(f"H3 face refinement returned unsupported video dtype: {refined.dtype}")
+        refined = refined.to(device="cpu", dtype=torch.float32)
+        return refined.clamp(-1.0, 1.0).add(1.0).mul(127.5).round().clamp(0, 255).to(torch.uint8).contiguous()
     finally:
         model._interrupt = False

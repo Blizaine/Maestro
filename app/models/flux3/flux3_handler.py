@@ -39,7 +39,7 @@ class family_handler:
             "group": "flux3", "image_outputs": True, "device_explicit": True,
             "dtype": "bf16", "auto_quantize": False, "compile": False,
             "guidance_max_phases": 0 if distilled else 1, "lock_guidance_scale": distilled,
-            "no_negative_prompt": distilled, "loras_disabled": True,
+            "no_negative_prompt": distilled, "loras_disabled": False,
             "flux3_distilled": distilled, "flux3_prompt_helper": True,
             "inference_steps": True,
             "sample_solvers": [("Flow-map Euler", "default")],
@@ -97,8 +97,6 @@ class family_handler:
             from services.hardware_detect import detect_hardware
             if not detect_hardware().get("supports_nvfp4", False):
                 return "Flux 3 NVFP4 requires an RTX 50 series GPU and a compatible NVFP4 kernel. Use BF16 or INT8 ConvRot on this GPU."
-        if inputs.get("activated_loras"):
-            return "FLUX 3 Klein LoRA loading has not yet been verified. Remove the adapters for this model."
         if inputs.get("image_mode", 1) in (2, "2") or inputs.get("image_mask") is not None:
             return "Use Image Generate with reference images to edit with FLUX 3 Klein. Masked inpainting is not supported yet."
         selector = str(inputs.get("video_prompt_type") or "")

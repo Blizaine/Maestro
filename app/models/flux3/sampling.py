@@ -32,6 +32,7 @@ def denoise_flow_map(
     check_cancel: Callable[[], None] | None = None,
     negative_packed: Packed | None = None,
     guidance_scale: float = 1.0,
+    loras_slists=None,
 ) -> Tensor:
     """Integrate one sample's packed latent tokens with the distilled flow map.
 
@@ -41,9 +42,15 @@ def denoise_flow_map(
     """
     device_type = packed.data["image"].device.type
     use_bf16 = device_type == "cuda"
+    if loras_slists is not None:
+        from mmgp import offload
+        from shared.utils.loras_mutipliers import update_loras_slists
+        update_loras_slists(dit, loras_slists, len(schedule) - 1)
     for step in range(len(schedule) - 1):
         if check_cancel is not None:
             check_cancel()
+        if loras_slists is not None:
+            offload.set_step_no_for_lora(dit, step)
         t = schedule[step].item()
         dt = (schedule[step + 1] - schedule[step]).item()
         packed.timesteps["image"].fill_(t)

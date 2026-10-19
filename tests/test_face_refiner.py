@@ -110,7 +110,9 @@ class FaceRefinerContracts(unittest.TestCase):
     def test_refinement_adapter_retains_huggingface_source_subfolder(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            calls = []
             def download(**kwargs):
+                calls.append(kwargs)
                 path = root / kwargs['targetFolderList'][0] / kwargs['sourceFolderList'][0] / kwargs['fileList'][0][0]
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b'adapter')
@@ -125,6 +127,47 @@ class FaceRefinerContracts(unittest.TestCase):
                 first = runtime.ensure_refinement_adapter()
                 self.assertEqual(Path(first).read_bytes(), b'adapter')
                 self.assertEqual(runtime.ensure_refinement_adapter(), first)
+            self.assertEqual(calls, [{
+                'repoId': 'DeepBeepMeep/MiniMax-H3',
+                'revision': '630975da14fd3c84169d6cd5092da3ce1287d137',
+                'sourceFolderList': ['loras'],
+                'targetFolderList': ['minimax_h3/face_refiner'],
+                'fileList': [[runtime.TURBO_FILE]],
+            }])
+
+    def test_tracking_assets_use_verified_revision_and_reuse_cache(self):
+        asset_names = ('face_yolov8m.pt', 'det_10g.onnx', '2d106det.onnx', 'w600k_r50.onnx')
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            calls = []
+
+            def locate(relative, error_if_none=True):
+                path = root / relative
+                if path.is_file():
+                    return str(path)
+                if error_if_none:
+                    raise FileNotFoundError(relative)
+
+            def download(**kwargs):
+                calls.append(kwargs)
+                for name in kwargs['fileList'][0]:
+                    path = root / kwargs['sourceFolderList'][0] / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b'asset')
+
+            with patch.dict(sys.modules, {'wgp': SimpleNamespace(process_files_def=download)}), \
+                 patch('shared.utils.files_locator.locate_file', side_effect=locate):
+                detector, identity_dir = runtime.ensure_tracking_assets()
+                self.assertEqual((detector, identity_dir),
+                    (str(root / 'buffalo_l' / 'face_yolov8m.pt'), str(root / 'buffalo_l')))
+                self.assertEqual(runtime.ensure_tracking_assets(), (detector, identity_dir))
+
+        self.assertEqual(calls, [{
+            'repoId': 'DeepBeepMeep/MiniMax-H3',
+            'revision': '630975da14fd3c84169d6cd5092da3ce1287d137',
+            'sourceFolderList': ['buffalo_l'],
+            'fileList': [list(asset_names)],
+        }])
 
     def test_auto_and_limits(self):
         self.assertEqual(service.normalize_options()["face_count"], 0)
@@ -308,6 +351,74 @@ class FaceRefinerContracts(unittest.TestCase):
         self.assertEqual(model.kwargs["fps"], 30)
         self.assertEqual(tuple(output.shape), tuple(crop.shape))
         self.assertEqual(output.dtype, torch.uint8)
+
+    def test_refinement_wrapper_preserves_uint8_decoder_output_and_trims_padding(self):
+        class Model:
+            _interrupt = False
+            def generate(self, _prompt, **kwargs):
+                self.kwargs = kwargs
+                output = torch.empty((3, kwargs["frame_num"], 32, 32), dtype=torch.uint8)
+                values = torch.tensor([0, 1, 64, 128, 255, 0, 1, 64, 128], dtype=torch.uint8)
+                repeats = (kwargs["frame_num"] + len(values) - 1) // len(values)
+                values = values.repeat(repeats)[:kwargs["frame_num"]]
+                output[:] = values.view(1, -1, 1, 1)
+                self.output = output
+                self.output_before = output.clone()
+                return {"x": output, "audio": torch.tensor([1.0])}
+
+        model = Model()
+        crop = torch.linspace(-1.0, 1.0, 3 * 9 * 32 * 32).reshape(3, 9, 32, 32)
+        original_crop = crop.clone()
+        audio = np.arange(9600 * 2, dtype=np.float32).reshape(9600, 2)
+        original_audio = audio.copy()
+        output = runtime.refine_window(model, crop, "reference.png", fps=30,
+            audio=audio, audio_rate=32000, options=service.normalize_options(), seed=17)
+
+        self.assertEqual(model.kwargs["frame_num"], 22)
+        self.assertEqual(tuple(model.kwargs["input_frames"].shape), (3, 22, 32, 32))
+        torch.testing.assert_close(model.kwargs["input_frames"][:, 9:], crop[:, -1:].expand(-1, 13, -1, -1))
+        self.assertEqual(tuple(output.shape), tuple(crop.shape))
+        self.assertEqual(output.dtype, torch.uint8)
+        self.assertEqual(output.device.type, "cpu")
+        self.assertFalse(output.requires_grad)
+        torch.testing.assert_close(output[:, :, 0, 0], model.output[:, :9, 0, 0])
+        self.assertEqual(output[0, :, 0, 0].tolist(), [0, 1, 64, 128, 255, 0, 1, 64, 128])
+        torch.testing.assert_close(model.output, model.output_before)
+        torch.testing.assert_close(crop, original_crop)
+        np.testing.assert_array_equal(audio, original_audio)
+
+    def test_refinement_wrapper_converts_signed_float_output_once_without_mutation(self):
+        class Model:
+            _interrupt = False
+            def generate(self, _prompt, **kwargs):
+                self.kwargs = kwargs
+                values = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float32)
+                repeats = (kwargs["frame_num"] + len(values) - 1) // len(values)
+                values = values.repeat(repeats)[:kwargs["frame_num"]]
+                output = values.view(1, kwargs["frame_num"], 1, 1).expand(3, -1, 32, 32).clone()
+                output[:, 3:] = 0.0
+                output.requires_grad_()
+                self.output = output
+                self.output_before = output.detach().clone()
+                return {"x": output}
+
+        model = Model()
+        crop = torch.zeros(3, 3, 32, 32)
+        original_crop = crop.clone()
+        audio = np.zeros((3200, 2), dtype=np.float32)
+        original_audio = audio.copy()
+        output = runtime.refine_window(model, crop, "reference.png", fps=24,
+            audio=audio, audio_rate=32000, options=service.normalize_options(), seed=29)
+
+        self.assertEqual(model.kwargs["frame_num"], 22)
+        self.assertEqual(tuple(output.shape), (3, 3, 32, 32))
+        self.assertEqual(output.dtype, torch.uint8)
+        self.assertEqual(output.device.type, "cpu")
+        self.assertFalse(output.requires_grad)
+        self.assertEqual(output[0, :, 0, 0].tolist(), [0, 128, 255])
+        torch.testing.assert_close(crop, original_crop)
+        torch.testing.assert_close(model.output, model.output_before)
+        np.testing.assert_array_equal(audio, original_audio)
 
 
 if __name__ == "__main__":

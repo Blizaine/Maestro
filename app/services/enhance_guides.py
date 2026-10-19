@@ -45,6 +45,7 @@ _ARCHITECTURE_MAP = {
 
     # Flux 3 image models — resolve before the generic Flux-family guide.
     "flux3": ("flux3_image_edit.md", "flux3_image.md"),
+    "moss_image": "moss_image.md",
 
     # Flux image models — edit guide when reference image exists, gen guide otherwise
     "flux": ("flux_image_edit.md", "flux_image.md"),

@@ -20,10 +20,11 @@ import torch
 from PIL import Image, ImageOps
 from .speakers import (
     is_h3_spoken_quote,
-    _ambiguous_ref2va_dialogue_error,
+    _REF2VA_CLIP_HEADING_RE,
+    _REF2VA_SUBJECT_DEFINITIONS_RE,
     _ref2va_alias_values,
-    _resolve_ref2va_dialogue_owner_name,
-    _resolve_ref2va_dialogue_speaker,
+    _resolve_ref2va_dialogue_owners,
+    resolve_ref2va_dialogue_owners,
 )
 
 from .packing import (
@@ -454,15 +455,19 @@ def _ref2va_dialogue_subject_order(
     )
     events.sort(key=lambda match: match.start())
 
-    order: list[int] = []
-    for match in events:
-        subject = _resolve_ref2va_dialogue_speaker(
-            source,
+    spans = [
+        (
             match.start(),
             match.end(),
-            speaker_aliases,
-            valid_subjects,
+            next((group for group in match.groups() if group is not None), match.group(0)),
         )
+        for match in events
+    ]
+    resolved = _resolve_ref2va_dialogue_owners(
+        source, spans, speaker_aliases, valid_subjects, strict=False,
+    )
+    order: list[int] = []
+    for subject, _owner in resolved:
         if subject in valid_subjects and subject not in order:
             order.append(subject)
     return order
@@ -688,6 +693,32 @@ def align_ref2va_voice_reference_order(
 
 
 
+def _ref2va_event_speaker_marker(
+    source: str,
+    dialogue_start: int,
+    previous_dialogue_end: int,
+    definitions_span: tuple[int, int] | None,
+) -> re.Match | None:
+    """Find this event's marker without consuming a definition or heading."""
+
+    context_start = max(previous_dialogue_end, dialogue_start - 240)
+    headings = list(_REF2VA_CLIP_HEADING_RE.finditer(
+        source, context_start, dialogue_start,
+    ))
+    if headings:
+        context_start = max(context_start, headings[-1].end())
+    markers = [
+        match for match in _SPEAKER_MARKER_RE.finditer(
+            source, context_start, dialogue_start,
+        )
+        if not (
+            definitions_span is not None
+            and definitions_span[0] <= match.start() < definitions_span[1]
+        )
+    ]
+    return markers[-1] if markers else None
+
+
 def _canonicalize_ref2va_tagged_dialogue(
     text: str,
     speaker_aliases: dict[str, int],
@@ -707,34 +738,26 @@ def _canonicalize_ref2va_tagged_dialogue(
     matches = list(_DIALOGUE_TAG_RE.finditer(text))
     if not matches:
         return text
+    resolved_owners = resolve_ref2va_dialogue_owners(
+        text,
+        [(match.start(), match.end(), match.group(1).strip()) for match in matches],
+        speaker_aliases,
+        valid_subjects,
+    )
     edits: list[tuple[int, int, str]] = []
     vocal_speakers: dict[tuple[str, Any], int] = {}
     previous_dialogue_end = 0
-    for match in matches:
-        words = match.group(1).strip()
-        subject = _resolve_ref2va_dialogue_speaker(
-            text,
-            match.start(),
-            match.end(),
-            speaker_aliases,
-            valid_subjects,
+    definition_field = _REF2VA_SUBJECT_DEFINITIONS_RE.search(text)
+    definitions_span = (
+        (definition_field.start(1), definition_field.end(1))
+        if definition_field else None
+    )
+    for match, (subject, explicit_owner) in zip(matches, resolved_owners):
+        marker = _ref2va_event_speaker_marker(
+            text, match.start(), previous_dialogue_end, definitions_span,
         )
-        explicit_owner = _resolve_ref2va_dialogue_owner_name(
-            text,
-            match.start(),
-            match.end(),
-        )
-        context_start = max(previous_dialogue_end, match.start() - 240)
-        markers = list(_SPEAKER_MARKER_RE.finditer(text, context_start, match.start()))
-        marker = markers[-1] if markers else None
-        # ``(Sx)`` is vocal-event order, not a Subject identifier.  It can
-        # validate a resolved speaker but must never select a face by itself.
-        # The old fallback silently mapped S1 to Subject 1, which is exactly
-        # how a correct voice could be lip-synced by the wrong character.
-        if subject is None and character_subject_count == 1 and not explicit_owner:
-            subject = 1
-        if subject is None and character_subject_count > 1 and not explicit_owner:
-            raise _ambiguous_ref2va_dialogue_error(words)
+        # The shared resolver proves ownership; event numbering is local to
+        # this clip and remains independent of Subject and Audio ordinals.
         speaker_key: tuple[str, Any] = (
             ("subject", subject)
             if subject is not None else

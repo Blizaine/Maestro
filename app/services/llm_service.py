@@ -3367,6 +3367,7 @@ def enhance_prompt(
     raw_enhancer_mode: bool = False,
     reference_context: Optional[str] = None,
     planning_style: str = "faithful",
+    resolution: Optional[str] = None,
 ) -> str:
     # Repair legacy Windows/code-page damage before model-specific parsers
     # copy user-authored international text into an immutable prompt contract.
@@ -3387,6 +3388,10 @@ def enhance_prompt(
     )
     is_h3_structured = is_h3_context_ir or is_h3_ref2va
     is_flux3_image = mode == "image" and (model_type or "").lower().startswith("flux3")
+    is_moss_image = mode == "image" and (model_type or "").lower().startswith("moss_image")
+    if is_moss_image:
+        # A general cinematic writer cannot safely strip MOSS's layout fields.
+        raw_enhancer_mode = False
     audio_driven = is_h3_ref2va and has_h3_performance_audio(reference_context)
     needs_h3_dialogue = is_h3_structured and not audio_driven
     if needs_h3_dialogue:
@@ -3664,6 +3669,9 @@ def enhance_prompt(
         model_type,
         planning_style,
     )
+    if is_moss_image:
+        from services.moss_image_prompt import enhancement_canvas_context
+        user_prompt = f"{enhancement_canvas_context(resolution)}\n\n{user_prompt}"
     if audio_driven:
         user_prompt = (
             f"Duration: {duration_seconds or 'the supplied audio duration'} seconds. "
@@ -3800,6 +3808,14 @@ def enhance_prompt(
             "Only clarify the caption and descriptions; never change, omit or invent layout boxes. "
             "Boxes use [top,left,bottom,right], integers from 0 to 1000, and guide composition rather than exact pixel masks."
         )
+    elif is_moss_image:
+        system += (
+            "\n\nMOSS IMAGE OUTPUT CONTRACT: A caption stays a caption. A supplied or explicitly "
+            "requested layout stays one complete JSON object with summary, items, bbox_coord_space "
+            "and bbox_format. JSON keys and exact text fields are required model syntax. Preserve "
+            "all items, extra fields, exact lettering and valid centered-pixel boxes for the selected "
+            "canvas. No reference-image tokens, pixel masks, Markdown fences or explanations."
+        )
     else:
         system += "\n\nCRITICAL: Output ONLY the enhanced prompt text. No headers, no labels, no markdown, no explanation, no \"Enhancement Logic\", no \"Edit Prompt:\". No LoRA filenames or display names; exact creator-declared trainedWords tokens from active-LoRA guidance may appear when relevant. Just the raw prompt text."
 
@@ -3818,6 +3834,8 @@ def enhance_prompt(
         # A detailed imported brief needs answer space, not thousands of
         # reasoning tokens. Keep small prompts quick and longer rewrites whole.
         effective_max_tokens = max(effective_max_tokens, min(2048, max(768, len(prompt) // 3 + 256)))
+        if is_moss_image and prompt.lstrip().startswith(("{", "#")):
+            effective_max_tokens = max(effective_max_tokens, 4096)
     if window_count and window_count > 1:
         effective_max_tokens = max(max_new_tokens, window_count * 300 + 256)
     if is_h3_ref2va:
@@ -3885,7 +3903,7 @@ def enhance_prompt(
         # Repeated source-binding phrases in a multi-reference caption are
         # legitimate. The ordinary substring-loop heuristic can cut the
         # caption halfway through a <ref_image_N> token and drop later subjects.
-        result = _clean_enhance_output(result, preserve_structure=is_h3_structured or is_flux3_image)
+        result = _clean_enhance_output(result, preserve_structure=is_h3_structured or is_flux3_image or is_moss_image)
     if is_h3_context_ir and result:
         # Adaptive dialogue may compile named cues into tags. For ordinary
         # locked user dialogue, compile only when the writer already returned
@@ -4545,10 +4563,8 @@ def _extract_h3_source_dialogue_entries(
     manifest = _parse_h3_ref2va_subject_manifest(reference_context)
     if manifest:
         from models.minimax_h3.speakers import (
-            _ambiguous_ref2va_dialogue_error,
             _ref2va_alias_values,
-            _resolve_ref2va_dialogue_owner_name,
-            _resolve_ref2va_dialogue_speaker,
+            resolve_ref2va_dialogue_owners,
         )
 
         valid_subjects = {int(subject["index"]) for subject in manifest}
@@ -4560,19 +4576,14 @@ def _extract_h3_source_dialogue_entries(
             alias: next(iter(subjects))
             for alias, subjects in alias_candidates.items() if len(subjects) == 1
         }
+        owners = resolve_ref2va_dialogue_owners(
+            source,
+            [(int(entry["start"]), int(entry["end"]), entry["words"]) for entry in spans],
+            aliases,
+            valid_subjects,
+        )
         vocal_speakers: dict[tuple, int] = {}
-        for entry in spans:
-            subject = _resolve_ref2va_dialogue_speaker(
-                source, int(entry["start"]), int(entry["end"]), aliases, valid_subjects,
-            )
-            owner = _resolve_ref2va_dialogue_owner_name(
-                source, int(entry["start"]), int(entry["end"]),
-            )
-            if subject is None and not owner:
-                if len(valid_subjects) == 1:
-                    subject = next(iter(valid_subjects))
-                else:
-                    raise _ambiguous_ref2va_dialogue_error(entry["words"])
+        for entry, (subject, owner) in zip(spans, owners):
             if subject is not None:
                 entry["subject_id"] = subject
             # Guests keep their own voice; neither input order nor an (Sx)

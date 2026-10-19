@@ -358,6 +358,8 @@ def _is_ref2va_possessive_speech_attribution(
 def _ref2va_alias_occurrences(source: str, aliases: dict[str, int]):
     occurrences: list[tuple[int, int, str, int]] = []
     for alias, subject in aliases.items():
+        if is_h3_production_label(alias):
+            continue
         alias_pattern = r"[\s_-]*".join(re.escape(char) for char in alias)
         for match in re.finditer(
             rf"(?<!\w){alias_pattern}(?!\w)",
@@ -503,7 +505,7 @@ def _resolve_ref2va_dialogue_owner_name(
                 raw_name = raw_name[:-2]
                 end = base_end
             name = _clean_ref2va_dialogue_owner_name(raw_name)
-            if name:
+            if name and not is_h3_production_label(name):
                 found.append((match.start(), end, name))
         return found
 
@@ -765,4 +767,352 @@ def _ambiguous_ref2va_dialogue_error(words: str) -> H3SpeakerBindingError:
         f"{excerpt!r}. Name the speaker beside the line (for example, Alex says, "
         '"Hello.") or place that character\'s explicit <Subject N> tag '
         "beside the line. (Sx) labels only identify vocal-event order."
+    )
+
+
+_REF2VA_SUBJECT_DEFINITIONS_RE = re.compile(
+    r"(?ims)^\s*subject_definitions\s*:\s*(.*?)(?="
+    r"^\s*(?:summary|retention_analysis|detailed_description|"
+    r"integrated_multimodal_description|overall_soundscape|"
+    r"non_diegetic_music)\s*:|\Z)"
+)
+_REF2VA_SUBJECT_MARKER_RE = re.compile(
+    r"<Subject\s+(\d+)>\s*\(S(\d+)\)", re.IGNORECASE,
+)
+_REF2VA_SPEAKER_MARKER_RE = re.compile(r"\(S(\d+)\)", re.IGNORECASE)
+_REF2VA_CLIP_HEADING_RE = re.compile(
+    r"(?im)(?:\[\s*(?:shot|scene)\s+\d+\s*\]|"
+    r"(?:^|[\r\n])\s*(?:shot|scene)\s+\d+\s*:?)"
+)
+
+
+def _ref2va_declared_marker_subjects(
+    source: str,
+    valid_subjects: set[int],
+) -> dict[int, int | None]:
+    """Read only explicit Subject/S pairs in the prompt's definition field.
+
+    ``None`` is a conflict sentinel.  In particular, an Audio ordinal is never
+    treated as either a Subject number or a speaker number: the explicit
+    ``<Subject N> (Sx)`` pair is the only supported identity declaration.
+    """
+
+    field = _REF2VA_SUBJECT_DEFINITIONS_RE.search(str(source or ""))
+    if not field:
+        return {}
+
+    declared: dict[int, int | None] = {}
+
+    def record(subject: int, marker: int) -> None:
+        if subject not in valid_subjects:
+            return
+        if marker not in declared:
+            declared[marker] = subject
+        elif declared[marker] != subject:
+            declared[marker] = None
+
+    body = field.group(1)
+    for match in _REF2VA_SUBJECT_MARKER_RE.finditer(body):
+        record(int(match.group(1)), int(match.group(2)))
+    return declared
+
+
+def _ref2va_marker_owner_is_explicit(
+    source: str,
+    dialogue_start: int,
+    dialogue_end: int,
+    marker: re.Match | None,
+    owner: str,
+    valid_subjects: set[int],
+) -> bool:
+    """Whether the current line directly attributes a raw marker to its owner."""
+
+    before_start = max(0, dialogue_start - 420)
+    before = source[before_start:dialogue_start]
+    # A Subject tag in the current clause is an explicit identity cue even if
+    # prose elsewhere in the same sentence mentions another character.
+    clause_start = max(
+        before.rfind("."), before.rfind("!"), before.rfind("?"),
+        before.rfind(";"), before.rfind("\n"),
+    ) + 1
+    explicit_subjects = [
+        int(value) for value in re.findall(
+            r"<Subject\s+(\d+)>", before[clause_start:], re.IGNORECASE,
+        )
+    ]
+    if any(subject in valid_subjects for subject in explicit_subjects):
+        return True
+    if marker is None:
+        if not owner:
+            return False
+        # A postposed speaker name is still an explicit attribution.
+        after = source[dialogue_end:dialogue_end + 180]
+        postposed = re.match(
+            rf"\s*[,;:\-–—]?\s*(?:{_SPEECH_VERB_RE.pattern})"
+            rf"\s+{re.escape(owner)}\b",
+            after,
+            re.IGNORECASE,
+        )
+        return bool(postposed)
+    if not owner:
+        return False
+
+    # The marker is within the current event's cue. A nearby proper name binds
+    # it directly; a distant action subject does not become the owner merely
+    # because the marker is followed by "says".
+    name_matches = list(re.finditer(
+        re.escape(owner), before, re.IGNORECASE,
+    ))
+    if not name_matches:
+        return False
+    selected = name_matches[-1]
+    marker_start = marker.start() - before_start
+    marker_end = marker.end() - before_start
+    if selected.end() <= marker_start:
+        gap = before[selected.end():marker_start]
+        if re.fullmatch(r"[\s,;:'’\-–—]*", gap):
+            return True
+        if _SPEECH_VERB_RE.search(gap):
+            return True
+    elif selected.start() >= marker_end:
+        # ``(S1) Sam says`` is an explicit speaker cue; ``(S1) says`` has no
+        # name and is resolved only by a definition or proven marker reuse.
+        tail = before[selected.end():]
+        if _SPEECH_VERB_RE.search(tail):
+            return True
+
+    # Postposed attribution can follow the dialogue tag rather than precede it.
+    after = source[dialogue_end:dialogue_end + 180]
+    if re.match(
+        rf"\s*[,;:\-–—]?\s*(?:{_SPEECH_VERB_RE.pattern})"
+        rf"\s+{re.escape(owner)}\b",
+        after,
+        re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
+def _ref2va_marker_is_another_speaker_object(
+    source: str,
+    dialogue_start: int,
+    marker: re.Match | None,
+    dialogue_subject: int | None,
+    speaker_aliases: dict[str, int],
+) -> bool:
+    """Do not learn a marker from a referenced name used as a speech object."""
+
+    if marker is None or dialogue_subject is None:
+        return False
+    marker_prefix = source[max(0, marker.start() - 140):marker.start()]
+    attached_name = re.search(
+        r"([A-Z][A-Za-z0-9_'’-]*(?:\s+[A-Z][A-Za-z0-9_'’-]*){0,3})\s*$",
+        marker_prefix,
+    )
+    if not attached_name:
+        return False
+    attached_subjects = {
+        speaker_aliases[alias]
+        for alias in _ref2va_alias_values({"character_name": attached_name.group(1)})
+        if alias in speaker_aliases
+    }
+    if len(attached_subjects) != 1 or dialogue_subject in attached_subjects:
+        return False
+    clause = re.split(r"[.!?;\r\n]", marker_prefix)[-1]
+    return bool(re.search(
+        r"\b(?:to|at|toward|towards|with|beside|near|behind)\b[^.!?;:\r\n]*$",
+        clause,
+        re.IGNORECASE,
+    ))
+
+
+def _source_from_latest_clip_heading(
+    source: str,
+    dialogue_start: int,
+    previous_dialogue_end: int = 0,
+) -> str:
+    """Blank prior events and clip context while preserving source offsets."""
+
+    prefix = source[:dialogue_start]
+    headings = list(_REF2VA_CLIP_HEADING_RE.finditer(prefix))
+    context_floor = max(
+        int(previous_dialogue_end), headings[-1].end() if headings else 0,
+    )
+    if not context_floor:
+        return source
+    chars = list(source)
+    for index in range(context_floor):
+        if chars[index] not in "\r\n":
+            chars[index] = " "
+    return "".join(chars)
+
+
+def _ref2va_owner_identity(owner: tuple[int | None, str]) -> tuple[str, Any]:
+    subject, name = owner
+    if subject is not None:
+        return "subject", subject
+    return "guest", _normalize_ref2va_speaker_alias(name)
+
+
+def _resolve_ref2va_dialogue_owners(
+    source: str,
+    spans: list[tuple[int, int, str]],
+    speaker_aliases: dict[str, int],
+    valid_subjects: set[int],
+    *,
+    strict: bool,
+) -> list[tuple[int | None, str]]:
+    """Shared per-prompt resolver; non-strict mode is for voice prefiltering."""
+
+    source = str(source or "")
+    valid_subjects = set(valid_subjects)
+    declarations = _ref2va_declared_marker_subjects(source, valid_subjects)
+    definitions_field = _REF2VA_SUBJECT_DEFINITIONS_RE.search(source)
+    definitions_span = (
+        (definitions_field.start(1), definitions_field.end(1))
+        if definitions_field else None
+    )
+    # A binding is either a referenced Subject or a known named guest.
+    marker_owners: dict[int, tuple[int | None, str] | None] = {}
+    output: list[tuple[int | None, str]] = []
+    previous_end = 0
+
+    for start, end, words in spans:
+        start, end = int(start), int(end)
+        bounded_source = _source_from_latest_clip_heading(source, start, previous_end)
+        subject = _resolve_ref2va_dialogue_speaker(
+            bounded_source, start, end, speaker_aliases, valid_subjects,
+        )
+        owner = _resolve_ref2va_dialogue_owner_name(
+            bounded_source, start, end,
+        )
+        if owner and is_h3_production_label(owner):
+            owner = ""
+
+        context_start = max(previous_end, start - 240)
+        heading = list(_REF2VA_CLIP_HEADING_RE.finditer(source, context_start, start))
+        if heading:
+            context_start = max(context_start, heading[-1].end())
+        markers = [
+            match for match in _REF2VA_SPEAKER_MARKER_RE.finditer(
+                source, context_start, start,
+            )
+            if not (
+                definitions_span is not None
+                and definitions_span[0] <= match.start() < definitions_span[1]
+            )
+        ]
+        marker = markers[-1] if markers else None
+        raw_marker = int(marker.group(1)) if marker else None
+        explicit = _ref2va_marker_owner_is_explicit(
+            bounded_source, start, end, marker, owner, valid_subjects,
+        )
+        natural_subject = subject
+        marker_is_object = _ref2va_marker_is_another_speaker_object(
+            source, start, marker, natural_subject, speaker_aliases,
+        )
+
+        declared: tuple[int | None, str] | None = None
+        declaration_conflict = False
+        if raw_marker is not None and raw_marker in declarations:
+            declared_subject = declarations[raw_marker]
+            if declared_subject is None:
+                declaration_conflict = True
+            else:
+                declared = (declared_subject, "")
+
+        proven = marker_owners.get(raw_marker) if raw_marker is not None else None
+        marker_conflict = raw_marker is not None and raw_marker in marker_owners and proven is None
+
+        # When a marker appears before a generic speech verb, the nearest
+        # silent actor is not enough to establish that actor as its speaker.
+        # Adjacent names, explicit Subject tags, direct speech labels, and
+        # postposed names remain direct cues.
+        marker_precedes_verb = bool(
+            marker is not None
+            and _SPEECH_VERB_RE.search(source[marker.end():start])
+        )
+        poisoned_marker = marker_conflict or declaration_conflict
+        if raw_marker is not None and poisoned_marker and not explicit:
+            subject, owner = None, ""
+        elif (
+            raw_marker is not None and marker_precedes_verb and not explicit
+            and not marker_is_object and len(valid_subjects) > 1
+        ):
+            binding = declared if declared is not None else proven
+            if binding is not None:
+                subject, owner = binding
+                if subject is not None:
+                    owner = ""
+            else:
+                subject, owner = None, ""
+        elif raw_marker is not None and not explicit:
+            binding = declared if declared is not None else proven
+            if binding is not None:
+                subject, owner = binding
+                if subject is not None:
+                    owner = ""
+
+        # An explicitly attributed current line stays readable even when its
+        # raw marker conflicts with an earlier line/declaration. The marker is
+        # then poisoned for future bare uses, which must not guess.
+        if subject is None and not owner and len(valid_subjects) == 1 and not poisoned_marker:
+            subject = next(iter(valid_subjects))
+
+        if (
+            strict and valid_subjects and raw_marker is not None
+            and poisoned_marker and not explicit
+        ):
+            raise _ambiguous_ref2va_dialogue_error(words)
+        if subject is None and not owner and len(valid_subjects) > 1 and strict:
+            raise _ambiguous_ref2va_dialogue_error(words)
+
+        current = (subject if subject in valid_subjects else None, owner)
+        if raw_marker is not None:
+            declaration_mismatch = bool(
+                explicit
+                and declared is not None
+                and _ref2va_owner_identity(current) != _ref2va_owner_identity(declared)
+            )
+            if declaration_conflict or declaration_mismatch:
+                marker_owners[raw_marker] = None
+            elif marker_conflict:
+                marker_owners[raw_marker] = None
+            elif explicit and (current[0] is not None or current[1]):
+                previous = marker_owners.get(raw_marker)
+                if (
+                    previous is not None
+                    and _ref2va_owner_identity(previous) != _ref2va_owner_identity(current)
+                ):
+                    marker_owners[raw_marker] = None
+                else:
+                    marker_owners[raw_marker] = current
+            elif raw_marker not in marker_owners and current[0] is not None and not marker_is_object:
+                # Natural, unambiguous discourse may establish an owner only
+                # when the marker does not precede an unattributed speech verb.
+                marker_owners[raw_marker] = current
+
+        output.append(current)
+        previous_end = max(previous_end, end)
+
+    return output
+
+
+def resolve_ref2va_dialogue_owners(
+    source: str,
+    spans: list[tuple[int, int, str]],
+    speaker_aliases: dict[str, int],
+    valid_subjects: set[int],
+) -> list[tuple[int | None, str]]:
+    """Resolve dialogue spans with prompt-local Subject/S proof.
+
+    Each result is ``(subject, owner_name)``. ``owner_name`` is the explicit
+    human label when one was found (including a named guest); it remains empty
+    for a bare line resolved from an explicit definition or prior marker proof.
+    Raw S markers are scoped to this call and never numerically converted to
+    Subjects. Multi-Subject ambiguity raises the normal H3 binding error.
+    """
+
+    return _resolve_ref2va_dialogue_owners(
+        source, spans, speaker_aliases, valid_subjects, strict=True,
     )

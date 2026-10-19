@@ -20,6 +20,7 @@ import {
 import { ComposerContext, ComposerToolbarItem } from './SidebarPanels'
 import { SidebarMenu } from './SidebarMenu'
 import { Flux3PromptHelper } from './Flux3PromptHelper'
+import { MossImagePromptHelper } from './MossImagePromptHelper'
 
 const placeholders: Record<string, string> = {
   image: 'Describe your image...',
@@ -586,6 +587,7 @@ export function PromptInput() {
         {/* One portal keeps conditional helpers before the existing enhancer after model switches. */}
         <ComposerToolbarItem><div className={`${composer ? 'relative' : 'absolute right-2 bottom-2'} flex items-center justify-end gap-2`}>
         {generationMode === 'image' && modelType.startsWith('flux3') && <Flux3PromptHelper />}
+        {generationMode === 'image' && modelOptions?.moss_image_prompt_helper && <MossImagePromptHelper />}
         {isAudioOnly ? (
           /* TTS: mode-aware split button. Main button uses default mode based
              on voice-slot count; dropdown exposes both Speech and Dialogue

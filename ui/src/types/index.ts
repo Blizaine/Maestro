@@ -946,6 +946,7 @@ export interface ModelOptions {
   video_continuation?: boolean
   motion_amplitude: boolean
   flow_shift: boolean
+  moss_image_prompt_helper?: boolean
   tea_cache: boolean
   first_block_cache?: boolean
   sol_attention?: boolean

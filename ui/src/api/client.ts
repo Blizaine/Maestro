@@ -2333,6 +2333,7 @@ export async function llmEnhancePrompt(params: {
   prompt: string
   mode?: string
   model_type?: string
+  resolution?: string
   temperature?: number
   image_path?: string
   image_paths?: string[]

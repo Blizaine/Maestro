@@ -6,6 +6,11 @@ A one-click local AI **creative studio, director, and video editor** for creator
 
 ## What it does
 
+- **MOSS Image 5B Base and SFT:** image generation from captions, tags or
+  structured layouts, with a visual Prompt Helper and dedicated prompt enhancement.
+  Public BF16 and INT8 ConvRot files download on first use; no Hugging Face account
+  is needed. [Usage and model details](docs/MOSS-Image.md).
+
 - **Qwen Image 2.1 7B and official Turbo:** unified image generation and editing
   with up to ten references, dedicated prompt enhancement and transparent PNG
   output. Turbo uses its published eight-step recipe, with BF16 or INT8 downloads.
@@ -126,6 +131,28 @@ View all past Director runs with their full state — clip plans, generated imag
 ## Updates
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
+
+### v3.1.0 — Dev testing (2026-10-19)
+
+- **MOSS Image 5B Base and SFT:** text-to-image generation, a visual layout helper
+  and model-specific prompt enhancement. Public BF16/INT8 downloads; SFT is
+  enabled once in the image picker. [MOSS guide](docs/MOSS-Image.md).
+- **H3 References compatibility:** generation and enhancement accept explicitly
+  declared legacy speaker labels and reuse established speakers within a clip.
+  Shot/scene headings cannot become character names; identities and voices stay
+  paired independently of their numeric labels.
+- **FLUX 3 Klein LoRAs:** restore LoRAs & presets for Distilled and Base, with
+  compatible adapter loading and per-step multiplier schedules.
+- **Viggle Animate and Refine faces:** repair missing upstream asset revisions;
+  fix a second pixel conversion that washed out refined faces.
+- **Recast RAM use:** release tracking arrays before generation and record
+  useful workload and memory diagnostics. The reported RTX 4080 runtime remains
+  unverified without its original settings/logs.
+
+Update your **Dev** installation in Pinokio while idle, restart Maestro and
+refresh the browser. Main remains on v3.0.0. See the
+[v3.1.0 testing notes](docs/RELEASE_NOTES_V3.1.0.md) and
+[workflow troubleshooting](docs/V3-Workflow-Fixes.md).
 
 ### v3.0.0 (2026-10-18)
 
@@ -1151,6 +1178,9 @@ Third-party models, weights, and components keep their own licenses — review t
 ## Issues
 
 Bug reports and feature requests: [github.com/Blizaine/Maestro/issues](https://github.com/Blizaine/Maestro/issues).
+
+Follow-up fixes for v3.0 Viggle/Face Refiner downloads, FLUX 3 LoRAs, and Recast
+memory diagnostics are documented in [the troubleshooting notes](docs/V3-Workflow-Fixes.md).
 
 ### Finding logs
 

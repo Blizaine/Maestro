@@ -175,6 +175,18 @@ class DiT(nn.Module):
         self.txt_mode_blocks = nn.ModuleList([Block(HIDDEN, HEADS, MLP_RATIO) for _ in range(DEPTH)])
         self.single_blocks = nn.ModuleList([Block(HIDDEN, HEADS, MLP_RATIO) for _ in range(DEPTH_SINGLE)])
         self.final_layer = nn.ModuleDict({"image": LastLayer(HIDDEN, IN_CHANNELS["image"])})
+        self.split_linear_modules_map = {
+            "qkv": {"mapped_modules": ["q_proj", "k_proj", "v_proj"], "split_sizes": [HIDDEN] * 3},
+        }
+
+    def preprocess_loras(self, model_type, state_dict):
+        from .lora import preprocess_lora_state_dict
+        return preprocess_lora_state_dict(
+            model_type,
+            state_dict,
+            dict(self.named_modules()),
+            split_linear_modules_map=self.split_linear_modules_map,
+        )
 
     def forward(self, packed: Packed, timesteps_ref: Tensor | None = None) -> Tensor:
         """Velocity prediction for the image tokens, in packed.data["image"] order.
