@@ -3083,6 +3083,9 @@ CIVIT_TO_LOCAL_ARCH = {
     # checkpoint-only on CivitAI; both Klein variants share the native handler.
     "Flux.3 Klein": "flux3_klein",
     "Flux.3 Klein-base": "flux3_klein",
+    # MOSS Base and SFT share the native image-transformer LoRA layout.
+    "MOSS Image": "moss_image",
+    "MOSS Image Base": "moss_image",
     # LTX — CivitAI splits LTX 1 (LTXV), LTX-2 (LTXV2), and LTX-2.3
     # (LTXV 2.3) into distinct baseModel values. LTX-2 and LTX-2.3
     # share the ltx2 architecture on disk; LTX 1 has its own ltxv dir.
@@ -3097,6 +3100,7 @@ CIVIT_TO_LOCAL_ARCH = {
     "Qwen 2": "qwen_image_21_7B",
     # Krea 2
     "Krea 2": "krea2",
+    "Krea 2 Turbo": "krea2",
     # Other
     "ZImageTurbo": "z_image",
     "Mochi": "mocha",
@@ -3183,6 +3187,8 @@ HF_BASE_TO_LOCAL_DIR = {
     "black-forest-labs/FLUX.2-dev": "flux2_dev",
     "black-forest-labs/flux-3-image-klein": "flux3_klein",
     "black-forest-labs/flux-3-image-klein-base": "flux3_klein",
+    "OpenMOSS-Team/MOSS-Image-Base": "moss_image",
+    "OpenMOSS-Team/MOSS-Image-SFT": "moss_image",
     "Freepik/flux.2-klein-guidance-9b": "flux2_klein_9b",
     "Freepik/flux.2-klein-guidance-4b": "flux2_klein_4b",
     "tencent/HunyuanVideo": "hunyuan",
@@ -3237,9 +3243,11 @@ CIVITAI_MODEL_FILTERS = [
     # CivitAI lists Flux.3 Klein and Flux.3 Klein-base separately; combine
     # both LoRA-capable variants. Plain Flux.3 is checkpoint-only there.
     {"label": "Flux.3 Klein", "civitai_base": "Flux.3 Klein,Flux.3 Klein-base", "default_dir": "flux3_klein"},
+    {"label": "MOSS Image", "civitai_base": "MOSS Image,MOSS Image Base", "default_dir": "moss_image"},
     {"label": "Qwen", "civitai_base": "Qwen", "default_dir": "qwen"},
     {"label": "Qwen Image 2.1", "civitai_base": "Qwen 2", "default_dir": "qwen21"},
-    {"label": "Krea 2", "civitai_base": "Krea 2", "default_dir": "krea2"},
+    {"label": "Krea 2", "civitai_base": "Krea 2,Krea 2 Turbo", "default_dir": "krea2"},
+    {"label": "Krea 2 Turbo", "civitai_base": "Krea 2 Turbo", "default_dir": "krea2"},
     {"label": "ZImageTurbo", "civitai_base": "ZImageTurbo", "default_dir": "z_image"},
 ]
 

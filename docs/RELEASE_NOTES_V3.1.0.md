@@ -16,6 +16,9 @@ v3.0.0 while the new features and fixes receive wider testing.
 - These checkpoints use 50 steps by default and support text/layout generation;
   they do not accept reference images or masks. The 5B name describes the image
   transformer; the separate text encoder also uses memory and disk space.
+- Enable compatible image-transformer LoRAs for Base and SFT, including
+  per-step multiplier schedules. The MOSS Image browser filter includes both
+  Civitai base labels; supported imports share the `moss_image` LoRA folder.
 
 See the [MOSS usage and validation guide](MOSS-Image.md).
 
@@ -46,6 +49,19 @@ This addresses [issue #185](https://github.com/Blizaine/Maestro/issues/185).
   fused QKV layouts, and apply multiplier schedules at each denoising step.
 - Keep incompatible targets subject to validation. FLUX 2 adapters are not
   interchangeable with FLUX 3 adapters.
+
+## Krea 2 Turbo imports
+
+- Recognize Civitai's explicit Krea 2 Turbo base label and register compatible
+  checkpoints using Turbo defaults. Older generic Krea 2 uploads retain the
+  RAW/Turbo recipe choice.
+- Include both labels in the Krea 2 browser filter, add a Turbo-only filter,
+  and route compatible LoRAs to the shared `krea2` folder. Tensor-layout and
+  supported-format checks still apply before checkpoint registration.
+- Recognize logical tensor dimensions for the supported packed NVFP4
+  SafeTensors layout, requiring its matching scale descriptors. Packed bytes
+  are no longer mistaken for a different architecture. This does not enable
+  unrelated or unverified quantization formats.
 
 ## Viggle Animate and Refine faces
 
@@ -88,6 +104,14 @@ preview/media regressions, JSON grammar regressions, Python syntax and undefined
 name checks, frontend lint and production build. Desktop/mobile browser checks
 covered the MOSS layout helper and FLUX 3 LoRA/reference controls. The public
 repository boundary guard passed with the new files staged.
+
+The MOSS LoRA and Civitai follow-up passed 83 targeted Python regressions,
+33 URL-hint and 10 import-request checks, frontend lint and production build.
+The numerical MOSS check uses a tiny transformer with real MMGP adapter loading
+on CPU, verifying zero/nonzero scheduled weights across CFG branches and batches.
+An authenticated, bounded header read confirmed the Krea NVFP4 packing and scale
+descriptors used by the import check; full generation with that community
+checkpoint has not been tested.
 
 Workstation 01 (RTX 4090 / 24 GB VRAM / 128 GB RAM) completed normal-API MOSS
 Base/SFT caption, layout and batch smoke tests, a Viggle video, compatible

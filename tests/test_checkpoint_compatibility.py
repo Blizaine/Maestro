@@ -44,6 +44,11 @@ KLEIN9_SHAPES = {
     "txt_in.weight": (4096, 12288),
     "double_blocks.0.img_attn.qkv.weight": (12288, 4096),
 }
+KREA2_SHAPES = {
+    "first.weight": (6144, 64),
+    "blocks.0.attn.wq.weight": (6144, 6144),
+    "blocks.0.attn.wk.weight": (1536, 6144),
+}
 
 
 def _write_safetensors(path: str, shapes: dict[str, tuple[int, ...]]) -> None:
@@ -54,6 +59,36 @@ def _write_safetensors(path: str, shapes: dict[str, tuple[int, ...]]) -> None:
             "data_offsets": [0, 2],
         }
         for key, shape in shapes.items()
+    }
+    encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    with open(path, "wb") as handle:
+        handle.write(struct.pack("<Q", len(encoded)))
+        handle.write(encoded)
+        handle.write(b"\0\0")
+
+
+def _krea2_nvfp4_descriptors() -> dict[str, tuple[str, tuple[int, ...]]]:
+    return {
+        "first.weight": ("BF16", (6144, 64)),
+        "blocks.0.attn.wq.weight": ("U8", (6144, 3072)),
+        "blocks.0.attn.wq.weight_scale": ("F8_E4M3", (6144, 384)),
+        "blocks.0.attn.wq.weight_scale_2": ("F32", ()),
+        "blocks.0.attn.wk.weight": ("U8", (1536, 3072)),
+        "blocks.0.attn.wk.weight_scale": ("F8_E4M3", (1536, 384)),
+        "blocks.0.attn.wk.weight_scale_2": ("F32", ()),
+    }
+
+
+def _write_safetensors_descriptors(
+    path: str, descriptors: dict[str, tuple[str, tuple[int, ...]]]
+) -> None:
+    header = {
+        key: {
+            "dtype": dtype,
+            "shape": list(shape),
+            "data_offsets": [0, 2],
+        }
+        for key, (dtype, shape) in descriptors.items()
     }
     encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
     with open(path, "wb") as handle:
@@ -123,6 +158,14 @@ class TestCheckpointMappings(unittest.TestCase):
                 "Flux.1 D", "flux2_dev"
             )
 
+    def test_explicit_krea_turbo_label_selects_only_its_turbo_recipe(self):
+        targets = compatibility.checkpoint_targets_for_base("Krea 2 Turbo")
+        self.assertEqual([target.architecture for target in targets], ["krea2_turbo"])
+        self.assertEqual(compatibility.suggested_checkpoint_architecture("  KREA 2  TURBO "), "krea2_turbo")
+        self.assertEqual(compatibility.checkpoint_template_model_type("Krea 2 Turbo", "krea2_turbo"), "krea2_turbo")
+        with self.assertRaises(compatibility.CheckpointCompatibilityError):
+            compatibility.ensure_allowed_checkpoint_target("Krea 2 Turbo", "krea2_raw")
+
 
 class TestCheckpointTensorSignatures(unittest.TestCase):
     def _validate(
@@ -134,6 +177,19 @@ class TestCheckpointTensorSignatures(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "checkpoint.safetensors")
             _write_safetensors(path, shapes)
+            return compatibility.validate_checkpoint_file(
+                path, base_model, architecture
+            )
+
+    def _validate_descriptors(
+        self,
+        descriptors: dict[str, tuple[str, tuple[int, ...]]],
+        base_model: str = "Krea 2 Turbo",
+        architecture: str = "krea2_turbo",
+    ) -> dict:
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "checkpoint.safetensors")
+            _write_safetensors_descriptors(path, descriptors)
             return compatibility.validate_checkpoint_file(
                 path, base_model, architecture
             )
@@ -151,6 +207,132 @@ class TestCheckpointTensorSignatures(unittest.TestCase):
                 compatibility.validate_checkpoint_file(
                     path, "Flux.1 D", "flux2_dev"
                 )
+
+    def test_krea_turbo_label_keeps_tensor_validation_and_format_gate(self):
+        receipt = self._validate(KREA2_SHAPES, "Krea 2 Turbo", "krea2_turbo")
+        self.assertEqual(receipt["architecture"], "krea2_turbo")
+        with self.assertRaisesRegex(compatibility.CheckpointCompatibilityError, "not the selected krea2_turbo"):
+            self._validate(FLUX1_SHAPES, "Krea 2 Turbo", "krea2_turbo")
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "checkpoint.gguf")
+            _write_safetensors(path, KREA2_SHAPES)
+            with self.assertRaisesRegex(compatibility.CheckpointCompatibilityError, "SafeTensor files only"):
+                compatibility.validate_checkpoint_file(path, "Krea 2 Turbo", "krea2_turbo")
+
+    def test_krea_nvfp4_tensorcore_scales_recover_only_known_logical_anchors(self):
+        expected_shapes = {
+            "first.weight": (6144, 64),
+            "blocks.0.attn.wq.weight": (6144, 6144),
+            "blocks.0.attn.wk.weight": (1536, 6144),
+        }
+        for prefix in ("", "model.diffusion_model."):
+            with self.subTest(prefix=prefix):
+                descriptors = {
+                    prefix + key: descriptor
+                    for key, descriptor in _krea2_nvfp4_descriptors().items()
+                }
+                with tempfile.TemporaryDirectory() as directory:
+                    path = os.path.join(directory, "checkpoint.safetensors")
+                    _write_safetensors_descriptors(path, descriptors)
+                    shapes = compatibility._tensor_shapes(
+                        compatibility.read_safetensors_header(path)
+                    )
+                    for key, expected in expected_shapes.items():
+                        self.assertEqual(shapes[key], expected)
+                    self.assertEqual(
+                        set(compatibility.detect_checkpoint_architectures(path)),
+                        {"krea2_raw", "krea2_turbo"},
+                    )
+                    receipt = compatibility.validate_checkpoint_file(
+                        path, "Krea 2 Turbo", "krea2_turbo"
+                    )
+                    self.assertEqual(receipt["architecture"], "krea2_turbo")
+                    with self.assertRaisesRegex(
+                        compatibility.CheckpointCompatibilityError,
+                        "compatible with krea2_turbo, not 'krea2_raw'",
+                    ):
+                        compatibility.validate_checkpoint_file(
+                            path, "Krea 2 Turbo", "krea2_raw"
+                        )
+
+    def test_krea_nvfp4_requires_every_exact_sidecar_and_valid_tile_geometry(self):
+        cases = {
+            "missing weight_scale": lambda d: d.pop("blocks.0.attn.wq.weight_scale"),
+            "missing weight_scale_2": lambda d: d.pop("blocks.0.attn.wq.weight_scale_2"),
+            "wrong weight_scale dtype": lambda d: d.__setitem__(
+                "blocks.0.attn.wq.weight_scale", ("F16", (6144, 384))
+            ),
+            "wrong weight_scale rows": lambda d: d.__setitem__(
+                "blocks.0.attn.wq.weight_scale", ("F8_E4M3", (6016, 384))
+            ),
+            "wrong weight_scale groups": lambda d: d.__setitem__(
+                "blocks.0.attn.wq.weight_scale", ("F8_E4M3", (6144, 383))
+            ),
+            "non-scalar weight_scale_2": lambda d: d.__setitem__(
+                "blocks.0.attn.wq.weight_scale_2", ("F32", (1,))
+            ),
+            "wrong weight_scale_2 dtype": lambda d: d.__setitem__(
+                "blocks.0.attn.wq.weight_scale_2", ("F16", ())
+            ),
+            "rows not 128 aligned": lambda d: (
+                d.__setitem__("blocks.0.attn.wq.weight", ("U8", (6143, 3072))),
+                d.__setitem__("blocks.0.attn.wq.weight_scale", ("F8_E4M3", (6143, 384))),
+            ),
+            "K not 64 aligned": lambda d: (
+                d.__setitem__("blocks.0.attn.wq.weight", ("U8", (6144, 3071))),
+                d.__setitem__("blocks.0.attn.wq.weight_scale", ("F8_E4M3", (6144, 383))),
+            ),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(case=name):
+                descriptors = _krea2_nvfp4_descriptors()
+                mutate(descriptors)
+                with self.assertRaises(
+                    compatibility.CheckpointCompatibilityError
+                ):
+                    self._validate_descriptors(descriptors)
+
+    def test_krea_raw_u8_and_unrelated_u8_shapes_are_not_expanded(self):
+        descriptors = _krea2_nvfp4_descriptors()
+        descriptors["blocks.0.attn.wq.weight"] = ("U8", (6144, 6144))
+        descriptors.pop("blocks.0.attn.wq.weight_scale")
+        descriptors.pop("blocks.0.attn.wq.weight_scale_2")
+        # An unidentified U8 tensor cannot claim the expected logical size.
+        with self.assertRaises(
+            compatibility.CheckpointCompatibilityError
+        ):
+            self._validate_descriptors(descriptors)
+
+        header = {
+            "img_in.weight": {
+                "dtype": "U8",
+                "shape": [6144, 3072],
+            },
+            "img_in.weight_scale": {
+                "dtype": "F8_E4M3",
+                "shape": [6144, 384],
+            },
+            "img_in.weight_scale_2": {
+                "dtype": "F32",
+                "shape": [],
+            },
+        }
+        self.assertEqual(
+            compatibility._tensor_shapes(header)["img_in.weight"],
+            (6144, 3072),
+        )
+
+    def test_quanto_weight_data_shape_normalization_is_unchanged(self):
+        header = {
+            "blocks.0.attn.wq.weight._data": {
+                "dtype": "U8",
+                "shape": [6144, 6144],
+            }
+        }
+        self.assertEqual(
+            compatibility._tensor_shapes(header)["blocks.0.attn.wq.weight"],
+            (6144, 6144),
+        )
 
     def test_flux2_variants_do_not_share_incompatible_shapes(self):
         self._validate(FLUX2_DEV_SHAPES, "Flux.2 D", "flux2_dev")

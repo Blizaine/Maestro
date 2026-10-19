@@ -27,6 +27,8 @@ const cases = [
   ['https://huggingface.co/creator/flux-3-image-klein-base-style', 'flux3_klein'],
   ['https://huggingface.co/creator/Flux3-Style', ''],
   ['https://huggingface.co/creator/FLUX.3-Video-Style', ''],
+  ['https://huggingface.co/creator/MOSS-Image-Base-Film', 'moss_image'],
+  ['https://huggingface.co/creator/moss_image_sft_style', 'moss_image'],
   ['https://civitai.com/models/123/flux-3-klein-style', 'flux3_klein'],
   ['https://huggingface.co/creator/Klein-Film', ''],
   ['https://huggingface.co/creator/Wan2.1-I2V-Film', 'wan_i2v'],
@@ -40,6 +42,7 @@ const cases = [
   ['https://huggingface.co/creator/Qwen-Image-2.10', 'qwen'],
   ['https://huggingface.co/creator/Film-LoRA?token=minimax', ''],
   ['https://huggingface.co/creator/Film-LoRA?token=flux3', ''],
+  ['https://huggingface.co/MossImageCreator/Film-LoRA', ''],
   ['https://huggingface.co/Flux3Creator/Film-LoRA', ''],
   ['https://huggingface.co/creator/Film-H3', ''],
   ['https://huggingface.co/MiniMaxCreator/LTX-2.3-Film', 'ltx2'],
@@ -81,5 +84,8 @@ for (const [url, expected] of cases) assert.equal(suggest(url), expected, url);
   assert.equal(requests.at(-1).body.target_dir, '', 'CivitAI version metadata still determines the Flux 3 destination');
   await client.importHuggingFaceLora(flux3, resolve(flux3, 'custom_adapters'));
   assert.equal(requests.at(-1).body.target_dir, 'custom_adapters');
+  const moss = 'https://huggingface.co/creator/MOSS-Image-Base-Film';
+  await client.importHuggingFaceLora(moss, resolve(moss, ''));
+  assert.equal(requests.at(-1).body.target_dir, 'moss_image');
   console.log(`${cases.length} URL suggestions and ${requests.length} import destination requests passed`);
 })().catch(error => { console.error(error); process.exitCode = 1; });

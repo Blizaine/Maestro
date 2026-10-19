@@ -18,6 +18,7 @@ export function suggestLoraImportDirectory(url: string): string {
   if (compact.includes('ltx25')) return 'ltx25'
   if (compact.includes('ltx2') || compact.includes('ltxvideo2')) return 'ltx2'
   if (compact.includes('ltxv') || compact.includes('ltxvideo')) return 'ltxv'
+  if (/(?<![a-z0-9])moss[\s._-]*image(?![a-z0-9])/.test(identity)) return 'moss_image'
   // FLUX 3 also names larger/API and video families; only Klein is local here.
   if (/(?<![a-z0-9])flux[\s._-]*3(?![a-z0-9])/.test(identity)) {
     return compact.includes('klein') ? 'flux3_klein' : ''

@@ -21,6 +21,12 @@ Public Dev testing update. Main remains on v3.0.0. See the
   the existing LoRAs & presets controls for these models.
 - Add the Flux 3 Klein Civitai browser filter for Distilled and Base tags and
   route supported Civitai/Hugging Face LoRA imports to the shared `flux3_klein` folder.
+- Add the MOSS Image Civitai filter and native LoRA imports for Base and SFT,
+  with per-step multiplier schedules during generation.
+- Recognize Civitai's explicit Krea 2 Turbo label for checkpoint imports and
+  LoRAs, retaining checkpoint layout validation and the correct Turbo recipe.
+  Interpret supported NVFP4 packed tensor dimensions using verified scale
+  descriptors instead of rejecting them as a mismatched architecture.
 - Release Recast timeline tracking arrays before generation after their mask,
   reference and shot files are saved. Record SCAIL-2 placement/workload settings
   and actionable host-memory diagnostics without changing generation defaults.

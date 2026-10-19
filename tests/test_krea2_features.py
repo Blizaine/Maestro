@@ -311,10 +311,15 @@ class TestKrea2LoraBrowser(unittest.TestCase):
         hf_map = _literal_assignment(_LAUNCH_PATH, "HF_BASE_TO_LOCAL_DIR")
         filters = _literal_assignment(_LAUNCH_PATH, "CIVITAI_MODEL_FILTERS")
         self.assertEqual(civit_map["Krea 2"], "krea2")
+        self.assertEqual(civit_map["Krea 2 Turbo"], "krea2")
         self.assertEqual(hf_map["krea/Krea-2-Raw"], "krea2")
         self.assertEqual(hf_map["krea/Krea-2-Turbo"], "krea2")
         self.assertIn(
-            {"label": "Krea 2", "civitai_base": "Krea 2", "default_dir": "krea2"},
+            {"label": "Krea 2", "civitai_base": "Krea 2,Krea 2 Turbo", "default_dir": "krea2"},
+            filters,
+        )
+        self.assertIn(
+            {"label": "Krea 2 Turbo", "civitai_base": "Krea 2 Turbo", "default_dir": "krea2"},
             filters,
         )
 

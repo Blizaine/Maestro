@@ -280,6 +280,11 @@ class MOSSImagePipeline:
         )
         set_phase_status("Preparing Timesteps")
         schedule = sampling_schedule(sampling_steps, flow_shift, device)
+        loras_slists = kwargs.get("loras_slists")
+        if loras_slists is not None:
+            from shared.utils.loras_mutipliers import update_loras_slists
+
+            update_loras_slists(self.transformer, loras_slists, len(schedule) - 1)
         latent_height, latent_width = height // 16, width // 16
         config = self.transformer.config
         ropes = [
@@ -301,6 +306,8 @@ class MOSSImagePipeline:
             for step in tqdm(range(len(schedule) - 1), desc="Denoising", mininterval=1 / 3):
                 if self._interrupt:
                     raise GenerationAborted
+                if loras_slists is not None:
+                    offload.set_step_no_for_lora(self.transformer, step)
                 predictions = self.transformer(latents, schedule[step] * 1000, texts, ropes)
                 if self._interrupt:
                     raise GenerationAborted

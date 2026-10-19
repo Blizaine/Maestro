@@ -29,6 +29,20 @@ editing, Inpaint or Outpaint. Dimensions must be divisible by 16; about 1–2
 megapixels is the suggested starting range, with an admission ceiling of 4,194,304
 pixels. Larger canvases and batches use more memory.
 
+## LoRAs
+
+Open **Advanced → LoRAs & presets** to select compatible MOSS image-transformer
+adapters and set their weights or per-step schedules. **Model Browser → LoRAs →
+MOSS Image** searches both Civitai's MOSS Image (SFT) and MOSS Image Base labels.
+Supported Civitai and Hugging Face imports use the shared `loras/moss_image`
+folder, so adapters are available to both model entries.
+
+Use the creator's recommended checkpoint and weight first. Base and SFT share
+an architecture, but their post-training differs; the same adapter and weight
+can produce different results. Adapters for unrelated models are not compatible.
+
+## Downloads and memory
+
 The **5B** name refers to the image transformer. A separate Qwen3.5-9B text
 encoder and a small Flux2-family decoder are also required. Transformer files are
 about 10.2 GB BF16 or 5.4 GB INT8; the encoder is about 15.9 GB BF16 or 9.0 GB
@@ -107,6 +121,12 @@ Targeted Python regressions (85 tests), layout utility tests, desktop/mobile
 browser flows, and the production UI build passed. Original system/service
 settings fingerprints and the active workspace were unchanged; Maestro was
 left running. Outputs are in workspace `MOSS-Image-Test-20261019`.
+
+LoRA follow-up checks use a tiny MOSS transformer and the real MMGP CPU adapter
+loader. Zero adapter weight matches the baseline; a nonzero scheduled weight
+changes the output for both CFG branches and both batch images. Supported key
+conversions and incompatible-shape rejection are covered as well. This verifies
+the adapter plumbing, rather than a trained adapter's artistic effect.
 
 BF16 transformer/encoder generation, LoRAs, and 8/12 GB GPU configurations have
 not yet been GPU-tested. This port's smoke tests do not establish numerical
