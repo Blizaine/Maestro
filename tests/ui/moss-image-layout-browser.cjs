@@ -93,6 +93,7 @@ function near(actual, expected, tolerance, message) {
       let box = await fieldBox()
       assert(box.every(Number.isInteger), `drawn coordinates should be integers: ${box}`)
       const beforeMove = box
+      await canvas.scrollIntoViewIfNeeded()
       const bounds = await canvas.boundingBox()
       const center = [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2]
       await drag(center, [center[0] + 24, center[1] + 32], bounds)
@@ -126,6 +127,22 @@ function near(actual, expected, tolerance, message) {
       assert.equal(saved.bbox_coord_space, 'abs_centralized')
       assert.equal(saved.bbox_format, 'yxyx')
       assert.equal(await dialog.count(), 0, 'saving closes the dialog')
+
+      await page.getByRole('button', { name: 'Prompt Helper' }).click()
+      await page.getByLabel('Canvas arrangement').selectOption('multi_panel')
+      await page.getByRole('button', { name: 'Add item' }).click()
+      await page.getByLabel('Item label').selectOption('character')
+      await page.getByLabel('Item caption').fill('An illustrator holding a brush.')
+      await page.getByRole('button', { name: 'Save prompt' }).click()
+      assert.equal(await dialog.count(), 0, 'character items can be saved')
+      const multiPanel = JSON.parse(await prompt())
+      assert.equal(multiPanel.summary.canvas, 'multi_panel')
+      assert.equal(multiPanel.items[1].label, 'character')
+      assert.equal(multiPanel.items[0].text, 'EXPLORE', 'changing arrangement retains existing text')
+      await page.getByRole('button', { name: 'Prompt Helper' }).click()
+      await page.getByLabel('Canvas arrangement').selectOption('collage')
+      await page.getByRole('button', { name: 'Save prompt' }).click()
+      assert.equal(JSON.parse(await prompt()).summary.canvas, 'collage')
 
       const fractional = JSON.stringify({
         summary: { meta: [], canvas: 'single', caption: 'Keep this scene.' },

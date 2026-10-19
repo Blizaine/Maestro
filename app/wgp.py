@@ -6808,7 +6808,11 @@ def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image
             seed = enhancer_seed,
             post_image_caption_hook = post_image_caption_hook,
             thinking_enabled = "K" in prompt_enhancer_mode,
+            literal_prompt = model_def.get("architecture") == "moss_image",
         )
+        if model_def.get("architecture") == "moss_image":
+            from services.moss_image_prompt import finalize_enhancement_output
+            prompts = [finalize_enhancement_output(prompt, resolution) for prompt in prompts]
         return prompts
 
 def enhance_prompt(state, prompt, prompt_enhancer, multi_images_gen_type, multi_prompts_gen_type, override_profile,  progress=gr.Progress()):

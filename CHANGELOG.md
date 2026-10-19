@@ -8,6 +8,9 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 Public Dev testing update. Main remains on v3.0.0. See the
 [v3.1.0 testing notes](docs/RELEASE_NOTES_V3.1.0.md).
 
+- Align MOSS enhancement with the official caption/layout guidance: compile
+  top-left pixel drafts in code, preserve literal text/comments and artist tags,
+  and add character, multi-panel and collage layout controls.
 - Support mixed-precision H3 checkpoint exports with retained FP32 I/O and
   compressed AdaLN weights, preserving their precision during loading. Missing
   SafeTensors QKV metadata now requests an explicit layout choice. Keep optional

@@ -79,6 +79,7 @@ class family_handler:
                 os.path.join(TEXT_FOLDER, name) for name in TEXT_ENCODER_FILES
             ]],
             "text_prompt_enhancer_instructions": CLASSIC,
+            "text_prompt_enhancer_max_tokens": 2048,
             "text_prompt_enhancer_instructions1": STRUCTURED,
             "text_prompt_enhancer_max_tokens1": 4096,
             "prompt_enhancer_def": {

@@ -20,3 +20,9 @@ https://huggingface.co/DeepBeepMeep/Moss/tree/0a508e986e920c8051b99df98d27329742
 WanGP integration portions retain the WanGP Community License 2.0 notices.
 Maestro's model-local runtime, attention, progress and tiled-decoding adapters
 allow this snapshot to run with the existing bundled shared interfaces.
+
+Prompt guidance and draft-export semantics reviewed against OpenMOSS revision:
+https://github.com/OpenMOSS/MOSS-Image/tree/95559c93ce9f85967de70435deefc1153a1a2fab/skills/moss-image-prompt-enhancer
+Maestro's in-process compiler applies the documented top-left-pixel draft to
+centered-pixel model-prompt conversion; existing compiled layouts retain their
+original dialect.

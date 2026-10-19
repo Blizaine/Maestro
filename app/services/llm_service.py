@@ -3810,11 +3810,12 @@ def enhance_prompt(
         )
     elif is_moss_image:
         system += (
-            "\n\nMOSS IMAGE OUTPUT CONTRACT: A caption stays a caption. A supplied or explicitly "
-            "requested layout stays one complete JSON object with summary, items, bbox_coord_space "
-            "and bbox_format. JSON keys and exact text fields are required model syntax. Preserve "
-            "all items, extra fields, exact lettering and valid centered-pixel boxes for the selected "
-            "canvas. No reference-image tokens, pixel masks, Markdown fences or explanations."
+            "\n\nMOSS IMAGE OUTPUT CONTRACT: A caption stays a caption. A NEW layout uses width, "
+            "height, summary, items, bbox_coord_space=abs and bbox_format=xyxy. Maestro compiles "
+            "top-left pixel boxes; do not manually center them. An EXISTING compiled layout keeps "
+            "abs_centralized/yxyx, all items, extra fields, exact lettering, comments and valid "
+            "centered-pixel boxes. JSON keys and exact text fields are required model syntax. "
+            "No reference-image tokens, pixel masks, Markdown fences or explanations."
         )
     else:
         system += "\n\nCRITICAL: Output ONLY the enhanced prompt text. No headers, no labels, no markdown, no explanation, no \"Enhancement Logic\", no \"Edit Prompt:\". No LoRA filenames or display names; exact creator-declared trainedWords tokens from active-LoRA guidance may appear when relevant. Just the raw prompt text."
@@ -3834,7 +3835,9 @@ def enhance_prompt(
         # A detailed imported brief needs answer space, not thousands of
         # reasoning tokens. Keep small prompts quick and longer rewrites whole.
         effective_max_tokens = max(effective_max_tokens, min(2048, max(768, len(prompt) // 3 + 256)))
-        if is_moss_image and prompt.lstrip().startswith(("{", "#")):
+        if is_moss_image:
+            # A brief poster request can produce a detailed layout too. This
+            # is an output ceiling, not a required length for simple captions.
             effective_max_tokens = max(effective_max_tokens, 4096)
     if window_count and window_count > 1:
         effective_max_tokens = max(max_new_tokens, window_count * 300 + 256)
@@ -3895,6 +3898,37 @@ def enhance_prompt(
         presence_penalty=0.1,   # encourage variety
     )
     result = repair_text(result)
+
+    if is_moss_image:
+        from services.moss_image_prompt import finalize_enhancement_output
+        from services.studio_enhancement import check_cancelled, fidelity_retry_limit
+
+        # Keep exact display strings and comments out of the prose cleaner.
+        # A single bounded repair can fix a truncated/invalid draft; never
+        # silently clip geometry or submit the draft coordinate dialect.
+        repair_limit = min(1, fidelity_retry_limit())
+        for attempt in range(repair_limit + 1):
+            try:
+                return finalize_enhancement_output(result, resolution)
+            except ValueError as error:
+                if attempt == repair_limit:
+                    raise ValueError(
+                        f"MOSS Image enhancement could not produce a valid prompt: {error} "
+                        "Your original prompt is unchanged. Review the layout in Prompt Helper or retry enhancement."
+                    ) from error
+                check_cancelled()
+                result = repair_text(generate(
+                    prompt=user_prompt + "\n\nPREVIOUS DRAFT TO REPAIR:\n" + str(result or '')
+                    + "\n\nVALIDATION ISSUE: " + str(error),
+                    system_prompt=system + "\nRepair only this draft's JSON/schema/canvas error. "
+                    "Preserve the original brief, all visible wording and intended composition. "
+                    "Return the complete corrected caption or layout, without explanations.",
+                    max_new_tokens=effective_max_tokens,
+                    temperature=min(float(temperature), 0.35),
+                    image_paths=None,
+                    enable_thinking=False,
+                    thinking_budget=0,
+                ))
 
     # Post-process ordinary prose aggressively, but preserve H3's required field
     # labels and media tags. The old substring-loop cleaner could truncate a

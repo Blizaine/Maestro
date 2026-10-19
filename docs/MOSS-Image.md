@@ -14,7 +14,7 @@ lighting and materials. Quote exact requested lettering. Prompt enhancement is
 optional and off by default; the enhancer follows MOSS's own caption/layout rules.
 
 **Prompt Helper** draws and edits boxes on the selected canvas. Add Object or
-Text items, describe each item, enter exact visible text, and save the result into
+Character or Text items, describe each item, enter exact visible text, and save the result into
 the prompt. Drag boxes to move them or use their edges/corners to resize. Boxes
 use `[ymin, xmin, ymax, xmax]` in pixels measured from the canvas center. For
 1024 × 1024, both axes run from -512 to 512; rectangular canvases use their actual
@@ -22,6 +22,59 @@ width and height. **Fit Boxes to Canvas** brings existing boxes inside the curre
 canvas while retaining their size where possible. Changing resolution does not
 silently rewrite the saved prompt. Extra JSON fields and `#` comment lines are
 preserved. Boxes guide composition, rather than providing exact pixel masks.
+Choose **Canvas arrangement → Single image, Multiple panels, or Collage** to
+describe the intended composition. This guides the model; it does not divide the
+canvas into exact pixel masks.
+
+## Getting the most from MOSS
+
+The [official Base user guide](https://github.com/OpenMOSS/MOSS-Image/blob/95559c93ce9f85967de70435deefc1153a1a2fab/USERGUIDE.md)
+recommends at least 50 steps, Euler, shift 5, about 1–2 megapixels, and guidance
+3–6. Maestro starts at guidance 3, which the guide says is generally sufficient
+for long prompts. Try increasing it within that range for a short prompt that
+misses details. Dimensions must be multiples of 16. These are starting points,
+rather than a guarantee that more steps or guidance improve every image.
+
+- Use **A Detailed Image Caption** for ordinary photographs and illustrations.
+  Describe subjects and their relationships, framing, materials, lighting and
+  intended style. Keep minimalist requests explicitly minimalist. The enhancer
+  uses English descriptions by default unless another output language is requested.
+- Use **An Image Layout with Bounding Boxes**, or ask the Studio enhancer for a
+  layout, when precise text placement, multiple panels or relative object
+  placement matters. Natural overlap and occlusion are allowed; a box does not
+  instruct MOSS to draw a border or sticker.
+- Supply exact visible words, punctuation, capitalization and line breaks. For
+  example: `A ceramic mug on an ivory background. Dark-green text on the right
+  reads "Take a moment" with "Make it yours" on the next line.` Text accuracy
+  remains model-dependent. Quote only intended display text, distinguishing it
+  from instructions or examples.
+- If using tags, the guide suggests quality, score, medium/meta, year, character,
+  series, artist, then general tags. Useful negative terms include `worst quality,
+  bad anatomy, watermark, jpeg artifact`. Maestro leaves the saved negative prompt
+  under your control; it does not silently add content exclusions.
+
+Maestro follows the official
+[prompt-enhancer skill](https://github.com/OpenMOSS/MOSS-Image/blob/95559c93ce9f85967de70435deefc1153a1a2fab/skills/moss-image-prompt-enhancer/SKILL.md)
+and [layout draft specification](https://github.com/OpenMOSS/MOSS-Image/blob/95559c93ce9f85967de70435deefc1153a1a2fab/skills/moss-image-prompt-enhancer/references/layout.md).
+New AI layout drafts use ordinary top-left pixel boxes; deterministic code checks
+the schema and selected dimensions, encloses fractional edges, and converts to the
+centered coordinates MOSS consumes. Width/height draft fields are removed before
+generation. Invalid boxes are rejected rather than clipped. Studio enhancement
+can make one repair attempt within the configured retry allowance. If it still
+fails, it leaves the original prompt unchanged and reports the problem.
+Existing compiled Prompt Helper layouts keep their centered format, extra fields,
+comments and exact strings. The classic enhancer also compiles new drafts before
+returning them and keeps literal `@` artist tags and email addresses in the prompt,
+instead of interpreting them as system-instruction separators. Caption enhancement
+preserves intentional style and counts and
+avoids fabricated dates, venues, prices, placeholders or unsolicited lettering.
+
+The current runtime already implements the recommended **two-pass negative-branch
+skip at layer 22** when guidance is enabled (CFG other than 1). It does not expose
+standard SLG or a selector for Off/22/24/26 yet. Those are potential quality
+experiments, not features supplied by this prompt-enhancer update. The guide's
+thinking-enabled VLM example is for captioning training images; it is separate
+from the frozen generation text encoder and Maestro's interactive enhancer.
 
 These releases are **text-to-image only**. They do not accept reference images,
 start/end frames, pixel masks, or audio. Use another image model for reference
@@ -131,3 +184,9 @@ the adapter plumbing, rather than a trained adapter's artistic effect.
 BF16 transformer/encoder generation, LoRAs, and 8/12 GB GPU configurations have
 not yet been GPU-tested. This port's smoke tests do not establish numerical
 parity with the official pipeline or quality across arbitrary prompts.
+
+The official-guide follow-up adds CPU coverage of draft compilation, rectangular
+geometry, exact multilingual text, invalid-layout repair and legacy-layout
+preservation, plus desktop/mobile checks for character and canvas-arrangement
+controls. These checks do not measure the quality of live LLM rewrites or new
+image generations; the existing GPU smoke tests above predate this follow-up.

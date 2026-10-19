@@ -277,9 +277,9 @@ export function MossImagePromptHelper() {
     }
     for (let index = 0; index < next.items.length; index++) {
       const item = next.items[index]
-      if (item.label !== 'text' && item.label !== 'object') {
+      if (!['text', 'object', 'character'].includes(item.label || '')) {
         selectItem(index, next)
-        setError(`Item ${index + 1}: choose Text or Object for its label.`)
+        setError(`Item ${index + 1}: choose Text, Object or Character for its label.`)
         return
       }
       if (!item.caption?.trim()) {
@@ -356,11 +356,18 @@ export function MossImagePromptHelper() {
             </div>
             <div className="min-w-0 space-y-2">
               <label className="block text-sm">Summary caption<textarea aria-label="Summary caption" value={layout.summary.caption} onChange={event => setLayout(value => ({ ...value, summary: { ...value.summary, caption: event.target.value } }))} className={fieldClass} rows={4} /></label>
+              <label className="block text-sm">Canvas arrangement<select aria-label="Canvas arrangement" value={layout.summary.canvas} onChange={event => {
+                const arrangement = event.currentTarget.value
+                setLayout(value => ({ ...value, summary: { ...value.summary, canvas: arrangement } }))
+              }} className={fieldClass}>
+                {!['single', 'multi_panel', 'collage'].includes(layout.summary.canvas) && <option value={layout.summary.canvas}>{layout.summary.canvas}</option>}
+                <option value="single">Single image</option><option value="multi_panel">Multiple panels</option><option value="collage">Collage</option>
+              </select></label>
               {current && <>
                 <label className="block text-sm">Label<select aria-label="Item label" value={current.label || ''} onChange={event => patchItem(selected, { label: event.target.value })} className={fieldClass}>
                   <option value="" disabled>Choose a label</option>
-                  {!['text', 'object', ''].includes(current.label || '') && <option value={current.label}>{current.label}</option>}
-                  <option value="object">Object</option><option value="text">Text</option>
+                  {!['text', 'object', 'character', ''].includes(current.label || '') && <option value={current.label}>{current.label}</option>}
+                  <option value="object">Object</option><option value="character">Character</option><option value="text">Text</option>
                 </select></label>
                 <label className="block text-sm">Item caption<textarea aria-label="Item caption" value={current.caption || ''} onChange={event => patchItem(selected, { caption: event.target.value })} className={fieldClass} rows={3} /></label>
                 {current.label === 'text' && <label className="block text-sm">Exact visible text<textarea aria-label="Exact visible text" value={current.text || ''} onChange={event => patchItem(selected, { text: event.target.value })} className={fieldClass} rows={2} /></label>}
