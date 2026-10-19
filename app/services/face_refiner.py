@@ -519,6 +519,10 @@ def process_video(source, destination, *, options=None, analysis_id=None, assign
                                 refined = refine_window(model, crop, refs[mapping["track_id"]],
                                     fps=geometry["fps"], audio=audio, audio_rate=rate, options=options,
                                     seed=int(seed) + mapping["track_id"] + start, abort=abort, progress=face_progress)
+                                if refined.is_inference():
+                                    # H3's uint8 frames are created under inference mode;
+                                    # blend_overlap below updates them in place.
+                                    refined = refined.clone()
                                 overlap = max(0, previous_stop - start)
                                 if overlap and previous_tail is not None:
                                     blend_overlap(previous_tail, refined, overlap)
