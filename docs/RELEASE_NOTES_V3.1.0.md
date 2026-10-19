@@ -39,6 +39,9 @@ This addresses [issue #185](https://github.com/Blizaine/Maestro/issues/185).
 ## FLUX 3 Klein LoRAs
 
 - Restore LoRAs & presets for both Distilled and Base.
+- Add a Flux 3 Klein Civitai browser filter covering Distilled and Base tags,
+  with automatic imports into their shared `flux3_klein` LoRA folder. Recognize the
+  official Hugging Face base-model metadata and Klein URL hints as well.
 - Load compatible native and supported Diffusers adapter targets, including
   fused QKV layouts, and apply multiplier schedules at each denoising step.
 - Keep incompatible targets subject to validation. FLUX 2 adapters are not

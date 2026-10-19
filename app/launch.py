@@ -3079,6 +3079,10 @@ CIVIT_TO_LOCAL_ARCH = {
     "Flux.2 Klein 9B-base": "flux2_klein_9b",
     "Flux.2 Klein 4B": "flux2_klein_4b",
     "Flux.2 Klein 4B-base": "flux2_klein_4b",
+    # CivitAI's exact LoRA-capable Flux 3 labels. Plain "Flux.3" is
+    # checkpoint-only on CivitAI; both Klein variants share the native handler.
+    "Flux.3 Klein": "flux3_klein",
+    "Flux.3 Klein-base": "flux3_klein",
     # LTX — CivitAI splits LTX 1 (LTXV), LTX-2 (LTXV2), and LTX-2.3
     # (LTXV 2.3) into distinct baseModel values. LTX-2 and LTX-2.3
     # share the ltx2 architecture on disk; LTX 1 has its own ltxv dir.
@@ -3177,6 +3181,8 @@ HF_BASE_TO_LOCAL_DIR = {
     "black-forest-labs/FLUX.1-dev": "flux",
     "black-forest-labs/FLUX.1-schnell": "flux",
     "black-forest-labs/FLUX.2-dev": "flux2_dev",
+    "black-forest-labs/flux-3-image-klein": "flux3_klein",
+    "black-forest-labs/flux-3-image-klein-base": "flux3_klein",
     "Freepik/flux.2-klein-guidance-9b": "flux2_klein_9b",
     "Freepik/flux.2-klein-guidance-4b": "flux2_klein_4b",
     "tencent/HunyuanVideo": "hunyuan",
@@ -3228,6 +3234,9 @@ CIVITAI_MODEL_FILTERS = [
     {"label": "Flux.2 Dev", "civitai_base": "Flux.2 D", "default_dir": "flux2"},
     {"label": "Flux.2 Klein 9B", "civitai_base": "Flux.2 Klein 9B,Flux.2 Klein 9B-base", "default_dir": "flux2_klein_9b"},
     {"label": "Flux.2 Klein 4B", "civitai_base": "Flux.2 Klein 4B,Flux.2 Klein 4B-base", "default_dir": "flux2_klein_4b"},
+    # CivitAI lists Flux.3 Klein and Flux.3 Klein-base separately; combine
+    # both LoRA-capable variants. Plain Flux.3 is checkpoint-only there.
+    {"label": "Flux.3 Klein", "civitai_base": "Flux.3 Klein,Flux.3 Klein-base", "default_dir": "flux3_klein"},
     {"label": "Qwen", "civitai_base": "Qwen", "default_dir": "qwen"},
     {"label": "Qwen Image 2.1", "civitai_base": "Qwen 2", "default_dir": "qwen21"},
     {"label": "Krea 2", "civitai_base": "Krea 2", "default_dir": "krea2"},

@@ -19,6 +19,8 @@ Public Dev testing update. Main remains on v3.0.0. See the
 - Enable compatible FLUX 3 Klein LoRAs for Distilled and Base, including
   native/Diffusers naming conversion and per-step multiplier schedules; restore
   the existing LoRAs & presets controls for these models.
+- Add the Flux 3 Klein Civitai browser filter for Distilled and Base tags and
+  route supported Civitai/Hugging Face LoRA imports to the shared `flux3_klein` folder.
 - Release Recast timeline tracking arrays before generation after their mask,
   reference and shot files are saved. Record SCAIL-2 placement/workload settings
   and actionable host-memory diagnostics without changing generation defaults.
