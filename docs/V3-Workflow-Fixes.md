@@ -28,7 +28,7 @@ For new prompts, keep ownership explicit:
 Use the Subject and Audio labels that belong to the intended character in your
 actual references. Existing unambiguous legacy prompts do not need manual edits.
 
-## Viggle Animate and Refine faces downloads
+## H3 VAE x2, Viggle Animate and Refine faces downloads
 
 Older releases pinned model assets to Hugging Face revisions that the upstream
 repository subsequently removed. This can produce a missing-revision or
@@ -36,6 +36,13 @@ file-not-found error on the first download. The corrected workflows use verified
 revision `630975da14fd3c84169d6cd5092da3ce1287d137` of
 [DeepBeepMeep/MiniMax-H3](https://huggingface.co/DeepBeepMeep/MiniMax-H3/tree/630975da14fd3c84169d6cd5092da3ce1287d137).
 Existing downloaded files are reused; deleting your model cache is unnecessary.
+
+The H3 VAE x2 option had a separate stale pin, so its selection-time download
+could still fail in early v3.1 Dev builds. Its checkpoint, license and notice
+now use that same verified revision. The checkpoint remains byte-identical to
+the original pinned asset; its size and SHA-256 verification are retained.
+Update Dev and restart Maestro before selecting H3 VAE x2 again. No Hugging Face
+account or manual model download is needed for these public files.
 
 Face Refiner also handles H3's newer 8-bit video output directly. Applying the
 older floating-point conversion to those pixels twice washed out refined faces.

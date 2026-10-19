@@ -39,10 +39,13 @@ Diffusers MiniMax H3 implementation at commit
 The optional learned 2x video decoder follows the MiniMax H3 X2 VAE integration
 in Wan2GP commit `6479db36bdc2619a904a852bba9c2d78e1a83f82`. Its INT8 ConvRot
 checkpoint is downloaded on demand from
-`DeepBeepMeep/MiniMax-H3@adc81ccb71352192214d83d5fafb9487e860be39`
+`DeepBeepMeep/MiniMax-H3@630975da14fd3c84169d6cd5092da3ce1287d137`
 (`minimax_h3/MiniMax-H3-X2-Detail-v1_int8_convrot.safetensors`, 2,834,844,787
 bytes, SHA-256
 `7ca1a1ad298e06e430da5c18bf721af4e0dcdf7f4ec7283391520bd0b6df7387`). The
+original `adc81ccb71352192214d83d5fafb9487e860be39` download revision now
+returns 404 for these files. The replacement revision preserves the same
+checkpoint bytes and companion license/notice files. The
 loader keeps the selected standard H3 VAE's encoder, quantization projection,
 and latent conditioning path, then loads only `decoder.*` from the X2 file. It
 filters the checkpoint's `detail_b32.*` branch because that path requires

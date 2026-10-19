@@ -176,7 +176,10 @@ class H3X2VaeRoutingTests(unittest.TestCase):
         x2_downloads = direct_handler.family_handler.query_model_files(
             [], "minimax_h3", model_def, VAE_upsampling="h3_vae*2"
         )
-        x2 = next(item for item in x2_downloads if item.get("revision") == vae_upsampler.X2_VAE_REVISION)
+        x2 = next(item for item in x2_downloads
+                  if item.get("repoId") == vae_upsampler.X2_VAE_REPO
+                  and item.get("revision") == vae_upsampler.X2_VAE_REVISION
+                  and any(vae_upsampler.X2_VAE_FILE in group for group in item.get("fileList", [])))
         self.assertEqual(x2["repoId"], vae_upsampler.X2_VAE_REPO)
         self.assertEqual(x2["fileList"], [[
             vae_upsampler.X2_VAE_FILE,

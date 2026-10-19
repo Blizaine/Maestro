@@ -77,10 +77,13 @@ This addresses [issue #185](https://github.com/Blizaine/Maestro/issues/185).
   are no longer mistaken for a different architecture. This does not enable
   unrelated or unverified quantization formats.
 
-## Viggle Animate and Refine faces
+## H3 VAE x2, Viggle Animate and Refine faces
 
 - Replace removed Hugging Face revision pins with a verified asset revision.
   Existing downloaded files are reused.
+- Repair the H3 VAE x2 selection download as well. The checkpoint, license and
+  notice now use the verified replacement revision; the checkpoint's original
+  byte size and SHA-256 checks remain unchanged.
 - Preserve H3's decoded 8-bit pixels during face refinement. The previous
   double conversion saturated those pixels and washed out facial features.
   Signed floating-point output remains supported with one conversion.

@@ -13,7 +13,8 @@ import os
 X2_VAE_METHOD = "h3_vae"
 X2_VAE_VALUE = "h3_vae*2"
 X2_VAE_REPO = "DeepBeepMeep/MiniMax-H3"
-X2_VAE_REVISION = "adc81ccb71352192214d83d5fafb9487e860be39"
+# The previous immutable pin stopped serving the checkpoint and its sidecars.
+X2_VAE_REVISION = "630975da14fd3c84169d6cd5092da3ce1287d137"
 X2_VAE_REPO_SUBFOLDER = "minimax_h3"
 X2_VAE_FILE = "MiniMax-H3-X2-Detail-v1_int8_convrot.safetensors"
 X2_VAE_LICENSE_FILE = "MiniMax-H3-X2-Detail-v1.LICENSE"

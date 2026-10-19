@@ -8,6 +8,9 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 Public Dev testing update. Main remains on v3.0.0. See the
 [v3.1.0 testing notes](docs/RELEASE_NOTES_V3.1.0.md).
 
+- Restore H3 VAE x2 downloads from a verified replacement Hugging Face
+  revision after the old file URLs started returning 404. Keep the same
+  checkpoint size/SHA-256 checks and reuse existing downloads.
 - Align MOSS enhancement with the official caption/layout guidance: compile
   top-left pixel drafts in code, preserve literal text/comments and artist tags,
   and add character, multi-panel and collage layout controls.

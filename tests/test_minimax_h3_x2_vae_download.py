@@ -20,6 +20,9 @@ from models.minimax_h3 import vae_upsampler  # noqa: E402
 
 
 _HANDLER_PATH = APP / "models" / "minimax_h3" / "minimax_h3_handler.py"
+EXPECTED_X2_VAE_REVISION = "630975da14fd3c84169d6cd5092da3ce1287d137"
+EXPECTED_X2_VAE_SIZE = 2_834_844_787
+EXPECTED_X2_VAE_SHA256 = "7ca1a1ad298e06e430da5c18bf721af4e0dcdf7f4ec7283391520bd0b6df7387"
 
 
 def _load_handler_module():
@@ -78,7 +81,22 @@ class H3X2VaeDownloadPathTests(unittest.TestCase):
             downloads = cls.handler.family_handler.query_model_files(
                 [], "minimax_h3", cls.model_def, VAE_upsampling=vae_upsampler.X2_VAE_VALUE
             )
-        return [item for item in downloads if item.get("repoId") == vae_upsampler.X2_VAE_REPO]
+        x2_files = {
+            vae_upsampler.X2_VAE_FILE,
+            vae_upsampler.X2_VAE_LICENSE_FILE,
+            vae_upsampler.X2_VAE_NOTICE_FILE,
+        }
+        return [
+            item for item in downloads
+            if item.get("repoId") == vae_upsampler.X2_VAE_REPO
+            and item.get("revision") == vae_upsampler.X2_VAE_REVISION
+            and item.get("sourceFolderList") == [vae_upsampler.X2_VAE_REPO_SUBFOLDER]
+            and x2_files.intersection(
+                filename
+                for file_group in item.get("fileList", [])
+                for filename in file_group
+            )
+        ]
 
     @staticmethod
     def _full_descriptor():
@@ -93,6 +111,22 @@ class H3X2VaeDownloadPathTests(unittest.TestCase):
                 vae_upsampler.X2_VAE_NOTICE_FILE,
             ]],
         }
+
+    def test_current_asset_pin_and_checkpoint_digest_are_locked(self):
+        self.assertEqual(vae_upsampler.X2_VAE_REVISION, EXPECTED_X2_VAE_REVISION)
+        self.assertEqual(vae_upsampler.X2_VAE_SIZE, EXPECTED_X2_VAE_SIZE)
+        self.assertEqual(vae_upsampler.X2_VAE_SHA256, EXPECTED_X2_VAE_SHA256)
+
+        with tempfile.TemporaryDirectory() as temp:
+            descriptors = self._x2_descriptors([Path(temp)])
+        self.assertEqual(len(descriptors), 1)
+        descriptor = descriptors[0]
+        self.assertEqual(descriptor["revision"], EXPECTED_X2_VAE_REVISION)
+        self.assertEqual(descriptor["fileList"], [[
+            vae_upsampler.X2_VAE_FILE,
+            vae_upsampler.X2_VAE_LICENSE_FILE,
+            vae_upsampler.X2_VAE_NOTICE_FILE,
+        ]])
 
     def test_first_download_uses_hugging_face_subfolder_and_resolver_finds_it(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -112,6 +146,18 @@ class H3X2VaeDownloadPathTests(unittest.TestCase):
             calls = _process_files_def(descriptor, root, [root])
             expected = root / "minimax_h3" / "vae" / vae_upsampler.X2_VAE_REPO_SUBFOLDER / vae_upsampler.X2_VAE_FILE
             self.assertEqual(len(calls), 3)
+            self.assertEqual(
+                {call["filename"] for call in calls},
+                {
+                    vae_upsampler.X2_VAE_FILE,
+                    vae_upsampler.X2_VAE_LICENSE_FILE,
+                    vae_upsampler.X2_VAE_NOTICE_FILE,
+                },
+            )
+            for call in calls:
+                self.assertEqual(call["repo_id"], vae_upsampler.X2_VAE_REPO)
+                self.assertEqual(call["revision"], EXPECTED_X2_VAE_REVISION)
+                self.assertEqual(call["subfolder"], vae_upsampler.X2_VAE_REPO_SUBFOLDER)
             self.assertTrue(expected.is_file())
             with mock.patch.object(vae_upsampler, "verify_x2_vae_checkpoint") as verify:
                 resolved = vae_upsampler.resolve_x2_vae_checkpoint("minimax_h3", [root])
