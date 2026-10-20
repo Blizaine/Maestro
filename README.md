@@ -6,11 +6,13 @@ A one-click local AI **creative studio, director, and video editor** for creator
 
 ## What it does
 
-- **FastH3 OmniRef 8-Step (experimental):** a separate community Ref2VA
-  checkpoint with ordered image, video and audio references, trained VSA-H3
-  attention and its native PDD sampler. Enable it in the References model
-  picker; begin at 480p / 5.2 seconds. Additional LoRAs and continuation are
-  unavailable. Consumer real-time performance remains unverified.
+- **FastH3 OmniRef 8-Step (experimental):** official FastVideo Comfy releases
+  with ordered image, video and audio references, trained VSA-H3 attention
+  and native PDD sampling. BF16, INT8 ConvRot and FP8 are available; the
+  separately enabled QAD NVFP4 model requires supported Blackwell hardware
+  and a native kernel. Begin at 480p / 5.2 seconds. Additional LoRAs and
+  continuation are unavailable. [Formats, hardware and validation](docs/FastH3.md).
+  Consumer real-time performance remains unverified.
 
 - **FastH3 V2 8-Step (experimental):** text-to-video with generated audio,
   using its trained VSA-H3 attention and fixed eight-step recipe. Enable it

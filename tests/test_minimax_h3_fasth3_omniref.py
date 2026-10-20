@@ -1,7 +1,10 @@
 """FastH3 OmniRef must use its own PDD integration and conditioning contract."""
 import json
+import ast
+import os
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 
 import torch
@@ -95,6 +98,32 @@ class OmniRefTests(unittest.TestCase):
         self.assertEqual(options['minimax_h3_video_shift'], 12)
         with self.assertRaises(ValueError):
             family_handler.query_model_def('minimax_h3', model)
+
+    def test_official_formats_and_qad_use_the_real_filename_selector(self):
+        standard = json.loads((ROOT / 'app/defaults/minimax_h3_fasth3_omniref.json').read_text())['model']
+        qad = json.loads((ROOT / 'app/defaults/minimax_h3_fasth3_omniref_nvfp4.json').read_text())['model']
+        source = ast.parse((ROOT / 'app/wgp.py').read_text(encoding='utf-8'))
+        node = next(item for item in source.body if isinstance(item, ast.FunctionDef)
+                    and item.name == 'get_model_filename')
+        scope = {'os': os, 'torch': torch, 'models_def': {'standard': standard, 'qad': qad},
+                 'get_transformer_dtype': lambda *_: torch.bfloat16,
+                 'quant_router': SimpleNamespace(get_quantization_tokens=lambda quant: [quant])}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), 'wgp.py', 'exec'), scope)
+        select = scope['get_model_filename']
+        for precision, suffix in (('bf16', 'pruned_bf16.safetensors'),
+                                  ('int8', 'pruned_int8_convrot.safetensors'),
+                                  ('fp8', 'fp8_comfy.safetensors')):
+            with self.subTest(precision=precision):
+                chosen = select('standard', quantization=precision)
+                self.assertTrue(chosen.endswith(suffix), chosen)
+                self.assertNotIn('nvfp4', chosen)
+                self.assertTrue(select('qad', quantization=precision).endswith('qad_nvfp4_comfy.safetensors'))
+        self.assertEqual(qad['source_size_bytes'], 13773998700)
+        self.assertTrue(qad['minimax_h3_fasth3_omniref'])
+        options = family_handler.query_model_def('minimax_h3_ref2va', qad)
+        self.assertTrue(options['omni_reference'])
+        self.assertFalse(options['sliding_window'])
+        self.assertFalse(options['sla_attention'])
 
     def test_request_keeps_ordered_refs_but_locks_recipe_and_rejects_unsupported_routes(self):
         refs = [{'type': 'image', 'path': 'character.png'}, {'type': 'video', 'path': 'motion.mp4'},

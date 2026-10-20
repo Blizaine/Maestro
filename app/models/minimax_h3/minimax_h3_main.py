@@ -976,21 +976,29 @@ def _load_transformer(
     fasth3: bool = False,
     fasth3_omniref: bool = False,
 ) -> MiniMaxH3Transformer:
-    checkpoint = probe_h3_checkpoint(_first_path(filename))
     from .turbo import safetensors_header
     header = safetensors_header(_first_path(filename))
     gates = [key for key in header if key.endswith(".attn.to_gate_compress.weight")]
+    omni_variant = None
     if gates and not fasth3:
         raise ValueError("This H3 checkpoint requires trained VSA-H3 attention. Select the dedicated FastH3 model; ordinary H3 cannot discard its compression gates.")
     if fasth3:
         if fasth3_omniref:
-            from .fasth3_omniref import verify_checkpoint
-            verify_checkpoint(_first_path(filename), header)
+            from .fasth3_omniref import (
+                checkpoint_variant_from_size,
+                require_nvfp4_kernel_support,
+                verify_checkpoint,
+            )
+            candidate_variant = checkpoint_variant_from_size(_first_path(filename))
+            if candidate_variant == "nvfp4":
+                require_nvfp4_kernel_support(torch.device("cuda"))
+            omni_variant = verify_checkpoint(_first_path(filename), header)
         else:
             from .fasth3 import verify_fasth3_checkpoint
             verify_fasth3_checkpoint(_first_path(filename))
-        if len(gates) != 50 or any(header.get(f"blocks.{i}.attn.to_gate_compress.weight", {}).get("shape") != [7168, 5376] for i in range(50)):
+        if not fasth3_omniref and (len(gates) != 50 or any(header.get(f"blocks.{i}.attn.to_gate_compress.weight", {}).get("shape") != [7168, 5376] for i in range(50))):
             raise ValueError("FastH3 V2 requires all 50 trained compression-gate projections.")
+    checkpoint = probe_h3_checkpoint(_first_path(filename))
     qkv_layout = str(qkv_layout or "contiguous").strip().lower()
     if qkv_layout not in {"contiguous", "grouped", "interleaved"}:
         raise ValueError(f"Unsupported MiniMax H3 QKV layout {qkv_layout!r}")
@@ -1059,15 +1067,20 @@ def _load_transformer(
     # ConvRot checkpoints use WanGP's proven independent-projection path. The
     # custom INT8 handler splits their quantized data and row scales as three
     # contiguous [Q, K, V] groups; older BF16/full definitions can still ask
-    # for the head-interleaved split explicitly.
+    # for the head-interleaved split explicitly. Official OmniRef FP8 and NVFP4
+    # use one per-tensor scale for fused QKV and deliberately stay fused even
+    # though their metadata has no legacy quantization_format marker.
     split_map = None
-    scaled_fp8_grouped = checkpoint.get("quantization_format") == "scaled_fp8" and qkv_layout == "grouped"
+    keep_fused_grouped_qkv = (
+        checkpoint.get("quantization_format") == "scaled_fp8"
+        or (fasth3_omniref and omni_variant in {"fp8", "nvfp4"})
+    ) and qkv_layout == "grouped"
     # GGUF stores packed blocks whose byte shape differs from logical rows.
     # Keep fused QKV/MLP weights, as WanGP does, and interpret their verified
     # grouped/interleaved row order in the transformer forward pass.
     filenames = filename if isinstance(filename, (list, tuple)) else [filename]
     gguf_checkpoint = any(str(path).lower().endswith(".gguf") for path in filenames)
-    if qkv_layout in {"grouped", "interleaved"} and not scaled_fp8_grouped and not gguf_checkpoint:
+    if qkv_layout in {"grouped", "interleaved"} and not keep_fused_grouped_qkv and not gguf_checkpoint:
         split_map = get_linear_split_map(
             inner_size,
             interleaved=qkv_layout == "interleaved",

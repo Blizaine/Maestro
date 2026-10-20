@@ -34,25 +34,58 @@ documented training support is not a benchmark of Maestro output quality.
 
 OmniRef PDD is a separate model/recipe with 32 output heads, eight PDD blocks,
 90% sparsity and 128-token tiles. The official documented weight repository was
-not publicly readable during review on 20 October 2026. The newly available
-community conversion is exposed separately as described below.
-The published early real-time demo used eight B200 GPUs. Neither that result
-nor consumer-GPU launch profiles establish real-time performance on a 4090,
+not publicly readable during the initial review on 20 October 2026. It became
+public later that day; the official formats are described below.
+The published early real-time demo used eight B200 GPUs; the later OmniRef
+release benchmarks report 5.6–11.9× end-to-end gains on eight GB200 GPUs.
+Neither those results nor consumer-GPU launch profiles establish real-time performance on a 4090,
 3080 Ti or 8 GB laptop.
 
-## FastH3 OmniRef (experimental community conversion)
+## FastH3 OmniRef (experimental official Comfy formats)
 
-`minimax_h3_fasth3_omniref` pins the public community upload
+The initial `minimax_h3_fasth3_omniref` integration pinned the community upload
 [`lrigamai/FastH3-OmniRef-Comfy`](https://huggingface.co/lrigamai/FastH3-OmniRef-Comfy)
 at `0d2c00a333ab1393d3ff18a008d7d9eda5536f11`, file
 `diffusion_models/fasth3_omniref_8step_pruned_int8_convrot.safetensors`,
 22,213,723,064 bytes, SHA-256
 `851b2dc9670ed864b7f1e951ac9da047d83b1c04ded9bfcc1a9e5bba0ee33f80`.
-It has no model card or exported inference sidecar. Its safetensors header
+That upload had no model card or exported inference sidecar. Its safetensors header
 identifies `source=transformer_ref`, `config.transformer.pdd_steps=32`,
 FP32 output banks (video 3072×5376, audio 1024×5376) and all 50 learned
 compression gates. This establishes the structural PDD Ref2VA contract,
-not provenance/quality parity with an unavailable official export.
+not provenance/quality parity with an unavailable official export at that time.
+
+The official `FastVideo/FastH3-Omni-Comfy` release is now public at
+`c6e7d1f212c44b21227bbd6e76bfff7da70e285d`. Its INT8 file has exactly the same
+size and LFS SHA-256 as that community download, so Maestro now uses the official
+source while reusing existing cached bytes. The same release's BF16 file is
+44,240,780,704 bytes, SHA-256
+`c0fac98c0317eb85215bd186b250be9b113675baab1323add40f26262f552ed9`.
+Its source contract records Ref2VA, eight forwards, shifts 12/3, .999 grid,
+32 PDD heads, VSA .9/tile128 and p2 multi-region reference routing. Header
+geometry retains rank-8 AdaLN and FP32 residual PDD heads.
+
+The additional official Comfy exports are pinned independently:
+
+- `FastVideo/FastH3-Omni-FP8-Comfy@03127300d4803d5b66df66a22208b1d9238c8588`,
+  `fasth3_omniref_fp8_comfy.safetensors`, 23,046,497,628 bytes, SHA-256
+  `d3aa751e151df957b6248db7dbe4a159549dfefe78ba884056b12b0425b019f3`.
+- `FastVideo/FastH3-Omni-NVFP4-QAD-Comfy@e1f39b9187e3e4059b7507e0a62fa22621ff77a5`,
+  `fasth3_omniref_qad_nvfp4_comfy.safetensors`, 13,773,998,700 bytes, SHA-256
+  `bf25ee58df65b4dfee349d612f7ac62a2fea0dddd1e68eb37e75c8ce8b166f5a`.
+
+Their published quantization receipts describe **new native Comfy per-tensor
+requantizations** with fused QKV. They must not be confused with a byte-preserving
+repack of FastVideo's original per-row FP8 or independently scaled Q/K/V NVFP4.
+The NVFP4 variant is QAD-trained and separately selectable. Header inspection
+confirms U8 half-width packed weights, group-16 FP8 scales and a scalar second
+scale. These use the existing MMGP native quantization handlers. All formats
+retain source FP32 output banks; Maestro does not silently quantize those heads.
+The trained sparse routing still uses Maestro's BF16/FP16 VSA kernel rather than
+FastVideo's Blackwell FP4 attention/decoder stack. See [usage and hardware
+limits](../../../docs/FastH3.md) for the distinction between model-format support
+and measured performance. Conversion tools bundled in those repositories were
+read as evidence only and are not vendored or executed by Maestro.
 
 The native recipe follows the pinned FastVideo source above, particularly
 `fastvideo/layers/pdd.py`, `docs/inference/fasth3-distilled.md` and
@@ -103,6 +136,27 @@ Stills and decoding cannot certify continuous motion, voice/sound-reference
 fidelity or exact identity preservation. No 8/12 GB generation or real-time
 performance was established. Existing H3 duration recommendations remain
 unchanged; this experimental model does not inherit their benchmark tiers.
+
+### Official-format checks (20 October 2026, after public release)
+
+The four public checkpoint headers and LFS size/SHA pins were fetched with
+bounded HTTP requests. Actual header contracts and schemas were inspected,
+including fused QKV, all 50 compression gates, FP32 output banks and rank-8
+AdaLN. No full BF16, FP8 or NVFP4 model was downloaded for this check.
+The integrated CPU pass covered 50 recipe, pin, metadata, geometry, format
+selection, attention, quantization, AdaLN and split/fused loader regressions
+(two optional CUDA attention tests skipped in that pass).
+
+Separate real-format checks copied only the first FP8 and NVFP4 compression
+gate, then loaded it through the installed MMGP runtime on an RTX 5070 Laptop
+GPU, SM120. FP8 loaded `ScaledFP8WeightTensor`; NVFP4 loaded
+`NVFP4WeightTensor` and executed the lightx2v native kernel. Its comparison
+with quantized-input/dequantized-weight math measured maximum absolute error
+0.0009765625 and mean absolute error 0.0000587. Preferences and running Maestro
+were preserved. The first private test omitted the application startup's
+quantization-handler registration and failed before NVFP4 execution; that
+test setup was corrected. These checks do not certify complete generation,
+reference fidelity or 5090 throughput for the new variants.
 
 ### Separate T2AV V2 validation
 
