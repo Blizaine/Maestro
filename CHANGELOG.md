@@ -5,8 +5,8 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [3.1.0] - 2026-10-19
 
-Public Dev testing update. Main remains on v3.0.0. See the
-[v3.1.0 testing notes](docs/RELEASE_NOTES_V3.1.0.md).
+Public Main and Dev release. See the
+[v3.1.0 release notes](docs/RELEASE_NOTES_V3.1.0.md).
 
 - Restore H3 VAE x2 downloads from a verified replacement Hugging Face
   revision after the old file URLs started returning 404. Keep the same

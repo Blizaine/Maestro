@@ -1,7 +1,6 @@
-# Maestro v3.1.0 — Dev testing
+# Maestro v3.1.0
 
-19 October 2026. This update is for the public **Dev** branch. Main remains on
-v3.0.0 while the new features and fixes receive wider testing.
+19 October 2026. Available on public **Main and Dev**, following Dev testing.
 
 ## MOSS Image 5B
 
@@ -9,8 +8,14 @@ v3.0.0 while the new features and fixes receive wider testing.
   in the enabled model list; Base is available through Manage models. Existing
   model selections and visibility preferences are retained.
 - Generate from captions, tags or structured layouts. The visual Prompt Helper
-  supports object and text boxes, canvas-aware coordinates and exact lettering.
-  Dedicated prompt enhancement preserves the layout and selected canvas.
+  supports object, character and text boxes, canvas-aware coordinates and exact
+  lettering, with single-image, multi-panel and collage arrangements.
+- Align enhancement with the official MOSS guidance: preserve minimalist intent,
+  counts, style and exact visible words; compile new top-left-pixel layout drafts
+  into centered model coordinates in code. Validate the selected canvas and boxes
+  without silently clipping. Keep existing compiled layouts, extra fields and
+  comments intact. Classic enhancement also preserves literal artist tags and
+  email addresses rather than interpreting `@` as an instruction separator.
 - Public, pinned BF16 and INT8 ConvRot downloads use Maestro's normal model
   management and offloading. No Hugging Face login is required.
 - These checkpoints use 50 steps by default and support text/layout generation;
@@ -104,9 +109,9 @@ See the [workflow troubleshooting notes](V3-Workflow-Fixes.md).
 
 ## Updating and testing
 
-1. Use **Update** on your Dev installation in Pinokio while Maestro is idle.
+1. Use **Update** on your Main or Dev installation in Pinokio while Maestro is idle.
 2. Restart Maestro, refresh the browser and check that the UI shows **v3.1.0**.
-3. Try your existing reference-dialogue prompts, FLUX 3 adapters, Viggle and
+3. Try your existing reference-dialogue prompts, adapters, H3 VAE x2, Viggle and
    Refine faces workflows. MOSS downloads its required components when selected.
 4. Include saved settings, GPU/RAM details and the console error or workload
    summary with a bug report.
@@ -137,6 +142,16 @@ reported community file headers and bounded quantization markers passed
 verification; the BF16 export requires explicit QKV layout selection. Full
 generation with these newly admitted files and arbitrary Turbo adapters remains
 untested.
+
+The MOSS official-guide follow-up passed 42 CPU regressions, desktop/mobile
+layout-browser checks, frontend lint and the production build. Live LLM quality
+and new image quality were not measured by those CPU checks. The H3 VAE x2
+download follow-up verified all three replacement URLs and passed 34 related
+CPU regressions; the checkpoint size and SHA-256 remain unchanged.
+
+The final runtime commit passed the complete public CI suite before release.
+Publication changes the release documentation only; the validated runtime is
+unchanged.
 
 Workstation 01 (RTX 4090 / 24 GB VRAM / 128 GB RAM) completed normal-API MOSS
 Base/SFT caption, layout and batch smoke tests, a Viggle video, compatible
