@@ -25,7 +25,8 @@ A one-click local AI **creative studio, director, and video editor** for creator
 
 - **Qwen Image 2.1 7B and official Turbo:** unified image generation and editing
   with up to ten references, dedicated prompt enhancement and transparent PNG
-  output. Turbo uses its published eight-step recipe, with BF16 or INT8 downloads.
+  output. Context-aware VAE tiles reduce boundary lines and single-image decode
+  memory. Turbo uses its published eight-step recipe, with BF16 or INT8 downloads.
   Research/evaluation license; commercial use requires a separate Qwen license.
   [Usage and model details](docs/Qwen-Image-2.1.md).
 

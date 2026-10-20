@@ -3851,7 +3851,31 @@ def get_compatible_local_model_filename(
     
 
 
-def process_files_def(repoId = None, sourceFolderList = None, fileList = None, targetFolderList = None, revision = None):
+def process_files_def(repoId = None, sourceFolderList = None, fileList = None, targetFolderList = None, revision = None, fileNameMap = None):
+    # Some publishers retain compatible processor exports under *_legacy
+    # names. Keep the local canonical names so existing caches and model
+    # loaders work unchanged, while downloading the explicitly named export.
+    file_name_map = {} if fileNameMap is None else fileNameMap
+    if not isinstance(file_name_map, dict):
+        raise ValueError("fileNameMap must map local filenames to remote filenames")
+    for local_name, remote_name in file_name_map.items():
+        if any(not isinstance(name, str) or not name or name in (".", "..")
+               or "/" in name or "\\" in name or ":" in name
+               for name in (local_name, remote_name)):
+            raise ValueError("fileNameMap entries must be plain filenames")
+
+    def download_file(onefile, local_dir, source_folder):
+        remote_name = file_name_map.get(onefile, onefile)
+        kwargs = dict(repo_id=repoId, revision=revision, filename=remote_name, local_dir=local_dir)
+        if source_folder:
+            kwargs["subfolder"] = source_folder
+        downloaded = hf_download_with_public_fallback(**kwargs)
+        if remote_name != onefile:
+            destination = os.path.join(local_dir, source_folder, onefile) if source_folder else os.path.join(local_dir, onefile)
+            # Move only after a successful complete download; never create a
+            # canonical placeholder which could hide a failed first install.
+            os.replace(downloaded, destination)
+
     if targetFolderList is None:
         targetFolderList = [None] * len(sourceFolderList)
     for targetFolder, sourceFolder, files in zip(targetFolderList, sourceFolderList,fileList ):
@@ -3899,30 +3923,11 @@ def process_files_def(repoId = None, sourceFolderList = None, fileList = None, t
                 if complete_root is None or target_partial:
                     for onefile, rel_key in zip(files, rel_keys):
                         if not os.path.isfile(os.path.join(targetRoot, rel_key)):
-                            if len(sourceFolder) > 0:
-                                hf_download_with_public_fallback(
-                                    repo_id=repoId,
-                                    revision=revision,
-                                    filename=onefile,
-                                    local_dir=local_dir,
-                                    subfolder=sourceFolder,
-                                )
-                            else:
-                                hf_download_with_public_fallback(
-                                    repo_id=repoId,
-                                    revision=revision,
-                                    filename=onefile,
-                                    local_dir=local_dir,
-                                )
+                            download_file(onefile, local_dir, sourceFolder)
             else:
                 for onefile in files:
                     if fl.locate_file(onefile, error_if_none= False) is None:
-                        hf_download_with_public_fallback(
-                            repo_id=repoId,
-                            revision=revision,
-                            filename=onefile,
-                            local_dir=local_dir,
-                        )
+                        download_file(onefile, local_dir, "")
 
 
 def download_mmaudio(variant_override=None):
