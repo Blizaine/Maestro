@@ -5,6 +5,7 @@ export const H3_EXPERIMENTAL_MAX_FRAMES = 719
 
 export function supportsH3ExtendedDuration(options?: ModelOptions | null): boolean {
   return !!options && !options.audio_only && options.model_type !== 'viggle_animate'
+    && !options.minimax_h3_fasth3
     && String(options.architecture || '').startsWith('minimax_h3')
 }
 

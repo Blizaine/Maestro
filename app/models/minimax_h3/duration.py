@@ -13,6 +13,7 @@ def h3_duration_model_def(model_def: dict, inputs: dict) -> dict:
         or not str(model_def.get("architecture") or "").startswith("minimax_h3")
         or model_def.get("audio_only")
         or model_def.get("minimax_h3_viggle")
+        or model_def.get("minimax_h3_fasth3")
     ):
         return model_def
     return {

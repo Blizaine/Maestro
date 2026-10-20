@@ -1,5 +1,59 @@
 # MiniMax H3 upstream components
 
+## FastH3 V2 (experimental text-to-audio/video)
+
+The optional `minimax_h3_fasth3` definition uses FastVideo's Comfy repack at
+`FastVideo/FastVideo-FastH3-Comfy@ec1e3aa374a91c57b0b94a1623b7e657c0498cf2`:
+`fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors`, 22,128,378,696 bytes,
+SHA-256 `0922785978dc9bfe1adf27d8b291b0ca763f9f165f882e6cb297c72fbb6deda8`.
+Weights download on demand and are checked before allocation. Shared H3
+conditioning and VAE components retain their existing immutable sources.
+
+Its sampling contract is `FastVideo/FastVideo-FastH3-8-Step-V2` revision
+`3da2ddfe1954d9cda4c05b643dc0f26007a655c5`, `fastvideo_inference.json`:
+T2AV only, no CFG, eight Euler forwards from unshifted noise rungs
+`999,874,749,624,500,375,250,125` divided by 1000, shifted once with video/audio
+10/3, followed by terminal zero. Nine grid points are eight forwards. The
+uniform H3 schedule, RES, Turbo/PDD adapters and First Block Cache are excluded.
+
+The native VSA policy follows Apache-2.0 FastVideo source at
+`hao-ai-lab/FastVideo@d4f144581d6882d5bceb288ca13d767c054ca041`, particularly
+`fastvideo/attention/backends/video_sparse_attn_h3.py` and
+`fastvideo/models/dits/minimax_h3.py`. It preserves segment-pure text/audio
+prefix tiles, generated-video 4×4×4 tiles, true partial-tile counts, 80% sparse
+video top-k, dense prefix queries and exempt prefix keys. Dense pooled-tile
+attention is multiplied by the raw trained compression projection and added
+to fine attention. All 50 gate projections are loaded through MMGP; this is
+not SLA or Veda and must never fall back to an ordinary H3 path.
+
+Grouped QKV packing was independently checked with bounded HTTP range reads:
+27 BF16 rows across Q/K/V and blocks 0/25/49 matched the original split
+FastVideo tensors byte for byte. The INT8 file uses the same author's Comfy
+ConvRot conversion convention. Native kernels and integration are experimental;
+documented training support is not a benchmark of Maestro output quality.
+
+OmniRef PDD is a separate model/recipe with 32 output heads, eight PDD blocks,
+90% sparsity and 128-token tiles. Its documented weight repository was not
+publicly readable during review on 20 October 2026; it is not exposed here.
+The published early real-time demo used eight B200 GPUs. Neither that result
+nor consumer-GPU launch profiles establish real-time performance on a 4090,
+3080 Ti or 8 GB laptop.
+
+Validation on 20 October 2026: CPU recipe, input/capability, projection and
+duration regressions passed, as did a small FP16/BF16 CUDA comparison against
+the explicit attention oracle. A corrected full-prompt smoke render on an
+RTX 4090 (24 GB; 128 GB system RAM; Windows; PyTorch 2.10/CUDA 13; Triton 3.6)
+produced and fully decoded 124 frames at 864×480/24 fps plus audio, seed 424242,
+eight Euler forwards, Q2_K encoder, full INT8 VAE and Auto-tune Profile 2.
+It took about 50 seconds in denoising and 63 seconds of active generation;
+the cold job including loading took 122 seconds. Sampled device-wide peak
+VRAM was 12.63 GiB with an 8 GiB transformer allowance; this is not a minimum
+VRAM requirement. Five representative stills showed a coherent traveler,
+camera arc and birds; continuous motion and speech fidelity were not certified.
+An earlier diagnostic exposed generic line splitting, which was fixed by
+preserving the complete structured prompt as one native request. These are
+smoke checks, not comparative performance or lower-memory benchmarks.
+
 Viggle Animate adapts Wan2GP v12.72 at
 `057f9ecab9ad57dfbec9768b2daf7a4426ce986c`: fixed prompt conditioning,
 video-then-edited-image reference ordering, target-only control slicing after

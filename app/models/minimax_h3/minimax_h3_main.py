@@ -973,8 +973,19 @@ def _load_transformer(
     dasiwa: bool = False,
     import_profile: dict | None = None,
     veda_filename: str | None = None,
+    fasth3: bool = False,
 ) -> MiniMaxH3Transformer:
     checkpoint = probe_h3_checkpoint(_first_path(filename))
+    from .turbo import safetensors_header
+    header = safetensors_header(_first_path(filename))
+    gates = [key for key in header if key.endswith(".attn.to_gate_compress.weight")]
+    if gates and not fasth3:
+        raise ValueError("This H3 checkpoint requires trained VSA-H3 attention. Select the dedicated FastH3 model; ordinary H3 cannot discard its compression gates.")
+    if fasth3:
+        from .fasth3 import verify_fasth3_checkpoint
+        verify_fasth3_checkpoint(_first_path(filename))
+        if len(gates) != 50 or any(header.get(f"blocks.{i}.attn.to_gate_compress.weight", {}).get("shape") != [7168, 5376] for i in range(50)):
+            raise ValueError("FastH3 V2 requires all 50 trained compression-gate projections.")
     qkv_layout = str(qkv_layout or "contiguous").strip().lower()
     if qkv_layout not in {"contiguous", "grouped", "interleaved"}:
         raise ValueError(f"Unsupported MiniMax H3 QKV layout {qkv_layout!r}")
@@ -1017,6 +1028,12 @@ def _load_transformer(
             sla_config=sla_config,
             vdn=vdn,
         )
+        if fasth3:
+            from .fasth3_attention import FastH3Attention
+            transformer.fasth3_attention = FastH3Attention()
+            for block in transformer.blocks:
+                block.attn.fasth3_attention = transformer.fasth3_attention
+                block.attn.to_gate_compress = torch.nn.Linear(5376, 7168, bias=False, dtype=dtype)
         _lock_fp32_adaln_modules(
             transformer,
             checkpoint.get("fp32_adaln_modules", ()),
@@ -1399,6 +1416,12 @@ class MiniMaxH3Model:
             model_def.get("minimax_h3_video_vae_variant") or "auto"
         )
         self.veda = bool(minimax_h3_veda)
+        self.fasth3 = bool(model_def.get("minimax_h3_fasth3"))
+        if self.fasth3 and (self.veda or model_def.get("omni_reference") or model_def.get("vdn")):
+            raise ValueError("FastH3 V2 is a separate T2AV model with mandatory VSA-H3 attention.")
+        if self.fasth3:
+            from .fasth3_attention import FastH3Attention
+            FastH3Attention.require_supported(self.device, dtype)
         if self.veda and (not model_def.get("veda_attention") or dtype != torch.bfloat16):
             raise ValueError("Experimental H3 Veda requires a Veda-capable H3 model with BF16 activations.")
         self.assets_root = model_def.get("minimax_h3_assets_root", "minimax_h3")
@@ -1431,6 +1454,8 @@ class MiniMaxH3Model:
         self.sample_solver = str(
             model_def.get("minimax_h3_sampler") or "euler"
         ).strip().lower()
+        if self.fasth3:
+            self.sample_solver = "euler"
 
         transformer_path = _first_path(model_filename)
         if not transformer_path:
@@ -1493,6 +1518,7 @@ class MiniMaxH3Model:
             dasiwa=self.dasiwa,
             import_profile=model_def.get("minimax_h3_import_profile"),
             veda_filename=veda_filename,
+            fasth3=self.fasth3,
         )
         from .viggle import load_conditioner
         self.conditioner = load_conditioner() if self.viggle else _load_conditioner(
@@ -1527,6 +1553,8 @@ class MiniMaxH3Model:
         # A retained model can be reused across jobs. Always restore its
         # ordinary heads before inspecting the next job's adapter selection.
         self.release_special_loras()
+        if getattr(self, "fasth3", False) and loras_selected:
+            raise ValueError("FastH3 V2 does not support additional LoRAs.")
         if getattr(self, "_fused_turbo", False):
             validate_fused_h3_loras(loras_selected)
         if getattr(self, "_baked_turbo", False):
@@ -2045,6 +2073,22 @@ class MiniMaxH3Model:
             self._interrupt = False
         if not isinstance(input_prompt, str):
             raise ValueError("MiniMax H3 accepts one text prompt per generation.")
+        if getattr(self, "fasth3", False):
+            from .fasth3 import validate_fasth3_request
+            validate_fasth3_request({
+                "sampling_steps": sampling_steps, "frame_num": frame_num,
+                "image_start": image_start, "image_end": image_end, "input_frames": input_frames,
+                "input_ref_images": input_ref_images, "input_masks": input_masks,
+                "input_video": input_video, "input_waveform": input_waveform,
+                "minimax_h3_references": minimax_h3_references,
+                "prefix_frames_count": prefix_frames_count, "window_start_frame_no": window_start_frame_no,
+                "frames_to_inject": frames_to_inject, "audio_guide": audio_guide,
+                "audio_guide2": audio_guide2, "audio_prompt_type": audio_prompt_type,
+                "video_prompt_type": video_prompt_type, "denoising_strength": denoising_strength,
+                "custom_settings": custom_settings,
+            })
+            if _face_refinement is not None:
+                raise ValueError("FastH3 V2 does not support H3 face refinement.")
         if self.audio_only and not _audio_segment:
             from .dialogue import generate_audio
             return generate_audio(
@@ -2860,6 +2904,12 @@ class MiniMaxH3Model:
         self.scheduler.set_solver(self.sample_solver)
         self.scheduler.set_timesteps(scheduler_points, device=self.device)
         self.audio_scheduler.set_timesteps(scheduler_points, device=self.device)
+        if getattr(self, "fasth3", False):
+            from .fasth3 import fasth3_sigmas
+            self.scheduler.set_solver("euler")
+            self.scheduler.set_timesteps(sigmas=fasth3_sigmas(10.0), device=self.device)
+            self.audio_scheduler.set_timesteps(sigmas=fasth3_sigmas(3.0), device=self.device)
+            print("[FastH3] V2 T2AV: 8 DMD forwards, Euler, shifts 10/3; required VSA-H3 80%, tiles 4×4×4; learned compression gates active.")
         if _face_refinement is not None:
             from postprocessing.h3_face_refiner.runtime import refinement_sigmas
             if not self.omni_reference or self.audio_only or self._pdd_lora_active or input_masks is not None:
@@ -2994,6 +3044,7 @@ class MiniMaxH3Model:
             MiniMaxH3FirstBlockCache(cache_config)
             if cache_config is not None
             and getattr(cache_config, "cache_type", "") == "first_block"
+            and not getattr(self, "fasth3", False)
             else None
         )
         if first_block_cache is not None:
@@ -3034,6 +3085,8 @@ class MiniMaxH3Model:
         attention_backend = str(
             offload.shared_state.get("_attention", "sdpa")
         )
+        if getattr(self, "fasth3", False):
+            attention_backend = "vsa-h3/80%-tile64-learned-compression"
         cache_label = (
             f"first-block/{first_block_cache.threshold:g}"
             if first_block_cache is not None

@@ -6,6 +6,12 @@ A one-click local AI **creative studio, director, and video editor** for creator
 
 ## What it does
 
+- **FastH3 V2 8-Step (experimental):** text-to-video with generated audio,
+  using its trained VSA-H3 attention and fixed eight-step recipe. Enable it
+  in the Frames model picker. Requires CUDA/Triton; the pinned INT8 model
+  downloads on first use. These weights do not support image/Omni references
+  or continuation. Consumer-GPU real-time performance remains unverified.
+
 - **MOSS Image 5B Base and SFT:** image generation from captions, tags or
   structured layouts, with a visual Prompt Helper and dedicated prompt enhancement.
   Public BF16 and INT8 ConvRot files download on first use; no Hugging Face account

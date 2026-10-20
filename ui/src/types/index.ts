@@ -991,6 +991,7 @@ export interface ModelOptions {
     protect_audio: boolean
   } | null
   minimax_h3_fused_turbo?: boolean
+  minimax_h3_fasth3?: boolean
   minimax_h3_full_checkpoint?: boolean
   minimax_h3_baked_turbo?: boolean
   loras_disabled?: boolean
