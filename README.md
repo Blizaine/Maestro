@@ -147,6 +147,22 @@ View all past Director runs with their full state — clip plans, generated imag
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
 
+### v3.2.0 Dev preview (2026-10-20)
+
+- **FastH3 V2:** experimental eight-step text-to-video with generated audio,
+  trained VSA-H3 attention and its own sampling recipe.
+- **FastH3 OmniRef:** experimental eight-step video/audio generation from ordered
+  image, video and audio references. Official BF16, INT8 and FP8 options, plus a
+  separate Blackwell QAD NVFP4 model. [FastH3 guide](docs/FastH3.md).
+- **Qwen Image 2.1:** repair processor downloads and reduce final VAE decode
+  memory; improve overlapping tiles to address thin boundary lines in
+  lower-memory decode modes. [Qwen guide](docs/Qwen-Image-2.1.md).
+
+Available on **Dev** for testing. Update the idle Dev installation in Pinokio,
+restart Maestro and refresh the browser. New FastH3 variants remain experimental;
+consumer real-time speed and complete renders with the new BF16/FP8/NVFP4 formats
+are not yet verified. See the [v3.2.0 notes](docs/RELEASE_NOTES_V3.2.0.md).
+
 ### v3.1.0 (2026-10-19)
 
 - **MOSS Image 5B Base and SFT:** text-to-image generation, a visual layout helper
