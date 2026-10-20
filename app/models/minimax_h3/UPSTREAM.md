@@ -33,13 +33,80 @@ ConvRot conversion convention. Native kernels and integration are experimental;
 documented training support is not a benchmark of Maestro output quality.
 
 OmniRef PDD is a separate model/recipe with 32 output heads, eight PDD blocks,
-90% sparsity and 128-token tiles. Its documented weight repository was not
-publicly readable during review on 20 October 2026; it is not exposed here.
+90% sparsity and 128-token tiles. The official documented weight repository was
+not publicly readable during review on 20 October 2026. The newly available
+community conversion is exposed separately as described below.
 The published early real-time demo used eight B200 GPUs. Neither that result
 nor consumer-GPU launch profiles establish real-time performance on a 4090,
 3080 Ti or 8 GB laptop.
 
-Validation on 20 October 2026: CPU recipe, input/capability, projection and
+## FastH3 OmniRef (experimental community conversion)
+
+`minimax_h3_fasth3_omniref` pins the public community upload
+[`lrigamai/FastH3-OmniRef-Comfy`](https://huggingface.co/lrigamai/FastH3-OmniRef-Comfy)
+at `0d2c00a333ab1393d3ff18a008d7d9eda5536f11`, file
+`diffusion_models/fasth3_omniref_8step_pruned_int8_convrot.safetensors`,
+22,213,723,064 bytes, SHA-256
+`851b2dc9670ed864b7f1e951ac9da047d83b1c04ded9bfcc1a9e5bba0ee33f80`.
+It has no model card or exported inference sidecar. Its safetensors header
+identifies `source=transformer_ref`, `config.transformer.pdd_steps=32`,
+FP32 output banks (video 3072×5376, audio 1024×5376) and all 50 learned
+compression gates. This establishes the structural PDD Ref2VA contract,
+not provenance/quality parity with an unavailable official export.
+
+The native recipe follows the pinned FastVideo source above, particularly
+`fastvideo/layers/pdd.py`, `docs/inference/fasth3-distilled.md` and
+`fastvideo/tests/attention/test_vsa_h3_ref2va_regions.py`: fine grid
+`linspace(.999,0,33)`, indices `[0,4,8,12,16,20,24,28,32]`, video/audio
+shifts 12/3 with .999 fixed, target initial noise scaled by .999, FP32
+integration-weighted output-head fusion and eight Euler forwards. The
+ordinary Alibaba PDD LoRA grid and T2AV DMD ladder are not substituted.
+
+The conversion's output storage differs from the FastVideo export: bank zero
+is the complete base head, and banks 1–31 are residuals from it. Reconstruct
+that base before integration. This convention is documented in ComfyUI's
+`comfy/ldm/minimax/model.py`, `_pdd_head`, pinned at
+`b1a247c9cf9dbfda4b2c0a0c1d50950667eeaa0c`. The local checkpoint's head RMS
+magnitudes corroborate it (video .0804 base versus .0027–.0063 residuals).
+An initial smoke render treated residuals as absolute heads and produced
+noise; it is retained as a failed diagnostic, not a successful generation.
+
+VSA uses 128-token 4×4×8 tiles, 90% target sparsity and 10% keep per
+reference-video region; images, text and audio stay dense. Maestro's native
+Triton implementation supports consumer CUDA hardware; it does not claim
+the official Blackwell NVFP4 kernel's performance or quantized numerics.
+Ordered references use the existing native Ref2VA conditioner and VAEs.
+Start/end conditions, frozen target soundtrack, edit masks, continuation,
+Director, additional adapters, First Block Cache, SLA and Veda are excluded. Weights
+are fetched on demand and their pinned digest is checked before allocation.
+
+### OmniRef validation (20 October 2026)
+
+211 selected CPU regressions passed (two opt-in CUDA tests skipped in that
+pass). A separate 15-test attention run included both CUDA tests, comparing
+FP16/BF16 64- and 128-token kernels with explicit CPU attention oracles.
+The UI type-check/build and undefined-name checks passed.
+
+After the residual-head correction, two 4090 smoke cases produced fully
+software-decoded 864×480, 124-frame, 24 fps clips with generated audio:
+two image references (job `b6bd2617`, 86 s active generation / 144 s job
+elapsed, sampled device-wide peak 12.79 GiB) and an image/video/audio mix
+(job `b2e9db5d`, 243 s active / 261 s job elapsed, 13.69 GiB). Both used
+seed 424242, eight forwards, Q2_K encoder, full INT8 VAE, Auto-tune Profile 2,
+8 GiB transformer allowance and head splitting off. Saved preferences were
+unchanged. Representative frames show a driver and white car in a coastal
+tracking shot, without the initial diagnostic's noise.
+
+These are functional smoke checks, not controlled throughput or quality
+benchmarks. A short CPU regression pass overlapped the mixed-media case.
+Stills and decoding cannot certify continuous motion, voice/sound-reference
+fidelity or exact identity preservation. No 8/12 GB generation or real-time
+performance was established. Existing H3 duration recommendations remain
+unchanged; this experimental model does not inherit their benchmark tiers.
+
+### Separate T2AV V2 validation
+
+Separate T2AV V2 validation on 20 October 2026: CPU recipe, input/capability, projection and
 duration regressions passed, as did a small FP16/BF16 CUDA comparison against
 the explicit attention oracle. A corrected full-prompt smoke render on an
 RTX 4090 (24 GB; 128 GB system RAM; Windows; PyTorch 2.10/CUDA 13; Triton 3.6)

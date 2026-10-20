@@ -6655,6 +6655,7 @@ def get_model_options(model_type: str):
         ),
         "minimax_h3_baked_turbo": md.get("minimax_h3_baked_turbo", False),
         "minimax_h3_fasth3": md.get("minimax_h3_fasth3", False),
+        "minimax_h3_fasth3_omniref": md.get("minimax_h3_fasth3_omniref", False),
         "minimax_h3_full_checkpoint": md.get("minimax_h3_full_checkpoint", False),
         "loras_disabled": md.get("loras_disabled", False),
         "minimax_h3_runtime_advisory": _minimax_h3_runtime_advisory(md),
@@ -11273,7 +11274,10 @@ async def _prepare_generation_submission(
         _base_model_type = body.get("model_type")
     _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
     if _generation_model_def.get("minimax_h3_fasth3"):
-        from models.minimax_h3.fasth3 import validate_fasth3_request
+        if _generation_model_def.get("minimax_h3_fasth3_omniref"):
+            from models.minimax_h3.fasth3_omniref import validate_request as validate_fasth3_request
+        else:
+            from models.minimax_h3.fasth3 import validate_fasth3_request
         try:
             validate_fasth3_request(body)
         except (TypeError, ValueError) as error:

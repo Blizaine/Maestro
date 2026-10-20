@@ -220,6 +220,7 @@ def block_sparse_attention(
     num_prefix_tiles: int,
     num_video_tiles: int,
     topk: int,
+    tile_size: int = 64,
 ) -> torch.Tensor:
     """Run tile-routed attention on contiguous ``(B, L, H, D)`` tensors."""
 
@@ -233,8 +234,8 @@ def block_sparse_attention(
     if head_dim != 128:
         raise ValueError(f"FastH3 VSA Triton kernel requires 128-wide heads, got {head_dim}")
     num_tiles = int(tile_rows.shape[0])
-    if tile_rows.shape[1] != 64:
-        raise ValueError("FastH3 VSA tiles must have 64 rows")
+    if tile_size not in (64, 128) or tile_rows.shape[1] != tile_size:
+        raise ValueError("FastH3 VSA tiles must have 64 or 128 rows matching the selected policy")
     if num_prefix_tiles <= 0 or num_video_tiles <= 0 or topk <= 0:
         raise ValueError("FastH3 VSA requires non-empty prefix/video tiles and a positive top-k")
     output = torch.empty_like(query)
@@ -256,7 +257,7 @@ def block_sparse_attention(
         topk,
         gate is not None,
         head_dim ** -0.5,
-        64,
+        tile_size,
         128,
         num_warps=4,
         num_stages=2,
@@ -279,7 +280,7 @@ def pool_qkv(
         raise ValueError("FastH3 VSA pooling requires matching BLHD Q/K/V tensors")
     batch, sequence_length, heads, head_dim = query.shape
     num_tiles = int(tile_rows.shape[0])
-    if tile_rows.shape[1] != 64 or valid_counts.numel() != num_tiles:
+    if tile_rows.shape[1] not in (64, 128) or valid_counts.numel() != num_tiles:
         raise ValueError("FastH3 VSA pooling metadata has invalid tile dimensions")
     features = heads * head_dim
     pooled = tuple(
@@ -296,7 +297,7 @@ def pool_qkv(
         sequence_length,
         features,
         num_tiles,
-        64,
+        int(tile_rows.shape[1]),
         128,
         num_warps=4,
     )

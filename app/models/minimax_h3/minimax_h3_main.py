@@ -974,6 +974,7 @@ def _load_transformer(
     import_profile: dict | None = None,
     veda_filename: str | None = None,
     fasth3: bool = False,
+    fasth3_omniref: bool = False,
 ) -> MiniMaxH3Transformer:
     checkpoint = probe_h3_checkpoint(_first_path(filename))
     from .turbo import safetensors_header
@@ -982,8 +983,12 @@ def _load_transformer(
     if gates and not fasth3:
         raise ValueError("This H3 checkpoint requires trained VSA-H3 attention. Select the dedicated FastH3 model; ordinary H3 cannot discard its compression gates.")
     if fasth3:
-        from .fasth3 import verify_fasth3_checkpoint
-        verify_fasth3_checkpoint(_first_path(filename))
+        if fasth3_omniref:
+            from .fasth3_omniref import verify_checkpoint
+            verify_checkpoint(_first_path(filename), header)
+        else:
+            from .fasth3 import verify_fasth3_checkpoint
+            verify_fasth3_checkpoint(_first_path(filename))
         if len(gates) != 50 or any(header.get(f"blocks.{i}.attn.to_gate_compress.weight", {}).get("shape") != [7168, 5376] for i in range(50)):
             raise ValueError("FastH3 V2 requires all 50 trained compression-gate projections.")
     qkv_layout = str(qkv_layout or "contiguous").strip().lower()
@@ -1030,7 +1035,11 @@ def _load_transformer(
         )
         if fasth3:
             from .fasth3_attention import FastH3Attention
-            transformer.fasth3_attention = FastH3Attention()
+            transformer.fasth3_attention = FastH3Attention(omni_ref=True) if fasth3_omniref else FastH3Attention()
+            if fasth3_omniref:
+                from .fasth3_omniref import PDDOutput
+                transformer.final_layer.video_out = PDDOutput(5376, 96, 12.0)
+                transformer.final_layer.audio_out = PDDOutput(5376, 32, 3.0)
             for block in transformer.blocks:
                 block.attn.fasth3_attention = transformer.fasth3_attention
                 block.attn.to_gate_compress = torch.nn.Linear(5376, 7168, bias=False, dtype=dtype)
@@ -1417,7 +1426,8 @@ class MiniMaxH3Model:
         )
         self.veda = bool(minimax_h3_veda)
         self.fasth3 = bool(model_def.get("minimax_h3_fasth3"))
-        if self.fasth3 and (self.veda or model_def.get("omni_reference") or model_def.get("vdn")):
+        self.fasth3_omniref = bool(model_def.get("minimax_h3_fasth3_omniref"))
+        if self.fasth3 and (self.veda or (model_def.get("omni_reference") and not self.fasth3_omniref) or model_def.get("vdn")):
             raise ValueError("FastH3 V2 is a separate T2AV model with mandatory VSA-H3 attention.")
         if self.fasth3:
             from .fasth3_attention import FastH3Attention
@@ -1519,6 +1529,7 @@ class MiniMaxH3Model:
             import_profile=model_def.get("minimax_h3_import_profile"),
             veda_filename=veda_filename,
             fasth3=self.fasth3,
+            fasth3_omniref=self.fasth3_omniref,
         )
         from .viggle import load_conditioner
         self.conditioner = load_conditioner() if self.viggle else _load_conditioner(
@@ -2074,7 +2085,10 @@ class MiniMaxH3Model:
         if not isinstance(input_prompt, str):
             raise ValueError("MiniMax H3 accepts one text prompt per generation.")
         if getattr(self, "fasth3", False):
-            from .fasth3 import validate_fasth3_request
+            if getattr(self, "fasth3_omniref", False):
+                from .fasth3_omniref import validate_request as validate_fasth3_request
+            else:
+                from .fasth3 import validate_fasth3_request
             validate_fasth3_request({
                 "sampling_steps": sampling_steps, "frame_num": frame_num,
                 "image_start": image_start, "image_end": image_end, "input_frames": input_frames,
@@ -2089,6 +2103,7 @@ class MiniMaxH3Model:
             })
             if _face_refinement is not None:
                 raise ValueError("FastH3 V2 does not support H3 face refinement.")
+            minimax_h3_extended_duration = False
         if self.audio_only and not _audio_segment:
             from .dialogue import generate_audio
             return generate_audio(
@@ -2905,11 +2920,19 @@ class MiniMaxH3Model:
         self.scheduler.set_timesteps(scheduler_points, device=self.device)
         self.audio_scheduler.set_timesteps(scheduler_points, device=self.device)
         if getattr(self, "fasth3", False):
-            from .fasth3 import fasth3_sigmas
             self.scheduler.set_solver("euler")
-            self.scheduler.set_timesteps(sigmas=fasth3_sigmas(10.0), device=self.device)
-            self.audio_scheduler.set_timesteps(sigmas=fasth3_sigmas(3.0), device=self.device)
-            print("[FastH3] V2 T2AV: 8 DMD forwards, Euler, shifts 10/3; required VSA-H3 80%, tiles 4×4×4; learned compression gates active.")
+            if getattr(self, "fasth3_omniref", False):
+                from .fasth3_omniref import sigmas
+                self.scheduler.set_timesteps(sigmas=sigmas(12.0), device=self.device)
+                self.audio_scheduler.set_timesteps(sigmas=sigmas(3.0), device=self.device)
+                video_rows[layout.num_condition_video_rows:] *= self.scheduler.sigmas[0]
+                audio_rows[layout.num_condition_audio_rows:] *= self.audio_scheduler.sigmas[0]
+                print("[FastH3] OmniRef: 32 PDD heads / 8 forwards, Euler, shifts 12/3, initial noise .999; VSA-H3 90%, tiles 4×4×8; ordered reference regions active.")
+            else:
+                from .fasth3 import fasth3_sigmas
+                self.scheduler.set_timesteps(sigmas=fasth3_sigmas(10.0), device=self.device)
+                self.audio_scheduler.set_timesteps(sigmas=fasth3_sigmas(3.0), device=self.device)
+                print("[FastH3] V2 T2AV: 8 DMD forwards, Euler, shifts 10/3; required VSA-H3 80%, tiles 4×4×4; learned compression gates active.")
         if _face_refinement is not None:
             from postprocessing.h3_face_refiner.runtime import refinement_sigmas
             if not self.omni_reference or self.audio_only or self._pdd_lora_active or input_masks is not None:
@@ -3086,7 +3109,7 @@ class MiniMaxH3Model:
             offload.shared_state.get("_attention", "sdpa")
         )
         if getattr(self, "fasth3", False):
-            attention_backend = "vsa-h3/80%-tile64-learned-compression"
+            attention_backend = "vsa-h3/90%-tile128-omniref-pdd" if getattr(self, "fasth3_omniref", False) else "vsa-h3/80%-tile64-learned-compression"
         cache_label = (
             f"first-block/{first_block_cache.threshold:g}"
             if first_block_cache is not None
@@ -3117,6 +3140,9 @@ class MiniMaxH3Model:
                         return None
                     if self._pdd_controller is not None:
                         self._pdd_controller.set_step(index)
+                    if getattr(self, "fasth3_omniref", False):
+                        self.transformer.final_layer.video_out.step = index
+                        self.transformer.final_layer.audio_out.step = index
                     if first_block_cache is not None:
                         first_block_cache.begin_step(index)
                     self.transformer.sla_attention.begin_step(
@@ -3158,6 +3184,7 @@ class MiniMaxH3Model:
                         target_start_index=target_start_index,
                         video_sink_tokens=video_sink_tokens,
                         packed_layout=layout,
+                        prepared_references=references if getattr(self, "fasth3_omniref", False) else None,
                         latent_shape=(num_latent_frames, latent_height, latent_width),
                         target_video_order=group_order,
                         target_video_inverse_order=group_inverse,

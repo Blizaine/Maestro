@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from numbers import Integral, Real
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import torch
@@ -20,15 +21,18 @@ import torch
 TILE_SHAPE = (4, 4, 4)
 TILE_SIZE = math.prod(TILE_SHAPE)
 DEFAULT_SPARSITY = 0.80
+OMNI_REF_TILE_SHAPE = (4, 4, 8)
+OMNI_REF_TILE_SIZE = math.prod(OMNI_REF_TILE_SHAPE)
+OMNI_REF_DEFAULT_SPARSITY = 0.90
 _SCORE_ELEMENT_BUDGET = 1 << 20
 
 
 @dataclass(frozen=True)
 class FastH3Geometry:
-    """Reusable T2AV packed row-to-tile mapping for one latent geometry."""
+    """Reusable packed row-to-tile mapping for one H3 latent geometry."""
 
     sequence_length: int
-    prefix_segments: tuple[int, int]
+    prefix_segments: tuple[int, ...]
     latent_grid: tuple[int, int, int]
     num_prefix_tiles: int
     num_video_tiles: int
@@ -37,10 +41,21 @@ class FastH3Geometry:
     tile_rows: torch.Tensor
     row_to_tile: torch.Tensor
     valid_counts: torch.Tensor
+    tile_size: int
+    # Sparse video spans are tile-index ranges.  OmniRef has one range per
+    # reference video followed by the generated target; T2AV has only target.
+    video_tile_spans: tuple[tuple[int, int], ...]
+    span_topks: tuple[int, ...]
 
     @property
     def num_tiles(self) -> int:
         return self.num_prefix_tiles + self.num_video_tiles
+
+    @property
+    def route_count(self) -> int:
+        """Number of sparse keys selected for each video query tile."""
+
+        return sum(self.span_topks)
 
 
 def compute_topk(sparsity: float, num_video_tiles: int) -> int:
@@ -90,6 +105,299 @@ def _count_rows(layout: Any, field: str) -> int:
     return int(rows.numel())
 
 
+def _count_value(value: Any, name: str, *, allow_zero: bool = True) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be an integer")
+    count = int(value)
+    if count < 0 or (not allow_zero and count == 0):
+        qualifier = "non-negative" if allow_zero else "positive"
+        raise ValueError(f"{name} must be {qualifier}")
+    return count
+
+
+def _reference_value(reference: Any, field: str, default: Any = None) -> Any:
+    if isinstance(reference, Mapping):
+        return reference.get(field, default)
+    return getattr(reference, field, default)
+
+
+def _require_indices(layout: Any, field: str, expected: list[int]) -> None:
+    rows = getattr(layout, field, None)
+    if not torch.is_tensor(rows) or rows.ndim != 1:
+        raise TypeError(f"OmniRef layout must provide a one-dimensional {field} tensor")
+    expected_rows = torch.tensor(expected, dtype=rows.dtype, device=rows.device)
+    if not torch.equal(rows, expected_rows):
+        raise ValueError(f"OmniRef {field} do not match the prepared reference packing order")
+
+
+def _append_dense_tiles(
+    tile_rows: list[list[int]],
+    valid_counts: list[int],
+    start: int,
+    count: int,
+    tile_size: int,
+) -> None:
+    for offset in range(0, count, tile_size):
+        rows = list(range(start + offset, start + min(offset + tile_size, count)))
+        valid_counts.append(len(rows))
+        tile_rows.append(rows + [-1] * (tile_size - len(rows)))
+
+
+def _append_video_tiles(
+    tile_rows: list[list[int]],
+    valid_counts: list[int],
+    start: int,
+    grid: tuple[int, int, int],
+    tile_shape: tuple[int, int, int],
+    tile_size: int,
+) -> None:
+    grid_t, grid_h, grid_w = grid
+    tile_t, tile_h, tile_w = tile_shape
+    for t0 in range(0, grid_t, tile_t):
+        for h0 in range(0, grid_h, tile_h):
+            for w0 in range(0, grid_w, tile_w):
+                rows = [
+                    start + (t * grid_h + h) * grid_w + w
+                    for t in range(t0, min(t0 + tile_t, grid_t))
+                    for h in range(h0, min(h0 + tile_h, grid_h))
+                    for w in range(w0, min(w0 + tile_w, grid_w))
+                ]
+                if not rows:
+                    raise AssertionError("FastH3 VSA constructed an empty video tile")
+                valid_counts.append(len(rows))
+                tile_rows.append(rows + [-1] * (tile_size - len(rows)))
+
+
+def _geometry_from_tiles(
+    *,
+    sequence_length: int,
+    prefix_segments: tuple[int, ...],
+    latent_grid: tuple[int, int, int],
+    num_prefix_tiles: int,
+    tile_rows: list[list[int]],
+    valid_counts: list[int],
+    sparsity: float,
+    tile_size: int,
+    video_tile_spans: tuple[tuple[int, int], ...],
+) -> FastH3Geometry:
+    if not video_tile_spans:
+        raise ValueError("FastH3 VSA requires at least one sparse video region")
+    num_video_tiles = len(tile_rows) - num_prefix_tiles
+    if num_video_tiles <= 0:
+        raise ValueError("FastH3 VSA requires at least one target-video tile")
+    if sum(valid_counts) != sequence_length:
+        raise AssertionError("FastH3 VSA tile geometry does not cover the packed sequence exactly")
+
+    rows_tensor = torch.tensor(tile_rows, dtype=torch.int32)
+    flattened = rows_tensor.flatten()
+    valid = flattened >= 0
+    packed_rows = flattened[valid].long()
+    if packed_rows.numel() != sequence_length or torch.unique(packed_rows).numel() != sequence_length:
+        raise AssertionError("FastH3 VSA tile geometry duplicates or omits packed rows")
+    if int(packed_rows.min()) != 0 or int(packed_rows.max()) != sequence_length - 1:
+        raise AssertionError("FastH3 VSA tile geometry contains out-of-range rows")
+    tile_indices = torch.arange(len(tile_rows), dtype=torch.int32).repeat_interleave(tile_size)
+    row_to_tile = torch.empty((sequence_length,), dtype=torch.int32)
+    row_to_tile[packed_rows] = tile_indices[valid]
+
+    span_topks = tuple(compute_topk(sparsity, end - start) for start, end in video_tile_spans)
+    return FastH3Geometry(
+        sequence_length=sequence_length,
+        prefix_segments=prefix_segments,
+        latent_grid=latent_grid,
+        num_prefix_tiles=num_prefix_tiles,
+        num_video_tiles=num_video_tiles,
+        # Keep the historical target-region meaning for callers that inspect
+        # ``topk``; the full per-forward route budget is ``route_count``.
+        topk=span_topks[-1],
+        tile_rows=rows_tensor,
+        row_to_tile=row_to_tile,
+        valid_counts=torch.tensor(valid_counts, dtype=torch.int32),
+        tile_size=tile_size,
+        video_tile_spans=video_tile_spans,
+        span_topks=span_topks,
+    )
+
+
+def _build_omniref_geometry(
+    layout: Any,
+    latent_shape: tuple[int, int, int],
+    patch_size: tuple[int, int, int],
+    sparsity: float,
+    references: Sequence[Any] | None,
+) -> FastH3Geometry:
+    """Tile packed Ref2VA media with separate sparse spans for each video."""
+
+    references = () if references is None else references
+    if isinstance(references, (str, bytes)) or not isinstance(references, Sequence):
+        raise TypeError("OmniRef prepared references must be an ordered sequence")
+
+    target_shape = _shape_tuple(latent_shape, "latent_shape")
+    patch = _shape_tuple(patch_size, "patch_size")
+    if any(size % patch_axis for size, patch_axis in zip(target_shape, patch)):
+        raise ValueError(f"Latent dimensions {target_shape} are not divisible by patch size {patch}")
+    target_grid = tuple(size // patch_axis for size, patch_axis in zip(target_shape, patch))
+    sequence_length_value = getattr(layout, "sequence_length", None)
+    sequence_length = _count_value(sequence_length_value, "OmniRef sequence_length", allow_zero=False)
+    text_rows = _count_rows(layout, "text_indices")
+    audio_rows = _count_rows(layout, "audio_indices")
+    video_rows = _count_rows(layout, "video_indices")
+    _require_contiguous_rows(layout, "text_indices", 0, text_rows)
+
+    condition_video_rows = _count_value(
+        getattr(layout, "num_condition_video_rows", 0), "num_condition_video_rows"
+    )
+    condition_audio_rows = _count_value(
+        getattr(layout, "num_condition_audio_rows", 0), "num_condition_audio_rows"
+    )
+    if _count_value(getattr(layout, "num_target_condition_audio_latents", 0), "num_target_condition_audio_latents"):
+        raise ValueError("FastH3 OmniRef does not support frozen target-audio rows")
+    if _count_value(getattr(layout, "num_target_condition_video_rows", 0), "num_target_condition_video_rows"):
+        raise ValueError("FastH3 OmniRef does not support frozen target-video rows")
+
+    # Keep the true packed Ref2VA row order. Images and all audio are dense;
+    # each video reference owns one independently routed latent-grid span.
+    cursor = text_rows
+    expected_audio: list[int] = []
+    expected_video: list[int] = []
+    dense_segments: list[tuple[int, int]] = [(0, text_rows)]
+    reference_video_regions: list[tuple[int, tuple[int, int, int]]] = []
+    reference_video_rows = 0
+    reference_audio_rows = 0
+
+    for reference_index, reference in enumerate(references):
+        kind = str(
+            _reference_value(reference, "kind", _reference_value(reference, "media_type", ""))
+        ).strip().lower()
+        if kind not in {"image", "video", "audio"}:
+            raise ValueError(f"OmniRef prepared reference {reference_index} has unsupported kind {kind!r}")
+        audio_latents = _count_value(
+            _reference_value(reference, "num_audio_latents", 0),
+            f"references[{reference_index}].num_audio_latents",
+        )
+        ref_audio_rows = audio_latents * 2
+
+        if kind == "audio":
+            if ref_audio_rows <= 0:
+                raise ValueError(f"OmniRef audio reference {reference_index} has no prepared audio latents")
+            dense_segments.append((cursor, ref_audio_rows))
+            expected_audio.extend(range(cursor, cursor + ref_audio_rows))
+            cursor += ref_audio_rows
+            reference_audio_rows += ref_audio_rows
+            continue
+
+        ref_shape = _shape_tuple(
+            (
+                _reference_value(reference, "num_latent_frames", 1),
+                _reference_value(reference, "latent_height", 0),
+                _reference_value(reference, "latent_width", 0),
+            ),
+            f"references[{reference_index}] latent shape",
+        )
+        if any(size % patch_axis for size, patch_axis in zip(ref_shape, patch)):
+            raise ValueError(
+                f"OmniRef reference {reference_index} latent dimensions {ref_shape} are not divisible by patch size {patch}"
+            )
+        if kind == "image" and ref_shape[0] != 1:
+            raise ValueError(f"OmniRef image reference {reference_index} must contain one latent frame")
+        ref_grid = tuple(size // patch_axis for size, patch_axis in zip(ref_shape, patch))
+        ref_video_rows = math.prod(ref_grid)
+        if kind == "image":
+            if ref_audio_rows:
+                raise ValueError(f"OmniRef image reference {reference_index} cannot carry prepared audio rows")
+            dense_segments.append((cursor, ref_video_rows))
+            expected_video.extend(range(cursor, cursor + ref_video_rows))
+            cursor += ref_video_rows
+            reference_video_rows += ref_video_rows
+            continue
+
+        if ref_audio_rows:
+            dense_segments.append((cursor, ref_audio_rows))
+            expected_audio.extend(range(cursor, cursor + ref_audio_rows))
+            cursor += ref_audio_rows
+            reference_audio_rows += ref_audio_rows
+        reference_video_regions.append((cursor, ref_grid))
+        expected_video.extend(range(cursor, cursor + ref_video_rows))
+        cursor += ref_video_rows
+        reference_video_rows += ref_video_rows
+
+    if condition_video_rows != reference_video_rows:
+        raise ValueError(
+            "FastH3 OmniRef expects reference-only visual conditioning rows; keyframe or other extra video conditions are unsupported."
+        )
+    if condition_audio_rows != reference_audio_rows:
+        raise ValueError(
+            "FastH3 OmniRef expects reference-only audio conditioning rows; keyframe or other extra audio conditions are unsupported."
+        )
+
+    target_audio_rows = audio_rows - condition_audio_rows
+    if target_audio_rows <= 0:
+        raise ValueError("FastH3 OmniRef requires a generated target-audio segment")
+    dense_segments.append((cursor, target_audio_rows))
+    expected_audio.extend(range(cursor, cursor + target_audio_rows))
+    cursor += target_audio_rows
+
+    target_video_rows = math.prod(target_grid)
+    if video_rows - condition_video_rows != target_video_rows:
+        raise ValueError(
+            f"OmniRef layout has {video_rows - condition_video_rows} target-video rows, but latent grid {target_grid} has {target_video_rows} patches"
+        )
+    target_video_start = cursor
+    expected_video.extend(range(target_video_start, target_video_start + target_video_rows))
+    cursor += target_video_rows
+    if cursor != sequence_length:
+        raise ValueError(
+            f"OmniRef reference and target segments reach row {cursor}, but sequence_length is {sequence_length}"
+        )
+    _require_indices(layout, "audio_indices", expected_audio)
+    _require_indices(layout, "video_indices", expected_video)
+
+    tile_rows: list[list[int]] = []
+    valid_counts: list[int] = []
+    prefix_segments: list[int] = []
+    for start, count in dense_segments:
+        if count:
+            prefix_segments.append(count)
+            _append_dense_tiles(tile_rows, valid_counts, start, count, OMNI_REF_TILE_SIZE)
+    num_prefix_tiles = len(tile_rows)
+
+    video_tile_spans: list[tuple[int, int]] = []
+    for start, grid in reference_video_regions:
+        tile_start = len(tile_rows)
+        _append_video_tiles(
+            tile_rows,
+            valid_counts,
+            start,
+            grid,
+            OMNI_REF_TILE_SHAPE,
+            OMNI_REF_TILE_SIZE,
+        )
+        video_tile_spans.append((tile_start, len(tile_rows)))
+
+    target_tile_start = len(tile_rows)
+    _append_video_tiles(
+        tile_rows,
+        valid_counts,
+        target_video_start,
+        target_grid,
+        OMNI_REF_TILE_SHAPE,
+        OMNI_REF_TILE_SIZE,
+    )
+    video_tile_spans.append((target_tile_start, len(tile_rows)))
+
+    return _geometry_from_tiles(
+        sequence_length=sequence_length,
+        prefix_segments=tuple(prefix_segments),
+        latent_grid=target_grid,
+        num_prefix_tiles=num_prefix_tiles,
+        tile_rows=tile_rows,
+        valid_counts=valid_counts,
+        sparsity=sparsity,
+        tile_size=OMNI_REF_TILE_SIZE,
+        video_tile_spans=tuple(video_tile_spans),
+    )
+
+
 def _require_contiguous_rows(layout: Any, field: str, start: int, count: int) -> None:
     rows = getattr(layout, field, None)
     if not torch.is_tensor(rows) or rows.ndim != 1:
@@ -108,7 +416,13 @@ def _build_geometry(
     latent_shape: tuple[int, int, int],
     patch_size: tuple[int, int, int],
     sparsity: float,
+    *,
+    omni_ref: bool = False,
+    references: Sequence[Any] | None = None,
 ) -> FastH3Geometry:
+    if omni_ref:
+        return _build_omniref_geometry(layout, latent_shape, patch_size, sparsity, references)
+
     for field in (
         "num_condition_video_rows",
         "num_condition_audio_rows",
@@ -188,31 +502,16 @@ def _build_geometry(
     if sum(valid_counts) != sequence_length:
         raise AssertionError("FastH3 VSA tile geometry does not cover the packed sequence exactly")
 
-    rows_tensor = torch.tensor(tile_rows, dtype=torch.int32)
-    flattened = rows_tensor.flatten()
-    valid = flattened >= 0
-    packed_rows = flattened[valid].long()
-    # Validate and invert the permutation in bulk. Scalar Tensor indexing
-    # for every packed token otherwise adds significant Python work at each
-    # denoising step, even though this metadata is only an integer mapping.
-    if packed_rows.numel() != sequence_length or torch.unique(packed_rows).numel() != sequence_length:
-        raise AssertionError("FastH3 VSA tile geometry duplicates or omits packed rows")
-    if int(packed_rows.min()) != 0 or int(packed_rows.max()) != sequence_length - 1:
-        raise AssertionError("FastH3 VSA tile geometry contains out-of-range rows")
-    tile_indices = torch.arange(len(tile_rows), dtype=torch.int32).repeat_interleave(TILE_SIZE)
-    row_to_tile = torch.empty((sequence_length,), dtype=torch.int32)
-    row_to_tile[packed_rows] = tile_indices[valid]
-
-    return FastH3Geometry(
+    return _geometry_from_tiles(
         sequence_length=sequence_length,
         prefix_segments=(text_rows, audio_rows),
         latent_grid=grid,
         num_prefix_tiles=num_prefix_tiles,
-        num_video_tiles=num_video_tiles,
-        topk=compute_topk(sparsity, num_video_tiles),
-        tile_rows=rows_tensor,
-        row_to_tile=row_to_tile,
-        valid_counts=torch.tensor(valid_counts, dtype=torch.int32),
+        tile_rows=tile_rows,
+        valid_counts=valid_counts,
+        sparsity=sparsity,
+        tile_size=TILE_SIZE,
+        video_tile_spans=((video_tile_start, len(tile_rows)),),
     )
 
 
@@ -263,9 +562,9 @@ def _routing_and_compression(
         v_pool = _pool_tokens(value, row_to_tile, valid_counts, geometry.num_tiles)
     else:
         q_pool, k_pool, v_pool = pooled_qkv
-    topk = compute_topk(sparsity, geometry.num_video_tiles)
+    route_count = geometry.route_count
     route = torch.empty(
-        (batch, heads, geometry.num_video_tiles, topk),
+        (batch, heads, geometry.num_video_tiles, route_count),
         dtype=torch.int32,
         device=query.device,
     )
@@ -313,11 +612,26 @@ def _routing_and_compression(
             if video_query_start < video_query_end:
                 local_start = video_query_start - q_start
                 local_end = video_query_end - q_start
-                relative = score_block[:, :, local_start:local_end, geometry.num_prefix_tiles:]
-                indices = torch.topk(relative, k=topk, dim=-1, largest=True, sorted=False).indices
-                route[:, head_start:head_end, video_query_start - geometry.num_prefix_tiles:video_query_end - geometry.num_prefix_tiles, :] = (
-                    indices.permute(0, 1, 2, 3).to(torch.int32) + geometry.num_prefix_tiles
+                video_query_scores = score_block[:, :, local_start:local_end, :]
+                query_rows = slice(
+                    video_query_start - geometry.num_prefix_tiles,
+                    video_query_end - geometry.num_prefix_tiles,
                 )
+                route_offset = 0
+                for (region_start, region_end), region_topk in zip(
+                    geometry.video_tile_spans, geometry.span_topks, strict=True
+                ):
+                    indices = torch.topk(
+                        video_query_scores[..., region_start:region_end],
+                        k=region_topk,
+                        dim=-1,
+                        largest=True,
+                        sorted=False,
+                    ).indices
+                    route[
+                        :, head_start:head_end, query_rows, route_offset : route_offset + region_topk
+                    ] = (indices.to(torch.int32) + region_start)
+                    route_offset += region_topk
 
     return route, compression
 
@@ -407,24 +721,27 @@ def reference_attention_cpu(
         compression = torch.matmul(torch.softmax(pooled_scores, dim=-1), v_pool.permute(0, 2, 1, 3))
         compression = compression.permute(0, 2, 1, 3)
 
-    topk = compute_topk(sparsity, geometry.num_video_tiles)
     result = torch.empty_like(query)
     for batch_index in range(batch):
         for head_index in range(heads):
             for query_tile in range(geometry.num_tiles):
-                if query_tile < geometry.num_prefix_tiles or topk == geometry.num_video_tiles:
+                if query_tile < geometry.num_prefix_tiles:
                     key_tiles = list(range(geometry.num_tiles))
                 else:
-                    scores = pooled_scores[
-                        batch_index,
-                        head_index,
-                        query_tile,
-                        geometry.num_prefix_tiles :,
-                    ]
-                    selected = torch.topk(scores, topk, dim=-1, largest=True, sorted=False).indices
-                    key_tiles = list(range(geometry.num_prefix_tiles)) + [
-                        geometry.num_prefix_tiles + int(index) for index in selected.tolist()
-                    ]
+                    key_tiles = list(range(geometry.num_prefix_tiles))
+                    for (region_start, region_end), region_topk in zip(
+                        geometry.video_tile_spans, geometry.span_topks, strict=True
+                    ):
+                        scores = pooled_scores[
+                            batch_index,
+                            head_index,
+                            query_tile,
+                            region_start:region_end,
+                        ]
+                        selected = torch.topk(
+                            scores, region_topk, dim=-1, largest=True, sorted=False
+                        ).indices
+                        key_tiles.extend(region_start + int(index) for index in selected.tolist())
                 query_rows = tile_rows[query_tile]
                 query_rows = query_rows[query_rows >= 0].long()
                 key_rows = tile_rows[key_tiles]
@@ -450,12 +767,15 @@ class FastH3Attention:
 
     def __init__(
         self,
-        sparsity: float = DEFAULT_SPARSITY,
+        sparsity: float | None = None,
         *,
         heads_per_chunk: int = 4,
         max_score_elements: int = _SCORE_ELEMENT_BUDGET,
+        omni_ref: bool = False,
     ) -> None:
-        self.sparsity = _normalize_sparsity(sparsity)
+        self.omni_ref = bool(omni_ref)
+        default_sparsity = OMNI_REF_DEFAULT_SPARSITY if self.omni_ref else DEFAULT_SPARSITY
+        self.sparsity = _normalize_sparsity(default_sparsity if sparsity is None else sparsity)
         if isinstance(heads_per_chunk, bool) or not isinstance(heads_per_chunk, Integral) or int(heads_per_chunk) <= 0:
             raise ValueError("heads_per_chunk must be a positive integer")
         if isinstance(max_score_elements, bool) or not isinstance(max_score_elements, Integral) or int(max_score_elements) <= 0:
@@ -478,10 +798,20 @@ class FastH3Attention:
         layout: Any,
         latent_shape: tuple[int, int, int],
         patch_size: tuple[int, int, int] = (1, 2, 2),
+        references: Sequence[Any] | None = None,
     ) -> FastH3Geometry:
-        """Validate a T2AV layout and prepare segment-pure 64-token tiles."""
+        """Validate a T2AV or Ref2VA layout and prepare its segment-pure tiles."""
 
-        self.geometry = _build_geometry(layout, latent_shape, patch_size, self.sparsity)
+        if references is not None and not self.omni_ref:
+            raise ValueError("Prepared references require FastH3Attention(omni_ref=True)")
+        self.geometry = _build_geometry(
+            layout,
+            latent_shape,
+            patch_size,
+            self.sparsity,
+            omni_ref=self.omni_ref,
+            references=references,
+        )
         self._device_geometry.clear()
         return self.geometry
 
@@ -539,7 +869,8 @@ class FastH3Attention:
             route,
             num_prefix_tiles=self.geometry.num_prefix_tiles,
             num_video_tiles=self.geometry.num_video_tiles,
-            topk=self.geometry.topk,
+            topk=self.geometry.route_count,
+            tile_size=self.geometry.tile_size,
         )
         return output
 
@@ -560,6 +891,9 @@ class FastH3Attention:
 
 __all__ = [
     "DEFAULT_SPARSITY",
+    "OMNI_REF_DEFAULT_SPARSITY",
+    "OMNI_REF_TILE_SHAPE",
+    "OMNI_REF_TILE_SIZE",
     "TILE_SHAPE",
     "TILE_SIZE",
     "FastH3Attention",

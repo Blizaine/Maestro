@@ -24,7 +24,7 @@ FASTH3_HELP = (
     "and additional LoRAs are unavailable. Begin with 480p / 5.2 seconds. "
     "Real-time generation on consumer GPUs has not been verified in Maestro."
 )
-_VERIFIED: set[tuple[str, int, int, int]] = set()
+_VERIFIED: set[tuple[str, int, int, int, str]] = set()
 
 
 def fasth3_sigmas(shift: float) -> tuple[float, ...]:
@@ -36,22 +36,26 @@ def fasth3_sigmas(shift: float) -> tuple[float, ...]:
 
 def verify_fasth3_checkpoint(filename: str) -> None:
     """Fail before MMGP allocation if the downloaded weights are not the pin."""
+    verify_checkpoint_pin(filename, FASTH3_SIZE, FASTH3_SHA256, "FastH3 V2")
+
+
+def verify_checkpoint_pin(filename: str, expected_size: int, expected_sha256: str, label: str) -> None:
     path = Path(filename).resolve(strict=True)
     stat = path.stat()
-    key = (str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    key = (str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, expected_sha256)
     if key in _VERIFIED:
         return
-    if stat.st_size != FASTH3_SIZE:
-        raise ValueError("FastH3 V2 requires its pinned INT8 ConvRot checkpoint; the file size differs.")
+    if stat.st_size != expected_size:
+        raise ValueError(f"{label} requires its pinned INT8 ConvRot checkpoint; the file size differs.")
     print("[FastH3] Verifying pinned checkpoint SHA-256…", flush=True)
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
             digest.update(chunk)
-    if digest.hexdigest() != FASTH3_SHA256:
-        raise ValueError("FastH3 V2 checkpoint checksum differs from the published pin. Re-download the model.")
+    if digest.hexdigest() != expected_sha256:
+        raise ValueError(f"{label} checkpoint checksum differs from the published pin. Re-download the model.")
     current = path.stat()
-    if (current.st_size, current.st_mtime_ns, current.st_ctime_ns) != key[1:]:
+    if (current.st_size, current.st_mtime_ns, current.st_ctime_ns) != key[1:4]:
         raise ValueError("FastH3 checkpoint changed during verification.")
     _VERIFIED.add(key)
 

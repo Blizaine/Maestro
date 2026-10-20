@@ -2542,9 +2542,13 @@ class family_handler:
             if baked_turbo:
                 result["custom_settings"] = result["custom_settings"][:1]
         if (model_def or {}).get("minimax_h3_fasth3"):
-            if base_model_type != _MODEL_TYPE or any((fused_turbo, singularity, dasiwa, vdn, bool(import_profile))):
+            fast_omni = bool((model_def or {}).get("minimax_h3_fasth3_omniref"))
+            if base_model_type != (_REF2VA_MODEL_TYPE if fast_omni else _MODEL_TYPE) or any((fused_turbo, singularity, dasiwa, vdn, bool(import_profile))):
                 raise ValueError("FastH3 V2 requires its separate text-to-video workflow.")
-            from models.minimax_h3.fasth3 import fasth3_capabilities
+            if fast_omni:
+                from models.minimax_h3.fasth3_omniref import capabilities as fasth3_capabilities
+            else:
+                from models.minimax_h3.fasth3 import fasth3_capabilities
             result.update(fasth3_capabilities())
         return result
 
@@ -2881,7 +2885,7 @@ class family_handler:
             ui_defaults.update({"resolution": "32x32", "duration_seconds": 15, "video_length": 362,
                                 "sliding_window_size": 362, "audio_prompt_type": "", "multi_prompts_gen_type": 2})
         if (model_def or {}).get("minimax_h3_fasth3"):
-            ui_defaults.update({"num_inference_steps": 8, "flow_shift": 10.0,
+            ui_defaults.update({"num_inference_steps": 8, "flow_shift": 12.0 if (model_def or {}).get("minimax_h3_fasth3_omniref") else 10.0,
                                 "audio_flow_shift": 3.0, "override_attention": "sdpa",
                                 "minimax_h3_turbo_mode": False, "minimax_h3_turbo_preset": "",
                                 "video_length": 124, "sliding_window_size": 124,
@@ -2992,7 +2996,7 @@ class family_handler:
         )
         ui_defaults["guidance_scale"] = 1.0
         if (model_def or {}).get("minimax_h3_fasth3"):
-            ui_defaults.update({"num_inference_steps": 8, "flow_shift": 10.0,
+            ui_defaults.update({"num_inference_steps": 8, "flow_shift": 12.0 if (model_def or {}).get("minimax_h3_fasth3_omniref") else 10.0,
                                 "audio_flow_shift": 3.0, "override_attention": "sdpa",
                                 "minimax_h3_turbo_mode": False, "minimax_h3_turbo_preset": "",
                                 "skip_steps_cache_type": "", "minimax_h3_extended_duration": False,
@@ -3098,7 +3102,10 @@ class family_handler:
     def validate_generative_settings(base_model_type, model_def, inputs):
         """Enforce H3's single-pass and continuation geometry server-side."""
         if (model_def or {}).get("minimax_h3_fasth3"):
-            from models.minimax_h3.fasth3 import validate_fasth3_request
+            if (model_def or {}).get("minimax_h3_fasth3_omniref"):
+                from models.minimax_h3.fasth3_omniref import validate_request as validate_fasth3_request
+            else:
+                from models.minimax_h3.fasth3 import validate_fasth3_request
             try:
                 validate_fasth3_request(inputs)
             except (ValueError, TypeError) as error:

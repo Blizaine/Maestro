@@ -1745,8 +1745,12 @@ class MiniMaxH3Transformer(nn.Module):
             layout = _kwargs.get("packed_layout")
             latent_shape = _kwargs.get("latent_shape")
             if layout is None or latent_shape is None or target_order is not None:
-                raise ValueError("FastH3 VSA requires the original packed T2AV geometry.")
-            self.fasth3_attention.begin_forward(layout, latent_shape, self.config.patch_size)
+                raise ValueError("FastH3 VSA requires the original packed geometry.")
+            if _kwargs.get("prepared_references") is not None:
+                self.fasth3_attention.begin_forward(layout, latent_shape, self.config.patch_size,
+                                                  references=_kwargs["prepared_references"])
+            else:
+                self.fasth3_attention.begin_forward(layout, latent_shape, self.config.patch_size)
             if first_block_cache is not None:
                 raise ValueError("FastH3 V2 requires all eight forwards without First Block Cache.")
         if self.blocks[0].attn.vdn is not None:
