@@ -16,10 +16,17 @@
   Media Flow processing failures remain failed jobs.
 - **DLSS availability (#190):** installed files alone no longer establish
   Windows 11 Neural Rendering availability. A bounded, cached synthetic-frame
-  evaluation checks the installed native worker. Failed probes disable the option
-  with a reason; refresh reruns the check while idle. This does not repair the
-  upstream NGX/DLL fault reported on the 5090 or establish a new working driver
-  combination. The native binary pins are unchanged. [DLSS details](DLSS5.md).
+  evaluation now exercises an unaligned 1.5x request through the same padding
+  and crop path as processing. Failed probes disable the option with a reason;
+  refresh reruns the check while idle. A small passing probe does not certify
+  every scale or clip. The native binary pins are unchanged. [DLSS details](DLSS5.md).
+- **DLSS output alignment (#190):** apply internal right/bottom edge padding to
+  the standard Windows 11 backend for the reported 64-pixel output constraint.
+  Pad the image, motion and depth together, then crop back to the requested
+  even-rounded dimensions. Both requested and padded sizes must fit the native
+  limit. The separate Windows 10 experimental path keeps its existing policy.
+  CPU regressions cover the reported sizes, guides, cropping and failure cleanup;
+  the workaround still needs native confirmation on the reporter's RTX 5090.
 - **WGPKernels and Auto-tune (#191):** split activation preparation into bounded
   calls below the native 65,535-row limit, preserving row order and projection
   reuse. Reapplying Auto-tune keeps a valid selected manual INT8 backend and

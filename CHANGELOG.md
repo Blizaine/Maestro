@@ -21,6 +21,12 @@ Dev follow-up fixes, 21 October:
   processing metadata. Standalone processing jobs still report their own failures.
   Gate Windows 11 DLSS Neural Rendering on a bounded cached native evaluation,
   rather than installed files alone; refresh retries the probe while idle (#190).
+- Add Windows 11 DLSS internal edge padding for the output-size alignment
+  pattern reported in #190, padding frames and motion/depth guides together
+  and cropping back to the requested even-rounded dimensions. Check padded
+  native limits before worker startup and make the small availability probe
+  exercise an unaligned 1.5x request. Native RTX 5090 confirmation is pending;
+  the pinned binaries and separate Windows 10 backend are unchanged.
 - Tile WGPKernels row preparation within its native row limit and temporary
   memory budget. Preserve valid manual INT8 backend choices when reapplying
   Auto-tune and return the settings actually applied to the UI (#191).
