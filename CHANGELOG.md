@@ -10,6 +10,10 @@ Public **Dev** preview. Main remains v3.1.0. See the
 
 Dev follow-up fixes, 21 October:
 
+- Repair H3 VDN Full and Pruned module/default-LoRA downloads and the bundled
+  eight-step Turbo preset after the old Hugging Face revision stopped serving
+  them. Redirect the four known obsolete URLs retained in saved presets and
+  reuse existing local files.
 - Incorporate PR #189's conditional clone before Face Refiner overlap blending,
   fixing inference-tensor writes on clips longer than one refinement window (#188).
 - Preserve saved Studio generations when optional Media Flow finishing fails,

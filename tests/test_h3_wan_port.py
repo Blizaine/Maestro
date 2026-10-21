@@ -182,7 +182,7 @@ class H3VDNTests(unittest.TestCase):
             turbo = recipes["VDN Turbo 8 Steps"]
             self.assertTrue(turbo["builtin"])
             self.assertEqual(turbo["params"]["num_inference_steps"], 8)
-            self.assertIn("/304d34f7751f8ba9ca0eb55d5d10044234cdbfe2/", turbo["activated_loras"][0])
+            self.assertIn("/630975da14fd3c84169d6cd5092da3ce1287d137/", turbo["activated_loras"][0])
             self.assertEqual(recipes["VDN Standard 50 Steps"]["activated_loras"], [])
 
     def test_adapter_url_can_download_without_a_prior_classic_ui_cache(self):
