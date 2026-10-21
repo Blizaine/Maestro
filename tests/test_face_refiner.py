@@ -217,6 +217,80 @@ class FaceRefinerContracts(unittest.TestCase):
         self.assertGreater(int(result[0, 9, 0, 0]), 20)
         self.assertLess(int(result[0, 9, 0, 0]), 220)
 
+    def test_multi_window_inference_frames_blend_and_save_without_mutating_model_output(self):
+        geometry = {"frames": 294, "width": 2, "height": 2, "fps": 24}
+        model_outputs, stitched_windows, inference_flags, encoded = [], [], [], []
+
+        class Model:
+            _interrupt = False
+
+            @torch.inference_mode()
+            def generate(self, _prompt, **kwargs):
+                value = 40 if not model_outputs else 200
+                tensor = torch.full((3, kwargs["frame_num"], 2, 2), value, dtype=torch.uint8)
+                model_outputs.append(tensor)
+                return {"x": tensor}
+
+        @contextlib.contextmanager
+        def model_context(*_args):
+            yield Model(), "minimax_h3_ref2va"
+
+        def stitch(frames, refined, _segment, **_kwargs):
+            inference_flags.append(refined.is_inference())
+            stitched_windows.append(refined.clone())
+            frames.copy_(refined.permute(1, 2, 3, 0))
+            return frames
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source, destination = root / "source.mp4", root / "refined.mp4"
+            source.write_bytes(b"source video")
+            transform = {"segments": [(0, geometry["frames"])], **{
+                key: [None] * geometry["frames"]
+                for key in ("boxes", "face_rect", "weights", "detected", "active")}}
+            data = {"id": "a" * 32, "faces": [{}], "warnings": [],
+                    "transforms": [transform], **geometry}
+
+            @contextlib.contextmanager
+            def decoded(*_args):
+                yield torch.zeros((294, 2, 2, 3), dtype=torch.uint8), geometry, root
+
+            def encode(_source, output, frames, fps, *_args):
+                encoded.append((np.array(frames, copy=True), fps))
+                Path(output).write_bytes(b"refined video")
+
+            with patch.object(service, "analyze", return_value=data), \
+                 patch.object(service, "resolve_mappings", return_value=[{
+                     "track_id": 1, "character_id": None, "skip": False}]), \
+                 patch.object(service, "analysis_directory", return_value=root), \
+                 patch.object(service, "decoded_video", decoded), \
+                 patch.object(service, "audio_window", return_value=(np.zeros((1, 2)), 32000)), \
+                 patch("numpy.memmap", side_effect=lambda _path, *, shape, dtype, **_kwargs:
+                       np.zeros(shape, dtype=dtype)), \
+                 patch.object(service, "_encode", side_effect=encode), \
+                 patch.object(runtime, "refinement_model", model_context), \
+                 patch.object(face, "crop_face_track", side_effect=lambda _frames, _transform, start, stop:
+                              torch.zeros((3, stop - start, 2, 2))), \
+                 patch.object(face, "stitch", side_effect=stitch):
+                report = service.process_video(source, destination)
+
+            self.assertEqual(destination.read_bytes(), b"refined video")
+            self.assertEqual(source.read_bytes(), b"source video")
+            self.assertEqual(report["faces_refined"], 1)
+
+        self.assertEqual(len(model_outputs), 2)
+        self.assertEqual(inference_flags, [False, False])
+        self.assertTrue(all(tensor.is_inference() for tensor in model_outputs))
+        self.assertTrue(bool((model_outputs[0] == 40).all()))
+        self.assertTrue(bool((model_outputs[1] == 200).all()))
+        self.assertEqual(tuple(encoded[0][0].shape), (294, 2, 2, 3))
+        self.assertEqual(encoded[0][1], 24)
+        overlap = 243 - runtime.window_starts(294)[1]
+        weights = torch.linspace(0, torch.pi, overlap).cos().mul(-0.5).add(0.5)
+        expected = torch.full((overlap,), 40.0).lerp(torch.full((overlap,), 200.0), weights).round().to(torch.uint8)
+        torch.testing.assert_close(stitched_windows[1][0, :overlap, 0, 0], expected)
+        self.assertTrue(bool((stitched_windows[1][:, overlap:] == 200).all()))
+
     def test_mapping_identity_is_explicit_not_character_order(self):
         data = {"faces": [{"track_id": 1, "character_id": "a" * 16}, {"track_id": 2, "character_id": "b" * 16}]}
         mapped = service.resolve_mappings(data, [
