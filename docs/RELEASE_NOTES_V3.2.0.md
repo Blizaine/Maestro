@@ -2,6 +2,44 @@
 
 20 October 2026. Public **Dev** preview for testing. Main remains v3.1.0.
 
+## Dev follow-up fixes — 21 October
+
+- **Face Refiner (#188 / PR #189):** clone H3 inference-mode uint8 windows
+  before in-place overlap blending. This retains the earlier color-range fix
+  while allowing clips longer than one refinement window to finish. The fix
+  follows [glenndav's PR #189](https://github.com/Blizaine/Maestro/pull/189);
+  a CPU two-window regression checks blending, source preservation and export.
+- **Optional finishing (#190):** a failed Studio DLSS/RIFE finishing stage keeps
+  the generated original and reports a non-fatal warning in completion notices,
+  completed queue entries and the output processing metadata. Warnings survive
+  browser reconnection. Cancellation remains cancellation; standalone Tools and
+  Media Flow processing failures remain failed jobs.
+- **DLSS availability (#190):** installed files alone no longer establish
+  Windows 11 Neural Rendering availability. A bounded, cached synthetic-frame
+  evaluation checks the installed native worker. Failed probes disable the option
+  with a reason; refresh reruns the check while idle. This does not repair the
+  upstream NGX/DLL fault reported on the 5090 or establish a new working driver
+  combination. The native binary pins are unchanged. [DLSS details](DLSS5.md).
+- **WGPKernels and Auto-tune (#191):** split activation preparation into bounded
+  calls below the native 65,535-row limit, preserving row order and projection
+  reuse. Reapplying Auto-tune keeps a valid selected manual INT8 backend and
+  reports the actual applied settings. CPU regressions cover boundary-sized
+  inputs and longer sequences; these are not full RTX 5090 render benchmarks.
+- **Qwen processor downloads (#192):** the repair already included in Dev uses
+  a replacement immutable revision and canonical local filenames. All ten
+  replacement processor files returned public HTTP 200 during review. Existing
+  fresh-install and cached-download regressions pass; no model weights were
+  downloaded for this verification.
+- **External LLM Director planning (#193):** accept unambiguous wrapped music-arc
+  responses instead of mistaking a JSON object container for one timeline row.
+  Make the fixed timeline and output object explicit, and use bounded corrective
+  retries for malformed responses. This music-arc call opts into the
+  OpenAI-compatible strict JSON Schema format, with one unconstrained fallback
+  when the endpoint explicitly rejects that format. Other remote calls keep
+  their existing behavior. Duplicate/missing groups and contradictory
+  source-action assignments remain errors; the fix does not invent missing beats
+  or turn off continuity checks.
+
 ## FastH3 V2 and OmniRef
 
 - Enable **FastH3 V2 8-Step — Text to Video (Experimental)** in the Frames model picker for

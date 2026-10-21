@@ -8,6 +8,7 @@ Runs on CPU by default to avoid VRAM conflicts with WanGP.
 import os
 import gc
 import time
+import copy
 import subprocess
 import threading
 import logging
@@ -752,6 +753,47 @@ _OPENAI_CHAT_FIELDS = frozenset({
     "tool_choice",
     "user",
 })
+
+
+def _openai_structured_response_format(json_schema: Optional[dict]) -> Optional[dict]:
+    """Build the OpenAI-compatible strict format for supported object schemas."""
+
+    if not isinstance(json_schema, dict) or json_schema.get("type") != "object":
+        return None
+    schema = copy.deepcopy(json_schema)
+
+    def compatible(node: object) -> bool:
+        if isinstance(node, dict):
+            node.pop("uniqueItems", None)
+            node_type = node.get("type")
+            if node_type == "object" or (
+                isinstance(node_type, list) and "object" in node_type
+            ):
+                properties = node.get("properties", {})
+                if not isinstance(properties, dict):
+                    return False
+                required = node.get("required", [])
+                if (
+                    not isinstance(required, list)
+                    or set(required) != set(properties)
+                    or node.get("additionalProperties") is not False
+                ):
+                    return False
+            return all(compatible(value) for value in node.values())
+        if isinstance(node, list):
+            return all(compatible(value) for value in node)
+        return True
+
+    if not compatible(schema):
+        return None
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "maestro_response",
+            "strict": True,
+            "schema": schema,
+        },
+    }
 
 
 def _finalize_payload(payload: dict) -> dict:
@@ -2541,6 +2583,7 @@ def generate(
     presence_penalty: float = 0.0,
     stop: Optional[list[str]] = None,
     json_schema: Optional[dict] = None,
+    remote_json_schema: bool = False,
 ) -> str:
     """Generate text via llama-server's OpenAI-compatible chat endpoint.
 
@@ -2554,11 +2597,12 @@ def generate(
             --jinja chat template. If None, uses model default (thinking on).
         reasoning_effort: Optional Qwen3.8 reasoning tier. When omitted,
             registered Qwen3.8 creative calls use ``xhigh``.
-        json_schema: Optional JSON Schema dict. When set (local llama-server
-            only), the output is grammar-constrained to schema-valid JSON —
-            the sampler masks every token that would break the schema, so
-            the model physically cannot emit prose, markdown fences, or the
-            repeat-loop garbage that breaks structured planning passes.
+        json_schema: Optional JSON Schema dict. Local llama-server uses its
+            grammar extension. Remote/OpenAI providers receive strict JSON
+            Schema only when ``remote_json_schema`` is explicitly enabled.
+        remote_json_schema: Opt in to the OpenAI-compatible strict format for
+            a known remote planning call; other remote callers retain the
+            historical unconstrained behavior.
     """
     global _stream_buffer, _stream_done, _last_system_prompt, _last_user_prompt
     global _last_thinking_text, _last_generation_metrics
@@ -2572,7 +2616,7 @@ def generate(
             image_paths=image_paths, thinking_budget=thinking_budget,
             enable_thinking=enable_thinking, reasoning_effort=reasoning_effort,
             frequency_penalty=frequency_penalty, presence_penalty=presence_penalty,
-            json_schema=json_schema, stop=stop,
+            json_schema=json_schema, remote_json_schema=remote_json_schema, stop=stop,
         )
 
     if not is_loaded():
@@ -2660,16 +2704,23 @@ def generate(
     if combined_stop:
         payload["stop"] = combined_stop
 
-    # Grammar-constrained JSON output. llama-server compiles the schema to
-    # a GBNF grammar server-side ({"type": "json_object", "schema": ...} is
-    # the long-standing llama.cpp extension form). Local provider only —
-    # remote OpenAI-compatible endpoints vary in which response_format
-    # flavor they accept, so we degrade to an unconstrained call there.
+    # Use llama.cpp's native grammar form locally. Remote OpenAI-compatible
+    # endpoints receive strict JSON Schema only for explicit opt-in callers.
     if json_schema is not None:
         if _provider == "local":
             payload["response_format"] = {"type": "json_object", "schema": json_schema}
+        elif _provider in ("remote", "openai") and remote_json_schema:
+            response_format = _openai_structured_response_format(json_schema)
+            if response_format is not None:
+                payload["response_format"] = response_format
+                print(f"[LLM] Sending strict JSON Schema to provider={_provider}")
+            else:
+                print(
+                    f"[LLM] json_schema requested but provider={_provider} "
+                    "requires a compatible object-root schema; sending unconstrained"
+                )
         else:
-            print(f"[LLM] json_schema requested but provider={_provider} — sending unconstrained (grammar is local llama-server only)")
+            print(f"[LLM] json_schema requested but provider={_provider} is not opted into remote structured output")
 
     if _provider == "anthropic":
         return _generate_anthropic(messages, total_tokens, max(temperature, 0.01), top_p)
@@ -2768,6 +2819,7 @@ def generate_streaming(
     presence_penalty: float = 0.0,
     json_schema: Optional[dict] = None,
     stop: Optional[list[str]] = None,
+    remote_json_schema: bool = False,
 ) -> str:
     """Generate text using SSE streaming, populating the stream buffer in real-time.
 
@@ -2778,9 +2830,11 @@ def generate_streaming(
         thinking_budget: Extra tokens reserved for model reasoning/thinking.
             Added on top of max_new_tokens so thinking doesn't eat into
             the content budget. Set to 0 to use max_new_tokens as-is.
-        json_schema: Optional JSON Schema dict — grammar-constrains the
-            output to schema-valid JSON on local llama-server. Forces
+        json_schema: Optional JSON Schema dict — uses local llama-server
+            grammar or remote strict JSON Schema for opted-in calls. Forces
             thinking OFF (see generate() for the rationale).
+        remote_json_schema: Opt in to the OpenAI-compatible strict format for
+            a known remote planning call.
     """
     global _stream_buffer, _stream_done, _last_system_prompt, _last_user_prompt, _last_thinking_text
     global _last_generation_metrics
@@ -2880,13 +2934,24 @@ def generate_streaming(
         existing = payload.get("stop") or []
         payload["stop"] = list(existing) + [t for t in stop_tokens if t not in existing]
 
-    # Grammar-constrained JSON output — local llama-server only (see the
-    # matching block in generate() for the full rationale).
+    # Structured JSON output. Local llama-server uses its native grammar;
+    # remote OpenAI-compatible endpoints receive strict JSON Schema only for
+    # compatible object-root schemas (see generate() above).
     if json_schema is not None:
         if _provider == "local":
             payload["response_format"] = {"type": "json_object", "schema": json_schema}
+        elif _provider in ("remote", "openai") and remote_json_schema:
+            response_format = _openai_structured_response_format(json_schema)
+            if response_format is not None:
+                payload["response_format"] = response_format
+                print(f"[LLM] Sending strict JSON Schema to provider={_provider}")
+            else:
+                print(
+                    f"[LLM] json_schema requested but provider={_provider} "
+                    "requires a compatible object-root schema; sending unconstrained"
+                )
         else:
-            print(f"[LLM] json_schema requested but provider={_provider} — sending unconstrained (grammar is local llama-server only)")
+            print(f"[LLM] json_schema requested but provider={_provider} is not opted into remote structured output")
 
     # Diagnostic — log every payload field except `messages` so we can
     # compare what Maestro sends to llama-server vs what LM Studio sends

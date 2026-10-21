@@ -103,6 +103,54 @@ def test_native_worker_cancellation_unblocks_pending_reply():
         worker.close(abort=True)
 
 
+def test_generation_finishing_preserves_source_on_failure_and_cancellation():
+    import tempfile
+    from services.media_flow import ProcessingCancelled, process_generation_video
+
+    with tempfile.TemporaryDirectory() as folder:
+        source = Path(folder) / "generated.mp4"
+        destination = Path(folder) / "generated.media-flow.mp4"
+        source.write_bytes(b"generated-original")
+
+        with patch("services.media_flow.process_video", side_effect=RuntimeError("native eval failed")):
+            with unittest.TestCase().assertRaisesRegex(RuntimeError, "native eval failed"):
+                process_generation_video(source, destination, spatial="dlss5*1")
+        assert source.read_bytes() == b"generated-original"
+        assert not destination.exists()
+
+        def render(_source, output, **_kwargs):
+            Path(output).write_bytes(b"finished")
+            return {"frames": 1}
+
+        with patch("services.media_flow.process_video", side_effect=render):
+            result = process_generation_video(source, destination, spatial="dlss5*1")
+        assert result == {"frames": 1}
+        assert source.read_bytes() == b"finished"
+        assert not destination.exists()
+
+        source.write_bytes(b"generated-original")
+        with patch("services.media_flow.process_video", side_effect=render):
+            with unittest.TestCase().assertRaisesRegex(ProcessingCancelled, "cancelled"):
+                process_generation_video(source, destination, abort=lambda: True)
+        assert source.read_bytes() == b"generated-original"
+        assert not destination.exists()
+
+
+def test_dlss_user_processing_only_uses_cached_readiness():
+    with patch("services.media_processing._nr_modes", return_value=[1.0]), \
+            patch("services.media_processing.capabilities", return_value={
+        "neural_rendering": {
+            "available": False,
+            "reason": "readiness check has not run; use Refresh while idle",
+            "scales": [1.0],
+        },
+        "frame_generation": {"available": True, "factors": [2]},
+    }) as caps:
+        with unittest.TestCase().assertRaisesRegex(ValueError, "use Refresh while idle"):
+            validate_methods("dlss5*1")
+    caps.assert_called_once_with(probe_neural=False)
+
+
 def load_tests(loader, suite, pattern):
     return unittest.TestSuite(unittest.FunctionTestCase(value) for name, value in globals().items() if name.startswith("test_") and callable(value))
 

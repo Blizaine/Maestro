@@ -149,6 +149,11 @@ The version you are running is shown next to the Maestro title in the UI. To upd
 
 ### v3.2.0 Dev preview (2026-10-20)
 
+- **21 October fixes:** multi-window Face Refiner blending, visible warnings
+  when optional finishing fails, native DLSS availability checks, large-input
+  WGPKernels preparation, preserved manual INT8 choices during Auto-tune, and
+  external-LLM Director music-arc response compatibility. The Qwen processor
+  download repair is also verified against the current public asset pin.
 - **FastH3 V2:** experimental eight-step text-to-video with generated audio,
   trained VSA-H3 attention and its own sampling recipe.
 - **FastH3 OmniRef:** experimental eight-step video/audio generation from ordered

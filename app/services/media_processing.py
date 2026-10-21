@@ -42,13 +42,16 @@ def normalize_options(options=None):
     return {"dlss_intensity": intensity, "dlss_depth": depth, "dlss_motion": motion}
 
 
-def capabilities(refresh=False):
+def capabilities(refresh=False, *, probe_neural=True):
     from postprocessing.dlss5 import runtime
     if refresh:
         runtime.dlssg_capabilities.cache_clear()
         runtime._gpu_series.cache_clear()
+        runtime._gpu_identity.cache_clear()
         runtime._hags_enabled.cache_clear()
-    nr_reason = runtime.unavailable_reason(temporal=False)
+        runtime.clear_neural_rendering_probe_cache()
+    nr_probe = runtime.neural_rendering_capabilities(allow_probe=probe_neural)
+    nr_reason = nr_probe["reason"]
     experimental = runtime.uses_experimental_backend()
     fg_reason = runtime.unavailable_reason(temporal=True)
     probe = runtime.dlssg_capabilities() if not fg_reason else {}
@@ -61,6 +64,7 @@ def capabilities(refresh=False):
         "neural_rendering": {"available": not nr_reason, "reason": nr_reason,
                              "scales": list(runtime.NR_MODES),
                              "experimental": experimental,
+                             "validation_deferred": bool(nr_probe.get("deferred")),
                              "backend": "direct-nr-with-separate-sr" if experimental else "wangp"},
         "frame_generation": {"available": not fg_reason, "reason": fg_reason,
                              "factors": factors},
@@ -81,7 +85,9 @@ def validate_methods(spatial="", temporal="", *, image=False, options=None, chec
         raise ValueError("Temporal upsampling requires a video")
     normalized = normalize_options(options)
     if check_runtime and (scale is not None or temporal.startswith("dlssg")):
-        caps = capabilities()
+        # A capability read during user work must only consult cached state;
+        # it must never launch a native worker beside generation or Media Flow.
+        caps = capabilities(probe_neural=False)
         if scale is not None and not caps["neural_rendering"]["available"]:
             raise ValueError("DLSS Neural Rendering: " + caps["neural_rendering"]["reason"] + ". See docs/DLSS5.md.")
         if scale is not None and scale not in caps["neural_rendering"].get("scales", _nr_modes()):

@@ -21,6 +21,10 @@ from services.job_lifecycle import (  # noqa: E402
     call_with_sticky_interrupt,
     collect_job_outputs,
     finish_job,
+    configure_generation_probe_lock,
+    generation_activity_reason,
+    generation_slot,
+    idle_generation_probe,
     record_job_outputs,
     register_abort_state,
     register_terminal_listener,
@@ -407,6 +411,115 @@ class TestJobLifecycle(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(result, [False])
         generation_lock.release()
+
+    def test_idle_probe_defers_for_active_or_waiting_generation_and_retries(self):
+        generation_lock = threading.Lock()
+        configure_generation_probe_lock(generation_lock)
+        self.addCleanup(configure_generation_probe_lock, None)
+        owner_entered = threading.Event()
+        release_owner = threading.Event()
+        waiter_entered = threading.Event()
+        owner_job = {"id": "owner", "status": "running"}
+        waiter_job = {"id": "waiter", "status": "running"}
+
+        def own_slot():
+            with generation_slot(generation_lock, owner_job, poll_interval=0.01) as acquired:
+                if acquired:
+                    owner_entered.set()
+                    release_owner.wait(timeout=2)
+
+        def wait_for_slot():
+            with generation_slot(generation_lock, waiter_job, poll_interval=0.01) as acquired:
+                if acquired:
+                    waiter_entered.set()
+
+        owner = threading.Thread(target=own_slot)
+        owner.start()
+        self.assertTrue(owner_entered.wait(timeout=1))
+        waiter = threading.Thread(target=wait_for_slot)
+        waiter.start()
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and generation_activity_reason() is None:
+            time.sleep(0.005)
+
+        with idle_generation_probe() as busy_reason:
+            self.assertIsNotNone(busy_reason)
+            self.assertIn("generation is active or waiting", busy_reason)
+        release_owner.set()
+        owner.join(timeout=1)
+        waiter.join(timeout=1)
+        self.assertFalse(owner.is_alive())
+        self.assertFalse(waiter.is_alive())
+        self.assertTrue(waiter_entered.is_set())
+        self.assertIsNone(generation_activity_reason())
+        with idle_generation_probe() as retry:
+            self.assertIsNone(retry)
+
+    def test_idle_probe_defers_for_waiter_even_when_generation_lock_is_free(self):
+        waiting = threading.Event()
+        allow_acquire = threading.Event()
+        real_lock = threading.Lock()
+
+        class GapLock:
+            def acquire(self, *args, **kwargs):
+                if "timeout" in kwargs:
+                    waiting.set()
+                    allow_acquire.wait(timeout=2)
+                return real_lock.acquire(*args, **kwargs)
+
+            def release(self):
+                real_lock.release()
+
+            def locked(self):
+                return real_lock.locked()
+
+        generation_lock = GapLock()
+        configure_generation_probe_lock(generation_lock)
+        self.addCleanup(configure_generation_probe_lock, None)
+        acquired = []
+
+        def start_generation():
+            with generation_slot(generation_lock, {"status": "running"}) as entered:
+                acquired.append(entered)
+
+        worker = threading.Thread(target=start_generation)
+        worker.start()
+        try:
+            self.assertTrue(waiting.wait(timeout=1))
+            self.assertFalse(generation_lock.locked())
+            self.assertIsNotNone(generation_activity_reason())
+            with idle_generation_probe() as reason:
+                self.assertIsNotNone(reason)
+                self.assertFalse(generation_lock.locked())
+        finally:
+            allow_acquire.set()
+            worker.join(timeout=1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(acquired, [True])
+        self.assertIsNone(generation_activity_reason())
+        with idle_generation_probe() as reason:
+            self.assertIsNone(reason)
+
+    def test_generation_waits_for_idle_probe_reservation(self):
+        generation_lock = threading.Lock()
+        configure_generation_probe_lock(generation_lock)
+        self.addCleanup(configure_generation_probe_lock, None)
+        entered = threading.Event()
+
+        def start_generation():
+            with generation_slot(generation_lock, {"status": "running"}, poll_interval=0.01) as acquired:
+                if acquired:
+                    entered.set()
+
+        with idle_generation_probe() as probe_reason:
+            self.assertIsNone(probe_reason)
+            worker = threading.Thread(target=start_generation)
+            worker.start()
+            time.sleep(0.04)
+            self.assertFalse(entered.is_set())
+        worker.join(timeout=1)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(entered.is_set())
 
     def test_finish_cancel_race_has_only_valid_outcomes(self):
         for _ in range(50):

@@ -167,12 +167,14 @@ export function NotificationCoordinator() {
           `studio:${job.id || 'pending'}`,
           status,
           status === 'completed'
-            ? 'Generation complete'
+            ? job.finishingWarnings?.length ? 'Generation complete with warnings' : 'Generation complete'
             : status === 'failed'
               ? 'Generation failed'
               : 'Generation cancelled',
           status === 'completed'
-            ? job.outputFiles.length > 0
+            ? job.finishingWarnings?.length
+              ? job.finishingWarnings.join('\n')
+              : job.outputFiles.length > 0
               ? `${job.outputFiles.length} ${job.outputFiles.length === 1 ? 'output is' : 'outputs are'} ready.`
               : 'Your output is ready in the gallery.'
             : status === 'failed'

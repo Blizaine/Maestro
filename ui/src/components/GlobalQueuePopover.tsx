@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   Check,
@@ -495,7 +496,9 @@ export function GlobalQueuePopover({
               <div id={completedId} hidden={!completedOpen} className="space-y-1">
                 {completedJobs.map(job => <div key={job.id} className="rounded-lg border border-border bg-bg-tertiary p-2">
                   <div className="flex items-center gap-2">
-                    <Check size={11} className="shrink-0 text-indicator-success"/>
+                    {job.finishingWarnings?.length
+                      ? <AlertTriangle size={11} className="shrink-0 text-indicator-warning"/>
+                      : <Check size={11} className="shrink-0 text-indicator-success"/>}
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-[10px] text-text-secondary">{job.message || 'Done'}</div>
                       <div className="text-[9px] text-text-muted">{job.kind === 'editor_export' ? 'Editor export' : 'Studio'} · Completed</div>
@@ -503,6 +506,8 @@ export function GlobalQueuePopover({
                     <button type="button" title="Dismiss saved job" aria-label="Dismiss saved job" disabled={clearingCompleted}
                       onClick={() => dismissJob(job.id)} className="rounded p-1 text-text-muted hover:bg-bg-hover disabled:opacity-40"><X size={12}/></button>
                   </div>
+                  {job.finishingWarnings?.map((warning, index) => <p key={index} role="status"
+                    className="mt-1 whitespace-pre-wrap break-words text-[10px] text-indicator-warning">{warning}</p>)}
                   {job.enhancement && <button type="button" onClick={() => {setReviewJob(job); setOpen(false)}}
                     className="mt-2 min-h-8 rounded border border-border px-2 text-[10px] text-accent-blue hover:bg-bg-hover">View prompts</button>}
                 </div>)}

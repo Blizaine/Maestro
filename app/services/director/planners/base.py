@@ -41,6 +41,21 @@ from services.text_integrity import repair_payload, repair_text
 # most once, making field-level repeat loops unrepresentable.
 _GENERIC_ARRAY_SCHEMA = {"type": "array", "items": {"type": "object"}, "minItems": 1}
 
+
+def _remote_json_schema_rejected(error: Exception) -> bool:
+    """Return whether a remote endpoint explicitly rejected JSON Schema."""
+
+    message = str(error).casefold()
+    format_markers = ("response_format", "json_schema", "json schema", "structured output")
+    rejection_markers = (
+        "unsupported", "not supported", "unknown", "unrecognized", "invalid",
+        "not accepted", "does not accept", "does not support", "rejected",
+    )
+    return (
+        any(marker in message for marker in format_markers)
+        and any(marker in message for marker in rejection_markers)
+    )
+
 # Checkpoints persist creative planning across restarts.  Increment this when
 # the meaning of stored planner rows changes so a repaired runtime never
 # replays structurally valid but semantically stale outlines.
@@ -553,6 +568,7 @@ class BasePlanner(ABC):
         frequency_penalty: float = 0.3,
         presence_penalty: float = 0.1,
         json_schema: Optional[dict] = None,
+        remote_json_schema: bool = False,
     ) -> list[dict]:
         """Call LLM and parse JSON array response with retry on failure.
 
@@ -636,16 +652,21 @@ class BasePlanner(ABC):
             # their unconstrained first attempt and rely on the retry net.
             if json_schema is not None:
                 kwargs["json_schema"] = json_schema
+                if remote_json_schema:
+                    kwargs["remote_json_schema"] = True
         try:
             response = gen_fn(**kwargs)
         except Exception as e:
-            if "json_schema" not in kwargs:
+            if "json_schema" not in kwargs or (
+                remote_json_schema and not _remote_json_schema_rejected(e)
+            ):
                 raise
             # Never let the grammar make planning WORSE than before it
             # existed — a rejecting server (old llama-server binary, odd
             # provider) drops the constraint and runs the call as-is.
             print(f"[Planner] Grammar-constrained call failed ({e}); retrying unconstrained")
             kwargs.pop("json_schema", None)
+            kwargs.pop("remote_json_schema", None)
             response = gen_fn(**kwargs)
 
         parsed = self._parse_json_response(response)
@@ -659,12 +680,19 @@ class BasePlanner(ABC):
         # 12B looped 96K chars of pseudo-JSON straight through it).
         # Thinking goes OFF here (grammar requires it; see llm_service).
         print("[Planner] JSON parse failed, retrying with fix prompt + JSON grammar...")
+        object_root = bool(json_schema and json_schema.get("type") == "object")
+        root_instruction = (
+            "Please output ONLY a JSON object matching the requested fields. "
+            "Just the raw JSON object starting with { and ending with }.\n\n"
+            if object_root else
+            "Please output ONLY a JSON array of objects. "
+            "Just the raw JSON array starting with [ and ending with ].\n\n"
+        )
         fix_prompt = (
             "Your previous response was not valid JSON. "
-            "Please output ONLY a JSON array of objects. "
             "No markdown fences, no explanation, no thinking tags. "
-            "Just the raw JSON array starting with [ and ending with ].\n\n"
-            f"Original request:\n{user_prompt}"
+            + root_instruction
+            + f"Original request:\n{user_prompt}"
         )
         retry_kwargs = dict(
             prompt=fix_prompt,
@@ -678,13 +706,18 @@ class BasePlanner(ABC):
             enable_thinking=False,
             json_schema=json_schema or _GENERIC_ARRAY_SCHEMA,
         )
+        if remote_json_schema:
+            retry_kwargs["remote_json_schema"] = True
         try:
             response2 = gen_fn(**retry_kwargs)
         except Exception as e:
+            if remote_json_schema and not _remote_json_schema_rejected(e):
+                raise
             # Same degradation contract as attempt 1: fall back to the
             # historical unconstrained retry (thinking budget restored).
             print(f"[Planner] Grammar-constrained retry failed ({e}); retrying unconstrained")
             retry_kwargs.pop("json_schema", None)
+            retry_kwargs.pop("remote_json_schema", None)
             retry_kwargs.pop("enable_thinking", None)
             retry_kwargs["thinking_budget"] = 2048
             response2 = gen_fn(**retry_kwargs)

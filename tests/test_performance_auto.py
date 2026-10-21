@@ -278,6 +278,17 @@ class TestAutomaticProfileMigration(unittest.TestCase):
         self.assertIn("video_preload_mode", result["preserved"])
         self.assertNotIn("vram_allocator", config["services"]["auto_performance_defaults"])
 
+    def test_startup_migration_preserves_existing_manual_int8_backend(self):
+        config = legacy_config()
+        config["int8_kernels"] = "wgpkernels"
+
+        result = perf.apply_auto_performance(config, hardware())
+
+        self.assertEqual(config["int8_kernels"], "wgpkernels")
+        self.assertIn("int8_kernels", result["preserved"])
+        self.assertNotIn("int8_kernels", config["services"]["auto_performance_defaults"])
+        self.assertEqual(result["applied"]["int8_kernels"], "wgpkernels")
+
     def test_manually_selected_profile4_is_preserved(self):
         config = legacy_config()
         config["video_profile"] = 4
@@ -299,6 +310,21 @@ class TestAutomaticProfileMigration(unittest.TestCase):
         self.assertTrue(config["services"]["auto_performance"])
         self.assertFalse(perf.auto_performance_needs_refresh(config))
         self.assertEqual(result["preserved"], [])
+
+    def test_explicit_apply_preserves_valid_manual_int8_backend(self):
+        for selection in ("disabled", "wgpkernels", "triton", "kitchen"):
+            with self.subTest(selection=selection):
+                config = legacy_config()
+                config["services"]["auto_performance"] = False
+                config["int8_kernels"] = selection
+
+                result = perf.apply_auto_performance(config, hardware(), force=True)
+
+                self.assertEqual(config["int8_kernels"], selection)
+                self.assertNotIn("int8_kernels", result["updated"])
+                self.assertIn("int8_kernels", result["preserved"])
+                self.assertNotIn("int8_kernels", config["services"]["auto_performance_defaults"])
+                self.assertEqual(result["applied"]["int8_kernels"], selection)
 
     def test_failed_detection_does_not_consume_pending_migration(self):
         config = legacy_config()
@@ -403,13 +429,15 @@ class TestAutomaticProfileEntryPoints(unittest.TestCase):
 
     def test_explicit_apply_endpoint_stamps_revision_and_retains_response(self):
         self.wgp.server_config["video_profile"] = 4.5
+        self.wgp.server_config["int8_kernels"] = "wgpkernels"
         with patch("services.hardware_detect.detect_hardware", return_value=hardware()):
             result = asyncio.run(self._endpoint("apply_system_detect")())
         self.assertEqual(result["status"], "ok")
         self.assertTrue(result["profile_changed"])
         self.assertTrue(result["settings_reload"])
         self.assertTrue(self.wgp.reload_needed)
-        self.assertEqual(result["applied"]["int8_kernels"], "auto")
+        self.assertEqual(result["applied"]["int8_kernels"], "wgpkernels")
+        self.assertEqual(self.wgp.server_config["int8_kernels"], "wgpkernels")
         self.assertIn("vram_allocator_restart_required", result)
         self.assertEqual(result["applied"]["video_profile"], 5)
         self.assertFalse(perf.auto_performance_needs_refresh(self.wgp.server_config))

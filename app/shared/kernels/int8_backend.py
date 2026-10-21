@@ -49,6 +49,7 @@ _COMPILE_CACHE_VERSION = 4
 # Includes row quantization, a possible INT32 GEMM result, and a temporary output.
 # Never allocate an activation-sized quantization buffer for a whole video.
 _SCRATCH_BYTES = 16 * 1024 * 1024
+_WGP_MAX_PREPARE_ROWS = 65_535
 
 
 def prepare_compile_cache(enabled):
@@ -385,7 +386,10 @@ def linear_multi(modules, x):
             return [module(x) for module in modules]
         x = _wgp_aligned(x)
         outputs = [x.new_empty((x.shape[0], module.out_features)) for module in modules]
-        rows = max(128, (_SCRATCH_BYTES // (2 * x.shape[-1] + 4)) // 128 * 128)
+        rows = max(1, _SCRATCH_BYTES // (2 * x.shape[-1] + 4))
+        if rows >= 128:
+            rows = rows // 128 * 128
+        rows = min(_WGP_MAX_PREPARE_ROWS, rows)
         precise = all(hasattr(module, "_int8_residual_forward") for module in modules)
         for start in range(0, x.shape[0], rows):
             stop = min(start + rows, x.shape[0])
@@ -554,15 +558,34 @@ def linear_grouped(modules, x):
         tokens = x.shape[1]
         flat = x.reshape(-1, x.shape[2])
         precise = all(hasattr(module, "_int8_residual_forward") for module in modules)
-        prepared = _wgp.prepare(flat, group, _wgp_path(modules[0], x[0], group, precise))
         output = x.new_empty((x.shape[0], tokens, modules[0].out_features))
-        for index, (module, part, out) in enumerate(zip(modules, x.unbind(0), output.unbind(0))):
-            input_rows = prepared.rows(index * tokens, (index + 1) * tokens)
-            result = _call_prepared(module, part, (input_rows, None, out))
-            if result.shape != out.shape or result.dtype != out.dtype:
-                raise RuntimeError("Grouped WGPKernels projection returned an incompatible output")
-            if result.data_ptr() != out.data_ptr():
-                out.copy_(result)
+        tile_rows = max(1, _SCRATCH_BYTES // (2 * flat.shape[1] + 4))
+        if tile_rows >= 128:
+            tile_rows = tile_rows // 128 * 128
+        tile_rows = min(_WGP_MAX_PREPARE_ROWS, tile_rows)
+        for start in range(0, flat.shape[0], tile_rows):
+            stop = min(start + tile_rows, flat.shape[0])
+            tile = flat[start:stop]
+            prepared = _wgp.prepare(tile, group, _wgp_path(modules[0], tile, group, precise))
+            first_module = start // tokens
+            last_module = (stop - 1) // tokens
+            for index in range(first_module, last_module + 1):
+                row_start = max(start, index * tokens)
+                row_stop = min(stop, (index + 1) * tokens)
+                local_start, local_stop = row_start - index * tokens, row_stop - index * tokens
+                module, part, out = modules[index], x[index], output[index]
+                input_rows = prepared.rows(row_start - start, row_stop - start)
+                result = _call_prepared(
+                    module,
+                    part[local_start:local_stop],
+                    (input_rows, None, out[local_start:local_stop]),
+                )
+                target = out[local_start:local_stop]
+                if result.shape != target.shape or result.dtype != target.dtype:
+                    raise RuntimeError("Grouped WGPKernels projection returned an incompatible output")
+                if result.data_ptr() != target.data_ptr():
+                    target.copy_(result)
+            del prepared
         return output
     if not _linear_grouped_supported(modules, x):
         return torch.stack([module(part) for module, part in zip(modules, x.unbind(0))])
@@ -815,14 +838,60 @@ class _WgpRowProjection:
     @staticmethod
     def prepare(module, x):
         _, group, precise = _WGP_ROW_PROJECTION.key(module)
-        return _wgp.prepare(x, group, _wgp_path(module, x, group, precise))
+        # WGPKernels 1.1's preparation grid has a 65,535-row limit. Keep each
+        # temporary tile within that limit and the shared scratch budget. Pick
+        # one path for the full sequence so every tile has the same Prepared
+        # representation (large inputs use quantized storage, not BF16 copies).
+        path = _wgp_path(module, x, group, precise)
+        rows = max(1, _SCRATCH_BYTES // (2 * x.shape[-1] + 4))
+        if rows >= 128:
+            rows = rows // 128 * 128
+        rows = min(_WGP_MAX_PREPARE_ROWS, rows)
+        if x.shape[0] <= rows:
+            return _wgp.prepare(x, group, path)
+
+        chunks = []
+        for start in range(0, x.shape[0], rows):
+            stop = min(start + rows, x.shape[0])
+            tile = x[start:stop]
+            chunks.append((start, stop, _wgp.prepare(tile, group, path)))
+        # Prepared keeps the quantized activation (and its scales) for block,
+        # exact and row paths. Retaining these bounded tiles costs up to one
+        # sequence-sized quantized buffer, but avoids quantizing once per
+        # projection row slice. WGPKernels only retains transformed BF16 rows
+        # for its few-row lines/small paths, which cannot be selected for these
+        # long sequences.
+        return _WgpPreparedRows(chunks, x.shape[0], x.dtype, x.device)
 
     @staticmethod
     def rows(module, prepared, start, stop):
         weight = module.qweight
         scale = _weight_scale(weight, weight._data.shape[0], weight._data.device)[start:stop]
         bias = None if module.bias is None else module.bias[start:stop].to(prepared.dtype)
-        return _wgp.linear_prepared(prepared, weight._data[start:stop], scale, bias)
+        weight_rows = weight._data[start:stop]
+        if not isinstance(prepared, _WgpPreparedRows):
+            return _wgp.linear_prepared(prepared, weight_rows, scale, bias)
+
+        output = torch.empty(
+            (prepared.row_count, stop - start), dtype=prepared.dtype, device=prepared.device
+        )
+        for row_start, row_stop, tile in prepared.chunks:
+            output[row_start:row_stop].copy_(
+                _wgp.linear_prepared(tile, weight_rows, scale, bias)
+            )
+        return output
+
+
+class _WgpPreparedRows:
+    """A row-wise collection of WGPKernels Prepared tiles for one activation."""
+
+    __slots__ = ("chunks", "row_count", "dtype", "device")
+
+    def __init__(self, chunks, row_count, dtype, device):
+        self.chunks = tuple(chunks)
+        self.row_count = row_count
+        self.dtype = dtype
+        self.device = device
 
 
 _WGP_ROW_PROJECTION = _WgpRowProjection()

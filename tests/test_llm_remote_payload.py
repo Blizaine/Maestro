@@ -18,6 +18,7 @@ if _APP not in sys.path:
     sys.path.insert(0, _APP)
 
 from services import llm_service
+from services.director.planners.music_video import MusicVideoPlanner
 
 
 def _llama_payload():
@@ -223,6 +224,149 @@ class TestRemoteVisionRequests(unittest.TestCase):
                     )
                 self.assertTrue(llm_service._vision_available)
 
+    def test_remote_openai_payload_sends_strict_object_schema_without_mutating_it(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "beats": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"source_event_ids": {"type": "array", "uniqueItems": True}},
+                        "required": ["source_event_ids"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["beats"],
+            "additionalProperties": False,
+        }
+        for streaming in (False, True):
+            with self.subTest(streaming=streaming):
+                _result, captured = self._run_request(
+                    "remote", streaming, [], self._openai_response(streaming), schema,
+                    remote_json_schema=True,
+                )
+                response_format = captured["json"]["response_format"]
+                self.assertEqual(response_format["type"], "json_schema")
+                self.assertTrue(response_format["json_schema"]["strict"])
+                self.assertEqual(response_format["json_schema"]["schema"]["type"], "object")
+                self.assertNotIn(
+                    "uniqueItems",
+                    response_format["json_schema"]["schema"]["properties"]["beats"]
+                    ["items"]["properties"]["source_event_ids"],
+                )
+        self.assertTrue(schema["properties"]["beats"]["items"]["properties"]
+                        ["source_event_ids"]["uniqueItems"])
+
+    def test_remote_object_schema_stays_unconstrained_without_explicit_opt_in(self):
+        schema = {
+            "type": "object",
+            "properties": {"beats": {"type": "array", "items": {"type": "object"}}},
+            "required": ["beats"],
+            "additionalProperties": False,
+        }
+        _result, captured = self._run_request(
+            "remote", False, [], self._openai_response(False), schema,
+        )
+        self.assertNotIn("response_format", captured["json"])
+
+    def test_opted_in_remote_schema_400_falls_back_once_through_base_planner(self):
+        self._prepare_provider("remote")
+        schema = {
+            "type": "object",
+            "properties": {"beats": {"type": "array"}},
+            "required": ["beats"],
+            "additionalProperties": False,
+        }
+        response_text = json.dumps({"beats": [{"clip_index": 0}]})
+        responses = [
+            _TransportResponse(
+                status_code=400,
+                text='{"error":{"message":"response_format json_schema is unsupported"}}',
+            ),
+            _TransportResponse({
+                "choices": [{"message": {"content": response_text}, "finish_reason": "stop"}],
+                "usage": {},
+            }),
+        ]
+        requests_sent = []
+
+        def post(_url, **kwargs):
+            requests_sent.append(kwargs["json"])
+            return responses.pop(0)
+
+        with ExitStack() as stack:
+            for patcher in (
+                patch.object(llm_service, "_cancel_idle_timer"),
+                patch.object(llm_service, "_reset_idle_timer"),
+                patch.object(
+                    llm_service, "_prepare_thinking",
+                    side_effect=lambda system, enabled, budget: (system, enabled, budget),
+                ),
+                patch.object(llm_service, "record_payload", side_effect=lambda payload, **_kwargs: payload),
+                patch.object(llm_service, "record_response"),
+                patch.object(llm_service, "record_metrics"),
+                patch.object(llm_service.requests, "post", side_effect=post),
+            ):
+                stack.enter_context(patcher)
+            planner = MusicVideoPlanner(llm_generate=llm_service.generate)
+            parsed = planner._call_llm_json(
+                user_prompt="Return one arc row.",
+                system_prompt="Return JSON only.",
+                json_schema=schema,
+                remote_json_schema=True,
+            )
+
+        self.assertEqual(len(requests_sent), 2)
+        self.assertEqual(requests_sent[0]["response_format"]["type"], "json_schema")
+        self.assertNotIn("response_format", requests_sent[1])
+        self.assertEqual(parsed, [{"beats": [{"clip_index": 0}]}])
+
+    def test_opted_in_remote_schema_does_not_retry_unrelated_http_failures(self):
+        self._prepare_provider("remote")
+        schema = {
+            "type": "object",
+            "properties": {"beats": {"type": "array"}},
+            "required": ["beats"],
+            "additionalProperties": False,
+        }
+        response = _TransportResponse(
+            status_code=503,
+            text='{"error":{"message":"temporary backend failure"}}',
+        )
+        requests_sent = []
+
+        def post(_url, **kwargs):
+            requests_sent.append(kwargs["json"])
+            return response
+
+        with ExitStack() as stack:
+            for patcher in (
+                patch.object(llm_service, "_cancel_idle_timer"),
+                patch.object(llm_service, "_reset_idle_timer"),
+                patch.object(
+                    llm_service, "_prepare_thinking",
+                    side_effect=lambda system, enabled, budget: (system, enabled, budget),
+                ),
+                patch.object(llm_service, "record_payload", side_effect=lambda payload, **_kwargs: payload),
+                patch.object(llm_service, "record_response"),
+                patch.object(llm_service, "record_metrics"),
+                patch.object(llm_service.requests, "post", side_effect=post),
+            ):
+                stack.enter_context(patcher)
+            planner = MusicVideoPlanner(llm_generate=llm_service.generate)
+            with self.assertRaisesRegex(RuntimeError, "temporary backend failure"):
+                planner._call_llm_json(
+                    user_prompt="Return one arc row.",
+                    system_prompt="Return JSON only.",
+                    json_schema=schema,
+                    remote_json_schema=True,
+                )
+
+        self.assertEqual(len(requests_sent), 1)
+        self.assertEqual(requests_sent[0]["response_format"]["type"], "json_schema")
+
     @staticmethod
     def _openai_response(streaming):
         if streaming:
@@ -248,7 +392,10 @@ class TestRemoteVisionRequests(unittest.TestCase):
             "usage": {},
         })
 
-    def _run_request(self, provider, streaming, image_paths, response):
+    def _run_request(
+        self, provider, streaming, image_paths, response, json_schema=None,
+        remote_json_schema=False,
+    ):
         self._prepare_provider(provider)
         captured = {}
 
@@ -274,13 +421,18 @@ class TestRemoteVisionRequests(unittest.TestCase):
                 side_effect=lambda resp, **kwargs: resp.iter_lines(**kwargs),
             ))
             generate = llm_service.generate_streaming if streaming else llm_service.generate
-            result = generate(
-                "describe this frame",
-                system_prompt="Keep the answer concise.",
-                max_new_tokens=32,
-                image_paths=image_paths,
-                enable_thinking=False,
-            )
+            request = {
+                "prompt": "describe this frame",
+                "system_prompt": "Keep the answer concise.",
+                "max_new_tokens": 32,
+                "image_paths": image_paths,
+                "enable_thinking": False,
+            }
+            if json_schema is not None:
+                request["json_schema"] = json_schema
+            if remote_json_schema:
+                request["remote_json_schema"] = True
+            result = generate(**request)
         return result, captured
 
     def test_unreadable_remote_images_fail_instead_of_being_dropped(self):

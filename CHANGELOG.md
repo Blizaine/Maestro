@@ -8,6 +8,24 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 Public **Dev** preview. Main remains v3.1.0. See the
 [v3.2.0 release notes](docs/RELEASE_NOTES_V3.2.0.md).
 
+Dev follow-up fixes, 21 October:
+
+- Incorporate PR #189's conditional clone before Face Refiner overlap blending,
+  fixing inference-tensor writes on clips longer than one refinement window (#188).
+- Preserve saved Studio generations when optional Media Flow finishing fails,
+  retaining a visible warning in queue history, completion notices and output
+  processing metadata. Standalone processing jobs still report their own failures.
+  Gate Windows 11 DLSS Neural Rendering on a bounded cached native evaluation,
+  rather than installed files alone; refresh retries the probe while idle (#190).
+- Tile WGPKernels row preparation within its native row limit and temporary
+  memory budget. Preserve valid manual INT8 backend choices when reapplying
+  Auto-tune and return the settings actually applied to the UI (#191).
+- Verify the existing Qwen 2.1 processor repair against all ten public replacement
+  assets, with fresh-install and cached-download regressions (#192).
+- Normalize unambiguous external-LLM music-arc JSON containers against Director's
+  fixed timeline, with bounded corrective retries. Keep exact group coverage,
+  unique indices and source-action assignments enforced (#193).
+
 - Add experimental FastH3 V2 eight-step text-to-video with generated audio,
   its trained VSA-H3 attention and fixed DMD sampling recipe. Keep it separate
   from ordinary H3 accelerators, LoRAs and reference workflows.

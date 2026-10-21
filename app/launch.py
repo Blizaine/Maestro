@@ -341,6 +341,7 @@ api.add_middleware(
 from services.job_lifecycle import (
     GENERATED_MEDIA_EXTENSIONS,
     collect_job_outputs,
+    configure_generation_probe_lock,
     finish_job,
     generation_slot,
     is_cancel_requested,
@@ -390,6 +391,7 @@ register_terminal_listener(_studio_job_archive.save)
 register_terminal_listener(lambda job, status: _generation_previews.clear(str(job.get("id") or "")))
 _studio_submission_lock = threading.RLock()
 _gen_lock = threading.Lock()
+configure_generation_probe_lock(_gen_lock)
 
 
 def _play_host_completion_sound() -> None:
@@ -414,12 +416,15 @@ def _on_generation_job_terminal(job: dict, status: str) -> None:
     is_editor = job.get("kind") == "editor_export"
     surface = "Editor" if is_editor else "Studio"
     if status == "completed":
+        finishing_warnings = job.get("finishing_warnings") or []
         _play_host_completion_sound()
         _web_push.dispatch(
             category="completion",
-            title=f"{surface} {'export' if is_editor else 'generation'} complete",
+            title=f"{surface} {'export' if is_editor else 'generation'} complete"
+                  + (" with warnings" if finishing_warnings else ""),
             body=(
-                "Your Maestro edit is ready."
+                "\n".join(finishing_warnings) if finishing_warnings
+                else "Your Maestro edit is ready."
                 if is_editor
                 else "Your Maestro generation is ready."
             ),
@@ -7296,7 +7301,7 @@ async def apply_system_detect():
         flag noting this so the UI can show the user.
     """
     from services.hardware_detect import detect_hardware
-    from services.perf_recommend import apply_auto_performance, applied_keys
+    from services.perf_recommend import apply_auto_performance
     from services.memory_settings import MODEL_LOAD_KEYS
     from shared.cuda_memory import allocator_status
 
@@ -7335,7 +7340,7 @@ async def apply_system_detect():
         return {
             "status": "ok",
             "hardware": hw,
-            "applied": {k: rec[k] for k in applied_keys() if k in rec},
+            "applied": result["applied"],
             "label": rec.get("_recommendation_label", ""),
             "reason": rec.get("_recommendation_reason", ""),
             # Tells UI to show "changes take effect on next model load" toast
@@ -28468,7 +28473,6 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 # Run temporal and DLSS processing over the assembled clip so
                 # audio timing and native temporal history span H3 windows.
                 if success and (pp_media_spatial or pp_media_temporal):
-                    from services.media_flow import process_video
                     wgp.release_model()
                     for fname in new_files:
                         if os.path.splitext(fname)[1].lower() not in {".mp4", ".webm", ".mkv"}:
@@ -28479,22 +28483,73 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         def media_progress(phase, step=None, total=None):
                             update_job(job, phase=phase, message=phase, step=int(step or 0),
                                        total_steps=int(total or 0))
+                        before_processing = {}
+                        finishing_started = time.monotonic()
                         try:
+                            from services.media_flow import process_generation_video
                             from services.media_info import probe_media, processing_record
                             before_processing = probe_media(video_path)
-                            finishing_started = time.monotonic()
-                            process_video(video_path, temporary, spatial=pp_media_spatial,
+                            process_generation_video(video_path, temporary, spatial=pp_media_spatial,
                                 temporal=pp_media_temporal, options=pp_media_options,
                                 abort=lambda: is_cancel_requested(job), progress=media_progress)
-                            os.replace(temporary, video_path)
+                        except Exception as media_error:
+                            if is_cancel_requested(job):
+                                raise
+                            detail = str(media_error).strip() or type(media_error).__name__
+                            warning = (
+                                f"Media Flow failed for {fname}; the generated original was kept. "
+                                f"{detail}"
+                            )
+                            if (str(pp_media_spatial).startswith("dlss5*")
+                                    or str(pp_media_temporal).startswith("dlssg*")):
+                                warning += (
+                                    " Check docs/DLSS5.md and app/dlss5/host/ReShade.log, "
+                                    "then use Refresh DLSS availability while Maestro is idle."
+                                )
+                            print(f"  [Media Flow] Warning: {warning}")
+                            traceback.print_exc()
+                            finishing_warnings = list(job.get("finishing_warnings") or [])
+                            finishing_warnings.append(warning)
+                            if not update_job(job, finishing_warnings=finishing_warnings):
+                                if is_cancel_requested(job):
+                                    raise
+                            try:
+                                warning_record = processing_record(
+                                    spatial=pp_media_spatial, temporal=pp_media_temporal,
+                                    before=before_processing, after=before_processing,
+                                    options=pp_media_options)
+                            except Exception:
+                                warning_record = {
+                                    "method": pp_media_spatial or pp_media_temporal,
+                                }
+                            warning_record.update(status="warning", warnings=[warning])
+                            processing_by_output[fname] = warning_record
+                            continue
+                        try:
                             processing_by_output[fname] = processing_record(
                                 spatial=pp_media_spatial, temporal=pp_media_temporal,
                                 before=before_processing, after=probe_media(video_path),
                                 elapsed=time.monotonic() - finishing_started,
                                 completed_at=time.time(), options=pp_media_options)
-                        finally:
-                            if os.path.isfile(temporary):
-                                os.remove(temporary)
+                        except Exception as metadata_error:
+                            if is_cancel_requested(job):
+                                raise
+                            warning = (
+                                f"Media Flow completed for {fname}, but its processing details could not be recorded: "
+                                f"{str(metadata_error).strip() or type(metadata_error).__name__}"
+                            )
+                            print(f"  [Media Flow] Warning: {warning}")
+                            traceback.print_exc()
+                            finishing_warnings = list(job.get("finishing_warnings") or [])
+                            finishing_warnings.append(warning)
+                            if not update_job(job, finishing_warnings=finishing_warnings):
+                                if is_cancel_requested(job):
+                                    raise
+                            processing_by_output[fname] = {
+                                "method": pp_media_spatial or pp_media_temporal,
+                                "status": "warning",
+                                "warnings": [warning],
+                            }
 
                 # Post-generation FlashVSR pass — whole-file upscale on the
                 # assembled video (see the pop near the top of this function
@@ -28521,10 +28576,13 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                             before_processing = probe_media(video_path)
                             finishing_started = time.monotonic()
                             _apply_spatial_upsampling_to_file(video_path, pp_spatial_upsampling, job=job)
+                            prior_warnings = processing_by_output.get(fname, {}).get("warnings", [])
                             processing_by_output[fname] = processing_record(
                                 spatial=pp_spatial_upsampling, before=before_processing,
                                 after=probe_media(video_path), elapsed=time.monotonic() - finishing_started,
                                 completed_at=time.time())
+                            if prior_warnings:
+                                processing_by_output[fname]["warnings"] = list(prior_warnings)
                             print(f"  [Upscale] Done: {fname}")
                         except Exception as up_err:
                             print(f"  [Upscale] Warning: failed on {fname} (keeping original): {up_err}")
@@ -29575,6 +29633,7 @@ def get_status(job_id: str):
         "phase": j.get("phase", ""),
         "message": j["message"],
         "output_files": j["output_files"],
+        "finishing_warnings": j.get("finishing_warnings", []),
         "reconstruction_report": j.get("reconstruction_report"),
         "error": j["error"],
         "viggle_preparation": j.get("viggle_preparation"),
@@ -29785,7 +29844,7 @@ def list_jobs():
         j = snapshot_job(job)
         if j.get("dismissed"):
             continue
-        if j["status"] in ("held", "queued", "running") or j.get("enhancement"):
+        if j["status"] in ("held", "queued", "running") or j.get("enhancement") or j.get("finishing_warnings"):
             active.append({
                 "job_id": j["id"],
                 "client_submission_id": j.get("client_submission_id"),
@@ -29798,6 +29857,7 @@ def list_jobs():
                 "phase": j.get("phase", ""),
                 "message": j["message"],
                 "output_files": j["output_files"],
+                "finishing_warnings": j.get("finishing_warnings", []),
                 "error": j["error"],
                 "enhancement": public_enhancement(j.get("enhancement"), summary=True),
                 "oom_info": j.get("oom_info"),

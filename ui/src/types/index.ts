@@ -532,6 +532,8 @@ export interface GenerationJob {
   phase: string
   message: string
   outputFiles: string[]
+  /** Non-fatal finishing failures; the original output remains available. */
+  finishingWarnings?: string[]
   error: string | null
   /** Small, job-scoped in-progress preview. Absent on older backends. */
   preview?: GenerationPreview | null

@@ -153,6 +153,42 @@ installation; the optional `-Force` flag backs them up before replacement.
 Do not use that flag without reviewing the conflict list. Restart Maestro,
 then use **Refresh availability** in the finishing controls.
 
+### Windows 11 compatibility and native checks
+
+Installed files and an RTX model name establish eligibility, not a successful
+Neural Rendering evaluation. Maestro checks one small synthetic frame through
+the installed native worker and caches the result. **Refresh availability**
+invalidates that result and retries while Maestro is idle. A deferred busy check
+is not stored as a permanent hardware failure. A successful small probe does not
+certify every output size, scale or long video.
+
+API clients should request `GET /api/v1/media-flow/capabilities` while
+Maestro is idle before submitting Neural Rendering work. Add `?refresh=true`
+after installing or changing the runtime. Processing validation uses that
+cached result so it cannot start a native probe while a job owns the GPU.
+
+The pinned Windows 11 bundle is WanGP workers v1.1.3, RenoDX 4.70, DLSSNR
+310.8.SF-v2, DLSS SR 310.8.0 and ReShade 6.8.0. Maestro has no documented
+successful RTX 50 / 61x-driver Neural Rendering validation for that combination.
+[Issue #190](https://github.com/Blizaine/Maestro/issues/190) reports frame-zero
+NGX `0xBAD00000` on an RTX 5090 with drivers 616.92 and 617.42, despite valid
+installed hashes. That upstream runtime fault is not fixed by the availability
+check; the failed check prevents offering the broken path as ready.
+
+The [worker releases](https://github.com/DeepBeepMeep/dlss5-visual-enhancer/releases)
+still list v1.1.3 as the current Windows worker release at review on 21 October
+2026. [Newer component uploads](https://github.com/RankFTW/rhi-repo/releases),
+including RenoDX prereleases and other DLSS runtimes, do not establish a tested
+replacement combination for this worker. This fix keeps the verified binary
+pins instead of replacing them with an unvalidated set. The Windows 10 results
+above apply to its separate experimental backend.
+
+If optional Studio finishing fails after generation, Maestro retains the saved
+original, marks generation completed and displays the finishing warning in its
+completion notice and completed queue entry. Output processing metadata also
+records the warning. Tools → Upscale and standalone Media Flow still fail when
+their requested processing fails. Cancelling processing remains cancellation.
+
 Runtime layout:
 
 ```text

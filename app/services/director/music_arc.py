@@ -12,7 +12,7 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from difflib import SequenceMatcher
-from typing import Any
+from typing import Any, Optional
 
 
 MAX_MUSIC_ARC_ROWS = 48
@@ -98,6 +98,225 @@ def creative_plan_schema() -> dict[str, Any]:
 
 def _is_sequence(value: Any) -> bool:
     return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+
+
+_ARC_ROW_CONTAINERS = (
+    "beats", "rows", "arc", "music_arc", "outline", "timeline_groups", "groups",
+)
+_ARC_ZERO_BASED_INDEX_FIELDS = ("clip_index", "timeline_index", "group_index", "index")
+_ARC_ONE_BASED_INDEX_FIELDS = ("clip_number", "timeline_number", "group_number", "number")
+_ARC_ZERO_BASED_RANGE_FIELDS = ("clip_index_range", "timeline_index_range", "group_index_range", "index_range")
+_ARC_ONE_BASED_RANGE_FIELDS = ("clip_number_range", "timeline_number_range", "group_number_range", "number_range")
+_ARC_RANGE_FIELDS = frozenset((
+    *_ARC_ZERO_BASED_RANGE_FIELDS, *_ARC_ONE_BASED_RANGE_FIELDS,
+    "clip_range", "timeline_range", "group_range", "range",
+))
+_ARC_INDEX_FIELDS = frozenset((*_ARC_ZERO_BASED_INDEX_FIELDS, *_ARC_ONE_BASED_INDEX_FIELDS))
+_ARC_RANGE_KEY_RE = re.compile(r"^(\d+)\s*[-–]\s*(\d+)$")
+
+
+def _arc_integer(value: Any, label: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"music arc {label} must be an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"\s*\d+\s*", value):
+        return int(value)
+    raise ValueError(f"music arc {label} must be an integer")
+
+
+def _arc_source_rows(value: Any) -> tuple[list[Any], Optional[list[int]], Optional[list[tuple[int, int]]]]:
+    """Unwrap known row containers and complete numeric/range maps."""
+
+    if isinstance(value, Mapping):
+        containers = [
+            key for key in _ARC_ROW_CONTAINERS
+            if key in value and isinstance(value[key], (Mapping, Sequence))
+            and not isinstance(value[key], (str, bytes, bytearray))
+        ]
+        if containers:
+            if len(containers) != 1 or set(value) != {containers[0]}:
+                raise ValueError("music arc wrapper has unrelated fields")
+            return _arc_source_rows(value[containers[0]])
+
+        numeric: list[tuple[Mapping[str, Any], int]] = []
+        ranges: list[tuple[Mapping[str, Any], tuple[int, int]]] = []
+        for key, row in value.items():
+            if not isinstance(key, str) or not isinstance(row, Mapping):
+                raise ValueError("music arc object must contain a recognized row container or numeric group keys")
+            if re.fullmatch(r"\s*\d+\s*", key):
+                numeric.append((row, _arc_integer(key, "group key")))
+            elif (match := _ARC_RANGE_KEY_RE.fullmatch(key)):
+                ranges.append((row, (int(match.group(1)), int(match.group(2)))))
+            else:
+                raise ValueError(f"music arc object has unrelated key {key[:60]!r}")
+        if numeric and ranges:
+            raise ValueError("music arc cannot mix numeric keys and range keys")
+        if numeric:
+            return [row for row, _index in numeric], [index for _row, index in numeric], None
+        if ranges:
+            return [row for row, _bounds in ranges], None, [bounds for _row, bounds in ranges]
+        raise ValueError("music arc object has no timeline rows")
+
+    if not _is_sequence(value):
+        raise ValueError("music arc rows must be a list or recognized object container")
+    rows = list(value)
+    # BasePlanner wraps a root JSON object in a one-item list. Unwrap only
+    # recognized containers/maps, rather than treating an arbitrary row as one.
+    if len(rows) == 1 and isinstance(rows[0], Mapping):
+        nested = rows[0]
+        if any(key in nested for key in _ARC_ROW_CONTAINERS):
+            return _arc_source_rows(nested)
+        if nested and all(
+            isinstance(key, str)
+            and (re.fullmatch(r"\s*\d+\s*", key) or _ARC_RANGE_KEY_RE.fullmatch(key))
+            and isinstance(row, Mapping)
+            for key, row in nested.items()
+        ):
+            return _arc_source_rows(nested)
+    return rows, None, None
+
+
+def _arc_explicit_index(row: Mapping[str, Any]) -> Optional[int]:
+    values = [_arc_integer(row[field], field) for field in _ARC_ZERO_BASED_INDEX_FIELDS if field in row]
+    for field in _ARC_ONE_BASED_INDEX_FIELDS:
+        if field in row:
+            number = _arc_integer(row[field], field)
+            if number < 1:
+                raise ValueError(f"music arc {field} must start at 1")
+            values.append(number - 1)
+    if len(set(values)) > 1:
+        raise ValueError("music arc row has conflicting timeline index fields")
+    return values[0] if values else None
+
+
+def _arc_singleton_range(value: Any, field: str) -> tuple[int, Optional[int]]:
+    """Read an explicit range only when it names one authored timeline row."""
+
+    if isinstance(value, Mapping):
+        if set(value) == {"start_index", "end_index"}:
+            start, end, base = _arc_integer(value["start_index"], "range start"), _arc_integer(value["end_index"], "range end"), 0
+        elif set(value) == {"start_number", "end_number"}:
+            start, end, base = _arc_integer(value["start_number"], "range start"), _arc_integer(value["end_number"], "range end"), 1
+        elif set(value) == {"start", "end"}:
+            start, end, base = _arc_integer(value["start"], "range start"), _arc_integer(value["end"], "range end"), None
+        else:
+            raise ValueError("music arc range object must contain only start and end")
+    elif isinstance(value, str):
+        match = _ARC_RANGE_KEY_RE.fullmatch(value)
+        if not match:
+            raise ValueError("music arc range must use an inclusive start-end form")
+        start, end, base = int(match.group(1)), int(match.group(2)), None
+    elif _is_sequence(value) and len(value) == 2:
+        start, end, base = _arc_integer(value[0], "range start"), _arc_integer(value[1], "range end"), None
+    else:
+        raise ValueError("music arc range must contain exactly two integer endpoints")
+    if end != start:
+        raise ValueError("music arc ranges must identify one timeline group per authored row")
+    if base is None:
+        base = 0 if field in _ARC_ZERO_BASED_RANGE_FIELDS else 1 if field in _ARC_ONE_BASED_RANGE_FIELDS else None
+    return start, base
+
+
+def coerce_music_arc_rows(rows: Any, timeline_group_count: int) -> list[dict[str, Any]]:
+    """Normalize explicit remote JSON layouts without inventing timeline rows."""
+
+    if (
+        not isinstance(timeline_group_count, int)
+        or isinstance(timeline_group_count, bool)
+        or timeline_group_count < 0
+    ):
+        raise ValueError("music arc timeline group count must be nonnegative")
+    source_rows, keyed_indexes, keyed_ranges = _arc_source_rows(rows)
+    if len(source_rows) != timeline_group_count:
+        raise ValueError(
+            f"music arc must cover exactly {timeline_group_count} timeline groups "
+            f"(received {len(source_rows)})"
+        )
+
+    prepared: list[dict[str, Any]] = []
+    row_indexes: list[Optional[int]] = []
+    row_ranges: list[Optional[tuple[int, Optional[int]]]] = []
+    for position, raw in enumerate(source_rows):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"music arc row {position + 1} must be an object")
+        row = dict(raw)
+        index = _arc_explicit_index(row)
+        range_fields = [field for field in _ARC_RANGE_FIELDS if field in row]
+        if len(range_fields) > 1 or (range_fields and index is not None):
+            raise ValueError(f"music arc row {position + 1} has conflicting index fields")
+        row_range = _arc_singleton_range(row[range_fields[0]], range_fields[0]) if range_fields else None
+        for field in (*_ARC_INDEX_FIELDS, *range_fields):
+            row.pop(field, None)
+        prepared.append(row)
+        row_indexes.append(index)
+        row_ranges.append(row_range)
+
+    if keyed_indexes is not None:
+        if keyed_ranges is not None:
+            raise ValueError("music arc cannot mix numeric keys and range keys")
+        mapped = _resolve_music_arc_key_positions(keyed_indexes, timeline_group_count)
+        if any(row_ranges):
+            raise ValueError("music arc cannot combine group keys and row ranges")
+        for row_index, key_index in zip(row_indexes, mapped):
+            if row_index is not None and row_index != key_index:
+                raise ValueError("music arc row conflicts with its numeric group key")
+        positions = mapped
+    elif keyed_ranges is not None:
+        if any(index is not None for index in row_indexes) or any(row_ranges):
+            raise ValueError("music arc cannot combine range keys with row indexes or ranges")
+        if any(start != end for start, end in keyed_ranges):
+            raise ValueError("music arc ranges must identify one timeline group per authored row")
+        positions = _resolve_music_arc_key_positions([start for start, _end in keyed_ranges], timeline_group_count)
+    elif any(row_ranges):
+        if any(index is not None for index in row_indexes) or any(value is None for value in row_ranges):
+            raise ValueError("music arc cannot mix indexed, ranged, and positional rows")
+        positions = _resolve_music_arc_row_ranges(row_ranges, timeline_group_count)
+    elif any(index is not None for index in row_indexes):
+        if any(index is None for index in row_indexes):
+            raise ValueError("music arc cannot mix indexed and unindexed rows")
+        positions = [int(index) for index in row_indexes]
+        _require_complete_music_arc_positions(positions, timeline_group_count)
+    else:
+        # Positional rows are safe only for a complete array whose ordering is
+        # the fixed timeline ordering supplied in the prompt.
+        positions = list(range(timeline_group_count))
+
+    return sorted(
+        [dict(row, clip_index=index) for row, index in zip(prepared, positions)],
+        key=lambda row: row["clip_index"],
+    )
+
+
+def _require_complete_music_arc_positions(positions: list[int], count: int) -> None:
+    if len(positions) != count or set(positions) != set(range(count)):
+        raise ValueError("music arc indexes must cover the complete timeline exactly once")
+
+
+def _resolve_music_arc_key_positions(raw_indexes: list[int], count: int) -> list[int]:
+    candidates = [
+        [index - base for index in raw_indexes]
+        for base in (0, 1)
+        if set(index - base for index in raw_indexes) == set(range(count))
+        and len(set(raw_indexes)) == count
+    ]
+    if len(candidates) != 1:
+        raise ValueError("music arc keys must cover the complete timeline with unambiguous numbering")
+    return candidates[0]
+
+
+def _resolve_music_arc_row_ranges(
+    ranges: list[Optional[tuple[int, Optional[int]]]], count: int,
+) -> list[int]:
+    values = [value for value in ranges if value is not None]
+    candidates: set[tuple[int, ...]] = set()
+    for base in (0, 1):
+        positions = [start - (hint if hint is not None else base) for start, hint in values]
+        if set(positions) == set(range(count)) and len(set(positions)) == count:
+            candidates.add(tuple(positions))
+    if len(candidates) != 1:
+        raise ValueError("music arc ranges must cover the complete timeline with unambiguous numbering")
+    return list(next(iter(candidates)))
 
 
 def _contract_event_ids(contract: Any) -> list[str]:
@@ -630,10 +849,11 @@ def normalize_music_arc(rows: Any, clips: Any, contract: Any) -> list[dict[str, 
     clip_count = len(clips)
     if clip_count > MAX_MUSIC_ARC_CLIPS:
         raise ValueError(f"music arc supports at most {MAX_MUSIC_ARC_CLIPS} clip rows")
-    if not _is_sequence(rows):
-        raise ValueError("music arc rows must be a list")
+    rows = coerce_music_arc_rows(rows, clip_count)
     if len(rows) != clip_count:
-        raise ValueError(f"music arc must cover exactly {clip_count} timeline groups")
+        raise ValueError(
+            f"music arc must cover exactly {clip_count} timeline groups (received {len(rows)})"
+        )
     expected_ids = _contract_event_ids(contract)
 
     normalized: list[dict[str, Any]] = []

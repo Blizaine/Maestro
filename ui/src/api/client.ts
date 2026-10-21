@@ -88,6 +88,8 @@ export interface ApiJobStatus {
   phase: string
   message: string
   output_files: string[]
+  /** Optional finishing failed after the original generation was saved. */
+  finishing_warnings?: string[]
   /** Small job-specific preview; absent on older backends. */
   preview?: GenerationPreview | null
   preview_notice?: string | null

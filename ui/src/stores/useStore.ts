@@ -8787,6 +8787,7 @@ export const useStore = create<AppState>((set, get) => ({
               phase: status.phase,
               message: status.message,
               outputFiles: status.output_files,
+              finishingWarnings: status.finishing_warnings ?? j.finishingWarnings,
               error: status.error,
               oomInfo: status.oom_info ?? null,
               h3WindowPlan: status.h3_window_plan ?? j.h3WindowPlan ?? null,
@@ -8805,7 +8806,7 @@ export const useStore = create<AppState>((set, get) => ({
             clearInterval(pollInterval)
             // Completed job — remove the placeholder, real output now in gallery
             set(s => {
-              const remaining = s.jobs.filter(j => j.id !== job_id || !!j.enhancement)
+              const remaining = s.jobs.filter(j => j.id !== job_id || !!j.enhancement || !!j.finishingWarnings?.length)
               return {
                 jobs: remaining,
                 isGenerating: remaining.some(j => j.status === 'running' || j.status === 'queued'),
@@ -8982,6 +8983,7 @@ export const useStore = create<AppState>((set, get) => ({
             phase: j.phase,
             message: j.message,
             outputFiles: j.output_files,
+            finishingWarnings: j.finishing_warnings,
             error: j.error,
             ..._directorJobFields(j),
             oomInfo: (j as { oom_info?: import('../types').OomInfo | null }).oom_info ?? null,
@@ -9022,6 +9024,7 @@ export const useStore = create<AppState>((set, get) => ({
                     phase: status.phase,
                     message: status.message,
                     outputFiles: status.output_files,
+                    finishingWarnings: status.finishing_warnings ?? j.finishingWarnings,
                     error: status.error,
                     ..._directorJobFields(status),
                     oomInfo: status.oom_info ?? null,
@@ -9034,7 +9037,7 @@ export const useStore = create<AppState>((set, get) => ({
                 if (status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled') {
                   clearInterval(pollInterval)
                   set(s => {
-                    const remaining = s.jobs.filter(j => j.id !== job.id || !!j.enhancement)
+                    const remaining = s.jobs.filter(j => j.id !== job.id || !!j.enhancement || !!j.finishingWarnings?.length)
                     return {
                       jobs: remaining,
                       isGenerating: remaining.some(
