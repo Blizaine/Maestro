@@ -25,6 +25,10 @@ Dev follow-up fixes, 21 October:
 - Normalize unambiguous external-LLM music-arc JSON containers against Director's
   fixed timeline, with bounded corrective retries. Keep exact group coverage,
   unique indices and source-action assignments enforced (#193).
+- Keep the complete music-outline response format in the prompt when an LLM
+  endpoint cannot enforce structured output. Accept unambiguous row-local `beat`
+  and `prompt` aliases for `visual_beat`, while rejecting conflicting values,
+  incomplete rows and invalid timeline or source-action assignments.
 
 - Add experimental FastH3 V2 eight-step text-to-video with generated audio,
   its trained VSA-H3 attention and fixed DMD sampling recipe. Keep it separate

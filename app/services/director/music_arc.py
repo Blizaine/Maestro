@@ -103,6 +103,7 @@ def _is_sequence(value: Any) -> bool:
 _ARC_ROW_CONTAINERS = (
     "beats", "rows", "arc", "music_arc", "outline", "timeline_groups", "groups",
 )
+_ARC_VISUAL_BEAT_ALIASES = ("beat", "prompt")
 _ARC_ZERO_BASED_INDEX_FIELDS = ("clip_index", "timeline_index", "group_index", "index")
 _ARC_ONE_BASED_INDEX_FIELDS = ("clip_number", "timeline_number", "group_number", "number")
 _ARC_ZERO_BASED_RANGE_FIELDS = ("clip_index_range", "timeline_index_range", "group_index_range", "index_range")
@@ -190,6 +191,37 @@ def _arc_explicit_index(row: Mapping[str, Any]) -> Optional[int]:
     return values[0] if values else None
 
 
+def _normalize_arc_visual_beat_aliases(row: dict[str, Any], row_number: int) -> None:
+    """Map row-local beat aliases to visual_beat without losing conflicts.
+
+    When multiple spellings are present, text is equal after collapsing
+    whitespace with ``str.split``/``str.join``. Keep the canonical value when
+    supplied; otherwise prefer ``beat`` to ``prompt``. The final text is still
+    validated and whitespace-collapsed by ``_collapsed_text``.
+    """
+
+    fields = [
+        field for field in ("visual_beat", *_ARC_VISUAL_BEAT_ALIASES)
+        if field in row
+    ]
+    if not fields:
+        return
+
+    if len(fields) > 1:
+        values = [row[field] for field in fields]
+        if any(not isinstance(value, str) for value in values):
+            raise ValueError(f"music arc row {row_number} visual_beat aliases must be text")
+        collapsed = [" ".join(value.split()) for value in values]
+        if len(set(collapsed)) > 1:
+            raise ValueError(f"music arc row {row_number} has conflicting visual_beat alias values")
+
+    canonical = next((field for field in ("visual_beat", *_ARC_VISUAL_BEAT_ALIASES) if field in row), None)
+    if canonical != "visual_beat":
+        row["visual_beat"] = row[canonical]
+    for field in _ARC_VISUAL_BEAT_ALIASES:
+        row.pop(field, None)
+
+
 def _arc_singleton_range(value: Any, field: str) -> tuple[int, Optional[int]]:
     """Read an explicit range only when it names one authored timeline row."""
 
@@ -248,6 +280,7 @@ def coerce_music_arc_rows(rows: Any, timeline_group_count: int) -> list[dict[str
         row_range = _arc_singleton_range(row[range_fields[0]], range_fields[0]) if range_fields else None
         for field in (*_ARC_INDEX_FIELDS, *range_fields):
             row.pop(field, None)
+        _normalize_arc_visual_beat_aliases(row, position + 1)
         prepared.append(row)
         row_indexes.append(index)
         row_ranges.append(row_range)

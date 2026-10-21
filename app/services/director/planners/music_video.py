@@ -2696,7 +2696,7 @@ class MusicVideoPlanner(BasePlanner):
             "synonyms for the same action. Cutaways and performance inserts may develop "
             "the concept without resetting persistent physical facts. An intentional "
             "reprise needs a specific purpose and new development or treatment. "
-            "Only source_event_ids below are immutable obligations: assign each once "
+            "Only the source-event IDs below are immutable obligations: assign each once "
             "in order; other creative beats may be invented within the concept. "
             "A continuing state (e.g. travelling together) does not require replaying "
             "the transition that established it. Visibly complete each assigned "
@@ -2722,6 +2722,19 @@ class MusicVideoPlanner(BasePlanner):
             )
         else:
             prompt += "\nOutput one JSON object with a beats array."
+        # Keep the complete response contract in the text as well as the
+        # provider's structured-output argument. A server that rejects that
+        # argument falls back to this same prompt and still needs exact row
+        # fields, bounds, and source-event ownership instructions.
+        prompt += (
+            "\nUse visual_beat for each row's visible action. Use the exact required "
+            "field names and value types below; include every required field and "
+            "no unrelated fields. Return only the outline data matching this "
+            "schema, not the schema itself or an explanation.\n"
+            "Required JSON response schema:\n"
+            + json.dumps(response_schema, ensure_ascii=False, separators=(",", ":"))
+        )
+
         def parse_candidate(response, baseline=None):
             """Parse and validate one response, preserving locked source assignments."""
             rows = response
