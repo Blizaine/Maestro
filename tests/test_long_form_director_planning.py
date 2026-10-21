@@ -127,17 +127,22 @@ def _music_planning_phase_response(kwargs) -> str | None:
     """Stub the whole-song outline and review phases in music planner tests."""
 
     schema = kwargs.get("json_schema") or {}
-    item_schema = schema.get("items") or {}
-    properties = item_schema.get("properties") or {}
+    root_properties = schema.get("properties") or {}
+    beats_schema = root_properties.get("beats") or {}
+    arc_item_schema = beats_schema.get("items") or {}
+    if "beats" in root_properties:
+        properties = arc_item_schema.get("properties") or {}
+    else:
+        item_schema = schema.get("items") or {}
+        properties = item_schema.get("properties") or {}
     if "visual_beat" in properties:
         prompt = str(kwargs.get("user_prompt") or kwargs.get("prompt") or "")
         marker = "Song timeline:"
         if marker not in prompt:
             raise AssertionError("Music arc request did not include its timeline")
-        timeline_text = prompt.split(marker, 1)[1].strip()
-        timeline_text = timeline_text.split("\nOptional thematic lyric context:", 1)[0].strip()
-        timeline = json.loads(timeline_text)
-        return json.dumps([
+        timeline_text = prompt.split(marker, 1)[1].lstrip()
+        timeline, _end = json.JSONDecoder().raw_decode(timeline_text)
+        beats = [
             {
                 "clip_index": index,
                 "visual_beat": (
@@ -153,7 +158,8 @@ def _music_planning_phase_response(kwargs) -> str | None:
                 "reprise_reason": "",
             }
             for index, _group in enumerate(timeline)
-        ])
+        ]
+        return json.dumps({"beats": beats})
     if "category" in properties and "evidence" in properties:
         return "[]"
     return None
