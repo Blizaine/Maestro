@@ -41,8 +41,12 @@ verification and installed-weight reuse.
 
 The browser's exact base-model compatibility rules still apply:
 
-- **Krea 2:** supported files can target RAW or Turbo. Select the recipe matching
-  the creator's file; CivitAI does not distinguish the two in its base-model label.
+- **Krea 2:** older uploads use a generic label; choose RAW or Turbo to match the
+  creator's file. CivitAI's explicit **Krea 2 Turbo** label selects the Turbo
+  pipeline directly. Both labels still require a supported SafeTensors layout;
+  a base label alone does not establish file-format compatibility. The importer
+  recognizes the supported NVFP4 packed layout using its tensor and scale
+  descriptors, while GGUF checkpoint import remains unavailable for this family.
 - **LTX-2.3:** compatible checkpoint structure can be imported through the LTX-2.3
   architecture. The generic import template uses Maestro's Dev recipe; it does
   not automatically reproduce the retired DragonLeap distilled preset.

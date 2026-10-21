@@ -68,6 +68,8 @@ class TestLoraUrlImport(unittest.TestCase):
         )
         lora_dir = Mock(side_effect=lambda arch: str(self.app_dir / 'loras' / {
             'qwen_image_21_7B': 'qwen21', 'qwen_image_20B': 'qwen',
+            'flux3_klein': 'flux3_klein',
+            'moss_image': 'moss_image', 'krea2': 'krea2',
         }[arch]))
         self.namespace = {
             'os': os, 'PureWindowsPath': PureWindowsPath, 'time': time,
@@ -193,9 +195,126 @@ class TestLoraUrlImport(unittest.TestCase):
         self.assertEqual(result['metadata']['nextCursor'], 'next-page')
         self.assertEqual(selected['default_dir'], 'qwen21')
 
+    def test_flux3_klein_filter_uses_civitai_lora_labels_and_keeps_pagination(self):
+        filters = self.namespace['civitai_base_models']()['filters']
+        selected = next(f for f in filters if f['label'] == 'Flux.3 Klein')
+        self.assertEqual(selected['civitai_base'], 'Flux.3 Klein,Flux.3 Klein-base')
+        self.assertEqual(selected['default_dir'], 'flux3_klein')
+        self.assertNotIn('Flux.3', [
+            base.strip()
+            for entry in filters
+            for base in entry['civitai_base'].split(',')
+        ])
+
+        result = self.namespace['civitai_search'](
+            baseModels=selected['civitai_base'], cursor='page-2',
+        )
+        params = self.http.get.call_args.kwargs['params']
+        self.assertEqual(params['baseModels'], ['Flux.3 Klein', 'Flux.3 Klein-base'])
+        self.assertEqual(params['cursor'], 'page-2')
+        self.assertEqual(params['types'], 'LORA')
+        self.assertEqual(result['metadata']['nextCursor'], 'next-page')
+
+    def test_flux3_klein_civitai_versions_map_to_shared_native_model_key(self):
+        variants = ['Flux.3 Klein', 'Flux.3 Klein-base']
+        arch = self.namespace['_civitai_lora_arch']
+        for base_model in variants:
+            with self.subTest(base_model=base_model):
+                self.assertEqual(arch(base_model), 'flux3_klein')
+        # CivitAI's plain Flux.3 entry is checkpoint-only and must not be
+        # admitted to the LoRA browser or auto-import mapping.
+        self.assertEqual(arch('Flux.3'), '')
+
+        self.civit_model['modelVersions'] = [
+            {'id': 31, 'name': 'Klein Base', 'baseModel': variants[1], 'files': []},
+            {'id': 30, 'name': 'Klein Distilled', 'baseModel': variants[0], 'files': []},
+        ]
+        versions = self.namespace['civitai_model_detail'](123)['modelVersions']
+        self.assertEqual([version['localArch'] for version in versions], ['flux3_klein', 'flux3_klein'])
+
+    def test_civitai_flux3_klein_import_routes_both_variants_to_native_lora_directory(self):
+        variants = ['Flux.3 Klein', 'Flux.3 Klein-base']
+        for index, base_model in enumerate(variants, start=30):
+            with self.subTest(base_model=base_model):
+                self.civit_model['modelVersions'] = [{
+                    'id': index, 'name': f'Klein {index}', 'baseModel': base_model,
+                    'files': [{'primary': True, 'name': 'film.safetensors',
+                               'downloadUrl': f'https://civitai.com/api/download/models/{index}'}],
+                }]
+                result = self.namespace['_import_civitai_lora_by_url']('https://civitai.com/models/123')
+                self.assertEqual(result['status'], 'downloading', result)
+                record = self.namespace['_civitai_downloads'][result['download_id']]
+                self.assertEqual(record['_base_model'], base_model)
+                self.assertEqual(
+                    os.path.normcase(record['target_dir']),
+                    os.path.normcase(str((self.app_dir / 'loras/flux3_klein').resolve())),
+                )
+                self.assertEqual(list((self.app_dir / 'loras/flux3_klein').iterdir()), [])
+                self.worker.return_value.start.assert_called_once()
+                self.namespace['_civitai_downloads'].clear()
+                self.worker.return_value.start.reset_mock()
+
+    def test_flux3_huggingface_base_repositories_use_native_lora_directory(self):
+        repos = [
+            'black-forest-labs/flux-3-image-klein',
+            'black-forest-labs/flux-3-image-klein-base',
+        ]
+        for repo_id in repos:
+            with self.subTest(repo_id=repo_id):
+                self.assertEqual(self.namespace['HF_BASE_TO_LOCAL_DIR'][repo_id], 'flux3_klein')
+
+        self.repo['cardData']['base_model'] = repos[1]
+        self.assert_destination(self.run_import(), self.app_dir / 'loras/flux3_klein')
+
     def test_model_detail_maps_each_version_separately(self):
         versions = self.namespace['civitai_model_detail'](123)['modelVersions']
         self.assertEqual([v['localArch'] for v in versions], ['qwen_image_21_7B', 'qwen_image_20B'])
+
+    def test_moss_browser_filter_searches_base_and_sft_with_pagination(self):
+        selected = next(f for f in self.namespace['civitai_base_models']()['filters'] if f['label'] == 'MOSS Image')
+        result = self.namespace['civitai_search'](baseModels=selected['civitai_base'], cursor='moss-page-2')
+        params = self.http.get.call_args.kwargs['params']
+        self.assertEqual(params['baseModels'], ['MOSS Image', 'MOSS Image Base'])
+        self.assertEqual(params['cursor'], 'moss-page-2')
+        self.assertEqual(result['metadata']['nextCursor'], 'next-page')
+        self.assertEqual(selected['default_dir'], 'moss_image')
+
+    def test_moss_base_and_sft_civitai_imports_use_native_lora_folder(self):
+        for base in ['MOSS Image', 'MOSS Image Base']:
+            with self.subTest(base=base):
+                self.civit_model['modelVersions'] = [{
+                    'id': 40, 'name': 'MOSS adapter', 'baseModel': base,
+                    'files': [{'primary': True, 'name': 'moss.safetensors',
+                               'downloadUrl': 'https://civitai.com/api/download/models/40'}],
+                }]
+                self.assertEqual(self.namespace['_civitai_lora_arch'](base), 'moss_image')
+                result = self.namespace['_import_civitai_lora_by_url']('https://civitai.com/models/123')
+                self.assert_destination(result, self.app_dir / 'loras/moss_image')
+                self.namespace['_civitai_downloads'].clear()
+                self.worker.return_value.start.reset_mock()
+
+    def test_moss_huggingface_base_metadata_routes_to_native_lora_folder(self):
+        for base in ['OpenMOSS-Team/MOSS-Image-Base', 'OpenMOSS-Team/MOSS-Image-SFT']:
+            with self.subTest(base=base):
+                self.repo['cardData']['base_model'] = base
+                self.assert_destination(self.run_import(), self.app_dir / 'loras/moss_image')
+                self.namespace['_civitai_downloads'].clear()
+                self.worker.return_value.start.reset_mock()
+
+    def test_krea_turbo_filter_and_version_metadata_use_shared_lora_folder(self):
+        filters = self.namespace['civitai_base_models']()['filters']
+        combined = next(f for f in filters if f['label'] == 'Krea 2')
+        turbo = next(f for f in filters if f['label'] == 'Krea 2 Turbo')
+        self.namespace['civitai_search'](baseModels=combined['civitai_base'])
+        self.assertEqual(self.http.get.call_args.kwargs['params']['baseModels'], ['Krea 2', 'Krea 2 Turbo'])
+        self.assertEqual(turbo['civitai_base'], 'Krea 2 Turbo')
+        self.civit_model['modelVersions'] = [{
+            'id': 41, 'name': 'Turbo adapter', 'baseModel': 'Krea 2 Turbo',
+            'files': [{'primary': True, 'name': 'krea.safetensors',
+                       'downloadUrl': 'https://civitai.com/api/download/models/41'}],
+        }]
+        result = self.namespace['_import_civitai_lora_by_url']('https://civitai.com/models/123')
+        self.assert_destination(result, self.app_dir / 'loras/krea2')
 
     def test_civitai_url_import_routes_new_qwen(self):
         result = self.namespace['_import_civitai_lora_by_url']('https://civitai.com/models/123')

@@ -1,0 +1,42 @@
+{
+    "model": {
+        "name": "MOSS Image 5B Base",
+        "architecture": "moss_image",
+        "description": "MOSS Image Base. Text-to-image with captions, tags or layout boxes. Start at 50 steps, CFG 3 and shift 5; not step-distilled.",
+        "selector_help": "Generate images from text, tags or the MOSS Prompt Helper. No reference-image editing or masks. The 5B transformer uses a separate Qwen3.5-9B text encoder. BF16 and INT8 ConvRot download on first use from public sources. Apache 2.0.",
+        "URLs": [
+            "moss_image_base_bf16.safetensors",
+            "moss_image_base_int8_convrot.safetensors"
+        ],
+        "download_sources": {
+            "moss_image_base_bf16.safetensors": {
+                "url": "https://huggingface.co/DeepBeepMeep/Moss/resolve/0a508e986e920c8051b99df98d27329742fc3d0e/moss_image_base_bf16.safetensors",
+                "sha256": "0146386bf55c0780539d7b5ab2f148c4ace66605a2de7fd891a64484a4f5aa51",
+                "size_bytes": 10164668176,
+                "anonymous": true
+            },
+            "moss_image_base_int8_convrot.safetensors": {
+                "url": "https://huggingface.co/DeepBeepMeep/Moss/resolve/0a508e986e920c8051b99df98d27329742fc3d0e/moss_image_base_int8_convrot.safetensors",
+                "sha256": "715c82f0342a14cf70943f4e91bc92e2501c4c0f124b1910b854a8506f38787d",
+                "size_bytes": 5413734368,
+                "anonymous": true
+            }
+        },
+        "source_repo": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base",
+        "license_name": "Apache 2.0",
+        "license_url": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base/blob/main/LICENSE",
+        "model_size_gb": 26
+    },
+    "prompt": "A cream travel poster with a flat blue mountain illustration, a large navy title reading \"EXPLORE\" and a smaller subtitle reading \"Find your next trail\". Balanced typography, generous margins, fine paper texture.",
+    "negative_prompt": "",
+    "resolution": "1024x1024",
+    "image_mode": 1,
+    "batch_size": 1,
+    "num_inference_steps": 50,
+    "guidance_scale": 3,
+    "flow_shift": 5,
+    "sample_solver": "default",
+    "video_prompt_type": "",
+    "prompt_enhancer": "",
+    "multi_prompts_gen_type": "FG"
+}

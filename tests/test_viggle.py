@@ -1,5 +1,6 @@
 """Viggle's immutable recipe and control-window conditioning contracts."""
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 import sys
@@ -13,6 +14,23 @@ from models.minimax_h3.scheduler import MiniMaxH3Scheduler
 
 
 class ViggleTests(unittest.TestCase):
+    def test_checkpoint_adapter_and_conditioning_revisions_stay_in_sync(self):
+        defaults_path = Path(__file__).resolve().parents[1] / 'app/defaults/viggle_animate.json'
+        catalog = json.loads(defaults_path.read_text(encoding='utf-8'))['model']
+        urls = catalog['URLs'] + catalog['loras']
+        prefix = f'https://huggingface.co/{viggle.REPO}/resolve/{viggle.REVISION}/'
+        self.assertEqual([url.removeprefix(prefix) for url in urls], [
+            'Viggle-Animate-pruned_rank8_bf16.safetensors',
+            'Viggle-Animate-pruned_rank8_int8_convrot.safetensors',
+            'loras/viggle_animate_distillation_bf16.safetensors',
+        ])
+        model = family_handler.query_model_def('viggle_animate', {})
+        assets = family_handler.query_model_files(None, 'viggle_animate', model)
+        conditioner = next(spec for spec in assets if spec.get('repoId') == viggle.REPO)
+        self.assertEqual(conditioner['revision'], viggle.REVISION)
+        self.assertEqual(conditioner['sourceFolderList'], ['viggle_animate'])
+        self.assertEqual(conditioner['fileList'], [[viggle.PROMPT_FILE]])
+
     def test_discovery_and_no_text_encoder_download(self):
         self.assertIn('viggle_animate', family_handler.query_supported_types())
         model = family_handler.query_model_def('viggle_animate', {})

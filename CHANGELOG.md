@@ -3,6 +3,100 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [3.2.0] - 2026-10-20
+
+Public **Dev** preview. Main remains v3.1.0. See the
+[v3.2.0 release notes](docs/RELEASE_NOTES_V3.2.0.md).
+
+Dev follow-up fixes, 21 October:
+
+- Incorporate PR #189's conditional clone before Face Refiner overlap blending,
+  fixing inference-tensor writes on clips longer than one refinement window (#188).
+- Preserve saved Studio generations when optional Media Flow finishing fails,
+  retaining a visible warning in queue history, completion notices and output
+  processing metadata. Standalone processing jobs still report their own failures.
+  Gate Windows 11 DLSS Neural Rendering on a bounded cached native evaluation,
+  rather than installed files alone; refresh retries the probe while idle (#190).
+- Tile WGPKernels row preparation within its native row limit and temporary
+  memory budget. Preserve valid manual INT8 backend choices when reapplying
+  Auto-tune and return the settings actually applied to the UI (#191).
+- Verify the existing Qwen 2.1 processor repair against all ten public replacement
+  assets, with fresh-install and cached-download regressions (#192).
+- Normalize unambiguous external-LLM music-arc JSON containers against Director's
+  fixed timeline, with bounded corrective retries. Keep exact group coverage,
+  unique indices and source-action assignments enforced (#193).
+- Keep the complete music-outline response format in the prompt when an LLM
+  endpoint cannot enforce structured output. Accept unambiguous row-local `beat`
+  and `prompt` aliases for `visual_beat`, while rejecting conflicting values,
+  incomplete rows and invalid timeline or source-action assignments.
+
+- Add experimental FastH3 V2 eight-step text-to-video with generated audio,
+  its trained VSA-H3 attention and fixed DMD sampling recipe. Keep it separate
+  from ordinary H3 accelerators, LoRAs and reference workflows.
+- Add experimental FastH3 OmniRef eight-step generation with ordered image,
+  video and audio references, native 32-head PDD sampling and trained VSA-H3
+  attention. Require at least one image or video reference and reject unsupported
+  continuation, Director and extra-LoRA routes instead of using an incompatible recipe.
+- Use official, pinned Omni Comfy BF16, INT8 ConvRot and FP8 exports. Reuse the
+  byte-identical earlier INT8 download. Offer the QAD-trained NVFP4 export as a
+  separate experimental model for supported Blackwell GPUs with a native kernel;
+  preserve fused quantized QKV and retained FP32 heads/AdaLN precision.
+- Repair Qwen Image 2.1 processor downloads after upstream asset moves, using
+  a verified replacement source and canonical filenames for generation and
+  prompt enhancement while reusing existing local processor files.
+- Reduce Qwen 2.1 final VAE decode memory by omitting unused temporal caches,
+  and address thin tile-boundary lines with full-sized edge tiles, at least
+  512px context in lower-memory modes, overlapping interiors and FP32 CPU blending
+  before one final pixel conversion. Denoising and final decode remain separate
+  memory stages; decoder checks do not establish that every full render fits 8GB.
+- Document source contracts, hardware requirements and validation limits. FastVideo's
+  public near-real-time OmniRef measurements used eight GB200 GPUs; Maestro does
+  not yet include its full FP4-attention/NVFP4-decoder acceleration stack.
+
+## [3.1.0] - 2026-10-19
+
+Public Main and Dev release. See the
+[v3.1.0 release notes](docs/RELEASE_NOTES_V3.1.0.md).
+
+- Restore H3 VAE x2 downloads from a verified replacement Hugging Face
+  revision after the old file URLs started returning 404. Keep the same
+  checkpoint size/SHA-256 checks and reuse existing downloads.
+- Align MOSS enhancement with the official caption/layout guidance: compile
+  top-left pixel drafts in code, preserve literal text/comments and artist tags,
+  and add character, multi-panel and collage layout controls.
+- Support mixed-precision H3 checkpoint exports with retained FP32 I/O and
+  compressed AdaLN weights, preserving their precision during loading. Missing
+  SafeTensors QKV metadata now requests an explicit layout choice. Keep optional
+  Turbo LoRA schedules separate from the base recipe and respect negated sampler advice.
+- Restore H3 References compatibility with explicitly declared legacy speaker labels
+  and repeated speakers within a clip, sharing ownership rules between generation
+  and prompt enhancement. Keep independent Subject/voice numbering and reject
+  ambiguous bindings; stop treating shot and production labels as character names.
+- Repair Viggle Animate and Face Refiner downloads after the upstream Hugging
+  Face repository removed older revisions. Reuse existing cached files.
+- Preserve H3's decoded 8-bit pixels in Face Refiner instead of applying its
+  legacy floating-point conversion twice, which washed out refined faces.
+- Enable compatible FLUX 3 Klein LoRAs for Distilled and Base, including
+  native/Diffusers naming conversion and per-step multiplier schedules; restore
+  the existing LoRAs & presets controls for these models.
+- Add the Flux 3 Klein Civitai browser filter for Distilled and Base tags and
+  route supported Civitai/Hugging Face LoRA imports to the shared `flux3_klein` folder.
+- Add the MOSS Image Civitai filter and native LoRA imports for Base and SFT,
+  with per-step multiplier schedules during generation.
+- Recognize Civitai's explicit Krea 2 Turbo label for checkpoint imports and
+  LoRAs, retaining checkpoint layout validation and the correct Turbo recipe.
+  Interpret supported NVFP4 packed tensor dimensions using verified scale
+  descriptors instead of rejecting them as a mismatched architecture.
+- Release Recast timeline tracking arrays before generation after their mask,
+  reference and shot files are saved. Record SCAIL-2 placement/workload settings
+  and actionable host-memory diagnostics without changing generation defaults.
+- Add MOSS Image 5B Base and SFT with public, pinned BF16/INT8 ConvRot
+  downloads, native text conditioning and Euler sampling. Image Generate gains a
+  MOSS layout editor with centered-pixel boxes, exact text fields and a dedicated
+  canvas-aware prompt-enhancement guide. SFT is enabled once in the image picker;
+  Base is available through Manage models. These models generate from text and
+  layouts; they do not accept reference images or masks.
+
 ## [3.0.0] - 2026-10-18
 
 Public Main and Dev release. Supersedes the unreleased

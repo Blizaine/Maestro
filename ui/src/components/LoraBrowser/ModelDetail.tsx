@@ -407,7 +407,7 @@ export function ModelDetail({ model, onBack, kind = 'lora' }: Props) {
                         <option value="grouped">Grouped Q / K / V (Comfy exports)</option>
                         <option value="interleaved">Head-interleaved (native H3 exports)</option>
                       </select>
-                      <span className="block mt-1 text-text-muted">This GGUF file omits row-order metadata. Follow the creator's conversion instructions; the wrong order can produce noise.</span>
+                      <span className="block mt-1 text-text-muted">This checkpoint omits row-order metadata. Follow the creator's conversion instructions; the wrong order can produce noise.</span>
                     </label>
                   )}
                   {(h3Inspection?.profile?.needs_selection?.some(choice => choice === 'sampling_profile' || choice === 'sampling_recipe') || h3SamplingProfile !== 'auto') && (

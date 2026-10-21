@@ -2497,7 +2497,7 @@ class MusicVideoPlanner(BasePlanner):
             creative_plan_schema, normalize_music_arc, music_arc_quality_issues,
             music_arc_action_issues, music_arc_repetition_findings,
             music_arc_reprise_reason_findings,
-            ground_music_combat_arc,
+            ground_music_combat_arc, coerce_music_arc_rows,
         )
         cached = self._planning_resume_checkpoint.get("music_creative_arc")
         contract = self._music_narrative_contract
@@ -2647,25 +2647,32 @@ class MusicVideoPlanner(BasePlanner):
             # was a bookkeeping trap even when their visual beats were sound.
             schema["items"]["properties"].pop("source_event_ids")
             schema["items"]["required"].remove("source_event_ids")
-            response_schema = {
-                "type": "object",
-                "properties": {
-                    "beats": schema,
-                    "source_event_clips": {
-                        "type": "object",
-                        "properties": {event_id: {"type": "integer", "minimum": 0,
-                                                   "maximum": len(groups) - 1}
-                                       for event_id in event_ids},
-                        "required": event_ids,
-                        "additionalProperties": False,
-                    },
+            response_properties = {
+                "beats": schema,
+                "source_event_clips": {
+                    "type": "object",
+                    "properties": {event_id: {"type": "integer", "minimum": 0,
+                                               "maximum": len(groups) - 1}
+                                   for event_id in event_ids},
+                    "required": event_ids,
+                    "additionalProperties": False,
                 },
-                "required": ["beats", "source_event_clips"],
-                "additionalProperties": False,
             }
+            response_required = ["beats", "source_event_clips"]
         else:
             event_field["maxItems"] = 0
-            response_schema = schema
+            response_properties = {"beats": schema}
+            response_required = ["beats"]
+        # Remote OpenAI-compatible structured-output APIs require an object
+        # at the schema root. Keeping the rows under `beats` gives the remote
+        # writer one explicit container to return; local llama-server still
+        # receives the same complete schema.
+        response_schema = {
+            "type": "object",
+            "properties": response_properties,
+            "required": response_required,
+            "additionalProperties": False,
+        }
         lyric_context = ""
         if self._use_lyrics_context and lyrics:
             lyric_context = "\nOptional thematic lyric context:\n" + _compact_lyrics_for_context(
@@ -2689,7 +2696,7 @@ class MusicVideoPlanner(BasePlanner):
             "synonyms for the same action. Cutaways and performance inserts may develop "
             "the concept without resetting persistent physical facts. An intentional "
             "reprise needs a specific purpose and new development or treatment. "
-            "Only source_event_ids below are immutable obligations: assign each once "
+            "Only the source-event IDs below are immutable obligations: assign each once "
             "in order; other creative beats may be invented within the concept. "
             "A continuing state (e.g. travelling together) does not require replaying "
             "the transition that established it. Visibly complete each assigned "
@@ -2697,6 +2704,9 @@ class MusicVideoPlanner(BasePlanner):
             "writing its event ID. Following items begin from its completed result; "
             "do not spread an enabling action across unassigned items. Keep each text field concise.\n"
             "Required source actions: " + json.dumps(contract.get("events", []), ensure_ascii=False)
+            + f"\nThe supplied timeline is fixed and exhaustive: exactly {len(groups)} groups. "
+            "Do not merge, split, reorder, omit, or add groups. Return one beat row for "
+            "each supplied clip_index, once each. The timeline indices are zero-based."
             + "\nSong timeline: " + json.dumps(timeline, ensure_ascii=False)
             + lyric_context
         )
@@ -2710,18 +2720,34 @@ class MusicVideoPlanner(BasePlanner):
                 "source-event key to exactly one ZERO-BASED timeline item where "
                 "its visible action occurs. Keep those clip indices in source order."
             )
+        else:
+            prompt += "\nOutput one JSON object with a beats array."
+        # Keep the complete response contract in the text as well as the
+        # provider's structured-output argument. A server that rejects that
+        # argument falls back to this same prompt and still needs exact row
+        # fields, bounds, and source-event ownership instructions.
+        prompt += (
+            "\nUse visual_beat for each row's visible action. Use the exact required "
+            "field names and value types below; include every required field and "
+            "no unrelated fields. Return only the outline data matching this "
+            "schema, not the schema itself or an explanation.\n"
+            "Required JSON response schema:\n"
+            + json.dumps(response_schema, ensure_ascii=False, separators=(",", ":"))
+        )
+
         def parse_candidate(response, baseline=None):
             """Parse and validate one response, preserving locked source assignments."""
             rows = response
             assignments = None
             if event_ids:
+                envelope = response
+                if isinstance(response, list) and len(response) == 1:
+                    envelope = response[0]
                 if (
-                    not isinstance(response, list) or len(response) != 1
-                    or not isinstance(response[0], dict)
-                    or set(response[0]) != {"beats", "source_event_clips"}
+                    not isinstance(envelope, dict)
+                    or set(envelope) != {"beats", "source_event_clips"}
                 ):
                     raise ValueError("outline response must contain beats and source_event_clips")
-                envelope = response[0]
                 assignments = envelope.get("source_event_clips")
                 rows = envelope.get("beats")
                 if not isinstance(assignments, dict) or set(assignments) != set(event_ids):
@@ -2733,24 +2759,11 @@ class MusicVideoPlanner(BasePlanner):
                         or index < 0 or index >= len(groups)
                     ):
                         raise ValueError(f"source event {event_id} needs a valid zero-based timeline index")
-                if (
-                    not isinstance(rows, list) or len(rows) != len(groups)
-                    or not all(isinstance(row, dict) for row in rows)
-                ):
-                    raise ValueError("beats must cover exactly the requested timeline items")
+                rows = coerce_music_arc_rows(rows, len(groups))
+                if any("source_event_ids" in row for row in rows):
+                    raise ValueError("outline beats must omit source_event_ids; use source_event_clips")
                 rows = copy.deepcopy(rows)
-                by_index = {}
-                for row in rows:
-                    index = row.get("clip_index")
-                    if not isinstance(index, int) or isinstance(index, bool):
-                        raise ValueError("each outline beat needs an integer clip_index")
-                    if index in by_index:
-                        raise ValueError("outline beat clip_index values must be unique")
-                    if "source_event_ids" in row:
-                        raise ValueError("outline beats must omit source_event_ids; use source_event_clips")
-                    by_index[index] = row
-                if set(by_index) != set(range(len(groups))):
-                    raise ValueError("beats must cover each requested timeline item exactly once")
+                by_index = {row["clip_index"]: row for row in rows}
                 if baseline is None:
                     for row in rows:
                         row["source_event_ids"] = []
@@ -2882,8 +2895,10 @@ class MusicVideoPlanner(BasePlanner):
                 )
             elif issue:
                 repair_context = (
-                    "\nRepair this outline's structural or source-assignment issue: " + issue
-                    + "\nPreserve valid beats, cast, and pacing. Keep immutable source actions exactly once and in order."
+                    "\nThe previous outline could not be normalized: " + issue
+                    + "\nMake one bounded correction using the fixed timeline in the original request. "
+                    "Return exactly one beat for each supplied group and preserve valid creative details, "
+                    "the requested cast and pacing, and every immutable source action exactly once and in order."
                 )
                 if best_outline:
                     repair_context += "\nBest previously accepted outline:\n" + json.dumps(
@@ -2895,6 +2910,7 @@ class MusicVideoPlanner(BasePlanner):
                 max_tokens=max(2048, 160 * len(groups) + 1024),
                 temperature=0.55, thinking_budget=0,
                 json_schema=response_schema,
+                remote_json_schema=True,
             )
             try:
                 candidate = parse_candidate(response, baseline=baseline)

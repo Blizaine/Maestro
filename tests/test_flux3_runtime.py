@@ -215,6 +215,29 @@ class Flux3RuntimeTests(unittest.TestCase):
         self.assertEqual(callback_steps, [0])
         self.assertEqual(cancelling_dit.calls, 1)
 
+    def test_flow_map_sampler_expands_lora_multipliers_and_selects_each_step(self):
+        from shared.utils.loras_mutipliers import parse_loras_multipliers
+
+        packed = Packed(
+            data={"image": torch.zeros((1, 128))},
+            ids={"image": torch.zeros((1, 4))},
+            timesteps={"image": torch.zeros((1,), dtype=torch.bfloat16)},
+            mode_indices={"image": [(0, 1)], "image_cond": [(0, 0)], "text": [(0, 0)]},
+        )
+        _, loras_slists, error = parse_loras_multipliers(["0.25,0.75"], 1, 2, nb_phases=1)
+        self.assertEqual(error, "")
+        activate_loras = Mock()
+        set_step = Mock()
+        with patch.dict(sys.modules, {"mmgp": mmgp_stub}):
+            with patch.object(mmgp_stub.offload, "activate_loras", activate_loras, create=True), \
+                    patch.object(mmgp_stub.offload, "set_step_no_for_lora", set_step, create=True):
+                denoise_flow_map(
+                    _ConstantDiT(), packed, torch.tensor([1.0, 0.5, 0.0]), loras_slists=loras_slists,
+                )
+
+        self.assertEqual(activate_loras.call_args.args[1:], (["0"], [[0.25, 0.75]]))
+        self.assertEqual([call.args[1] for call in set_step.call_args_list], [0, 1])
+
     def test_default_flow_map_schedule_has_sixteen_steps(self):
         schedule = timesteps()
         self.assertEqual(len(schedule) - 1, DEFAULT_STEPS)

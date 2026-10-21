@@ -6,9 +6,29 @@ A one-click local AI **creative studio, director, and video editor** for creator
 
 ## What it does
 
+- **FastH3 OmniRef 8-Step (experimental):** official FastVideo Comfy releases
+  with ordered image, video and audio references, trained VSA-H3 attention
+  and native PDD sampling. BF16, INT8 ConvRot and FP8 are available; the
+  separately enabled QAD NVFP4 model requires supported Blackwell hardware
+  and a native kernel. Begin at 480p / 5.2 seconds. Additional LoRAs and
+  continuation are unavailable. [Formats, hardware and validation](docs/FastH3.md).
+  Consumer real-time performance remains unverified.
+
+- **FastH3 V2 8-Step (experimental):** text-to-video with generated audio,
+  using its trained VSA-H3 attention and fixed eight-step recipe. Enable it
+  in the Frames model picker. Requires CUDA/Triton; the pinned INT8 model
+  downloads on first use. These weights do not support image/Omni references
+  or continuation. Consumer-GPU real-time performance remains unverified.
+
+- **MOSS Image 5B Base and SFT:** image generation from captions, tags or
+  structured layouts, with a visual Prompt Helper and dedicated prompt enhancement.
+  Public BF16 and INT8 ConvRot files download on first use; no Hugging Face account
+  is needed. [Usage and model details](docs/MOSS-Image.md).
+
 - **Qwen Image 2.1 7B and official Turbo:** unified image generation and editing
   with up to ten references, dedicated prompt enhancement and transparent PNG
-  output. Turbo uses its published eight-step recipe, with BF16 or INT8 downloads.
+  output. Context-aware VAE tiles reduce boundary lines and single-image decode
+  memory. Turbo uses its published eight-step recipe, with BF16 or INT8 downloads.
   Research/evaluation license; commercial use requires a separate Qwen license.
   [Usage and model details](docs/Qwen-Image-2.1.md).
 
@@ -126,6 +146,55 @@ View all past Director runs with their full state — clip plans, generated imag
 ## Updates
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
+
+### v3.2.0 Dev preview (2026-10-20)
+
+- **21 October fixes:** multi-window Face Refiner blending, visible warnings
+  when optional finishing fails, native DLSS availability checks, large-input
+  WGPKernels preparation, preserved manual INT8 choices during Auto-tune, and
+  external-LLM Director music-arc response compatibility. The Qwen processor
+  download repair is also verified against the current public asset pin.
+- **FastH3 V2:** experimental eight-step text-to-video with generated audio,
+  trained VSA-H3 attention and its own sampling recipe.
+- **FastH3 OmniRef:** experimental eight-step video/audio generation from ordered
+  image, video and audio references. Official BF16, INT8 and FP8 options, plus a
+  separate Blackwell QAD NVFP4 model. [FastH3 guide](docs/FastH3.md).
+- **Qwen Image 2.1:** repair processor downloads and reduce final VAE decode
+  memory; improve overlapping tiles to address thin boundary lines in
+  lower-memory decode modes. [Qwen guide](docs/Qwen-Image-2.1.md).
+
+Available on **Dev** for testing. Update the idle Dev installation in Pinokio,
+restart Maestro and refresh the browser. New FastH3 variants remain experimental;
+consumer real-time speed and complete renders with the new BF16/FP8/NVFP4 formats
+are not yet verified. See the [v3.2.0 notes](docs/RELEASE_NOTES_V3.2.0.md).
+
+### v3.1.0 (2026-10-19)
+
+- **MOSS Image 5B Base and SFT:** text-to-image generation, a visual layout helper
+  with character, multi-panel and collage options, and model-specific prompt
+  enhancement with validated coordinate conversion. Public BF16/INT8 downloads;
+  SFT is enabled once in the image picker. [MOSS guide](docs/MOSS-Image.md).
+- **H3 community checkpoints:** accept compatible mixed-precision exports,
+  preserve retained FP32 layers, request missing QKV layout information and
+  distinguish optional Turbo LoRA recipes from the checkpoint's base settings.
+- **H3 References compatibility:** generation and enhancement accept explicitly
+  declared legacy speaker labels and reuse established speakers within a clip.
+  Shot/scene headings cannot become character names; identities and voices stay
+  paired independently of their numeric labels.
+- **FLUX 3 Klein and MOSS LoRAs:** compatible adapter loading, per-step
+  multiplier schedules and matching Civitai browser filters.
+- **Krea 2 Turbo imports:** recognize its Civitai label and supported NVFP4
+  checkpoint layouts while retaining compatibility validation.
+- **H3 VAE x2, Viggle Animate and Refine faces:** repair missing upstream asset
+  revisions; fix a second pixel conversion that washed out refined faces.
+- **Recast RAM use:** release tracking arrays before generation and record
+  useful workload and memory diagnostics. The reported RTX 4080 runtime remains
+  unverified without its original settings/logs.
+
+Update your **Main or Dev** installation in Pinokio while idle, restart Maestro and
+refresh the browser. See the
+[v3.1.0 release notes](docs/RELEASE_NOTES_V3.1.0.md) and
+[workflow troubleshooting](docs/V3-Workflow-Fixes.md).
 
 ### v3.0.0 (2026-10-18)
 
@@ -1151,6 +1220,9 @@ Third-party models, weights, and components keep their own licenses — review t
 ## Issues
 
 Bug reports and feature requests: [github.com/Blizaine/Maestro/issues](https://github.com/Blizaine/Maestro/issues).
+
+Follow-up fixes for v3.0 Viggle/Face Refiner downloads, FLUX 3 LoRAs, and Recast
+memory diagnostics are documented in [the troubleshooting notes](docs/V3-Workflow-Fixes.md).
 
 ### Finding logs
 

@@ -4,6 +4,19 @@ This file supplements the license files distributed with Maestro and is not
 an exhaustive replacement for dependency-specific notices in installed Python
 or JavaScript packages.
 
+## FastVideo FastH3 V2
+
+The experimental native VSA-H3 routing, pooled compression semantics and
+eight-step DMD sampling integration follow **hao-ai-lab/FastVideo**, revision
+`d4f144581d6882d5bceb288ca13d767c054ca041`, licensed under Apache-2.0.
+The upstream license is preserved in `app/LICENSES/FastVideo-Apache-2.0.txt`.
+Maestro supplies its own MMGP adapter, forward kernel and application controls.
+Source: https://github.com/hao-ai-lab/FastVideo/tree/d4f144581d6882d5bceb288ca13d767c054ca041
+
+FastVideo/FastVideo-FastH3-Comfy weights are downloaded on demand, not bundled.
+The MiniMax Model License and component terms remain applicable. This integration
+uses the T2AV V2 student, not the separate OmniRef PDD checkpoint.
+
 ## Wan2GP v12.71 media and H3 integrations
 
 The VDN attention implementation, H3 dialogue Whisper boundary alignment,

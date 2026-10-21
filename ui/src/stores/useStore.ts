@@ -929,6 +929,7 @@ const familyModeMap: Record<string, GenerationMode> = {
   flux: 'image',
   flux2: 'image',
   flux3: 'image',
+  moss_image: 'image',
   qwen: 'image',
   z_image: 'image',
   krea2: 'image',
@@ -1015,6 +1016,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
   // Other image models remain opt-in through Model Visibility.
   'flux2_klein_9b',
   'flux3_klein',
+  'moss_image_sft',
   'qwen_image_21_7B',
   'qwen_image_21_7B_turbo',
   'krea2_raw',
@@ -1072,7 +1074,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 22
+const DEFAULTS_VERSION = 23
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -1112,6 +1114,8 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   21: ['qwen_image_21_7B_turbo'],
   // Native FLUX 3 image generation/editing; retain the user's selected model.
   22: ['flux3_klein'],
+  // Curated-data MOSS Image; Base remains available in Model Visibility.
+  23: ['moss_image_sft'],
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 
@@ -8789,6 +8793,7 @@ export const useStore = create<AppState>((set, get) => ({
               phase: status.phase,
               message: status.message,
               outputFiles: status.output_files,
+              finishingWarnings: status.finishing_warnings ?? j.finishingWarnings,
               error: status.error,
               oomInfo: status.oom_info ?? null,
               h3WindowPlan: status.h3_window_plan ?? j.h3WindowPlan ?? null,
@@ -8807,7 +8812,7 @@ export const useStore = create<AppState>((set, get) => ({
             clearInterval(pollInterval)
             // Completed job — remove the placeholder, real output now in gallery
             set(s => {
-              const remaining = s.jobs.filter(j => j.id !== job_id || !!j.enhancement)
+              const remaining = s.jobs.filter(j => j.id !== job_id || !!j.enhancement || !!j.finishingWarnings?.length)
               return {
                 jobs: remaining,
                 isGenerating: remaining.some(j => j.status === 'running' || j.status === 'queued'),
@@ -8984,6 +8989,7 @@ export const useStore = create<AppState>((set, get) => ({
             phase: j.phase,
             message: j.message,
             outputFiles: j.output_files,
+            finishingWarnings: j.finishing_warnings,
             error: j.error,
             ..._directorJobFields(j),
             oomInfo: (j as { oom_info?: import('../types').OomInfo | null }).oom_info ?? null,
@@ -9024,6 +9030,7 @@ export const useStore = create<AppState>((set, get) => ({
                     phase: status.phase,
                     message: status.message,
                     outputFiles: status.output_files,
+                    finishingWarnings: status.finishing_warnings ?? j.finishingWarnings,
                     error: status.error,
                     ..._directorJobFields(status),
                     oomInfo: status.oom_info ?? null,
@@ -9036,7 +9043,7 @@ export const useStore = create<AppState>((set, get) => ({
                 if (status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled') {
                   clearInterval(pollInterval)
                   set(s => {
-                    const remaining = s.jobs.filter(j => j.id !== job.id || !!j.enhancement)
+                    const remaining = s.jobs.filter(j => j.id !== job.id || !!j.enhancement || !!j.finishingWarnings?.length)
                     return {
                       jobs: remaining,
                       isGenerating: remaining.some(
@@ -10461,6 +10468,7 @@ export const useStore = create<AppState>((set, get) => ({
         mode: generationMode,
         model_type: params.model_type,
         max_new_tokens: maxTokens,
+        resolution: generationMode === 'image' ? params.resolution : undefined,
         image_paths: imagePaths.length > 0 ? imagePaths : undefined,
         duration_seconds: (generationMode === 'video' || generationMode === 'avatar') ? state.durationSeconds : undefined,
         window_count: (generationMode === 'video' || generationMode === 'avatar') ? windowCount : undefined,

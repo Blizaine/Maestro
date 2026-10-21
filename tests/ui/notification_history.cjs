@@ -15,9 +15,15 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
       import { useStore } from './src/stores/useStore';
       import { NotificationCoordinator } from './src/components/NotificationCoordinator';
       import { NotificationToastHost } from './src/components/NotificationToastHost';
+      import { GlobalQueuePopover } from './src/components/GlobalQueuePopover';
       import { subscribeMaestroAlerts } from './src/lib/notifications';
       window.store = useStore;
       window.alerts = [];
+      window.mountQueue = () => {
+        const node = document.createElement('div');
+        document.body.appendChild(node);
+        createRoot(node).render(<GlobalQueuePopover/>);
+      };
       subscribeMaestroAlerts(alert => window.alerts.push(alert));
       function Ready() { useEffect(() => { window.ready = true; }, []); return null; }
       createRoot(document.getElementById('root')).render(<StrictMode>
@@ -45,8 +51,11 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
       id => job(`old-${id}`, 'completed')), job('old-failure', 'failed'), job('old-cancelled', 'cancelled')];
     await page.route('**/*', route => {
       const url = new URL(route.request().url());
+      if (url.pathname.startsWith('/api/v1/director/queue')) return route.fulfill({json: {
+        version: 1, paused: false, running: false, entries: [],
+      }});
       if (url.pathname === '/api/v1/jobs') return route.fulfill({json: {jobs: history}});
-      if (url.pathname.startsWith('/api/v1/jobs/')) {
+      if (url.pathname.startsWith('/api/v1/jobs/') || url.pathname.startsWith('/api/v1/status/')) {
         const id = url.pathname.split('/').pop();
         statusRequests.push(id);
         return route.fulfill({json: history.find(item => item.job_id === id) || job(id, 'completed')});
@@ -94,6 +103,33 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
     await page.evaluate(() => window.store.getState().reconnectJobs());
     assert.equal((await alerts()).length, 3, 'Refreshing queue history does not repeat alerts');
     console.log('Active Studio jobs, live failures and queue summaries still notify');
+
+    const finishingWarning = 'DLSS 5 finishing failed for clip.mp4; the original was kept. NGX evaluate failed (0xBAD00000).';
+    history = [job('finishing-warning', 'running', 0)];
+    delete history[0].enhancement;
+    await open();
+    await page.evaluate(() => window.store.getState().reconnectJobs());
+    history = [{...job('finishing-warning', 'completed'), finishing_warnings: [finishingWarning]}];
+    delete history[0].enhancement;
+    await page.waitForFunction(() => window.store.getState().jobs.some(item =>
+      item.id === 'finishing-warning' && item.status === 'completed' && item.finishingWarnings?.length));
+    const warningAlert = (await alerts()).find(alert => alert.title === 'Generation complete with warnings');
+    assert.equal(warningAlert?.body, finishingWarning, 'A skipped finishing stage is visible in the completion notice');
+    const savedWarning = await page.evaluate(() => window.store.getState().jobs.find(item => item.id === 'finishing-warning'));
+    assert.equal(savedWarning.status, 'completed', 'Successful generation is retained after failed finishing');
+    assert.equal(savedWarning.enhancement, undefined, 'Warning retention does not depend on AI prompt enhancement');
+    assert.deepEqual(savedWarning.finishingWarnings, [finishingWarning]);
+    await page.evaluate(() => window.mountQueue());
+    await page.getByRole('button', {name: /^Generation queue,/}).click();
+    const queue = page.getByRole('dialog', {name: 'Generation queue', exact: true});
+    await queue.getByRole('button', {name: 'Completed 1', exact: true}).click();
+    await queue.getByText(finishingWarning, {exact: true}).waitFor();
+    history = [history[0]];
+    await open();
+    await page.evaluate(() => window.store.getState().reconnectJobs());
+    assert.deepEqual(await page.evaluate(() => window.store.getState().jobs[0].finishingWarnings), [finishingWarning]);
+    assert.deepEqual(await alerts(), [], 'Restored warning history remains readable without replaying notifications');
+    console.log('Finishing warnings survive polling/history, remain completed and display in queue and completion notices');
 
     await open();
     await page.evaluate(() => {

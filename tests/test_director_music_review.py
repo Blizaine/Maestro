@@ -123,7 +123,9 @@ class MusicReviewTests(unittest.TestCase):
         self.assertEqual(call.call_count, 1)
         self.assertEqual(len(first), 60)
         self.assertEqual(first, cached)
-        self.assertLessEqual(call.call_args.kwargs["json_schema"]["maxItems"], 48)
+        arc_schema = call.call_args.kwargs["json_schema"]
+        self.assertEqual(arc_schema["type"], "object")
+        self.assertLessEqual(arc_schema["properties"]["beats"]["maxItems"], 48)
 
     def _arc_planner(self, contract):
         planner = MusicVideoPlanner(llm_generate=lambda **kw: "[]")
@@ -421,7 +423,10 @@ class MusicReviewTests(unittest.TestCase):
                     result = planner._plan_music_arc(clips, planner._music_narrative_contract["source"])
                 self.assertEqual(writer.call_count, 2)
                 self.assertEqual(result[1]["source_event_ids"], ["M1"])
-                self.assertIn("Repair this outline", writer.call_args.kwargs["user_prompt"])
+                repair_prompt = writer.call_args_list[1].kwargs["user_prompt"]
+                self.assertIn("fixed and exhaustive", repair_prompt)
+                self.assertIn("runs across the field", repair_prompt)
+                self.assertIn("exactly once and in order", repair_prompt)
 
     def test_literal_recycling_is_caught_without_blocking_intentional_refrains(self):
         quote = "The performer raises both hands and walks around the empty microphone stand."

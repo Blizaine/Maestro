@@ -123,6 +123,7 @@ class DasiwaRuntimeTests(unittest.TestCase):
             "MiniMaxH3Transformer": lambda **_: transformer,
             "get_linear_split_map": lambda *_, **__: {"qkv": "split"},
             "offload": offload, "partial": partial, "_strip_transformer_wrappers": lambda *_, **__: None,
+            "_lock_fp32_adaln_modules": lambda transformer, module_names: None,
         })
         result = loader("dasiwa.safetensors", "bf16", qkv_layout="grouped", dasiwa=True)
         descriptors.assert_called_once_with("dasiwa.safetensors")

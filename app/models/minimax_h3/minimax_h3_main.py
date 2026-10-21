@@ -881,7 +881,9 @@ def _normalize_conditioner_checkpoint_namespaces(
     )
 
 
-def probe_h3_checkpoint(filename: str) -> dict[str, int | bool | str | tuple | None]:
+def probe_h3_checkpoint(
+    filename: str,
+) -> dict[str, int | bool | str | tuple | list[str] | None]:
     """Inspect H3 tensor headers before allocating its 20B/33B network."""
 
     state_dict, metadata = quant_router.load_metadata_state_dict(filename)
@@ -892,14 +894,16 @@ def probe_h3_checkpoint(filename: str) -> dict[str, int | bool | str | tuple | N
         "convrot" in metadata_quantization_format
         or has_convrot_layout(state_dict)
     )
+    # Apply the same SafeTensor namespace cleanup used by the full loader,
+    # without reordering QKV rows. The metadata-only tensors retain dtype and
+    # shape, so this can distinguish FP32 compressed AdaLN projections before
+    # building the very large transformer.
+    state_dict, _, _ = _strip_transformer_wrappers(
+        state_dict,
+        interleave_qkv=False,
+    )
     table = None
     for key, tensor in state_dict.items():
-        prefixes = ("model.diffusion_model.", "diffusion_model.", "module.")
-        while any(key.startswith(prefix) for prefix in prefixes):
-            for prefix in prefixes:
-                if key.startswith(prefix):
-                    key = key[len(prefix) :]
-                    break
         if key == "adaln_t_table":
             table = tensor
             break
@@ -911,11 +915,28 @@ def probe_h3_checkpoint(filename: str) -> dict[str, int | bool | str | tuple | N
             "convrot": convrot,
             "quantization_format": metadata_quantization_format,
             "convrot_group_size": None,
+            "fp32_adaln_modules": [],
         }
     if len(table.shape) != 2 or int(table.shape[0]) < 2:
         raise ValueError(f"Invalid H3 AdaLN curve table shape: {tuple(table.shape)}")
     if not table.dtype.is_floating_point:
         raise ValueError("The H3 AdaLN curve must use unquantized floating-point storage.")
+    adaln_weight_suffix = ".adaln_proj.linear.weight"
+    fp32_adaln_modules = []
+    for name, tensor in state_dict.items():
+        if not name.endswith(adaln_weight_suffix) or tensor.dtype != torch.float32:
+            continue
+        module_name = name[: -len(".weight")]
+        if module_name == "final_layer.adaln_proj.linear":
+            fp32_adaln_modules.append(module_name)
+        elif module_name.startswith("blocks."):
+            block_index = module_name[len("blocks.") :].split(".", 1)[0]
+            if (
+                block_index.isdecimal()
+                and int(block_index) < 50
+                and module_name == f"blocks.{block_index}.adaln_proj.linear"
+            ):
+                fp32_adaln_modules.append(module_name)
     return {
         "compressed_modulation": True,
         "adaln_curve_grid": int(table.shape[0]),
@@ -923,7 +944,22 @@ def probe_h3_checkpoint(filename: str) -> dict[str, int | bool | str | tuple | N
         "convrot": convrot,
         "quantization_format": metadata_quantization_format,
         "convrot_group_size": None,
+        "fp32_adaln_modules": sorted(fp32_adaln_modules),
     }
+
+
+def _lock_fp32_adaln_modules(transformer, module_names) -> None:
+    """Keep checkpoint-FP32 compressed AdaLN projections at their source dtype."""
+
+    if not getattr(transformer, "use_adaln_curves", False):
+        return
+    for module_name in module_names or ():
+        projection = transformer.get_submodule(module_name)
+        if not isinstance(projection, torch.nn.Linear):
+            raise ValueError(
+                f"MiniMax H3 FP32 AdaLN target {module_name!r} is not a Linear projection."
+            )
+        projection._lock_dtype = torch.float32
 
 
 def _load_transformer(
@@ -937,7 +973,31 @@ def _load_transformer(
     dasiwa: bool = False,
     import_profile: dict | None = None,
     veda_filename: str | None = None,
+    fasth3: bool = False,
+    fasth3_omniref: bool = False,
 ) -> MiniMaxH3Transformer:
+    from .turbo import safetensors_header
+    header = safetensors_header(_first_path(filename))
+    gates = [key for key in header if key.endswith(".attn.to_gate_compress.weight")]
+    omni_variant = None
+    if gates and not fasth3:
+        raise ValueError("This H3 checkpoint requires trained VSA-H3 attention. Select the dedicated FastH3 model; ordinary H3 cannot discard its compression gates.")
+    if fasth3:
+        if fasth3_omniref:
+            from .fasth3_omniref import (
+                checkpoint_variant_from_size,
+                require_nvfp4_kernel_support,
+                verify_checkpoint,
+            )
+            candidate_variant = checkpoint_variant_from_size(_first_path(filename))
+            if candidate_variant == "nvfp4":
+                require_nvfp4_kernel_support(torch.device("cuda"))
+            omni_variant = verify_checkpoint(_first_path(filename), header)
+        else:
+            from .fasth3 import verify_fasth3_checkpoint
+            verify_fasth3_checkpoint(_first_path(filename))
+        if not fasth3_omniref and (len(gates) != 50 or any(header.get(f"blocks.{i}.attn.to_gate_compress.weight", {}).get("shape") != [7168, 5376] for i in range(50))):
+            raise ValueError("FastH3 V2 requires all 50 trained compression-gate projections.")
     checkpoint = probe_h3_checkpoint(_first_path(filename))
     qkv_layout = str(qkv_layout or "contiguous").strip().lower()
     if qkv_layout not in {"contiguous", "grouped", "interleaved"}:
@@ -981,6 +1041,20 @@ def _load_transformer(
             sla_config=sla_config,
             vdn=vdn,
         )
+        if fasth3:
+            from .fasth3_attention import FastH3Attention
+            transformer.fasth3_attention = FastH3Attention(omni_ref=True) if fasth3_omniref else FastH3Attention()
+            if fasth3_omniref:
+                from .fasth3_omniref import PDDOutput
+                transformer.final_layer.video_out = PDDOutput(5376, 96, 12.0)
+                transformer.final_layer.audio_out = PDDOutput(5376, 32, 3.0)
+            for block in transformer.blocks:
+                block.attn.fasth3_attention = transformer.fasth3_attention
+                block.attn.to_gate_compress = torch.nn.Linear(5376, 7168, bias=False, dtype=dtype)
+        _lock_fp32_adaln_modules(
+            transformer,
+            checkpoint.get("fp32_adaln_modules", ()),
+        )
         if veda_policy is not None:
             transformer.veda_attention = veda_policy
             for layer, block in enumerate(transformer.blocks):
@@ -993,15 +1067,20 @@ def _load_transformer(
     # ConvRot checkpoints use WanGP's proven independent-projection path. The
     # custom INT8 handler splits their quantized data and row scales as three
     # contiguous [Q, K, V] groups; older BF16/full definitions can still ask
-    # for the head-interleaved split explicitly.
+    # for the head-interleaved split explicitly. Official OmniRef FP8 and NVFP4
+    # use one per-tensor scale for fused QKV and deliberately stay fused even
+    # though their metadata has no legacy quantization_format marker.
     split_map = None
-    scaled_fp8_grouped = checkpoint.get("quantization_format") == "scaled_fp8" and qkv_layout == "grouped"
+    keep_fused_grouped_qkv = (
+        checkpoint.get("quantization_format") == "scaled_fp8"
+        or (fasth3_omniref and omni_variant in {"fp8", "nvfp4"})
+    ) and qkv_layout == "grouped"
     # GGUF stores packed blocks whose byte shape differs from logical rows.
     # Keep fused QKV/MLP weights, as WanGP does, and interpret their verified
     # grouped/interleaved row order in the transformer forward pass.
     filenames = filename if isinstance(filename, (list, tuple)) else [filename]
     gguf_checkpoint = any(str(path).lower().endswith(".gguf") for path in filenames)
-    if qkv_layout in {"grouped", "interleaved"} and not scaled_fp8_grouped and not gguf_checkpoint:
+    if qkv_layout in {"grouped", "interleaved"} and not keep_fused_grouped_qkv and not gguf_checkpoint:
         split_map = get_linear_split_map(
             inner_size,
             interleaved=qkv_layout == "interleaved",
@@ -1359,6 +1438,13 @@ class MiniMaxH3Model:
             model_def.get("minimax_h3_video_vae_variant") or "auto"
         )
         self.veda = bool(minimax_h3_veda)
+        self.fasth3 = bool(model_def.get("minimax_h3_fasth3"))
+        self.fasth3_omniref = bool(model_def.get("minimax_h3_fasth3_omniref"))
+        if self.fasth3 and (self.veda or (model_def.get("omni_reference") and not self.fasth3_omniref) or model_def.get("vdn")):
+            raise ValueError("FastH3 V2 is a separate T2AV model with mandatory VSA-H3 attention.")
+        if self.fasth3:
+            from .fasth3_attention import FastH3Attention
+            FastH3Attention.require_supported(self.device, dtype)
         if self.veda and (not model_def.get("veda_attention") or dtype != torch.bfloat16):
             raise ValueError("Experimental H3 Veda requires a Veda-capable H3 model with BF16 activations.")
         self.assets_root = model_def.get("minimax_h3_assets_root", "minimax_h3")
@@ -1391,6 +1477,8 @@ class MiniMaxH3Model:
         self.sample_solver = str(
             model_def.get("minimax_h3_sampler") or "euler"
         ).strip().lower()
+        if self.fasth3:
+            self.sample_solver = "euler"
 
         transformer_path = _first_path(model_filename)
         if not transformer_path:
@@ -1453,6 +1541,8 @@ class MiniMaxH3Model:
             dasiwa=self.dasiwa,
             import_profile=model_def.get("minimax_h3_import_profile"),
             veda_filename=veda_filename,
+            fasth3=self.fasth3,
+            fasth3_omniref=self.fasth3_omniref,
         )
         from .viggle import load_conditioner
         self.conditioner = load_conditioner() if self.viggle else _load_conditioner(
@@ -1487,6 +1577,8 @@ class MiniMaxH3Model:
         # A retained model can be reused across jobs. Always restore its
         # ordinary heads before inspecting the next job's adapter selection.
         self.release_special_loras()
+        if getattr(self, "fasth3", False) and loras_selected:
+            raise ValueError("FastH3 V2 does not support additional LoRAs.")
         if getattr(self, "_fused_turbo", False):
             validate_fused_h3_loras(loras_selected)
         if getattr(self, "_baked_turbo", False):
@@ -2005,6 +2097,26 @@ class MiniMaxH3Model:
             self._interrupt = False
         if not isinstance(input_prompt, str):
             raise ValueError("MiniMax H3 accepts one text prompt per generation.")
+        if getattr(self, "fasth3", False):
+            if getattr(self, "fasth3_omniref", False):
+                from .fasth3_omniref import validate_request as validate_fasth3_request
+            else:
+                from .fasth3 import validate_fasth3_request
+            validate_fasth3_request({
+                "sampling_steps": sampling_steps, "frame_num": frame_num,
+                "image_start": image_start, "image_end": image_end, "input_frames": input_frames,
+                "input_ref_images": input_ref_images, "input_masks": input_masks,
+                "input_video": input_video, "input_waveform": input_waveform,
+                "minimax_h3_references": minimax_h3_references,
+                "prefix_frames_count": prefix_frames_count, "window_start_frame_no": window_start_frame_no,
+                "frames_to_inject": frames_to_inject, "audio_guide": audio_guide,
+                "audio_guide2": audio_guide2, "audio_prompt_type": audio_prompt_type,
+                "video_prompt_type": video_prompt_type, "denoising_strength": denoising_strength,
+                "custom_settings": custom_settings,
+            })
+            if _face_refinement is not None:
+                raise ValueError("FastH3 V2 does not support H3 face refinement.")
+            minimax_h3_extended_duration = False
         if self.audio_only and not _audio_segment:
             from .dialogue import generate_audio
             return generate_audio(
@@ -2820,6 +2932,20 @@ class MiniMaxH3Model:
         self.scheduler.set_solver(self.sample_solver)
         self.scheduler.set_timesteps(scheduler_points, device=self.device)
         self.audio_scheduler.set_timesteps(scheduler_points, device=self.device)
+        if getattr(self, "fasth3", False):
+            self.scheduler.set_solver("euler")
+            if getattr(self, "fasth3_omniref", False):
+                from .fasth3_omniref import sigmas
+                self.scheduler.set_timesteps(sigmas=sigmas(12.0), device=self.device)
+                self.audio_scheduler.set_timesteps(sigmas=sigmas(3.0), device=self.device)
+                video_rows[layout.num_condition_video_rows:] *= self.scheduler.sigmas[0]
+                audio_rows[layout.num_condition_audio_rows:] *= self.audio_scheduler.sigmas[0]
+                print("[FastH3] OmniRef: 32 PDD heads / 8 forwards, Euler, shifts 12/3, initial noise .999; VSA-H3 90%, tiles 4×4×8; ordered reference regions active.")
+            else:
+                from .fasth3 import fasth3_sigmas
+                self.scheduler.set_timesteps(sigmas=fasth3_sigmas(10.0), device=self.device)
+                self.audio_scheduler.set_timesteps(sigmas=fasth3_sigmas(3.0), device=self.device)
+                print("[FastH3] V2 T2AV: 8 DMD forwards, Euler, shifts 10/3; required VSA-H3 80%, tiles 4×4×4; learned compression gates active.")
         if _face_refinement is not None:
             from postprocessing.h3_face_refiner.runtime import refinement_sigmas
             if not self.omni_reference or self.audio_only or self._pdd_lora_active or input_masks is not None:
@@ -2954,6 +3080,7 @@ class MiniMaxH3Model:
             MiniMaxH3FirstBlockCache(cache_config)
             if cache_config is not None
             and getattr(cache_config, "cache_type", "") == "first_block"
+            and not getattr(self, "fasth3", False)
             else None
         )
         if first_block_cache is not None:
@@ -2994,6 +3121,8 @@ class MiniMaxH3Model:
         attention_backend = str(
             offload.shared_state.get("_attention", "sdpa")
         )
+        if getattr(self, "fasth3", False):
+            attention_backend = "vsa-h3/90%-tile128-omniref-pdd" if getattr(self, "fasth3_omniref", False) else "vsa-h3/80%-tile64-learned-compression"
         cache_label = (
             f"first-block/{first_block_cache.threshold:g}"
             if first_block_cache is not None
@@ -3024,6 +3153,9 @@ class MiniMaxH3Model:
                         return None
                     if self._pdd_controller is not None:
                         self._pdd_controller.set_step(index)
+                    if getattr(self, "fasth3_omniref", False):
+                        self.transformer.final_layer.video_out.step = index
+                        self.transformer.final_layer.audio_out.step = index
                     if first_block_cache is not None:
                         first_block_cache.begin_step(index)
                     self.transformer.sla_attention.begin_step(
@@ -3065,6 +3197,7 @@ class MiniMaxH3Model:
                         target_start_index=target_start_index,
                         video_sink_tokens=video_sink_tokens,
                         packed_layout=layout,
+                        prepared_references=references if getattr(self, "fasth3_omniref", False) else None,
                         latent_shape=(num_latent_frames, latent_height, latent_width),
                         target_video_order=group_order,
                         target_video_inverse_order=group_inverse,

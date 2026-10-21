@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 from services.director.music_arc import (
     MAX_MUSIC_ARC_ROWS,
     arc_allocation,
+    coerce_music_arc_rows,
     creative_plan_schema,
     filter_music_arc_context,
     format_music_arc_context,
@@ -22,6 +24,7 @@ from services.director.music_arc import (
     normalize_music_arc,
 )
 from services.director.music_narrative import build_music_narrative_contract
+from services.director.planners.music_video import MusicVideoPlanner
 
 
 def arc_row(
@@ -54,7 +57,276 @@ def contract(source: str = "A performer makes a journey through changing places.
     }
 
 
+_REMOTE_VERBS = (
+    "studies", "opens", "reads", "marks", "photographs", "counts", "follows", "collects",
+    "sketches", "tastes", "checks", "folds", "compares", "chooses", "packs", "unpacks",
+    "notices", "records", "shares", "trades", "carries", "finds", "frames",
+)
+_REMOTE_OBJECTS = (
+    "the paper map", "the glovebox", "a postcard", "the route", "the bridge", "the mile marker",
+    "the river", "a seashell", "the skyline", "the local pie", "the fuel gauge", "a receipt",
+    "the road sign", "a new playlist", "the camera", "the suitcase", "the harbor", "a voice memo",
+    "the last coin", "a souvenir", "the raincoat", "the overlook", "the horizon",
+)
+
+
+def remote_arc_rows(count: int, *, one_based: bool = False, include_event_ids: bool = True) -> list[dict]:
+    rows = []
+    for index in range(count):
+        row = arc_row(
+            index,
+            f"The traveler {_REMOTE_VERBS[index % len(_REMOTE_VERBS)]} "
+            f"{_REMOTE_OBJECTS[index % len(_REMOTE_OBJECTS)]} during road trip moment {index + 1}.",
+        )
+        row.pop("clip_index")
+        if not include_event_ids:
+            row.pop("source_event_ids")
+        if one_based:
+            row["number"] = str(index + 1)
+        else:
+            row["index"] = index
+        rows.append(row)
+    return rows
+
+
 class MusicArcTests(unittest.TestCase):
+    def test_remote_wrappers_and_numbered_rows_cover_fixed_15_and_23_group_timelines(self):
+        for count in (15, 23):
+            with self.subTest(count=count):
+                numbered = remote_arc_rows(count, one_based=True)
+                normalized = coerce_music_arc_rows([{"beats": numbered}], count)
+                self.assertEqual(
+                    [row["clip_index"] for row in normalized], list(range(count)),
+                )
+                self.assertEqual(
+                    [row["visual_beat"] for row in normalized],
+                    [row["visual_beat"] for row in numbered],
+                )
+
+    def test_complete_numeric_maps_and_singleton_ranges_resolve_their_base(self):
+        for count in (15, 23):
+            with self.subTest(count=count):
+                rows = remote_arc_rows(count)
+                numeric = {str(index + 1): row for index, row in enumerate(rows)}
+                mapped = coerce_music_arc_rows({"groups": numeric}, count)
+                self.assertEqual([row["clip_index"] for row in mapped], list(range(count)))
+
+                ranged = {}
+                for index, raw in enumerate(rows):
+                    row = dict(raw)
+                    row.pop("index")
+                    ranged[f"{index + 1}-{index + 1}"] = row
+                ranged_rows = coerce_music_arc_rows({"beats": ranged}, count)
+                self.assertEqual([row["clip_index"] for row in ranged_rows], list(range(count)))
+
+    def test_incomplete_duplicate_unrelated_and_expanded_ranges_remain_errors(self):
+        rows = remote_arc_rows(15)
+        with self.assertRaisesRegex(ValueError, "cover exactly 15.*received 14"):
+            coerce_music_arc_rows({"beats": rows[:-1]}, 15)
+
+        duplicate = remote_arc_rows(15, one_based=True)
+        duplicate[-1]["number"] = duplicate[-2]["number"]
+        with self.assertRaisesRegex(ValueError, "cover the complete timeline"):
+            coerce_music_arc_rows(duplicate, 15)
+
+        with self.assertRaisesRegex(ValueError, "unrelated fields"):
+            coerce_music_arc_rows([{"beats": rows, "note": "discard?"}], 15)
+
+        expanded = {"range": [1, 2], **rows[0]}
+        expanded.pop("index")
+        with self.assertRaisesRegex(ValueError, "one timeline group"):
+            coerce_music_arc_rows([expanded] + rows[1:], 15)
+
+    def test_visual_beat_aliases_normalize_only_unambiguous_row_values(self):
+        valid_beat = "The traveler studies the folded map beside the roadside lantern."
+        source_clip = [{}]
+
+        for alias in ("beat", "prompt"):
+            with self.subTest(alias=alias):
+                row = arc_row(0, valid_beat)
+                row[alias] = row.pop("visual_beat")
+                normalized = normalize_music_arc([row], source_clip, contract())
+                self.assertEqual(normalized[0]["visual_beat"], valid_beat)
+                self.assertNotIn(alias, normalized[0])
+
+        canonical = arc_row(0, valid_beat)
+        self.assertEqual(
+            normalize_music_arc([canonical], source_clip, contract())[0]["visual_beat"],
+            valid_beat,
+        )
+
+        spaced = dict(canonical)
+        spaced["visual_beat"] = f"  {valid_beat}  "
+        spaced["beat"] = "  The traveler studies the folded map\n beside the roadside lantern.  "
+        spaced["prompt"] = valid_beat
+        self.assertEqual(coerce_music_arc_rows([spaced], 1)[0]["visual_beat"], f"  {valid_beat}  ")
+        normalized = normalize_music_arc([spaced], source_clip, contract())
+        self.assertEqual(normalized[0]["visual_beat"], valid_beat)
+
+        alias_only = dict(canonical)
+        alias_only.pop("visual_beat")
+        alias_only["beat"] = "  The traveler studies the folded map\n beside the roadside lantern.  "
+        self.assertEqual(
+            normalize_music_arc([alias_only], source_clip, contract())[0]["visual_beat"],
+            valid_beat,
+        )
+
+        alias_pair = dict(canonical)
+        alias_pair.pop("visual_beat")
+        alias_pair["beat"] = f"  {valid_beat}  "
+        alias_pair["prompt"] = valid_beat
+        self.assertEqual(coerce_music_arc_rows([alias_pair], 1)[0]["visual_beat"], f"  {valid_beat}  ")
+
+    def test_visual_beat_alias_conflicts_malformed_values_and_unrelated_fields_fail(self):
+        base = arc_row(0, "The traveler studies the folded map beside the roadside lantern.")
+
+        conflicting_rows = []
+        canonical_conflict = dict(base)
+        canonical_conflict["beat"] = "The driver unfolds a paper map across the steering wheel."
+        conflicting_rows.append(canonical_conflict)
+
+        alias_conflict = dict(base)
+        alias_conflict.pop("visual_beat")
+        alias_conflict["beat"] = "The driver unfolds a paper map across the steering wheel."
+        alias_conflict["prompt"] = "The passenger watches the coast beyond the window."
+        conflicting_rows.append(alias_conflict)
+
+        for row in conflicting_rows:
+            with self.subTest(row=row):
+                with self.assertRaisesRegex(ValueError, "conflicting visual_beat alias"):
+                    normalize_music_arc([row], [{}], contract())
+
+        malformed = dict(base)
+        malformed["visual_beat"] = 7
+        malformed["prompt"] = "The traveler studies the folded map beside the roadside lantern."
+        with self.assertRaisesRegex(ValueError, "aliases must be text"):
+            normalize_music_arc([malformed], [{}], contract())
+
+        alias_only_malformed = dict(base)
+        alias_only_malformed.pop("visual_beat")
+        alias_only_malformed["prompt"] = None
+        with self.assertRaisesRegex(ValueError, "visual_beat must be text"):
+            normalize_music_arc([alias_only_malformed], [{}], contract())
+
+        unrelated = dict(base, note="preserve me")
+        coerced = coerce_music_arc_rows([unrelated], 1)
+        self.assertEqual(coerced[0]["note"], "preserve me")
+        with self.assertRaisesRegex(ValueError, "unexpected fields"):
+            normalize_music_arc([unrelated], [{}], contract())
+
+    def test_visual_beat_aliases_do_not_bypass_required_timeline_or_event_checks(self):
+        rows = remote_arc_rows(2)
+        for row in rows:
+            row["beat"] = row.pop("visual_beat")
+        with self.assertRaisesRegex(ValueError, "cover exactly 2.*received 1"):
+            normalize_music_arc(rows[:1], [{}, {}], contract())
+
+        missing = dict(rows[0])
+        missing.pop("beat")
+        with self.assertRaisesRegex(ValueError, "missing required fields.*visual_beat"):
+            normalize_music_arc([missing], [{}], contract())
+
+        event_rows = remote_arc_rows(2)
+        for row in event_rows:
+            row["prompt"] = row.pop("visual_beat")
+        source_contract = contract(event_ids=("M1", "M2"))
+        event_rows[0]["source_event_ids"] = ["M2"]
+        event_rows[1]["source_event_ids"] = ["M1"]
+        with self.assertRaisesRegex(ValueError, "exactly once and in source order"):
+            normalize_music_arc(event_rows, [{}, {}], source_contract)
+
+        generic = dict(arc_row(0, "Cinematic visuals that match the mood of the music."))
+        generic["beat"] = generic.pop("visual_beat")
+        with self.assertRaisesRegex(ValueError, "specific visible action"):
+            normalize_music_arc([generic], [{}], contract())
+
+    def test_mixed_number_bases_and_mixed_indexed_rows_cannot_shift_assignments(self):
+        rows = remote_arc_rows(3, one_based=True)
+        rows[0]["number"] = 1
+        rows[1]["number"] = 3
+        rows[2]["number"] = 2
+        rows[2]["clip_index"] = 2
+        with self.assertRaisesRegex(ValueError, "conflicting timeline index fields"):
+            coerce_music_arc_rows(rows, 3)
+
+        mixed = remote_arc_rows(3)
+        mixed[1].pop("index")
+        with self.assertRaisesRegex(ValueError, "mix indexed and unindexed"):
+            coerce_music_arc_rows(mixed, 3)
+
+    def test_remote_object_repair_is_bounded_and_keeps_fixed_timeline(self):
+        for count in (15, 23):
+            with self.subTest(count=count):
+                calls = []
+                complete = remote_arc_rows(count)
+
+                def generate(**kwargs):
+                    calls.append(kwargs)
+                    response_rows = complete[:-1] if len(calls) == 1 else complete
+                    return json.dumps({"beats": response_rows})
+
+                planner = MusicVideoPlanner(llm_generate=generate)
+                planner._music_narrative_contract = contract()
+                planner._use_lyrics_context = False
+                clips = [{"start": index, "end": index + 1, "label": "verse"} for index in range(count)]
+
+                result = planner._plan_music_arc(clips, "A traveler crosses the country.")
+
+                self.assertEqual(len(calls), 2)
+                self.assertEqual([row["clip_index"] for row in result], list(range(count)))
+                self.assertTrue(all("fixed and exhaustive" in call["prompt"] for call in calls))
+                self.assertIn("previous outline could not be normalized", calls[1]["prompt"])
+                self.assertEqual(calls[0]["json_schema"]["type"], "object")
+
+    def test_truncated_and_repeated_incomplete_remote_objects_never_get_filled(self):
+        count = 15
+        rows = remote_arc_rows(count)
+        truncated = json.dumps({"beats": rows[:-1]})[:-1]
+        planner = MusicVideoPlanner()
+        parsed = planner._parse_json_response(truncated)
+        with self.assertRaisesRegex(ValueError, "cover exactly 15|missing required fields"):
+            normalize_music_arc(parsed or [], [{} for _ in range(count)], contract())
+
+        calls = []
+
+        def generate(**_kwargs):
+            calls.append(None)
+            return json.dumps({"beats": rows[:-1]})
+
+        planner = MusicVideoPlanner(llm_generate=generate)
+        planner._music_narrative_contract = contract()
+        planner._use_lyrics_context = False
+        clips = [{"start": index, "end": index + 1, "label": "verse"} for index in range(count)]
+        with self.assertRaisesRegex(RuntimeError, "needs revision"):
+            planner._plan_music_arc(clips, "A traveler crosses the country.")
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("music_creative_arc", planner._planning_resume_checkpoint)
+
+    def test_remote_object_with_h3_assignments_keeps_zero_based_event_slot(self):
+        count = 23
+        rows = remote_arc_rows(count, one_based=True, include_event_ids=False)
+        calls = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            return json.dumps({
+                "beats": rows,
+                "source_event_clips": {"M1": 5},
+            })
+
+        planner = MusicVideoPlanner(llm_generate=generate)
+        planner._music_narrative_contract = contract(event_ids=("M1",))
+        planner._use_lyrics_context = False
+        clips = [{"start": index, "end": index + 1, "label": "chorus"} for index in range(count)]
+
+        result = planner._plan_music_arc(clips, "A traveler crosses the country.")
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([row["clip_index"] for row in result], list(range(count)))
+        self.assertEqual(result[4]["source_event_ids"], [])
+        self.assertEqual(result[5]["source_event_ids"], ["M1"])
+        self.assertEqual(sum(row["source_event_ids"].count("M1") for row in result), 1)
+
     def test_action_ids_cannot_assign_a_run_to_a_standing_beat(self):
         source_contract = build_music_narrative_contract(
             "The traveler runs across the field, then climbs onto a horse."

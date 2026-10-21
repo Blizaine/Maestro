@@ -4,10 +4,10 @@
         "architecture": "viggle_animate",
         "description": "Animate a person or object using a control video and one edited frame. Dedicated H3-based Pruned 20B model, three Euler evaluations, automatic 5.2-second windows. Text prompting is not needed.",
         "URLs": [
-            "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/fa7ed035f21d341439d4dd763a020fc4a2482c43/Viggle-Animate-pruned_rank8_bf16.safetensors",
-            "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/fa7ed035f21d341439d4dd763a020fc4a2482c43/Viggle-Animate-pruned_rank8_int8_convrot.safetensors"
+            "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/630975da14fd3c84169d6cd5092da3ce1287d137/Viggle-Animate-pruned_rank8_bf16.safetensors",
+            "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/630975da14fd3c84169d6cd5092da3ce1287d137/Viggle-Animate-pruned_rank8_int8_convrot.safetensors"
         ],
-        "loras": ["https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/fa7ed035f21d341439d4dd763a020fc4a2482c43/loras/viggle_animate_distillation_bf16.safetensors"],
+        "loras": ["https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/630975da14fd3c84169d6cd5092da3ce1287d137/loras/viggle_animate_distillation_bf16.safetensors"],
         "loras_multipliers": [1.0]
     },
     "prompt": "Viggle Animate",

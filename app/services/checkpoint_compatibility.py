@@ -96,11 +96,15 @@ _CHECKPOINT_TARGETS: dict[str, tuple[CheckpointTarget, ...]] = {
     "ltxv 2.3": (
         CheckpointTarget("ltx2_22B", "ltx2_22B", "LTX-2.3 22B"),
     ),
-    # CivitAI currently does not distinguish RAW from Turbo in baseModel.
-    # Both share the same tensor layout, so require an explicit user choice
-    # instead of guessing the sampling schedule.
+    # Older uploads use the generic label for both recipes. Their tensor
+    # layout alone cannot distinguish RAW from Turbo, so keep that choice.
     "krea 2": (
         CheckpointTarget("krea2_raw", "krea2_raw", "Krea 2 RAW"),
+        CheckpointTarget("krea2_turbo", "krea2_turbo", "Krea 2 Turbo"),
+    ),
+    # CivitAI now also supplies an explicit Turbo label. Use its own recipe
+    # while retaining the normal tensor-layout validation before registration.
+    "krea 2 turbo": (
         CheckpointTarget("krea2_turbo", "krea2_turbo", "Krea 2 Turbo"),
     ),
     "qwen": (
@@ -247,6 +251,62 @@ def _canonical_tensor_key(key: str) -> str:
     return canonical
 
 
+_KREA2_NVFP4_WEIGHT_KEYS = frozenset({
+    "first.weight",
+    "blocks.0.attn.wq.weight",
+    "blocks.0.attn.wk.weight",
+})
+
+
+def _positive_shape(value: object, rank: int) -> tuple[int, ...] | None:
+    if (
+        not isinstance(value, list)
+        or len(value) != rank
+        or not all(type(dim) is int and dim > 0 for dim in value)
+    ):
+        return None
+    return tuple(value)
+
+
+def _krea2_nvfp4_logical_shape(
+    raw_key: str, value: dict, header: dict
+) -> tuple[int, int] | None:
+    """Return the logical shape for a verified Krea TensorCore NVFP4 weight.
+
+    Krea's TensorCore NVFP4 SafeTensors store two FP4 values per U8 byte.  The
+    eager dequantizer reshapes the block scales in 128-row by 64-column tiles,
+    so the packed input width must encode a K divisible by 64 and the scale
+    dimensions must exactly match the output rows and K/16 groups.
+    """
+
+    if not raw_key.endswith(".weight"):
+        return None
+    canonical = _canonical_tensor_key(raw_key)
+    if canonical not in _KREA2_NVFP4_WEIGHT_KEYS or value.get("dtype") != "U8":
+        return None
+    packed_shape = _positive_shape(value.get("shape"), 2)
+    if packed_shape is None:
+        return None
+    rows, packed_columns = packed_shape
+    logical_columns = packed_columns * 2
+    if rows % 128 != 0 or logical_columns % 64 != 0:
+        return None
+
+    raw_base = raw_key[:-len("weight")]
+    weight_scale = header.get(raw_base + "weight_scale")
+    weight_scale_2 = header.get(raw_base + "weight_scale_2")
+    if not isinstance(weight_scale, dict) or not isinstance(weight_scale_2, dict):
+        return None
+    if weight_scale.get("dtype") != "F8_E4M3":
+        return None
+    scale_shape = _positive_shape(weight_scale.get("shape"), 2)
+    if scale_shape != (rows, logical_columns // 16):
+        return None
+    if weight_scale_2.get("dtype") != "F32" or weight_scale_2.get("shape") != []:
+        return None
+    return rows, logical_columns
+
+
 def _tensor_shapes(header: dict) -> dict[str, tuple[int, ...]]:
     shapes: dict[str, tuple[int, ...]] = {}
     priorities: dict[str, int] = {}
@@ -255,10 +315,23 @@ def _tensor_shapes(header: dict) -> dict[str, tuple[int, ...]]:
             continue
         if raw_key.endswith(("._scale", ".input_scale", ".output_scale")):
             continue
-        shape = value.get("shape")
-        if not isinstance(shape, list) or not all(isinstance(dim, int) for dim in shape):
-            continue
         canonical = _canonical_tensor_key(raw_key)
+        is_krea_nvfp4_anchor = (
+            isinstance(raw_key, str)
+            and raw_key.endswith(".weight")
+            and canonical in _KREA2_NVFP4_WEIGHT_KEYS
+            and value.get("dtype") == "U8"
+        )
+        if is_krea_nvfp4_anchor:
+            shape = _krea2_nvfp4_logical_shape(raw_key, value, header)
+            # Never treat a raw U8 extent as a logical model shape. Only the
+            # exact TensorCore NVFP4 sidecar schema above can identify it.
+            if shape is None:
+                continue
+        else:
+            shape = value.get("shape")
+            if not isinstance(shape, list) or not all(isinstance(dim, int) for dim in shape):
+                continue
         priority = 2 if raw_key.endswith("._data") else 1
         if priority >= priorities.get(canonical, -1):
             priorities[canonical] = priority

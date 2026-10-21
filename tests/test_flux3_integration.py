@@ -51,7 +51,7 @@ class Flux3IntegrationTests(unittest.TestCase):
         spec = family_handler.query_model_def(MODEL_TYPE, {})
         self.assertTrue(spec["image_outputs"])
         self.assertTrue(spec["no_negative_prompt"])
-        self.assertTrue(spec["loras_disabled"])
+        self.assertFalse(spec["loras_disabled"])
         self.assertFalse(spec["inpaint_support"])
         self.assertFalse(spec["auto_quantize"])
         self.assertEqual(spec["max_image_refs"], 10)
@@ -66,6 +66,7 @@ class Flux3IntegrationTests(unittest.TestCase):
         self.assertEqual(spec["guidance_max_phases"], 1)
         self.assertFalse(spec["lock_guidance_scale"])
         self.assertFalse(spec["no_negative_prompt"])
+        self.assertFalse(spec["loras_disabled"])
         self.assertEqual(BASE_DEFINITION["num_inference_steps"], 50)
         self.assertEqual(BASE_DEFINITION["guidance_scale"], 3.5)
 
@@ -125,7 +126,7 @@ class Flux3IntegrationTests(unittest.TestCase):
             *(f"{COMPONENT_FOLDER}/{TEXT_FOLDER}/{filename}" for filename in ENCODER_FILES),
         })
 
-    def test_guard_rejects_inert_controls_and_foreign_adapters(self):
+    def test_guard_rejects_unsupported_controls_but_allows_compatible_adapter_selection(self):
         def validate(values):
             return family_handler.validate_generative_settings(MODEL_TYPE, {}, values)
 
@@ -133,7 +134,7 @@ class Flux3IntegrationTests(unittest.TestCase):
         self.assertIsNone(validate({"video_prompt_type": "", "image_refs": ["inactive"] * 12}))
         self.assertIn("10 reference", validate({"video_prompt_type": "I", "image_refs": ["x"] * 11}))
         self.assertIn("Masked inpainting", validate({"image_mode": 2}))
-        self.assertIn("LoRA", validate({"activated_loras": ["flux2_adapter.safetensors"]}))
+        self.assertIsNone(validate({"activated_loras": ["compatible_flux3_adapter.safetensors"]}))
         self.assertIn("reference-image", validate({"video_prompt_type": "V"}))
         self.assertIn("Euler", validate({"sample_solver": "unipc"}))
 

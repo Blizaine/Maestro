@@ -1,5 +1,180 @@
 # MiniMax H3 upstream components
 
+## FastH3 V2 (experimental text-to-audio/video)
+
+The optional `minimax_h3_fasth3` definition uses FastVideo's Comfy repack at
+`FastVideo/FastVideo-FastH3-Comfy@ec1e3aa374a91c57b0b94a1623b7e657c0498cf2`:
+`fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors`, 22,128,378,696 bytes,
+SHA-256 `0922785978dc9bfe1adf27d8b291b0ca763f9f165f882e6cb297c72fbb6deda8`.
+Weights download on demand and are checked before allocation. Shared H3
+conditioning and VAE components retain their existing immutable sources.
+
+Its sampling contract is `FastVideo/FastVideo-FastH3-8-Step-V2` revision
+`3da2ddfe1954d9cda4c05b643dc0f26007a655c5`, `fastvideo_inference.json`:
+T2AV only, no CFG, eight Euler forwards from unshifted noise rungs
+`999,874,749,624,500,375,250,125` divided by 1000, shifted once with video/audio
+10/3, followed by terminal zero. Nine grid points are eight forwards. The
+uniform H3 schedule, RES, Turbo/PDD adapters and First Block Cache are excluded.
+
+The native VSA policy follows Apache-2.0 FastVideo source at
+`hao-ai-lab/FastVideo@d4f144581d6882d5bceb288ca13d767c054ca041`, particularly
+`fastvideo/attention/backends/video_sparse_attn_h3.py` and
+`fastvideo/models/dits/minimax_h3.py`. It preserves segment-pure text/audio
+prefix tiles, generated-video 4×4×4 tiles, true partial-tile counts, 80% sparse
+video top-k, dense prefix queries and exempt prefix keys. Dense pooled-tile
+attention is multiplied by the raw trained compression projection and added
+to fine attention. All 50 gate projections are loaded through MMGP; this is
+not SLA or Veda and must never fall back to an ordinary H3 path.
+
+Grouped QKV packing was independently checked with bounded HTTP range reads:
+27 BF16 rows across Q/K/V and blocks 0/25/49 matched the original split
+FastVideo tensors byte for byte. The INT8 file uses the same author's Comfy
+ConvRot conversion convention. Native kernels and integration are experimental;
+documented training support is not a benchmark of Maestro output quality.
+
+OmniRef PDD is a separate model/recipe with 32 output heads, eight PDD blocks,
+90% sparsity and 128-token tiles. The official documented weight repository was
+not publicly readable during the initial review on 20 October 2026. It became
+public later that day; the official formats are described below.
+The published early real-time demo used eight B200 GPUs; the later OmniRef
+release benchmarks report 5.6–11.9× end-to-end gains on eight GB200 GPUs.
+Neither those results nor consumer-GPU launch profiles establish real-time performance on a 4090,
+3080 Ti or 8 GB laptop.
+
+## FastH3 OmniRef (experimental official Comfy formats)
+
+The initial `minimax_h3_fasth3_omniref` integration pinned the community upload
+[`lrigamai/FastH3-OmniRef-Comfy`](https://huggingface.co/lrigamai/FastH3-OmniRef-Comfy)
+at `0d2c00a333ab1393d3ff18a008d7d9eda5536f11`, file
+`diffusion_models/fasth3_omniref_8step_pruned_int8_convrot.safetensors`,
+22,213,723,064 bytes, SHA-256
+`851b2dc9670ed864b7f1e951ac9da047d83b1c04ded9bfcc1a9e5bba0ee33f80`.
+That upload had no model card or exported inference sidecar. Its safetensors header
+identifies `source=transformer_ref`, `config.transformer.pdd_steps=32`,
+FP32 output banks (video 3072×5376, audio 1024×5376) and all 50 learned
+compression gates. This establishes the structural PDD Ref2VA contract,
+not provenance/quality parity with an unavailable official export at that time.
+
+The official `FastVideo/FastH3-Omni-Comfy` release is now public at
+`c6e7d1f212c44b21227bbd6e76bfff7da70e285d`. Its INT8 file has exactly the same
+size and LFS SHA-256 as that community download, so Maestro now uses the official
+source while reusing existing cached bytes. The same release's BF16 file is
+44,240,780,704 bytes, SHA-256
+`c0fac98c0317eb85215bd186b250be9b113675baab1323add40f26262f552ed9`.
+Its source contract records Ref2VA, eight forwards, shifts 12/3, .999 grid,
+32 PDD heads, VSA .9/tile128 and p2 multi-region reference routing. Header
+geometry retains rank-8 AdaLN and FP32 residual PDD heads.
+
+The additional official Comfy exports are pinned independently:
+
+- `FastVideo/FastH3-Omni-FP8-Comfy@03127300d4803d5b66df66a22208b1d9238c8588`,
+  `fasth3_omniref_fp8_comfy.safetensors`, 23,046,497,628 bytes, SHA-256
+  `d3aa751e151df957b6248db7dbe4a159549dfefe78ba884056b12b0425b019f3`.
+- `FastVideo/FastH3-Omni-NVFP4-QAD-Comfy@e1f39b9187e3e4059b7507e0a62fa22621ff77a5`,
+  `fasth3_omniref_qad_nvfp4_comfy.safetensors`, 13,773,998,700 bytes, SHA-256
+  `bf25ee58df65b4dfee349d612f7ac62a2fea0dddd1e68eb37e75c8ce8b166f5a`.
+
+Their published quantization receipts describe **new native Comfy per-tensor
+requantizations** with fused QKV. They must not be confused with a byte-preserving
+repack of FastVideo's original per-row FP8 or independently scaled Q/K/V NVFP4.
+The NVFP4 variant is QAD-trained and separately selectable. Header inspection
+confirms U8 half-width packed weights, group-16 FP8 scales and a scalar second
+scale. These use the existing MMGP native quantization handlers. All formats
+retain source FP32 output banks; Maestro does not silently quantize those heads.
+The trained sparse routing still uses Maestro's BF16/FP16 VSA kernel rather than
+FastVideo's Blackwell FP4 attention/decoder stack. See [usage and hardware
+limits](../../../docs/FastH3.md) for the distinction between model-format support
+and measured performance. Conversion tools bundled in those repositories were
+read as evidence only and are not vendored or executed by Maestro.
+
+The native recipe follows the pinned FastVideo source above, particularly
+`fastvideo/layers/pdd.py`, `docs/inference/fasth3-distilled.md` and
+`fastvideo/tests/attention/test_vsa_h3_ref2va_regions.py`: fine grid
+`linspace(.999,0,33)`, indices `[0,4,8,12,16,20,24,28,32]`, video/audio
+shifts 12/3 with .999 fixed, target initial noise scaled by .999, FP32
+integration-weighted output-head fusion and eight Euler forwards. The
+ordinary Alibaba PDD LoRA grid and T2AV DMD ladder are not substituted.
+
+The conversion's output storage differs from the FastVideo export: bank zero
+is the complete base head, and banks 1–31 are residuals from it. Reconstruct
+that base before integration. This convention is documented in ComfyUI's
+`comfy/ldm/minimax/model.py`, `_pdd_head`, pinned at
+`b1a247c9cf9dbfda4b2c0a0c1d50950667eeaa0c`. The local checkpoint's head RMS
+magnitudes corroborate it (video .0804 base versus .0027–.0063 residuals).
+An initial smoke render treated residuals as absolute heads and produced
+noise; it is retained as a failed diagnostic, not a successful generation.
+
+VSA uses 128-token 4×4×8 tiles, 90% target sparsity and 10% keep per
+reference-video region; images, text and audio stay dense. Maestro's native
+Triton implementation supports consumer CUDA hardware; it does not claim
+the official Blackwell NVFP4 kernel's performance or quantized numerics.
+Ordered references use the existing native Ref2VA conditioner and VAEs.
+Start/end conditions, frozen target soundtrack, edit masks, continuation,
+Director, additional adapters, First Block Cache, SLA and Veda are excluded. Weights
+are fetched on demand and their pinned digest is checked before allocation.
+
+### OmniRef validation (20 October 2026)
+
+211 selected CPU regressions passed (two opt-in CUDA tests skipped in that
+pass). A separate 15-test attention run included both CUDA tests, comparing
+FP16/BF16 64- and 128-token kernels with explicit CPU attention oracles.
+The UI type-check/build and undefined-name checks passed.
+
+After the residual-head correction, two 4090 smoke cases produced fully
+software-decoded 864×480, 124-frame, 24 fps clips with generated audio:
+two image references (job `b6bd2617`, 86 s active generation / 144 s job
+elapsed, sampled device-wide peak 12.79 GiB) and an image/video/audio mix
+(job `b2e9db5d`, 243 s active / 261 s job elapsed, 13.69 GiB). Both used
+seed 424242, eight forwards, Q2_K encoder, full INT8 VAE, Auto-tune Profile 2,
+8 GiB transformer allowance and head splitting off. Saved preferences were
+unchanged. Representative frames show a driver and white car in a coastal
+tracking shot, without the initial diagnostic's noise.
+
+These are functional smoke checks, not controlled throughput or quality
+benchmarks. A short CPU regression pass overlapped the mixed-media case.
+Stills and decoding cannot certify continuous motion, voice/sound-reference
+fidelity or exact identity preservation. No 8/12 GB generation or real-time
+performance was established. Existing H3 duration recommendations remain
+unchanged; this experimental model does not inherit their benchmark tiers.
+
+### Official-format checks (20 October 2026, after public release)
+
+The four public checkpoint headers and LFS size/SHA pins were fetched with
+bounded HTTP requests. Actual header contracts and schemas were inspected,
+including fused QKV, all 50 compression gates, FP32 output banks and rank-8
+AdaLN. No full BF16, FP8 or NVFP4 model was downloaded for this check.
+The integrated CPU pass covered 50 recipe, pin, metadata, geometry, format
+selection, attention, quantization, AdaLN and split/fused loader regressions
+(two optional CUDA attention tests skipped in that pass).
+
+Separate real-format checks copied only the first FP8 and NVFP4 compression
+gate, then loaded it through the installed MMGP runtime on an RTX 5070 Laptop
+GPU, SM120. FP8 loaded `ScaledFP8WeightTensor`; NVFP4 loaded
+`NVFP4WeightTensor` and executed the lightx2v native kernel. Its comparison
+with quantized-input/dequantized-weight math measured maximum absolute error
+0.0009765625 and mean absolute error 0.0000587. Preferences and running Maestro
+were preserved. The first private test omitted the application startup's
+quantization-handler registration and failed before NVFP4 execution; that
+test setup was corrected. These checks do not certify complete generation,
+reference fidelity or 5090 throughput for the new variants.
+
+### Separate T2AV V2 validation
+
+Separate T2AV V2 validation on 20 October 2026: CPU recipe, input/capability, projection and
+duration regressions passed, as did a small FP16/BF16 CUDA comparison against
+the explicit attention oracle. A corrected full-prompt smoke render on an
+RTX 4090 (24 GB; 128 GB system RAM; Windows; PyTorch 2.10/CUDA 13; Triton 3.6)
+produced and fully decoded 124 frames at 864×480/24 fps plus audio, seed 424242,
+eight Euler forwards, Q2_K encoder, full INT8 VAE and Auto-tune Profile 2.
+It took about 50 seconds in denoising and 63 seconds of active generation;
+the cold job including loading took 122 seconds. Sampled device-wide peak
+VRAM was 12.63 GiB with an 8 GiB transformer allowance; this is not a minimum
+VRAM requirement. Five representative stills showed a coherent traveler,
+camera arc and birds; continuous motion and speech fidelity were not certified.
+An earlier diagnostic exposed generic line splitting, which was fixed by
+preserving the complete structured prompt as one native request. These are
+smoke checks, not comparative performance or lower-memory benchmarks.
+
 Viggle Animate adapts Wan2GP v12.72 at
 `057f9ecab9ad57dfbec9768b2daf7a4426ce986c`: fixed prompt conditioning,
 video-then-edited-image reference ordering, target-only control slicing after
@@ -39,10 +214,13 @@ Diffusers MiniMax H3 implementation at commit
 The optional learned 2x video decoder follows the MiniMax H3 X2 VAE integration
 in Wan2GP commit `6479db36bdc2619a904a852bba9c2d78e1a83f82`. Its INT8 ConvRot
 checkpoint is downloaded on demand from
-`DeepBeepMeep/MiniMax-H3@adc81ccb71352192214d83d5fafb9487e860be39`
+`DeepBeepMeep/MiniMax-H3@630975da14fd3c84169d6cd5092da3ce1287d137`
 (`minimax_h3/MiniMax-H3-X2-Detail-v1_int8_convrot.safetensors`, 2,834,844,787
 bytes, SHA-256
 `7ca1a1ad298e06e430da5c18bf721af4e0dcdf7f4ec7283391520bd0b6df7387`). The
+original `adc81ccb71352192214d83d5fafb9487e860be39` download revision now
+returns 404 for these files. The replacement revision preserves the same
+checkpoint bytes and companion license/notice files. The
 loader keeps the selected standard H3 VAE's encoder, quantization projection,
 and latent conditioning path, then loads only `decoder.*` from the X2 file. It
 filters the checkpoint's `detail_b32.*` branch because that path requires

@@ -534,6 +534,8 @@ export interface GenerationJob {
   phase: string
   message: string
   outputFiles: string[]
+  /** Non-fatal finishing failures; the original output remains available. */
+  finishingWarnings?: string[]
   error: string | null
   /** Small, job-scoped in-progress preview. Absent on older backends. */
   preview?: GenerationPreview | null
@@ -948,6 +950,7 @@ export interface ModelOptions {
   video_continuation?: boolean
   motion_amplitude: boolean
   flow_shift: boolean
+  moss_image_prompt_helper?: boolean
   tea_cache: boolean
   first_block_cache?: boolean
   sol_attention?: boolean
@@ -992,6 +995,8 @@ export interface ModelOptions {
     protect_audio: boolean
   } | null
   minimax_h3_fused_turbo?: boolean
+  minimax_h3_fasth3?: boolean
+  minimax_h3_fasth3_omniref?: boolean
   minimax_h3_full_checkpoint?: boolean
   minimax_h3_baked_turbo?: boolean
   loras_disabled?: boolean

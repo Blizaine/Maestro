@@ -187,8 +187,19 @@ def _merge_prompt_enhancer_system_prompt(prompt_enhancer_model, system_prompt: s
     return f"{QWEN35_THINKING_SUPER_SYSTEM_PROMPT.rstrip()}\n\n{merged_prompt}"
 
 
-def _format_prompt_enhancer_user_content(prompt_enhancer_model, prompt: str, image_caption: Optional[str] = None, thinking_enabled: Optional[bool] = None) -> str:
-    prompt, _system_suffix, _replace_system_prompt = _split_prompt_enhancer_system_suffix(prompt_enhancer_model, prompt)
+def _format_prompt_enhancer_user_content(
+    prompt_enhancer_model,
+    prompt: str,
+    image_caption: Optional[str] = None,
+    thinking_enabled: Optional[bool] = None,
+    literal_prompt: bool = False,
+) -> str:
+    if literal_prompt:
+        prompt = str(prompt or "")
+    else:
+        prompt, _system_suffix, _replace_system_prompt = (
+            _split_prompt_enhancer_system_suffix(prompt_enhancer_model, prompt)
+        )
     if not _use_qwen35_thinking_prompt(prompt_enhancer_model, thinking_enabled=thinking_enabled):
         if image_caption is None:
             return f"user_prompt: {prompt}"
@@ -219,6 +230,7 @@ def generate_cinematic_prompt(
     seed: Optional[int] = None,
     post_image_caption_hook = None,
     thinking_enabled: Optional[bool] = None,
+    literal_prompt: bool = False,
 ) -> List[str]:
     prompts = [prompt] if isinstance(prompt, str) else prompt
 
@@ -237,6 +249,7 @@ def generate_cinematic_prompt(
             top_k,
             seed,
             thinking_enabled,
+            literal_prompt=literal_prompt,
         )
     else:
         if prompt_enhancer_instructions is None:
@@ -283,15 +296,26 @@ def _generate_t2v_prompt(
     top_k: Optional[int],
     seed: Optional[int],
     thinking_enabled: Optional[bool],
+    literal_prompt: bool = False,
 ) -> List[str]:
     messages = []
     for prompt in prompts:
-        prompt_body, system_suffix, replace_system_prompt = _split_prompt_enhancer_system_suffix(prompt_enhancer_model, prompt)
+        if literal_prompt:
+            prompt_body, system_suffix, replace_system_prompt = str(prompt or ""), "", False
+        else:
+            prompt_body, system_suffix, replace_system_prompt = (
+                _split_prompt_enhancer_system_suffix(prompt_enhancer_model, prompt)
+            )
         message_system_prompt = _merge_prompt_enhancer_system_prompt(prompt_enhancer_model, system_prompt, system_suffix, replace_system_prompt, thinking_enabled=thinking_enabled)
         messages.append(
             [
                 {"role": "system", "content": message_system_prompt},
-                {"role": "user", "content": _format_prompt_enhancer_user_content(prompt_enhancer_model, prompt_body, thinking_enabled=thinking_enabled)},
+                {"role": "user", "content": _format_prompt_enhancer_user_content(
+                    prompt_enhancer_model,
+                    prompt_body,
+                    thinking_enabled=thinking_enabled,
+                    literal_prompt=literal_prompt,
+                )},
             ]
         )
 

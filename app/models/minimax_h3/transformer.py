@@ -666,6 +666,46 @@ class MiniMaxH3Attention(nn.Module):
                 raise ValueError("MiniMax H3 attention expects one owned input tensor")
             hidden_states = hidden_states.pop()
         batch, length, _ = hidden_states.shape
+        fast_attention = getattr(self, "fasth3_attention", None)
+        if fast_attention is not None:
+            if batch != 1 or attention_mask is not None:
+                raise ValueError("FastH3 VSA requires one unpadded T2AV sequence.")
+            # The compression gate is a trained fourth projection, not a
+            # generic sparse-attention approximation. Keep it on the same
+            # normalized input as Q/K/V and preserve its raw linear values.
+            shape = (batch, length, self.heads, self.head_dim)
+            chunk = _activation_chunk_tokens(length, hidden_states.shape[-1], self.heads * self.head_dim * 3)
+            projected = []
+            if hasattr(self, "q_proj"):
+                projections = (self.q_proj, self.k_proj, self.v_proj, self.to_gate_compress)
+                for index, projection in enumerate(projections):
+                    target = hidden_states.new_empty(shape)
+                    for start in range(0, length, chunk):
+                        end = min(length, start + chunk)
+                        rows = projection(hidden_states[:, start:end]).view(batch, end - start, self.heads, self.head_dim)
+                        if index < 2:
+                            rows = _rms_norm_inplace(self.q_norm if index == 0 else self.k_norm, rows)
+                            if rotary is not None:
+                                rows = _apply_rope_inplace(rows, rotary[0][start:end], rotary[1][start:end])
+                        target[:, start:end].copy_(rows)
+                    projected.append(target)
+            else:
+                projected = [hidden_states.new_empty(shape) for _ in range(4)]
+                for start in range(0, length, chunk):
+                    end = min(length, start + chunk)
+                    q, k, v = _split_fused_qkv(self.qkv_proj(hidden_states[:, start:end]), self.heads, self.head_dim, self.qkv_layout)
+                    q = _rms_norm_inplace(self.q_norm, q)
+                    k = _rms_norm_inplace(self.k_norm, k)
+                    if rotary is not None:
+                        q = _apply_rope_inplace(q, rotary[0][start:end], rotary[1][start:end])
+                        k = _apply_rope_inplace(k, rotary[0][start:end], rotary[1][start:end])
+                    gate = self.to_gate_compress(hidden_states[:, start:end]).view(batch, end - start, self.heads, self.head_dim)
+                    for target, rows in zip(projected, (q, k, v, gate)):
+                        target[:, start:end].copy_(rows)
+            hidden_states = rows = target = None
+            attended = fast_attention(*projected)
+            projected.clear()
+            return self.out_proj(attended.reshape(batch, length, self.heads * self.head_dim))
         if self.vdn is not None:
             if batch != 1 or attention_mask is not None:
                 raise ValueError("H3 VDN requires one unpadded packed sequence")
@@ -1701,6 +1741,18 @@ class MiniMaxH3Transformer(nn.Module):
             if layout is None or payload is None:
                 raise ValueError("H3 Veda requires packed reference and target geometry.")
             self.veda_attention.begin_forward(layout, payload["target_grid"], payload, device, packed.dtype)
+        if getattr(self, "fasth3_attention", None) is not None:
+            layout = _kwargs.get("packed_layout")
+            latent_shape = _kwargs.get("latent_shape")
+            if layout is None or latent_shape is None or target_order is not None:
+                raise ValueError("FastH3 VSA requires the original packed geometry.")
+            if _kwargs.get("prepared_references") is not None:
+                self.fasth3_attention.begin_forward(layout, latent_shape, self.config.patch_size,
+                                                  references=_kwargs["prepared_references"])
+            else:
+                self.fasth3_attention.begin_forward(layout, latent_shape, self.config.patch_size)
+            if first_block_cache is not None:
+                raise ValueError("FastH3 V2 requires all eight forwards without First Block Cache.")
         if self.blocks[0].attn.vdn is not None:
             layout = _kwargs.get("packed_layout")
             latent_shape = _kwargs.get("latent_shape")

@@ -110,7 +110,9 @@ class FaceRefinerContracts(unittest.TestCase):
     def test_refinement_adapter_retains_huggingface_source_subfolder(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            calls = []
             def download(**kwargs):
+                calls.append(kwargs)
                 path = root / kwargs['targetFolderList'][0] / kwargs['sourceFolderList'][0] / kwargs['fileList'][0][0]
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b'adapter')
@@ -125,6 +127,47 @@ class FaceRefinerContracts(unittest.TestCase):
                 first = runtime.ensure_refinement_adapter()
                 self.assertEqual(Path(first).read_bytes(), b'adapter')
                 self.assertEqual(runtime.ensure_refinement_adapter(), first)
+            self.assertEqual(calls, [{
+                'repoId': 'DeepBeepMeep/MiniMax-H3',
+                'revision': '630975da14fd3c84169d6cd5092da3ce1287d137',
+                'sourceFolderList': ['loras'],
+                'targetFolderList': ['minimax_h3/face_refiner'],
+                'fileList': [[runtime.TURBO_FILE]],
+            }])
+
+    def test_tracking_assets_use_verified_revision_and_reuse_cache(self):
+        asset_names = ('face_yolov8m.pt', 'det_10g.onnx', '2d106det.onnx', 'w600k_r50.onnx')
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            calls = []
+
+            def locate(relative, error_if_none=True):
+                path = root / relative
+                if path.is_file():
+                    return str(path)
+                if error_if_none:
+                    raise FileNotFoundError(relative)
+
+            def download(**kwargs):
+                calls.append(kwargs)
+                for name in kwargs['fileList'][0]:
+                    path = root / kwargs['sourceFolderList'][0] / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b'asset')
+
+            with patch.dict(sys.modules, {'wgp': SimpleNamespace(process_files_def=download)}), \
+                 patch('shared.utils.files_locator.locate_file', side_effect=locate):
+                detector, identity_dir = runtime.ensure_tracking_assets()
+                self.assertEqual((detector, identity_dir),
+                    (str(root / 'buffalo_l' / 'face_yolov8m.pt'), str(root / 'buffalo_l')))
+                self.assertEqual(runtime.ensure_tracking_assets(), (detector, identity_dir))
+
+        self.assertEqual(calls, [{
+            'repoId': 'DeepBeepMeep/MiniMax-H3',
+            'revision': '630975da14fd3c84169d6cd5092da3ce1287d137',
+            'sourceFolderList': ['buffalo_l'],
+            'fileList': [list(asset_names)],
+        }])
 
     def test_auto_and_limits(self):
         self.assertEqual(service.normalize_options()["face_count"], 0)
@@ -173,6 +216,80 @@ class FaceRefinerContracts(unittest.TestCase):
         self.assertTrue(bool((result[:, 17:] == 220).all()))
         self.assertGreater(int(result[0, 9, 0, 0]), 20)
         self.assertLess(int(result[0, 9, 0, 0]), 220)
+
+    def test_multi_window_inference_frames_blend_and_save_without_mutating_model_output(self):
+        geometry = {"frames": 294, "width": 2, "height": 2, "fps": 24}
+        model_outputs, stitched_windows, inference_flags, encoded = [], [], [], []
+
+        class Model:
+            _interrupt = False
+
+            @torch.inference_mode()
+            def generate(self, _prompt, **kwargs):
+                value = 40 if not model_outputs else 200
+                tensor = torch.full((3, kwargs["frame_num"], 2, 2), value, dtype=torch.uint8)
+                model_outputs.append(tensor)
+                return {"x": tensor}
+
+        @contextlib.contextmanager
+        def model_context(*_args):
+            yield Model(), "minimax_h3_ref2va"
+
+        def stitch(frames, refined, _segment, **_kwargs):
+            inference_flags.append(refined.is_inference())
+            stitched_windows.append(refined.clone())
+            frames.copy_(refined.permute(1, 2, 3, 0))
+            return frames
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source, destination = root / "source.mp4", root / "refined.mp4"
+            source.write_bytes(b"source video")
+            transform = {"segments": [(0, geometry["frames"])], **{
+                key: [None] * geometry["frames"]
+                for key in ("boxes", "face_rect", "weights", "detected", "active")}}
+            data = {"id": "a" * 32, "faces": [{}], "warnings": [],
+                    "transforms": [transform], **geometry}
+
+            @contextlib.contextmanager
+            def decoded(*_args):
+                yield torch.zeros((294, 2, 2, 3), dtype=torch.uint8), geometry, root
+
+            def encode(_source, output, frames, fps, *_args):
+                encoded.append((np.array(frames, copy=True), fps))
+                Path(output).write_bytes(b"refined video")
+
+            with patch.object(service, "analyze", return_value=data), \
+                 patch.object(service, "resolve_mappings", return_value=[{
+                     "track_id": 1, "character_id": None, "skip": False}]), \
+                 patch.object(service, "analysis_directory", return_value=root), \
+                 patch.object(service, "decoded_video", decoded), \
+                 patch.object(service, "audio_window", return_value=(np.zeros((1, 2)), 32000)), \
+                 patch("numpy.memmap", side_effect=lambda _path, *, shape, dtype, **_kwargs:
+                       np.zeros(shape, dtype=dtype)), \
+                 patch.object(service, "_encode", side_effect=encode), \
+                 patch.object(runtime, "refinement_model", model_context), \
+                 patch.object(face, "crop_face_track", side_effect=lambda _frames, _transform, start, stop:
+                              torch.zeros((3, stop - start, 2, 2))), \
+                 patch.object(face, "stitch", side_effect=stitch):
+                report = service.process_video(source, destination)
+
+            self.assertEqual(destination.read_bytes(), b"refined video")
+            self.assertEqual(source.read_bytes(), b"source video")
+            self.assertEqual(report["faces_refined"], 1)
+
+        self.assertEqual(len(model_outputs), 2)
+        self.assertEqual(inference_flags, [False, False])
+        self.assertTrue(all(tensor.is_inference() for tensor in model_outputs))
+        self.assertTrue(bool((model_outputs[0] == 40).all()))
+        self.assertTrue(bool((model_outputs[1] == 200).all()))
+        self.assertEqual(tuple(encoded[0][0].shape), (294, 2, 2, 3))
+        self.assertEqual(encoded[0][1], 24)
+        overlap = 243 - runtime.window_starts(294)[1]
+        weights = torch.linspace(0, torch.pi, overlap).cos().mul(-0.5).add(0.5)
+        expected = torch.full((overlap,), 40.0).lerp(torch.full((overlap,), 200.0), weights).round().to(torch.uint8)
+        torch.testing.assert_close(stitched_windows[1][0, :overlap, 0, 0], expected)
+        self.assertTrue(bool((stitched_windows[1][:, overlap:] == 200).all()))
 
     def test_mapping_identity_is_explicit_not_character_order(self):
         data = {"faces": [{"track_id": 1, "character_id": "a" * 16}, {"track_id": 2, "character_id": "b" * 16}]}
@@ -308,6 +425,74 @@ class FaceRefinerContracts(unittest.TestCase):
         self.assertEqual(model.kwargs["fps"], 30)
         self.assertEqual(tuple(output.shape), tuple(crop.shape))
         self.assertEqual(output.dtype, torch.uint8)
+
+    def test_refinement_wrapper_preserves_uint8_decoder_output_and_trims_padding(self):
+        class Model:
+            _interrupt = False
+            def generate(self, _prompt, **kwargs):
+                self.kwargs = kwargs
+                output = torch.empty((3, kwargs["frame_num"], 32, 32), dtype=torch.uint8)
+                values = torch.tensor([0, 1, 64, 128, 255, 0, 1, 64, 128], dtype=torch.uint8)
+                repeats = (kwargs["frame_num"] + len(values) - 1) // len(values)
+                values = values.repeat(repeats)[:kwargs["frame_num"]]
+                output[:] = values.view(1, -1, 1, 1)
+                self.output = output
+                self.output_before = output.clone()
+                return {"x": output, "audio": torch.tensor([1.0])}
+
+        model = Model()
+        crop = torch.linspace(-1.0, 1.0, 3 * 9 * 32 * 32).reshape(3, 9, 32, 32)
+        original_crop = crop.clone()
+        audio = np.arange(9600 * 2, dtype=np.float32).reshape(9600, 2)
+        original_audio = audio.copy()
+        output = runtime.refine_window(model, crop, "reference.png", fps=30,
+            audio=audio, audio_rate=32000, options=service.normalize_options(), seed=17)
+
+        self.assertEqual(model.kwargs["frame_num"], 22)
+        self.assertEqual(tuple(model.kwargs["input_frames"].shape), (3, 22, 32, 32))
+        torch.testing.assert_close(model.kwargs["input_frames"][:, 9:], crop[:, -1:].expand(-1, 13, -1, -1))
+        self.assertEqual(tuple(output.shape), tuple(crop.shape))
+        self.assertEqual(output.dtype, torch.uint8)
+        self.assertEqual(output.device.type, "cpu")
+        self.assertFalse(output.requires_grad)
+        torch.testing.assert_close(output[:, :, 0, 0], model.output[:, :9, 0, 0])
+        self.assertEqual(output[0, :, 0, 0].tolist(), [0, 1, 64, 128, 255, 0, 1, 64, 128])
+        torch.testing.assert_close(model.output, model.output_before)
+        torch.testing.assert_close(crop, original_crop)
+        np.testing.assert_array_equal(audio, original_audio)
+
+    def test_refinement_wrapper_converts_signed_float_output_once_without_mutation(self):
+        class Model:
+            _interrupt = False
+            def generate(self, _prompt, **kwargs):
+                self.kwargs = kwargs
+                values = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float32)
+                repeats = (kwargs["frame_num"] + len(values) - 1) // len(values)
+                values = values.repeat(repeats)[:kwargs["frame_num"]]
+                output = values.view(1, kwargs["frame_num"], 1, 1).expand(3, -1, 32, 32).clone()
+                output[:, 3:] = 0.0
+                output.requires_grad_()
+                self.output = output
+                self.output_before = output.detach().clone()
+                return {"x": output}
+
+        model = Model()
+        crop = torch.zeros(3, 3, 32, 32)
+        original_crop = crop.clone()
+        audio = np.zeros((3200, 2), dtype=np.float32)
+        original_audio = audio.copy()
+        output = runtime.refine_window(model, crop, "reference.png", fps=24,
+            audio=audio, audio_rate=32000, options=service.normalize_options(), seed=29)
+
+        self.assertEqual(model.kwargs["frame_num"], 22)
+        self.assertEqual(tuple(output.shape), (3, 3, 32, 32))
+        self.assertEqual(output.dtype, torch.uint8)
+        self.assertEqual(output.device.type, "cpu")
+        self.assertFalse(output.requires_grad)
+        self.assertEqual(output[0, :, 0, 0].tolist(), [0, 128, 255])
+        torch.testing.assert_close(crop, original_crop)
+        torch.testing.assert_close(model.output, model.output_before)
+        np.testing.assert_array_equal(audio, original_audio)
 
 
 if __name__ == "__main__":

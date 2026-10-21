@@ -85,6 +85,10 @@ FIELD CONTENT
 - non_diegetic_music: audience-only music when requested; otherwise N/A.
 
 DIALOGUE
+- Preserve explicit speaker-to-Subject declarations from older structured prompts and reuse
+  already established speakers within the current clip. Write the mapped <Subject N> beside
+  every referenced character's dialogue; do not equate Subject, speaker, and Audio numbers.
+  Shot/scene headings, timestamps, and production directions never identify a speaking character.
 - Copy every supplied quoted line verbatim before planning the visuals. Every copied line must
   appear exactly once inside a <d> block, in source order, adjacent to its true speaker.
 - Use this direct form for a referenced on-screen speaker:

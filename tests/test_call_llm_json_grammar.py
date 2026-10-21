@@ -66,6 +66,26 @@ def test_retry_gets_generic_grammar_without_schema():
     assert calls[1]["json_schema"] == _GENERIC_ARRAY_SCHEMA
 
 
+def test_object_schema_retry_requests_object_without_array_instruction():
+    schema = {
+        "type": "object",
+        "properties": {"beats": {"type": "array", "items": {"type": "object"}}},
+        "required": ["beats"],
+        "additionalProperties": False,
+    }
+    planner, calls = _planner_with(["malformed ((", '{"beats": [{"clip_index": 0}]}'])
+    out = planner._call_llm_json(
+        "Return the beats object.", "Return JSON.", thinking_budget=0,
+        json_schema=schema, remote_json_schema=True,
+    )
+    assert out == [{"beats": [{"clip_index": 0}]}]
+    assert len(calls) == 2
+    assert "ONLY a JSON object" in calls[1]["prompt"]
+    assert "JSON array" not in calls[1]["prompt"]
+    assert calls[1]["json_schema"] == schema
+    assert calls[1]["remote_json_schema"] is True
+
+
 def test_degrades_when_gen_fn_rejects_schema():
     calls = []
     responses = [VALID]

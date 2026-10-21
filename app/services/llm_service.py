@@ -8,6 +8,7 @@ Runs on CPU by default to avoid VRAM conflicts with WanGP.
 import os
 import gc
 import time
+import copy
 import subprocess
 import threading
 import logging
@@ -752,6 +753,47 @@ _OPENAI_CHAT_FIELDS = frozenset({
     "tool_choice",
     "user",
 })
+
+
+def _openai_structured_response_format(json_schema: Optional[dict]) -> Optional[dict]:
+    """Build the OpenAI-compatible strict format for supported object schemas."""
+
+    if not isinstance(json_schema, dict) or json_schema.get("type") != "object":
+        return None
+    schema = copy.deepcopy(json_schema)
+
+    def compatible(node: object) -> bool:
+        if isinstance(node, dict):
+            node.pop("uniqueItems", None)
+            node_type = node.get("type")
+            if node_type == "object" or (
+                isinstance(node_type, list) and "object" in node_type
+            ):
+                properties = node.get("properties", {})
+                if not isinstance(properties, dict):
+                    return False
+                required = node.get("required", [])
+                if (
+                    not isinstance(required, list)
+                    or set(required) != set(properties)
+                    or node.get("additionalProperties") is not False
+                ):
+                    return False
+            return all(compatible(value) for value in node.values())
+        if isinstance(node, list):
+            return all(compatible(value) for value in node)
+        return True
+
+    if not compatible(schema):
+        return None
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "maestro_response",
+            "strict": True,
+            "schema": schema,
+        },
+    }
 
 
 def _finalize_payload(payload: dict) -> dict:
@@ -2541,6 +2583,7 @@ def generate(
     presence_penalty: float = 0.0,
     stop: Optional[list[str]] = None,
     json_schema: Optional[dict] = None,
+    remote_json_schema: bool = False,
 ) -> str:
     """Generate text via llama-server's OpenAI-compatible chat endpoint.
 
@@ -2554,11 +2597,12 @@ def generate(
             --jinja chat template. If None, uses model default (thinking on).
         reasoning_effort: Optional Qwen3.8 reasoning tier. When omitted,
             registered Qwen3.8 creative calls use ``xhigh``.
-        json_schema: Optional JSON Schema dict. When set (local llama-server
-            only), the output is grammar-constrained to schema-valid JSON —
-            the sampler masks every token that would break the schema, so
-            the model physically cannot emit prose, markdown fences, or the
-            repeat-loop garbage that breaks structured planning passes.
+        json_schema: Optional JSON Schema dict. Local llama-server uses its
+            grammar extension. Remote/OpenAI providers receive strict JSON
+            Schema only when ``remote_json_schema`` is explicitly enabled.
+        remote_json_schema: Opt in to the OpenAI-compatible strict format for
+            a known remote planning call; other remote callers retain the
+            historical unconstrained behavior.
     """
     global _stream_buffer, _stream_done, _last_system_prompt, _last_user_prompt
     global _last_thinking_text, _last_generation_metrics
@@ -2572,7 +2616,7 @@ def generate(
             image_paths=image_paths, thinking_budget=thinking_budget,
             enable_thinking=enable_thinking, reasoning_effort=reasoning_effort,
             frequency_penalty=frequency_penalty, presence_penalty=presence_penalty,
-            json_schema=json_schema, stop=stop,
+            json_schema=json_schema, remote_json_schema=remote_json_schema, stop=stop,
         )
 
     if not is_loaded():
@@ -2660,16 +2704,23 @@ def generate(
     if combined_stop:
         payload["stop"] = combined_stop
 
-    # Grammar-constrained JSON output. llama-server compiles the schema to
-    # a GBNF grammar server-side ({"type": "json_object", "schema": ...} is
-    # the long-standing llama.cpp extension form). Local provider only —
-    # remote OpenAI-compatible endpoints vary in which response_format
-    # flavor they accept, so we degrade to an unconstrained call there.
+    # Use llama.cpp's native grammar form locally. Remote OpenAI-compatible
+    # endpoints receive strict JSON Schema only for explicit opt-in callers.
     if json_schema is not None:
         if _provider == "local":
             payload["response_format"] = {"type": "json_object", "schema": json_schema}
+        elif _provider in ("remote", "openai") and remote_json_schema:
+            response_format = _openai_structured_response_format(json_schema)
+            if response_format is not None:
+                payload["response_format"] = response_format
+                print(f"[LLM] Sending strict JSON Schema to provider={_provider}")
+            else:
+                print(
+                    f"[LLM] json_schema requested but provider={_provider} "
+                    "requires a compatible object-root schema; sending unconstrained"
+                )
         else:
-            print(f"[LLM] json_schema requested but provider={_provider} — sending unconstrained (grammar is local llama-server only)")
+            print(f"[LLM] json_schema requested but provider={_provider} is not opted into remote structured output")
 
     if _provider == "anthropic":
         return _generate_anthropic(messages, total_tokens, max(temperature, 0.01), top_p)
@@ -2768,6 +2819,7 @@ def generate_streaming(
     presence_penalty: float = 0.0,
     json_schema: Optional[dict] = None,
     stop: Optional[list[str]] = None,
+    remote_json_schema: bool = False,
 ) -> str:
     """Generate text using SSE streaming, populating the stream buffer in real-time.
 
@@ -2778,9 +2830,11 @@ def generate_streaming(
         thinking_budget: Extra tokens reserved for model reasoning/thinking.
             Added on top of max_new_tokens so thinking doesn't eat into
             the content budget. Set to 0 to use max_new_tokens as-is.
-        json_schema: Optional JSON Schema dict — grammar-constrains the
-            output to schema-valid JSON on local llama-server. Forces
+        json_schema: Optional JSON Schema dict — uses local llama-server
+            grammar or remote strict JSON Schema for opted-in calls. Forces
             thinking OFF (see generate() for the rationale).
+        remote_json_schema: Opt in to the OpenAI-compatible strict format for
+            a known remote planning call.
     """
     global _stream_buffer, _stream_done, _last_system_prompt, _last_user_prompt, _last_thinking_text
     global _last_generation_metrics
@@ -2880,13 +2934,24 @@ def generate_streaming(
         existing = payload.get("stop") or []
         payload["stop"] = list(existing) + [t for t in stop_tokens if t not in existing]
 
-    # Grammar-constrained JSON output — local llama-server only (see the
-    # matching block in generate() for the full rationale).
+    # Structured JSON output. Local llama-server uses its native grammar;
+    # remote OpenAI-compatible endpoints receive strict JSON Schema only for
+    # compatible object-root schemas (see generate() above).
     if json_schema is not None:
         if _provider == "local":
             payload["response_format"] = {"type": "json_object", "schema": json_schema}
+        elif _provider in ("remote", "openai") and remote_json_schema:
+            response_format = _openai_structured_response_format(json_schema)
+            if response_format is not None:
+                payload["response_format"] = response_format
+                print(f"[LLM] Sending strict JSON Schema to provider={_provider}")
+            else:
+                print(
+                    f"[LLM] json_schema requested but provider={_provider} "
+                    "requires a compatible object-root schema; sending unconstrained"
+                )
         else:
-            print(f"[LLM] json_schema requested but provider={_provider} — sending unconstrained (grammar is local llama-server only)")
+            print(f"[LLM] json_schema requested but provider={_provider} is not opted into remote structured output")
 
     # Diagnostic — log every payload field except `messages` so we can
     # compare what Maestro sends to llama-server vs what LM Studio sends
@@ -3367,6 +3432,7 @@ def enhance_prompt(
     raw_enhancer_mode: bool = False,
     reference_context: Optional[str] = None,
     planning_style: str = "faithful",
+    resolution: Optional[str] = None,
 ) -> str:
     # Repair legacy Windows/code-page damage before model-specific parsers
     # copy user-authored international text into an immutable prompt contract.
@@ -3387,6 +3453,10 @@ def enhance_prompt(
     )
     is_h3_structured = is_h3_context_ir or is_h3_ref2va
     is_flux3_image = mode == "image" and (model_type or "").lower().startswith("flux3")
+    is_moss_image = mode == "image" and (model_type or "").lower().startswith("moss_image")
+    if is_moss_image:
+        # A general cinematic writer cannot safely strip MOSS's layout fields.
+        raw_enhancer_mode = False
     audio_driven = is_h3_ref2va and has_h3_performance_audio(reference_context)
     needs_h3_dialogue = is_h3_structured and not audio_driven
     if needs_h3_dialogue:
@@ -3664,6 +3734,9 @@ def enhance_prompt(
         model_type,
         planning_style,
     )
+    if is_moss_image:
+        from services.moss_image_prompt import enhancement_canvas_context
+        user_prompt = f"{enhancement_canvas_context(resolution)}\n\n{user_prompt}"
     if audio_driven:
         user_prompt = (
             f"Duration: {duration_seconds or 'the supplied audio duration'} seconds. "
@@ -3800,6 +3873,15 @@ def enhance_prompt(
             "Only clarify the caption and descriptions; never change, omit or invent layout boxes. "
             "Boxes use [top,left,bottom,right], integers from 0 to 1000, and guide composition rather than exact pixel masks."
         )
+    elif is_moss_image:
+        system += (
+            "\n\nMOSS IMAGE OUTPUT CONTRACT: A caption stays a caption. A NEW layout uses width, "
+            "height, summary, items, bbox_coord_space=abs and bbox_format=xyxy. Maestro compiles "
+            "top-left pixel boxes; do not manually center them. An EXISTING compiled layout keeps "
+            "abs_centralized/yxyx, all items, extra fields, exact lettering, comments and valid "
+            "centered-pixel boxes. JSON keys and exact text fields are required model syntax. "
+            "No reference-image tokens, pixel masks, Markdown fences or explanations."
+        )
     else:
         system += "\n\nCRITICAL: Output ONLY the enhanced prompt text. No headers, no labels, no markdown, no explanation, no \"Enhancement Logic\", no \"Edit Prompt:\". No LoRA filenames or display names; exact creator-declared trainedWords tokens from active-LoRA guidance may appear when relevant. Just the raw prompt text."
 
@@ -3818,6 +3900,10 @@ def enhance_prompt(
         # A detailed imported brief needs answer space, not thousands of
         # reasoning tokens. Keep small prompts quick and longer rewrites whole.
         effective_max_tokens = max(effective_max_tokens, min(2048, max(768, len(prompt) // 3 + 256)))
+        if is_moss_image:
+            # A brief poster request can produce a detailed layout too. This
+            # is an output ceiling, not a required length for simple captions.
+            effective_max_tokens = max(effective_max_tokens, 4096)
     if window_count and window_count > 1:
         effective_max_tokens = max(max_new_tokens, window_count * 300 + 256)
     if is_h3_ref2va:
@@ -3878,6 +3964,37 @@ def enhance_prompt(
     )
     result = repair_text(result)
 
+    if is_moss_image:
+        from services.moss_image_prompt import finalize_enhancement_output
+        from services.studio_enhancement import check_cancelled, fidelity_retry_limit
+
+        # Keep exact display strings and comments out of the prose cleaner.
+        # A single bounded repair can fix a truncated/invalid draft; never
+        # silently clip geometry or submit the draft coordinate dialect.
+        repair_limit = min(1, fidelity_retry_limit())
+        for attempt in range(repair_limit + 1):
+            try:
+                return finalize_enhancement_output(result, resolution)
+            except ValueError as error:
+                if attempt == repair_limit:
+                    raise ValueError(
+                        f"MOSS Image enhancement could not produce a valid prompt: {error} "
+                        "Your original prompt is unchanged. Review the layout in Prompt Helper or retry enhancement."
+                    ) from error
+                check_cancelled()
+                result = repair_text(generate(
+                    prompt=user_prompt + "\n\nPREVIOUS DRAFT TO REPAIR:\n" + str(result or '')
+                    + "\n\nVALIDATION ISSUE: " + str(error),
+                    system_prompt=system + "\nRepair only this draft's JSON/schema/canvas error. "
+                    "Preserve the original brief, all visible wording and intended composition. "
+                    "Return the complete corrected caption or layout, without explanations.",
+                    max_new_tokens=effective_max_tokens,
+                    temperature=min(float(temperature), 0.35),
+                    image_paths=None,
+                    enable_thinking=False,
+                    thinking_budget=0,
+                ))
+
     # Post-process ordinary prose aggressively, but preserve H3's required field
     # labels and media tags. The old substring-loop cleaner could truncate a
     # valid Context-IR response at its first repeated <Picture>/<Audio> mapping.
@@ -3885,7 +4002,7 @@ def enhance_prompt(
         # Repeated source-binding phrases in a multi-reference caption are
         # legitimate. The ordinary substring-loop heuristic can cut the
         # caption halfway through a <ref_image_N> token and drop later subjects.
-        result = _clean_enhance_output(result, preserve_structure=is_h3_structured or is_flux3_image)
+        result = _clean_enhance_output(result, preserve_structure=is_h3_structured or is_flux3_image or is_moss_image)
     if is_h3_context_ir and result:
         # Adaptive dialogue may compile named cues into tags. For ordinary
         # locked user dialogue, compile only when the writer already returned
@@ -4545,10 +4662,8 @@ def _extract_h3_source_dialogue_entries(
     manifest = _parse_h3_ref2va_subject_manifest(reference_context)
     if manifest:
         from models.minimax_h3.speakers import (
-            _ambiguous_ref2va_dialogue_error,
             _ref2va_alias_values,
-            _resolve_ref2va_dialogue_owner_name,
-            _resolve_ref2va_dialogue_speaker,
+            resolve_ref2va_dialogue_owners,
         )
 
         valid_subjects = {int(subject["index"]) for subject in manifest}
@@ -4560,19 +4675,14 @@ def _extract_h3_source_dialogue_entries(
             alias: next(iter(subjects))
             for alias, subjects in alias_candidates.items() if len(subjects) == 1
         }
+        owners = resolve_ref2va_dialogue_owners(
+            source,
+            [(int(entry["start"]), int(entry["end"]), entry["words"]) for entry in spans],
+            aliases,
+            valid_subjects,
+        )
         vocal_speakers: dict[tuple, int] = {}
-        for entry in spans:
-            subject = _resolve_ref2va_dialogue_speaker(
-                source, int(entry["start"]), int(entry["end"]), aliases, valid_subjects,
-            )
-            owner = _resolve_ref2va_dialogue_owner_name(
-                source, int(entry["start"]), int(entry["end"]),
-            )
-            if subject is None and not owner:
-                if len(valid_subjects) == 1:
-                    subject = next(iter(valid_subjects))
-                else:
-                    raise _ambiguous_ref2va_dialogue_error(entry["words"])
+        for entry, (subject, owner) in zip(spans, owners):
             if subject is not None:
                 entry["subject_id"] = subject
             # Guests keep their own voice; neither input order nor an (Sx)

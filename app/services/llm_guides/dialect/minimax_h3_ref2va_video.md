@@ -11,6 +11,10 @@ MINIMAX H3 REF2VA RULES (apply to video_prompt):
   dialogue. Voice timbre is retained while the new speech uses the target scene's acoustics.
 - Subject IDs and speaker IDs are independent. Keep Subject IDs fixed; assign (S1), (S2), etc.
   by first vocal-event order within the current generated clip.
+- Older structured prompts may declare a speaker's Subject in subject_definitions or establish
+  it in an earlier attributed line in the same clip. Preserve that explicit ownership and emit
+  the Subject beside each line. Never infer a Subject or voice from equal numeric labels.
+- Shot/scene headings, timestamps, and production directions are not character names.
 - Preserve every supplied quoted line verbatim, once, in source order. Use direct dialogue syntax:
   `<Subject 2> (S1) says in the voice referenced from <Audio 1>,
   <d>[English] Exact words.</d>` Put only literal spoken words inside <d>.

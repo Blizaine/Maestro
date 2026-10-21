@@ -18,6 +18,8 @@ from typing import Any
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _lifecycle_lock = threading.RLock()
+_generation_probe_lock = None
+_generation_slot_waiters: dict[int, int] = {}
 _registrations: dict[
     str,
     tuple[
@@ -420,6 +422,18 @@ def unregister_terminal_listener(
         _terminal_listeners.discard(listener)
 
 
+def configure_generation_probe_lock(generation_lock) -> None:
+    """Register the real generation lock used to serialize GPU work."""
+    if generation_lock is not None and not all(
+        callable(getattr(generation_lock, name, None))
+        for name in ("acquire", "release", "locked")
+    ):
+        raise TypeError("generation_lock must provide acquire, release and locked")
+    global _generation_probe_lock
+    with _lifecycle_lock:
+        _generation_probe_lock = generation_lock
+
+
 def acquire_generation_slot(
     generation_lock: threading.Lock,
     job: MutableMapping[str, Any],
@@ -427,13 +441,24 @@ def acquire_generation_slot(
     poll_interval: float = 0.1,
 ) -> bool:
     """Wait for the GPU lock while allowing a queued cancellation to exit."""
-    while not is_cancel_requested(job):
-        if generation_lock.acquire(timeout=poll_interval):
-            if is_cancel_requested(job):
-                generation_lock.release()
-                return False
-            return True
-    return False
+    lock_id = id(generation_lock)
+    with _lifecycle_lock:
+        _generation_slot_waiters[lock_id] = _generation_slot_waiters.get(lock_id, 0) + 1
+    try:
+        while not is_cancel_requested(job):
+            if generation_lock.acquire(timeout=poll_interval):
+                if is_cancel_requested(job):
+                    generation_lock.release()
+                    return False
+                return True
+        return False
+    finally:
+        with _lifecycle_lock:
+            remaining = _generation_slot_waiters[lock_id] - 1
+            if remaining:
+                _generation_slot_waiters[lock_id] = remaining
+            else:
+                _generation_slot_waiters.pop(lock_id)
 
 
 @contextmanager
@@ -452,3 +477,43 @@ def generation_slot(
     finally:
         if acquired:
             generation_lock.release()
+
+
+def generation_activity_reason() -> str | None:
+    """Return a locked snapshot of whether Maestro can reserve the GPU."""
+    with _lifecycle_lock:
+        if _generation_probe_lock is None:
+            return "the generation lock is not configured"
+        if (_registrations or _generation_slot_waiters.get(id(_generation_probe_lock))
+                or _generation_probe_lock.locked()):
+            return "generation is active or waiting for the generation slot"
+    return None
+
+
+@contextmanager
+def idle_generation_probe() -> Iterator[str | None]:
+    """Temporarily own the real generation lock for an idle capability probe."""
+    with _lifecycle_lock:
+        generation_lock = _generation_probe_lock
+        if generation_lock is None:
+            reason = "the generation lock is not configured"
+        elif _registrations or _generation_slot_waiters.get(id(generation_lock)):
+            reason = "generation is active or waiting for the generation slot"
+        else:
+            reason = None
+    if reason:
+        yield reason
+        return
+
+    if not generation_lock.acquire(blocking=False):
+        yield "generation is active or waiting for the generation slot"
+        return
+    try:
+        with _lifecycle_lock:
+            reason = (
+                "generation is active or waiting for the generation slot"
+                if _registrations or _generation_slot_waiters.get(id(generation_lock)) else None
+            )
+        yield reason
+    finally:
+        generation_lock.release()

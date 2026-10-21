@@ -242,6 +242,7 @@ def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
     payload = {
         "prompt": str(params.get("prompt") or ""),
         "mode": mode, "model_type": params.get("model_type"),
+        "resolution": params.get("resolution") if mode == "image" else None,
         "planning_style": "adaptive" if h3 else "faithful",
         "duration_seconds": total / fps, "window_count": 1, "window_size_seconds": window / fps,
         "image_paths": images, "reference_context": "\n".join(context),

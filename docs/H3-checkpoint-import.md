@@ -10,6 +10,10 @@ The importer supports individual joint video/audio H3 transformer checkpoints th
 
 - Pruned rank-8 20B or full 33B layouts.
 - BF16/FP16 weights with proven QKV row order.
+- Mixed floating-point exports may retain FP32 input/output projection weights
+  and compressed AdaLN projection weights. Maestro preserves those FP32 AdaLN
+  weights when loading instead of rounding them to FP16. This does not admit
+  arbitrary FP32 block, norm, condition or full-width modulation weights.
 - Comfy INT8 ConvRot with consistent group-64 or group-256 descriptors. All 200 transformer linear layers must be described, either by per-layer `.comfy_quant` tensors or by the file header's `_quantization_metadata`. Header-based exports do not need duplicate descriptor tensors; if both representations are present, they must agree.
 - Scaled E4M3 FP8 with supported scalar/column scales and proven grouped QKV row order. Published Comfy-Org FP8 file checksums are recognized, including their CivitAI copies.
 - DaSiWa/WanGP asymmetric **W4A8 INT4** SafeTensors (`asym_w4a8_int8`): packed four-bit weights, FP8 relative scales, FP32 channel scales, weight groups of 16, and ConvRot groups of 64 or 256. Codebook and correction tensors are preserved. Maestro uses chunked Triton decoding and INT8 multiplication on compatible CUDA devices, with a portable fallback.
@@ -23,13 +27,25 @@ Entries are labeled with the creator's model and version and appear in the Studi
 
 Other INT4 encodings (including Nunchaku/NF4), INT6, NVFP4, unsupported GGUF types such as IQ/MXFP, archives, workflow JSON, VAEs, standalone LoRAs, VDN/custom attention exports and unknown layouts remain blocked. An INT4 label alone does not prove W4A8 compatibility. Files without a published SHA-256 remain blocked until that verification data is available.
 
-Some GGUF exports omit QKV row-order metadata. The browser asks for the creator's **grouped Q/K/V** or **head-interleaved** layout before importing; an unknown layout is never silently assigned. Follow the creator's exporter instructions. Maestro supports both orders in its fused attention paths. Already-fused native LoRAs must use the checkpoint's logical row order; independently named Diffusers Q/K/V adapters are converted to the loaded layout.
+Some SafeTensors and GGUF exports omit QKV row-order metadata. The browser asks for the creator's **grouped Q/K/V** or **head-interleaved** layout before importing; an unknown layout is never silently assigned. Follow the creator's exporter instructions. Maestro supports both orders in its fused attention paths. Already-fused native LoRAs must use the checkpoint's logical row order; independently named Diffusers Q/K/V adapters are converted to the loaded layout.
+
+The actual timestep table and projection shapes determine the compressed width.
+Training metadata such as `ss_h3_adaln_rank` does not override those tensors.
+A true rank-16 curve export is still outside this importer's verified rank-8
+layout; a LoRA's adapter rank is a separate dimension.
 
 ## Sampling recipes
 
 Maestro detects documented native workflows and standard, baked Turbo or fused sampling recipes. When that information is ambiguous or incomplete, the browser asks you to select the creator's workflow/recipe explicitly. The resulting verification profile records the choices and defaults. A selection cannot override a conflicting concrete file identity.
 
 When a model page offers both Turbo and non-Turbo files, its shared acceleration instructions do not identify every file. Maestro asks for the selected file's recipe unless its header or version name proves one, and does not borrow step counts or shifts from a sibling edition.
+
+A base checkpoint that describes an optional Turbo LoRA retains its standard
+recipe and keeps LoRA controls available. A published count such as “30 steps
+without it” belongs to the base recipe; “12 steps with the Turbo LoRA” is not
+treated as baked acceleration. Apply the matching LoRA and its own step count
+when testing that configuration. Negated advice such as “not res_multistep”
+does not select that sampler.
 
 DaSiWa Hybrid v3 standard INT8 and W4A8 INT4 use the documented 25-step Euler recipe, video shift 11 and audio shift 4. Their baked Turbo v3 versions use 8 steps by default, accept 4–8, and use video shift 9 and audio shift 4. These releases are identified by their exact CivitAI model/version/file IDs and published checksums.
 
@@ -92,6 +108,13 @@ the bundled fused model's SLA recipe.
 Focused CPU tests cover architecture anchors, quantization descriptors, finite AdaLN curves, wrapped names, full/pruned detection, source/file matching, authentication errors, bounded byte reads, checksum reuse, atomic publication, native workflow registration, loader revalidation and baked acceleration guards. Isolated tests of the actual UI store cover arbitrary imported companion IDs, step memory, model visibility and preservation of current generation state.
 
 Real CivitAI preflight was exercised for DaSiWa standard/Turbo INT8, DaSiWa Turbo v3 W4A8 INT4, native FL2VA INT8, both published Comfy-Org pruned FP8 workflows, and community Q4_0 GGUF checkpoints. Public Unsloth Q2_K FL2VA and Q4_K Ref2VA indexes were also checked. Unsupported or mislabeled quantizations and missing checksums are rejected. These checks do not substitute for rendering a newly imported creator checkpoint.
+
+Two additional mixed-precision BF16 and INT8 ConvRot community files passed
+bounded inspection with FP32 compressed AdaLN weights. Their concrete table
+and projection widths are 8 despite exporter training metadata reporting 16.
+CPU tests load tiny real SafeTensor projections through MMGP, check that FP32
+values survive unchanged, and compare the forward result with FP32 linear
+evaluation. Full renders of those community files remain untested.
 
 Eros Max beta5 standard/Turbo and beta3 Turbo INT8 headers also passed bounded inspection with their matching recipe selections. Header-based INT8 loading is tested through MMGP using tiny real SafeTensor files on the CPU, checking group-64/group-256 rotation, QKV splits and row scales against an independent dense reference.
 

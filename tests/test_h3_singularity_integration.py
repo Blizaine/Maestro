@@ -150,6 +150,7 @@ class SingularityIntegrationTests(unittest.TestCase):
             validate(stock_frames, [FILENAME])
 
     def test_loader_preserves_ref2va_lora_basis_for_shared_singularity_checkpoint(self):
+        from models.minimax_h3 import turbo
         from models.minimax_h3.singularity import validate_minimax_h3_singularity_checkpoint
 
         checkpoint = {"compressed_modulation": True, "adaln_curve_grid": 1025,
@@ -161,9 +162,12 @@ class SingularityIntegrationTests(unittest.TestCase):
                 transformer.eval = lambda: transformer
                 transformer.requires_grad_ = lambda _value: transformer
                 offload = SimpleNamespace(split_linear_modules=Mock(), load_model_data=Mock())
+                header = Mock(return_value={})
                 load = production_function(
                     ROOT / "app/models/minimax_h3/minimax_h3_main.py", "_load_transformer",
-                    {"probe_h3_checkpoint": lambda _path: checkpoint.copy(),
+                    {"__name__": "models.minimax_h3.minimax_h3_main",
+                     "__package__": "models.minimax_h3",
+                     "probe_h3_checkpoint": lambda _path: checkpoint.copy(),
                      "_first_path": lambda path: path,
                      "convrot_quantization_info_from_file": lambda _path: {},
                      "validate_minimax_h3_singularity_checkpoint": validate_minimax_h3_singularity_checkpoint,
@@ -171,9 +175,12 @@ class SingularityIntegrationTests(unittest.TestCase):
                      "MiniMaxH3Transformer": lambda **_kwargs: transformer,
                      "get_linear_split_map": lambda *_args, **_kwargs: {"qkv": "split"},
                      "offload": offload, "partial": partial,
-                     "_strip_transformer_wrappers": lambda state, **_kwargs: state},
+                     "_strip_transformer_wrappers": lambda state, **_kwargs: state,
+                     "_lock_fp32_adaln_modules": lambda transformer, module_names: None},
                 )
-                result = load("shared.safetensors", "bf16", qkv_layout="grouped", singularity=singularity)
+                with patch.object(turbo, "safetensors_header", header):
+                    result = load("shared.safetensors", "bf16", qkv_layout="grouped", singularity=singularity)
+                header.assert_called_once_with("shared.safetensors")
                 self.assertIs(result, transformer)
                 offload.load_model_data.assert_called_once()
                 if singularity:

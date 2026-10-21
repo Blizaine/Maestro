@@ -112,14 +112,14 @@ class TestWgpRowProjection(unittest.TestCase):
         self.patches.enter_context(mock.patch.object(torch.compiler, "is_compiling", return_value=False))
         self.patches.enter_context(mock.patch.object(self.backend.triton, "_is_fake_tensor", return_value=False))
 
-    def _module(self):
-        data = torch.arange(64, dtype=torch.int8).reshape(4, 16)
-        weight = SimpleNamespace(_data=data)
+    def _module(self, features=16, group=16, outputs=4):
+        data = torch.arange(outputs * features, dtype=torch.int8).reshape(outputs, features)
+        weight = SimpleNamespace(_data=data, _scale=torch.ones((outputs, 1), dtype=torch.float32))
         return SimpleNamespace(
             weight_qtype=SimpleNamespace(name="qint8_convrot"),
-            _convrot_group_size=16,
+            _convrot_group_size=group,
             qweight=weight,
-            bias=torch.arange(4, dtype=torch.bfloat16),
+            bias=torch.arange(outputs, dtype=torch.bfloat16),
         )
 
     def test_row_provider_supports_only_compatible_cuda_dispatch_metadata(self):
@@ -158,6 +158,174 @@ class TestWgpRowProjection(unittest.TestCase):
         torch.testing.assert_close(args[1], module.qweight._data[1:3])
         torch.testing.assert_close(args[2], torch.tensor([1.0, 2.0]))
         torch.testing.assert_close(args[3], module.bias[1:3])
+
+    def test_prepare_tiles_at_wgpkernels_grid_limit_for_long_video_rows(self):
+        module = self._module()
+        cases = (
+            (65_535, (65_535,)),
+            (65_536, (65_535, 1)),
+            (80_400, (65_535, 14_865)),
+            (236_012, (65_535, 65_535, 65_535, 39_407)),
+        )
+        for rows, expected_tiles in cases:
+            with self.subTest(rows=rows):
+                calls = []
+                wgp = SimpleNamespace(
+                    prepare=mock.Mock(side_effect=lambda tile, group, path: (
+                        calls.append((tile.shape[0], group, path))
+                        or SimpleNamespace(dtype=tile.dtype, device=tile.device)
+                    ))
+                )
+                with mock.patch.object(self.backend, "_wgp", wgp):
+                    with mock.patch.object(self.backend, "_wgp_path", return_value="block"):
+                        prepared = self.backend._WGP_ROW_PROJECTION.prepare(
+                            module, torch.empty((rows, 16), dtype=torch.bfloat16)
+                        )
+
+                self.assertEqual(tuple(call[0] for call in calls), expected_tiles)
+                self.assertTrue(all(tile_rows <= 65_535 for tile_rows, _, _ in calls))
+                self.assertTrue(all(group == 16 and path == "block" for _, group, path in calls))
+                self.assertEqual(sum(tile_rows for tile_rows, _, _ in calls), rows)
+                if len(expected_tiles) == 1:
+                    self.assertIsInstance(prepared, SimpleNamespace)
+                else:
+                    self.assertEqual(prepared.row_count, rows)
+                    self.assertEqual(
+                        tuple((start, stop) for start, stop, _ in prepared.chunks),
+                        tuple((sum(expected_tiles[:index]), sum(expected_tiles[:index + 1]))
+                              for index in range(len(expected_tiles))),
+                    )
+
+    def test_scratch_tiled_prepared_rows_preserve_group_scales_and_math(self):
+        module = self._module(features=64, group=64)
+        torch.manual_seed(191)
+        x = torch.randn((11, 64), dtype=torch.bfloat16)
+        module.qweight._data = torch.randint(-6, 7, (4, 64), dtype=torch.int8)
+        scales = torch.tensor([[0.01], [0.02], [0.03], [0.04]], dtype=torch.float32)
+        module.qweight._scale = scales
+        module.bias = torch.randn((4,), dtype=torch.bfloat16)
+        prepare_calls = []
+
+        def prepare(tile, group, path):
+            prepare_calls.append((tile.shape[0], group, path))
+            return SimpleNamespace(value=tile.clone(), group=group, dtype=tile.dtype, device=tile.device)
+
+        def linear_prepared(prepared, weight, scale, bias):
+            self.assertEqual(prepared.group, 64)
+            result = prepared.value.float() @ weight.float().t()
+            result.mul_(scale.reshape(1, -1))
+            if bias is not None:
+                result.add_(bias)
+            return result.to(prepared.dtype)
+
+        wgp = SimpleNamespace(prepare=prepare, linear_prepared=linear_prepared)
+        with mock.patch.object(self.backend, "_SCRATCH_BYTES", (2 * 64 + 4) * 4):
+            with mock.patch.object(self.backend, "_wgp", wgp):
+                with mock.patch.object(
+                    self.backend, "_wgp_path",
+                    side_effect=lambda _module, _rows, group, precise: f"group-{group}-precise-{precise}",
+                ) as choose_path:
+                    with mock.patch.object(self.backend, "_weight_scale", return_value=scales):
+                        prepared = self.backend._WGP_ROW_PROJECTION.prepare(module, x)
+                        actual = self.backend._WGP_ROW_PROJECTION.rows(module, prepared, 1, 4)
+
+        self.assertEqual([rows for rows, _, _ in prepare_calls], [4, 4, 3])
+        self.assertTrue(all(group == 64 for _, group, _ in prepare_calls))
+        self.assertEqual({path for _, _, path in prepare_calls}, {"group-64-precise-False"})
+        self.assertEqual(choose_path.call_count, 1)
+        self.assertEqual(choose_path.call_args.args[1].shape[0], x.shape[0])
+        expected = x.float() @ module.qweight._data[1:4].float().t()
+        expected.mul_(scales[1:4].reshape(1, -1)).add_(module.bias[1:4])
+        torch.testing.assert_close(actual, expected.to(x.dtype), rtol=0, atol=0)
+
+    def test_grouped_tiling_preserves_native_prepare_protocol_and_projection_order(self):
+        qtype_module = _import_project_module("shared.qtypes.int8_convrot")
+        qlinear_type = qtype_module.QLinearInt8ConvRot
+
+        def make_module(weight_data, scales, bias):
+            qtype = qtype_module._QINT8_CONVROT_QTYPE
+            module = qlinear_type(
+                16, weight_data.shape[0], bias=True, device="cpu",
+                dtype=torch.bfloat16, weights=qtype, quantize_input=True,
+            )
+            weight = qtype_module.Int8ConvRotWeightTensor.create(
+                qtype,
+                0,
+                tuple(weight_data.shape),
+                tuple(weight_data.stride()),
+                weight_data,
+                scales,
+                compute_dtype=torch.bfloat16,
+            )
+            delattr(module, "weight")
+            module.weight = weight
+            module._convrot_group_size = 16
+            with torch.no_grad():
+                module.bias.copy_(bias)
+            return module
+
+        torch.manual_seed(191)
+        modules = [
+            make_module(
+                torch.randint(-5, 6, (8, 16), dtype=torch.int8),
+                torch.linspace(0.01, 0.08, 8),
+                torch.linspace(-0.2, 0.2, 8, dtype=torch.bfloat16),
+            ),
+            make_module(
+                torch.randint(-5, 6, (8, 16), dtype=torch.int8),
+                torch.linspace(0.03, 0.10, 8),
+                torch.linspace(0.3, -0.3, 8, dtype=torch.bfloat16),
+            ),
+        ]
+        x = torch.randn((2, 32_768, 16), dtype=torch.bfloat16)
+        prepare_rows = []
+
+        class Prepared:
+            def __init__(self, value):
+                self.value = value.clone()
+
+            def rows(self, start, stop):
+                return Prepared(self.value[start:stop])
+
+        def prepare(tile, group, path):
+            prepare_rows.append((tile.shape[0], group, path))
+            return Prepared(tile)
+
+        def linear_prepared(prepared, weight, scale, bias, *, out=None):
+            result = prepared.value.float() @ weight.float().t()
+            result.mul_(scale.reshape(1, -1))
+            if bias is not None:
+                result.add_(bias)
+            if out is not None:
+                out.copy_(result.to(out.dtype))
+                return out
+            return result.to(prepared.value.dtype)
+
+        patches = ExitStack()
+        self.addCleanup(patches.close)
+        patches.enter_context(mock.patch.object(self.backend, "_backend", "wgpkernels"))
+        patches.enter_context(mock.patch.object(self.backend, "_SCRATCH_BYTES", 16 * 1024 * 1024))
+        patches.enter_context(mock.patch.object(self.backend, "_wgp", SimpleNamespace(
+            prepare=prepare, linear_prepared=linear_prepared,
+        )))
+        patches.enter_context(mock.patch.object(self.backend, "_wgp_path", return_value="block"))
+        patches.enter_context(mock.patch.object(self.backend, "_weight_scale", side_effect=lambda weight, _n, _device: weight._scale))
+        patches.enter_context(mock.patch.object(self.backend.triton, "_is_fake_tensor", return_value=False))
+        patches.enter_context(mock.patch.object(torch.compiler, "is_compiling", return_value=False))
+        patches.enter_context(mock.patch.object(
+            torch.Tensor, "is_cuda", new_callable=mock.PropertyMock, return_value=True,
+        ))
+
+        with torch.inference_mode():
+            actual = self.backend.linear_grouped(modules, x)
+
+        self.assertEqual([rows for rows, _, _ in prepare_rows], [65_535, 1])
+        self.assertTrue(all(group == 16 and path == "block" for _, group, path in prepare_rows))
+        self.assertEqual(actual.shape, (2, 32_768, 8))
+        for index, module in enumerate(modules):
+            expected = x[index].float() @ module.qweight._data.float().t()
+            expected.mul_(module.qweight._scale.reshape(1, -1)).add_(module.bias)
+            torch.testing.assert_close(actual[index], expected.to(x.dtype), rtol=0, atol=0)
 
     def test_row_registration_requires_the_full_mmgp_contract(self):
         names = ("register_row_projection", "unregister_row_projection", "linear_rows_supported",

@@ -429,7 +429,7 @@ class MaskedPipelineTests(unittest.TestCase):
 
 class TiledDecoderTests(unittest.TestCase):
     @torch.inference_mode()
-    def test_cpu_uint8_tiles_match_the_float_tiled_decode(self):
+    def test_small_image_decodes_as_one_context_complete_tile(self):
         torch.manual_seed(34)
         vae = tiny_vae()
         vae.enable_tiling(
@@ -439,15 +439,18 @@ class TiledDecoderTests(unittest.TestCase):
             tile_sample_stride_width=48,
         )
         latents = torch.randn(1, 4, 1, 8, 8)
-        float_tiles = vae.tiled_decode(latents.clone()).sample
         byte_tiles = vae.decode_to_cpu_uint8([latents.clone()])
+        # A 128px image fits inside the quality floor. Its reference is the
+        # whole-image decode, rather than the former 64px tiled seam pattern.
+        vae.use_tiling = False
+        float_tiles = vae.decode(latents.clone()).sample
         expected = float_tiles.float().add(1.0).mul(127.5).round().clamp(0, 255).to(torch.uint8).cpu()
         self.assertEqual(tuple(byte_tiles.shape), (1, 4, 1, 128, 128))
         self.assertEqual(byte_tiles.device.type, "cpu")
         torch.testing.assert_close(byte_tiles, expected, atol=0, rtol=0)
 
     @torch.inference_mode()
-    def test_cpu_uint8_tiles_match_partial_nonsquare_float_tiles(self):
+    def test_small_nonsquare_image_preserves_untiled_rgba_and_clamping(self):
         class AmplifiedDecoder(torch.nn.Module):
             def __init__(self, decoder):
                 super().__init__()
@@ -466,8 +469,9 @@ class TiledDecoderTests(unittest.TestCase):
             tile_sample_stride_width=96,
         )
         latents = torch.randn(1, 4, 1, 20, 26)
-        float_tiles = vae.tiled_decode(latents.clone()).sample
         byte_tiles = vae.decode_to_cpu_uint8([latents.clone()])
+        vae.use_tiling = False
+        float_tiles = vae.decode(latents.clone()).sample
         expected = float_tiles.float().add(1.0).mul(127.5).round().clamp(0, 255).to(torch.uint8).cpu()
         self.assertEqual(tuple(byte_tiles.shape), (1, 4, 1, 320, 416))
         torch.testing.assert_close(byte_tiles, expected, atol=0, rtol=0)

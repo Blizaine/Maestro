@@ -341,6 +341,7 @@ api.add_middleware(
 from services.job_lifecycle import (
     GENERATED_MEDIA_EXTENSIONS,
     collect_job_outputs,
+    configure_generation_probe_lock,
     finish_job,
     generation_slot,
     is_cancel_requested,
@@ -390,6 +391,7 @@ register_terminal_listener(_studio_job_archive.save)
 register_terminal_listener(lambda job, status: _generation_previews.clear(str(job.get("id") or "")))
 _studio_submission_lock = threading.RLock()
 _gen_lock = threading.Lock()
+configure_generation_probe_lock(_gen_lock)
 
 
 def _play_host_completion_sound() -> None:
@@ -414,12 +416,15 @@ def _on_generation_job_terminal(job: dict, status: str) -> None:
     is_editor = job.get("kind") == "editor_export"
     surface = "Editor" if is_editor else "Studio"
     if status == "completed":
+        finishing_warnings = job.get("finishing_warnings") or []
         _play_host_completion_sound()
         _web_push.dispatch(
             category="completion",
-            title=f"{surface} {'export' if is_editor else 'generation'} complete",
+            title=f"{surface} {'export' if is_editor else 'generation'} complete"
+                  + (" with warnings" if finishing_warnings else ""),
             body=(
-                "Your Maestro edit is ready."
+                "\n".join(finishing_warnings) if finishing_warnings
+                else "Your Maestro edit is ready."
                 if is_editor
                 else "Your Maestro generation is ready."
             ),
@@ -2383,6 +2388,7 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
         not architecture.startswith("minimax_h3")
         or (model_def or {}).get("minimax_h3_fused_turbo", False)
         or (model_def or {}).get("minimax_h3_baked_turbo", False)
+        or (model_def or {}).get("minimax_h3_fasth3", False)
         or (model_def or {}).get("audio_only", False)
         or (model_def or {}).get("vdn", False)
     ):
@@ -3134,6 +3140,13 @@ CIVIT_TO_LOCAL_ARCH = {
     "Flux.2 Klein 9B-base": "flux2_klein_9b",
     "Flux.2 Klein 4B": "flux2_klein_4b",
     "Flux.2 Klein 4B-base": "flux2_klein_4b",
+    # CivitAI's exact LoRA-capable Flux 3 labels. Plain "Flux.3" is
+    # checkpoint-only on CivitAI; both Klein variants share the native handler.
+    "Flux.3 Klein": "flux3_klein",
+    "Flux.3 Klein-base": "flux3_klein",
+    # MOSS Base and SFT share the native image-transformer LoRA layout.
+    "MOSS Image": "moss_image",
+    "MOSS Image Base": "moss_image",
     # LTX — CivitAI splits LTX 1 (LTXV), LTX-2 (LTXV2), and LTX-2.3
     # (LTXV 2.3) into distinct baseModel values. LTX-2 and LTX-2.3
     # share the ltx2 architecture on disk; LTX 1 has its own ltxv dir.
@@ -3148,6 +3161,7 @@ CIVIT_TO_LOCAL_ARCH = {
     "Qwen 2": "qwen_image_21_7B",
     # Krea 2
     "Krea 2": "krea2",
+    "Krea 2 Turbo": "krea2",
     # Other
     "ZImageTurbo": "z_image",
     "Mochi": "mocha",
@@ -3232,6 +3246,10 @@ HF_BASE_TO_LOCAL_DIR = {
     "black-forest-labs/FLUX.1-dev": "flux",
     "black-forest-labs/FLUX.1-schnell": "flux",
     "black-forest-labs/FLUX.2-dev": "flux2_dev",
+    "black-forest-labs/flux-3-image-klein": "flux3_klein",
+    "black-forest-labs/flux-3-image-klein-base": "flux3_klein",
+    "OpenMOSS-Team/MOSS-Image-Base": "moss_image",
+    "OpenMOSS-Team/MOSS-Image-SFT": "moss_image",
     "Freepik/flux.2-klein-guidance-9b": "flux2_klein_9b",
     "Freepik/flux.2-klein-guidance-4b": "flux2_klein_4b",
     "tencent/HunyuanVideo": "hunyuan",
@@ -3283,9 +3301,14 @@ CIVITAI_MODEL_FILTERS = [
     {"label": "Flux.2 Dev", "civitai_base": "Flux.2 D", "default_dir": "flux2"},
     {"label": "Flux.2 Klein 9B", "civitai_base": "Flux.2 Klein 9B,Flux.2 Klein 9B-base", "default_dir": "flux2_klein_9b"},
     {"label": "Flux.2 Klein 4B", "civitai_base": "Flux.2 Klein 4B,Flux.2 Klein 4B-base", "default_dir": "flux2_klein_4b"},
+    # CivitAI lists Flux.3 Klein and Flux.3 Klein-base separately; combine
+    # both LoRA-capable variants. Plain Flux.3 is checkpoint-only there.
+    {"label": "Flux.3 Klein", "civitai_base": "Flux.3 Klein,Flux.3 Klein-base", "default_dir": "flux3_klein"},
+    {"label": "MOSS Image", "civitai_base": "MOSS Image,MOSS Image Base", "default_dir": "moss_image"},
     {"label": "Qwen", "civitai_base": "Qwen", "default_dir": "qwen"},
     {"label": "Qwen Image 2.1", "civitai_base": "Qwen 2", "default_dir": "qwen21"},
-    {"label": "Krea 2", "civitai_base": "Krea 2", "default_dir": "krea2"},
+    {"label": "Krea 2", "civitai_base": "Krea 2,Krea 2 Turbo", "default_dir": "krea2"},
+    {"label": "Krea 2 Turbo", "civitai_base": "Krea 2 Turbo", "default_dir": "krea2"},
     {"label": "ZImageTurbo", "civitai_base": "ZImageTurbo", "default_dir": "z_image"},
 ]
 
@@ -6680,6 +6703,7 @@ def get_model_options(model_type: str):
         "minimax_h3_video_vae_choices": md.get("minimax_h3_video_vae_choices"),
         "minimax_h3_video_vae_default": "auto",
         "flux3_prompt_helper": md.get("flux3_prompt_helper", False),
+        "moss_image_prompt_helper": md.get("moss_image_prompt_helper", False),
         "ltx25_video_vae_choices": md.get("ltx25_video_vae_choices"),
         "ltx25_video_vae_default": md.get(
             "ltx25_video_vae_default",
@@ -6690,6 +6714,8 @@ def get_model_options(model_type: str):
             "minimax_h3_fused_turbo", False
         ),
         "minimax_h3_baked_turbo": md.get("minimax_h3_baked_turbo", False),
+        "minimax_h3_fasth3": md.get("minimax_h3_fasth3", False),
+        "minimax_h3_fasth3_omniref": md.get("minimax_h3_fasth3_omniref", False),
         "minimax_h3_full_checkpoint": md.get("minimax_h3_full_checkpoint", False),
         "loras_disabled": md.get("loras_disabled", False),
         "minimax_h3_runtime_advisory": _minimax_h3_runtime_advisory(md),
@@ -7330,7 +7356,7 @@ async def apply_system_detect():
         flag noting this so the UI can show the user.
     """
     from services.hardware_detect import detect_hardware
-    from services.perf_recommend import apply_auto_performance, applied_keys
+    from services.perf_recommend import apply_auto_performance
     from services.memory_settings import MODEL_LOAD_KEYS
     from shared.cuda_memory import allocator_status
 
@@ -7369,7 +7395,7 @@ async def apply_system_detect():
         return {
             "status": "ok",
             "hardware": hw,
-            "applied": {k: rec[k] for k in applied_keys() if k in rec},
+            "applied": result["applied"],
             "label": rec.get("_recommendation_label", ""),
             "reason": rec.get("_recommendation_reason", ""),
             # Tells UI to show "changes take effect on next model load" toast
@@ -9309,6 +9335,9 @@ async def _llm_enhance_prompt_payload(body: dict):
     needs_flux3_image_guide = (
         model_type.lower().startswith("flux3") and generation_mode == "image"
     )
+    needs_moss_image_guide = (
+        model_type.lower().startswith("moss_image") and generation_mode == "image"
+    )
     try:
         requested_window_count = max(1, int(body.get("window_count") or 1))
     except (TypeError, ValueError):
@@ -9331,6 +9360,7 @@ async def _llm_enhance_prompt_payload(body: dict):
         and not needs_h3_context_ir
         and not needs_ltx_window_plan
         and not needs_flux3_image_guide
+        and not needs_moss_image_guide
     ):
         try:
             # Support both single image_path and array image_paths
@@ -9351,6 +9381,8 @@ async def _llm_enhance_prompt_payload(body: dict):
             )
         elif needs_flux3_image_guide:
             print("[Enhance] FLUX 3 uses native image captions and reference bindings; using Maestro's model-specific LLM guide")
+        elif needs_moss_image_guide:
+            print("[Enhance] MOSS Image uses native captions and centered-pixel layouts; using Maestro's model-specific LLM guide")
 
     # Use our local LLM service
     from services import llm_service
@@ -9428,6 +9460,7 @@ async def _llm_enhance_prompt_payload(body: dict):
             raw_enhancer_mode=raw_enhancer_mode,
             reference_context=body.get("reference_context"),
             planning_style=str(body.get("planning_style") or "faithful"),
+            resolution=body.get("resolution"),
         )
         if needs_ltx_window_plan:
             from services.ltx_window_planner import (
@@ -11300,6 +11333,15 @@ async def _prepare_generation_submission(
     except Exception:
         _base_model_type = body.get("model_type")
     _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
+    if _generation_model_def.get("minimax_h3_fasth3"):
+        if _generation_model_def.get("minimax_h3_fasth3_omniref"):
+            from models.minimax_h3.fasth3_omniref import validate_request as validate_fasth3_request
+        else:
+            from models.minimax_h3.fasth3 import validate_fasth3_request
+        try:
+            validate_fasth3_request(body)
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
     # Apply atomic checkpoint recipes before preparation captures the request
     # for enhancement, queue retries and restorable output metadata.
     if not is_sfx:
@@ -20765,6 +20807,28 @@ async def recast_endpoint(request: Request):
                         f"{shot_manifest['frame_count']} exact output frames "
                         f"at {shot_manifest['fps']:.6g}fps."
                     )
+                if mapped_tracking is not None:
+                    from services.recast_tracking_memory import (
+                        release_recast_tracking_arrays,
+                    )
+
+                    released_arrays = release_recast_tracking_arrays(
+                        mapped_tracking,
+                        mapping_anchors,
+                    )
+                    # These locals are NumPy views into the arrays released
+                    # above. _ensure_source_scene_reference is already done
+                    # for this job; clear its closure cells before generation.
+                    mapping_anchors = None
+                    probe_frame = None
+                    probe_mask = None
+                    scene_anchor_frame = None
+                    scene_anchor_mask = None
+                    if released_arrays:
+                        print(
+                            "[Recast] Released host timeline arrays after "
+                            "reference/shot preparation and before generation."
+                        )
         except Exception as e:
             traceback.print_exc()
             if shot_temp_dir and os.path.isdir(shot_temp_dir):
@@ -23503,12 +23567,18 @@ def _apply_per_job_performance(job, raw_params):
             definition["_checkpoint_files"] = wgp.get_local_model_filename(selected_file) or selected_file
         except Exception:
             pass
-        plan = build_performance_plan(_performance_hardware(), wgp.server_config, definition, params,
+        performance_hardware = _performance_hardware()
+        plan = build_performance_plan(performance_hardware, wgp.server_config, definition, params,
                                      job.get("vram_adjustment"), output_type=output, profile=profile, cli=cli,
                                      available_ram_gb=stats.get("ram", {}).get("available_gb"),
                                      external_vram_gb=(stats.get("gpu", {}).get("vram_used_gb", 0)
                                                        if getattr(wgp, "wan_model", None) is None else 0),
                                      own_pinned_gb=pinned, history=_get_performance_history())
+        preload_mode, preload = preload_for_output(
+            wgp.server_config,
+            wgp.args,
+            output,
+        )
         if plan["applied"]:
             if _BASE_TRANSFORMER_BUDGET_MB is None:
                 _BASE_TRANSFORMER_BUDGET_MB = original_budget
@@ -23519,7 +23589,6 @@ def _apply_per_job_performance(job, raw_params):
                 plan["transformer_budget_mb"] = int(getattr(wgp.args, "transformer_budget", 0) or 0)
             raw_params["override_profile"] = plan["profile"]
         else:
-            _, preload = preload_for_output(wgp.server_config, wgp.args, output)
             plan["transformer_budget_mb"] = preload or int(getattr(wgp.args, "transformer_budget", 0) or 0)
         # Attention grouping is independent of model placement. An explicit
         # profile may coexist with Auto-owned head splitting for this job.
@@ -23532,6 +23601,37 @@ def _apply_per_job_performance(job, raw_params):
         if getattr(wgp, "wan_model", None) is not None:
             if getattr(wgp.wan_model, "_maestro_performance_placement", None) != signature:
                 wgp.reload_needed = True
+        try:
+            from services.scail2_diagnostics import (
+                collect_scail2_performance_diagnostic,
+                format_scail2_performance_summary,
+            )
+            diagnostic = collect_scail2_performance_diagnostic(
+                wgp=wgp,
+                model_definition=definition,
+                params=params,
+                plan=plan,
+                hardware=performance_hardware,
+                live_stats=stats,
+                own_pinned_gb=pinned,
+                settings=wgp.server_config,
+                preload_mode=preload_mode,
+                manual_preload_mb=preload,
+            )
+            if diagnostic:
+                plan["scail2_diagnostic"] = diagnostic["summary"]
+                for warning in diagnostic["warnings"]:
+                    if warning not in plan["warnings"]:
+                        plan["warnings"].append(warning)
+                print(format_scail2_performance_summary(
+                    diagnostic["summary"],
+                ))
+        except Exception as diagnostic_error:
+            # Read-only diagnostics are best effort and never block a render.
+            print(
+                "[SCAIL-2 Performance] Diagnostic unavailable "
+                f"({type(diagnostic_error).__name__})."
+            )
         job["performance_plan"] = plan
         _last_performance_plan = plan
         split_label = {0: "Off", 1: "Low", 2: "Medium", 3: "High"}.get(plan.get("attention_head_split"), "unchanged")
@@ -28428,7 +28528,6 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 # Run temporal and DLSS processing over the assembled clip so
                 # audio timing and native temporal history span H3 windows.
                 if success and (pp_media_spatial or pp_media_temporal):
-                    from services.media_flow import process_video
                     wgp.release_model()
                     for fname in new_files:
                         if os.path.splitext(fname)[1].lower() not in {".mp4", ".webm", ".mkv"}:
@@ -28439,22 +28538,73 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         def media_progress(phase, step=None, total=None):
                             update_job(job, phase=phase, message=phase, step=int(step or 0),
                                        total_steps=int(total or 0))
+                        before_processing = {}
+                        finishing_started = time.monotonic()
                         try:
+                            from services.media_flow import process_generation_video
                             from services.media_info import probe_media, processing_record
                             before_processing = probe_media(video_path)
-                            finishing_started = time.monotonic()
-                            process_video(video_path, temporary, spatial=pp_media_spatial,
+                            process_generation_video(video_path, temporary, spatial=pp_media_spatial,
                                 temporal=pp_media_temporal, options=pp_media_options,
                                 abort=lambda: is_cancel_requested(job), progress=media_progress)
-                            os.replace(temporary, video_path)
+                        except Exception as media_error:
+                            if is_cancel_requested(job):
+                                raise
+                            detail = str(media_error).strip() or type(media_error).__name__
+                            warning = (
+                                f"Media Flow failed for {fname}; the generated original was kept. "
+                                f"{detail}"
+                            )
+                            if (str(pp_media_spatial).startswith("dlss5*")
+                                    or str(pp_media_temporal).startswith("dlssg*")):
+                                warning += (
+                                    " Check docs/DLSS5.md and app/dlss5/host/ReShade.log, "
+                                    "then use Refresh DLSS availability while Maestro is idle."
+                                )
+                            print(f"  [Media Flow] Warning: {warning}")
+                            traceback.print_exc()
+                            finishing_warnings = list(job.get("finishing_warnings") or [])
+                            finishing_warnings.append(warning)
+                            if not update_job(job, finishing_warnings=finishing_warnings):
+                                if is_cancel_requested(job):
+                                    raise
+                            try:
+                                warning_record = processing_record(
+                                    spatial=pp_media_spatial, temporal=pp_media_temporal,
+                                    before=before_processing, after=before_processing,
+                                    options=pp_media_options)
+                            except Exception:
+                                warning_record = {
+                                    "method": pp_media_spatial or pp_media_temporal,
+                                }
+                            warning_record.update(status="warning", warnings=[warning])
+                            processing_by_output[fname] = warning_record
+                            continue
+                        try:
                             processing_by_output[fname] = processing_record(
                                 spatial=pp_media_spatial, temporal=pp_media_temporal,
                                 before=before_processing, after=probe_media(video_path),
                                 elapsed=time.monotonic() - finishing_started,
                                 completed_at=time.time(), options=pp_media_options)
-                        finally:
-                            if os.path.isfile(temporary):
-                                os.remove(temporary)
+                        except Exception as metadata_error:
+                            if is_cancel_requested(job):
+                                raise
+                            warning = (
+                                f"Media Flow completed for {fname}, but its processing details could not be recorded: "
+                                f"{str(metadata_error).strip() or type(metadata_error).__name__}"
+                            )
+                            print(f"  [Media Flow] Warning: {warning}")
+                            traceback.print_exc()
+                            finishing_warnings = list(job.get("finishing_warnings") or [])
+                            finishing_warnings.append(warning)
+                            if not update_job(job, finishing_warnings=finishing_warnings):
+                                if is_cancel_requested(job):
+                                    raise
+                            processing_by_output[fname] = {
+                                "method": pp_media_spatial or pp_media_temporal,
+                                "status": "warning",
+                                "warnings": [warning],
+                            }
 
                 # Post-generation FlashVSR pass — whole-file upscale on the
                 # assembled video (see the pop near the top of this function
@@ -28481,10 +28631,13 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                             before_processing = probe_media(video_path)
                             finishing_started = time.monotonic()
                             _apply_spatial_upsampling_to_file(video_path, pp_spatial_upsampling, job=job)
+                            prior_warnings = processing_by_output.get(fname, {}).get("warnings", [])
                             processing_by_output[fname] = processing_record(
                                 spatial=pp_spatial_upsampling, before=before_processing,
                                 after=probe_media(video_path), elapsed=time.monotonic() - finishing_started,
                                 completed_at=time.time())
+                            if prior_warnings:
+                                processing_by_output[fname]["warnings"] = list(prior_warnings)
                             print(f"  [Upscale] Done: {fname}")
                         except Exception as up_err:
                             print(f"  [Upscale] Warning: failed on {fname} (keeping original): {up_err}")
@@ -29535,6 +29688,7 @@ def get_status(job_id: str):
         "phase": j.get("phase", ""),
         "message": j["message"],
         "output_files": j["output_files"],
+        "finishing_warnings": j.get("finishing_warnings", []),
         "reconstruction_report": j.get("reconstruction_report"),
         "error": j["error"],
         "viggle_preparation": j.get("viggle_preparation"),
@@ -29745,7 +29899,7 @@ def list_jobs():
         j = snapshot_job(job)
         if j.get("dismissed"):
             continue
-        if j["status"] in ("held", "queued", "running") or j.get("enhancement"):
+        if j["status"] in ("held", "queued", "running") or j.get("enhancement") or j.get("finishing_warnings"):
             active.append({
                 "job_id": j["id"],
                 "client_submission_id": j.get("client_submission_id"),
@@ -29758,6 +29912,7 @@ def list_jobs():
                 "phase": j.get("phase", ""),
                 "message": j["message"],
                 "output_files": j["output_files"],
+                "finishing_warnings": j.get("finishing_warnings", []),
                 "error": j["error"],
                 "enhancement": public_enhancement(j.get("enhancement"), summary=True),
                 "oom_info": j.get("oom_info"),

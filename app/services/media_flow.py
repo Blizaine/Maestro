@@ -285,3 +285,25 @@ def process_video(source, destination, *, spatial="", temporal="", options=None,
         if (spatial or "").startswith("dlss") or temporal.startswith("dlss"):
             from postprocessing.dlss5.runtime import release_flow_model
             release_flow_model()
+
+
+def process_generation_video(source, destination, *, spatial="", temporal="",
+                             options=None, abort=None, progress=None):
+    """Apply optional Studio finishing and atomically replace its source.
+
+    Tools and standalone Media Flow continue to call :func:`process_video`
+    directly and retain its failure behavior. This Studio-only helper leaves
+    the generated original untouched unless processing completes, propagates
+    cancellation, and always removes the temporary output.
+    """
+    try:
+        result = process_video(
+            source, destination, spatial=spatial, temporal=temporal,
+            options=options, abort=abort, progress=progress,
+        )
+        _check_abort(abort)
+        os.replace(destination, source)
+        return result
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(destination)

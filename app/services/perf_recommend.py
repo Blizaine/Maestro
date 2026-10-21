@@ -3,8 +3,8 @@ Performance recommendation engine for the Performance Auto-Tune feature.
 
 `recommend_settings(hw)` takes the dict from
 `hardware_detect.detect_hardware()` and returns a dict of settings
-to apply to wgp_config.json. Pure function — no side effects, no
-imports beyond stdlib, easy to unit test.
+to apply to wgp_config.json. It performs no runtime I/O or GPU imports,
+so the recommendation and migration logic stays easy to unit test.
 
 The auto-apply helpers below update a supplied config dict, without disk or
 runtime I/O, and track which recommendation revision owns each setting.
@@ -23,6 +23,8 @@ Coefficient policy (decided 2026-05-02):
 from __future__ import annotations
 
 from typing import Optional
+
+from services.memory_settings import INT8_BACKENDS
 
 
 # Wan2GP `mmgp.profile_type` integer values, hardcoded here to avoid
@@ -399,8 +401,9 @@ def apply_auto_performance(config: dict, hw: dict, *, force: bool = False) -> di
     """Apply or migrate recommendations in memory; callers persist the result.
 
     Startup refreshes only values that still match their previous automatic
-    defaults. Explicit Apply and fresh installs use force=True. Manual mode
-    never migrates, and failed CUDA detection leaves startup eligible to retry.
+    defaults. Explicit Apply and fresh installs use force=True, except that an
+    existing valid manual INT8 backend remains user-owned. Manual mode never
+    migrates, and failed CUDA detection leaves startup eligible to retry.
     """
     if not force and (
         not auto_performance_needs_refresh(config)
@@ -436,7 +439,15 @@ def apply_auto_performance(config: dict, hw: dict, *, force: bool = False) -> di
 
     updated = {}
     preserved = []
+    preserved_manual_int8 = False
     for key, value in recommended.items():
+        if (force and key == "int8_kernels" and config.get(key) in INT8_BACKENDS
+                and config.get(key) != "auto"):
+            # Explicit Apply/Re-detect refreshes Auto-owned settings, while a
+            # valid selected INT8 backend remains a deliberate user choice.
+            preserved.append(key)
+            preserved_manual_int8 = True
+            continue
         if key in untracked_existing_keys:
             preserved.append(key)
             continue
@@ -455,10 +466,12 @@ def apply_auto_performance(config: dict, hw: dict, *, force: bool = False) -> di
         AUTO_PERFORMANCE_REVISION if services["auto_performance_applied"] else 0
     )
     tracked_defaults = dict(recommended)
-    for key in untracked_existing_keys:
+    manual_keys = {"int8_kernels"} if preserved_manual_int8 else set()
+    for key in untracked_existing_keys | manual_keys:
         tracked_defaults.pop(key, None)
     services["auto_performance_defaults"] = tracked_defaults
-    return {"recommended": rec, "updated": updated, "preserved": preserved}
+    applied = {key: config[key] for key in applied_keys() if key in config}
+    return {"recommended": rec, "updated": updated, "preserved": preserved, "applied": applied}
 
 
 # ── Per-job coefficient adjustment ─────────────────────────────────

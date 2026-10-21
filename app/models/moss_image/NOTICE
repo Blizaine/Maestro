@@ -1,0 +1,28 @@
+MOSS-Image inference architecture adapted from OpenMOSS:
+https://github.com/OpenMOSS/MOSS-Image
+https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base
+Base revision: 5f40f07a304541840b6019d2d34d30f966756787
+SFT revision: daf706d2e1c7a6369c17b6d1658671aee6db1ebe
+The released weights and inference code are licensed under Apache-2.0.
+
+The frozen text encoder is Qwen3.5-9B, using WanGP's existing Qwen
+implementation and its preserved upstream license notices. The unused
+vision tower is omitted. Q/gate projection rows are stored in separate
+contiguous groups in the WanGP encoder checkpoint.
+
+The FLUX.2 small VAE decoder reuses WanGP's FLUX autoencoder implementation.
+The unused image encoder is omitted from the prepared decoder checkpoint.
+
+Maestro port source snapshot:
+https://github.com/deepbeepmeep/WanGP/tree/fdc63bdf89358fb13c93cf6b38693fd89a859f00/models/moss_image
+Public prepared weights and tokenizer snapshot:
+https://huggingface.co/DeepBeepMeep/Moss/tree/0a508e986e920c8051b99df98d27329742fc3d0e
+WanGP integration portions retain the WanGP Community License 2.0 notices.
+Maestro's model-local runtime, attention, progress and tiled-decoding adapters
+allow this snapshot to run with the existing bundled shared interfaces.
+
+Prompt guidance and draft-export semantics reviewed against OpenMOSS revision:
+https://github.com/OpenMOSS/MOSS-Image/tree/95559c93ce9f85967de70435deefc1153a1a2fab/skills/moss-image-prompt-enhancer
+Maestro's in-process compiler applies the documented top-left-pixel draft to
+centered-pixel model-prompt conversion; existing compiled layouts retain their
+original dialect.
