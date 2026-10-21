@@ -230,6 +230,43 @@ class MiniMaxH3PDDTests(unittest.TestCase):
             ]
             self.assertTrue(torch.equal(delta[index * 3 : (index + 1) * 3], expected))
 
+    def test_fc1_adapter_matches_diffusers_swiglu_row_order(self):
+        # The reference PDD loader patches Diffusers' SwiGLU projection, whose
+        # rows are [value; gate]. Maestro's fused fc1 keeps [gate; value].
+        hidden, ffn, rank = 4, 3, 2
+        for official, local in (
+            ("transformer_blocks.0", "blocks.0"),
+            ("token_refiner.refiner_blocks.0", "token_refiner.blocks.0"),
+        ):
+            with self.subTest(module=official):
+                torch.manual_seed(11)
+                value_rows = torch.randn(ffn, hidden)
+                gate_rows = torch.randn(ffn, hidden)
+                down = torch.randn(rank, hidden)
+                up = torch.randn(2 * ffn, rank)
+                source = self._synthetic_state()
+                source[f"{official}.ff.net.0.proj.lora_down"] = down
+                source[f"{official}.ff.net.0.proj.lora_up"] = up
+                converted = self.pdd.preprocess_pdd_lora_state_dict(
+                    source,
+                    split_qkv=True,
+                )
+                rows = torch.randn(5, hidden)
+
+                reference = torch.cat((value_rows, gate_rows)) + up @ down
+                value, gate = (rows @ reference.T).chunk(2, dim=-1)
+                expected = value * torch.nn.functional.silu(gate)
+
+                fc1 = torch.cat((gate_rows, value_rows)) + (
+                    converted[f"{local}.mlp.fc1.lora_B.weight"]
+                    @ converted[f"{local}.mlp.fc1.lora_A.weight"]
+                )
+                gate, value = (rows @ fc1.T).chunk(2, dim=-1)
+                torch.testing.assert_close(
+                    value * torch.nn.functional.silu(gate),
+                    expected,
+                )
+
     def test_interval_heads_are_fused_and_restored(self):
         final_layer = types.SimpleNamespace(
             video_out=torch.nn.Linear(4, 3),

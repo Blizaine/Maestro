@@ -204,7 +204,8 @@ def preprocess_pdd_lora_state_dict(
     Output-head banks are removed here and loaded separately by
     :func:`install_pdd_parallel_heads`.  Split INT8 ConvRot transformers keep
     the three independent Q/K/V adapters.  Legacy fused checkpoints receive
-    an exactly equivalent rank-3R block-diagonal adapter.
+    an exactly equivalent rank-3R block-diagonal adapter.  SwiGLU ``fc1``
+    up-projections are reordered from Diffusers' value-then-gate rows.
     """
 
     if not is_pdd_state_dict(state_dict):
@@ -239,6 +240,13 @@ def preprocess_pdd_lora_state_dict(
             group = fused_groups.setdefault(qkv_parent, {})
             group.setdefault(qkv_kind, {})[factor] = tensor
             continue
+
+        if factor == "up" and local_module.endswith(".mlp.fc1"):
+            # The reference loader patches Diffusers' SwiGLU projection,
+            # whose rows are [value; gate]; Maestro's fused fc1 keeps the
+            # checkpoint's [gate; value].  Shapes match either way, so an
+            # unswapped adapter loads silently with each half misplaced.
+            tensor = torch.cat(tensor.chunk(2, dim=0)[::-1], dim=0).contiguous()
 
         suffix = "lora_A.weight" if factor == "down" else "lora_B.weight"
         converted[f"{local_module}.{suffix}"] = tensor
