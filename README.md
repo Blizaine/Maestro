@@ -146,6 +146,9 @@ View all past Director runs with their full state — clip plans, generated imag
 ## Updates
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
+Runtime upgrades are explicit menu actions. A missing performance-runtime marker
+does not automatically run Update when you open the launcher. If offered,
+**Start with Compatibility Runtime** keeps the existing runtime available.
 
 ### v3.2.0 Dev preview (2026-10-20)
 

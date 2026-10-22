@@ -90,6 +90,29 @@ def remote_arc_rows(count: int, *, one_based: bool = False, include_event_ids: b
 
 
 class MusicArcTests(unittest.TestCase):
+    def test_formatting_text_does_not_exhaust_source_event_budget(self):
+        source = (
+            "Create twelve beats running sequentially from 0 through 11. " * 20
+            + "Show the sailor boarding the boat."
+        )
+        source_contract = build_music_narrative_contract(source)
+        self.assertEqual(len(source_contract["events"]), 1)
+        normalized = normalize_music_arc([
+            arc_row(0, "The sailor boards the boat and settles beside the mast.",
+                    source_event_ids=["M1"]),
+        ], [{}], source_contract)
+        self.assertEqual(normalized[0]["source_event_ids"], ["M1"])
+
+    def test_real_actions_are_not_silently_truncated_to_the_outline_budget(self):
+        source_contract = build_music_narrative_contract(" ".join(
+            f"The courier opens numbered parcel {index}." for index in range(17)
+        ))
+        self.assertEqual(len(source_contract["events"]), 17)
+        with self.assertRaisesRegex(ValueError, "exceeds 16 source events"):
+            normalize_music_arc([
+                arc_row(0, "The courier examines the numbered parcels."),
+            ], [{}], source_contract)
+
     def test_remote_wrappers_and_numbered_rows_cover_fixed_15_and_23_group_timelines(self):
         for count in (15, 23):
             with self.subTest(count=count):

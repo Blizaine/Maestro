@@ -117,6 +117,113 @@ class MusicNarrativeTests(unittest.TestCase):
         boarding = contract_for("Show the sailor boarding the boat.")["events"][0]
         self.assertIn("boat", boarding["target_aliases"])
 
+    def test_native_h3_metadata_and_sound_fields_do_not_become_story_events(self):
+        source = (
+            "subject_definitions: The sailor boards a boat and wears a navy coat; "
+            "preserve identity and wardrobe. "
+            "summary: A sailor boards a small boat, then the boat sails across the bay. "
+            "retention_analysis: Keep actions running sequentially from0 through11; "
+            "preserve the opening pose and wardrobe. "
+            "direction_and_description: Create a twelve-beat outline running "
+            "sequentially from 0 through 11. Each beat specifies shot size, movement, "
+            "and intended framing. Opening: establish the harbor before the story. "
+            "overall_soundscape: Waves and wind swell softly. "
+            "on_diegetic_music: A guitarist plays beside the water. "
+            "non_diegetic_music: Let the score rise during the ending."
+        )
+        contract = contract_for(source)
+        events = contract["events"]
+
+        self.assertEqual(contract["revision"], 3)
+        self.assertEqual([event["text"] for event in events], [
+            "boards a small boat", "sails across the bay",
+        ])
+        self.assertEqual([event["kind"] for event in events], ["boarding", "action"])
+        self.assertIn("sailor", events[0]["actor_aliases"])
+        self.assertIn("boat", events[0]["target_aliases"])
+        self.assertIn("boat", events[1]["actor_aliases"])
+
+    def test_schema_examples_are_ignored_but_real_json_beats_are_extracted(self):
+        example_source = (
+            'Use a JSON beats example like '
+            '{"beats": [{"action": "A sailor opens the hatch."}]}. '
+            "Show the sailor boarding the boat."
+        )
+        self.assertEqual(
+            [event["text"] for event in contract_for(example_source)["events"]],
+            ["boarding the boat"],
+        )
+
+        actual_beats = (
+            '{"beats": ['
+            '{"action": "A sailor boards a skiff."}, '
+            '{"visual_beat": "The boat sails east."}'
+            ']}'
+        )
+        events = contract_for(actual_beats)["events"]
+        self.assertEqual([event["text"] for event in events], [
+            "boards a skiff", "sails east",
+        ])
+
+        beat_with_unrelated_nested_metadata = (
+            '{"beats": [{"visual_beat": "A courier opens the gate.", '
+            '"metadata": {"type": "object", "properties": {"label": {"type": "string"}}}}]}'
+        )
+        self.assertEqual(
+            [event["text"] for event in contract_for(beat_with_unrelated_nested_metadata)["events"]],
+            ["opens the gate"],
+        )
+
+        directed_field = contract_for(
+            "direction_and_description: Show the sailor boarding the boat."
+        )
+        self.assertEqual([event["text"] for event in directed_field["events"]], [
+            "boarding the boat",
+        ])
+
+    def test_native_identity_definitions_remain_context_for_collective_combat(self):
+        source = (
+            "subject_definitions: <Subject 1> is Astra, a commander in silver armor. "
+            "<Subject 2> is Regent, her rival in a dark coat. "
+            "detailed_description: They fight using their respective powers."
+        )
+        events = contract_for(source)["events"]
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["kind"], "combat")
+        self.assertEqual(events[0]["participant_names"], ["Astra", "Regent"])
+        self.assertEqual(len(events[0]["participant_alias_groups"]), 2)
+
+    def test_nested_json_metadata_and_schemas_do_not_add_events(self):
+        source = (
+            '{"beats": [{"visual_beat": "A courier opens the gate.", '
+            '"metadata": {"description": "The courier runs past a sample camera."}, '
+            '"overall_soundscape": {"description": "Waves and wind."}}], '
+            '"response_schema": {"type": "object", "properties": {'
+            '"beats": {"description": "A sailor boards the sample boat."}}}}'
+        )
+        self.assertEqual(
+            [event["text"] for event in contract_for(source)["events"]],
+            ["opens the gate"],
+        )
+
+    def test_camera_format_words_do_not_hide_adjacent_story_actions(self):
+        sources = (
+            "Show the sailor boarding the boat with a wide shot size and intended framing.",
+            "The courier opens the door; specify the shot size and intended framing.",
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                events = contract_for(source)["events"]
+                self.assertEqual(len(events), 1)
+                self.assertIn(events[0]["kind"], {"boarding", "action"})
+
+        repeated_camera_metadata = (
+            "Specify shot size, movement, and intended framing, then specify "
+            "shot size, movement, and intended framing."
+        )
+        self.assertEqual(contract_for(repeated_camera_metadata)["events"], [])
+
     def test_explicit_action_references_do_not_create_milestones(self):
         for source in (
             "Show the boarding action before sailing.",

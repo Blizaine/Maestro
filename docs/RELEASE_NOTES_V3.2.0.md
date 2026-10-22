@@ -4,6 +4,23 @@
 
 ## Dev follow-up fixes — 21 October
 
+- **Director source actions and outline contracts:** keep timeline-formatting
+  instructions, schema examples and native identity/retention/soundscape metadata
+  out of the mandatory story-action ledger. Preserve actual narrative actions,
+  including JSON `visual_beat` text, and keep native identity definitions available
+  for participant resolution. The sixteen-action planning bound remains; genuine
+  actions are not silently truncated. Make the compact-outline stage explicit to
+  local and external writers, and keep optional repair examples consistent with
+  the requested event-assignment schema. New planning invalidates older cached
+  results. Users can supply a normal creative brief without maintaining an internal
+  JSON template. Clarify that the displayed minimum clip count applies to the
+  selected track and maximum clip length, rather than a twelve-clip requirement.
+- **Explicit runtime upgrades:** opening an installed launcher with missing
+  performance-runtime markers no longer automatically starts Update and its
+  `git pull`. Keep the existing compatibility-start option and a running app's
+  Web UI accessible. Updating remains an explicit user action. Director and
+  launcher regressions passed 292 CPU checks; this does not certify a live run
+  with the reporter's Gemma/LM Studio configuration.
 - **Viggle Animate trim:** use the video's measured picture duration for the
   timeline and submitted range. A soundtrack that ends later no longer makes
   an untouched full-video selection fail as out of range. Check restored sources,

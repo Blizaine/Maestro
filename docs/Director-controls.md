@@ -46,6 +46,8 @@ Music-video setup includes **Clip length**, with Auto and a maximum-length slide
 Auto follows the chosen video model, resolution and memory recommendation. Moving
 the dimmed slider selects a custom maximum immediately. The displayed time follows
 the model's frame increments, and the minimum clip count updates with it.
+That count is the number of clips needed for this track at the selected maximum;
+it is not a requirement to supply a song with twelve or more clips.
 
 Cuts follow section changes, lyric phrases, performer changes, and strong beats.
 **Cut Speed** controls how tightly these cues divide the song: **0** keeps the
@@ -92,6 +94,29 @@ action. Review checks actual visual instructions; focused repairs retain good
 neighboring clips and revalidate their boundaries. Final H3 compilation also
 checks reference-picture ownership. These checks guide prompts; review the
 planned shots and rendered video for creative quality.
+
+Write the visual concept in plain language: who appears, what happens, the visual
+style, camera constraints, and whether visible characters sing. There is no need
+to paste Maestro's internal JSON schema or six-section H3 prompt layout into the
+concept box. The outline contains short beats; the later clip-writing pass builds
+the complete model-specific prompts and reference bindings. Formatting instructions,
+schema examples, and native identity/retention/soundscape metadata do not become
+mandatory story actions. Concrete actions in narrative sections remain ordered
+obligations. The bounded outline supports up to sixteen extracted source actions;
+this is separate from the number of clips in the song.
+
+The internal outline contract depends on those actions. When actions exist,
+`source_event_clips` maps each action to a zero-based timeline item, and beat rows
+omit `source_event_ids`. Without source actions, rows have empty `source_event_ids`
+arrays. Maestro supplies the required schema to the selected writer; users should
+not maintain a separate response template in their concept.
+
+The Dashboard's expandable **LLM Planning Log** intentionally shows the requests
+and responses for troubleshooting. A planning failure can leave a saved Director
+draft with zero completed clips: **Resume** retries from the first unfinished
+planning unit, while **Open & Edit** restores the inputs for a new revision.
+This recovery draft is separate from an Editor timeline project. If the draft is
+missing entirely, include the launcher log so a persistence failure can be checked.
 
 API clients can send the JSON boolean `use_lyrics_context` to
 `POST /api/v1/director/v2/plan` or

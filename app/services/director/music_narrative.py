@@ -6,14 +6,59 @@ style, and static identity descriptions do not become story milestones.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
 
-_REVISION = 2
+_REVISION = 3
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _SENTENCE_RE = re.compile(r"[^.!?;\n]+(?:[.!?;]+|$)")
 _SUBJECT_TAG_RE = re.compile(r"<\s*subject\s+\d+\s*>", re.IGNORECASE)
+_SOURCE_SECTION_RE = re.compile(
+    r"(?i)(?<![a-z0-9_])(?P<name>subject_definitions|summary|"
+    r"retention_analysis|detailed_description|direction_and_description|"
+    r"overall_soundscape|on_diegetic_music|non_diegetic_music)\s*:"
+)
+_NARRATIVE_SOURCE_FIELDS = frozenset({
+    "summary", "detailed_description", "direction_and_description",
+})
+_JSON_NARRATIVE_KEYS = frozenset({
+    "action", "action_description", "beat", "beat_description", "description",
+    "detailed_description", "direction_and_description", "event", "narrative",
+    "story", "summary", "text", "visual_beat", "visual_description",
+})
+_JSON_NARRATIVE_CONTAINERS = frozenset({
+    "actions", "beats", "events", "narrative", "outline", "scenes", "sequence", "story",
+})
+_JSON_NON_NARRATIVE_KEYS = frozenset({
+    "camera", "environment", "purpose", "metadata", "subject_definitions",
+    "retention_analysis", "overall_soundscape", "on_diegetic_music", "non_diegetic_music",
+    "schema", "json_schema", "response_schema", "response_format",
+    "source_event_clips", "source_event_ids",
+})
+_JSON_SCHEMA_KEYS = frozenset({
+    "$defs", "$schema",
+})
+_JSON_EXAMPLE_PREFIX_RE = re.compile(
+    r"\b(?:example|sample|template)\b[^.!?\n]{0,80}$", re.IGNORECASE,
+)
+_FORMAT_SEQUENCE_RANGE_RE = re.compile(
+    r"\b(?:running|run|numbered|ordered|indexed|sequenced)\s+"
+    r"(?:strictly\s+)?sequentially\s+from\s*\d+\s+"
+    r"(?:through|to|until)\s*\d+\b",
+    re.IGNORECASE,
+)
+_CAMERA_SCHEMA_FIELD_RE = re.compile(
+    r"\b(?:shot\s+size|camera\s+movement|intended\s+framing|"
+    r"framing\s+instructions?|camera\s+instructions?)\b",
+    re.IGNORECASE,
+)
+_STRUCTURAL_HEADING_RE = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:opening|beginning|introduction|middle|"
+    r"climax|ending|closing|conclusion|finale)\s*:",
+    re.IGNORECASE,
+)
 _NATIVE_SECTION_RE = re.compile(
     r"(?im)^\s*(subject_definitions|summary|retention_analysis|"
     r"detailed_description|overall_soundscape|non_diegetic_music)\s*:\s*"
@@ -506,6 +551,163 @@ def _mask_cast_credit_text(value: str) -> str:
     return _CAST_CREDIT_PAREN_RE.sub(
         lambda match: " " * len(match.group(0)), value,
     )
+
+
+def _json_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9_$]+", "_", str(value).casefold()).strip("_")
+
+
+def _json_story_values(value: Any, parent_key: str = "") -> list[str]:
+    """Read prose fields from actual beat data, excluding camera metadata."""
+
+    found: list[str] = []
+    if isinstance(value, dict):
+        if _json_has_schema_shape(value):
+            return []
+        for raw_key, child in value.items():
+            key = _json_key(raw_key)
+            if key in _JSON_NON_NARRATIVE_KEYS:
+                continue
+            if isinstance(child, str) and key in _JSON_NARRATIVE_KEYS:
+                found.append(child)
+            elif isinstance(child, list) and key in _JSON_NARRATIVE_KEYS:
+                found.extend(item for item in child if isinstance(item, str))
+                for item in child:
+                    if isinstance(item, (dict, list)):
+                        found.extend(_json_story_values(item, key))
+            elif isinstance(child, (dict, list)):
+                found.extend(_json_story_values(child, key))
+    elif isinstance(value, list):
+        for child in value:
+            if isinstance(child, str) and (
+                parent_key in _JSON_NARRATIVE_CONTAINERS or not parent_key
+            ):
+                found.append(child)
+            elif isinstance(child, (dict, list)):
+                found.extend(_json_story_values(child, parent_key))
+    return [item for item in found if item.strip()]
+
+
+def _json_has_schema_shape(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    keys = {_json_key(key) for key in value}
+    return bool(
+        keys & _JSON_SCHEMA_KEYS
+        or ("properties" in keys and ("type" in keys or "required" in keys))
+    )
+
+
+def _replace_json_blocks_with_story_text(value: str) -> str:
+    """Keep actual JSON beat descriptions, but remove schema/example objects."""
+
+    decoder = json.JSONDecoder()
+    pieces: list[str] = []
+    cursor = 0
+    index = 0
+    while index < len(value):
+        if value[index] not in "[{":
+            index += 1
+            continue
+        try:
+            parsed, end = decoder.raw_decode(value, index)
+        except (TypeError, ValueError):
+            index += 1
+            continue
+
+        if index < cursor:
+            index = end
+            continue
+        prefix = value[max(0, index - 96):index]
+        is_example = bool(_JSON_EXAMPLE_PREFIX_RE.search(prefix))
+        story_values = (
+            [] if is_example or _json_has_schema_shape(parsed)
+            else _json_story_values(parsed)
+        )
+        pieces.append(value[cursor:index])
+        pieces.append("\n" + "\n".join(story_values) + "\n" if story_values else " ")
+        cursor = end
+        index = end
+
+    if cursor == 0:
+        return value
+    pieces.append(value[cursor:])
+    return "".join(pieces)
+
+
+def _native_music_source_fields(value: str) -> list[tuple[str, str]] | None:
+    sections = list(_SOURCE_SECTION_RE.finditer(value))
+    is_native_sections = bool(
+        sections and (
+            not value[:sections[0].start()].strip()
+            or len(sections) > 1
+        )
+    )
+    if not is_native_sections:
+        return None
+
+    fields: list[tuple[str, str]] = []
+    prefix = value[:sections[0].start()]
+    if prefix.strip():
+        fields.append(("", prefix))
+    for index, section in enumerate(sections):
+        end = sections[index + 1].start() if index + 1 < len(sections) else len(value)
+        fields.append((section.group("name").casefold(), value[section.end():end]))
+    return fields
+
+
+def _music_narrative_source(value: str) -> str:
+    """Select narrative-bearing native fields and extract actual beat text."""
+
+    fields = _native_music_source_fields(value)
+    if fields is None:
+        narrative = value
+    else:
+        narrative = "\n".join(
+            text for name, text in fields
+            if not name or name in _NARRATIVE_SOURCE_FIELDS
+        )
+    return _replace_json_blocks_with_story_text(narrative)
+
+
+def _music_participant_context(value: str) -> str:
+    """Keep native identity definitions available for combat name resolution."""
+
+    fields = _native_music_source_fields(value)
+    if fields is None:
+        return ""
+    return "\n".join(
+        text for name, text in fields if name == "subject_definitions"
+    )
+
+
+def _is_structural_heading_action(
+    value: str,
+    start: int,
+    end: int,
+    verb: str,
+) -> bool:
+    if _normal_text(verb) not in {
+        "opening", "beginning", "introduction", "middle", "climax",
+        "ending", "closing", "conclusion", "finale",
+    }:
+        return False
+    heading = _STRUCTURAL_HEADING_RE.match(value)
+    return bool(heading and start < heading.end() and end <= heading.end())
+
+
+def _is_formatting_action(value: str, start: int, end: int) -> bool:
+    """Ignore action-shaped words in timeline and camera-format instructions."""
+
+    cues = (
+        _FORMAT_SEQUENCE_RANGE_RE,
+        _CAMERA_SCHEMA_FIELD_RE,
+    )
+    for cue in cues:
+        for match in cue.finditer(value):
+            if start < match.end() and end > match.start():
+                return True
+    return False
 
 
 def _sentence_ranges(value: str) -> list[tuple[int, int]]:
@@ -1037,10 +1239,14 @@ def build_music_narrative_contract(
     # "Also include ... as it swoops down and breathes fire" remain visible.
     # This small parser is self-contained instead of importing H3's event
     # splitter, which can discard action clauses attached to directives.
-    visible_source = _mask_cast_credit_text(_mask_quoted_text(original))
+    extraction_source = _music_narrative_source(original)
+    visible_source = _mask_cast_credit_text(_mask_quoted_text(extraction_source))
+    visible_identity_context = _mask_cast_credit_text(_mask_quoted_text(
+        _music_participant_context(original),
+    ))
     events: list[dict[str, Any]] = []
-    for sentence_start, sentence_end in _sentence_ranges(original):
-        sentence = original[sentence_start:sentence_end]
+    for sentence_start, sentence_end in _sentence_ranges(extraction_source):
+        sentence = extraction_source[sentence_start:sentence_end]
         visible_sentence = visible_source[sentence_start:sentence_end]
         matches = [
             match for match in _action_matches(visible_sentence)
@@ -1048,6 +1254,12 @@ def build_music_narrative_contract(
                 visible_sentence, match[0], match[1], match[3],
             )
             and not _is_nominal_action_reference(
+                visible_sentence, match[0], match[1], match[3],
+            )
+            and not _is_formatting_action(
+                visible_sentence, match[0], match[1],
+            )
+            and not _is_structural_heading_action(
                 visible_sentence, match[0], match[1], match[3],
             )
         ]
@@ -1073,7 +1285,10 @@ def build_music_narrative_contract(
                 participants, participant_names = _combat_participants(
                     visible_sentence,
                     action_start,
-                    visible_source[max(0, sentence_start - 1200):sentence_start],
+                    " ".join(filter(None, (
+                        visible_identity_context[-1200:],
+                        visible_source[max(0, sentence_start - 1200):sentence_start],
+                    ))),
                     participant_hints,
                 )
                 if len(participants) != 2 or len(participant_names) != 2:

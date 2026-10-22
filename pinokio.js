@@ -108,9 +108,11 @@ module.exports = {
         text: "Connecting Hugging Face",
         href: "huggingface_login.js",
       }]
-    } else if (installed && solCapable && !cuda13DriverUpdateRequired && !runtimeReady) {
+    } else if (installed && solCapable && !cuda13DriverUpdateRequired && !runtimeReady
+      && !running.start && !running.start_sol) {
       return [{
-        default: true,
+        // An upgrade is an explicit user action. A default script href would
+        // auto-run update.js (including git pull) just by opening this menu.
         icon: "fa-solid fa-bolt",
         text: "Finish H3 Performance Runtime Upgrade",
         href: "update.js",
