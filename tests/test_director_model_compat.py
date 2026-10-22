@@ -2670,8 +2670,14 @@ class TestDirectorUICatalogContract(unittest.TestCase):
 
         self.assertIn("director?: DirectorModelCompatibility", client)
         self.assertIn("planned_clips?: import('../types').PlannedClip[]", client)
-        self.assertIn("const backendModels: ModelDef[]", store)
-        self.assertIn("...m,", store)
+        # Initial loads and startup recovery share the same mapper. It must
+        # retain the full backend capability record, including Director data.
+        self.assertRegex(
+            store,
+            r"function _catalogModels\(models: api\.ApiModel\[\]\): ModelDef\[\] \{"
+            r"\s*return \[\.\.\.models\.map\(model => \(\{\s*\.\.\.model,",
+        )
+        self.assertGreaterEqual(store.count("_catalogModels(data.models)"), 2)
         self.assertIn("shot_image_guidance: directorShotImageGuidance", store)
         self.assertIn("director_max_shot_frames: directorMaxShotFrames", store)
         self.assertIn("resolution: directorVideoResolution", store)
