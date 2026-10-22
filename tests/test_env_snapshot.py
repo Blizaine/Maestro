@@ -74,6 +74,49 @@ class ConfigDigestTests(unittest.TestCase):
             config_digest({"services": {"civitai_api_key": "two"}}),
         )
 
+    def test_switching_studio_mode_does_not_move_the_digest(self):
+        # Observed in the wild: generating an image then a video rewrote
+        # maestro_studio_preferences and flipped the digest, which made it
+        # noise rather than a signal.
+        image_session = {
+            "vram_allocator": "vmm",
+            "maestro_studio_preferences": {
+                "generation_mode": "image",
+                "selected_model_per_mode": {"image": "qwen_image_21_7B"},
+            },
+        }
+        video_session = {
+            "vram_allocator": "vmm",
+            "maestro_studio_preferences": {
+                "generation_mode": "video",
+                "selected_model_per_mode": {"video": "minimax_h3_ref2va"},
+            },
+        }
+        self.assertEqual(
+            config_digest(image_session), config_digest(video_session)
+        )
+
+    def test_ui_only_state_is_ignored(self):
+        for noisy in ("UI_theme", "queue_color_scheme",
+                      "maestro_model_visibility", "generation_preview"):
+            self.assertEqual(
+                config_digest({"vram_allocator": "vmm"}),
+                config_digest({"vram_allocator": "vmm", noisy: "anything"}),
+                f"{noisy} should not move the digest",
+            )
+
+    def test_switching_workspace_is_ignored(self):
+        self.assertEqual(
+            config_digest({"services": {"active_workspace": "default"}}),
+            config_digest({"services": {"active_workspace": "Proofs"}}),
+        )
+
+    def test_a_real_performance_setting_still_moves_the_digest(self):
+        self.assertNotEqual(
+            config_digest({"vram_allocator": "vmm"}),
+            config_digest({"vram_allocator": "native"}),
+        )
+
     def test_unserializable_values_still_digest_stably(self):
         first = config_digest({"x": object()})
         second = config_digest({"x": object()})
@@ -125,13 +168,25 @@ class BuildEnvSnapshotTests(unittest.TestCase):
         self.assertNotIn("civitai_api_key", blob)
 
     def test_unlisted_keys_are_left_out_but_still_move_the_digest(self):
+        # lm_decoder_engine is a real engine setting the allowlist does not
+        # name yet -- exactly the case the digest exists to surface.
         base = self.config()
-        noisy = self.config()
-        noisy["UI_theme"] = "midnight"
-        self.assertNotIn("UI_theme", build_env_snapshot(base, "3.2.0"))
+        changed = self.config()
+        changed["lm_decoder_engine"] = "something_else"
+        self.assertNotIn("lm_decoder_engine", build_env_snapshot(base, "3.2.0"))
         self.assertNotEqual(
             build_env_snapshot(base, "3.2.0")["config_digest"],
-            build_env_snapshot(noisy, "3.2.0")["config_digest"],
+            build_env_snapshot(changed, "3.2.0")["config_digest"],
+        )
+
+    def test_ui_theme_is_neither_captured_nor_digested(self):
+        base = self.config()
+        themed = self.config()
+        themed["UI_theme"] = "midnight"
+        self.assertNotIn("UI_theme", build_env_snapshot(base, "3.2.0"))
+        self.assertEqual(
+            build_env_snapshot(base, "3.2.0")["config_digest"],
+            build_env_snapshot(themed, "3.2.0")["config_digest"],
         )
 
     def test_absent_keys_are_omitted_rather_than_guessed(self):

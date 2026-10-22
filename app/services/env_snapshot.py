@@ -89,6 +89,51 @@ _SERVICE_KEYS = (
 )
 
 
+# Config branches that track UI and session state rather than anything that
+# shapes a render: which mode the user last opened, which model is selected,
+# which models are visible in the picker. They move constantly -- switching
+# from image to video rewrites several -- so including them would make the
+# digest flip between almost any two runs and stop meaning "something that
+# matters moved". h3_optimizations lives under studio preferences but is a
+# real acceleration setting, so it is captured in the snapshot above.
+_VOLATILE_ROOT = frozenset({
+    "maestro_studio_preferences",
+    "maestro_model_visibility",
+    "UI_theme",
+    "queue_color_scheme",
+    "generation_preview",
+    "clear_file_list",
+    "save_queue_if_crash",
+    "model_hierarchy_type",
+    "notification_sound_enabled",
+    "maestro_host_notification_sound_enabled",
+    "maestro_host_notification_sound_volume",
+})
+
+_VOLATILE_SERVICE = frozenset({
+    "active_workspace",
+    "nsfw_accepted_at",
+    "auto_performance_applied",
+})
+
+
+def _drop_volatile(config: dict) -> dict:
+    """Remove UI and session state so the digest tracks machine config only."""
+    stable = {
+        key: value
+        for key, value in config.items()
+        if key not in _VOLATILE_ROOT
+    }
+    services = stable.get("services")
+    if isinstance(services, dict):
+        stable["services"] = {
+            key: value
+            for key, value in services.items()
+            if key not in _VOLATILE_SERVICE
+        }
+    return stable
+
+
 def _strip_secrets(value):
     """Recursively drop secret-shaped values, keeping a set/unset boolean."""
     if isinstance(value, dict):
@@ -109,10 +154,11 @@ def config_digest(server_config: dict) -> str:
 
     The allowlist above cannot anticipate every setting. When two runs agree
     on every frozen value but disagree here, some unlisted setting moved and
-    the allowlist is worth widening.
+    the allowlist is worth widening. UI and session state is excluded so the
+    signal stays rare enough to be worth acting on.
     """
     try:
-        clean = _strip_secrets(server_config or {})
+        clean = _strip_secrets(_drop_volatile(server_config or {}))
         # A repr would embed a memory address and make the digest differ
         # between runs of an identical config, so an unserializable value
         # degrades to its type name instead.
