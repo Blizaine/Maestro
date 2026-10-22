@@ -25968,6 +25968,18 @@ def _apply_deferred_generation_preparation(job: dict) -> None:
             )
 
 
+def _normalize_viggle_job_source(job: dict) -> None:
+    """Check original video bounds before spending GPU time on its character."""
+    if not (wgp.get_model_def(job["params"].get("model_type")) or {}).get("minimax_h3_viggle"):
+        return
+    from services.viggle_media import normalize_control_selection
+    job["params"].update(normalize_control_selection(
+        job["params"],
+        resolve_media=lambda path: _resolve_tool_clip_path(path, job.get("workspace")),
+        aborted=lambda: is_cancel_requested(job),
+    ))
+
+
 def _prepare_viggle_character_frame(job: dict) -> bool:
     """Run Klein as an internal phase of the same cancellable GPU job."""
     from services.viggle_preparation import prepare
@@ -26086,6 +26098,10 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 if is_cancel_requested(job):
                     return False
                 _apply_deferred_generation_preparation(job)
+                _normalize_viggle_job_source(job)
+            except InterruptedError as error:
+                finish_job(job, "cancelled", message=str(error))
+                return False
             except Exception as error:
                 detail = getattr(error, "detail", None) or str(error)
                 finish_job(job, "failed", error=str(detail), message=str(detail))
@@ -30025,6 +30041,25 @@ def _resolve_gallery_media_file(filename: str, workspace: str = "") -> str:
     if filepath and os.path.isfile(filepath):
         return filepath
     raise HTTPException(status_code=404, detail="File not found")
+
+
+@api.post("/api/v1/viggle/source-info")
+def serve_viggle_source_info(body: dict):
+    """Return the same video bounds used to validate Animate jobs, without GPU work."""
+    from services.viggle_media import probe_control_video
+    raw_path = body.get("video_path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise HTTPException(status_code=400, detail="Choose an Animate control video.")
+    workspace = body.get("workspace")
+    if workspace is not None and not isinstance(workspace, str):
+        raise HTTPException(status_code=400, detail="Choose a valid workspace.")
+    source = _resolve_tool_clip_path(raw_path, workspace)
+    if not source:
+        raise HTTPException(status_code=400, detail="The Animate control video is missing. Load it again.")
+    try:
+        return probe_control_video(source)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @api.get("/api/v1/media-info/{filename:path}")

@@ -10,6 +10,11 @@ Public **Dev** preview. Main remains v3.1.0. See the
 
 Dev follow-up fixes, 21 October:
 
+- Use checked video-track bounds for Viggle Animate's timeline, source frame and
+  submitted trim so a longer soundtrack cannot trigger a false out-of-range
+  error. Recheck restored settings, clear bounds across source/workflow changes,
+  and validate ranges before character preparation. Reconcile measured full-file
+  audio tails while retaining rejection of genuinely invalid selections.
 - Repair H3 VDN Full and Pruned module/default-LoRA downloads and the bundled
   eight-step Turbo preset after the old Hugging Face revision stopped serving
   them. Redirect the four known obsolete URLs retained in saved presets and

@@ -1899,6 +1899,20 @@ export async function mixAudio(tracks: {
 
 // --- Upload ---
 
+export async function fetchViggleSourceInfo(videoPath: string, workspace: string, signal?: AbortSignal): Promise<{
+  duration_seconds: number
+}> {
+  const res = await fetch(`${BASE}/api/v1/viggle/source-info`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({video_path: videoPath, workspace}), signal,
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({detail: 'Could not inspect the control video.'}))
+    throw new Error(error.detail || 'Could not inspect the control video.')
+  }
+  return res.json()
+}
+
 export async function uploadImage(file: File, options?: { reuseIdentical?: boolean }): Promise<{
   filename: string
   path: string

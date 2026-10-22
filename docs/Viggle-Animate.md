@@ -28,6 +28,14 @@ distillation adapter. It does not use ordinary H3 text prompting or load Qwen.
 5. Generate. Results appear in the normal gallery and support Load Settings,
    the queue, postprocessing, and optional face refinement.
 
+Maestro checks the video track before enabling generation, frame editing or
+character preparation. The timeline ends at the available picture frames;
+a longer soundtrack does not add animation time. Loading saved settings checks
+the current source again and adjusts the selection if needed, with a notice.
+Replacing the control video clears its old trim and frame state even when the
+replacement happens in another workflow. If inspection fails, use **Retry video
+check** or load another video. Genuinely out-of-range selections still fail.
+
 The manual Image-mode handoff starts with this editable prompt. Add the
 replacement character as the second image:
 
@@ -110,6 +118,32 @@ The model enforces the recipe server-side, including for restored queue jobs.
 window, or 230 for two full overlapping windows. Poll `/api/v1/status/{job_id}`.
 Replace the port below with the URL shown by Pinokio.
 
+`POST /api/v1/viggle/source-info` with `video_path` and optional `workspace`
+returns `duration_seconds` for the video track and, when available,
+`container_duration_seconds` for the whole file. Use the video duration for
+trim limits and frame selection. The CPU-only inspection is bounded and cached
+by file identity; it does not load a generation model. For example:
+
+```javascript
+const source = await fetch('http://127.0.0.1:42015/api/v1/viggle/source-info', {
+  method: 'POST', headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({video_path: '/absolute/control.mp4'})
+}).then(response => response.json());
+console.log(source.duration_seconds);
+```
+
+```python
+import requests
+source = requests.post('http://127.0.0.1:42015/api/v1/viggle/source-info',
+                       json={'video_path': '/absolute/control.mp4'}).json()
+print(source['duration_seconds'])
+```
+
+```sh
+curl http://127.0.0.1:42015/api/v1/viggle/source-info -H 'Content-Type: application/json' \
+  -d '{"video_path":"/absolute/control.mp4"}'
+```
+
 ```javascript
 const response = await fetch('http://127.0.0.1:42015/api/v1/generate', {
   method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -175,6 +209,11 @@ To animate a selection, include `_viggle_trim_start` and `_viggle_trim_end`
 The frame must fall within the selected range. `_viggle_frame_seconds` stores
 the manual editor's playhead. Output `video_length` is capped to the range at
 24 fps. Omitting both bounds preserves the existing full-source API behavior.
+Before character preparation, Maestro validates those bounds against the source
+video. An older full-file selection that matches the measured container end can
+be shortened to the video-track end when audio extends farther. A selected frame
+in that removed tail moves inside the valid range; valid original-source
+timestamps stay unchanged. An arbitrary end beyond the actual file is rejected.
 
 Sources: [Viggle model and guidance](https://huggingface.co/Viggle/Viggle-Animate),
 [pinned Wan2GP implementation](https://github.com/deepbeepmeep/Wan2GP/tree/057f9ecab9ad57dfbec9768b2daf7a4426ce986c/models/minimax_h3).

@@ -169,6 +169,8 @@ export interface GenerateParams {
   _duration_planning_mode?: 'duration' | 'windows' | 'auto'
   _viggle_edited_frame?: string
   _viggle_source_seconds?: number
+  /** Ephemeral server-verified video bounds, tied to the current source. */
+  _viggle_source_info?: { source: string; workspace: string; duration_seconds: number }
   _viggle_frame_seconds?: number
   /** Absolute source-video trim bounds; end is exclusive. */
   _viggle_trim_start?: number

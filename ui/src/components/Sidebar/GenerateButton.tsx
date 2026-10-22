@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { AlertTriangle, ListPlus, Loader2, Play } from 'lucide-react'
 import { getModelVisibilityScope, isModelEnabledInScope } from '../../lib/modelVisibility'
 import { isLongCatAvatarModel } from '../../lib/avatarWorkflow'
+import { viggleSourceReady } from '../../lib/viggle'
 import {
   studioAvatarInputError,
   modelSupportsImageWorkflow,
@@ -71,6 +72,8 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
   const viggleMissing = useStore(s => s.generationMode === 'video' && s.studioVideoWorkflow === 'animate'
     && (!s.params.video_guide || !(s.params.viggle_character ? s.params.viggle_character.reference_path : s.params._viggle_edited_frame)
       || (s.params.audio_prompt_type === 'A' && !s.params.audio_guide)))
+  const viggleSourcePending = useStore(s => s.generationMode === 'video' && s.studioVideoWorkflow === 'animate'
+    && !!s.params.video_guide && !viggleSourceReady(s.params, s.activeWorkspace))
   const createWorkflow = studioVideoWorkflow === 'references' ? 'references'
     : studioVideoWorkflow === 'avatar' ? 'avatar' : 'frames'
   const studioMediaIntent = {
@@ -130,7 +133,7 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
     && Object.values(imagePadding).every(value => value === 0)
   const incompatibleImageModel = generationMode === 'image'
     && !modelSupportsImageWorkflow(currentModel, imageWorkflow, imageRefs.length > 0)
-  const blocked = needsEnabledModel || viggleMissing || needsCreateModel || needsWorkflowModel || !!avatarInputError
+  const blocked = needsEnabledModel || viggleMissing || viggleSourcePending || needsCreateModel || needsWorkflowModel || !!avatarInputError
     || needsGuidance || needsImage || needsReference || needsOutpaintSource || needsOutpaintArea
     || needsImageGenerateSource || needsImageWorkflowSource || needsImageMask
     || needsImageOutpaintArea || incompatibleImageModel
@@ -153,7 +156,7 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
   }
 
   if (blocked) {
-    const label = needsEnabledModel ? 'Need model' : viggleMissing ? 'Need inputs' : needsCreateModel || needsWorkflowModel
+    const label = needsEnabledModel ? 'Need model' : viggleMissing ? 'Need inputs' : viggleSourcePending ? 'Check video' : needsCreateModel || needsWorkflowModel
       ? 'Need model'
       : avatarInputError
         ? avatarInputError.startsWith('Choose') ? 'Choose speakers' : 'Need inputs'

@@ -4,6 +4,12 @@
 
 ## Dev follow-up fixes — 21 October
 
+- **Viggle Animate trim:** use the video's measured picture duration for the
+  timeline and submitted range. A soundtrack that ends later no longer makes
+  an untouched full-video selection fail as out of range. Check restored sources,
+  invalidate old bounds when the source changes in any workflow, and verify
+  ranges before character preparation. Existing full-file selections can be
+  reconciled against measured audio tails; genuinely invalid ranges still fail.
 - **Face Refiner (#188 / PR #189):** clone H3 inference-mode uint8 windows
   before in-place overlap blending. This retains the earlier color-range fix
   while allowing clips longer than one refinement window to finish. The fix

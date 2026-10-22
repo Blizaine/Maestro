@@ -12,9 +12,16 @@ export function vigglePreparationKey(source: unknown, character: unknown, seed: 
 }
 
 /** Source timestamps stay absolute, even when generation uses a trimmed copy. */
-export function viggleTimeline(params: Partial<GenerateParams>) {
+export function viggleSourceReady(params: Partial<GenerateParams>, workspace?: string): boolean {
+  const info = params._viggle_source_info
+  return !!params.video_guide && info?.source === params.video_guide
+    && (workspace === undefined || info.workspace === workspace)
+    && Number.isFinite(info.duration_seconds) && info.duration_seconds >= 1 / 24
+}
+
+export function viggleTimeline(params: Partial<GenerateParams>, workspace?: string) {
   const finite = (value: unknown, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback
-  const duration = Math.max(0, finite(params._viggle_source_seconds))
+  const duration = viggleSourceReady(params, workspace) ? params._viggle_source_info!.duration_seconds : 0
   const end = Math.min(duration, Math.max(Math.min(0.1, duration), finite(params._viggle_trim_end, duration)))
   const start = Math.min(Math.max(0, end - 0.1), Math.max(0, finite(params._viggle_trim_start)))
   const lastFrame = Math.max(start, end - 1 / 24)

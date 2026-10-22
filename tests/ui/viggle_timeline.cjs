@@ -14,8 +14,10 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
   let browser;
   try {
     const videoFile = path.join(temporary, 'source.mp4');
-    execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24',
-      '-t', '8', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', videoFile], {windowsHide: true});
+    execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24:duration=8',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=8.2',
+      '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'libx264',
+      '-pix_fmt', 'yuv420p', '-c:a', 'aac', videoFile], {windowsHide: true});
     const media = fs.readFileSync(videoFile);
     const picture = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jK1sAAAAASUVORK5CYII=', 'base64');
     const bundle = await esbuild.build({stdin: {contents: `
@@ -23,11 +25,12 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
       import {useStore} from './src/stores/useStore';
       import {ViggleControls} from './src/components/Sidebar/ViggleControls';
       import {DurationSlider} from './src/components/Sidebar/DurationSlider';
+      import {GenerateButton} from './src/components/Sidebar/GenerateButton';
       import {VideoTimelineSelector} from './src/components/shared/VideoTimelineSelector';
       window.store = useStore;
       function App() { const mode = useStore(s => s.generationMode);
         return <main className="mx-auto max-w-sm p-4 bg-bg-primary text-text-primary">
-          {mode === 'video' ? <><ViggleControls/><div hidden><DurationSlider/></div></> : <p>Image editor</p>}
+          {mode === 'video' ? <><ViggleControls/><GenerateButton/><div hidden><DurationSlider/></div></> : <p>Image editor</p>}
         </main>; }
       const root = createRoot(document.getElementById('root'));
       window.mount = () => root.render(<React.StrictMode><App/></React.StrictMode>);
@@ -46,12 +49,15 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
       {model_type: 'flux2_klein_9b', architecture: 'flux2_klein_9b', name: 'Klein', family: 'flux2',
         supports_image_edit: true, supports_ref_images: true, image_only: true}];
     browser = await playwright.chromium.launch({headless: true,
+      args: ['--disable-gpu', '--disable-accelerated-video-decode'],
       ...(process.env.MAESTRO_CHROME || process.platform === 'win32'
         ? {executablePath: process.env.MAESTRO_CHROME || 'C:/Program Files/Google/Chrome/Application/chrome.exe'} : {})});
     const page = await browser.newPage({viewport: {width: 390, height: 844}});
     const errors = [], jobs = [], extracts = [];
+    let canonicalDuration = 8, releaseSourceCheck, failSourceCheck = false;
+    const sourceCheckGate = new Promise(resolve => {releaseSourceCheck = resolve;});
     page.on('pageerror', error => errors.push(error.message));
-    await page.route('**/*', route => {
+    await page.route('**/*', async route => {
       const request = route.request(), url = new URL(request.url());
       const json = data => route.fulfill({contentType: 'application/json', body: JSON.stringify(data)});
       if (url.pathname.endsWith('.mp4')) {
@@ -62,6 +68,12 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
           headers: {'Content-Range': `bytes ${start}-${end}/${media.length}`, 'Accept-Ranges': 'bytes'}});
       }
       if (url.pathname.endsWith('.png')) return route.fulfill({contentType: 'image/png', body: picture});
+      if (url.pathname === '/api/v1/viggle/source-info') {
+        await sourceCheckGate;
+        if (failSourceCheck) return route.fulfill({status: 400, contentType: 'application/json',
+          body: JSON.stringify({detail: 'Could not read the control video.'})});
+        return json({duration_seconds: canonicalDuration});
+      }
       if (url.pathname === '/api/v1/upload') return json(request.postData()?.includes('new.mp4')
         ? {path: '/uploads/new.mp4', url: '/new.mp4'} : {path: '/uploads/edited.png', url: '/edited.png'});
       if (url.pathname === '/api/v1/generate') {jobs.push(request.postDataJSON()); return json({job_id: String(jobs.length), status: 'held'});}
@@ -82,8 +94,18 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
           _viggle_edited_frame: '/uploads/edited.png', video_length: 124, resolution: 'auto_480p'},
         durationSeconds: 124 / 24, slidingWindowSeconds: 124 / 24, slidingWindowOverlap: 18}); window.mount();
     }, {options, models});
+    await page.getByRole('button', {name: 'Check video', exact: true}).waitFor();
+    await page.evaluate(() => window.store.getState().startGeneration('queue'));
+    assert.equal(jobs.length, 0, 'Direct store submission also waits for verified video bounds');
+    releaseSourceCheck();
     await page.waitForFunction(() => window.store.getState().params._viggle_source_seconds === 8);
     await page.waitForFunction(() => window.store.getState().durationSeconds === 8);
+    await page.waitForFunction(() => document.querySelector('video').duration > 8);
+    assert.equal((await page.evaluate(() => window.store.getState().params._viggle_trim_end)), 8,
+      'An 8.2s browser/container duration cannot extend the 8s video selection');
+    await page.evaluate(() => window.store.getState().startGeneration('queue'));
+    assert.equal(jobs.at(-1)._viggle_trim_end, 8);
+    assert.equal(jobs.at(-1).video_length, 192);
     const timeline = page.getByLabel('Video trim timeline', {exact: true});
     await timeline.locator('img').first().waitFor();
     assert.equal(await timeline.locator('img').count(), 10, 'Filmstrip decoded');
@@ -155,7 +177,19 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
         selectedOutputMeta: {params: saved, generation_mode: 'video'}});
       await window.store.getState().loadSettingsFromOutput();
     }, saved);
+    await page.waitForFunction(() => !!window.store.getState().params._viggle_source_info);
     assert.deepEqual(await selection(), [2, 6, 4, 4], 'Load Settings restores trim and playhead');
+    canonicalDuration = 3;
+    await page.evaluate(async saved => {
+      window.store.setState({selectedOutputMeta: {params: saved, generation_mode: 'video'}});
+      await window.store.getState().loadSettingsFromOutput();
+    }, saved);
+    await page.waitForFunction(() => window.store.getState().params._viggle_source_info?.duration_seconds === 3);
+    const reconciled = await selection();
+    assert.equal(reconciled[0], 2); assert.equal(reconciled[1], 3);
+    assert.ok(Math.abs(reconciled[2] - (3 - 1 / 24)) < 1e-6, 'Restored frame stays inside current video');
+    await page.getByText('Selection adjusted to the available video frames.', {exact: true}).waitFor();
+    canonicalDuration = 8;
     for (const [width, height, theme] of [[390, 844, 'golden-hour'], [1440, 900, 'daylight']]) {
       await page.setViewportSize({width, height}); await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
       await page.evaluate(() => window.scrollTo(0, 0));
@@ -173,13 +207,35 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
     await page.getByLabel('Upload control video', {exact: true}).setInputFiles({name: 'new.mp4', mimeType: 'video/mp4', buffer: media});
     await page.waitForFunction(() => window.store.getState().params._viggle_source_seconds === 8);
     assert.deepEqual(await selection(), [0, 8, 0, 8], 'Replacement starts with its full range');
+    failSourceCheck = true;
+    await page.evaluate(() => window.store.getState().setParam('video_guide', '/uploads/retry.mp4'));
+    await page.getByRole('alert').filter({hasText: 'Could not read the control video.'}).waitFor();
+    assert.equal(await page.getByRole('button', {name: 'Edit current video frame in Maestro', exact: true}).isDisabled(), true);
+    const beforeRetry = jobs.length;
+    await page.evaluate(() => {
+      window.store.getState().setParam('_viggle_edited_frame', '/uploads/edited.png');
+      return window.store.getState().startGeneration('queue');
+    });
+    assert.equal(jobs.length, beforeRetry, 'A failed inspection cannot submit a generation');
+    failSourceCheck = false;
+    await page.getByRole('button', {name: 'Retry video check', exact: true}).click();
+    await page.waitForFunction(() => !!window.store.getState().params._viggle_source_info);
+    const invalidated = await page.evaluate(() => {
+      window.store.setState({params: {...window.store.getState().params, model_type: 'minimax_h3'}});
+      window.store.getState().setParam('video_guide', '/uploads/another.mp4');
+      const p = window.store.getState().params;
+      return {sourceInfo: p._viggle_source_info, trimEnd: p._viggle_trim_end,
+        frame: p._viggle_frame_seconds, edited: p._viggle_edited_frame};
+    });
+    assert.deepEqual(invalidated, {sourceInfo: undefined, trimEnd: undefined, frame: 0, edited: undefined},
+      'Changing a source outside Animate also invalidates its cached bounds and edited frame');
     // Existing Retake/Repaint/Recast behavior: the handle itself scrubs video, no frame playhead required.
     await page.evaluate(() => window.mountLegacy());
     await drag(page.getByRole('slider', {name: 'Trim start', exact: true}), 1);
     assert.equal(await page.getByRole('slider', {name: 'Frame to edit'}).count(), 0);
     await page.waitForFunction(() => Math.abs(document.querySelector('video').currentTime - 1) < 0.01);
     assert.deepEqual(errors, [], 'No React errors or resize/update loops');
-    console.log('Animate timeline: real preview/filmstrip, mouse/touch/keyboard scrub, trim clamp, Auto timing, queue payload, Image round trip, Load Settings, source reset, themes/mobile and legacy preview passed');
+    console.log('Animate timeline: verified video bounds/audio-tail, readiness gate, restore reconciliation, cross-workflow invalidation, preview/filmstrip, scrubbing, queue payload, Image round trip, mobile/themes and legacy preview passed');
   } finally {
     if (browser) await browser.close();
     fs.rmSync(temporary, {recursive: true, force: true}); // Owned mkdtemp directory only.

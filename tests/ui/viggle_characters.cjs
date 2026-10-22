@@ -26,6 +26,7 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
   const assets = path.join(root, 'ui/dist/assets');
   const css = fs.readFileSync(path.join(assets, fs.readdirSync(assets).find(name => name.endsWith('.css'))), 'utf8');
   const browser = await playwright.chromium.launch({headless: true,
+    args: ['--disable-gpu', '--disable-accelerated-video-decode'],
     ...(process.env.MAESTRO_CHROME || process.platform === 'win32'
       ? {executablePath: process.env.MAESTRO_CHROME || 'C:/Program Files/Google/Chrome/Application/chrome.exe'} : {})});
   try {
@@ -46,6 +47,7 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
     await page.route('**/*', async route => {
       const request = route.request(), url = new URL(request.url());
       const json = data => route.fulfill({contentType: 'application/json', body: JSON.stringify(data)});
+      if (url.pathname === '/api/v1/viggle/source-info') return json({duration_seconds: 5.2});
       if (url.pathname === '/api/v1/characters') return json({characters: [person, recovered,
         ...Array.from({length: 14}, (_, n) => ({...person, id: `extra${n}`, name: `Person ${n + 1}`}))]});
       if (url.pathname.endsWith('/images/recover')) {recoveries++; return json({id: 'recovery'});}
@@ -164,10 +166,21 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
     assert.equal(requests.at(-1).image_refs.length, 3);
     assert.equal(requests.at(-1).viggle_character, undefined);
     assert.equal(requests.at(-1)._viggle_prepared, undefined);
-    await page.evaluate(() => window.store.setState({studioImageWorkflow: 'inpaint', imageWorkflowSourcePath: '/source.png', imageWorkflowMaskPath: '/mask.png',
-      imageRefs: window.store.getState().imageRefs.slice(1), params: {...window.store.getState().params, image_mode: 2}}));
-    assert.equal(await page.getByRole('button', {name: 'Characters', exact: true}).isDisabled(), true, 'Inpaint source consumes one reference slot');
+    await page.evaluate(() => {
+      const state = window.store.getState();
+      window.store.setState({studioImageWorkflow: 'inpaint', imageWorkflowSourcePath: '/source.png', imageWorkflowMaskPath: '/mask.png',
+        imageRefs: state.imageRefs.slice(1),
+        params: {...state.params, model_type: 'qwen_image_21_7B', image_mode: 2},
+        modelOptions: {model_type: 'qwen_image_21_7B', architecture: 'qwen_image_21_7B', max_image_refs: 10,
+          image_ref_choices: {choices: [['None', ''], ['Main image / landscape first', 'KI'], ['Reference images', 'I']], letters_filter: 'KI', default: 'I'},
+          image_ref_inpaint: true, inpaint_video_prompt_type: 'VAG'},
+        models: [{model_type: 'qwen_image_21_7B', architecture: 'qwen_image_21_7B', family: 'qwen',
+          supports_image_edit: true, supports_ref_images: true, supports_image_inpaint: true, supports_image_outpaint: true}]});
+    });
+    assert.equal(await page.getByRole('button', {name: 'Characters', exact: true}).isDisabled(), false,
+      'Qwen inpaint keeps its remaining reference slots available');
     await page.evaluate(() => window.store.getState().startGeneration('queue'));
+    assert.equal(requests.at(-1).model_type, 'qwen_image_21_7B');
     assert.equal(requests.at(-1).image_guide, '/source.png');
     assert.equal(requests.at(-1).image_refs.length, 2, 'Reference-capable inpaint submits the selected character images');
     assert.ok(requests.at(-1).video_prompt_type.includes('I'));

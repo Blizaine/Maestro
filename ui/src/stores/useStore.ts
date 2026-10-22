@@ -21,7 +21,7 @@ import {
 import { isKreaIdentityEdit, normalizeKreaIdentitySettings, type KreaIdentitySettings } from '../lib/kreaIdentityControls'
 import type { SavedOmniCharacter, TtsVoice } from '../types'
 import { applyTtsVoices, ttsAudioModeForCount, ttsCharacterEnhancePrompt, ttsSpeakingVoiceCount, ttsVoiceLimit, ttsVoicePaths } from '../lib/ttsVoices'
-import { vigglePreparationKey, viggleTimeline } from '../lib/viggle'
+import { vigglePreparationKey, viggleSourceReady, viggleTimeline } from '../lib/viggle'
 import { DEFAULT_AVATAR_SPEAKER_LOCATIONS, isLongCatAvatarModel, isMultiSpeakerAvatarModel, parseAvatarSpeakerRegions } from '../lib/avatarWorkflow'
 import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, StudioVideoCreateRoute, StudioVideoEffectiveCreateRoute, StudioImageWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference, AppMode } from '../types'
 import * as api from '../api/client'
@@ -590,6 +590,7 @@ const EPHEMERAL_PARAM_FIELDS: ReadonlyArray<keyof SavedModeParams> = [
   'video_guide',
   '_viggle_edited_frame',
   '_viggle_source_seconds',
+  '_viggle_source_info',
   '_viggle_frame_seconds',
   '_viggle_trim_start',
   '_viggle_trim_end',
@@ -3691,7 +3692,10 @@ export const useStore = create<AppState>((set, get) => ({
       console.error('Edit Anything: no source video loaded')
       return
     }
-    const animateTimeline = viggleTimeline(state.params)
+    if (which === 'animate' && !viggleSourceReady(state.params, state.activeWorkspace)) {
+      throw new Error('Wait for the control video to finish checking before choosing a frame.')
+    }
+    const animateTimeline = viggleTimeline(state.params, state.activeWorkspace)
     const startTime = which === 'animate' ? animateTimeline.frame : state.editStartTime || 0
     const endTime = which === 'animate' ? animateTimeline.end || startTime + 1 : state.editEndTime || state.editVideoDuration || 0
     if (endTime <= startTime) {
@@ -4244,8 +4248,9 @@ export const useStore = create<AppState>((set, get) => ({
         // source begins at zero; retaining that hidden origin skips its head.
         nextParams.video_frame_offset = 0
       }
-      if (key === 'video_guide' && value !== s.params.video_guide && s.params.model_type === 'viggle_animate') {
+      if (key === 'video_guide' && value !== s.params.video_guide) {
         Object.assign(nextParams, {_viggle_source_seconds: undefined, _viggle_trim_start: undefined,
+          _viggle_source_info: undefined,
           _viggle_trim_end: undefined, _viggle_frame_seconds: 0,
           _viggle_prepared: undefined, _viggle_edited_frame: undefined,
           ...(s.params.viggle_character ? {viggle_character: {...s.params.viggle_character, frame_seconds: 0}} : {})})
@@ -5853,7 +5858,7 @@ export const useStore = create<AppState>((set, get) => ({
     const state = get()
     const options = state.modelOptions
     if (state.params.model_type === 'viggle_animate' && Number.isFinite(requested)) {
-      const range = viggleTimeline(state.params)
+      const range = viggleTimeline(state.params, state.activeWorkspace)
       const frames = Math.max(1, Math.floor(Math.min(requested, range.length || 3600, 3600) * 24 + 1e-6))
       if (state.params.video_length === frames && state.durationSeconds === frames / 24
         && state.params.sliding_window_size === 124 && state.slidingWindowSeconds === 124 / 24) return
@@ -8646,7 +8651,11 @@ export const useStore = create<AppState>((set, get) => ({
         set({promptEnhanceError: 'Viggle needs a control video and a character image or an edited frame.'})
         return
       }
-      const selection = viggleTimeline(state.params)
+      if (!viggleSourceReady(state.params, state.activeWorkspace)) {
+        set({promptEnhanceError: 'Wait for the control video to finish checking, or retry its check in Animate.'})
+        return
+      }
+      const selection = viggleTimeline(state.params, state.activeWorkspace)
       if (selection.length > 0) {
         Object.assign(params, {_viggle_trim_start: selection.start, _viggle_trim_end: selection.end,
           _viggle_frame_seconds: selection.frame,
@@ -13185,6 +13194,8 @@ export const useStore = create<AppState>((set, get) => ({
     newParams._viggle_edited_frame = (p._viggle_edited_frame as string)
       || (p.model_type === 'viggle_animate' && Array.isArray(p.image_refs) ? String(p.image_refs[0] || '') : undefined)
     newParams._viggle_source_seconds = Number(p._viggle_source_seconds) || undefined
+    // Restored bounds must be checked against the current file before use.
+    newParams._viggle_source_info = undefined
     newParams._viggle_frame_seconds = Number(p._viggle_frame_seconds) || 0
     newParams._viggle_trim_start = p.model_type === 'viggle_animate' && p._viggle_trim_start != null
       ? Number(p._viggle_trim_start) : undefined
