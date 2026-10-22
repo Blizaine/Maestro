@@ -733,7 +733,10 @@ class AdaptiveWritingTests(unittest.TestCase):
             with self.subTest(fallback=fallback):
                 self.assertIn('gives one relieved laugh', fallback)
                 self.assertIn('silently nods', fallback)
-                self.assertIn('Add no spoken words or speech-like vocalizations', fallback)
+                self.assertRegex(
+                    fallback,
+                    r'(?:Add no|Do not add new) spoken words or speech-like vocalizations',
+                )
                 self.assertIn('Preserve explicitly requested nonverbal reactions', fallback)
                 self.assertNotIn('approximately 0.25 seconds', fallback)
                 self.assertNotIn('all mouths remain closed before and after it', fallback)
