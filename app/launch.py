@@ -6921,6 +6921,16 @@ def _read_app_version() -> str:
 _APP_VERSION = _read_app_version()
 
 
+def _env_snapshot() -> dict:
+    """Machine settings that shaped this generation, for its sidecar.
+
+    wgp_config.json is global and mutable, so a run is only reproducible
+    later if the settings in force at write time travel with the output.
+    """
+    from services.env_snapshot import build_env_snapshot
+    return build_env_snapshot(wgp.server_config, _APP_VERSION)
+
+
 @api.get("/api/v1/system-config")
 def get_system_config():
     """Return system-level settings for the UI System tab."""
@@ -24815,6 +24825,7 @@ def _write_tool_sidecar(
         "job_id": job_id,
         "generation_time": round(elapsed),
         "created_at": time.time(),
+        "environment": _env_snapshot(),
     }
     if tool in {"upscale", "media_flow"}:
         from services.media_info import probe_media, processing_record
@@ -27118,6 +27129,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 sidecar = {
                     "params": sidecar_params,
                     "performance_plan": job.get("performance_plan"),
+                    "environment": _env_snapshot(),
                     "upload_filenames": upload_filenames,
                     "generation_mode": job["params"].get("generation_mode"),
                     "job_id": job_id,
@@ -28873,6 +28885,7 @@ def _write_recast_shot_aware_sidecar(
         "generation_time": int(round(float(generation_time))),
         "created_at": time.time(),
         "output_filename": output_name,
+        "environment": _env_snapshot(),
     }
     meta_path = os.path.splitext(output_path)[0] + ".meta.json"
     with open(meta_path, "w", encoding="utf-8") as handle:
@@ -29124,6 +29137,7 @@ def _write_repaint_shot_aware_sidecar(
         "generation_time": int(round(float(generation_time))),
         "created_at": time.time(),
         "output_filename": output_name,
+        "environment": _env_snapshot(),
     }
     meta_path = os.path.splitext(output_path)[0] + ".meta.json"
     with open(meta_path, "w", encoding="utf-8") as handle:
@@ -29397,6 +29411,7 @@ def _write_outpaint_shot_aware_sidecar(
         "generation_time": int(round(float(generation_time))),
         "created_at": time.time(),
         "output_filename": output_name,
+        "environment": _env_snapshot(),
     }
     meta_path = os.path.splitext(output_path)[0] + ".meta.json"
     with open(meta_path, "w", encoding="utf-8") as handle:
