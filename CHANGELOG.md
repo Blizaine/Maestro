@@ -10,6 +10,18 @@ Public **Dev** preview. Main remains v3.1.0. See the
 
 Dev follow-up fixes, 22 October:
 
+- Prioritize Studio/Director model controls during UI startup, defer gallery
+  scans and writer discovery, and load hidden panels on first use. Recover
+  failed startup reads automatically with a visible Retry control, including
+  mobile reconnects after a server restart. Compress large model-control JSON
+  and hashed UI assets without changing media or event-stream delivery.
+- Keep mobile mode, workflow and reference controls visible when browser chrome
+  or a restored tab changes the viewport height. Compact the sidecar only for
+  a focused text field with an actual keyboard-height reduction; restore its
+  controls on blur and browser return without requiring a refresh.
+- Show workspace loading throughout initial gallery startup, including saved
+  folder restoration, so model controls no longer hand off to a blank gallery
+  or premature empty-state message before the media request starts.
 - Fix H3 enhancement falsely treating motion-video retention entries as new
   characters. Save writer drafts and specific rejection reasons locally for
   Studio and Director, including failed/interrupted requests. Review them in

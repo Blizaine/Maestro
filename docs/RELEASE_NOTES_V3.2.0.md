@@ -2,8 +2,60 @@
 
 20 October 2026. Public **Dev** preview for testing. Main remains v3.1.0.
 
+## Dev follow-up fixes — 22 October
+
+- **UI startup:** prioritize service preferences, model controls and saved
+  choices before gallery scans and remote writer discovery. Load Settings,
+  browsing, dashboard and editor panels on first use. The initial JavaScript
+  bundle is about 24% smaller; this is a payload measurement, not a measured
+  reduction in cold-start seconds. Compress large catalogue/options JSON and
+  hashed JavaScript/CSS without changing generated media or event streams.
+- **Startup recovery:** share concurrent pending reads, bound request waits and
+  retry temporary failures. Show **Loading model controls** and a visible Retry
+  action instead of leaving controls empty after a restart. Recover on browser
+  return/reconnection while preserving prompts, edited settings and saved
+  preferences. A failed preferences read cannot overwrite the server record.
+- **Mobile sidecar:** distinguish an actual keyboard from browser toolbar and
+  restored-tab viewport changes. Keep modes, workflows, references and hardware
+  visible when no text entry is active; restore them on blur and page return.
+  Preserve keyboard compaction while moving between text fields.
+- **Gallery startup:** display **Loading workspace** through saved-folder
+  restoration and the first media listing, closing the blank interval after
+  model controls load. Preserve folder selection and reject stale listings
+  during a folder switch. This changes loading feedback, not scan throughput.
+- **H3 reference validation:** stop treating motion-video retention entries as
+  additional characters, avoiding false rejection of valid source-video prompts.
+- **Rejected writer drafts:** save drafts and specific rejection reasons locally
+  for Studio and Director, including failed or interrupted enhancement requests.
+  Review them through Studio prompt history or the Director Dashboard.
+- **Multi-window recovery:** preserve accepted windows during focused repairs,
+  retain usable camera cards if a repair request fails, and keep incomplete
+  schedules reviewable. Do not replace multiple windows with a repeated copy of
+  the original prompt. See [H3 reference audio and drafts](H3-Reference-Audio-and-Drafts.md).
+- **Video soundtrack roles:** give source videos the audio-role choices available
+  to audio references in Studio and Director: preserve soundtrack, voice,
+  music/sound style, sound effect, ignore, or the previous generative reference
+  behavior. Preserve the meaning of older saved checkbox settings.
+- **Director style and pacing:** carry the shot's visual style through the full
+  H3 frame and preserve it across saved projects, resume, native timeline splits
+  and clip reruns, with edited prompts remaining authoritative. Improve
+  instructions for visible performance, timed stillness and matching loop
+  composition/camera position. These improve prompt handoff; they do not guarantee
+  that every rendered frame follows the requested style, motion or loop.
+- **Director source actions:** stop turning choreography fragments such as
+  "dancing with spins" or the requester in "I want" into mandatory events.
+  Preserve genuine first-person actions and the original creative brief.
+- **Additional download repairs:** restore fifteen MiniMax-Music3 optimized
+  downloads, three local-writer vision projectors, the hidden Z-Image eight-step
+  ControlNet BF16 export and the YuE2 model-weight license link. Reuse compatible
+  cached files and retain pinned-source verification.
+
 ## Dev follow-up fixes — 21 October
 
+- **H3 VDN downloads:** repair Full/Pruned VDN modules, default LoRAs and the
+  bundled eight-step Turbo preset after the old Hugging Face revision stopped
+  serving them. Redirect four known obsolete URLs retained in saved presets
+  and reuse existing local files.
 - **Director source actions and outline contracts:** keep timeline-formatting
   instructions, schema examples and native identity/retention/soundscape metadata
   out of the mandatory story-action ledger. Preserve actual narrative actions,
@@ -69,6 +121,10 @@
   their existing behavior. Duplicate/missing groups and contradictory
   source-action assignments remain errors; the fix does not invent missing beats
   or turn off continuity checks.
+- **Outline compatibility:** retain the complete required response format in
+  writer prompts when an endpoint cannot enforce structured output. Accept
+  unambiguous row-local `beat` and `prompt` aliases for `visual_beat`; conflicting
+  aliases, incomplete rows and invalid timeline/action assignments still fail.
 
 ## FastH3 V2 and OmniRef
 

@@ -285,12 +285,14 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from services.access_log_filter import install_quiet_access_filter
 from services.http_runtime import configure_http_runtime
+from services.ui_delivery import UIStartupGZipMiddleware
 
 # Uvicorn's logging configuration replaces handlers but retains logger-level
 # filters. Install early, then idempotently confirm it again before startup.
 install_quiet_access_filter()
 
 api = FastAPI(title="Maestro API", version="1.0.0")
+api.add_middleware(UIStartupGZipMiddleware)
 api.add_event_handler("startup", configure_http_runtime)
 
 # Upload size caps — enforced in upload handlers. Tuned for real-world

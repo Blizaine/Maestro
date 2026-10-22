@@ -841,6 +841,42 @@ const _PRIMARY_MODEL_DEFAULT_FIELDS: ReadonlyArray<string> = [
 // Monotonic sequence for loadModelOptions staleness detection — only the
 // most recently requested model's options may touch the store.
 let _modelOptionsSeq = 0
+let _modelsLoadInFlight: Promise<void> | null = null
+let _modelCatalogReadFailed = false
+let _startupDefaultsPending: { modelType: string; baseline: GenerateParams } | null = null
+let _startupOptionsPending: { modelType: string; baseline: GenerateParams } | null = null
+
+function _catalogModels(models: api.ApiModel[]): ModelDef[] {
+  return [...models.map(model => ({
+    ...model,
+    guidance_max_phases: model.guidance_max_phases ?? 1,
+    fps: model.fps ?? 16,
+    is_downloaded: model.is_downloaded ?? false,
+    nsfw_only: model.nsfw_only ?? false,
+  })), ...SFX_VIRTUAL_MODELS]
+}
+
+async function _readModelCatalog() {
+  try {
+    const data = await api.fetchModels()
+    _modelCatalogReadFailed = false
+    return data
+  } catch (error) {
+    _modelCatalogReadFailed = true
+    throw error
+  }
+}
+
+async function _coalesceModelLoad(load: () => Promise<void>, freshCatalog = false): Promise<void> {
+  if (_modelsLoadInFlight) {
+    await _modelsLoadInFlight
+    if (!freshCatalog) return
+  }
+  const pending = load()
+  _modelsLoadInFlight = pending
+  try { await pending }
+  finally { if (_modelsLoadInFlight === pending) _modelsLoadInFlight = null }
+}
 
 function _normalizeRememberedSteps(values: unknown): Record<string, number> {
   if (!values || typeof values !== 'object' || Array.isArray(values)) return {}
@@ -887,19 +923,30 @@ function _rememberedModelSteps(
 }
 
 function _applyModelDefaults(
-  storeGet: () => Pick<AppState, 'selectedModelPerMode' | 'generationMode' | 'params' | 'inferenceStepsPerModel' | 'kreaIdentitySettingsPerModel' | 'modelOptions'>,
+  storeGet: () => Pick<AppState, 'selectedModelPerMode' | 'generationMode' | 'params' | 'inferenceStepsPerModel' | 'kreaIdentitySettingsPerModel' | 'modelOptions' | 'modelsLoading' | 'modelsLoadError'>,
   storeSet: (fn: (s: { params: GenerateParams }) => { params: GenerateParams }) => void,
   modelType: string,
-): void {
-  api.fetchDefaults(modelType).then((d) => {
-    if (!d || typeof d !== 'object') return
+  preserveEditsSince?: GenerateParams,
+): Promise<boolean> {
+  const before = storeGet()
+  const pending = before.modelsLoading || before.modelsLoadError || preserveEditsSince
+    ? {modelType, baseline: preserveEditsSince || before.params} : null
+  // A model can be changed while a startup error is visible. Track its
+  // failed defaults too, rather than retaining the previous model's retry.
+  if (pending) _startupDefaultsPending = pending
+  return api.fetchDefaults(modelType).then((d) => {
+    if (!d || typeof d !== 'object') return false
     // Race guard: model may have been switched again while this fetch
     // was in flight. Apply only if still the active model in current mode.
     const state = storeGet()
     const active = state.selectedModelPerMode[state.generationMode]
-    if (active !== modelType) return
+    if (active !== modelType) return true
     const overrides: Record<string, unknown> = {}
     for (const field of _PRIMARY_MODEL_DEFAULT_FIELDS) {
+      if (preserveEditsSince && !Object.is(
+        (state.params as unknown as Record<string, unknown>)[field],
+        (preserveEditsSince as unknown as Record<string, unknown>)[field],
+      )) continue
       // A one-click Full -> Pruned Turbo recommendation switches models and
       // then restores the managed low-step preset. Do not let the asynchronous
       // base-model defaults response race in afterward and put it back at
@@ -930,11 +977,25 @@ function _applyModelDefaults(
         overrides[field] = (d as Record<string, unknown>)[field]
       }
     }
-    overrides.custom_settings = _kreaCustomSettingsForModel(state.params.custom_settings, modelType, state.kreaIdentitySettingsPerModel)
+    if (!preserveEditsSince || state.params.custom_settings === preserveEditsSince.custom_settings) {
+      overrides.custom_settings = _kreaCustomSettingsForModel(state.params.custom_settings, modelType, state.kreaIdentitySettingsPerModel)
+    }
     if (Object.keys(overrides).length > 0) {
       storeSet(s => ({ params: { ...s.params, ...overrides } as GenerateParams }))
     }
-  }).catch(() => { /* fetch failure shouldn't break model switch */ })
+    return true
+  }).then(loaded => {
+    if (loaded && pending && _startupDefaultsPending === pending) _startupDefaultsPending = null
+    return loaded
+  }).catch(() => false) // A failed defaults read must not break a model switch.
+}
+
+async function _loadStartupOptions(get: () => AppState, modelType: string, recover = false) {
+  const pending = recover && _startupOptionsPending?.modelType === modelType
+    ? _startupOptionsPending : {modelType, baseline: get().params}
+  _startupOptionsPending = pending
+  await get().loadModelOptions(modelType, recover ? pending.baseline : undefined)
+  if (get().modelOptions?.model_type === modelType && _startupOptionsPending === pending) _startupOptionsPending = null
 }
 
 // Family → generation mode mapping
@@ -1836,8 +1897,10 @@ interface AppState {
   // Models & families (from API)
   families: ModelFamily[]
   models: ModelDef[]
-  loadModels: (options?: { catalogOnly?: boolean }) => Promise<void>
+  loadModels: (options?: { catalogOnly?: boolean; recoverOnly?: boolean }) => Promise<void>
   modelsLoaded: boolean
+  modelsLoading: boolean
+  modelsLoadError: string | null
 
   // Model visibility (favorites)
   enabledModels: Set<string>
@@ -2061,7 +2124,7 @@ interface AppState {
   // Model options
   modelOptions: ModelOptions | null
   modelOptionsLoading: boolean
-  loadModelOptions: (modelType: string) => Promise<void>
+  loadModelOptions: (modelType: string, preserveEditsSince?: GenerateParams) => Promise<void>
 
   // System config
   systemConfig: SystemConfig | null
@@ -2126,6 +2189,7 @@ interface AppState {
   setOutputSearchQuery: (q: string) => void
   filteredOutputs: () => OutputFile[]
   outputsLoading: boolean
+  galleryInitializing: boolean
   loadOutputs: () => Promise<void>
   loadMoreOutputs: () => Promise<void>
   refreshOutputs: () => Promise<void>
@@ -5369,6 +5433,8 @@ export const useStore = create<AppState>((set, get) => ({
   families: [],
   models: [],
   modelsLoaded: false,
+  modelsLoading: false,
+  modelsLoadError: null,
   enabledModels: _loadEnabledModels() ?? new Set(DEFAULT_ENABLED_MODELS),
   modelVisibilityOverrides: _modelVisibilityOverrides,
   toggleModelEnabled: (modelType, scope) => {
@@ -5450,28 +5516,48 @@ export const useStore = create<AppState>((set, get) => ({
     modelVisibilityFocus: mode,
   }),
   clearModelVisibilityFocus: () => set({ modelVisibilityFocus: null }),
-  loadModels: async (options) => {
+  loadModels: (options) => _coalesceModelLoad(async () => {
+    if (!options?.catalogOnly) set({ modelsLoading: true, modelsLoadError: null })
     try {
+      // Retry only failed active controls. Re-hydrating saved navigation here
+      // would discard the user's prompt/model choices after a brief outage.
+      if (options?.recoverOnly && get().modelsLoaded
+        && _studioPreferencesHydrated && _modelVisibilityHydrated && _h3WindowOverridesHydrated) {
+        if (_modelCatalogReadFailed) {
+          const data = await _readModelCatalog()
+          set({families: data.families, models: _catalogModels(data.models)})
+        }
+        const active = get().params.model_type
+        if (active && !sfxModelTypes.has(active)) {
+          const [, defaultsLoaded] = await Promise.all([
+            get().modelOptions?.model_type === active ? Promise.resolve() : _loadStartupOptions(get, active, true),
+            _startupDefaultsPending?.modelType === active
+              ? _applyModelDefaults(get, set, active, _startupDefaultsPending.baseline) : Promise.resolve(true),
+          ])
+          if (get().params.model_type === active && (!defaultsLoaded || get().modelOptions?.model_type !== active)) {
+            throw new Error('Model settings are not available yet. Retry when Maestro is ready.')
+          }
+        }
+        return
+      }
       const shouldHydrateVisibility = !_modelVisibilityHydrated
       const shouldHydrateH3WindowOverrides = !_h3WindowOverridesHydrated
       const shouldHydrateStudioPreferences = !_studioPreferencesHydrated
+      let preferencesReadFailed = false
       const [data, visibility, h3WindowPreferences, studioPreferences] = await Promise.all([
-        api.fetchModels(),
+        _readModelCatalog(),
         shouldHydrateVisibility
-          ? api.fetchModelVisibility().catch(error => {
-              console.warn('Failed to load model visibility:', error)
-              return null
-            })
+          ? api.fetchModelVisibility()
           : Promise.resolve(null),
         shouldHydrateH3WindowOverrides
-          ? api.fetchH3WindowOverrides().catch(error => {
-              console.warn('Failed to load H3 window overrides:', error)
-              return null
-            })
+          ? api.fetchH3WindowOverrides()
           : Promise.resolve(null),
         shouldHydrateStudioPreferences
           ? api.fetchStudioPreferences().catch(error => {
-              console.warn('Failed to load Studio preferences:', error)
+              // Keep a same-origin browser cache usable during an outage,
+              // but never mirror those fallback values over server settings.
+              if (!_loadSettings()) throw error
+              preferencesReadFailed = true
               return null
             })
           : Promise.resolve(null),
@@ -5481,15 +5567,8 @@ export const useStore = create<AppState>((set, get) => ({
       // stricter per-workflow contract than Studio; rebuilding model objects
       // field-by-field used to discard that metadata and leave both Director
       // selectors empty even though compatible models were enabled.
-      const backendModels: ModelDef[] = data.models.map(m => ({
-        ...m,
-        guidance_max_phases: m.guidance_max_phases ?? 1,
-        fps: m.fps ?? 16,
-        is_downloaded: m.is_downloaded ?? false,
-        nsfw_only: m.nsfw_only ?? false,
-      }))
       // Inject virtual SFX (MMAudio) models alongside backend models
-      const models = [...backendModels, ...SFX_VIRTUAL_MODELS]
+      const models = _catalogModels(data.models)
 
       // Installing a checkpoint refreshes the catalog while a user may be
       // composing or generating. Boot-time preference/default hydration
@@ -5726,7 +5805,7 @@ export const useStore = create<AppState>((set, get) => ({
         set(s => ({
           families,
           models,
-          modelsLoaded: true,
+          modelsLoaded: !preferencesReadFailed,
           generationMode: mode,
           ...(bootedIntoRecast
             ? { editSubMode: 'recast' as const }
@@ -5770,7 +5849,7 @@ export const useStore = create<AppState>((set, get) => ({
         set(s => ({
           families,
           models,
-          modelsLoaded: true,
+          modelsLoaded: !preferencesReadFailed,
           selectedModelPerMode: { ...selectedModelPerMode, [mode]: initialModelType },
           selectedModelPerAudioSubMode,
           ...(mode === 'image' ? { resolutionPreset: 'auto' as ResolutionPreset, aspectRatio: 'auto' as AspectRatio } : {}),
@@ -5801,10 +5880,17 @@ export const useStore = create<AppState>((set, get) => ({
       // without it the sliders would show INITIAL_PARAMS' generic values
       // instead of the model's.
       const mt = initialModelType || get().params.model_type
+      let modelSettingsUnavailable = false
       if (mt && !sfxModelTypes.has(mt)) {
+        const [, defaultsLoaded] = await Promise.all([
+          _loadStartupOptions(get, mt), _applyModelDefaults(get, set, mt),
+        ])
+        modelSettingsUnavailable = get().params.model_type === mt
+          && (!defaultsLoaded || get().modelOptions?.model_type !== mt)
         get().loadLoras(mt)
-        get().loadModelOptions(mt)
-        _applyModelDefaults(get, set, mt)
+      }
+      if (preferencesReadFailed) {
+        throw new Error('Using cached preferences while Maestro reconnects. Retry to restore saved settings.')
       }
       if (
         mode === 'video'
@@ -5836,11 +5922,28 @@ export const useStore = create<AppState>((set, get) => ({
           return { enabledModels: next }
         })
       }
+      // Finish the one-time preference/LoRA migration even when just the
+      // active model's metadata failed. Recovery then only retries those
+      // controls and never rehydrates over an in-progress prompt.
+      const finalModel = get().params.model_type
+      if (finalModel && finalModel !== mt && !sfxModelTypes.has(finalModel)) {
+        const [, defaultsLoaded] = await Promise.all([
+          _loadStartupOptions(get, finalModel), _applyModelDefaults(get, set, finalModel),
+        ])
+        modelSettingsUnavailable = get().params.model_type === finalModel
+          && (!defaultsLoaded || get().modelOptions?.model_type !== finalModel)
+      }
+      if (modelSettingsUnavailable) {
+        throw new Error('Model settings are not available yet. Retry when Maestro is ready.')
+      }
     } catch (e) {
       console.error('Failed to load models:', e)
       if (options?.catalogOnly) throw e
+      set({ modelsLoadError: e instanceof Error ? e.message : 'Could not load model controls.' })
+    } finally {
+      if (!options?.catalogOnly) set({ modelsLoading: false })
     }
-  },
+  }, options?.catalogOnly),
 
   resolutionPreset: '720p',
   setResolutionPreset: (preset) => {
@@ -9516,7 +9619,7 @@ export const useStore = create<AppState>((set, get) => ({
   modelOptions: null,
   modelOptionsLoading: false,
 
-  loadModelOptions: async (modelType) => {
+  loadModelOptions: async (modelType, preserveEditsSince) => {
     const seq = ++_modelOptionsSeq
     set({ modelOptionsLoading: true })
     try {
@@ -9844,10 +9947,20 @@ export const useStore = create<AppState>((set, get) => ({
           : ''
         Object.assign(paramUpdates, ttsVoicePaths(trimmedVoices, nextVoiceCount))
       }
+      if (preserveEditsSince) {
+        for (const field of [..._PRIMARY_MODEL_DEFAULT_FIELDS, 'custom_settings']) {
+          if (!Object.is(
+            (activeState.params as unknown as Record<string, unknown>)[field],
+            (preserveEditsSince as unknown as Record<string, unknown>)[field],
+          )) delete (paramUpdates as Record<string, unknown>)[field]
+        }
+      }
       set(s => ({
         ...ttsDefaults,
         modelOptions: options,
         modelOptionsLoading: false,
+        ...(!activeState.modelsLoading && activeState.modelsLoaded && !_modelCatalogReadFailed
+          && _startupDefaultsPending?.modelType !== modelType ? {modelsLoadError: null} : {}),
         durationSeconds: (
           typeof ttsDefaults.durationSeconds === 'number'
             ? ttsDefaults.durationSeconds
@@ -12575,6 +12688,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   outputsLoading: false,
+  galleryInitializing: true,
   loadOutputs: async () => {
     const revision = ++_galleryRevision
     ++_galleryMetadataRevision

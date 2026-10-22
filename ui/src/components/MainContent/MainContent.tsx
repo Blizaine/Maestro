@@ -615,6 +615,8 @@ export function MainContent() {
   const rootOutputsLoaded = useStore(s => s.outputs.length)
   const hasMoreOutputs = useStore(s => s.outputs.length < s.outputsTotal)
   const outputsLoading = useStore(s => s.outputsLoading)
+  const galleryInitializing = useStore(s => s.galleryInitializing)
+  const galleryLoading = outputsLoading || galleryInitializing
   const jobs = useStore(s => s.jobs)
   const pipelineId = useStore(s => s.pipelineId)
   const pipelineStatus = useStore(s => s.pipelineStatus)
@@ -1136,11 +1138,11 @@ export function MainContent() {
           </div>
 
           {/* Loading state */}
-          {outputsLoading && outputs.length === 0 && (
-            <div className="flex items-center justify-center min-h-[300px]">
+          {galleryLoading && outputs.length === 0 && (
+            <div role="status" className="flex items-center justify-center min-h-[300px]">
               <div className="flex flex-col items-center gap-3 text-text-muted">
                 <Loader2 size={24} className="animate-spin text-accent-blue" />
-                <p className="text-sm">Indexing workspace...</p>
+                <p className="text-sm">{galleryInitializing ? 'Loading workspace...' : 'Indexing workspace...'}</p>
               </div>
             </div>
           )}
@@ -1149,7 +1151,7 @@ export function MainContent() {
               to a first generation and sets the one expectation that most
               surprises new users: the first run of each model downloads
               its weights (tens of GB) before anything appears. */}
-          {!outputsLoading && outputs.length === 0 && jobs.length === 0 && (() => {
+          {!galleryLoading && outputs.length === 0 && jobs.length === 0 && (() => {
             const noun = generationMode === 'image' ? 'images'
               : generationMode === 'audio' ? 'audio' : 'videos'
             const example = generationMode === 'image'

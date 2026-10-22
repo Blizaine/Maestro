@@ -73,7 +73,7 @@ async function assertExplicitEnhancement(page, sidebar, requests, llmRequests) {
       assert.equal(provenance.original_prompt, verbatim, 'Repeated enhancement retains the source');
       assert.equal(provenance.enhanced_prompt, await prompt.inputValue());
       await page.evaluate(() => window.store.getState().startGeneration('queue'));
-      assert.deepEqual(requests.at(-1)._prompt_enhancement, provenance, 'Generation carries source into saved image metadata');
+      assert.deepEqual(requests.at(-1)._prompt_enhancement, JSON.parse(JSON.stringify(provenance)), 'Generation carries source into saved image metadata');
       await prompt.fill('A different image brief.');
       assert.equal(await page.evaluate(() => window.store.getState().params._prompt_enhancement), undefined, 'A new brief cannot inherit an unrelated source');
       await page.evaluate(provenance => {

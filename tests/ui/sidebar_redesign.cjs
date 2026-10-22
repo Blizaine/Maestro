@@ -133,7 +133,7 @@ const read = async endpoint => {
       window.options = options;
       window.resetFixture = (id = 'minimax_h3_ref2va_fused_turbo', mode = 'video', workflow = 'references') => {
         const options = window.options[id];
-        window.store.setState({models: catalogue.models, families: catalogue.families, enabledModels: new Set(catalogue.models.map(model => model.model_type)),
+        window.store.setState({modelsLoaded: true, models: catalogue.models, families: catalogue.families, enabledModels: new Set(catalogue.models.map(model => model.model_type)),
           // This harness intentionally enables every model, including legacy multi-phase LoRA fixtures.
           modelVisibilityOverrides: {},
           modelOptions: options, generationMode: mode, sidebarMode: 'studio', sidebarOpen: true,

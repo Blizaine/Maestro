@@ -1,5 +1,5 @@
 import { Settings, X } from 'lucide-react'
-import { useEffect, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
 import { useStore } from '../../stores/useStore'
 import { AvatarControls } from './AvatarControls'
 import { ViggleControls } from './ViggleControls'
@@ -16,7 +16,6 @@ import { SfxControls } from './SfxControls'
 import { MixerControls } from './MixerControls'
 import { StudioFooter } from './StudioFooter'
 import { MultiClipEditor } from './MultiClipEditor'
-import { DirectorChat } from './DirectorChat'
 import { RestyleControls } from './RestyleControls'
 import { InpaintControls } from './InpaintControls'
 import { OutpaintControls } from './OutpaintControls'
@@ -34,6 +33,18 @@ import { ImageWorkflowControls } from './ImageWorkflowControls'
 import { ControlVideoSection } from './ControlVideoSection'
 import { AppModeToggle, MaestroBrand } from '../AppModeNavigation'
 import { CharacterToolbarContext, PromptDock, SidebarLayoutContext } from './SidebarPanels'
+import { StartupStatus } from '../StartupStatus'
+
+const DirectorChat = lazy(() => import('./DirectorChat').then(module => ({default: module.DirectorChat})))
+
+function isKeyboardInput(element: Element | null): boolean {
+  if (element instanceof HTMLTextAreaElement) return !element.disabled && !element.readOnly
+  if (element instanceof HTMLInputElement) {
+    return !element.disabled && !element.readOnly
+      && ['text', 'search', 'email', 'number', 'password', 'tel', 'url'].includes(element.type)
+  }
+  return element instanceof HTMLElement && element.isContentEditable
+}
 
 function inputRevealBounds(input: HTMLElement) {
   if (input instanceof HTMLTextAreaElement) {
@@ -72,25 +83,55 @@ export function Sidebar() {
     const viewport = window.visualViewport
     let fullHeight = viewport.height
     let width = window.innerWidth
+    let focusFrame = 0
     const resize = () => {
-      // iOS browsers can shrink innerHeight along with the visual viewport.
-      // Retain the unobscured height; reset it when the orientation changes.
-      fullHeight = width === window.innerWidth ? Math.max(fullHeight, viewport.height) : viewport.height
+      const input = document.activeElement
+      const editing = sidebarOpen && !!sidebarElement?.contains(input) && isKeyboardInput(input)
+      // Browser chrome and restored tabs can leave innerHeight much taller
+      // than the visible page without a keyboard. Measure the actual viewport
+      // while idle, retaining that baseline only during text entry. This also
+      // handles iOS shrinking innerHeight together with an actual keyboard.
+      const unzoomed = Math.abs(viewport.scale - 1) < 0.01
+      fullHeight = width !== window.innerWidth || !editing || !unzoomed
+        ? viewport.height : Math.max(fullHeight, viewport.height)
       width = window.innerWidth
-      const keyboardOpen = viewport.height < Math.max(fullHeight, window.innerHeight) - 100
+      const keyboardOpen = editing && unzoomed && viewport.height < fullHeight - 100
       setVisibleViewport(previous => (
         previous?.height === viewport.height && previous.top === viewport.offsetTop && previous.keyboardOpen === keyboardOpen
           ? previous : { height: viewport.height, top: viewport.offsetTop, keyboardOpen }
       ))
     }
+    const focusChanged = () => {
+      // Focusout precedes focusin when using the keyboard's Next button. Wait
+      // until the new target is focused before resetting the height baseline.
+      cancelAnimationFrame(focusFrame)
+      focusFrame = requestAnimationFrame(resize)
+    }
+    const restore = () => {
+      if (document.visibilityState !== 'visible') return
+      fullHeight = viewport.height
+      width = window.innerWidth
+      resize()
+    }
     resize()
     viewport.addEventListener('resize', resize)
     viewport.addEventListener('scroll', resize)
+    window.addEventListener('resize', resize)
+    window.addEventListener('pageshow', restore)
+    document.addEventListener('visibilitychange', restore)
+    document.addEventListener('focusin', focusChanged)
+    document.addEventListener('focusout', focusChanged)
     return () => {
+      cancelAnimationFrame(focusFrame)
       viewport.removeEventListener('resize', resize)
       viewport.removeEventListener('scroll', resize)
+      window.removeEventListener('resize', resize)
+      window.removeEventListener('pageshow', restore)
+      document.removeEventListener('visibilitychange', restore)
+      document.removeEventListener('focusin', focusChanged)
+      document.removeEventListener('focusout', focusChanged)
     }
-  }, [isMobile])
+  }, [isMobile, sidebarOpen, sidebarElement])
   useEffect(() => {
     if (!isMobile || !sidebarOpen) return
     // iOS can scroll the document to an old caret position while opening the
@@ -335,7 +376,8 @@ export function Sidebar() {
               </button>
             </div>
           </div>
-          {isDirector ? <DirectorChat /> : studioControls}
+          <StartupStatus />
+          {isDirector ? <Suspense fallback={<p role="status" className="m-3 text-xs text-text-muted">Loading Director…</p>}><DirectorChat /></Suspense> : studioControls}
           <div className="studio-hardware shrink-0"><HardwareStatusBar /></div>
         </aside>
       </>
@@ -359,7 +401,8 @@ export function Sidebar() {
           </button>
         </div>
       </div>
-      {isDirector ? <DirectorChat /> : studioControls}
+      <StartupStatus />
+      {isDirector ? <Suspense fallback={<p role="status" className="m-3 text-xs text-text-muted">Loading Director…</p>}><DirectorChat /></Suspense> : studioControls}
       <div className="studio-hardware shrink-0"><HardwareStatusBar /></div>
     </aside>
   )

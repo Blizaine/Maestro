@@ -23,6 +23,7 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
   const studioVideoEffectiveCreateRoute = useStore(s => s.studioVideoEffectiveCreateRoute)
   const currentModel = useStore(s => s.models.find(model => model.model_type === s.params.model_type))
   const modelOptions = useStore(s => s.modelOptions)
+  const controlsPending = useStore(s => s.modelsLoading || !!s.modelsLoadError)
   const needsEnabledModel = useStore(s => s.generationMode !== 'tools'
     && !(s.generationMode === 'audio' && ['mixer', 'revoice'].includes(s.audioSubMode))
     && ((!s.servicesConfig?.nsfw_mode && s.models.find(model => model.model_type === s.params.model_type)?.nsfw_only === true)
@@ -133,7 +134,7 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
     && Object.values(imagePadding).every(value => value === 0)
   const incompatibleImageModel = generationMode === 'image'
     && !modelSupportsImageWorkflow(currentModel, imageWorkflow, imageRefs.length > 0)
-  const blocked = needsEnabledModel || viggleMissing || viggleSourcePending || needsCreateModel || needsWorkflowModel || !!avatarInputError
+  const blocked = controlsPending || needsEnabledModel || viggleMissing || viggleSourcePending || needsCreateModel || needsWorkflowModel || !!avatarInputError
     || needsGuidance || needsImage || needsReference || needsOutpaintSource || needsOutpaintArea
     || needsImageGenerateSource || needsImageWorkflowSource || needsImageMask
     || needsImageOutpaintArea || incompatibleImageModel
@@ -156,7 +157,7 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
   }
 
   if (blocked) {
-    const label = needsEnabledModel ? 'Need model' : viggleMissing ? 'Need inputs' : viggleSourcePending ? 'Check video' : needsCreateModel || needsWorkflowModel
+    const label = controlsPending ? 'Loading…' : needsEnabledModel ? 'Need model' : viggleMissing ? 'Need inputs' : viggleSourcePending ? 'Check video' : needsCreateModel || needsWorkflowModel
       ? 'Need model'
       : avatarInputError
         ? avatarInputError.startsWith('Choose') ? 'Choose speakers' : 'Need inputs'
@@ -177,7 +178,7 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
       : needsOutpaintSource
         ? 'Need source'
         : 'Choose canvas'
-    const title = needsEnabledModel
+    const title = controlsPending ? 'Waiting for model controls. Use Retry above if Maestro has restarted.' : needsEnabledModel
       ? 'Enable or select a model for this mode using Manage models.'
       : needsOutpaintArea
       ? 'Choose a larger output aspect or resize the source to create an area for Outpaint to generate.'

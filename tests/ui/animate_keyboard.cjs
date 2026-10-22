@@ -56,7 +56,9 @@ async function assertAnimateKeyboard(page, sidebar, output) {
       window.resetFixture('viggle_animate', 'video', 'animate');
       const s = window.store.getState();
       window.store.setState({selectedModelPerMode: {...s.selectedModelPerMode, image: 'flux2_klein_9b'},
-        params: {...s.params, video_guide: '/uploads/control.mp4', _viggle_source_seconds: 10, viggle_character: undefined}});
+        params: {...s.params, video_guide: '/uploads/control.mp4', _viggle_source_seconds: 10,
+          _viggle_source_info: {source: '/uploads/control.mp4', workspace: s.activeWorkspace, duration_seconds: 10},
+          viggle_character: undefined}});
     });
     await sidebar.getByRole('button', {name: 'Edit current video frame in Maestro'}).click();
     await sidebar.getByText('Editing Viggle reference frame', {exact: true}).waitFor();
