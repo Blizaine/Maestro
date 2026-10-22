@@ -3213,6 +3213,7 @@ def compile_h3_official_prompt(
     speaker_registry: Mapping[str, Any] | None = None,
     project_context: str = "",
     context_anchors: Sequence[str] | None = None,
+    visual_style: str = "",
     opening_blocking: str = "",
     closing_blocking: str = "",
     audio_plan: Mapping[str, Any] | None = None,
@@ -3302,6 +3303,25 @@ def compile_h3_official_prompt(
         audio_policy=audio_policy,
         has_driving_audio=has_driving_audio,
     )
+    style_text = _normalized_space(str(visual_style or "")).rstrip(" .")
+    if style_text:
+        style_direction = (
+            "Visual style across the entire frame: "
+            f"{style_text}. Apply this style consistently to every subject, "
+            "the environment and background, and all linework, shading, "
+            "color treatment, and rendering."
+        )
+        if _normalized_space(style_direction).casefold() not in _normalized_space(body).casefold():
+            # Ref2VA treats prose before its first shot marker as the visual-
+            # style opening. Give this explicit direction that same placement
+            # while keeping it out of the immutable source prompt. Other H3
+            # modes retain it as an introduction to their complete timeline.
+            if mode == "ref2va" and not re.search(
+                r"\[Shot\s+1\]", body, flags=re.IGNORECASE,
+            ):
+                body = f"{style_direction} [Shot 1] {body}".strip()
+            else:
+                body = f"{style_direction} {body}".strip()
     speech_forbidden = (
         _audio_policy_flag(audio_policy, "generated_speech_allowed") is False
         or (
@@ -4005,6 +4025,13 @@ def compile_h3_clip_plans(
             speaker_registry=registry,
             project_context=plan.get("_director_project_context", ""),
             context_anchors=context_anchors,
+            # Reviewed prompt text is authoritative after a user edit; stale
+            # planner metadata must not reimpose the earlier art direction.
+            visual_style=(
+                ""
+                if plan.get("_director_prompt_user_edited")
+                else plan.get("_director_visual_style", "")
+            ),
             opening_blocking=plan.get("_director_opening_blocking", ""),
             closing_blocking=plan.get("_director_closing_blocking", ""),
             audio_plan=plan.get("_director_audio_plan") or {},

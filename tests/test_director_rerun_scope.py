@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import os
 import sys
@@ -155,6 +156,135 @@ class TestDirectorRerunScope(unittest.TestCase):
             [clip["video_filename"] for clip in saved["clips"]],
             ["old-one.mp4", "old-two.mp4", "old-three.mp4"],
         )
+
+    def test_rerun_recompiles_saved_style_and_preserves_reviewed_prompt(self):
+        style = "2D anime with cel shading; avoid photorealism and 3D rendering"
+        model_def = {
+            "fps": 24,
+            "frames_minimum": 17,
+            "frames_steps": 8,
+            "frames_maximum": 345,
+            "director_video_strategy": pipeline.ROLLING_WINDOW,
+        }
+        pipeline._wgp = SimpleNamespace(
+            save_path=self.temp_dir.name,
+            get_model_def=lambda _model: model_def,
+            get_model_min_frames_and_step=lambda _model: (17, 345, 8),
+        )
+
+        cases = (
+            (
+                "style-rerun-generated",
+                "A performer dances beneath stage lights.",
+                False,
+            ),
+            (
+                "style-rerun-reviewed",
+                "Watercolor illustration with soft pigment edges: a performer "
+                "dances beneath stage lights.",
+                True,
+            ),
+        )
+        for pid, source, user_edited in cases:
+            with self.subTest(user_edited=user_edited):
+                clip_plan = {
+                    "video_prompt": source,
+                    "_director_h3_source_prompt": source,
+                    "_director_h3_compiled_prompt": "",
+                    "_director_h3_prompt_mode": "t2va",
+                    "_director_h3_model_family": "base",
+                    "_director_prompt_user_edited": user_edited,
+                    "_director_visual_style": style,
+                    "_director_subjects_on_screen": [],
+                    "_director_dialogue_beats": [],
+                }
+                pipeline._pipelines[pid] = {
+                    "id": pid,
+                    "status": "completed",
+                    "phase": "completed",
+                    "progress": {},
+                    "clip_plans": [clip_plan],
+                    "clip_images": [],
+                    "_planned_clips": [{
+                        "start": 0.0,
+                        "end": 8.0,
+                        "duration_sec": 8.0,
+                        "duration_frames": 192,
+                        "output_frames": 192,
+                        "music_timing_version": 0,
+                    }],
+                    "_clip_video_files": [],
+                    "output_files": [],
+                    "created_at": time.time(),
+                    "out_dir": self.temp_dir.name,
+                    "params": {
+                        "pipeline_type": "short_film_story",
+                        "scene_description": "A performer dances beneath stage lights.",
+                        "seamless": False,
+                        "video_model": "minimax_h3_test",
+                        "video_params": {},
+                        "video_loras": {},
+                        "_director_shot_image_policy": "prompt_only",
+                    },
+                }
+                self.assertTrue(pipeline._save_pipeline_state(pid))
+
+                compiled_during_rerun = []
+                real_preflight = pipeline._preflight_h3_director_prompts
+
+                def capture_preflight(video_model, plans, **options):
+                    result = real_preflight(video_model, plans, **options)
+                    compiled_during_rerun.append(copy.deepcopy(plans[0]))
+                    return result
+
+                output_path = os.path.join(self.temp_dir.name, f"{pid}.mp4")
+                with (
+                    patch.object(pipeline, "_validate_director_models"),
+                    patch.object(
+                        pipeline,
+                        "_saved_director_video_execution_profile",
+                        return_value={},
+                    ),
+                    patch.object(
+                        pipeline,
+                        "_preflight_h3_director_prompts",
+                        side_effect=capture_preflight,
+                    ),
+                    patch.object(
+                        pipeline,
+                        "_submit_and_wait",
+                        return_value=[output_path],
+                    ),
+                ):
+                    result = pipeline.rerun_clip_video(
+                        self.temp_dir.name, pid, 0,
+                    )
+
+                self.assertEqual(result["filename"], output_path)
+                self.assertEqual(len(compiled_during_rerun), 2)
+                self.assertEqual(
+                    compiled_during_rerun[-1]["_director_visual_style"], style,
+                )
+                self.assertEqual(
+                    compiled_during_rerun[-1]["_director_prompt_user_edited"],
+                    user_edited,
+                )
+                final_prompt = compiled_during_rerun[-1]["video_prompt"]
+                saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+                self.assertEqual(
+                    saved["clips"][0]["_director_visual_style"], style,
+                )
+                self.assertEqual(saved["clips"][0]["video_prompt"], final_prompt)
+
+                if user_edited:
+                    self.assertIn("Watercolor illustration", final_prompt)
+                    self.assertNotIn(
+                        "Visual style across the entire frame: 2D anime",
+                        final_prompt,
+                    )
+                else:
+                    self.assertIn(style, final_prompt)
+                    self.assertIn("Visual style across the entire frame", final_prompt)
 
 
 if __name__ == "__main__":

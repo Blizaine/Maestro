@@ -2266,7 +2266,7 @@ class MusicVideoPlanner(BasePlanner):
             kwargs,
             kind="music_video",
             fingerprint_payload={
-                "planner_revision": 26,
+                "planner_revision": 27,
                 **(
                     {"h3_music_physical_state_policy": "visual-prose-v1"}
                     if video_model.lower().startswith("minimax_h3") else {}
@@ -2704,7 +2704,15 @@ class MusicVideoPlanner(BasePlanner):
             "the transition that established it. Visibly complete each assigned "
             "source action in its item, describing the action rather than merely "
             "writing its event ID. Following items begin from its completed result; "
-            "do not spread an enabling action across unassigned items. Keep each text field concise.\n"
+            "do not spread an enabling action across unassigned items. "
+            "A requested opening or closing pose constrains that endpoint; it does not "
+            "mean the performer must freeze for an entire clip. For movement-led "
+            "concepts, plan visible performance that develops across each clip, with "
+            "restrained beat accents during a quiet introduction and the requested "
+            "energy when the performance builds. Preserve explicitly requested "
+            "stillness or timed holds. If a loop is requested, return the ending "
+            "pose, framing, camera position and setting to the planned opening; "
+            "do not rely on the same pose alone. Keep each text field concise.\n"
             "Required source actions: " + json.dumps(contract.get("events", []), ensure_ascii=False)
             + f"\nThe supplied timeline is fixed and exhaustive: exactly {len(groups)} groups. "
             "Do not merge, split, reorder, omit, or add groups. Return one beat row for "
@@ -4002,6 +4010,19 @@ MUSIC VIDEO RULES:
 - Keep anatomy and proportions stable. Convey energy through natural expression,
   gesture, movement, and camera work; do not invent expanding, pulsing, or bulging
   body parts. Preserve any transformation the Scene Concept explicitly requests.
+- Preserve the requested visual medium, rendering style and explicit style exclusions
+  in every visual_style field and video_prompt. Apply them to the whole frame,
+  including subjects, environments, backgrounds and shading, rather than merely
+  naming the medium in a character description. Identity references do not override
+  the Scene Concept's explicit target style. A camera or lighting change does not
+  change the rendering medium unless the user requests that change.
+- An opening or closing pose is an endpoint, not a full-clip freeze instruction.
+  For movement-led performances, describe visible development across the shot's
+  actual duration: restrained beat accents can build into the requested energetic
+  movement. Do not finish the action early and hold a static image for the rest
+  of the shot unless that pause is requested or deliberately motivated. Preserve
+  explicit stillness and timed holds. A requested loop should return to the opening
+  composition, camera and pose.
 
 {physical_continuity_rules}
 
@@ -4043,6 +4064,7 @@ Notes:
 KEEP MUSIC-VIDEO PROMPTS SIMPLE:
 For each scene, the music drives the pacing and energy. You only need to identify:
   - WHO is in frame ({"preserve user-supplied proper names and pair them with useful visible traits" if preserve_names else "the performer, by descriptor — never by name"})
+  - VISUAL MEDIUM and rendering style, including explicit exclusions, across the entire frame
   - CAMERA MOVEMENT (push-in, pull-back, orbit, handheld, low angle, etc.)
   - ATMOSPHERIC ELEMENTS (smoke, pyro, crowd cheering, lighting flashes, etc.)
   - The performer's BODY MOVEMENT in broad strokes (head bob, arms raised,

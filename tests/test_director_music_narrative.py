@@ -117,6 +117,46 @@ class MusicNarrativeTests(unittest.TestCase):
         boarding = contract_for("Show the sailor boarding the boat.")["events"][0]
         self.assertIn("boat", boarding["target_aliases"])
 
+    def test_finite_spins_are_actions_but_with_spins_is_a_choreography_noun(self):
+        finite = contract_for("The dancer spins on the beat.")
+        self.assertEqual([event["text"] for event in finite["events"]], [
+            "spins on the beat",
+        ])
+        self.assertIn("dancer", finite["events"][0]["actor_aliases"])
+
+        nominal_source = (
+            "The dancer dances with spins, footwork and floor moves, then "
+            "finishes in the starting pose."
+        )
+        nominal = contract_for(nominal_source)
+        self.assertEqual(nominal["source"], nominal_source)
+        self.assertEqual(nominal["events"], [])
+
+    def test_requester_intent_does_not_own_requested_action(self):
+        for intent in ("want", "need", "would like"):
+            source = f"I {intent} the woman to walk across the room."
+            with self.subTest(intent=intent):
+                events = contract_for(source)["events"]
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0]["text"], "walk across the room")
+                self.assertEqual(events[0]["actor_aliases"], ["woman"])
+
+        first_person = contract_for("I walk across the room.")["events"]
+        self.assertEqual(len(first_person), 1)
+        self.assertIn("i", first_person[0]["actor_aliases"])
+
+    def test_neutral_looping_dance_brief_keeps_choreography_in_source(self):
+        source = (
+            "I want a looping animated music video of a woman who starts in a "
+            "low crouch, dances energetically with spins, footwork and floor "
+            "moves, then finishes in the same pose so the clip loops smoothly."
+        )
+        contract = contract_for(source)
+        self.assertEqual(contract["revision"], 4)
+        self.assertEqual(contract["source"], source)
+        self.assertIn("spins, footwork and floor moves", contract["source"])
+        self.assertEqual(contract["events"], [])
+
     def test_native_h3_metadata_and_sound_fields_do_not_become_story_events(self):
         source = (
             "subject_definitions: The sailor boards a boat and wears a navy coat; "
@@ -134,7 +174,7 @@ class MusicNarrativeTests(unittest.TestCase):
         contract = contract_for(source)
         events = contract["events"]
 
-        self.assertEqual(contract["revision"], 3)
+        self.assertEqual(contract["revision"], 4)
         self.assertEqual([event["text"] for event in events], [
             "boards a small boat", "sails across the bay",
         ])

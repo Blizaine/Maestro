@@ -11,7 +11,7 @@ import re
 from typing import Any
 
 
-_REVISION = 3
+_REVISION = 4
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _SENTENCE_RE = re.compile(r"[^.!?;\n]+(?:[.!?;]+|$)")
 _SUBJECT_TAG_RE = re.compile(r"<\s*subject\s+\d+\s*>", re.IGNORECASE)
@@ -789,11 +789,16 @@ def _is_nominal_action_reference(
     end: int,
     verb: str,
 ) -> bool:
-    """Ignore gerunds used as references or timeline labels, not performed acts."""
+    """Ignore nominal action mentions, references, and timeline labels."""
 
-    if not _normal_text(verb).endswith("ing"):
-        return False
+    normalized_verb = _normal_text(verb)
     prefix = value[max(0, start - 96):start]
+    # In "dances with spins, footwork ...", plural "spins" names a
+    # choreography element. It is not a single performed story beat.
+    if normalized_verb == "spins" and re.search(r"\bwith\s*$", prefix, re.I):
+        return True
+    if not normalized_verb.endswith("ing"):
+        return False
     tail = value[end:min(len(value), end + 80)]
     if _ACTION_REFERENCE_HEAD_RE.match(tail):
         return True
@@ -945,6 +950,21 @@ def _actor_aliases(
                     return candidate[2]
 
     candidates = _entity_candidates(prefix)
+    requester_intent = re.match(
+        r"\s*(?P<speaker>i)\s+(?:want|need|would\s+like)\b", prefix, re.I,
+    )
+    if requester_intent:
+        # First-person request framing identifies the speaker, not the actor
+        # in the requested action. Keep ordinary first-person actions intact.
+        speaker_start = requester_intent.start("speaker")
+        candidates = [
+            candidate for candidate in candidates
+            if not (
+                candidate[0] == speaker_start
+                and candidate[2] == ["i"]
+                and candidate[1] <= requester_intent.end()
+            )
+        ]
     if action_number > 0 and prior_actor:
         connectors = list(_CONNECTOR_RE.finditer(prefix))
         if connectors:

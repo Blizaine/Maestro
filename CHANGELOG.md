@@ -8,6 +8,19 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 Public **Dev** preview. Main remains v3.1.0. See the
 [v3.2.0 release notes](docs/RELEASE_NOTES_V3.2.0.md).
 
+Dev follow-up fixes, 22 October:
+
+- Carry each Director shot's visual style into the complete H3 frame, including
+  subjects and backgrounds. Preserve it through saved projects, resume, native
+  timeline splits and individual clip reruns, while keeping edited prompts
+  authoritative.
+- Stop treating the noun in choreography descriptions such as "dancing with
+  spins" as a mandatory story action, or the requester in "I want" as its actor.
+  Keep genuine first-person actions and the original creative brief intact.
+- Clarify music-video planning instructions for rendering style, visible
+  performance across a clip, and matching loop composition and camera position.
+  Preserve explicitly requested stillness and timed holds.
+
 Dev follow-up fixes, 21 October:
 
 - Use checked video-track bounds for Viggle Animate's timeline, source frame and

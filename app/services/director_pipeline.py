@@ -1423,6 +1423,7 @@ def _save_pipeline_state_locked(pid: str) -> bool:
             "_director_speaker_registry": plan.get("_director_speaker_registry"),
             "_director_project_context": plan.get("_director_project_context"),
             "_director_environment": plan.get("_director_environment"),
+            "_director_visual_style": plan.get("_director_visual_style"),
             "_director_opening_blocking": plan.get("_director_opening_blocking"),
             "_director_closing_blocking": plan.get("_director_closing_blocking"),
             "_director_audio_plan": plan.get("_director_audio_plan"),
@@ -2865,6 +2866,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             or snapshot.get("scene_description")
             or ""
         ),
+        "_director_visual_style": clip.get("_director_visual_style", ""),
         "_director_opening_blocking": clip.get("_director_opening_blocking", ""),
         "_director_closing_blocking": clip.get("_director_closing_blocking", ""),
         "_director_audio_plan": clip.get("_director_audio_plan") or {},
@@ -3400,6 +3402,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             "_director_h3_model_family",
             "_director_speaker_registry",
             "_director_project_context",
+            "_director_visual_style",
             "_director_opening_blocking",
             "_director_closing_blocking",
             "_director_audio_plan",
@@ -5258,6 +5261,10 @@ def get_pipeline_status(pid: str, out_dir: str) -> Optional[dict]:
             "video_prompt": clip.get("video_prompt", ""),
             "window_prompts": clip.get("window_prompts", []) or [],
             "keyframe_prompts": clip.get("keyframe_prompts", []) or [],
+            "_director_prompt_user_edited": bool(
+                clip.get("_director_prompt_user_edited")
+            ),
+            "_director_visual_style": clip.get("_director_visual_style", ""),
         } for clip in clips],
         "planned_clips": [
             copy.deepcopy(clip.get("planned_clip"))
@@ -5441,6 +5448,7 @@ def _resume_pipeline_reserved(pid: str, out_dir: str) -> tuple[bool, str]:
         "_director_speaker_registry": c.get("_director_speaker_registry"),
         "_director_project_context": c.get("_director_project_context"),
         "_director_environment": c.get("_director_environment"),
+        "_director_visual_style": c.get("_director_visual_style", ""),
         "_director_opening_blocking": c.get("_director_opening_blocking"),
         "_director_closing_blocking": c.get("_director_closing_blocking"),
         "_director_audio_plan": c.get("_director_audio_plan"),
@@ -6717,6 +6725,11 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
                 shot, "spatial_setup", ""
             ),
             "_director_closing_blocking": closing_blocking,
+            # Style is explicit per shot so the compiler can apply it to the
+            # complete frame without expanding the project-wide story brief.
+            "_director_visual_style": str(
+                getattr(shot, "visual_style", "") or ""
+            ).strip(),
             # Retain the structured H3 speech contract through prompt polish,
             # persistence, resume, and Dashboard reruns. The final preflight
             # compiler uses these fields as the authoritative dialogue source.

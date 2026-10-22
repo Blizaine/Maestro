@@ -56,6 +56,124 @@ class TestDirectorProjectRevisionsAndQueue(unittest.TestCase):
             json.dump({"id": pid, "pipeline_id": pid, "clips": clips}, handle)
         return pid, path
 
+    def test_shot_visual_style_persists_and_restores_for_resume(self):
+        pid = "visual-style-resume"
+        style = (
+            "2D anime with cel shading; avoid photorealism and 3D rendering"
+        )
+        planned_clip = {
+            "start": 0.0,
+            "end": 8.0,
+            "duration_sec": 8.0,
+            "duration_frames": 128,
+            "_director_visual_style": style,
+        }
+        pipeline._pipelines[pid] = {
+            "id": pid,
+            "status": "crashed",
+            "phase": "video",
+            "params": {
+                "pipeline_type": "short_film_story",
+                "scene_description": "A dancer performs beneath neon lights.",
+                "video_model": "test-model",
+                "seamless": True,
+            },
+            "out_dir": self.temp_dir.name,
+            "clip_plans": [{
+                "video_prompt": "A watercolor dancer performs beneath neon lights.",
+                "_director_h3_source_prompt": (
+                    "A watercolor dancer performs beneath neon lights."
+                ),
+                "_director_prompt_user_edited": True,
+                "_director_visual_style": style,
+            }],
+            "_planned_clips": [planned_clip],
+            "output_files": [],
+        }
+
+        self.assertTrue(pipeline._save_pipeline_state_locked(pid))
+        saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        self.assertEqual(saved["clips"][0]["_director_visual_style"], style)
+        self.assertEqual(
+            saved["clips"][0]["planned_clip"]["_director_visual_style"],
+            style,
+        )
+
+        pipeline._pipelines.pop(pid)
+        recovered_status = pipeline.get_pipeline_status(pid, self.temp_dir.name)
+        self.assertTrue(
+            recovered_status["clip_plans"][0]["_director_prompt_user_edited"]
+        )
+        self.assertEqual(
+            recovered_status["clip_plans"][0]["_director_visual_style"],
+            style,
+        )
+
+        pipeline._wgp.get_model_def = lambda _model: {}
+        with (
+            patch.object(pipeline, "_repair_saved_h3_frame_lattice", return_value=False),
+            patch.object(pipeline, "_validate_director_models"),
+            patch.object(pipeline, "_saved_director_video_execution_profile", return_value={}),
+            patch.object(pipeline, "_validate_saved_profile_for_current_hardware"),
+            patch.object(pipeline, "_start_pipeline_worker"),
+        ):
+            ok, message = pipeline._resume_pipeline_reserved(
+                pid, self.temp_dir.name,
+            )
+
+        self.assertTrue(ok, message)
+        resumed = pipeline._pipelines[pid]
+        self.assertEqual(
+            resumed["clip_plans"][0]["_director_visual_style"], style,
+        )
+        self.assertTrue(resumed["clip_plans"][0]["_director_prompt_user_edited"])
+        self.assertEqual(
+            resumed["_planned_clips"][0]["_director_visual_style"], style,
+        )
+
+    def test_native_timeline_adaptation_keeps_each_clip_style(self):
+        styles = ["2D cel animation", "watercolor illustration"]
+        pipeline._wgp.get_model_def = lambda _model: {
+            "architecture": "minimax_h3_ref2va",
+            "omni_reference": True,
+            "director_video_strategy": "omni_reference",
+            "fps": 24,
+            "frames_minimum": 124,
+            "frames_maximum": 209,
+            "frames_steps": 17,
+        }
+        plans = [{
+            "video_prompt": f"Action {index}.",
+            "_director_visual_style": style,
+        } for index, style in enumerate(styles)]
+        clips = [{
+            "start": index * 12.0,
+            "end": (index + 1) * 12.0,
+            "duration_sec": 12.0,
+            "duration_frames": 288,
+            "music_timing_version": 0,
+            "_director_visual_style": style,
+        } for index, style in enumerate(styles)]
+
+        adapted_plans, adapted_clips = pipeline.prepare_director_timeline(
+            {
+                "video_model": "minimax_h3_ref2va",
+                "pipeline_type": "music_video",
+                "_director_video_execution_profile": {
+                    "effective_max_frames": 209,
+                },
+            },
+            plans,
+            clips,
+        )
+
+        self.assertGreater(len(adapted_plans), len(plans))
+        self.assertEqual(len(adapted_plans), len(adapted_clips))
+        for plan, clip in zip(adapted_plans, adapted_clips):
+            source_index = plan["_director_source_clip_indices"][0]
+            self.assertEqual(plan["_director_visual_style"], styles[source_index])
+            self.assertEqual(clip["_director_visual_style"], styles[source_index])
+
     def test_reviewed_clip_prompts_persist_and_clear_stale_h3_cache(self):
         pid, _path = self._saved_pipeline([
             {"image_prompt": "old image", "video_prompt": "old video",
