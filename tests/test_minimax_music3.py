@@ -214,6 +214,44 @@ class MiniMaxMusic3Tests(unittest.TestCase):
         self.assertEqual(license_manifest["repoId"], "MiniMaxAI/MiniMax-Music3")
         self.assertIn("LICENSE", license_manifest["fileList"][0])
 
+    def test_all_optimized_downloads_share_the_surviving_music3_snapshot(self):
+        namespace = _load_handler_namespace()
+        handler = namespace["family_handler"]
+        revision = "6e87e439357e25ebb563628a2ea6e93a46a8c4b1"
+        self.assertEqual(namespace["OPTIMIZED_REVISION"], revision)
+        prefix = f"https://huggingface.co/DeepBeepMeep/TTS/resolve/{revision}/"
+        model = json.loads(_read(_DEFAULT))["model"]
+        definition = handler.query_model_def("minimax_music3", {})
+        manifest, license_manifest = handler.query_model_files([], "minimax_music3")
+        self.assertEqual(manifest["revision"], revision)
+        # Check transformer, semantic encoder and support assets together: a
+        # catalog-only repair would still fail at first-use support downloads.
+        paths = set()
+        for url in model["URLs"] + definition["text_encoder_URLs"]:
+            self.assertTrue(url.startswith(prefix), url)
+            paths.add(url[len(prefix):])
+        for folder, files in zip(manifest["sourceFolderList"], manifest["fileList"]):
+            paths.update(f"{folder}/{name}" for name in files)
+        self.assertEqual(paths, {
+            "MiniMax_Music3_transformer_bf16.safetensors",
+            "MiniMax_Music3_transformer_int8_convrot.safetensors",
+            "MiniMax-Music3/rvq_depth_decoder_config.json",
+            "MiniMax-Music3/rvq_depth_decoder_bf16.safetensors",
+            "MiniMax-Music3/rvq_depth_decoder_int8_convrot.safetensors",
+            "MiniMax-Music3/condition_encoder_config.json",
+            "MiniMax-Music3/condition_encoder_fp32.safetensors",
+            "MiniMax-Music3/vocoder_config.json",
+            "MiniMax-Music3/vocoder_fp32.safetensors",
+            "MiniMax-Music3/scheduler_config.json",
+            "MiniMaxMusic3-Qwen3/MiniMaxMusic3-Qwen3_bf16.safetensors",
+            "MiniMaxMusic3-Qwen3/MiniMaxMusic3-Qwen3_int8_convrot.safetensors",
+            "MiniMaxMusic3-Qwen3/chat_template.jinja",
+            "MiniMaxMusic3-Qwen3/tokenizer.json",
+            "MiniMaxMusic3-Qwen3/tokenizer_config.json",
+        })
+        self.assertEqual(license_manifest["repoId"], "MiniMaxAI/MiniMax-Music3")
+        self.assertEqual(license_manifest["revision"], "bd348f9c49ea3c1b39f33ace3436f8fad435f24e")
+
     def test_music3_auto_engine_keeps_a4500_class_cards_on_cuda_graph_sdpa(self):
         without_flash_attention = _load_engine_resolver(vllm_supported=False)
         with_flash_attention = _load_engine_resolver(vllm_supported=True)

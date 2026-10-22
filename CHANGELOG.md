@@ -10,6 +10,10 @@ Public **Dev** preview. Main remains v3.1.0. See the
 
 Dev follow-up fixes, 22 October:
 
+- Restore all fifteen optimized MiniMax-Music3 downloads from a surviving
+  Hugging Face snapshot, repair three local-writer vision projector downloads
+  while reusing existing cached filenames, and correct the hidden Z-Image
+  eight-step ControlNet BF16 export and YuE2 model-weight license link.
 - Carry each Director shot's visual style into the complete H3 frame, including
   subjects and backgrounds. Preserve it through saved projects, resume, native
   timeline splits and individual clip reruns, while keeping edited prompts

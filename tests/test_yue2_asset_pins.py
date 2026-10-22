@@ -44,6 +44,12 @@ REMOTE_TTS_FILES = {
 
 
 class YuE2AssetPinTests(unittest.TestCase):
+    def test_license_information_uses_the_upstream_model_weight_license(self):
+        defaults = json.loads((APP_ROOT / "defaults/yue2.json").read_text(encoding="utf-8"))
+        self.assertEqual(defaults["model"]["license_name"], "CC BY-NC 4.0")
+        self.assertEqual(defaults["model"]["license_url"],
+            "https://huggingface.co/m-a-p/YuE2-3B/blob/8f24312f187763b9854adeec87e437e2b03bbff1/LICENSE")
+
     def test_handler_defaults_training_fetches_and_manifest_share_current_snapshot(self):
         self.assertEqual(DOWNLOAD_REVISION, CURRENT_DOWNLOAD_REVISION)
         manifest = json.loads((APP_ROOT / "models/TTS/yue2/assets.json").read_text(encoding="utf-8"))

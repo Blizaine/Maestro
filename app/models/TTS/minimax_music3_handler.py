@@ -14,7 +14,9 @@ MODEL_TYPE = "minimax_music3"
 OFFICIAL_REPO_ID = "MiniMaxAI/MiniMax-Music3"
 OFFICIAL_REVISION = "bd348f9c49ea3c1b39f33ace3436f8fad435f24e"
 OPTIMIZED_REPO_ID = "DeepBeepMeep/TTS"
-OPTIMIZED_REVISION = "d31b4665414200fcab779ced520b01bd9f5e07ba"
+# The publisher consolidated Hub history; the old d31b466 snapshot is gone.
+# This surviving snapshot retains all fifteen optimized Music3 assets unchanged.
+OPTIMIZED_REVISION = "6e87e439357e25ebb563628a2ea6e93a46a8c4b1"
 PROJECT_FOLDER = "MiniMax-Music3"
 TEXT_ENCODER_FOLDER = "MiniMaxMusic3-Qwen3"
 TEXT_ENCODER_BF16 = "MiniMaxMusic3-Qwen3_bf16.safetensors"

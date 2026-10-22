@@ -301,8 +301,12 @@ MODEL_REGISTRY = {
     "mradermacher/Huihui-Qwen3.5-9B-Claude-4.6-Opus-abliterated-i1-GGUF": {
         "label": "Qwen3.5 9B Claude Opus Abliterated Q6_K",
         "gguf_file": "Huihui-Qwen3.5-9B-Claude-4.6-Opus-abliterated.i1-Q6_K.gguf",
-        "mmproj_file": "mmproj-Q8_0.gguf",
-        "weights_gb": 6.85, "mmproj_gb": 0.58, "arch": "qwen3-9b",
+        # The weighted/i1 repo omits its projector; use the same model's
+        # static-quant sibling, which publishes the Q8_0 multimodal supplement.
+        "mmproj_file": "Huihui-Qwen3.5-9B-Claude-4.6-Opus-abliterated.mmproj-Q8_0.gguf",
+        "mmproj_repo": "mradermacher/Huihui-Qwen3.5-9B-Claude-4.6-Opus-abliterated-GGUF",
+        "mmproj_cache_aliases": ["mmproj-Q8_0.gguf"],
+        "weights_gb": 6.85, "mmproj_gb": 0.624, "arch": "qwen3-9b",
         "cache_dir_override": "Huihui-Qwen3.5-9B-Claude-4.6-Opus-abliterated",
         "extra_flags": [
             "-c", "65536",
@@ -417,9 +421,10 @@ MODEL_REGISTRY = {
     "Nesuwka/gemma-4-E2B-it-heretic-ara-Q4_K_M-GGUF": {
         "label": "Gemma 4 2B Heretic Uncensored (Vision, Tiny)",
         "gguf_file": "model-q4_k_m.gguf",
-        "mmproj_file": "mmproj-gemma-4-e2b-it-f16.gguf",
+        "mmproj_file": "mmproj-gemma-4-E2B-it-BF16.gguf",
         "mmproj_repo": "ggml-org/gemma-4-E2B-it-GGUF",
-        "weights_gb": 3.4, "mmproj_gb": 1.0, "arch": "gemma4-2b",
+        "mmproj_cache_aliases": ["mmproj-gemma-4-e2b-it-f16.gguf"],
+        "weights_gb": 3.4, "mmproj_gb": 0.987, "arch": "gemma4-2b",
         "thinking_style": "gemma",
         # Gemma 4 was tuned at temp=1.0; running below that leaves it
         # more deterministic than its sweet spot. frequency/presence
@@ -562,9 +567,10 @@ MODEL_REGISTRY = {
     "paperscarecrow/Gemma-4-31B-it-abliterated-gguf": {
         "label": "Gemma 4 31B Abliterated Q4_K_M (Vision)",
         "gguf_file": "gemma-4-31b-abliterated-Q4_K_M.gguf",
-        "mmproj_file": "mmproj-gemma-4-31B-it-f16.gguf",
+        "mmproj_file": "mmproj-gemma-4-31B-it-BF16.gguf",
         "mmproj_repo": "ggml-org/gemma-4-31B-it-GGUF",  # mmproj from official repo
-        "weights_gb": 17.4, "mmproj_gb": 1.12, "arch": "gemma4-27b",
+        "mmproj_cache_aliases": ["mmproj-gemma-4-31B-it-f16.gguf"],
+        "weights_gb": 17.4, "mmproj_gb": 1.2, "arch": "gemma4-27b",
         "thinking_style": "gemma",
         "sampling_defaults": {
             "temperature": 1.0, "top_p": 0.95, "top_k": 64,
@@ -1268,6 +1274,20 @@ def _download_gguf(repo_id: str, filename: str, cache_dir: str) -> str:
     )
     print(f"[LLM] Downloaded to: {downloaded}")
     return downloaded
+
+
+def _resolve_mmproj(repo_id: str, registry_entry: dict, cache_dir: str) -> tuple[str, str]:
+    """Reuse a renamed cached projector or download the registered file."""
+    mmproj_file = registry_entry.get("mmproj_file", DEFAULT_MMPROJ_FILE)
+    mmproj_repo = registry_entry.get("mmproj_repo", repo_id)
+
+    for alias in registry_entry.get("mmproj_cache_aliases", []):
+        cached = os.path.join(cache_dir, alias)
+        if os.path.isfile(cached) and os.path.getsize(cached) > 0:
+            return os.path.normpath(cached), mmproj_repo
+
+    mmproj_path = _download_gguf(mmproj_repo, mmproj_file, cache_dir)
+    return os.path.normpath(mmproj_path), mmproj_repo
 
 
 # Minimum llama.cpp build Maestro requires. Builds below this lack correct
@@ -2008,19 +2028,11 @@ def load_model(
         gguf_path = os.path.normpath(gguf_path)
 
         # Try to download mmproj for vision support (optional — not all models have it)
-        mmproj_file = registry_entry.get("mmproj_file", DEFAULT_MMPROJ_FILE)
-        mmproj_repo = registry_entry.get("mmproj_repo", repo_id)  # allow mmproj from different repo
         mmproj_path = None
         try:
-            # Reuse an already downloaded projector after an upstream rename.
-            for alias in registry_entry.get("mmproj_cache_aliases", []):
-                cached = os.path.join(cache_dir, alias)
-                if os.path.isfile(cached) and os.path.getsize(cached) > 0:
-                    mmproj_path = cached
-                    break
-            if mmproj_path is None:
-                mmproj_path = _download_gguf(mmproj_repo, mmproj_file, cache_dir)
-            mmproj_path = os.path.normpath(mmproj_path)
+            mmproj_path, mmproj_repo = _resolve_mmproj(
+                repo_id, registry_entry, cache_dir
+            )
             print(f"[LLM] Vision support: mmproj loaded from {mmproj_repo}")
         except Exception as e:
             print(f"[LLM] No mmproj available (vision disabled): {e}")
