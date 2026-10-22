@@ -9031,6 +9031,33 @@ def _camera_event_card_schema(segment_number: int, assigned_beats: list[dict[str
     })
 
 
+def _project_schema_fields(value: Any, schema: dict[str, Any]) -> Any:
+    """Drop only recognized provider bookkeeping, preserving semantic extras."""
+
+    schema_type = schema.get("type")
+    if schema_type == "object" and isinstance(value, dict):
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            return value
+        projected = {}
+        for key, item in value.items():
+            normalized_key = str(key).casefold()
+            if normalized_key in {"provider_note", "provider_trace", "provider_metadata"}:
+                continue
+            child_schema = properties.get(key)
+            projected[key] = (
+                _project_schema_fields(item, child_schema)
+                if isinstance(child_schema, dict) else item
+            )
+        return projected
+    if schema_type == "array" and isinstance(value, list):
+        item_schema = schema.get("items")
+        if not isinstance(item_schema, dict):
+            return value
+        return [_project_schema_fields(item, item_schema) for item in value]
+    return value
+
+
 def _expand_camera_event_cards(
     segment: dict[str, Any], *, assigned_beats: list[dict[str, Any]],
     segment_number: int, duration: float,
@@ -9043,6 +9070,21 @@ def _expand_camera_event_cards(
     copy and count identifiers. Do not invent a card if a provider ignores the
     schema: incomplete writing still needs repair/review.
     """
+
+    # Some providers append benign bookkeeping fields despite the structured
+    # schema. Ignore those fields, while leaving every required value and
+    # source-ordered event assignment subject to the same checks below.
+    source_proof = segment.get("_source_camera_proof") if isinstance(segment, dict) else None
+    segment = _project_schema_fields(
+        segment, _camera_event_card_schema(segment_number, assigned_beats),
+    )
+    if not isinstance(segment, dict):
+        raise ValueError("Camera draft must be an object.")
+    if source_proof is not None:
+        # This opaque compiler evidence is attached after the provider draft is
+        # schema-projected. Keep it through event-card compilation so exact
+        # source actions remain trusted during validation.
+        segment["_source_camera_proof"] = source_proof
 
     events = segment.get("event_cards")
     expected_keys = [f"event_{i}" for i in range(1, len(assigned_beats) + 1)]
@@ -15062,6 +15104,13 @@ def _render_h3_story_segments(
         def canonicalize_camera_draft(draft):
             if source_camera is not None:
                 try:
+                    if isinstance(draft, dict):
+                        draft = _project_schema_fields(draft, schema)
+                        raw_segment_number = draft.get("segment")
+                        if (isinstance(raw_segment_number, str)
+                                and re.fullmatch(r"[1-9]\d*", raw_segment_number.strip())
+                                and int(raw_segment_number.strip()) == segment_number):
+                            draft["segment"] = segment_number
                     draft = _h3_source_camera_optics_only(draft, cast_names)
                     draft = source_camera.bind(draft)
                 except ValueError as error:
@@ -15076,6 +15125,42 @@ def _render_h3_story_segments(
                     and segment_number < segment_count
                 ),
             )
+
+        def note_camera_repair_failure(error: Exception) -> None:
+            reason = f"Focused camera repair failed ({type(error).__name__}): {error}"
+            planning_diagnostics.append(
+                f"Window {segment_number}: {reason} The last parsed camera draft "
+                "remains available for source-scoped recovery."
+            )
+            try:
+                from services.enhancement_diagnostics import record_rejection
+
+                record_rejection(
+                    [reason],
+                    stage=f"H3 window {segment_number} camera repair",
+                )
+            except Exception:
+                pass
+
+        def record_camera_validation_rejection(errors: list[str]) -> None:
+            # The separate source-coverage reviewer can confirm only lexical
+            # paraphrase omissions. Record hard contract failures immediately,
+            # while the camera response is still the active diagnostic draft.
+            hard_errors = [
+                error for error in errors
+                if not re.match(r"^\S+ shot action omits required source step:", error)
+            ]
+            if not hard_errors:
+                return
+            try:
+                from services.enhancement_diagnostics import record_rejection
+
+                record_rejection(
+                    hard_errors,
+                    stage=f"H3 window {segment_number} camera repair",
+                )
+            except Exception:
+                pass
 
         try:
             raw = generate(
@@ -15104,6 +15189,7 @@ def _render_h3_story_segments(
                 dialogue_catalog=catalog,
                 accepted_segments=segments,
             )
+            record_camera_validation_rejection(segment_errors)
             from services.h3_camera_fidelity import (
                 CameraReviewBudget, clear_confirmed_coverage_errors,
                 review_missing_camera_actions,
@@ -15194,42 +15280,53 @@ def _render_h3_story_segments(
                 from services.llm_sampling import caller_sampling
                 from promptbench.experiments import camera_repair_sampling_enabled
                 camera_repair_attempts += 1
-                with caller_sampling(camera_repair_sampling_enabled()):
-                    raw = generate(
-                        prompt=(
-                            repair_prompt
-                            + "\n\nPREVIOUS REJECTED SEGMENT JSON:\n"
-                            + rejected
-                            + "\n\nREPAIR ONLY THIS SEGMENT. Correct these violations:\n- "
-                            + "\n- ".join(feedback)
-                            + "\nReturn the complete event_cards object required by the schema. Maestro supplies the clock and ownership. "
-                            "Correct the named cards and preserve the other cards. "
-                            "Do not add, repeat, recap, or preview any event."
-                        ),
-                        system_prompt=camera_guide,
-                        max_new_tokens=min(8192, segment_token_budget * 2),
-                        temperature=0.08,
-                        top_p=0.78,
-                        image_paths=camera_images,
-                        enable_thinking=False,
-                        frequency_penalty=0.0,
-                        presence_penalty=0.0,
-                        json_schema=repair_schema,
-                    )
-                segment = _parse_json_object(raw, allow_repair=False)
-                if repair_keys:
-                    patches = segment.get("event_cards") if isinstance(segment, dict) else None
-                    if not isinstance(patches, dict) or any(key not in patches for key in repair_keys):
-                        raise ValueError("camera repair omitted a requested event card")
-                    # Ignore unrequested cards/metadata even if a remote
-                    # writer does not honor the restricted output schema.
-                    camera_draft["event_cards"].update({key: patches[key] for key in repair_keys})
-                    segment = camera_draft
-                else:
-                    # A later retry must see the newest rejected draft, not
-                    # the original response that began this repair sequence.
-                    camera_draft = deepcopy(segment)
-                segment = canonicalize_camera_draft(segment)
+                try:
+                    with caller_sampling(camera_repair_sampling_enabled()):
+                        raw = generate(
+                            prompt=(
+                                repair_prompt
+                                + "\n\nPREVIOUS REJECTED SEGMENT JSON:\n"
+                                + rejected
+                                + "\n\nREPAIR ONLY THIS SEGMENT. Correct these violations:\n- "
+                                + "\n- ".join(feedback)
+                                + "\nReturn the complete event_cards object required by the schema. Maestro supplies the clock and ownership. "
+                                "Correct the named cards and preserve the other cards. "
+                                "Do not add, repeat, recap, or preview any event."
+                            ),
+                            system_prompt=camera_guide,
+                            max_new_tokens=min(8192, segment_token_budget * 2),
+                            temperature=0.08,
+                            top_p=0.78,
+                            image_paths=camera_images,
+                            enable_thinking=False,
+                            frequency_penalty=0.0,
+                            presence_penalty=0.0,
+                            json_schema=repair_schema,
+                        )
+                    repaired_draft = _parse_json_object(raw, allow_repair=False)
+                    if not isinstance(repaired_draft, dict):
+                        raise ValueError("camera repair returned invalid JSON")
+                    if repair_keys:
+                        patches = repaired_draft.get("event_cards")
+                        if not isinstance(patches, dict) or any(key not in patches for key in repair_keys):
+                            raise ValueError("camera repair omitted a requested event card")
+                        # Ignore unrequested cards/metadata even if a remote
+                        # writer does not honor the restricted output schema.
+                        repaired_draft = deepcopy(camera_draft)
+                        repaired_draft["event_cards"].update(
+                            {key: patches[key] for key in repair_keys}
+                        )
+                    repaired_segment = canonicalize_camera_draft(repaired_draft)
+                except InterruptedError:
+                    raise
+                except Exception as error:
+                    note_camera_repair_failure(error)
+                    break
+                # A later retry must see the newest parsed draft, but a broken
+                # repair response must leave the last usable camera writing
+                # available to event-scoped recovery below.
+                camera_draft = deepcopy(repaired_draft)
+                segment = repaired_segment
                 segment_errors = segment_violations(
                     prompt,
                     segment,
@@ -15239,6 +15336,7 @@ def _render_h3_story_segments(
                     dialogue_catalog=catalog,
                     accepted_segments=segments,
                 )
+                record_camera_validation_rejection(segment_errors)
                 # A focused repair may leave other, already-reviewed cards
                 # untouched. Reuse their evidence only while it still matches.
                 segment_errors = clear_confirmed_coverage_errors(
@@ -15303,6 +15401,16 @@ def _render_h3_story_segments(
         except InterruptedError:
             raise
         except Exception as error:
+            if not segment_errors:
+                try:
+                    from services.enhancement_diagnostics import record_rejection
+
+                    record_rejection(
+                        [f"Camera draft was unusable ({type(error).__name__}): {error}"],
+                        stage=f"H3 window {segment_number} camera repair",
+                    )
+                except Exception:
+                    pass
             print(f"[MiniMax H3] Segment {segment_number} fallback: {error}")
             review_windows.add(segment_number)
             planned_by = "deterministic_fallback"

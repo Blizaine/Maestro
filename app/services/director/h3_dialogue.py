@@ -4057,6 +4057,8 @@ def compile_h3_clip_plans(
             has_driving_audio=transcript_only[index],
         )
         if errors:
+            from services.enhancement_diagnostics import record_rejection
+            record_rejection(errors, stage=f"Director H3 shot {index + 1}")
             raise H3DialogueContractError(
                 f"Shot {index + 1}: " + "; ".join(errors)
             )

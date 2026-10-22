@@ -19,6 +19,10 @@ from services.h3_performance_audio import (
     has_h3_performance_audio,
     performance_audio_item_duration_seconds,
 )
+from services.h3_reference_audio import (
+    normalize_video_audio_role,
+    video_drive_prompt_context,
+)
 
 from services.h3_story_ledger import (
     H3DialogueTimingError,
@@ -54,7 +58,7 @@ from services.h3_window_planner import (
 # is persisted with reviewed/generated window prompts, so this prevents a run
 # restored from gallery metadata from silently reusing pre-fix dialogue and
 # reference bindings.
-_H3_SEQUENCE_PLANNER_VERSION = 9 + H3_STORY_LEDGER_VERSION
+_H3_SEQUENCE_PLANNER_VERSION = 10 + H3_STORY_LEDGER_VERSION
 _H3_CLIP_BOUNDARY = "\n---CLIP_BOUNDARY---\n"
 
 
@@ -203,8 +207,14 @@ def h3_sequence_plan_signature(
             "role": item.get("role"),
             "image_intent": item.get("image_intent"),
             "audio_intent": item.get("audio_intent"),
+            "video_audio_role": (
+                normalize_video_audio_role(item)
+                if str(item.get("type") or item.get("kind") or "").strip().lower() == "video"
+                else None
+            ),
             "include_audio": item.get("include_audio"),
             "audio_path": item.get("audio_path"),
+            "audio_duration_seconds": item.get("audio_duration_seconds"),
         }
         for item in (references or [])
         if isinstance(item, dict)
@@ -538,7 +548,16 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                     f"<Video {video}> provides motion, camera, scene, or timing reference for {role}."
                 )
                 retention.append(f"<Video {video}>: partially_preserved")
-            if (item.get("has_audio") or item.get("audio_path")) and item.get("include_audio", True):
+            audio_role = normalize_video_audio_role(item)
+            derived_audio_row = bool(
+                item.get("_h3_video_audio_source_id")
+                and not item.get("_h3_video_audio_role_routed")
+            )
+            if (
+                audio_role == "legacy"
+                and (item.get("has_audio") or item.get("audio_path"))
+                and item.get("include_audio", True)
+            ):
                 audio += 1
                 relationships.append(
                     f"<Audio {audio}> is the soundtrack paired with <Video {video}> and keeps its audible timeline."
@@ -546,6 +565,45 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                 retention.append(f"<Audio {audio}>: partially_copy")
                 if "audio reuse" not in task_types:
                     task_types.append("audio reuse")
+            elif audio_role == "drive" and not derived_audio_row:
+                relationships.extend(video_drive_prompt_context(
+                    item, video_index=video, role=role,
+                ))
+                retention.append("Exact target soundtrack: fully_preserved")
+                if "audio reuse" not in task_types:
+                    task_types.append("audio reuse")
+            elif audio_role in {"voice", "style", "sound"} and not derived_audio_row:
+                audio += 1
+                if audio_role == "style":
+                    relationships.append(
+                        f"<Audio {audio}> supplies sound, music, rhythm, or texture style for {role}, without copying its signal."
+                    )
+                    retention.append(f"<Audio {audio}>: weak_reference")
+                    if "audio reference" not in task_types:
+                        task_types.append("audio reference")
+                elif audio_role == "sound":
+                    relationships.append(
+                        f"<Audio {audio}> is a reusable sound-effect reference for {role}; generate matching effects for the requested actions using its timbre and texture, with timing determined by those actions in each window."
+                    )
+                    retention.append(f"<Audio {audio}>: reference")
+                    if "audio reference" not in task_types:
+                        task_types.append("audio reference")
+                else:
+                    character_key = str(item.get("library_character_id") or "").strip()
+                    mapped_subject = (
+                        character_subjects.get(character_key)
+                        if character_key else role_subjects.get(str(role).strip().casefold())
+                    )
+                    if mapped_subject is None and (character_key or str(role).strip()):
+                        pending_voice.append((audio, item, role))
+                    else:
+                        target = f"<Subject {mapped_subject}>" if mapped_subject else str(role)
+                        relationships.append(
+                            f"<Audio {audio}> is the voice-timbre reference for {target}, guiding emotion and delivery without reusing source words or timing."
+                        )
+                        retention.append(f"<Audio {audio}>: reference")
+                    if "audio reference" not in task_types:
+                        task_types.append("audio reference")
         else:
             intent = item.get("audio_intent", "voice")
             if intent == "drive":

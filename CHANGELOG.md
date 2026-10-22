@@ -10,6 +10,17 @@ Public **Dev** preview. Main remains v3.1.0. See the
 
 Dev follow-up fixes, 22 October:
 
+- Fix H3 enhancement falsely treating motion-video retention entries as new
+  characters. Save writer drafts and specific rejection reasons locally for
+  Studio and Director, including failed/interrupted requests. Review them in
+  Studio's prompt history or the Director Dashboard.
+- Preserve accepted multi-window prompts during focused repairs and retain
+  usable camera cards when a repair call fails. Keep incomplete schedules
+  reviewable without replacing them with one repeated original paragraph.
+- Give video soundtracks explicit audio roles in Studio and Director: preserve
+  soundtrack, voice, music/sound style, sound effect, ignore, or the previous
+  generative audio-reference behavior. Existing saved checkbox settings retain
+  their meaning. See [H3 reference audio and draft recovery](docs/H3-Reference-Audio-and-Drafts.md).
 - Restore all fifteen optimized MiniMax-Music3 downloads from a surviving
   Hugging Face snapshot, repair three local-writer vision projector downloads
   while reusing existing cached filenames, and correct the hidden Z-Image

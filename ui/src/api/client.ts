@@ -278,7 +278,9 @@ export async function planH3Windows(params: {
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'H3 window planning failed' }))
-    throw new Error(err.detail || 'H3 window planning failed')
+    throw Object.assign(new Error(err.detail || 'H3 window planning failed'), {
+      draft_history_id: res.headers.get('X-Maestro-Draft-History') || undefined,
+    })
   }
   return res.json()
 }
@@ -372,7 +374,9 @@ export async function planH3Sequence(params: {
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'H3 sequence planning failed' }))
-    throw new Error(err.detail || 'H3 sequence planning failed')
+    throw Object.assign(new Error(err.detail || 'H3 sequence planning failed'), {
+      draft_history_id: res.headers.get('X-Maestro-Draft-History') || undefined,
+    })
   }
   return res.json()
 }
@@ -2366,6 +2370,7 @@ export async function llmEnhancePrompt(params: {
   original: string
   enhanced: string
   warnings?: string[]
+  draft_history_id?: string
 }> {
   const res = await fetch(`${BASE}/api/v1/llm/enhance-prompt`, {
     method: 'POST',
@@ -2374,7 +2379,9 @@ export async function llmEnhancePrompt(params: {
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Enhancement failed' }))
-    throw new Error(err.detail || 'Enhancement failed')
+    throw Object.assign(new Error(err.detail || 'Enhancement failed'), {
+      draft_history_id: res.headers.get('X-Maestro-Draft-History') || undefined,
+    })
   }
   return res.json()
 }
@@ -3180,6 +3187,16 @@ export async function fetchActiveDownloads(
   const res = await fetch(`${BASE}/api/v1/downloads/active${query}`, { signal })
   if (!res.ok) throw new Error(`Failed to fetch active downloads (${res.status})`)
   return res.json()
+}
+
+export async function fetchWriterDrafts(kind: 'director' | 'interactive', id: string): Promise<import('../components/WriterDraftHistory').WriterDraft[]> {
+  const route = kind === 'director'
+    ? `/api/v1/director/pipeline/${encodeURIComponent(id)}/llm-drafts`
+    : `/api/v1/llm/drafts/${encodeURIComponent(id)}`
+  const response = await fetch(`${BASE}${route}`)
+  if (!response.ok) throw new Error('Could not load saved writer drafts.')
+  const data = await response.json()
+  return data.drafts || []
 }
 
 export async function fetchJobEnhancement(jobId: string): Promise<{

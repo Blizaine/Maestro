@@ -12,6 +12,7 @@ import re
 import socket
 import threading
 from typing import Callable
+from services.enhancement_diagnostics import capture_drafts
 
 
 _request_context: ContextVar[dict | None] = ContextVar("studio_enhancement", default=None)
@@ -169,13 +170,14 @@ def close_response(response) -> None:
 
 
 @contextmanager
-def enhancement_context(settings: dict, cancelled: Callable[[], bool]):
+def enhancement_context(settings: dict, cancelled: Callable[[], bool], *, drafts=None, on_drafts=None):
     token = _request_context.set({"settings": settings, "cancelled": cancelled,
                                   "warnings": [], "continuity_reviews": []})
     try:
-        check_cancelled()
-        yield
-        check_cancelled()
+        with capture_drafts(drafts, on_change=on_drafts):
+            check_cancelled()
+            yield
+            check_cancelled()
     finally:
         _request_context.reset(token)
 
@@ -191,12 +193,14 @@ def new_enhancement(params: dict, services: dict) -> dict:
     }
 
 
-def public_enhancement(record: dict | None, *, summary: bool = False) -> dict | None:
+def public_enhancement(record: dict | None, *, summary: bool = False, include_drafts: bool = False) -> dict | None:
     if not record:
         return None
     keys = ["version", "state", "warnings", "error", "continuity_reviews"]
     if not summary:
         keys.extend(["original_prompt", "enhanced_prompt"])
+    if include_drafts:
+        keys.append("drafts")
     return {key: deepcopy(record.get(key)) for key in keys}
 
 
@@ -219,7 +223,8 @@ def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
     if omni:
         from services.h3_sequence_planner import _reference_context
         from models.minimax_h3.ref2va import canonicalize_ref2va_reference_order
-        references = params.get("minimax_h3_references") or []
+        from services.h3_reference_audio import measure_video_audio_metadata
+        references = measure_video_audio_metadata(params.get("minimax_h3_references") or [])
         _, references, _ = canonicalize_ref2va_reference_order("", references)
         relationships, retention, _ = _reference_context(references)
         context.extend([relationships, retention])

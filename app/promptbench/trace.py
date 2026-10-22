@@ -37,6 +37,8 @@ def expired():
 
 
 def record_payload(payload, *, model_id=None, command=None):
+    from services.enhancement_diagnostics import record_payload as diagnostic_payload
+    diagnostic_payload(payload, model_id=model_id)
     call = _call.get()
     if call is not None:
         call["payload"] = sanitize(payload)
@@ -46,6 +48,8 @@ def record_payload(payload, *, model_id=None, command=None):
 
 
 def record_metrics(metrics):
+    from services.enhancement_diagnostics import record_metrics as diagnostic_metrics
+    diagnostic_metrics(metrics)
     call = _call.get()
     if call is not None:
         call["metrics"] = sanitize(metrics)
@@ -53,6 +57,8 @@ def record_metrics(metrics):
 
 def record_response(content, reasoning="", *, complete=True):
     """Retain local-writer text before stripping, including an interrupted stream."""
+    from services.enhancement_diagnostics import record_response as diagnostic_response
+    diagnostic_response(content, reasoning, complete=complete)
     call = _call.get()
     if call is not None:
         call["raw_response"] = {"content": sanitize(content), "reasoning_content": sanitize(reasoning),
@@ -83,4 +89,5 @@ def traced(function):
         finally:
             entry["seconds"] = round(time.monotonic() - started, 3)
             _call.reset(token)
-    return wrapped
+    from services.enhancement_diagnostics import diagnostic_call
+    return diagnostic_call(wrapped)

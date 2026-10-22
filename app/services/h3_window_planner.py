@@ -24,6 +24,7 @@ from services.h3_story_ledger import (
     UNREQUESTED_SPECTACLE_PATTERNS,
     extract_h3_source_intent,
     extract_locked_dialogue,
+    extract_source_events,
     has_h3_window_bookkeeping,
     normalize_h3_planning_style,
     plan_h3_story_segments,
@@ -1252,6 +1253,30 @@ def _fallback_plan(
         for part in beat_separator.split(source)
         if part.strip(" ,;:-")
     ]
+    # Timed source-video motion edits may put several ordered actions in one
+    # punctuation-free paragraph. When the source has no dialogue, use the
+    # ledger's already-parsed source events if they expose more detail than
+    # the lightweight sentence splitter. This keeps each exact source action
+    # in its own ordered slot without inventing choreography.
+    if not extract_locked_dialogue(source) and not re.search(
+        r"\b(?:says?|said|speaks?|spoke|asks?|asked|replies?|answers?|"
+        r"shouts?|whispers?|tells?|told|explains?|explained|announces?|announced)\b",
+        source,
+        flags=re.IGNORECASE,
+    ):
+        try:
+            source_events = extract_source_events(source)
+            event_beats = [
+                str(event.get("text") or "").strip()
+                for event in source_events
+                if isinstance(event, dict) and str(event.get("text") or "").strip()
+            ]
+            if len(event_beats) > len(beats):
+                beats = event_beats
+        except Exception:
+            # Keep the conservative sentence-based fallback if source
+            # extraction cannot make a stable ordered schedule.
+            pass
     if not beats:
         beats = ["Establish and begin the requested action"]
     beat_buckets: list[list[str]] = [[] for _ in range(window_count)]

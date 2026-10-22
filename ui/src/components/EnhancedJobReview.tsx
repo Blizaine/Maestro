@@ -4,6 +4,7 @@ import { X } from 'lucide-react'
 import * as api from '../api/client'
 import { useStore } from '../stores/useStore'
 import type { GenerationJob } from '../types'
+import { LoadWriterDraftHistory, WriterDraftHistory } from './WriterDraftHistory'
 
 export function EnhancedJobReview({job, onClose, onSubmitted}: {job: GenerationJob; onClose: () => void; onSubmitted?: () => void}) {
   const dialog = useRef<HTMLDialogElement>(null)
@@ -93,6 +94,9 @@ export function EnhancedJobReview({job, onClose, onSubmitted}: {job: GenerationJ
           <p className="whitespace-pre-wrap break-words text-xs leading-relaxed">{data.enhancement.enhanced_prompt}</p>
         </div>}
       {data.enhancement.warnings?.map((warning, index) => <p key={index} className="mb-2 text-xs text-indicator-warning">{warning}</p>)}
+      <WriterDraftHistory drafts={data.enhancement.drafts || []}/>
+      {data.enhancement.draft_history_id && <LoadWriterDraftHistory
+        load={() => api.fetchWriterDrafts('interactive', data.enhancement.draft_history_id!)}/>}
       <div className="mt-4 space-y-3 border-t border-border pt-3">
         {terminal && (review || complete) && data.prepared && <div>
           <button className={`${button} bg-accent-blue text-white`} disabled={busy}
@@ -121,10 +125,10 @@ export function EnhancedJobReview({job, onClose, onSubmitted}: {job: GenerationJ
                 <button className={button} disabled={busy} onClick={() => void act('refresh')}>Rewrite all prompts & generate</button>
                 <p className="mt-1 text-xs text-text-muted">Starts enhancement over for the entire job. Replaces every window prompt in the new draft.</p>
               </div>}
-              <div>
+              {windowCount <= 1 && <div>
                 <button className={button} disabled={busy} onClick={() => void act('as_written')}>Generate {fullJob} from original prompt</button>
                 <p className="mt-1 text-xs text-text-muted">Uses your original text with enhancement off. Ignores the AI draft shown above.</p>
-              </div>
+              </div>}
             </>}
             <button className={button} disabled={busy} onClick={() => void openDraft(true)}>Edit original prompt in Studio</button>
           </div>

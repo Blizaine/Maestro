@@ -19,7 +19,7 @@ import {
   sanitizeH3VaeUpsampling,
 } from '../lib/h3VaeUpsampling'
 import { isKreaIdentityEdit, normalizeKreaIdentitySettings, type KreaIdentitySettings } from '../lib/kreaIdentityControls'
-import type { SavedOmniCharacter, TtsVoice } from '../types'
+import type { MiniMaxH3VideoAudioRole, SavedOmniCharacter, TtsVoice } from '../types'
 import { applyTtsVoices, ttsAudioModeForCount, ttsCharacterEnhancePrompt, ttsSpeakingVoiceCount, ttsVoiceLimit, ttsVoicePaths } from '../lib/ttsVoices'
 import { vigglePreparationKey, viggleSourceReady, viggleTimeline } from '../lib/viggle'
 import { DEFAULT_AVATAR_SPEAKER_LOCATIONS, isLongCatAvatarModel, isMultiSpeakerAvatarModel, parseAvatarSpeakerRegions } from '../lib/avatarWorkflow'
@@ -222,6 +222,10 @@ function _stringArray(value: unknown): string[] {
     : []
 }
 
+function _videoAudioRole(reference: MiniMaxH3Reference): MiniMaxH3VideoAudioRole {
+  return reference.video_audio_role ?? (reference.include_audio === false ? 'ignore' : 'legacy')
+}
+
 function _omniEnhanceInventory(references: MiniMaxH3Reference[]): {
   imagePaths: string[]
   referenceContext?: string
@@ -268,8 +272,22 @@ function _omniEnhanceInventory(references: MiniMaxH3Reference[]): {
       if (reference.path) imagePaths.push(reference.path)
     } else {
       const nextVideoIndex = videoIndex + 1
-      if ((reference.has_audio || reference.audio_path) && reference.include_audio !== false) {
+      const audioRole = _videoAudioRole(reference)
+      const hasSoundtrack = Boolean(reference.has_audio || reference.audio_path)
+      if (audioRole === 'legacy' && hasSoundtrack) {
         labelLines.push(`<Audio ${++audioIndex}>: soundtrack paired with <Video ${nextVideoIndex}>; intent=AUDIO REUSE / PERFORMANCE DRIVER; retention=partially_copy; preserve its audible timeline and synchronize action to it`)
+      } else if (audioRole === 'drive') {
+        labelLines.push(`Exact target soundtrack from <Video ${nextVideoIndex}>: ${note}; intent=AUDIO REUSE / PERFORMANCE DRIVER; retention=fully_preserved; preserve its waveform and audible timeline exactly and synchronize visible action and lip movement to it; this is target conditioning rather than a numbered Omni audio reference`)
+      } else if (audioRole === 'voice') {
+        const label = `<Audio ${++audioIndex}>`
+        labelLines.push(`${label}: ${note}; intent=VOICE REFERENCE; retention=reference; reuse vocal identity/timbre/emotion/delivery for new dialogue without copying source words or timing, waveform, room tone, reverberation, echo, background noise, microphone coloration, or source spatial acoustics; render the voice acoustically inside the target environment`)
+        bindSavedCharacter(reference, label)
+      } else if (audioRole === 'style') {
+        const label = `<Audio ${++audioIndex}>`
+        labelLines.push(`${label}: ${note}; intent=AUDIO REFERENCE; retention=weak_reference; borrow only rhythm/style/texture across the source timeline and do not copy the source signal or words`)
+      } else if (audioRole === 'sound') {
+        const label = `<Audio ${++audioIndex}>`
+        labelLines.push(`${label}: ${note}; intent=SOUND EFFECT REFERENCE; retention=reference; use only as timbre guidance to generate the explicitly requested sound effect attached to its named action; reuse the clip from its beginning in each window; do not play, copy, or loop its waveform or words; synchronize the effect to its requested action rather than the recording’s original timing`)
       }
       videoIndex = nextVideoIndex
       const label = `<Video ${videoIndex}>`
@@ -3190,7 +3208,8 @@ function _studioCreateInputState(state: AppState): {
     workflow !== 'references'
       ? state.params.audio_guide
       : references.some(reference => (
-      reference.type === 'audio' && reference.audio_intent === 'drive'
+        (reference.type === 'audio' && reference.audio_intent === 'drive')
+        || (reference.type === 'video' && _videoAudioRole(reference) === 'drive')
       ))
   )
   const hasFrameGuidance = workflow === 'avatar' ? hasLongCatAvatarAnchorImage(state) : workflow === 'frames' && Boolean(
@@ -10373,6 +10392,13 @@ export const useStore = create<AppState>((set, get) => ({
             ...s.params,
             prompt: plan.source_prompt || h3PlanningSource,
             _h3_original_prompt: undefined,
+            _prompt_enhancement: plan.draft_history_id ? {
+              version: 1,
+              state: 'review',
+              original_prompt: h3PlanningSource,
+              enhanced_prompt: plan.window_prompts?.join('\n') || plan.source_prompt,
+              draft_history_id: plan.draft_history_id,
+            } : undefined,
             minimax_h3_sequence_clip_frames: effectiveClipFrames,
             minimax_h3_sequence_prompt_mode: params.minimax_h3_sequence_prompt_mode,
             minimax_h3_sequence_memory_override: state.slidingWindowLocked,
@@ -10435,6 +10461,13 @@ export const useStore = create<AppState>((set, get) => ({
             ...s.params,
             prompt: plan.source_prompt || h3PlanningSource,
             _h3_original_prompt: undefined,
+            _prompt_enhancement: plan.draft_history_id ? {
+              version: 1,
+              state: 'review',
+              original_prompt: h3PlanningSource,
+              enhanced_prompt: plan.window_prompts?.join('\n') || plan.source_prompt,
+              draft_history_id: plan.draft_history_id,
+            } : undefined,
             video_length: effectiveTotalFrames,
             sliding_window_size: effectiveWindowFrames,
             sliding_window_overlap: effectiveOverlapFrames,
@@ -10515,6 +10548,7 @@ export const useStore = create<AppState>((set, get) => ({
               ? params._prompt_enhancement.original_prompt || params.prompt : params.prompt,
             enhanced_prompt: preserveLtxPlan ? enhancedLtxLines.join('\n') : result.enhanced,
             warnings: result.warnings || [],
+            draft_history_id: result.draft_history_id,
           },
           ...(preserveH3Source ? { _h3_original_prompt: preserveH3Source } : {}),
           ...(preserveLtxSource ? { _ltx_original_prompt: ltxSourcePrompt } : {}),
@@ -10539,10 +10573,23 @@ export const useStore = create<AppState>((set, get) => ({
     } catch (e) {
       console.error('Failed to enhance prompt:', e)
       const message = e instanceof Error ? e.message : 'Prompt enhancement failed'
-      set({
+      const draftHistoryId = _record(e).draft_history_id
+      set(s => ({
+        ...(typeof draftHistoryId === 'string' && draftHistoryId ? {
+          params: {
+            ...s.params,
+            _prompt_enhancement: {
+              version: 1,
+              state: 'failed',
+              original_prompt: s.params.prompt,
+              error: message,
+              draft_history_id: draftHistoryId,
+            },
+          },
+        } : {}),
         isEnhancing: false,
         promptEnhanceError: `Prompt enhancement failed: ${message}`,
-      })
+      }))
     }
   },
 
@@ -14493,8 +14540,8 @@ export const useStore = create<AppState>((set, get) => ({
       ? state.directorH3References.map(reference => ({ ...reference }))
       : []
     const exactDriveReferences = directorH3References.filter(
-      reference => reference.type === 'audio'
-        && (reference.audio_intent || 'voice') === 'drive',
+      reference => (reference.type === 'audio' && (reference.audio_intent || 'voice') === 'drive')
+        || (reference.type === 'video' && _videoAudioRole(reference) === 'drive'),
     )
     if (exactDriveReferences.length > 1) {
       set({
@@ -14505,7 +14552,9 @@ export const useStore = create<AppState>((set, get) => ({
       return
     }
     const exactDriveReference = exactDriveReferences[0]
-    const exactDriveDuration = Number(exactDriveReference?.duration_seconds)
+    const exactDriveDuration = Number(exactDriveReference?.type === 'video'
+      ? exactDriveReference.audio_duration_seconds
+      : exactDriveReference?.duration_seconds)
     const analyzedDuration = Number(directorAnalysis?.duration)
     if (
       exactDriveReference
@@ -14521,7 +14570,9 @@ export const useStore = create<AppState>((set, get) => ({
       })
       return
     }
-    const effectiveDirectorAudioPath = exactDriveReference?.path || directorAudioPath
+    const effectiveDirectorAudioPath = exactDriveReference?.type === 'video'
+      ? exactDriveReference.audio_path || directorAudioPath
+      : exactDriveReference?.path || directorAudioPath
 
     // Director model choices are independent from whichever Studio model was
     // edited most recently. Hydrate each selected model's own tuned defaults,

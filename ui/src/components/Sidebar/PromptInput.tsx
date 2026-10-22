@@ -18,6 +18,8 @@ import {
   resolveH3StoryboardDiscardFrames,
 } from '../../lib/h3WindowTiming'
 import { ComposerContext, ComposerToolbarItem } from './SidebarPanels'
+import { fetchWriterDrafts } from '../../api/client'
+import { LoadWriterDraftHistory } from '../WriterDraftHistory'
 import { SidebarMenu } from './SidebarMenu'
 import { Flux3PromptHelper } from './Flux3PromptHelper'
 import { MossImagePromptHelper } from './MossImagePromptHelper'
@@ -163,6 +165,7 @@ export function PromptInput() {
   const canDeferEnhancement = useStore(canEnhanceOnGeneration)
   const isEnhancing = useStore(s => s.isEnhancing)
   const promptEnhanceError = useStore(s => s.promptEnhanceError)
+  const draftHistoryId = useStore(s => s.params._prompt_enhancement?.draft_history_id)
   const durationSeconds = useStore(s => s.durationSeconds)
   const slidingWindowSeconds = useStore(s => s.slidingWindowSeconds)
   const slidingWindowOverlap = useStore(s => s.slidingWindowOverlap)
@@ -436,6 +439,8 @@ export function PromptInput() {
           {promptEnhanceError}
         </div>
       )}
+      {!isEnhancing && draftHistoryId && <LoadWriterDraftHistory key={draftHistoryId}
+        load={() => fetchWriterDrafts('interactive', draftHistoryId)}/>}
       {(usesH3Plan || h3FramesPlanIsStale) && h3WindowPlan && (
         <div className="mb-1.5">
           <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-border bg-bg-tertiary/70">

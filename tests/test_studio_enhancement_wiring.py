@@ -64,6 +64,7 @@ class EnhancedJobWiringTests(unittest.TestCase):
         self.prepare = AsyncMock(side_effect=prepare)
         self.writer = AsyncMock(return_value={'enhanced': 'Finished native prompt.'})
         self.ns = dict(asyncio=asyncio, deepcopy=deepcopy, wraps=wraps, Request=Request, HTTPException=HttpError,
+            Path=Path, _app_dir=self.temp.name,
             uuid=uuid, time=time, threading=threading, wgp=self.engine, update_job=update_job,
             is_cancel_requested=is_cancel_requested, snapshot_job=snapshot_job,
             _studio_job_archive=self.archive, _jobs=self.jobs, _studio_submission_lock=threading.RLock(),

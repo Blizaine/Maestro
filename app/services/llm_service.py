@@ -2761,8 +2761,8 @@ def generate(
     message = choice["message"]
     raw_content = message.get("content") or ""
     reasoning_content = message.get("reasoning_content") or ""
-    record_response(raw_content, reasoning_content)
     finish_reason = choice.get("finish_reason", "unknown")
+    record_response(raw_content, reasoning_content, complete=finish_reason == "stop")
     usage = data.get("usage", {})
     prompt_tokens = usage.get("prompt_tokens", "?")
     completion_tokens = usage.get("completion_tokens", "?")
@@ -3085,7 +3085,10 @@ def generate_streaming(
         raise
 
     finally:
-        record_response(raw_content, reasoning_content, complete=finish_reason not in {None, "unknown"})
+        # A streamed response is complete only when the provider stopped at
+        # a normal completion boundary. In particular, ``length`` means the
+        # writer hit its token ceiling and its retained text is only a draft.
+        record_response(raw_content, reasoning_content, complete=finish_reason == "stop")
         if "resp" in locals():
             from services.studio_enhancement import close_response
             close_response(resp)
@@ -4063,11 +4066,12 @@ def enhance_prompt(
         if needs_h3_dialogue
         else True
     )
-    voice_binding_is_valid = (
-        _h3_voice_binding_contract_satisfied(result, reference_context)
+    reference_contract_issues = (
+        _h3_ref2va_reference_contract_issues(result, reference_context)
         if is_h3_ref2va
-        else True
+        else []
     )
+    reference_contract_is_valid = not reference_contract_issues
     dialogue_binding_is_valid = True if audio_driven else (
         _h3_ref2va_dialogue_binding_contract_satisfied(
             prompt, result, reference_context
@@ -4085,25 +4089,28 @@ def enhance_prompt(
         structure_is_valid
         and dialogue_is_valid
         and timed_silence_is_valid
-        and voice_binding_is_valid
+        and reference_contract_is_valid
         and dialogue_binding_is_valid
     ):
         from services.studio_enhancement import check_cancelled, fidelity_retry_limit
         repair_limit = fidelity_retry_limit()
         for repair_attempt in range(repair_limit):
             check_cancelled()
-            failures = []
-            if not structure_is_valid:
-                failures.append("structure")
-            if not dialogue_is_valid:
-                failures.append("dialogue")
-            if not timed_silence_is_valid:
-                failures.append("timed silence")
-            if not voice_binding_is_valid:
-                failures.append("voice binding")
-            if not dialogue_binding_is_valid:
-                failures.append("dialogue speaker binding")
-            print(f"[Enhance] Invalid MiniMax H3 {'/'.join(failures)}; repair {repair_attempt + 1}/{repair_limit}.")
+            failures = _h3_structured_rejection_reasons(
+                result,
+                is_h3_ref2va=is_h3_ref2va,
+                structure_valid=structure_is_valid,
+                dialogue_valid=dialogue_is_valid,
+                timed_silence_valid=timed_silence_is_valid,
+                reference_issues=reference_contract_issues,
+                dialogue_binding_valid=dialogue_binding_is_valid,
+            )
+            if repair_attempt == 0:
+                _record_h3_enhancement_rejection(
+                    failures,
+                    stage="initial_validation",
+                )
+            print(f"[Enhance] Invalid MiniMax H3: {'; '.join(failures)}; repair {repair_attempt + 1}/{repair_limit}.")
             field_requirement = (
                 "Emit each of the six required field labels exactly once, in order."
                 if is_h3_ref2va
@@ -4159,11 +4166,12 @@ def enhance_prompt(
                 duration_seconds,
                 planning_style,
             )
-            retry_voice_binding_is_valid = (
-                _h3_voice_binding_contract_satisfied(retry, reference_context)
+            retry_reference_issues = (
+                _h3_ref2va_reference_contract_issues(retry, reference_context)
                 if is_h3_ref2va
-                else True
+                else []
             )
+            retry_reference_contract_is_valid = not retry_reference_issues
             retry_dialogue_binding_is_valid = True if audio_driven else (
                 _h3_ref2va_dialogue_binding_contract_satisfied(
                     prompt, retry, reference_context
@@ -4177,25 +4185,53 @@ def enhance_prompt(
                 retry_structure_is_valid
                 and retry_dialogue_is_valid
                 and retry_timed_silence_is_valid
-                and retry_voice_binding_is_valid
+                and retry_reference_contract_is_valid
                 and retry_dialogue_binding_is_valid
             ):
                 result = retry
                 break
+            retry_reasons = _h3_structured_rejection_reasons(
+                retry,
+                is_h3_ref2va=is_h3_ref2va,
+                structure_valid=retry_structure_is_valid,
+                dialogue_valid=retry_dialogue_is_valid,
+                timed_silence_valid=retry_timed_silence_is_valid,
+                reference_issues=retry_reference_issues,
+                dialogue_binding_valid=retry_dialogue_binding_is_valid,
+            )
+            _record_h3_enhancement_rejection(
+                retry_reasons,
+                stage=f"repair_{repair_attempt + 1}",
+            )
             result = retry
             structure_is_valid = retry_structure_is_valid
             dialogue_is_valid = retry_dialogue_is_valid
             timed_silence_is_valid = retry_timed_silence_is_valid
-            voice_binding_is_valid = retry_voice_binding_is_valid
+            reference_contract_issues = retry_reference_issues
+            reference_contract_is_valid = retry_reference_contract_is_valid
             dialogue_binding_is_valid = retry_dialogue_binding_is_valid
         else:
-            print("[Enhance] H3 fidelity repairs exhausted; using deterministic structured fallback.")
+            fallback_reasons = _h3_structured_rejection_reasons(
+                result,
+                is_h3_ref2va=is_h3_ref2va,
+                structure_valid=structure_is_valid,
+                dialogue_valid=dialogue_is_valid,
+                timed_silence_valid=timed_silence_is_valid,
+                reference_issues=reference_contract_issues,
+                dialogue_binding_valid=dialogue_binding_is_valid,
+            )
+            _record_h3_enhancement_rejection(fallback_reasons, stage="final_fallback")
+            print(
+                "[Enhance] H3 fidelity repairs exhausted; using deterministic structured fallback. "
+                + "; ".join(fallback_reasons)
+            )
             result = (
                 _build_h3_ref2va_tagged_fallback(
                     prompt,
                     reference_context,
                     duration_seconds=duration_seconds,
                     planning_style=planning_style,
+                    rejection_reasons=fallback_reasons,
                 )
                 if is_h3_ref2va
                 else _build_h3_context_fallback(
@@ -4278,20 +4314,43 @@ def enhance_prompt(
         result = _canonicalize_h3_ref2va_dialogue_speakers(
             result, prompt, reference_context
         )
+        final_reference_issues = _h3_ref2va_reference_contract_issues(
+            result, reference_context
+        )
+        final_structure_valid = _has_complete_h3_ref2va_structure(result)
+        final_dialogue_valid = audio_driven or _h3_dialogue_contract_satisfied(prompt, result)
+        final_dialogue_binding_valid = audio_driven or _h3_ref2va_dialogue_binding_contract_satisfied(
+            prompt, result, reference_context
+        )
         if not (
-            _has_complete_h3_ref2va_structure(result)
-            and (audio_driven or _h3_dialogue_contract_satisfied(prompt, result))
-            and _h3_voice_binding_contract_satisfied(result, reference_context)
-            and (audio_driven or _h3_ref2va_dialogue_binding_contract_satisfied(
-                prompt, result, reference_context
-            ))
+            final_structure_valid
+            and final_dialogue_valid
+            and not final_reference_issues
+            and final_dialogue_binding_valid
         ):
-            print("[Enhance] Enforcing deterministic Omni character/dialogue contract.")
+            final_rejection_reasons = _h3_structured_rejection_reasons(
+                result,
+                is_h3_ref2va=True,
+                structure_valid=final_structure_valid,
+                dialogue_valid=final_dialogue_valid,
+                timed_silence_valid=True,
+                reference_issues=final_reference_issues,
+                dialogue_binding_valid=final_dialogue_binding_valid,
+            )
+            _record_h3_enhancement_rejection(
+                final_rejection_reasons,
+                stage="final_fallback",
+            )
+            print(
+                "[Enhance] Enforcing deterministic Omni character/dialogue contract: "
+                + "; ".join(final_rejection_reasons)
+            )
             result = _build_h3_ref2va_tagged_fallback(
                 prompt,
                 reference_context,
                 duration_seconds=duration_seconds,
                 planning_style=planning_style,
+                rejection_reasons=final_rejection_reasons,
             )
     if is_h3_context_ir and image_paths:
         result = _ensure_h3_visual_grounding(
@@ -6978,8 +7037,36 @@ def _parse_h3_ref2va_subject_manifest(
             attach(item, label)
 
     # Add visual identities that were not part of a saved-character row.
+    # Native inventories also emit retention rows for motion, scene, style,
+    # and composition references. Those rows must not invent character
+    # Subjects merely because their label is a Picture or Video.
     for label, description in rows:
         if label.casefold() in claimed or label.casefold() in object_pictures or not label.startswith(("<Picture", "<Video")):
+            continue
+        if re.match(
+            r"(?i)^(?:partially_preserved|fully_preserved|weak_reference|"
+            r"partially_copy|fully_copy|retention\s*=\s*(?:reference|"
+            r"partial(?:ly)?[_ -]?preserved|full(?:y)?[_ -]?preserved|"
+            r"weak[_ -]?reference|partial|full|copy))\b",
+            description,
+        ):
+            continue
+        intent_match = re.search(
+            r"(?i)\b(?:image_intent|video_intent|intent)\s*=\s*([^;\r\n]+)",
+            description,
+        )
+        if intent_match:
+            intent = re.sub(r"[_-]+", " ", intent_match.group(1)).strip().casefold()
+            if label.startswith("<Video") and not re.search(r"\b(?:character|identity)\b", intent):
+                continue
+            if label.startswith("<Picture") and re.search(
+                r"\b(?:object|prop|composition|blocking|scene|style|motion)\b", intent,
+            ):
+                continue
+        elif label.startswith("<Video") and re.search(
+            r"(?i)\b(?:motion|camera|framing|composition|scene|environment|timing)\b",
+            description,
+        ):
             continue
         name_match = re.search(
             r"(?i)(?:reference|evidence)\s+for\s+([^;]+)", description
@@ -7298,68 +7385,179 @@ def _canonicalize_h3_ref2va_dialogue_speakers(
     return text
 
 
-def _h3_ref2va_reference_contract_satisfied(
+def _h3_ref2va_reference_contract_issues(
     result: str,
     reference_context: Optional[str],
-) -> bool:
-    """Reject placeholder, duplicate, invented, or cross-wired Omni subjects."""
+) -> list[str]:
+    """Explain missing, invented, and ambiguous Omni reference bindings."""
     import re
     manifest = _parse_h3_ref2va_subject_manifest(reference_context)
+    text = str(result or "")
+    issues: list[str] = []
+
+    def add(message: str) -> None:
+        if message not in issues:
+            issues.append(message)
+
     if reference_context is not None:
         label_pattern = r"<(?:Subject|Picture|Video|Audio)\s+\d+>"
-        supplied_labels = {label.casefold() for label in re.findall(label_pattern, reference_context, re.I)}
+        supplied_labels = {
+            label.casefold()
+            for label in re.findall(label_pattern, reference_context, re.I)
+        }
         # Legacy inventories can name a saved character on its Picture row;
         # the canonical manifest assigns that character a Subject slot.
         supplied_labels.update(f"<subject {subject['index']}>" for subject in manifest)
-        actual_labels = {label.casefold() for label in re.findall(label_pattern, str(result or ""), re.I)}
-        if not actual_labels.issubset(supplied_labels):
-            return False
-    if not manifest:
-        return True
-    text = str(result or "")
+        actual_label_values = {
+            label.casefold(): label for label in re.findall(label_pattern, text, re.I)
+        }
+        invented_labels = sorted(
+            actual_label_values[key] for key in actual_label_values.keys() - supplied_labels
+        )
+        if invented_labels:
+            add("invented reference label(s): " + ", ".join(invented_labels))
+
     if re.search(r"<Subject\s+N>", text, flags=re.IGNORECASE):
-        return False
+        add("unresolved placeholder reference <Subject N>")
+
     expected = {int(subject["index"]) for subject in manifest}
     # Native queued inventories also number environment/style Subjects. They
-    # are valid references, but must never become dialogue speaker candidates.
-    expected.update(int(value) for value in re.findall(
-        r"(?m)^<Subject (\d+)> is (?:the environment and location|the visual treatment)\b",
-        str(reference_context or ""),
-    ))
+    # are valid roles, but a retention row alone must not create a character.
+    native_role_subjects = {
+        int(value)
+        for value in re.findall(
+            r"(?m)^<Subject (\d+)> is (?:the environment and location|the visual treatment)\b",
+            str(reference_context or ""),
+        )
+    }
+    expected.update(native_role_subjects)
     actual_subjects = {
-        int(value) for value in re.findall(r"<Subject\s+(\d+)>", text, flags=re.IGNORECASE)
+        int(value)
+        for value in re.findall(r"<Subject\s+(\d+)>", text, flags=re.IGNORECASE)
     }
-    actual_speakers = {
-        int(value) for value in re.findall(r"\(S(\d+)\)", text, flags=re.IGNORECASE)
-    }
-    if not expected.issubset(actual_subjects):
-        return False
-    if not actual_subjects.issubset(expected):
-        return False
+    missing_subjects = sorted(expected - actual_subjects)
+    if missing_subjects:
+        add("missing reference Subject(s): " + ", ".join(
+            f"<Subject {value}>" for value in missing_subjects
+        ))
+    invented_subjects = sorted(actual_subjects - expected)
+    if invented_subjects and reference_context is not None:
+        add("invented reference Subject(s): " + ", ".join(
+            f"<Subject {value}>" for value in invented_subjects
+        ))
+
+    # Duplicate ownership in the supplied map is ambiguous before the draft
+    # is considered; surface it instead of silently accepting either owner.
+    label_owners: dict[str, set[int]] = {}
+    for subject in manifest:
+        for label in subject["pictures"] + subject["videos"] + subject["audios"]:
+            label_owners.setdefault(label.casefold(), set()).add(int(subject["index"]))
+    for label, owners in sorted(label_owners.items()):
+        if len(owners) > 1:
+            add(
+                f"ambiguous reference binding {label}: assigned to "
+                + ", ".join(f"<Subject {value}>" for value in sorted(owners))
+            )
+
     # Guests may speak without a saved visual reference. Speaker IDs count
     # vocal participants, not referenced Subjects; only their own contiguous,
     # positive event ordering is relevant here.
-    if actual_speakers != set(range(1, len(actual_speakers) + 1)):
-        return False
+    actual_speakers = {
+        int(value) for value in re.findall(r"\(S(\d+)\)", text, flags=re.IGNORECASE)
+    }
+    if (manifest or native_role_subjects) and actual_speakers != set(
+        range(1, len(actual_speakers) + 1)
+    ):
+        actual = ", ".join(f"S{value}" for value in sorted(actual_speakers)) or "none"
+        add(
+            "invalid speaker ID sequence for referenced dialogue: "
+            f"found {actual}; expected contiguous IDs from S1"
+        )
+
+    # A role-only or empty context need not create a Subject definition block.
+    if not expected:
+        return issues
     definitions_match = re.search(
         r"(?ms)^\s*subject_definitions\s*:(.*?)(?=^\s*summary\s*:)", text
     )
     if not definitions_match:
-        return False
+        add("missing subject_definitions field for supplied reference Subjects")
+        return issues
     definitions = definitions_match.group(1)
+    definition_subjects = {
+        int(value)
+        for value in re.findall(r"<Subject\s+(\d+)>", definitions, re.I)
+    }
+    for index in sorted(expected - definition_subjects):
+        add(f"missing <Subject {index}> definition")
     for subject in manifest:
         index = int(subject["index"])
-        if f"<Subject {index}>" not in definitions:
-            return False
         for label in subject["pictures"] + subject["videos"] + subject["audios"]:
-            if label not in definitions:
-                return False
+            if label.casefold() not in definitions.casefold():
+                add(f"missing {label} binding from <Subject {index}> definitions")
         for audio_label in subject["audios"]:
-            audio_pos = definitions.find(audio_label)
+            audio_pos = definitions.casefold().find(audio_label.casefold())
             nearby = definitions[max(0, audio_pos - 320):audio_pos + 420]
-            if f"<Subject {index}>" not in nearby:
-                return False
-    return True
+            if f"<Subject {index}>".casefold() not in nearby.casefold():
+                add(f"ambiguous or detached voice reference {audio_label} for <Subject {index}>")
+    return issues
+
+
+def _h3_structured_rejection_reasons(
+    result: str,
+    *,
+    is_h3_ref2va: bool,
+    structure_valid: bool,
+    dialogue_valid: bool,
+    timed_silence_valid: bool,
+    reference_issues: list[str],
+    dialogue_binding_valid: bool,
+) -> list[str]:
+    """Build concise, actionable reasons for a rejected structured draft."""
+    import re
+    reasons: list[str] = []
+    fields = _H3_REF2VA_FIELDS if is_h3_ref2va else _H3_CONTEXT_FIELDS
+    if not structure_valid:
+        structural_reason_count = len(reasons)
+        positions = []
+        for field in fields:
+            matches = list(re.finditer(rf"(?mi)^\s*{re.escape(field)}\s*:", result or ""))
+            if not matches:
+                reasons.append(f"missing required field {field}:")
+            elif len(matches) > 1:
+                reasons.append(f"duplicate required field {field}:")
+            positions.append(matches[0].start() if matches else None)
+        present = [position for position in positions if position is not None]
+        if len(present) == len(fields) and present != sorted(present):
+            reasons.append("required fields are out of order")
+        if len(reasons) == structural_reason_count:
+            reasons.append(
+                "invalid structured field shape: one or more required field blocks are empty or malformed"
+            )
+    if not dialogue_valid:
+        reasons.append("requested dialogue is missing, changed, or duplicated")
+    if not timed_silence_valid:
+        reasons.append("required speech timing or nonverbal interval is missing")
+    reasons.extend(reference_issues)
+    if not dialogue_binding_valid:
+        reasons.append("dialogue speaker binding does not match the named reference owner")
+    return list(dict.fromkeys(reasons))
+
+
+def _record_h3_enhancement_rejection(reasons: list[str], *, stage: str) -> None:
+    """Attach a rejection explanation to the most recent local writer call."""
+    if not reasons:
+        return
+    from services.enhancement_diagnostics import record_rejection
+    record_rejection(reasons, stage=stage)
+
+
+def _h3_ref2va_reference_contract_satisfied(
+    result: str,
+    reference_context: Optional[str],
+) -> bool:
+    """Compatibility boolean wrapper for the explainable reference contract."""
+    return not _h3_ref2va_reference_contract_issues(result, reference_context)
 
 
 def _h3_ref2va_dialogue_binding_contract_satisfied(
@@ -7786,8 +7984,10 @@ def _build_h3_ref2va_tagged_fallback(
     *,
     duration_seconds: Optional[float] = None,
     planning_style: str = "faithful",
+    rejection_reasons: Optional[list[str]] = None,
 ) -> str:
     """Create a deterministic six-field fallback when the local LLM loops."""
+    import re
     from services.h3_prompt_budget import H3PromptBudgetError
     from services.h3_dialogue_source import unclosed_h3_spoken_quote_error
 
@@ -7796,7 +7996,14 @@ def _build_h3_ref2va_tagged_fallback(
         raise H3PromptBudgetError(source_error)
 
     from services.studio_enhancement import record_review_warning
-    record_review_warning("The AI draft did not produce a valid H3 reference prompt. Review the source-based draft before generating.")
+    if rejection_reasons:
+        reason_text = "; ".join(str(reason) for reason in rejection_reasons if str(reason).strip())
+        record_review_warning(
+            "The AI draft was rejected: " + reason_text
+            + ". Review the source-based draft before generating."
+        )
+    else:
+        record_review_warning("The AI draft did not produce a valid H3 reference prompt. Review the source-based draft before generating.")
     if has_h3_performance_audio(reference_context):
         definitions, retention = _canonical_h3_ref2va_subject_fields(reference_context, {})
         return enforce_h3_performance_audio(
@@ -7815,8 +8022,48 @@ def _build_h3_ref2va_tagged_fallback(
         speaker_map,
     )
     request = _compile_h3_explicit_dialogue(prompt, reference_context)
+    request_text = request.strip()
+    if request_text and request_text[-1] not in ".!?":
+        request_text += "."
     adaptive = planning_style == "adaptive"
     requests_speech = _h3_requests_speech(prompt)
+    from services.dialogue_writing import dialogue_forbidden
+    speech_forbidden = dialogue_forbidden(prompt)
+    has_voice_reference = any(subject.get("audios") for subject in manifest)
+    context_text = str(reference_context or "")
+    motion_labels = sorted(set(re.findall(
+        r"(?mi)^\s*(<Video\s+\d+>)\s+provides\s+motion\b", context_text
+    )))
+    for label, description in _h3_ref2va_reference_rows(reference_context):
+        if label.startswith("<Video") and re.search(
+            r"(?i)\b(?:video_intent|intent)\s*=\s*motion\b|"
+            r"\b(?:motion|camera|composition)\s+reference\b",
+            description,
+        ):
+            motion_labels.append(label)
+    motion_labels = sorted(set(motion_labels), key=lambda label: int(re.search(r"\d+", label).group()))
+    motion_clause = (
+        " Use " + ", ".join(motion_labels)
+        + " as the requested motion, camera, composition, or timing reference. Preserve visible source movement and framing where requested; do not assert or invent source actions or events absent from the supplied prompt."
+        if motion_labels
+        else ""
+    )
+    has_identity_picture = any(subject.get("pictures") for subject in manifest)
+    identity_picture_clause = (
+        " Character identity pictures define appearance only; they do not transfer their original background, framing, pose, or opening still."
+        if has_identity_picture
+        else ""
+    )
+    composition_labels = sorted(set(re.findall(
+        r"(?mi)^\s*(<Picture\s+\d+>)\s+is\s+a\s+composition\s+and\s+blocking\s+reference\b",
+        context_text,
+    )), key=lambda label: int(re.search(r"\d+", label).group()))
+    composition_clause = (
+        " Use " + ", ".join(composition_labels)
+        + " for the requested composition and blocking, not as a character identity source."
+        if composition_labels
+        else ""
+    )
     timed_clause = (
         "Place each tagged line only after every action that causes or motivates it and before "
         "any consequence the source puts after it. Let the source action order determine speech "
@@ -7825,48 +8072,84 @@ def _build_h3_ref2va_tagged_fallback(
         if adaptive and requests_speech
         else (
             "Preserve every requested action and nonverbal reaction in source order; do not invent "
-            "spoken words or an absolute speech time."
+            "actions or events."
             if adaptive
             else _build_h3_timed_silence_clause(prompt, duration_seconds)
         )
     )
-    speech_boundary = (
-        (
+    paired_audio = re.search(
+        r"(?i)(<Audio\s+\d+>)\s+is\s+the\s+soundtrack\s+paired\s+with\s+<Video\s+\d+>",
+        context_text,
+    )
+    if requests_speech:
+        speech_boundary = (
             "The tagged dialogue is the only speech; add no other spoken words or speech-like "
             "vocalizations. Preserve explicitly requested nonverbal reactions."
-            if requests_speech
-            else "Add no spoken words or speech-like vocalizations. Preserve explicitly requested "
-            "nonverbal reactions."
+            if adaptive
+            else "The scripted dialogue is the only speech; all mouths remain closed before and after it."
         )
-        if adaptive
-        else "The scripted dialogue is the only speech; all mouths remain closed before and after it."
+        dialogue_boundary = (
+            " Each tagged dialogue block is spoken exactly once by its adjacent mapped speaker only; "
+            "no other subject repeats, echoes, mouths, or paraphrases another subject's line."
+        )
+    elif speech_forbidden:
+        speech_boundary = "No spoken words or speech-like vocalizations, as requested."
+        dialogue_boundary = ""
+    elif paired_audio:
+        speech_boundary = (
+            "Preserve the supplied soundtrack's vocal/nonvocal content; do not add new spoken words "
+            "or speech-like vocalizations."
+        )
+        dialogue_boundary = ""
+    else:
+        speech_boundary = (
+            "Do not add new spoken words or speech-like vocalizations. "
+            "Preserve explicitly requested nonverbal reactions."
+        )
+        dialogue_boundary = ""
+
+    sound_effect_audio = re.search(
+        r"(?i)<Audio\s+\d+>\s+(?:is|supplies)\s+(?:a\s+)?(?:reusable\s+)?sound[- ]effect\s+reference",
+        context_text,
     )
-    sound_boundary = (
-        "Outside tagged dialogue, add no spoken words or speech-like vocalizations; preserve only "
-        "explicitly requested nonverbal reactions."
-        if adaptive
-        else "Outside tagged dialogue there are no human voices, whispers, grunts, audible breathing, or speech-like vocalizations."
+    sound_requested = bool(re.search(
+        r"(?i)\b(?:sound|audio|soundtrack|music|ambience|ambiance|foley|sound effects?)\b",
+        prompt,
+    ))
+    if paired_audio:
+        soundscape = (
+            f"Use {paired_audio.group(1)} as a reference for the supplied soundtrack and its audible timing."
+        )
+    elif sound_effect_audio:
+        soundscape = "Use the supplied sound-effect reference only for explicitly requested sounds."
+    elif requests_speech:
+        soundscape = "Render the requested dialogue clearly; do not add unrequested voices or generic ambience."
+    elif speech_forbidden or sound_requested:
+        soundscape = "Include only sounds explicitly requested by the prompt."
+    else:
+        soundscape = "N/A"
+
+    summary_dialogue = " and explicitly tagged dialogue" if requests_speech else ""
+    voice_clause = (
+        " Voice references supply vocal identity, timbre, emotion, and delivery only; reject source room tone, "
+        "reverberation, echo, background noise, microphone coloration, and spatial acoustics, and render "
+        "each requested voice inside the target environment."
+        if requests_speech and has_voice_reference
+        else ""
     )
     task_types = "reference generation"
-    if any(subject["audios"] for subject in manifest):
+    if has_voice_reference:
         task_types += " + audio reference"
     return (
         f"subject_definitions: {subject_mapping}\n"
         f"summary: [{task_types}] A finished video matching the requested action, identity, "
-        "setting, and explicitly tagged dialogue.\n"
+        f"setting{summary_dialogue}.\n"
         f"retention_analysis: {retention_mapping}\n"
         "detailed_description: The target video maintains the requested visual style, lighting, "
         "color, and cinematic texture. "
-        f"[Shot 1] The finished target video follows this request: {request} "
-        "Reference pictures provide identity and appearance only, never their original background, "
-        f"framing, pose, or an opening still. {speech_boundary} Each tagged dialogue block is spoken exactly once by its adjacent "
-        "mapped speaker only; no other subject repeats, echoes, mouths, or paraphrases another "
-        f"subject's line. {timed_clause}\n"
-        "overall_soundscape: Continuous scene-appropriate stereo ambience and synchronized practical "
-        "sound effects begin at the first frame and continue naturally underneath dialogue. "
-        f"{sound_boundary} Voice references supply vocal identity, timbre, emotion, and "
-        "delivery only; reject source room tone, reverberation, echo, background noise, microphone "
-        "coloration, and spatial acoustics, and render each voice inside the target environment.\n"
+        f"[Shot 1] The finished target video follows this request: {request_text}{identity_picture_clause}"
+        f"{composition_clause}{motion_clause} {speech_boundary}{dialogue_boundary} {timed_clause}\n"
+        f"overall_soundscape: {soundscape}{voice_clause}\n"
         "non_diegetic_music: N/A"
     )
 

@@ -8975,10 +8975,38 @@ def _interactive_enhancement_slot(function):
         try:
             await request.json()  # Cache request body before moving off the API loop.
             def run():
-                with enhancement_context(_enhancement_settings_snapshot(), lambda: False):
-                    if wgp.wan_model is not None or wgp.offloadobj is not None:
-                        wgp.release_model()
-                    return asyncio.run(function(request))
+                from services.enhancement_diagnostics import DraftHistoryArchive, record_rejection
+                history_id = uuid.uuid4().hex
+                archive = DraftHistoryArchive(Path(_app_dir) / "settings" / "llm_drafts")
+                history = {"id": history_id, "created_at": time.time(), "state": "running", "drafts": []}
+                def save_drafts(drafts):
+                    history["drafts"] = drafts
+                    archive.save(history_id, history)
+                try:
+                    with enhancement_context(_enhancement_settings_snapshot(), lambda: False,
+                                             on_drafts=save_drafts):
+                        if wgp.wan_model is not None or wgp.offloadobj is not None:
+                            wgp.release_model()
+                        try:
+                            result = asyncio.run(function(request))
+                        except Exception as error:
+                            record_rejection([str(getattr(error, "detail", None) or error)], stage="Interactive enhancement")
+                            raise
+                    history["state"] = "complete"
+                    if isinstance(result, dict):
+                        result["draft_history_id"] = history_id
+                    return result
+                except Exception as error:
+                    history.update(state="failed", error=str(getattr(error, "detail", None) or error))
+                    raise HTTPException(
+                        getattr(error, "status_code", 500), detail=history["error"],
+                        headers={"X-Maestro-Draft-History": history_id},
+                    ) from error
+                finally:
+                    try:
+                        archive.save(history_id, history)
+                    except OSError as save_error:
+                        print(f"[LLM diagnostics] Could not save interactive writer history: {save_error}")
             worker = asyncio.create_task(asyncio.to_thread(run))
             try:
                 return await asyncio.shield(worker)
@@ -8992,6 +9020,18 @@ def _interactive_enhancement_slot(function):
         finally:
             _gen_lock.release()
     return wrapped
+
+
+@api.get("/api/v1/llm/drafts/{history_id}")
+def get_interactive_writer_drafts(history_id: str):
+    from services.enhancement_diagnostics import DraftHistoryArchive
+    try:
+        record = DraftHistoryArchive(Path(_app_dir) / "settings" / "llm_drafts").load(history_id)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    if record is None:
+        raise HTTPException(404, "Writer history not found")
+    return record
 
 
 @api.post("/api/v1/llm/plan-h3-windows")
@@ -9150,6 +9190,8 @@ async def llm_plan_h3_sequence(request: Request):
             require_visual=False,
             allow_empty=True,
         )
+        from services.h3_reference_audio import measure_video_audio_metadata
+        references = await asyncio.to_thread(measure_video_audio_metadata, references)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     sequence_inputs = {
@@ -10503,6 +10545,16 @@ def director_pipeline_status(pid: str):
     return p
 
 
+@api.get("/api/v1/director/pipeline/{pid}/llm-drafts")
+def director_pipeline_drafts(pid: str):
+    """Load full writer evidence only when requested, not on each status poll."""
+    from services.director_pipeline import get_pipeline_drafts
+    drafts = get_pipeline_drafts(pid, wgp.server_config.get("save_path", "outputs"))
+    if drafts is None:
+        raise HTTPException(404, "Pipeline not found")
+    return {"drafts": drafts}
+
+
 @api.post("/api/v1/director/pipeline/{pid}/continue")
 async def director_pipeline_continue(pid: str, request: Request):
     """Resume a paused pipeline, optionally with updated clip plans."""
@@ -11356,6 +11408,16 @@ async def _prepare_generation_submission(
                     body.get("minimax_h3_references"),
                     require_files=True,
                 )
+            from services.h3_reference_audio import measure_video_audio_metadata
+            if per_clip_references is not None:
+                body["per_clip_minimax_h3_references"] = [
+                    await asyncio.to_thread(measure_video_audio_metadata, manifest)
+                    for manifest in body["per_clip_minimax_h3_references"]
+                ]
+            else:
+                body["minimax_h3_references"] = await asyncio.to_thread(
+                    measure_video_audio_metadata, body["minimax_h3_references"]
+                )
             detail = str(body.get("minimax_h3_reference_detail") or "match").strip().lower()
             if detail not in {"match", "max"}:
                 raise ValueError("Reference detail must be 'match' or 'max'.")
@@ -11968,10 +12030,15 @@ async def _prepare_generation_submission(
             )
 
             runtime_references, drive_audio_path, drive_audio_ordinal = (
-                split_exact_drive_audio_reference(
-                    body.get("minimax_h3_references") or []
+                await asyncio.to_thread(
+                    split_exact_drive_audio_reference,
+                    body.get("minimax_h3_references") or [],
                 )
             )
+            # Typed video audio roles may add voice/style/effect references
+            # even when no exact target soundtrack is selected. Keep these
+            # runtime rows separate from the original saved UI manifest.
+            body["minimax_h3_runtime_references"] = runtime_references
             if drive_audio_path:
                 # ``drive`` is not a creative Ref2VA audio reference. Route it
                 # through the same frozen target-audio path as Director while
@@ -25876,7 +25943,12 @@ def _prepare_job_enhancement(job: dict) -> None:
         # Diffusion may be cached from the previous queue entry.
         if wgp.wan_model is not None or wgp.offloadobj is not None:
             wgp.release_model()
-        with enhancement_context(record["settings"], lambda: is_cancel_requested(job)):
+        def save_drafts(drafts):
+            record["drafts"] = drafts
+            _studio_job_archive.save(job)
+
+        with enhancement_context(record["settings"], lambda: is_cancel_requested(job),
+                                 drafts=record.get("drafts"), on_drafts=save_drafts):
             prepared = asyncio.run(prepare_enhanced_job(
                 record["original_params"], wgp.get_model_def(job["params"]["model_type"]) or {},
                 _llm_enhance_prompt_payload, _prepare_generation_submission,
@@ -26627,6 +26699,15 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         clip_params["minimax_h3_references"] = (
                             per_clip_h3_references[i]
                         )
+                        from models.minimax_h3.reference_manifest import split_exact_drive_audio_reference
+                        clip_runtime_refs, clip_drive_audio, clip_drive_ordinal = split_exact_drive_audio_reference(
+                            per_clip_h3_references[i]
+                        )
+                        clip_params["minimax_h3_runtime_references"] = clip_runtime_refs
+                        if clip_drive_audio:
+                            clip_params["audio_prompt_type"] = "AD"
+                            clip_params["audio_guide"] = clip_drive_audio
+                            clip_params["minimax_h3_exact_drive_audio_ordinal"] = clip_drive_ordinal
                     # Set per-clip image_prompt_type based on which images are present
                     has_start = bool(clip_params.get("image_start"))
                     has_end = bool(clip_end)
@@ -29687,7 +29768,7 @@ def get_job_enhancement(job_id: str):
     if not job or not job.get("enhancement"):
         raise HTTPException(404, "Enhanced job not found")
     record = job["enhancement"]
-    return {"enhancement": public_enhancement(record),
+    return {"enhancement": public_enhancement(record, include_drafts=True),
             "original_params": record["original_params"],
             "prepared": record.get("prepared")}
 
