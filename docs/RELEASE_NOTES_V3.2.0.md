@@ -3,6 +3,39 @@
 22 October 2026. Public Main and Dev release, including the 20–22 October Dev
 preview fixes. FastH3 models retain their experimental status.
 
+## Dev follow-up fixes — 23 October
+
+- **Eros Max beta6:** validate its mixed dense/INT8 layout and quantized
+  condition, output and refiner projections. The known file's published
+  identity/checksum selects both Frames and References, retaining the FL2VA
+  basis and creator's baked Turbo recipe: Euler, 8–12 steps, shifts 10/3.
+  Quantized output heads preserve their FP32 compute lock; BF16 CPU forwards
+  retain the original FP32 scale storage. These paths have numeric CPU coverage.
+- **One H3 import, both modes:** clarify the checkpoint's native-basis selector
+  and enable newly imported Frames/References companions even when old scoped
+  visibility defaults contain their IDs. Both entries share one weight file;
+  existing visibility choices for known models remain unchanged.
+- **16GB H3 placement:** for Auto-owned native H3 video on Windows 16GB
+  Blackwell / nominal 64GB RAM hosts, use Profile 4 and retain a feasible
+  guard-approved residency allowance instead of the extra 3 GiB ceiling.
+  Manual placement remains authoritative; clamped jobs retain streaming
+  defaults and other hardware tiers keep their existing policy. CPU regressions
+  cover the guard-to-loader handoff, cached-model reload/reuse and restoration.
+  The reported RTX 5080 slowdown has not been reproduced or benchmarked on that
+  machine. See [the diagnosis and reporter test](H3-16GB-placement.md).
+- **Eros Max import:** support the beta5 file's mixed W4A8/INT8 ConvRot layers
+  and per-layer weight groups of 4, 8 and 16, while retaining strict verification.
+  Let both quantization handlers load their own layers in the same model.
+  Accept finite BF16/FP16 AdaLN tables for the native FP32 interpolation path.
+  Bounded descriptor reads retry a transient failure once and preserve specific
+  transport/access errors in the browser. The real file's header and markers
+  were inspected; a complete weight download and GPU render were not performed.
+  See [supported formats and verification limits](H3-checkpoint-import.md).
+- **Concurrent soundtrack preparation:** on Windows, reuse an already published
+  nonempty WAV when another window's reader prevents replacing it. Preserve
+  atomic publication and temporary-file cleanup; permission errors still fail
+  when no usable cache exists.
+
 ## Dev follow-up fixes — 22 October
 
 - **UI startup:** prioritize service preferences, model controls and saved

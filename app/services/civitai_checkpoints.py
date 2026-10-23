@@ -13,8 +13,14 @@ from shared.checkpoint_downloads import _authenticated_request
 class CivitaiCheckpointError(ValueError):
     """An actionable checkpoint preflight/download failure."""
 
+    def __init__(self, message, *, retryable=False):
+        super().__init__(message)
+        self.public_message = message
+        self.retryable = bool(retryable)
+
 
 _MAX_HEADER = 8 * 1024 * 1024
+_MAX_RANGE_BYTES = _MAX_HEADER + 8
 _MAX_DESCRIPTOR = 16 * 1024
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 
@@ -119,9 +125,9 @@ def _read_exact(stream, size):
         try:
             chunk = stream.read(remaining)
         except Exception:
-            raise CivitaiCheckpointError("The checkpoint read was interrupted. Try again.") from None
+            raise CivitaiCheckpointError("The checkpoint read was interrupted. Try again.", retryable=True) from None
         if not chunk:
-            raise CivitaiCheckpointError("CivitAI returned a truncated checkpoint header. Try again.")
+            raise CivitaiCheckpointError("CivitAI returned a truncated checkpoint range. Try again.", retryable=True)
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
@@ -137,69 +143,123 @@ class RemoteH3Header:
         self.url, self.headers = _authenticated_request(source["url"], "civitai.com", api_key)
         self.markers = {}
         self._markers_prepared = False
-        response = self._open_range(0, _MAX_HEADER + 7)
-        try:
-            if source["filename"].casefold().endswith(".gguf"):
-                from services.h3_gguf_import import read_gguf_index
-                index = read_gguf_index(response.raw, source["size_bytes"])
-                self.header, self.payload_start = index.header, index.payload_start
-                self.file_format = "gguf"
-                # Many GGUF exporters put the tiny curve first. Cache it from
-                # the same bounded stream, including servers that ignore Range
-                # on redirected downloads. Large transformer payloads stay
-                # unread; distant curves still require verified byte ranges.
-                for name, descriptor in self.header.items():
-                    if not _is_curve_key(name) or not isinstance(descriptor, dict):
-                        continue
-                    start, end = descriptor["data_offsets"]
-                    if 0 <= start < end <= 128 * 1024 and end - start <= 64 * 1024:
-                        cursor = response.raw.tell()
-                        absolute_start = self.payload_start + start
-                        if 0 <= absolute_start - cursor <= 128 * 1024:
-                            _read_exact(response.raw, absolute_start - cursor)
-                            self.markers[name] = _read_exact(response.raw, end - start)
-                return
-            prefix = _read_exact(response.raw, 8)
-            header_size = struct.unpack("<Q", prefix)[0]
-            if not 2 <= header_size <= _MAX_HEADER or header_size + 8 >= source["size_bytes"]:
-                raise CivitaiCheckpointError("CivitAI did not return a valid H3 SafeTensor header. Check your API key and file access.")
-            self.header = json.loads(_read_exact(response.raw, header_size))
-            self.payload_start = 8 + header_size
-            self.file_format = "safetensors"
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            raise CivitaiCheckpointError("CivitAI returned an invalid SafeTensor header.") from None
-        finally:
-            response.close()
+        for attempt in range(2):
+            response = None
+            try:
+                response = self._open_range(0, min(_MAX_HEADER + 7, source["size_bytes"] - 1))
+                if source["filename"].casefold().endswith(".gguf"):
+                    from services.h3_gguf_import import read_gguf_index
+                    index = read_gguf_index(response.raw, source["size_bytes"])
+                    self.header, self.payload_start = index.header, index.payload_start
+                    self.file_format = "gguf"
+                    # Many GGUF exporters put the tiny curve first. Cache it from
+                    # the same bounded stream, including servers that ignore Range
+                    # on redirected downloads. Large transformer payloads stay
+                    # unread; distant curves still require verified byte ranges.
+                    for name, descriptor in self.header.items():
+                        if not _is_curve_key(name) or not isinstance(descriptor, dict):
+                            continue
+                        start, end = descriptor["data_offsets"]
+                        if 0 <= start < end <= 128 * 1024 and end - start <= 64 * 1024:
+                            cursor = response.raw.tell()
+                            absolute_start = self.payload_start + start
+                            if 0 <= absolute_start - cursor <= 128 * 1024:
+                                _read_exact(response.raw, absolute_start - cursor)
+                                self.markers[name] = _read_exact(response.raw, end - start)
+                    return
+                prefix = _read_exact(response.raw, 8)
+                header_size = struct.unpack("<Q", prefix)[0]
+                if not 2 <= header_size <= _MAX_HEADER or header_size + 8 >= source["size_bytes"]:
+                    raise CivitaiCheckpointError("CivitAI did not return a valid H3 SafeTensor header. Check your API key and file access.")
+                self.header = json.loads(_read_exact(response.raw, header_size))
+                self.payload_start = 8 + header_size
+                self.file_format = "safetensors"
+                break
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise CivitaiCheckpointError("CivitAI returned an invalid SafeTensor header.") from None
+            except CivitaiCheckpointError as exc:
+                if attempt == 0 and exc.retryable:
+                    continue
+                raise
+            finally:
+                if response is not None:
+                    response.close()
         if not isinstance(self.header, dict):
             raise CivitaiCheckpointError("CivitAI returned an invalid SafeTensor tensor index.")
 
     def _open_range(self, start, end):
+        size = self.source.get("size_bytes")
+        if (
+            type(start) is not int
+            or type(end) is not int
+            or type(size) is not int
+            or size <= 0
+            or start < 0
+            or end < start
+            or end >= size
+            or end - start + 1 > _MAX_RANGE_BYTES
+        ):
+            raise CivitaiCheckpointError("The requested checkpoint byte range exceeds the bounded verification limit.")
         headers = {**self.headers, "Range": f"bytes={start}-{end}", "Accept-Encoding": "identity"}
         try:
             response = self.get(self.url, headers=headers, stream=True, timeout=30, allow_redirects=True)
         except Exception:
-            raise CivitaiCheckpointError("Could not inspect the checkpoint because of a network error. Try again.") from None
+            raise CivitaiCheckpointError("Could not inspect the checkpoint because of a network error. Try again.", retryable=True) from None
         error = None
+        retryable = False
         if response.status_code in (401, 403):
             error = "CivitAI denied access to this file. Check Settings > Services > CivitAI API Key and your account's model access."
         elif response.status_code not in (200, 206):
             error = f"CivitAI could not serve this checkpoint header (HTTP {response.status_code}). Try again."
+            retryable = response.status_code in {408, 429, 500, 502, 503, 504}
         elif response.status_code == 200 and start != 0:
             error = "This download server does not support the bounded reads needed to verify H3 quantization. Try another compatible file."
         elif response.status_code == 206:
             content_range = str(response.headers.get("Content-Range") or "")
             match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", content_range)
-            if not match or int(match[1]) != start or int(match[3]) != self.source["size_bytes"]:
+            if (
+                not match
+                or int(match[1]) != start
+                or int(match[2]) != end
+                or int(match[3]) != size
+            ):
                 error = "CivitAI returned an inconsistent checkpoint byte range. Refresh and try again."
+                retryable = True
+            else:
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None:
+                    try:
+                        declared_length = int(content_length)
+                    except (TypeError, ValueError):
+                        declared_length = -1
+                    if declared_length != end - start + 1:
+                        error = "CivitAI returned an inconsistent checkpoint byte range. Refresh and try again."
+                        retryable = True
         if response.headers.get("Content-Encoding", "identity").lower() not in ("", "identity"):
             error = "CivitAI returned a compressed byte range that cannot be verified safely. Try again."
         if error:
             response.close()
-            raise CivitaiCheckpointError(error)
+            raise CivitaiCheckpointError(error, retryable=retryable)
         return response
 
+    def _read_range(self, start, end):
+        """Read one source-bound range, retrying a single transient failure."""
+        expected = end - start + 1
+        for attempt in range(2):
+            response = None
+            try:
+                response = self._open_range(start, end)
+                return _read_exact(response.raw, expected)
+            except CivitaiCheckpointError as exc:
+                if attempt == 0 and exc.retryable:
+                    continue
+                raise
+            finally:
+                if response is not None:
+                    response.close()
+
     def _prepare_markers(self):
-        # FP8 exports interleave 200 tiny markers with their large weights.
+        # H3 exports interleave 200 tiny markers with their large weights.
         # Fetch disjoint bounded spans concurrently instead of imposing 200
         # sequential HTTP round-trips on every selection in the model browser.
         from concurrent.futures import ThreadPoolExecutor
@@ -225,11 +285,7 @@ class RemoteH3Header:
                 spans.append([start, end, [(start, end, name)]])
         def read_span(span):
             start, end, names = span
-            response = self._open_range(self.payload_start + start, self.payload_start + end - 1)
-            try:
-                raw = _read_exact(response.raw, end - start)
-            finally:
-                response.close()
+            raw = self._read_range(self.payload_start + start, self.payload_start + end - 1)
             return {name: raw[left - start:right - start] for left, right, name in names}
         with ThreadPoolExecutor(max_workers=6) as pool:
             for markers in pool.map(read_span, spans):
@@ -264,11 +320,7 @@ class RemoteH3Header:
                 if len(bounds) == 2 and all(type(x) is int for x in bounds) and start <= bounds[0] < bounds[1] <= start + 128 * 1024 and bounds[1] - bounds[0] <= _MAX_DESCRIPTOR and bounds[1] + self.payload_start <= self.source["size_bytes"]:
                     nearby[name] = bounds
                     range_end = max(range_end, bounds[1])
-        response = self._open_range(self.payload_start + start, self.payload_start + range_end - 1)
-        try:
-            raw = _read_exact(response.raw, range_end - start)
-        finally:
-            response.close()
+        raw = self._read_range(self.payload_start + start, self.payload_start + range_end - 1)
         for name, (left, right) in nearby.items():
             self.markers[name] = raw[left - start:right - start]
         return self.markers[key]
@@ -342,6 +394,7 @@ def build_h3_definitions(source, profile, filename, defaults_dir, *, auto_quanti
     turbo = bool(profile.get("baked_turbo") or profile.get("fused_turbo"))
     quant_label = {
         "asym_w4a8_int8": "W4A8 INT4", "int8_tensorwise": "INT8 ConvRot",
+        "mixed_w4a8_int8_convrot": "W4A8 + INT8 ConvRot",
         "scaled_fp8": "FP8", "none": "BF16 / FP16",
         "gguf": "GGUF " + " / ".join(profile.get("gguf_quant_types", [])),
     }.get(profile.get("quantization_format"), str(profile.get("quantization_format", "")))

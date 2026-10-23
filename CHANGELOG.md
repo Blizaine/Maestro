@@ -8,6 +8,35 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 Public Main and Dev release, including the 20–22 October Dev preview fixes. See the
 [v3.2.0 release notes](docs/RELEASE_NOTES_V3.2.0.md).
 
+Dev follow-up fixes, 23 October:
+
+- Support Eros Max beta6's retained BF16 main layers and 11 additional INT8
+  projections, validating every quantized layer. Identify the verified beta6
+  hybrid by its file identity/checksum, enable both modes with its original
+  FL2VA adapter basis, and apply its creator's 8–12-step 10/3 recipe.
+  Preserve FP32 output-head compute locks through quantized loading and retain
+  FP32 scale storage when adapting the BF16 CPU fallback.
+- Clarify that importing a Ref2VA/hybrid H3 checkpoint enables Frames and
+  References with one shared file. Prevent stale per-workflow visibility
+  defaults from hiding newly imported companions; preserve existing opt-outs.
+- Adjust Auto-owned native H3 placement on Windows 16GB RTX 50-series / 64GB
+  RAM hosts: use Profile 4 and retain the existing workspace guard's feasible
+  residency allowance instead of imposing an additional 3 GiB ceiling. Preserve
+  manual settings, clamped-workload protection and the other hardware tiers.
+  This addresses identified placement differences; recovery of the reported
+  RTX 5080 slowdown still needs a matched hardware test. See the
+  [16GB H3 placement review](docs/H3-16GB-placement.md).
+- Support the mixed W4A8/INT8 ConvRot layout used by the 13GB Eros Max beta5
+  checkpoint, including per-layer W4A8 weight groups of 4, 8 and 16. Preserve
+  per-layer validation and reject conflicting descriptors. Accept finite
+  BF16/FP16 AdaLN curves through the runtime's existing FP32 interpolation.
+  Retry transient bounded descriptor reads once and show specific
+  access/network/range failures. See the
+  [H3 checkpoint import guide](docs/H3-checkpoint-import.md).
+- Reuse a completed soundtrack cache entry when concurrent preparation windows
+  collide on Windows. Failed publication still raises when no usable cache
+  exists, and each request cleans up its own temporary file.
+
 Dev follow-up fixes, 22 October:
 
 - Prioritize Studio/Director model controls during UI startup, defer gallery

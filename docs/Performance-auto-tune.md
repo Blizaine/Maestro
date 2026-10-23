@@ -7,6 +7,13 @@ the performance settings with the current recommendations.
 
 ## Generation-aware tuning and local learning
 
+Dev's 23 October follow-up adds a targeted native-H3 compatibility placement
+for Windows 16GB RTX 50-series / nominal 64GB RAM hosts: Profile 4 and the
+existing workspace guard's feasible residency allowance. Manual choices remain
+in control; other hardware tiers keep their policy. This is a code-path repair,
+not a measured RTX 5080 speedup. See the
+[placement review and matched-test instructions](H3-16GB-placement.md).
+
 Auto-tune now includes **Auto INT8 kernels**, a supported **MMGP optimized
 allocator**, **Smart Memory Pinning**, a RAM-dependent **Read Ahead** preference,
 and automatic pinning ceilings. It retains Auto attention, disabled compilation

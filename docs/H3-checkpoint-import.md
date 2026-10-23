@@ -4,6 +4,15 @@ Open **Model Browser → Checkpoints**, filter to **MiniMax H3**, and open a mod
 
 Check the file selection: one CivitAI version can contain several formats, or even VAE components. The selected file's actual tensor index determines compatibility. Imported model names include their quantization so different files from the same release are distinguishable.
 
+**Import once for both modes:** a Ref2VA or verified reference-capable hybrid checkpoint registers and enables
+both Frames and References entries sharing the same transformer file. There is
+no second download for the companion mode. When the file omits its native
+identity, **Checkpoint basis** asks which base the creator used, rather than
+which mode you want to enable. That choice determines compatible conditioning
+and LoRAs; an ordinary native FL2VA checkpoint is registered for Frames only. Existing
+model visibility choices remain yours, while newly imported companions are
+enabled without stale scoped defaults hiding them.
+
 ## Supported files and workflows
 
 The importer supports individual joint video/audio H3 transformer checkpoints that match Maestro's loader:
@@ -16,12 +25,28 @@ The importer supports individual joint video/audio H3 transformer checkpoints th
   arbitrary FP32 block, norm, condition or full-width modulation weights.
 - Comfy INT8 ConvRot with consistent group-64 or group-256 descriptors. All 200 transformer linear layers must be described, either by per-layer `.comfy_quant` tensors or by the file header's `_quantization_metadata`. Header-based exports do not need duplicate descriptor tensors; if both representations are present, they must agree.
 - Scaled E4M3 FP8 with supported scalar/column scales and proven grouped QKV row order. Published Comfy-Org FP8 file checksums are recognized, including their CivitAI copies.
-- DaSiWa/WanGP asymmetric **W4A8 INT4** SafeTensors (`asym_w4a8_int8`): packed four-bit weights, FP8 relative scales, FP32 channel scales, weight groups of 16, and ConvRot groups of 64 or 256. Codebook and correction tensors are preserved. Maestro uses chunked Triton decoding and INT8 multiplication on compatible CUDA devices, with a portable fallback.
+- DaSiWa/WanGP asymmetric **W4A8 INT4** SafeTensors (`asym_w4a8_int8`): packed four-bit weights, FP8 relative scales, FP32 channel scales, per-layer weight groups of 4, 8 or 16, and ConvRot groups of 64 or 256. Codebook and correction tensors are preserved. Maestro uses chunked Triton decoding and INT8 multiplication on compatible CUDA devices, with a portable fallback.
+- Mixed **W4A8 + INT8 ConvRot** H3 files, with a verified format for each of the 200 main transformer linear layers. Each layer retains its own packed weights, scales and verified weight grouping; a shared ConvRot group is required. Comfy marker tensors and header metadata must agree when both are present. This includes the format used by Eros Max beta5 file `h3ErosMax_beta5_3185144.safetensors`, whose CivitAI listing says FP8 despite containing mixed W4A8/INT8 storage.
 - **GGUF v2/v3** with Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q4_0, Q4_1, Q5_0, Q5_1 or Q8_0 linear weights. Mixed supported types and retained floating-point weights are allowed. Norms, biases and the AdaLN curve must remain floating point. Packed QKV and MLP weights remain fused during loading.
 
 The rotary-position frequency buffer can be stored in FP32, BF16 or FP16. Maestro calculates rotary positions in FP32. Integer or quantized rotary buffers and incorrect shapes remain unsupported.
 
-Native **FL2VA** checkpoints receive a **Frames** entry. Native **Ref2VA/hybrid** checkpoints receive **Frames and References** entries sharing one transformer file. Both use the checkpoint's native Ref2VA LoRA basis, including when the UI is in Frames mode. Full and pruned files retain their actual architectures.
+The pruned model's `[1025, 8]` AdaLN curve table can also use FP32, BF16 or
+FP16 storage. Its values must be finite. The native runtime promotes the table
+to FP32 for interpolation; integer and quantized curve tables remain blocked.
+
+W4A8 layers require per-layer `_quantization_metadata` in the file header so
+the runtime retains the verified weight and ConvRot groups. Optional
+`.comfy_quant` markers must use small, one-dimensional U8 tensors and agree
+with that header. A file's browser label cannot override its tensor layout.
+
+Native **FL2VA** checkpoints normally receive a **Frames** entry and retain
+their FL2VA LoRA basis. Native **Ref2VA** checkpoints receive **Frames and
+References** entries sharing one transformer file and their Ref2VA LoRA basis,
+including in Frames mode. A separately verified hybrid can support both modes
+while retaining its FL2VA basis, as Eros Max beta6 does. Mode availability never
+silently changes the checkpoint's adapter basis. Full and pruned files retain
+their actual architectures.
 
 Entries are labeled with the creator's model and version and appear in the Studio selectors after import. Version and file IDs distinguish standard/Turbo releases and quantizations. Switching between imported companion workflows retains the same checkpoint edition. Import completion refreshes the catalog without replacing a current prompt, selected model or generation settings.
 
@@ -56,6 +81,13 @@ Baked acceleration disables managed Turbo, extra Turbo/PDD adapters, First Block
 ## Downloads and reuse
 
 Preflight reads a bounded SafeTensor header or GGUF tensor index (at most 8 MiB), the small AdaLN curve, and any quantization markers. It does not load transformer weights onto the GPU. Nearby markers share a read; distant marker reads have bounded concurrency. Leading GGUF curves are read from the same bounded response, including when a server ignores Range.
+
+Small quantization reads retry once after a transient network or truncated-range
+failure. Returned byte ranges must match the requested source offsets and size.
+If a descriptor cannot be read, the browser preserves the actionable network,
+access or range error instead of showing only a generic descriptor failure.
+Authentication problems still require a valid CivitAI key and file access;
+retries do not bypass them or checkpoint validation.
 
 The download goes to a temporary file. Maestro checks its expected size, SHA-256 and H3 layout before publishing it, then writes provenance and workflow definitions. A failed check preserves an existing checkpoint.
 
@@ -117,5 +149,39 @@ values survive unchanged, and compare the forward result with FP32 linear
 evaluation. Full renders of those community files remain untested.
 
 Eros Max beta5 standard/Turbo and beta3 Turbo INT8 headers also passed bounded inspection with their matching recipe selections. Header-based INT8 loading is tested through MMGP using tiny real SafeTensor files on the CPU, checking group-64/group-256 rotation, QKV splits and row scales against an independent dense reference.
+
+The beta5 file ending in `3185144` is a separate mixed-format export with
+180 W4A8 layers (45 with weight group 4, 53 with group 8, and 82 with group 16)
+and 20 INT8 layers, all using ConvRot group 256. Its AdaLN curve is BF16.
+Its header and small descriptors were inspected without downloading the 13GB
+checkpoint. Tiny CPU SafeTensor fixtures exercise both quantization handlers in
+one MMGP load and compare their forwards against independent references. This
+does not verify the complete remote weight checksum or a full model render;
+the ordinary full-download checksum and local-layout gates remain required.
+This file resolves to the standard sampling recipe, distinct from the separate
+Turbo INT8 exports above. Preflight asks for its creator's native workflow
+(FL2VA or Ref2VA); selecting either explicitly completes structural verification.
+Forcing the Turbo recipe conflicts with the file's metadata and remains blocked.
+
+Eros Max beta6 INT8 file `3283276` retains all four main projections in blocks
+0, 1, 48 and 49 as BF16. Its other 184 main projections and 11 condition,
+output-head and token-refiner projections use INT8 ConvRot group 256. Maestro
+validates every quantized projection's descriptor, shape and FP32 row scales,
+and checks that the dense projections have no conflicting quantization data.
+It does not require a descriptor for a BF16 weight or ignore extra descriptors.
+Tiny actual H3 models loaded through MMGP exercise the mixed projections and
+QKV splitting against independent numeric references. Quantized output heads
+retain H3's FP32 compute lock. The BF16 CPU fallback adapts a temporary scale
+argument to its kernel while preserving checkpoint scales in FP32; CUDA dispatch
+is unchanged.
+
+The exact CivitAI model/version/file identity and published SHA-256 identify
+this beta6 edition. Its creator describes a FL2VA base with added reference
+deltas; both modes are enabled while retaining the FL2VA adapter basis. The
+pinned recipe is baked Turbo, Euler, 8 steps by default (8–12), video shift 10
+and audio shift 3. See the [creator's notes](https://huggingface.co/TenStrip/10Eros-Max).
+Other FL2VA files do not inherit reference capability from a model name or a
+client flag. Structural checks and the downloaded-file SHA-256 gate still apply;
+header and CPU tests do not certify a complete GPU render or output quality.
 
 The existing live INT8 import was verified to reuse installed weights and register both workflows. New W4A8 CUDA tests compare real Triton decoding and chunked INT8 multiplication against an independent CPU reference, including FP32/BF16, both ConvRot groups, codebooks and corrections. Tiny real GGUF files exercise the registered MMGP loader, all ten supported quantizations against the official GGUF dequantizer, CUDA linear execution, BF16 activations, both fused H3 attention layouts and CPU/CUDA tensor offloading. These imports retain their original GGUF container; conversion to MMGP's serialized Quanto SafeTensor format is outside this pipeline. GGUF parser tests cover nonseekable streams, malformed metadata, shapes, types, offsets, overlap, truncation and bounded reads. Workflow/receipt tests cover layout selection, restart revalidation, atomic publication and preservation of existing SafeTensor imports. The backend regressions, UI regression suites, production build and changed-file lint remain part of verification. Full new-format generation quality should be checked with a short creator checkpoint render.

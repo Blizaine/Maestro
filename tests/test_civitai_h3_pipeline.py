@@ -162,6 +162,54 @@ class TestCivitaiH3Transport(unittest.TestCase):
         with self.assertRaisesRegex(CivitaiCheckpointError, "inconsistent"):
             reader._open_range(30, 40)
 
+        reader.get = lambda *a, **k: Response(status=206, headers={"Content-Range": "bytes 30-39/10000"})
+        with self.assertRaisesRegex(CivitaiCheckpointError, "inconsistent"):
+            reader._open_range(30, 40)
+
+        reader.get = lambda *a, **k: Response(
+            status=206,
+            headers={"Content-Range": "bytes 30-40/10000", "Content-Length": "10"},
+        )
+        with self.assertRaisesRegex(CivitaiCheckpointError, "inconsistent"):
+            reader._open_range(30, 40)
+
+    def test_header_and_marker_ranges_retry_once_without_reading_extra_bytes(self):
+        header = {"weight": {"dtype": "BF16", "shape": [1], "data_offsets": [0, 2]}}
+        encoded = json.dumps(header).encode()
+        payload = struct.pack("<Q", len(encoded)) + encoded + b"\0" * 20
+        first_header = Response(payload[:5], status=206, headers={
+            "Content-Range": f"bytes 0-{len(payload) - 1}/{len(payload)}",
+            "Content-Length": str(len(payload)),
+        })
+        second_header = Response(payload, status=206, headers={
+            "Content-Range": f"bytes 0-{len(payload) - 1}/{len(payload)}",
+            "Content-Length": str(len(payload)),
+        })
+        get = Mock(side_effect=[first_header, second_header])
+        reader = RemoteH3Header(source(size_bytes=len(payload)), get=get)
+        self.assertEqual(reader.header, header)
+        self.assertEqual(get.call_count, 2)
+        self.assertTrue(first_header.closed and second_header.closed)
+
+        short = Response(b"ab", status=206, headers={"Content-Range": "bytes 20-23/10000"})
+        complete = Response(b"cdef", status=206, headers={"Content-Range": "bytes 20-23/10000"})
+        reader.source = source(size_bytes=10000)
+        reader.get = Mock(side_effect=[short, complete])
+        self.assertEqual(reader._read_range(20, 23), b"cdef")
+        self.assertEqual(reader.get.call_count, 2)
+        self.assertTrue(short.closed and complete.closed)
+
+    def test_remote_ranges_are_source_bound_and_size_capped_before_request(self):
+        reader = RemoteH3Header.__new__(RemoteH3Header)
+        reader.source = source(size_bytes=100)
+        reader.headers = {}
+        reader.url = source()["url"]
+        reader.get = Mock()
+        for start, end in ((-1, 0), (10, 9), (0, 100), (0, 108 * 1024 * 1024)):
+            with self.subTest(start=start, end=end), self.assertRaises(CivitaiCheckpointError):
+                reader._open_range(start, end)
+        reader.get.assert_not_called()
+
     def test_interrupted_header_read_has_a_sanitized_error(self):
         response = Response()
         response.raw = Mock()
@@ -313,6 +361,21 @@ class TestH3RegistrationAndRuntime(unittest.TestCase):
             self.assertTrue(model_def["sol_attention"])
             self.assertFalse(model_def["sla_attention"])
             self.assertFalse(model_def["sla_attention_default"])
+            self.assertNotIn("token", json.dumps(definition))
+
+    def test_mixed_quantization_label_reflects_verified_tensor_layout(self):
+        entries = build_h3_definitions(
+            source(),
+            profile(quantization_format="mixed_w4a8_int8_convrot"),
+            "local.safetensors",
+            ROOT / "app/defaults",
+        )
+        for definition in entries.values():
+            self.assertIn("W4A8 + INT8 ConvRot", definition["model"]["name"])
+            self.assertEqual(
+                definition["model"]["minimax_h3_import_profile"]["quantization_format"],
+                "mixed_w4a8_int8_convrot",
+            )
             self.assertNotIn("token", json.dumps(definition))
 
     def test_version_and_file_ids_keep_standard_turbo_and_quants_distinct(self):
