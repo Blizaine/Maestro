@@ -54,6 +54,7 @@ from .reference_manifest import (
     object_reference_prompt_contract,
     validate_reference_manifest,
 )
+from services.h3_reference_audio import video_audio_contributes_reference_ordinal
 from .reference_media import (
     allocate_reference_durations,
     extract_reference_audio_window,
@@ -341,8 +342,7 @@ def _ref2va_voice_audio_by_subject(
         kind = item.get("type")
         carries_audio = kind == "audio" or (
             kind == "video"
-            and (item.get("has_audio") or item.get("audio_path"))
-            and item.get("include_audio", True)
+            and video_audio_contributes_reference_ordinal(item)
         )
         if not carries_audio:
             continue
@@ -368,8 +368,7 @@ def _ref2va_audio_ordinals_by_item(items: list[dict]) -> dict[int, int]:
         kind = item.get("type")
         carries_audio = kind == "audio" or (
             kind == "video"
-            and (item.get("has_audio") or item.get("audio_path"))
-            and item.get("include_audio", True)
+            and video_audio_contributes_reference_ordinal(item)
         )
         if carries_audio:
             ordinal += 1
@@ -415,8 +414,7 @@ def canonicalize_ref2va_reference_order(
     for original_index, item in ordered_entries:
         carries_audio = item.get("type") == "audio" or (
             item.get("type") == "video"
-            and (item.get("has_audio") or item.get("audio_path"))
-            and item.get("include_audio", True)
+            and video_audio_contributes_reference_ordinal(item)
         )
         if carries_audio:
             ordinal += 1
@@ -563,10 +561,7 @@ def select_ref2va_window_voice_references(
     for item_index, item in enumerate(items):
         kind = item.get("type")
         if kind == "video":
-            if (
-                (item.get("has_audio") or item.get("audio_path"))
-                and item.get("include_audio", True)
-            ):
+            if video_audio_contributes_reference_ordinal(item):
                 audio_ordinal += 1
                 non_voice_audio_count += 1
                 audio_entries.append((item_index, audio_ordinal, False, None))

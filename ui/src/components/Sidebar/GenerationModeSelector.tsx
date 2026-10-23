@@ -20,6 +20,7 @@ export function GenerationModeSelector() {
   const setImageWorkflow = useStore(s => s.setStudioImageWorkflow)
   const toolsUpscaleMedia = useStore(s => s.toolsUpscaleMedia)
   const setToolsTool = useStore(s => s.setToolsTool)
+  const loadingControls = useStore(s => s.modelsLoading || (!s.modelsLoaded && !!s.modelsLoadError))
 
   const activeMode: StudioMediaMode = generationMode === 'avatar'
     ? 'video'
@@ -53,6 +54,7 @@ export function GenerationModeSelector() {
         return (
           <button
             key={m.value}
+            disabled={loadingControls}
             onClick={() => selectMode(m.value)}
             className={`flex-1 flex items-center justify-center gap-1.5 text-xs py-2 rounded-md transition-all ${
               active

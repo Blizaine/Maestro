@@ -1,5 +1,6 @@
 import type { DirectorModelCompatibility, GenerationPreview, GenerationPreviewSupport, H3WindowPlan, LTXWindowPlan, MiniMaxH3Reference, ProductionPlan, SavedOmniCharacter, ScailResolutionProfile } from '../types'
 import type { KreaIdentitySettings } from '../lib/kreaIdentityControls'
+import { getJson } from './readRequest'
 
 const BASE = ''  // same origin in production; Vite proxy handles /api in dev
 
@@ -123,9 +124,7 @@ export interface ApiJobStatus {
 // --- Models & Families ---
 
 export async function fetchModels(): Promise<{ families: ApiFamily[]; models: ApiModel[] }> {
-  const res = await fetch(`${BASE}/api/v1/models`)
-  if (!res.ok) throw new Error('Failed to fetch models')
-  return res.json()
+  return getJson(`${BASE}/api/v1/models`, 'Failed to fetch models')
 }
 
 export interface ModelVisibilitySettings {
@@ -137,9 +136,7 @@ export interface ModelVisibilitySettings {
 }
 
 export async function fetchModelVisibility(): Promise<ModelVisibilitySettings> {
-  const res = await fetch(`${BASE}/api/v1/model-visibility`)
-  if (!res.ok) throw new Error('Failed to fetch model visibility')
-  return res.json()
+  return getJson(`${BASE}/api/v1/model-visibility`, 'Failed to fetch model visibility')
 }
 
 export async function updateModelVisibility(params: {
@@ -218,9 +215,7 @@ export async function fetchResolutions(): Promise<ApiResolution[]> {
 // --- Model Defaults ---
 
 export async function fetchDefaults(modelType: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${BASE}/api/v1/defaults/${encodeURIComponent(modelType)}`)
-  if (!res.ok) throw new Error(`Failed to fetch defaults for ${modelType}`)
-  return res.json()
+  return getJson(`${BASE}/api/v1/defaults/${encodeURIComponent(modelType)}`, `Failed to fetch defaults for ${modelType}`)
 }
 
 // --- Generation ---
@@ -278,7 +273,9 @@ export async function planH3Windows(params: {
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'H3 window planning failed' }))
-    throw new Error(err.detail || 'H3 window planning failed')
+    throw Object.assign(new Error(err.detail || 'H3 window planning failed'), {
+      draft_history_id: res.headers.get('X-Maestro-Draft-History') || undefined,
+    })
   }
   return res.json()
 }
@@ -288,9 +285,7 @@ export interface H3WindowOverrideSettings {
 }
 
 export async function fetchH3WindowOverrides(): Promise<H3WindowOverrideSettings> {
-  const res = await fetch(`${BASE}/api/v1/h3-window-overrides`)
-  if (!res.ok) throw new Error('Failed to fetch H3 window overrides')
-  return res.json()
+  return getJson(`${BASE}/api/v1/h3-window-overrides`, 'Failed to fetch H3 window overrides')
 }
 
 export async function updateH3WindowOverrides(
@@ -331,9 +326,7 @@ export interface StudioPreferenceSettings {
 export type StudioPreferenceUpdate = Omit<StudioPreferenceSettings, 'configured'>
 
 export async function fetchStudioPreferences(): Promise<StudioPreferenceSettings> {
-  const res = await fetch(`${BASE}/api/v1/studio-preferences`)
-  if (!res.ok) throw new Error('Failed to fetch Studio preferences')
-  return res.json()
+  return getJson(`${BASE}/api/v1/studio-preferences`, 'Failed to fetch Studio preferences')
 }
 
 export async function updateStudioPreferences(
@@ -372,7 +365,9 @@ export async function planH3Sequence(params: {
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'H3 sequence planning failed' }))
-    throw new Error(err.detail || 'H3 sequence planning failed')
+    throw Object.assign(new Error(err.detail || 'H3 sequence planning failed'), {
+      draft_history_id: res.headers.get('X-Maestro-Draft-History') || undefined,
+    })
   }
   return res.json()
 }
@@ -506,9 +501,7 @@ export interface Workspace {
 }
 
 export async function fetchWorkspaces(): Promise<{ workspaces: Workspace[]; active: string }> {
-  const res = await fetch(`${BASE}/api/v1/workspaces`)
-  if (!res.ok) throw new Error('Failed to fetch workspaces')
-  return res.json()
+  return getJson(`${BASE}/api/v1/workspaces`, 'Failed to fetch workspaces')
 }
 
 export async function setActiveWorkspace(name: string): Promise<void> {
@@ -1424,17 +1417,13 @@ export async function deletePreset(id: string): Promise<void> {
 // --- LoRAs ---
 
 export async function fetchLoras(modelType: string): Promise<{ loras: string[]; guidance_max_phases: number }> {
-  const res = await fetch(`${BASE}/api/v1/loras/${encodeURIComponent(modelType)}`)
-  if (!res.ok) throw new Error('Failed to fetch loras')
-  return res.json()
+  return getJson(`${BASE}/api/v1/loras/${encodeURIComponent(modelType)}`, 'Failed to fetch loras')
 }
 
 // --- Model Options ---
 
 export async function fetchModelOptions(modelType: string): Promise<import('../types').ModelOptions> {
-  const res = await fetch(`${BASE}/api/v1/model-options/${encodeURIComponent(modelType)}`)
-  if (!res.ok) throw new Error('Failed to fetch model options')
-  return res.json()
+  return getJson(`${BASE}/api/v1/model-options/${encodeURIComponent(modelType)}`, 'Failed to fetch model options')
 }
 
 // --- Retake ---
@@ -1899,6 +1888,20 @@ export async function mixAudio(tracks: {
 
 // --- Upload ---
 
+export async function fetchViggleSourceInfo(videoPath: string, workspace: string, signal?: AbortSignal): Promise<{
+  duration_seconds: number
+}> {
+  const res = await fetch(`${BASE}/api/v1/viggle/source-info`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({video_path: videoPath, workspace}), signal,
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({detail: 'Could not inspect the control video.'}))
+    throw new Error(error.detail || 'Could not inspect the control video.')
+  }
+  return res.json()
+}
+
 export async function uploadImage(file: File, options?: { reuseIdentical?: boolean }): Promise<{
   filename: string
   path: string
@@ -1922,9 +1925,7 @@ export async function uploadImage(file: File, options?: { reuseIdentical?: boole
 // --- System Config ---
 
 export async function fetchSystemConfig(): Promise<import('../types').SystemConfig> {
-  const res = await fetch(`${BASE}/api/v1/system-config`)
-  if (!res.ok) throw new Error('Failed to fetch system config')
-  return res.json()
+  return getJson(`${BASE}/api/v1/system-config`, 'Failed to fetch system config')
 }
 
 export async function scanModelFolders(): Promise<{ candidates: import('../types').ModelFolderCandidate[] }> {
@@ -2237,9 +2238,7 @@ export async function applySystemDetect(): Promise<import('../types').SystemDete
 // --- Services Config ---
 
 export async function fetchServicesConfig(): Promise<import('../types').ServicesConfig> {
-  const res = await fetch(`${BASE}/api/v1/services-config`)
-  if (!res.ok) throw new Error('Failed to fetch services config')
-  return res.json()
+  return getJson(`${BASE}/api/v1/services-config`, 'Failed to fetch services config')
 }
 
 export async function updateServicesConfig(
@@ -2260,9 +2259,7 @@ export async function updateServicesConfig(
 // --- LLM Service ---
 
 export async function fetchLlmStatus(): Promise<import('../types').LlmStatus> {
-  const res = await fetch(`${BASE}/api/v1/llm/status`)
-  if (!res.ok) throw new Error('Failed to fetch LLM status')
-  return res.json()
+  return getJson(`${BASE}/api/v1/llm/status`, 'Failed to fetch LLM status')
 }
 
 export async function loadLlm(
@@ -2326,9 +2323,7 @@ export async function unloadRemoteModel(params: {
 }
 
 export async function fetchLlmModels(): Promise<{ models: import('../types').LlmModelOption[] }> {
-  const res = await fetch(`${BASE}/api/v1/llm/models`)
-  if (!res.ok) throw new Error('Failed to fetch LLM models')
-  return res.json()
+  return getJson(`${BASE}/api/v1/llm/models`, 'Failed to fetch LLM models')
 }
 
 export async function llmEnhancePrompt(params: {
@@ -2352,6 +2347,7 @@ export async function llmEnhancePrompt(params: {
   original: string
   enhanced: string
   warnings?: string[]
+  draft_history_id?: string
 }> {
   const res = await fetch(`${BASE}/api/v1/llm/enhance-prompt`, {
     method: 'POST',
@@ -2360,7 +2356,9 @@ export async function llmEnhancePrompt(params: {
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Enhancement failed' }))
-    throw new Error(err.detail || 'Enhancement failed')
+    throw Object.assign(new Error(err.detail || 'Enhancement failed'), {
+      draft_history_id: res.headers.get('X-Maestro-Draft-History') || undefined,
+    })
   }
   return res.json()
 }
@@ -3166,6 +3164,16 @@ export async function fetchActiveDownloads(
   const res = await fetch(`${BASE}/api/v1/downloads/active${query}`, { signal })
   if (!res.ok) throw new Error(`Failed to fetch active downloads (${res.status})`)
   return res.json()
+}
+
+export async function fetchWriterDrafts(kind: 'director' | 'interactive', id: string): Promise<import('../components/WriterDraftHistory').WriterDraft[]> {
+  const route = kind === 'director'
+    ? `/api/v1/director/pipeline/${encodeURIComponent(id)}/llm-drafts`
+    : `/api/v1/llm/drafts/${encodeURIComponent(id)}`
+  const response = await fetch(`${BASE}${route}`)
+  if (!response.ok) throw new Error('Could not load saved writer drafts.')
+  const data = await response.json()
+  return data.drafts || []
 }
 
 export async function fetchJobEnhancement(jobId: string): Promise<{

@@ -5,8 +5,8 @@
         "description": "MiniMax-Music3 creates complete stereo songs from lyrics and a detailed music caption, with expressive vocals, evolving arrangements, and long-form structure up to five minutes. Maestro uses WanGP's optimized ConvRot checkpoints with CUDA-graph or vLLM semantic decoding when supported.",
         "selector_help": "Best for full songs with detailed lyric sections and arrangement control. The default optimized download is about 15 GB. On 16 GB+ GPUs, Audio Memory Profile 3/3+ enables the accelerated CUDA-graph planner; compatible FlashAttention systems add the vLLM kernels automatically. Model weights use the MiniMax-Music3 Community License.",
         "URLs": [
-            "https://huggingface.co/DeepBeepMeep/TTS/resolve/d31b4665414200fcab779ced520b01bd9f5e07ba/MiniMax_Music3_transformer_bf16.safetensors",
-            "https://huggingface.co/DeepBeepMeep/TTS/resolve/d31b4665414200fcab779ced520b01bd9f5e07ba/MiniMax_Music3_transformer_int8_convrot.safetensors"
+            "https://huggingface.co/DeepBeepMeep/TTS/resolve/6e87e439357e25ebb563628a2ea6e93a46a8c4b1/MiniMax_Music3_transformer_bf16.safetensors",
+            "https://huggingface.co/DeepBeepMeep/TTS/resolve/6e87e439357e25ebb563628a2ea6e93a46a8c4b1/MiniMax_Music3_transformer_int8_convrot.safetensors"
         ],
         "source_repo": "https://huggingface.co/MiniMaxAI/MiniMax-Music3",
         "optimized_weights_repo": "https://huggingface.co/DeepBeepMeep/TTS",

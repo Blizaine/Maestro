@@ -1,6 +1,6 @@
 {
   "activated_loras": [
-    "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/304d34f7751f8ba9ca0eb55d5d10044234cdbfe2/loras/minimax_h3_vdn_turbo_8step_lora_bf16.safetensors"
+    "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/630975da14fd3c84169d6cd5092da3ce1287d137/loras/minimax_h3_vdn_turbo_8step_lora_bf16.safetensors"
   ],
   "loras_multipliers": "1",
   "num_inference_steps": 8,

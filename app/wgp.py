@@ -4002,6 +4002,9 @@ def hf_download_with_public_fallback(**kwargs):
         raise
 
 def download_file(url,filename):
+    from models.minimax_h3.vdn_assets import canonicalize_vdn_asset_url
+
+    url = canonicalize_vdn_asset_url(url)
     hf_match = re.match(
         r"^https://huggingface\.co/([^/]+/[^/]+)/resolve/([^/]+)/(.+)$",
         url,

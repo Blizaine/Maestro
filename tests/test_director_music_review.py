@@ -173,6 +173,11 @@ class MusicReviewTests(unittest.TestCase):
         self.assertIn("implicated later rows at zero-based indices [1]", writer.call_args.kwargs["user_prompt"])
         self.assertIn('"prior_clip_index": 0', writer.call_args.kwargs["user_prompt"])
         self.assertIn("Original valid outline to edit in place", writer.call_args.kwargs["user_prompt"])
+        repair_example = json.loads(writer.call_args.kwargs["user_prompt"].split(
+            "Original valid outline to edit in place:\n", 1,
+        )[1])
+        self.assertEqual(repair_example["source_event_clips"], {"M1": 1})
+        self.assertTrue(all("source_event_ids" not in row for row in repair_example["beats"]))
         self.assertEqual(planner._planning_resume_checkpoint["music_arc_quality_notes"], [])
 
     def test_malformed_optional_repair_keeps_valid_baseline_and_cached_notes(self):

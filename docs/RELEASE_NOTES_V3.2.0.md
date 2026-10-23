@@ -1,9 +1,85 @@
 # Maestro v3.2.0
 
-20 October 2026. Public **Dev** preview for testing. Main remains v3.1.0.
+22 October 2026. Public Main and Dev release, including the 20–22 October Dev
+preview fixes. FastH3 models retain their experimental status.
+
+## Dev follow-up fixes — 22 October
+
+- **UI startup:** prioritize service preferences, model controls and saved
+  choices before gallery scans and remote writer discovery. Load Settings,
+  browsing, dashboard and editor panels on first use. The initial JavaScript
+  bundle is about 24% smaller; this is a payload measurement, not a measured
+  reduction in cold-start seconds. Compress large catalogue/options JSON and
+  hashed JavaScript/CSS without changing generated media or event streams.
+- **Startup recovery:** share concurrent pending reads, bound request waits and
+  retry temporary failures. Show **Loading model controls** and a visible Retry
+  action instead of leaving controls empty after a restart. Recover on browser
+  return/reconnection while preserving prompts, edited settings and saved
+  preferences. A failed preferences read cannot overwrite the server record.
+- **Mobile sidecar:** distinguish an actual keyboard from browser toolbar and
+  restored-tab viewport changes. Keep modes, workflows, references and hardware
+  visible when no text entry is active; restore them on blur and page return.
+  Preserve keyboard compaction while moving between text fields.
+- **Gallery startup:** display **Loading workspace** through saved-folder
+  restoration and the first media listing, closing the blank interval after
+  model controls load. Preserve folder selection and reject stale listings
+  during a folder switch. This changes loading feedback, not scan throughput.
+- **H3 reference validation:** stop treating motion-video retention entries as
+  additional characters, avoiding false rejection of valid source-video prompts.
+- **Rejected writer drafts:** save drafts and specific rejection reasons locally
+  for Studio and Director, including failed or interrupted enhancement requests.
+  Review them through Studio prompt history or the Director Dashboard.
+- **Multi-window recovery:** preserve accepted windows during focused repairs,
+  retain usable camera cards if a repair request fails, and keep incomplete
+  schedules reviewable. Do not replace multiple windows with a repeated copy of
+  the original prompt. See [H3 reference audio and drafts](H3-Reference-Audio-and-Drafts.md).
+- **Video soundtrack roles:** give source videos the audio-role choices available
+  to audio references in Studio and Director: preserve soundtrack, voice,
+  music/sound style, sound effect, ignore, or the previous generative reference
+  behavior. Preserve the meaning of older saved checkbox settings.
+- **Director style and pacing:** carry the shot's visual style through the full
+  H3 frame and preserve it across saved projects, resume, native timeline splits
+  and clip reruns, with edited prompts remaining authoritative. Improve
+  instructions for visible performance, timed stillness and matching loop
+  composition/camera position. These improve prompt handoff; they do not guarantee
+  that every rendered frame follows the requested style, motion or loop.
+- **Director source actions:** stop turning choreography fragments such as
+  "dancing with spins" or the requester in "I want" into mandatory events.
+  Preserve genuine first-person actions and the original creative brief.
+- **Additional download repairs:** restore fifteen MiniMax-Music3 optimized
+  downloads, three local-writer vision projectors, the hidden Z-Image eight-step
+  ControlNet BF16 export and the YuE2 model-weight license link. Reuse compatible
+  cached files and retain pinned-source verification.
 
 ## Dev follow-up fixes — 21 October
 
+- **H3 VDN downloads:** repair Full/Pruned VDN modules, default LoRAs and the
+  bundled eight-step Turbo preset after the old Hugging Face revision stopped
+  serving them. Redirect four known obsolete URLs retained in saved presets
+  and reuse existing local files.
+- **Director source actions and outline contracts:** keep timeline-formatting
+  instructions, schema examples and native identity/retention/soundscape metadata
+  out of the mandatory story-action ledger. Preserve actual narrative actions,
+  including JSON `visual_beat` text, and keep native identity definitions available
+  for participant resolution. The sixteen-action planning bound remains; genuine
+  actions are not silently truncated. Make the compact-outline stage explicit to
+  local and external writers, and keep optional repair examples consistent with
+  the requested event-assignment schema. New planning invalidates older cached
+  results. Users can supply a normal creative brief without maintaining an internal
+  JSON template. Clarify that the displayed minimum clip count applies to the
+  selected track and maximum clip length, rather than a twelve-clip requirement.
+- **Explicit runtime upgrades:** opening an installed launcher with missing
+  performance-runtime markers no longer automatically starts Update and its
+  `git pull`. Keep the existing compatibility-start option and a running app's
+  Web UI accessible. Updating remains an explicit user action. Director and
+  launcher regressions passed 292 CPU checks; this does not certify a live run
+  with the reporter's Gemma/LM Studio configuration.
+- **Viggle Animate trim:** use the video's measured picture duration for the
+  timeline and submitted range. A soundtrack that ends later no longer makes
+  an untouched full-video selection fail as out of range. Check restored sources,
+  invalidate old bounds when the source changes in any workflow, and verify
+  ranges before character preparation. Existing full-file selections can be
+  reconciled against measured audio tails; genuinely invalid ranges still fail.
 - **Face Refiner (#188 / PR #189):** clone H3 inference-mode uint8 windows
   before in-place overlap blending. This retains the earlier color-range fix
   while allowing clips longer than one refinement window to finish. The fix
@@ -16,10 +92,17 @@
   Media Flow processing failures remain failed jobs.
 - **DLSS availability (#190):** installed files alone no longer establish
   Windows 11 Neural Rendering availability. A bounded, cached synthetic-frame
-  evaluation checks the installed native worker. Failed probes disable the option
-  with a reason; refresh reruns the check while idle. This does not repair the
-  upstream NGX/DLL fault reported on the 5090 or establish a new working driver
-  combination. The native binary pins are unchanged. [DLSS details](DLSS5.md).
+  evaluation now exercises an unaligned 1.5x request through the same padding
+  and crop path as processing. Failed probes disable the option with a reason;
+  refresh reruns the check while idle. A small passing probe does not certify
+  every scale or clip. The native binary pins are unchanged. [DLSS details](DLSS5.md).
+- **DLSS output alignment (#190):** apply internal right/bottom edge padding to
+  the standard Windows 11 backend for the reported 64-pixel output constraint.
+  Pad the image, motion and depth together, then crop back to the requested
+  even-rounded dimensions. Both requested and padded sizes must fit the native
+  limit. The separate Windows 10 experimental path keeps its existing policy.
+  CPU regressions cover the reported sizes, guides, cropping and failure cleanup;
+  the workaround still needs native confirmation on the reporter's RTX 5090.
 - **WGPKernels and Auto-tune (#191):** split activation preparation into bounded
   calls below the native 65,535-row limit, preserving row order and projection
   reuse. Reapplying Auto-tune keeps a valid selected manual INT8 backend and
@@ -39,6 +122,10 @@
   their existing behavior. Duplicate/missing groups and contradictory
   source-action assignments remain errors; the fix does not invent missing beats
   or turn off continuity checks.
+- **Outline compatibility:** retain the complete required response format in
+  writer prompts when an endpoint cannot enforce structured output. Accept
+  unambiguous row-local `beat` and `prompt` aliases for `visual_beat`; conflicting
+  aliases, incomplete rows and invalid timeline/action assignments still fail.
 
 ## FastH3 V2 and OmniRef
 
@@ -94,14 +181,14 @@ formats, hardware requirements and validation scope.
 
 See the [Qwen 2.1 guide](Qwen-Image-2.1.md) for workflow and measurement details.
 
-## Updating the Dev build
+## Updating to v3.2.0
 
-1. Let current work finish, then stop Maestro and use **Update** for your Dev
+1. Let current work finish, then stop Maestro and use **Update** for your
    installation in Pinokio.
 2. Restart Maestro, refresh the browser and confirm **v3.2.0** beside the title.
 3. Enable the desired experimental FastH3 model through **Manage models**.
    Weights download when requested; saved model visibility and user preferences
    are retained.
 
-This push updates public Dev only. It does not publish a stable GitHub release,
-move Main or change existing user duration recommendations.
+This release is available on public Main and Dev. Existing user duration
+recommendations are unchanged; experimental model limits remain as described above.

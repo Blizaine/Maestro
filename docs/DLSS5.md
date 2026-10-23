@@ -156,8 +156,11 @@ then use **Refresh availability** in the finishing controls.
 ### Windows 11 compatibility and native checks
 
 Installed files and an RTX model name establish eligibility, not a successful
-Neural Rendering evaluation. Maestro checks one small synthetic frame through
-the installed native worker and caches the result. **Refresh availability**
+Neural Rendering evaluation. Maestro checks a small 144x160 synthetic frame at
+1.5x through the standard processing adapter and installed native worker. Its
+requested 216x240 result exercises internal padding and cropping on both axes;
+an already aligned 128x128 DLAA probe could miss the reported size constraint.
+The bounded result is cached. **Refresh availability**
 invalidates that result and retries while Maestro is idle. A deferred busy check
 is not stored as a permanent hardware failure. A successful small probe does not
 certify every output size, scale or long video.
@@ -168,18 +171,37 @@ after installing or changing the runtime. Processing validation uses that
 cached result so it cannot start a native probe while a job owns the GPU.
 
 The pinned Windows 11 bundle is WanGP workers v1.1.3, RenoDX 4.70, DLSSNR
-310.8.SF-v2, DLSS SR 310.8.0 and ReShade 6.8.0. Maestro has no documented
-successful RTX 50 / 61x-driver Neural Rendering validation for that combination.
-[Issue #190](https://github.com/Blizaine/Maestro/issues/190) reports frame-zero
-NGX `0xBAD00000` on an RTX 5090 with drivers 616.92 and 617.42, despite valid
-installed hashes. That upstream runtime fault is not fixed by the availability
-check; the failed check prevents offering the broken path as ready.
+310.8.SF-v2, DLSS SR 310.8.0 and ReShade 6.8.0. The
+[issue #190 retest](https://github.com/Blizaine/Maestro/issues/190#issuecomment-6325327912)
+on an RTX 5090, driver 617.42 and Windows 11 build 26300 found successful
+704x1280 processing at 1x, 2x and 3x, and 512x512 at 1.5x. The failing outputs
+included 1056x1920, 1214x2206 and 720x720. Across the nine reported cases, every
+success had both output dimensions divisible by 64 and every failure had an
+unaligned dimension. This supports an output-alignment workaround; it does not
+establish a universal hardware or driver rule.
+
+The standard Windows 11 adapter now edge-pads the source on the right and bottom
+when needed, using the same padding for RGBA frames, motion vectors and depth.
+It chooses a padded source size whose even-rounded native output is divisible
+by 64 on both axes, then crops only the added border from each output. Public
+frame dimensions retain the requested even-rounded scale. The image is not
+stretched to fill an aligned canvas. Already aligned cases keep their existing
+geometry, and the separate Windows 10 experimental path keeps its own policy.
+Both requested and padded geometry must fit the native 7680x4320 limit;
+otherwise processing fails before starting a worker.
+
+For example, 704x1280 at 1.5x requests 1056x1920. The adapter pads its source
+canvas to 768x1280, processes a 1152x1920 native result, and crops back to
+1056x1920. A 720x720 1x request uses a 768x768 internal canvas and returns
+720x720. These geometry, guide and crop paths are covered by CPU worker doubles;
+the padding build still needs native RTX 5090 confirmation. Other native errors
+can remain, and a successful small probe does not certify every scale or clip.
 
 The [worker releases](https://github.com/DeepBeepMeep/dlss5-visual-enhancer/releases)
 still list v1.1.3 as the current Windows worker release at review on 21 October
 2026. [Newer component uploads](https://github.com/RankFTW/rhi-repo/releases),
 including RenoDX prereleases and other DLSS runtimes, do not establish a tested
-replacement combination for this worker. This fix keeps the verified binary
+replacement combination for this worker. The alignment workaround keeps the verified binary
 pins instead of replacing them with an unvalidated set. The Windows 10 results
 above apply to its separate experimental backend.
 

@@ -3,6 +3,7 @@ import ast
 import copy
 import hashlib
 import math
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -39,9 +40,26 @@ class ViggleMediaTests(unittest.TestCase):
         with wave.open(str(cls.audio), 'wb') as output:
             output.setparams((1, 2, sample_rate, 0, 'NONE', 'not compressed'))
             output.writeframes((signal * 20000).astype('<i2').tobytes())
+        cls.audio_tail = root / 'audio_tail.wav'
+        tail_t = np.arange(round(sample_rate * 3.2)) / sample_rate
+        tail_signal = np.sin(2 * math.pi * np.where(tail_t < 1, 440, 880) * tail_t)
+        with wave.open(str(cls.audio_tail), 'wb') as output:
+            output.setparams((1, 2, sample_rate, 0, 'NONE', 'not compressed'))
+            output.writeframes((tail_signal * 20000).astype('<i2').tobytes())
         cls.source = root / 'control.mkv'
         subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', str(frames), '-i', str(cls.audio),
                         '-c:v', 'libx264', '-crf', '0', '-c:a', 'pcm_s16le', str(cls.source)], check=True)
+        cls.mp4_matching = root / 'matching.mp4'
+        cls.mp4_audio_tail = root / 'audio_tail.mp4'
+        cls.mkv_audio_tail = root / 'audio_tail.mkv'
+        for audio, target, audio_codec in (
+            (cls.audio, cls.mp4_matching, 'aac'),
+            (cls.audio_tail, cls.mp4_audio_tail, 'aac'),
+            (cls.audio_tail, cls.mkv_audio_tail, 'pcm_s16le'),
+        ):
+            subprocess.run(['ffmpeg', '-v', 'error', '-y', '-i', str(frames), '-i', str(audio),
+                            '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'libx264', '-preset', 'ultrafast',
+                            '-crf', '0', '-c:a', audio_codec, str(target)], check=True)
         cls.source_hash = hashlib.sha256(cls.source.read_bytes()).digest()
 
     def body(self, **changes):
@@ -102,6 +120,174 @@ class ViggleMediaTests(unittest.TestCase):
         with patch.object(media, '_run', side_effect=AssertionError('No media work for old jobs')):
             with self.prepare(body) as runtime:
                 self.assertEqual(runtime, {})
+
+    def test_probe_uses_video_track_duration_for_mp4_audio_tail(self):
+        info = media.probe_control_video(self.mp4_audio_tail)
+        self.assertAlmostEqual(info['duration_seconds'], 3.0, places=2)
+        self.assertGreater(info['container_duration_seconds'], info['duration_seconds'] + 0.1)
+
+    def test_full_file_selection_matching_audio_tail_is_canonicalized(self):
+        info = media.probe_control_video(self.mp4_audio_tail)
+        body = dict(video_guide=str(self.mp4_audio_tail), video_length=124,
+                    _viggle_trim_start=0, _viggle_trim_end=info['container_duration_seconds'],
+                    _viggle_source_seconds=info['container_duration_seconds'],
+                    _viggle_frame_seconds=0)
+        original = copy.deepcopy(body)
+        updates = media.normalize_control_selection(body, resolve_media=lambda path: path)
+        self.assertEqual(updates['_viggle_source_seconds'], info['duration_seconds'])
+        self.assertEqual(updates['_viggle_trim_start'], 0)
+        self.assertEqual(updates['_viggle_trim_end'], info['duration_seconds'])
+        self.assertEqual(updates['video_length'], 72)
+        self.assertEqual(body, original)
+
+    def test_no_selection_keeps_the_legacy_no_probe_fast_path(self):
+        with patch.object(media, 'probe_control_video', side_effect=AssertionError('No source probe')):
+            updates = media.normalize_control_selection(
+                {'video_guide': 'missing.mp4'},
+                resolve_media=lambda path: self.fail('No source resolution'),
+            )
+        self.assertEqual(updates, {})
+
+    def test_matching_mp4_tracks_and_one_frame_overshoot(self):
+        info = media.probe_control_video(self.mp4_matching)
+        self.assertAlmostEqual(info['duration_seconds'], 3.0, places=2)
+        body = dict(video_guide=str(self.mp4_matching), video_length=124,
+                    _viggle_trim_start=0, _viggle_trim_end=info['duration_seconds'] + 0.02,
+                    _viggle_frame_seconds=0)
+        updates = media.normalize_control_selection(body, resolve_media=lambda path: path)
+        self.assertAlmostEqual(updates['_viggle_trim_end'], info['duration_seconds'], places=3)
+        self.assertEqual(updates['video_length'], 72)
+
+    def test_missing_matroska_stream_duration_uses_video_tag_not_audio_tail(self):
+        info = media.probe_control_video(self.mkv_audio_tail)
+        self.assertAlmostEqual(info['duration_seconds'], 3.0, places=3)
+        self.assertGreater(info['container_duration_seconds'], 3.1)
+        body = dict(video_guide=str(self.mkv_audio_tail), video_length=124,
+                    _viggle_trim_start=0, _viggle_trim_end=info['container_duration_seconds'],
+                    _viggle_source_seconds=info['container_duration_seconds'],
+                    _viggle_frame_seconds=0)
+        updates = media.normalize_control_selection(body, resolve_media=lambda path: path)
+        self.assertAlmostEqual(updates['_viggle_trim_end'], 3.0, places=3)
+        self.assertEqual(updates['video_length'], 72)
+
+    def test_frame_past_canonical_end_is_clamped_on_a_character_copy(self):
+        info = media.probe_control_video(self.mp4_audio_tail)
+        character = {'frame_seconds': 3.1, 'reference': 'character.png'}
+        body = dict(video_guide=str(self.mp4_audio_tail), video_length=124,
+                    _viggle_trim_start=0, _viggle_trim_end=info['container_duration_seconds'],
+                    _viggle_frame_seconds=3.1, viggle_character=character)
+        updates = media.normalize_control_selection(body, resolve_media=lambda path: path)
+        expected = info['duration_seconds'] - 1 / media.FPS
+        self.assertAlmostEqual(updates['viggle_character']['frame_seconds'], expected, places=5)
+        self.assertAlmostEqual(updates['_viggle_frame_seconds'], expected, places=5)
+        self.assertEqual(updates['viggle_character']['reference'], 'character.png')
+        self.assertEqual(character['frame_seconds'], 3.1)
+
+    def test_manual_audio_tail_frame_does_not_create_character_options(self):
+        info = media.probe_control_video(self.mp4_audio_tail)
+        body = dict(video_guide=str(self.mp4_audio_tail), video_length=124,
+                    _viggle_trim_start=0, _viggle_trim_end=info['container_duration_seconds'],
+                    _viggle_frame_seconds=3.1)
+        updates = media.normalize_control_selection(body, resolve_media=lambda path: path)
+        self.assertNotIn('viggle_character', updates)
+        self.assertAlmostEqual(updates['_viggle_frame_seconds'],
+                               info['duration_seconds'] - 1 / media.FPS, places=5)
+
+    def test_client_source_duration_does_not_allow_arbitrary_invalid_end(self):
+        body = dict(video_guide=str(self.mp4_audio_tail), video_length=124,
+                    _viggle_trim_start=0, _viggle_trim_end=5,
+                    _viggle_source_seconds=5, _viggle_frame_seconds=0)
+        with self.assertRaisesRegex(ValueError, 'outside the control video'):
+            media.normalize_control_selection(body, resolve_media=lambda path: path)
+        body.update(_viggle_trim_start=2.99, _viggle_trim_end=3.2,
+                    _viggle_source_seconds=3.2, _viggle_frame_seconds=2.99)
+        with self.assertRaisesRegex(ValueError, 'at least one frame'):
+            media.normalize_control_selection(body, resolve_media=lambda path: path)
+
+    def test_packet_fallback_uses_presentation_timestamps_for_vfr(self):
+        target = Path(self.directory.name) / 'mocked-vfr.bin'
+        target.write_bytes(b'vfr')
+        metadata = {'streams': [{'codec_type': 'video', 'start_time': '0.000000',
+                                 'avg_frame_rate': '30/1', 'r_frame_rate': '30/1'}],
+                    'format': {'duration': '3.221'}}
+        packets = {'packets': [
+            {'pts_time': '0.000', 'duration_time': '0.033'},
+            {'pts_time': '0.033', 'duration_time': '0.033'},
+            {'pts_time': '0.100', 'duration_time': '0.033'},
+            {'pts_time': '2.900', 'duration_time': '0.033'},
+            {'pts_time': '2.967', 'duration_time': '0.033'},
+        ]}
+        with patch.object(media, '_ffprobe_metadata', return_value=metadata), \
+                patch.object(media, '_probe_json', return_value=packets):
+            info = media.probe_control_video(target)
+        self.assertAlmostEqual(info['duration_seconds'], 3.0, places=3)
+        self.assertEqual(info['container_duration_seconds'], 3.221)
+
+    def test_duration_ticks_use_the_video_time_base(self):
+        target = Path(self.directory.name) / 'duration-ticks.bin'
+        target.write_bytes(b'timebase')
+        metadata = {'streams': [{'codec_type': 'video', 'duration_ts': '3000',
+                                 'time_base': '1/1000'}, {'codec_type': 'audio'}],
+                    'format': {'duration': '3.2'}}
+        with patch.object(media, '_ffprobe_metadata', return_value=metadata), \
+                patch.object(media, '_packet_duration', side_effect=AssertionError('Metadata is sufficient')):
+            info = media.probe_control_video(target)
+        self.assertEqual(info['duration_seconds'], 3.0)
+        self.assertEqual(info['container_duration_seconds'], 3.2)
+
+    def test_probe_cache_invalidates_after_source_mtime_changes(self):
+        target = Path(self.directory.name) / 'changed-source.bin'
+        target.write_bytes(b'fixture')
+        def metadata(seconds):
+            return {'streams': [{'codec_type': 'video', 'duration': str(seconds)}],
+                    'format': {'duration': str(seconds)}}
+        with patch.object(media, '_ffprobe_metadata', side_effect=[metadata(3), metadata(2)]):
+            first = media.probe_control_video(target)
+            stat = target.stat()
+            os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+            second = media.probe_control_video(target)
+        self.assertEqual(first['duration_seconds'], 3)
+        self.assertEqual(second['duration_seconds'], 2)
+
+    def test_missing_or_malformed_probe_metadata_fails_closed(self):
+        target = Path(self.directory.name) / 'unavailable-metadata.bin'
+        target.write_bytes(b'fixture')
+        with patch.object(media, '_ffprobe_metadata', return_value={'format': {'duration': '3.2'}}), \
+                patch.object(media, '_packet_duration', return_value=(None, False)):
+            with self.assertRaisesRegex(ValueError, "Could not read the control video's duration"):
+                media.probe_control_video(target)
+        with patch.object(media, '_run_probe', side_effect=['{broken', 'not-json']):
+            with self.assertRaisesRegex(ValueError, "Could not read the control video's duration"):
+                media.probe_control_video(target)
+
+    def test_truncated_packet_prefix_cannot_be_used_as_track_duration(self):
+        target = Path(self.directory.name) / 'truncated-packets.bin'
+        target.write_bytes(b'fixture')
+        metadata = {'streams': [{'codec_type': 'video'}, {'codec_type': 'audio'}],
+                    'format': {'duration': '3.221'}}
+        with patch.object(media, '_ffprobe_metadata', return_value=metadata), \
+                patch.object(media, '_packet_duration', return_value=(1.2, True)):
+            with self.assertRaisesRegex(ValueError, "Could not read the control video's duration"):
+                media.probe_control_video(target)
+
+    def test_probe_timeout_becomes_a_clear_media_validation_error(self):
+        target = Path(self.directory.name) / 'probe-timeout.bin'
+        target.write_bytes(b'fixture')
+        with patch.object(media, '_ffprobe_metadata', side_effect=TimeoutError('probe timed out')):
+            with self.assertRaisesRegex(ValueError, 'probe timed out'):
+                media.probe_control_video(target)
+
+    def test_probe_has_cancellation_and_a_hard_timeout(self):
+        started = time.monotonic()
+        with self.assertRaises(InterruptedError):
+            media._run_probe([sys.executable, '-c', 'import time; time.sleep(30)'],
+                             lambda: time.monotonic() - started > 0.3)
+        self.assertLess(time.monotonic() - started, 3)
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            media._run_probe([sys.executable, '-c', 'import time; time.sleep(30)'],
+                             lambda: False, timeout_seconds=0.3)
+        self.assertLess(time.monotonic() - started, 3)
 
     def test_invalid_ranges_frames_and_runtime_duration(self):
         for changes in ({'_viggle_trim_start': -1}, {'_viggle_trim_end': None},

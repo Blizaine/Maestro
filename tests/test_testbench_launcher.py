@@ -14,6 +14,43 @@ class TestBenchLauncherTests(unittest.TestCase):
                                 capture_output=True, text=True, timeout=10)
         return json.loads(result.stdout)
 
+    def test_missing_runtime_markers_never_auto_start_an_update(self):
+        for target, environment in (("sm_89", "app/env"), ("sm_120", "app/env-rtx50")):
+            with self.subTest(target=target):
+                menu = self.evaluate("""
+const launcher=require('./pinokio.js');
+const info={exists:name=>name===%s,running:()=>false,local:()=>null};
+launcher.menu({gpu:'nvidia',gpu_target:%s,gpu_driver:'610.88',platform:'win32'},info)
+  .then(v=>process.stdout.write(JSON.stringify(v)));
+""" % (json.dumps(environment), json.dumps(target)))
+                upgrade = next(item for item in menu if item.get("href") == "update.js")
+                self.assertFalse(upgrade.get("default", False))
+                self.assertFalse(any(item.get("default") for item in menu))
+                if target == "sm_89":
+                    self.assertTrue(any(item.get("href") == "start.js" for item in menu))
+
+    def test_running_compatibility_app_keeps_web_ui_with_missing_runtime_markers(self):
+        menu = self.evaluate("""
+const launcher=require('./pinokio.js');
+const info={exists:name=>name==='app/env',running:name=>name==='start.js',
+  local:()=>({url:'http://127.0.0.1:49999',port:'49999'})};
+launcher.menu({gpu:'nvidia',gpu_target:'sm_89',gpu_driver:'610.88',platform:'win32'},info)
+  .then(v=>process.stdout.write(JSON.stringify(v)));
+""")
+        self.assertEqual(menu[0]["href"], "http://127.0.0.1:49999")
+        self.assertTrue(menu[0]["default"])
+        self.assertFalse(any(item.get("href") == "update.js" for item in menu))
+
+    def test_existing_update_still_shows_its_progress(self):
+        menu = self.evaluate("""
+const launcher=require('./pinokio.js');
+const info={exists:name=>name==='app/env',running:name=>name==='update.js',local:()=>null};
+launcher.menu({gpu:'nvidia',gpu_target:'sm_89',gpu_driver:'610.88',platform:'win32'},info)
+  .then(v=>process.stdout.write(JSON.stringify(v)));
+""")
+        self.assertEqual(menu[0]["href"], "update.js")
+        self.assertEqual(menu[0]["text"], "Updating")
+
     def test_menu_keeps_web_ui_default_and_passes_captured_backend(self):
         menu = self.evaluate("""
 const launcher=require('./pinokio.js');

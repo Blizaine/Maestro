@@ -126,6 +126,10 @@ jobs:
       - name: Frontend lint
         working-directory: ui
         run: npm run lint
+      - name: Startup request and recovery regressions
+        run: |
+          node tests/ui/read_requests.cjs
+          node tests/ui/startup_controller.cjs
       - name: Type-check + build (tsc -b && vite build)
         working-directory: ui
         run: npm run build

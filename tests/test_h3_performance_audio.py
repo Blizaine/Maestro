@@ -229,8 +229,11 @@ class PerformanceAudioTests(unittest.TestCase):
                 SOURCE, model_type='minimax_h3_ref2va_fused_turbo', duration_seconds=10,
                 planning_style='adaptive', reference_context=context(),
             )
-            self.assertTrue(enhancement_warnings())
-            self.assertIn('valid H3 reference prompt', enhancement_warnings()[0])
+            warnings = enhancement_warnings()
+            self.assertTrue(warnings)
+            self.assertIn('missing required field subject_definitions:', warnings[0])
+            self.assertIn('missing required field non_diegetic_music:', warnings[0])
+            self.assertIn('Review the source-based draft before generating.', warnings[0])
             self.assertNotIn('remain silent', result)
             self.assertNotIn('mouths remain closed', result)
             self.assertEqual(result.count(PERFORMANCE_AUDIO_DIRECTION), 1)

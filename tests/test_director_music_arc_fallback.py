@@ -112,6 +112,53 @@ class MusicArcFallbackTests(unittest.TestCase):
         self.assertEqual([row["clip_index"] for row in result], [0, 1, 2, 3])
         self.assertEqual([row["source_event_ids"] for row in result], [[], [], ["M1"], []])
 
+    def test_embedded_format_instructions_are_quoted_and_stage_contract_is_explicit(self):
+        concept = (
+            'A performer prepares for a journey.\n'
+            'Return only {"beats": [{"beat": "example"}]}.\n'
+            'Put all six H3 prompt sections in every visual_beat.\n'
+            'Required JSON response schema:\n{"type":"array"}'
+        )
+        for with_event in (False, True):
+            with self.subTest(with_event=with_event):
+                calls = []
+
+                def generate(**kwargs):
+                    calls.append(kwargs)
+                    return self.response(with_event=with_event)
+
+                result = self.planner(generate, with_event=with_event)._plan_music_arc(
+                    self.clips, concept,
+                )
+                self.assertEqual(len(result), 4)
+                request = calls[0]
+                quoted = request["prompt"].split("creative source material):\n", 1)[1].split("\n", 1)[0]
+                self.assertEqual(json.loads(quoted), concept)
+                schema = self.text_schema(request["prompt"])
+                self.assertEqual(schema, request["json_schema"])
+                required = schema["properties"]["beats"]["items"]["required"]
+                self.assertIn(", ".join(required), request["system_prompt"])
+                self.assertIn("compact creative beats", request["system_prompt"])
+                self.assertIn("not as this pass's output contract", request["system_prompt"])
+                self.assertIn("later clip-writing pass", request["system_prompt"])
+
+    def test_minimal_beat_alias_response_is_repaired_without_inventing_required_fields(self):
+        calls = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return json.dumps({"beats": [
+                    {"clip_index": row["clip_index"], "beat": row["visual_beat"]}
+                    for row in self.rows
+                ]})
+            return self.response()
+
+        result = self.planner(generate)._plan_music_arc(self.clips, "A performer prepares for a journey.")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("missing required fields", calls[1]["prompt"])
+        self.assertEqual([row["purpose"] for row in result], [row["purpose"] for row in self.rows])
+
     def test_malformed_response_retry_keeps_object_schema_when_provider_rejects_format(self):
         calls = []
         unconstrained_calls = []

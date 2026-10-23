@@ -75,7 +75,7 @@ Direct access to every model and every knob:
 - **Blend video Mode** Remember Sora 1 blend mode, where you could overlap two videos, and use AI to blend them together? 
 - **Frames Injection (KFI)** for character continuity in long videos
 - **Sliding window** for arbitrarily long generations
-- **Viggle Animate:** select a saved character or image, describe its appearance, and let Flux 2 Klein prepare the replacement frame before three-step H3 animation. Preview the frame first or run both steps together; manual edited frames remain supported. See [Viggle Animate](docs/Viggle-Animate.md).
+- **Viggle Animate:** select a saved character or image, describe its appearance, and let Flux 2 Klein prepare the replacement frame before three-step H3 animation. Preview the frame first or run both steps together; manual edited frames remain supported. Trim and frame selection use checked video bounds, including when the soundtrack ends later. See [Viggle Animate](docs/Viggle-Animate.md).
 - **Studio composition workspace:** compact reference cards above a large prompt editor. Characters stays on the left; Recipes, Resolution, Aspect, Duration and Advanced group on the right. The model selector sits beside Generate / Add to Queue, with a direct Model Browser shortcut. The magic button runs Enhance now; its menu can instead arm **Enhance on generation** for the next job. Advanced groups Performance, Finishing, LoRAs and Generation. Time retains model-aligned steps through five minutes and presets through one hour; Auto shows its recommended duration. See [Studio controls](docs/Studio-controls.md).
 - **Enhancement in the queue:** submit a brief while the GPU is busy and let Maestro enhance it when the job gets its turn, then generate automatically. Original inputs and completed drafts are saved for review and retries. Add to Queue keeps jobs held until Run queue; interrupted jobs are held after an app restart. Enhancement failures stop for attention instead of silently generating a fallback.
 - **Detailed H3 source actions:** for eligible silent, locked scripts with long authored events, Maestro preserves the physical source phases and asks the writer for camera coverage and nonverbal sound. If individual camera cards still fail, it can recover those events while retaining the other cards. Recovered drafts identify the affected events and remain available for review or retry. Dialogue, creative staging, recurring actions and timed holds retain their existing planning paths.
@@ -146,9 +146,20 @@ View all past Director runs with their full state — clip plans, generated imag
 ## Updates
 
 The version you are running is shown next to the Maestro title in the UI. To update, use the launcher's Update button in Pinokio.
+Runtime upgrades are explicit menu actions. A missing performance-runtime marker
+does not automatically run Update when you open the launcher. If offered,
+**Start with Compatibility Runtime** keeps the existing runtime available.
 
-### v3.2.0 Dev preview (2026-10-20)
+### v3.2.0 (2026-10-22)
 
+- **Startup and mobile:** prioritize model controls, recover interrupted startup,
+  keep mobile controls visible without a refresh, and show workspace loading
+  continuously while the saved folder and gallery are restored.
+- **Director and H3 references:** improve source-action extraction, outline
+  compatibility and style handoff; retain rejected writer drafts with reasons,
+  preserve accepted multi-window prompts during repairs, and add explicit video
+  soundtrack roles in Studio and Director. Repair Animate trim bounds and H3 VDN,
+  Music3 and local-writer downloads. [Audio and drafts](docs/H3-Reference-Audio-and-Drafts.md).
 - **21 October fixes:** multi-window Face Refiner blending, visible warnings
   when optional finishing fails, native DLSS availability checks, large-input
   WGPKernels preparation, preserved manual INT8 choices during Auto-tune, and
@@ -163,7 +174,7 @@ The version you are running is shown next to the Maestro title in the UI. To upd
   memory; improve overlapping tiles to address thin boundary lines in
   lower-memory decode modes. [Qwen guide](docs/Qwen-Image-2.1.md).
 
-Available on **Dev** for testing. Update the idle Dev installation in Pinokio,
+Available on **Main and Dev**. Update the idle installation in Pinokio,
 restart Maestro and refresh the browser. New FastH3 variants remain experimental;
 consumer real-time speed and complete renders with the new BF16/FP8/NVFP4 formats
 are not yet verified. See the [v3.2.0 notes](docs/RELEASE_NOTES_V3.2.0.md).

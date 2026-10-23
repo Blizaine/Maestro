@@ -192,7 +192,14 @@ The September 2026 VDN, grouped-row masking/outpainting, audio-only voice
 preset, and six-step audio refinement additions adapt Wan2GP v12.71 at
 `1e1dd2757f24923f008593d9d4ec09062234be20` to Maestro's existing pipeline.
 VDN module and adapter downloads use the immutable Hugging Face revision
-`DeepBeepMeep/MiniMax-H3@304d34f7751f8ba9ca0eb55d5d10044234cdbfe2`.
+`DeepBeepMeep/MiniMax-H3@630975da14fd3c84169d6cd5092da3ce1287d137`.
+The earlier `304d34f7751f8ba9ca0eb55d5d10044234cdbfe2` pin stopped serving
+these files after the Hub history consolidation. Maestro redirects only the
+four known VDN module/default-adapter/Turbo-adapter URLs from that obsolete
+pin, including URLs retained in saved presets. Existing local filenames
+remain valid. On 21 October 2026, all four replacement assets were checked
+anonymously against Hub LFS metadata and bounded download requests. Their
+size and SHA-256 identities are recorded in `vdn_assets.py`.
 See `THIRD_PARTY_NOTICES.md`, `app/LICENSES/WanGP-Community-2.0.txt`, and
 `docs/development/wan2gp-12-71-port-plan.md` for licensing, integration and
 local validation details.

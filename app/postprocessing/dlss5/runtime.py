@@ -44,6 +44,9 @@ NR_FILES = (
 )
 DLSSG_FILES = (DLSSG_DIR / "nvngx_dlssg.dll", DLSSG_WORKER)
 NR_PROBE_TIMEOUT_SECONDS = 60.0
+# Exercise both-axis padding and output cropping, rather than an already
+# aligned 128x128 DLAA frame that cannot reveal the issue #190 size constraint.
+NR_PROBE_GEOMETRY = (144, 160, 1.5)
 _nr_probe_lock = threading.Lock()
 _nr_probe_cache_lock = threading.Lock()
 _nr_probe_cache: dict[tuple, dict] = {}
@@ -563,7 +566,11 @@ def create_neural_session(width, height, frames, scale, intensity=1.0, abort_cal
         from .experimental import ExperimentalNeuralSession
         return ExperimentalNeuralSession(width, height, frames, scale, intensity, abort_callback,
                                          still_image=still_image, runtime_dir=RUNTIME / "direct")
-    return NeuralRenderingSession(width, height, frames, scale, intensity, abort_callback)
+    from .alignment import AlignedNeuralSession
+    return AlignedNeuralSession(
+        width, height, frames, scale, intensity, abort_callback,
+        session_factory=NeuralRenderingSession,
+    )
 
 
 def clear_neural_rendering_probe_cache() -> None:
@@ -592,7 +599,8 @@ def _neural_rendering_probe_signature() -> tuple:
             file_signature.append((str(path.resolve()), stat.st_mtime_ns, stat.st_size))
         except OSError:
             file_signature.append((str(path), None, None))
-    return (os.name, build, experimental, _gpu_series(), _gpu_identity(), tuple(file_signature))
+    return (os.name, build, experimental, _gpu_series(), _gpu_identity(),
+            tuple(file_signature), NR_PROBE_GEOMETRY)
 
 
 def _deferred_neural_rendering_probe(reason: str) -> dict:
@@ -600,7 +608,7 @@ def _deferred_neural_rendering_probe(reason: str) -> dict:
 
 
 def neural_rendering_capabilities(*, allow_probe: bool = True) -> dict:
-    """Check NR readiness with one bounded synthetic evaluation frame.
+    """Check NR readiness with one bounded, unaligned synthetic upscale.
 
     A busy generation queue and concurrent probe return a transient deferred
     result, which is never cached. Actual success and failure are cached by
@@ -656,8 +664,11 @@ def neural_rendering_capabilities(*, allow_probe: bool = True) -> dict:
             session = None
             succeeded = False
             try:
+                probe_width, probe_height, probe_scale = NR_PROBE_GEOMETRY
+                expected_width = max(2, math.floor(probe_width * probe_scale / 2 + 0.5) * 2)
+                expected_height = max(2, math.floor(probe_height * probe_scale / 2 + 0.5) * 2)
                 session = create_neural_session(
-                    128, 128, 1, 1.0, 1.0,
+                    probe_width, probe_height, 1, probe_scale, 1.0,
                     abort_callback=lambda: time.monotonic() >= deadline,
                     still_image=True,
                 )
@@ -677,7 +688,8 @@ def neural_rendering_capabilities(*, allow_probe: bool = True) -> dict:
                 if (
                     not isinstance(output, np.ndarray)
                     or output.dtype != np.uint8
-                    or output.shape != (session.output_height, session.output_width, 4)
+                    or output.shape != (expected_height, expected_width, 4)
+                    or (session.output_width, session.output_height) != (expected_width, expected_height)
                 ):
                     raise RuntimeError("DLSS Neural Rendering returned an invalid evaluation frame")
                 if time.monotonic() >= deadline:

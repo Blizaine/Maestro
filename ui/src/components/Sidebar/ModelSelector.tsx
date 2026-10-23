@@ -64,6 +64,7 @@ function WorkflowModelSelector({ placement = 'above' }: { placement?: Placement 
   ))
   const currentModelType = useStore(s => s.params.model_type)
   const selectModel = useStore(s => s.selectModel)
+  const controlsPending = useStore(s => s.modelsLoading || (!s.modelsLoaded && !!s.modelsLoadError))
   const selectStudioVideoModel = useStore(s => s.selectStudioVideoModel)
   const openModelVisibility = useStore(s => s.openModelVisibility)
   const resetEnabledModels = useStore(s => s.resetEnabledModels)
@@ -189,6 +190,7 @@ function WorkflowModelSelector({ placement = 'above' }: { placement?: Placement 
       {/* Trigger button */}
       <button
         aria-label="Choose model" aria-expanded={open}
+        disabled={controlsPending}
         onClick={() => setOpen(!open)}
         title={currentModelCompatible
           ? `${currentModel?.name || 'Select model'}\n${currentModel?.selector_help || currentModel?.description || ''}`
@@ -196,7 +198,7 @@ function WorkflowModelSelector({ placement = 'above' }: { placement?: Placement 
         className={`w-full flex items-center gap-1.5 bg-bg-tertiary border border-border rounded-lg px-2 py-2 text-left hover:border-border-light transition-colors ${placement === 'footer' ? 'min-h-11' : ''}`}
       >
         <span className={`flex-1 min-w-0 text-text-primary ${placement === 'footer' ? 'line-clamp-2 text-[11px] leading-tight' : 'truncate text-xs'}`}>
-          {currentModelCompatible && currentModel
+          {controlsPending ? 'Loading model controls…' : currentModelCompatible && currentModel
             ? modelNameForContext(currentModel, visibilityScope)
             : currentModel ? 'No compatible model' : 'Select model'}
         </span>

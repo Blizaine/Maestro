@@ -673,6 +673,10 @@ class BasePlanner(ABC):
         if parsed is not None:
             return parsed
 
+        from services.enhancement_diagnostics import record_rejection
+        record_rejection(["The writer response could not be parsed as the requested JSON plan."],
+                         stage="Director JSON parsing")
+
         # Retry once with explicit JSON fix instruction + a hard JSON
         # grammar. The grammar (caller's schema, or the generic array-of-
         # objects fallback) is what actually guarantees a parseable result
@@ -726,6 +730,8 @@ class BasePlanner(ABC):
             return parsed2
 
         print("[Planner] JSON parse failed on retry, returning empty list")
+        record_rejection(["The repaired response still could not be parsed as the requested JSON plan."],
+                         stage="Director JSON repair")
         return []
 
     def _parse_json_response(self, text: str) -> Optional[list[dict]]:

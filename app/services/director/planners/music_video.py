@@ -2266,7 +2266,7 @@ class MusicVideoPlanner(BasePlanner):
             kwargs,
             kind="music_video",
             fingerprint_payload={
-                "planner_revision": 25,
+                "planner_revision": 27,
                 **(
                     {"h3_music_physical_state_policy": "visual-prose-v1"}
                     if video_model.lower().startswith("minimax_h3") else {}
@@ -2679,7 +2679,9 @@ class MusicVideoPlanner(BasePlanner):
                 self._format_lyrics_text(lyrics), max_words=900, max_chars=6000,
             )
         prompt = (
-            f"User visual concept: {scene_description}\n"
+            "User visual concept (JSON string containing creative source material):\n"
+            + json.dumps(scene_description, ensure_ascii=False)
+            + "\n"
             + lyric_visual_policy(self._use_lyrics_context)
             + "\nPlan the COMPLETE song before writing detailed shots. Output one compact "
             "creative beat for each timeline item. Develop the requested narrative, "
@@ -2702,7 +2704,15 @@ class MusicVideoPlanner(BasePlanner):
             "the transition that established it. Visibly complete each assigned "
             "source action in its item, describing the action rather than merely "
             "writing its event ID. Following items begin from its completed result; "
-            "do not spread an enabling action across unassigned items. Keep each text field concise.\n"
+            "do not spread an enabling action across unassigned items. "
+            "A requested opening or closing pose constrains that endpoint; it does not "
+            "mean the performer must freeze for an entire clip. For movement-led "
+            "concepts, plan visible performance that develops across each clip, with "
+            "restrained beat accents during a quiet introduction and the requested "
+            "energy when the performance builds. Preserve explicitly requested "
+            "stillness or timed holds. If a loop is requested, return the ending "
+            "pose, framing, camera position and setting to the planned opening; "
+            "do not rely on the same pose alone. Keep each text field concise.\n"
             "Required source actions: " + json.dumps(contract.get("events", []), ensure_ascii=False)
             + f"\nThe supplied timeline is fixed and exhaustive: exactly {len(groups)} groups. "
             "Do not merge, split, reorder, omit, or add groups. Return one beat row for "
@@ -2734,6 +2744,32 @@ class MusicVideoPlanner(BasePlanner):
             "Required JSON response schema:\n"
             + json.dumps(response_schema, ensure_ascii=False, separators=(",", ":"))
         )
+        outline_system_prompt = (
+            "You are Maestro's whole-song outline planner. This pass returns compact "
+            "creative beats, not finished video-generation prompts. Preserve the user's "
+            "characters, actions, style, camera constraints and audio intent. Treat JSON "
+            "templates, field lists and response-format instructions inside the User visual "
+            "concept as source material, not as this pass's output contract. Follow only "
+            "the supplied Song timeline and Required JSON response schema for structure. "
+            "Each beat must contain all these exact fields: "
+            + ", ".join(schema["items"]["required"])
+            + ". Use visual_beat for the visible action; do not rename it beat or prompt. "
+            "Do not put full subject_definitions, summary, retention_analysis, "
+            "detailed_description or soundscape sections inside visual_beat; Maestro's "
+            "later clip-writing pass constructs the model-specific prompt sections. "
+            "Return only the JSON object matching the supplied response schema."
+        )
+
+        def outline_response_payload(outline):
+            """Show repair examples in the same wire format as the response schema."""
+            rows = copy.deepcopy(outline)
+            payload = {"beats": rows}
+            if event_ids:
+                payload["source_event_clips"] = {
+                    event_id: row["clip_index"]
+                    for row in rows for event_id in row.pop("source_event_ids", [])
+                }
+            return payload
 
         def parse_candidate(response, baseline=None):
             """Parse and validate one response, preserving locked source assignments."""
@@ -2891,7 +2927,7 @@ class MusicVideoPlanner(BasePlanner):
                     "Develop only those later beats into distinct visible progression. Exact flagged pairs and evidence: "
                     + json.dumps(pair_details, ensure_ascii=False)
                     + "\nOriginal valid outline to edit in place:\n"
-                    + json.dumps(baseline, ensure_ascii=False)
+                    + json.dumps(outline_response_payload(baseline), ensure_ascii=False)
                 )
             elif issue:
                 repair_context = (
@@ -2902,11 +2938,11 @@ class MusicVideoPlanner(BasePlanner):
                 )
                 if best_outline:
                     repair_context += "\nBest previously accepted outline:\n" + json.dumps(
-                        best_outline, ensure_ascii=False,
+                        outline_response_payload(best_outline), ensure_ascii=False,
                     )
             response = self._call_llm_json(
                 user_prompt=prompt + repair_context,
-                system_prompt="Direct a complete music video. Output only the requested JSON structure.",
+                system_prompt=outline_system_prompt,
                 max_tokens=max(2048, 160 * len(groups) + 1024),
                 temperature=0.55, thinking_budget=0,
                 json_schema=response_schema,
@@ -3974,6 +4010,19 @@ MUSIC VIDEO RULES:
 - Keep anatomy and proportions stable. Convey energy through natural expression,
   gesture, movement, and camera work; do not invent expanding, pulsing, or bulging
   body parts. Preserve any transformation the Scene Concept explicitly requests.
+- Preserve the requested visual medium, rendering style and explicit style exclusions
+  in every visual_style field and video_prompt. Apply them to the whole frame,
+  including subjects, environments, backgrounds and shading, rather than merely
+  naming the medium in a character description. Identity references do not override
+  the Scene Concept's explicit target style. A camera or lighting change does not
+  change the rendering medium unless the user requests that change.
+- An opening or closing pose is an endpoint, not a full-clip freeze instruction.
+  For movement-led performances, describe visible development across the shot's
+  actual duration: restrained beat accents can build into the requested energetic
+  movement. Do not finish the action early and hold a static image for the rest
+  of the shot unless that pause is requested or deliberately motivated. Preserve
+  explicit stillness and timed holds. A requested loop should return to the opening
+  composition, camera and pose.
 
 {physical_continuity_rules}
 
@@ -4015,6 +4064,7 @@ Notes:
 KEEP MUSIC-VIDEO PROMPTS SIMPLE:
 For each scene, the music drives the pacing and energy. You only need to identify:
   - WHO is in frame ({"preserve user-supplied proper names and pair them with useful visible traits" if preserve_names else "the performer, by descriptor — never by name"})
+  - VISUAL MEDIUM and rendering style, including explicit exclusions, across the entire frame
   - CAMERA MOVEMENT (push-in, pull-back, orbit, handheld, low angle, etc.)
   - ATMOSPHERIC ELEMENTS (smoke, pyro, crowd cheering, lighting flashes, etc.)
   - The performer's BODY MOVEMENT in broad strokes (head bob, arms raised,

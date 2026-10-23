@@ -43,11 +43,37 @@ def validate_retry_plan(plan: dict | None, *, fingerprint: str, count: int) -> d
     if plan.get("retry_fingerprint") != fingerprint:
         raise H3PlanRetryError("The prompt, references or timing changed. Create a new draft for these settings.")
     context = checkpoint.get("context")
-    if (not isinstance(context, dict)
-            or len(plan.get("windows") or []) != count
-            or len(checkpoint.get("segments") or []) != count
-            or len(context.get("durations") or []) != count):
-        raise H3PlanRetryError("The saved window schedule is incomplete. Create a new draft.")
+    windows = plan.get("windows")
+    segments = checkpoint.get("segments")
+    durations = context.get("durations") if isinstance(context, dict) else None
+    window_prompts = plan.get("window_prompts")
+    advertised_count = plan.get("window_count")
+    malformed_schedule = (
+        not isinstance(windows, list)
+        or not isinstance(segments, list)
+        or not isinstance(durations, list)
+        or ("window_count" in plan and (
+            type(advertised_count) is not int or advertised_count != count
+        ))
+        or len(windows) != count
+        or len(segments) != count
+        or len(durations) != count
+        or any(not isinstance(window, dict) for window in (windows or []))
+        or any(not isinstance(segment, dict) for segment in (segments or []))
+        or any(not isinstance(window.get("prompt"), str) or not window["prompt"]
+               for window in (windows or []) if isinstance(window, dict))
+        or (window_prompts is not None and (
+            not isinstance(window_prompts, list)
+            or len(window_prompts) != count
+            or any(not isinstance(prompt, str) for prompt in window_prompts)
+            or window_prompts != [window.get("prompt") for window in windows]
+        ))
+    )
+    if malformed_schedule:
+        raise H3PlanRetryError(
+            "The saved window schedule is incomplete or malformed. "
+            "Your saved draft is unchanged; create a new draft to rebuild the schedule."
+        )
     targets = retryable_windows(plan)
     if not targets:
         raise H3PlanRetryError("This draft has no flagged windows to retry. Generate it or create a new draft.")
@@ -55,14 +81,42 @@ def validate_retry_plan(plan: dict | None, *, fingerprint: str, count: int) -> d
 
 
 def finish_retry_plan(result: dict, previous: dict | None, fingerprint: str) -> dict:
+    windows = result.get("windows") if isinstance(result, dict) else None
+    window_prompts = result.get("window_prompts") if isinstance(result, dict) else None
+    advertised_count = result.get("window_count") if isinstance(result, dict) else None
+    malformed_result = (
+        not isinstance(windows, list)
+        or not isinstance(window_prompts, list)
+        or not windows
+        or len(windows) != len(window_prompts)
+        or ("window_count" in result and (
+            type(advertised_count) is not int or advertised_count != len(windows)
+        ))
+        or any(not isinstance(window, dict) for window in (windows or []))
+        or any(not isinstance(window.get("prompt"), str) or not window["prompt"]
+               for window in (windows or []) if isinstance(window, dict))
+        or any(not isinstance(prompt, str) for prompt in (window_prompts or []))
+        or window_prompts != [window.get("prompt") for window in windows]
+    )
+    if malformed_result:
+        if previous is not None:
+            raise H3PlanRetryError(
+                "The repair returned an incomplete or unusable schedule. "
+                "Your saved draft is unchanged."
+            )
+        raise H3PlanRetryError(
+            "The planner returned an incomplete or unusable window schedule. "
+            "Review the source prompt and create a new draft."
+        )
     result["retry_fingerprint"] = fingerprint
     if previous is not None:
-        if len(result["windows"]) != len(previous["windows"]):
+        previous_windows = previous.get("windows") if isinstance(previous, dict) else None
+        if not isinstance(previous_windows, list) or len(result["windows"]) != len(previous_windows):
             raise H3PlanRetryError("The repair returned an incomplete schedule. Your saved draft is unchanged.")
         targets = set(retryable_windows(previous))
         # Compiling one repaired window must not normalize or otherwise change
         # any accepted prompt, including its timing and presentation metadata.
-        result["windows"] = [window if index + 1 in targets else deepcopy(previous["windows"][index])
+        result["windows"] = [window if index + 1 in targets else deepcopy(previous_windows[index])
                              for index, window in enumerate(result["windows"])]
         result["window_prompts"] = [window["prompt"] for window in result["windows"]]
         result["retried_windows"] = sorted(targets)

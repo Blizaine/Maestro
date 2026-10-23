@@ -142,17 +142,17 @@ class ExperimentalRoutingTests(unittest.TestCase):
             for scale in scales:
                 validate_methods(f"dlss5*{scale}")
 
-    def test_neural_probe_evaluates_one_synthetic_frame_and_caches_success(self):
+    def test_neural_probe_evaluates_unaligned_upscale_and_caches_success(self):
         import numpy as np
         import threading
         from postprocessing.dlss5 import runtime
         from services.job_lifecycle import configure_generation_probe_lock
 
         session = Mock(
-            render_width=128, render_height=128,
-            output_width=128, output_height=128, needs_guides=True,
+            render_width=144, render_height=160,
+            output_width=216, output_height=240, needs_guides=True,
         )
-        session.process_frame.return_value = np.zeros((128, 128, 4), dtype=np.uint8)
+        session.process_frame.return_value = np.zeros((240, 216, 4), dtype=np.uint8)
         generation_lock = threading.Lock()
         configure_generation_probe_lock(generation_lock)
         runtime.clear_neural_rendering_probe_cache()
@@ -167,10 +167,11 @@ class ExperimentalRoutingTests(unittest.TestCase):
             self.assertTrue(second["available"])
             self.assertFalse(first["deferred"])
             factory.assert_called_once()
+            self.assertEqual(factory.call_args.args, (144, 160, 1, 1.5, 1.0))
             args, kwargs = session.process_frame.call_args
             self.assertEqual(args[0], 0)
-            self.assertEqual(args[1].shape, (128, 128, 4))
-            self.assertEqual(args[2].shape, (128, 128, 2))
+            self.assertEqual(args[1].shape, (160, 144, 4))
+            self.assertEqual(args[2].shape, (160, 144, 2))
             self.assertTrue(kwargs["depth"].min() > 0)
             session.close.assert_called_once_with(abort=False)
         finally:
@@ -182,7 +183,7 @@ class ExperimentalRoutingTests(unittest.TestCase):
         from postprocessing.dlss5 import runtime
         from services.job_lifecycle import configure_generation_probe_lock
 
-        session = Mock(render_width=128, render_height=128)
+        session = Mock(render_width=144, render_height=160)
         session.process_frame.side_effect = RuntimeError(
             "DLSS Neural Rendering failed on frame 0 (NGX 0xBAD00000)."
         )
@@ -209,6 +210,74 @@ class ExperimentalRoutingTests(unittest.TestCase):
             runtime.clear_neural_rendering_probe_cache()
             configure_generation_probe_lock(None)
 
+    def test_neural_probe_rejects_an_uncropped_padded_output(self):
+        import numpy as np
+        import threading
+        from postprocessing.dlss5 import runtime
+        from services.job_lifecycle import configure_generation_probe_lock
+
+        session = Mock(render_width=144, render_height=160,
+                       output_width=256, output_height=256, needs_guides=True)
+        session.process_frame.return_value = np.zeros((256, 256, 4), dtype=np.uint8)
+        configure_generation_probe_lock(threading.Lock())
+        runtime.clear_neural_rendering_probe_cache()
+        try:
+            with patch.object(runtime, "unavailable_reason", return_value=""), \
+                    patch.object(runtime, "uses_experimental_backend", return_value=False), \
+                    patch.object(runtime, "_neural_rendering_probe_signature", return_value=("uncropped",)), \
+                    patch.object(runtime, "create_neural_session", return_value=session):
+                result = runtime.neural_rendering_capabilities()
+            self.assertFalse(result["available"])
+            self.assertIn("invalid evaluation frame", result["reason"])
+            session.close.assert_called_once_with(abort=True)
+        finally:
+            runtime.clear_neural_rendering_probe_cache()
+            configure_generation_probe_lock(None)
+
+    def test_neural_probe_uses_the_real_alignment_adapter_before_native_evaluation(self):
+        import math
+        import numpy as np
+        import threading
+        from postprocessing.dlss5 import runtime
+        from services.job_lifecycle import configure_generation_probe_lock
+
+        native_sessions = []
+
+        def native_factory(width, height, frames, scale, intensity, abort_callback):
+            output_width = math.floor(width * scale / 2 + 0.5) * 2
+            output_height = math.floor(height * scale / 2 + 0.5) * 2
+            self.assertEqual(output_width % 64, 0)
+            self.assertEqual(output_height % 64, 0)
+            session = Mock(render_width=width, render_height=height,
+                           output_width=output_width, output_height=output_height,
+                           needs_guides=True)
+            session.process_frame.return_value = np.zeros((output_height, output_width, 4), dtype=np.uint8)
+            native_sessions.append(session)
+            return session
+
+        configure_generation_probe_lock(threading.Lock())
+        runtime.clear_neural_rendering_probe_cache()
+        try:
+            with patch.object(runtime, "unavailable_reason", return_value=""), \
+                    patch.object(runtime, "uses_experimental_backend", return_value=False), \
+                    patch.object(runtime, "_neural_rendering_probe_signature", return_value=("aligned-probe",)), \
+                    patch.object(runtime, "NeuralRenderingSession", side_effect=native_factory):
+                result = runtime.neural_rendering_capabilities()
+            self.assertTrue(result["available"], result["reason"])
+            self.assertEqual(len(native_sessions), 1)
+            session = native_sessions[0]
+            rgba, motion = session.process_frame.call_args.args[1:3]
+            depth = session.process_frame.call_args.kwargs["depth"]
+            self.assertEqual(rgba.shape[:2], (session.render_height, session.render_width))
+            self.assertEqual(motion.shape[:2], rgba.shape[:2])
+            self.assertEqual(depth.shape, rgba.shape[:2])
+            self.assertGreater(session.render_width, 144)
+            self.assertGreater(session.render_height, 160)
+            session.close.assert_called_once_with(abort=False)
+        finally:
+            runtime.clear_neural_rendering_probe_cache()
+            configure_generation_probe_lock(None)
+
     def test_neural_probe_busy_deferral_is_not_cached_and_retries_after_generation(self):
         import threading
         import numpy as np
@@ -216,10 +285,10 @@ class ExperimentalRoutingTests(unittest.TestCase):
         from services.job_lifecycle import configure_generation_probe_lock, generation_slot
 
         session = Mock(
-            render_width=128, render_height=128,
-            output_width=128, output_height=128, needs_guides=True,
+            render_width=144, render_height=160,
+            output_width=216, output_height=240, needs_guides=True,
         )
-        session.process_frame.return_value = np.zeros((128, 128, 4), dtype=np.uint8)
+        session.process_frame.return_value = np.zeros((240, 216, 4), dtype=np.uint8)
         runtime.clear_neural_rendering_probe_cache()
         generation_lock = threading.Lock()
         configure_generation_probe_lock(generation_lock)
@@ -257,10 +326,10 @@ class ExperimentalRoutingTests(unittest.TestCase):
 
         clock = FakeClock()
         session = Mock(
-            render_width=128, render_height=128,
-            output_width=128, output_height=128, needs_guides=True,
+            render_width=144, render_height=160,
+            output_width=216, output_height=240, needs_guides=True,
         )
-        session.process_frame.return_value = np.zeros((128, 128, 4), dtype=np.uint8)
+        session.process_frame.return_value = np.zeros((240, 216, 4), dtype=np.uint8)
         generation_lock = threading.Lock()
         configure_generation_probe_lock(generation_lock)
         runtime.clear_neural_rendering_probe_cache()
@@ -299,10 +368,10 @@ class ExperimentalRoutingTests(unittest.TestCase):
         from services.job_lifecycle import configure_generation_probe_lock
 
         session = Mock(
-            render_width=128, render_height=128,
-            output_width=128, output_height=128, needs_guides=True,
+            render_width=144, render_height=160,
+            output_width=216, output_height=240, needs_guides=True,
         )
-        session.process_frame.return_value = np.zeros((128, 128, 4), dtype=np.uint8)
+        session.process_frame.return_value = np.zeros((240, 216, 4), dtype=np.uint8)
         runtime.clear_neural_rendering_probe_cache()
         configure_generation_probe_lock(None)
         generation_lock = threading.Lock()

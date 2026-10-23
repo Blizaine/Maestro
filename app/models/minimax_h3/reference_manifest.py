@@ -12,6 +12,8 @@ import os
 import re
 from pathlib import Path
 
+from services.h3_reference_audio import VIDEO_AUDIO_ROLES
+
 
 MINIMAX_H3_MAX_REFERENCE_IMAGES = 9
 MINIMAX_H3_MAX_REFERENCE_VIDEOS = 3
@@ -164,7 +166,28 @@ def validate_reference_manifest(
                     "An encoded RefMod video cannot follow the timeline; use the original video reference."
                 )
             item["follow_timeline"] = follow_timeline
-            item["include_audio"] = bool(raw.get("include_audio", True))
+            video_audio_role = raw.get("video_audio_role")
+            if video_audio_role is not None and str(video_audio_role).strip():
+                video_audio_role = str(video_audio_role).strip().lower()
+                if video_audio_role not in VIDEO_AUDIO_ROLES:
+                    choices = ", ".join(sorted(VIDEO_AUDIO_ROLES))
+                    raise ValueError(
+                        f"Reference {index + 1} has invalid video audio role "
+                        f"{video_audio_role!r}; expected one of: {choices}."
+                    )
+                item["video_audio_role"] = video_audio_role
+                if (
+                    video_audio_role in {"drive", "voice", "style", "sound"}
+                    and not item.get("_h3_video_audio_source_id")
+                ):
+                    counts["audio"] += 1
+                    if video_audio_role == "drive":
+                        drive_audio_count += 1
+                # An explicit dropdown choice owns audio independently from
+                # the legacy checkbox saved by older jobs.
+                item["include_audio"] = video_audio_role == "legacy"
+            else:
+                item["include_audio"] = bool(raw.get("include_audio", True))
             audio_path = str(raw.get("audio_path") or "").strip()
             if audio_path:
                 if require_files and not os.path.isfile(audio_path):
@@ -219,15 +242,26 @@ def split_exact_drive_audio_reference(references) -> tuple[list[dict], str | Non
     conditioning path and keeps visual, voice, style, and sound-effect media in the packed
     Omni reference sequence.
 
-    The returned ordinal is the drive file's original ``<Audio N>`` number so
-    old enhanced prompts can be repaired just before text encoding.
+    Standalone drive audio returns its original ``<Audio N>`` number so old
+    enhanced prompts can be repaired just before text encoding. A video-derived
+    drive has no Audio ordinal in the user's manifest, so it never returns one.
     """
 
-    items = [dict(item) for item in (references or []) if isinstance(item, dict)]
+    from services.h3_reference_audio import canonicalize_video_audio_roles
+
+    items = canonicalize_video_audio_roles(
+        [dict(item) for item in (references or []) if isinstance(item, dict)]
+    )
     runtime_references: list[dict] = []
     drive_path: str | None = None
     drive_ordinal: int | None = None
     audio_ordinal = 0
+    derived_video_by_source = {
+        str(item.get("_h3_video_audio_source_id")): item
+        for item in items
+        if str(item.get("type") or item.get("kind") or "").strip().lower() == "video"
+        and item.get("_h3_video_audio_source_id")
+    }
 
     for item in items:
         kind = str(item.get("type") or item.get("kind") or "").strip().lower()
@@ -243,8 +277,21 @@ def split_exact_drive_audio_reference(references) -> tuple[list[dict], str | Non
             runtime_references.append(item)
             continue
 
-        audio_ordinal += 1
-        if str(item.get("audio_intent") or "voice").strip().lower() != "drive":
+        audio_intent = str(item.get("audio_intent") or "voice").strip().lower()
+        source_id = str(item.get("_h3_video_audio_source_id") or "")
+        source_video = derived_video_by_source.get(source_id)
+        video_drive = bool(
+            source_video
+            and str(source_video.get("video_audio_role") or "").strip().lower() == "drive"
+        )
+
+        # Exact video soundtracks are not numbered by the UI/context layer.
+        # Do not let their hidden runtime row consume or rewrite another
+        # reference's Audio ordinal.
+        if not video_drive:
+            audio_ordinal += 1
+
+        if audio_intent != "drive":
             runtime_references.append(item)
             continue
         if drive_path is not None:
@@ -253,7 +300,10 @@ def split_exact_drive_audio_reference(references) -> tuple[list[dict], str | Non
                 "Use Voice reference, Sound effect reference, or Music / sound style only for additional audio references."
             )
         drive_path = str(item.get("path") or "").strip() or None
-        drive_ordinal = audio_ordinal
+        drive_ordinal = None if video_drive else audio_ordinal
+        if source_id and source_id in derived_video_by_source:
+            derived_video_by_source[source_id]["_h3_video_audio_role_routed"] = True
+            derived_video_by_source[source_id]["_h3_video_audio_routed_role"] = "drive"
 
     return runtime_references, drive_path, drive_ordinal
 

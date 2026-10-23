@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, Component, type ReactNode } from 'react'
 import { X, ChevronDown, ChevronRight, Play, ImageIcon, Check, AlertTriangle, Clock, Brain, Sparkles, Loader2, Camera, Film, Combine, Pencil, Trash2 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
-import { getFileUrl, updateClipPrompt } from '../../api/client'
+import { fetchWriterDrafts, getFileUrl, updateClipPrompt } from '../../api/client'
+import { LoadWriterDraftHistory } from '../WriterDraftHistory'
 import type { PipelineClipState, SavedPipelineState } from '../../types'
 
 /** Safely coerce any value to a displayable string */
@@ -888,6 +889,8 @@ function DirectorDashboardInner() {
             <div className="bg-bg-secondary rounded-lg border border-border p-3">
               <h3 className="text-[11px] text-text-secondary uppercase tracking-wider font-medium mb-2">LLM Planning Log</h3>
               <LlmLogPanel pipeline={selectedPipeline} />
+              <LoadWriterDraftHistory key={selectedPipeline.pipeline_id}
+                load={() => fetchWriterDrafts('director', selectedPipeline.pipeline_id)}/>
             </div>
 
             {/* Clip Grid */}

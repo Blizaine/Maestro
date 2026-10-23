@@ -347,6 +347,7 @@ def _load_llm_enhance_helpers():
         "_replace_h3_structured_field",
         "_canonicalize_h3_ref2va_reference_fields",
         "_canonicalize_h3_ref2va_dialogue_speakers",
+        "_h3_ref2va_reference_contract_issues",
         "_h3_ref2va_reference_contract_satisfied",
         "_h3_ref2va_dialogue_binding_contract_satisfied",
         "_h3_voice_binding_contract_satisfied",
@@ -2246,7 +2247,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("intent=AUDIO REUSE / PERFORMANCE DRIVER", store)
         self.assertIn("intent=VOICE REFERENCE", store)
         self.assertIn('draggable', section)
-        self.assertIn("Include soundtrack", section)
+        self.assertIn("soundtrack role", section)
+        self.assertIn("Preserve soundtrack / performance timeline", section)
         self.assertIn("Attach audio", section)
         self.assertIn("audio_path", section)
         self.assertIn("High detail (official PDD recipe)", section)
@@ -2321,11 +2323,11 @@ class TestMiniMaxH3Definition(unittest.TestCase):
     def test_omni_drive_audio_adopts_timeline_without_mutating_voice_or_style(self):
         section = _read(_OMNI_REFERENCE_SECTION_PATH)
         duration_slider = _read(_DURATION_SLIDER_PATH)
-        handler_start = section.index("const setAudioIntent =")
+        handler_start = section.index("const applyDriveDuration =")
         handler_end = section.index("const attachAudio =", handler_start)
         handler = section[handler_start:handler_end]
 
-        self.assertIn("if (intent !== 'drive') return", handler)
+        self.assertIn("if (intent === 'drive') applyDriveDuration", handler)
         self.assertIn("Number(reference?.duration_seconds)", handler)
         self.assertIn("audioDuration > slidingWindowSeconds + (1 / fps)", handler)
         self.assertIn("setParam('minimax_h3_reference_sequence', true)", handler)
@@ -2389,7 +2391,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             helpers["_h3_dialogue_contract_satisfied"]('A man says, "Hello."', fallback)
         )
         self.assertIn("<d>[English] Hello.</d>", fallback)
-        self.assertIn("begin at the first frame", fallback)
+        self.assertIn("Render the requested dialogue clearly", fallback)
+        self.assertNotIn("Continuous scene-appropriate stereo ambience", fallback)
         self.assertTrue(
             helpers["_h3_voice_binding_contract_satisfied"](
                 fallback,
@@ -2458,7 +2461,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             )
         )
         duplicated = timed.replace(
-            "summary: [reference generation + audio reference] A finished video matching the requested action, identity, setting, and explicitly tagged dialogue.",
+            "summary: [reference generation + audio reference] A finished video matching the requested action, identity, setting and explicitly tagged dialogue.",
             'summary: Blaine declares, "Snap this, bitch."',
         )
         deduplicated = helpers["_strip_h3_untagged_dialogue_duplicates"](

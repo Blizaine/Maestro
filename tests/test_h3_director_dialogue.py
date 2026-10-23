@@ -1032,6 +1032,95 @@ Then change the agenda.
         self.assertIn("swoops down", ordinary_prompt)
         self.assertIn("breathes fire", ordinary_prompt)
 
+    def test_visual_style_is_full_frame_per_clip_and_compilation_is_idempotent(self):
+        styles = [
+            "2D anime with bold ink outlines and cel shading; avoid photorealism and 3D rendering",
+            "watercolor illustration with soft pigment edges and paper texture",
+        ]
+        sources = [
+            "Ari dances under a row of stage lights. overall_soundscape: Venue ambience.",
+            "Ari pauses beside the stage door. overall_soundscape: Quiet room tone.",
+        ]
+        plans = [{
+            "video_prompt": source,
+            "_director_h3_source_prompt": source,
+            "_director_h3_model_family": "ref2va",
+            "_director_visual_style": style,
+            "_director_subjects_on_screen": [],
+            "_director_dialogue_beats": [],
+        } for source, style in zip(sources, styles)]
+
+        compile_h3_clip_plans(plans, prompt_modes=["ref2va", "ref2va"])
+        first_compiled = [plan["video_prompt"] for plan in plans]
+
+        for index, (plan, source, style) in enumerate(zip(plans, sources, styles)):
+            with self.subTest(shot=index + 1):
+                self.assertEqual(plan["_director_h3_source_prompt"], source)
+                self.assertIn(style, plan["video_prompt"])
+                self.assertIn("Visual style across the entire frame", plan["video_prompt"])
+                self.assertIn("every subject", plan["video_prompt"])
+                self.assertIn("environment and background", plan["video_prompt"])
+                self.assertIn("linework, shading", plan["video_prompt"])
+                self.assertNotIn(styles[1 - index], plan["video_prompt"])
+
+        compile_h3_clip_plans(plans, prompt_modes=["ref2va", "ref2va"])
+
+        self.assertEqual([plan["video_prompt"] for plan in plans], first_compiled)
+        self.assertEqual(
+            [plan["_director_h3_source_prompt"] for plan in plans], sources,
+        )
+
+        style = styles[0]
+        authored_style_intro = (
+            "Visual style across the entire frame: "
+            f"{style}. Apply this style consistently to every subject, the "
+            "environment and background, and all linework, shading, color "
+            "treatment, and rendering."
+        )
+        authored_source = (
+            f"{authored_style_intro} [Shot 1] Ari dances beneath stage lights. "
+            "overall_soundscape: Venue ambience."
+        )
+        authored_plan = {
+            "video_prompt": authored_source,
+            "_director_h3_source_prompt": authored_source,
+            "_director_h3_model_family": "ref2va",
+            "_director_visual_style": style,
+            "_director_subjects_on_screen": [],
+            "_director_dialogue_beats": [],
+        }
+        compile_h3_clip_plans([authored_plan], prompt_modes=["ref2va"])
+        visual_field = authored_plan["video_prompt"].split(
+            "detailed_description:", 1,
+        )[1].split("overall_soundscape:", 1)[0]
+        self.assertEqual(visual_field.count(authored_style_intro), 1)
+
+    def test_reviewed_visual_style_overrides_stale_planner_style(self):
+        source = (
+            "A watercolor illustration with soft pigment edges shows Ari "
+            "dancing beneath stage lights. overall_soundscape: Venue ambience."
+        )
+        plan = {
+            "video_prompt": source,
+            "_director_h3_source_prompt": source,
+            "_director_h3_model_family": "ref2va",
+            "_director_prompt_user_edited": True,
+            "_director_visual_style": (
+                "2D anime with cel shading; avoid photorealism and 3D rendering"
+            ),
+            "_director_subjects_on_screen": [],
+            "_director_dialogue_beats": [],
+        }
+
+        compile_h3_clip_plans([plan], prompt_modes=["ref2va"])
+
+        self.assertEqual(plan["_director_h3_source_prompt"], source)
+        self.assertIn("watercolor illustration", plan["video_prompt"])
+        self.assertNotIn(
+            "Visual style across the entire frame: 2D anime",
+            plan["video_prompt"],
+        )
+
     def test_prompt_contract_reports_missing_canonical_world_ledger(self):
         prompt, _ = compile_h3_official_prompt(
             "A man enters a cafe. overall_soundscape: Room tone.",

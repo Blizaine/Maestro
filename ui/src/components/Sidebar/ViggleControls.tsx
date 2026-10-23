@@ -4,7 +4,7 @@ import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { CharacterImagePickerButton } from '../Characters/CharacterImagePicker'
 import { CharacterToolbarItem } from './SidebarPanels'
-import { newViggleCharacter, vigglePreparationKey, viggleTimeline, VIGGLE_SWAP_PROMPT } from '../../lib/viggle'
+import { newViggleCharacter, vigglePreparationKey, viggleSourceReady, viggleTimeline, VIGGLE_SWAP_PROMPT } from '../../lib/viggle'
 import { VideoTimelineSelector } from '../shared/VideoTimelineSelector'
 import { GalleryInput } from '../shared/GalleryInput'
 import { characterDisplayName } from '../../lib/characters'
@@ -16,6 +16,7 @@ const mediaUrl = (path: string) => /[/\\]uploads[/\\]/.test(path)
 
 export function ViggleControls() {
   const params = useStore(s => s.params)
+  const workspace = useStore(s => s.activeWorkspace)
   const setParam = useStore(s => s.setParam)
   const editFrame = useStore(s => s.sendFrameToImageMode)
   const generationError = useStore(s => s.promptEnhanceError)
@@ -24,29 +25,74 @@ export function ViggleControls() {
   const [preparing, setPreparing] = useState(false)
   const [progress, setProgress] = useState('')
   const [previewJob, setPreviewJob] = useState('')
+  const [sourceError, setSourceError] = useState('')
+  const [sourceNotice, setSourceNotice] = useState('')
+  const [sourceRevision, setSourceRevision] = useState(0)
   const alive = useRef(true)
   useEffect(() => {alive.current = true; return () => {alive.current = false}}, [])
   const source = String(params.video_guide || '')
   const edited = String(params._viggle_edited_frame || '')
   const audio = String(params.audio_prompt_type || '')
   const character = params.viggle_character
-  const timeline = viggleTimeline(params)
+  const sourceReady = viggleSourceReady(params, workspace)
+  const timeline = viggleTimeline(params, workspace)
   const locked = busy || preparing
+  useEffect(() => {
+    if (!source || sourceReady) return
+    const controller = new AbortController()
+    let cancelled = false
+    setSourceError(''); setSourceNotice('')
+    useStore.setState(state => state.params.video_guide === source && state.activeWorkspace === workspace
+      ? {params: {...state.params, _viggle_source_info: undefined}} : state)
+    void api.fetchViggleSourceInfo(source, workspace, controller.signal).then(info => {
+      if (cancelled) return
+      if (!Number.isFinite(info.duration_seconds) || info.duration_seconds < 1 / 24) {
+        throw new Error('The control video must contain at least one frame at 24 fps.')
+      }
+      let adjusted = false
+      useStore.setState(state => {
+        if (state.params.video_guide !== source || state.activeWorkspace !== workspace) return state
+        const next = {...state.params, _viggle_source_seconds: info.duration_seconds,
+          _viggle_source_info: {source, workspace, duration_seconds: info.duration_seconds}}
+        if (Number(next._viggle_trim_start) >= info.duration_seconds) {
+          next._viggle_trim_start = 0
+          next._viggle_trim_end = info.duration_seconds
+          adjusted = true
+        }
+        const selection = viggleTimeline(next, workspace)
+        const oldFrame = Number(next.viggle_character?.frame_seconds ?? next._viggle_frame_seconds ?? 0)
+        const frameChanged = oldFrame !== selection.frame
+        adjusted ||= Number(state.params._viggle_trim_end) > info.duration_seconds || frameChanged
+        return {params: {...next, _viggle_trim_start: selection.start, _viggle_trim_end: selection.end,
+          _viggle_frame_seconds: selection.frame,
+          ...(next.viggle_character ? {viggle_character: {...next.viggle_character, frame_seconds: selection.frame},
+            ...(frameChanged ? {_viggle_prepared: undefined, _viggle_edited_frame: undefined} : {})} : {})}}
+      })
+      if (adjusted) setSourceNotice('Selection adjusted to the available video frames.')
+      const current = useStore.getState()
+      const range = viggleTimeline(current.params, workspace)
+      if (current.params.video_guide === source && current.activeWorkspace === workspace && range.length > 0
+        && (current.params._duration_planning_mode ?? 'auto') === 'auto') current.setDurationSeconds(range.length)
+    }).catch(error => {
+      if (!cancelled) setSourceError(error instanceof Error ? error.message : 'Could not inspect the control video.')
+    })
+    return () => {cancelled = true; controller.abort()}
+  }, [source, workspace, sourceRevision, sourceReady])
   const changeTimeline = (changes: Partial<GenerateParams>) => {
     useStore.setState(state => {
-      if (state.params.video_guide !== source) return state
+      if (state.params.video_guide !== source || state.activeWorkspace !== workspace) return state
       const next = {...state.params, ...changes}
       // A frame is always an absolute timestamp in the original source.
-      const selection = viggleTimeline(next)
-      const frameChanged = selection.frame !== viggleTimeline(state.params).frame
+      const selection = viggleTimeline(next, workspace)
+      const frameChanged = selection.frame !== viggleTimeline(state.params, workspace).frame
       return {params: {...next, _viggle_trim_start: selection.start, _viggle_trim_end: selection.end,
         _viggle_frame_seconds: selection.frame,
         ...(next.viggle_character ? {viggle_character: {...next.viggle_character, frame_seconds: selection.frame},
           ...(frameChanged ? {_viggle_prepared: undefined, _viggle_edited_frame: undefined} : {})} : {})}}
     })
     const current = useStore.getState()
-    const range = viggleTimeline(current.params)
-    if (current.params.video_guide === source && range.length > 0
+    const range = viggleTimeline(current.params, workspace)
+    if (current.params.video_guide === source && current.activeWorkspace === workspace && range.length > 0
       && (current.params._duration_planning_mode ?? 'auto') === 'auto') current.setDurationSeconds(range.length)
   }
   const changeFrame = (seconds: number) => changeTimeline({
@@ -94,7 +140,7 @@ export function ViggleControls() {
     </label>
   )
   const preparePreview = async () => {
-    if (!source || !character?.reference_path || locked) return
+    if (!source || !sourceReady || !character?.reference_path || locked) return
     const key = vigglePreparationKey(source, character, params.seed)
     setPreparing(true); setProgress('Queuing character preparation…'); setError('')
     try {
@@ -152,12 +198,15 @@ export function ViggleControls() {
         </div>
         {source ? <>
           <VideoTimelineSelector key={source} videoUrl={mediaUrl(source)} duration={timeline.duration}
-            startTime={timeline.start} endTime={timeline.end} playheadTime={timeline.frame} disabled={locked}
+            startTime={timeline.start} endTime={timeline.end} playheadTime={timeline.frame} disabled={locked || !sourceReady}
             onStartChange={seconds => changeTimeline({_viggle_trim_start: seconds})}
             onEndChange={seconds => changeTimeline({_viggle_trim_end: seconds})}
-            onPlayheadChange={changeFrame} onMetadata={seconds => {
-              if (Number.isFinite(seconds) && seconds > 0) changeTimeline({_viggle_source_seconds: seconds})
-            }}/>
+            onPlayheadChange={changeFrame}/>
+          {!sourceReady && !sourceError && <p role="status" className="text-[11px] text-text-muted">Checking control video…</p>}
+          {sourceError && <div role="alert" className="text-xs text-red-400">{sourceError}
+            <button type="button" onClick={() => setSourceRevision(value => value + 1)} className="ml-2 text-accent-blue">Retry video check</button>
+          </div>}
+          {sourceNotice && <p role="status" className="text-[11px] text-text-secondary">{sourceNotice}</p>}
           <div className="grid grid-cols-3 gap-2">
             {([
               ['Start', 'Trim start seconds', timeline.start, 0, Math.max(0, timeline.end - 0.1),
@@ -168,7 +217,7 @@ export function ViggleControls() {
             ] as const).map(([label, ariaLabel, value, min, max, change]) => <label key={label}
               className="min-w-0 text-[10px] text-text-muted">{label}
               <input type="number" aria-label={ariaLabel} min={min} max={max} step={0.01}
-                disabled={locked || !timeline.duration} value={Math.round(value * 100) / 100}
+                disabled={locked || !sourceReady} value={Math.round(value * 100) / 100}
                 onChange={event => change(Number(event.target.value) || 0)}
                 className="mt-1 min-h-10 w-full min-w-0 rounded-lg border border-border bg-bg-tertiary px-2 text-base sm:text-xs text-text-primary"/>
             </label>)}
@@ -216,7 +265,7 @@ export function ViggleControls() {
             </label>
             <button type="button" disabled={locked} onClick={() => changeCharacter({swap_prompt: VIGGLE_SWAP_PROMPT})} className="mt-2 text-accent-blue">Reset instructions</button>
           </details>
-          <button type="button" disabled={!source || !character.reference_path || locked} onClick={() => void preparePreview()}
+          <button type="button" disabled={!source || !sourceReady || !character.reference_path || locked} onClick={() => void preparePreview()}
             className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-border bg-bg-tertiary px-3 text-xs text-text-primary disabled:opacity-40">
             <WandSparkles size={15}/>Preview replacement frame
           </button>
@@ -233,7 +282,7 @@ export function ViggleControls() {
         </div>
         {edited && <img src={mediaUrl(edited)} alt="Edited reference frame" className="max-h-48 w-full rounded-xl object-contain bg-black" />}
         {input('image', edited ? 'Replace edited frame' : 'Upload edited frame')}
-        <button type="button" disabled={!source || locked} onClick={async () => {
+        <button type="button" disabled={!source || !sourceReady || locked} onClick={async () => {
           setBusy(true); setError('')
           try {
             await editFrame('animate')

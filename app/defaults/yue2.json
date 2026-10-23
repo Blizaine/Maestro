@@ -9,7 +9,7 @@
         ],
         "source_repo": "https://huggingface.co/m-a-p/YuE2-3B",
         "license_name": "CC BY-NC 4.0",
-        "license_url": "https://huggingface.co/m-a-p/YuE2-3B/blob/main/MODEL_LICENSE",
+        "license_url": "https://huggingface.co/m-a-p/YuE2-3B/blob/8f24312f187763b9854adeec87e437e2b03bbff1/LICENSE",
         "selector_help": "48 kHz stereo songs from lyrics and style. Optional melody/chord planning or score extraction from a source song. Duration is an upper limit. CC BY-NC 4.0 weights.",
         "model_size_gb": 4.6,
         "required_model_assets": [

@@ -133,12 +133,18 @@ async function assertDirectorLayout(page, sidebar, output) {
     await page.evaluate(() => window.store.setState({directorStep: 'plan', directorLoading: true,
       directorLoadingMessage: 'Planning video prompts…', pipelineStatus: {status: 'running', phase: 'planning',
         progress: {message: 'Planning video prompts…'}}}));
-    await page.waitForTimeout(450);
+    await page.waitForFunction(() => {
+      const node = document.querySelector('[data-testid="director-messages"]');
+      return node && node.scrollHeight - node.clientHeight - node.scrollTop <= 2;
+    }, null, {timeout: 3000});
     const atPlanningTail = await messages.evaluate(node => node.scrollHeight - node.clientHeight - node.scrollTop <= 2);
     assert.ok(atPlanningTail, 'Planning resumes useful progress tailing at width ' + width);
     await messages.evaluate(node => {node.scrollTop = 0});
     await page.evaluate(() => window.store.setState({directorLoadingMessage: 'Writing the final prompt pass…'}));
-    await page.waitForTimeout(450);
+    await page.waitForFunction(() => {
+      const node = document.querySelector('[data-testid="director-messages"]');
+      return node && node.scrollHeight - node.clientHeight - node.scrollTop <= 2;
+    }, null, {timeout: 3000});
     assert.ok(await messages.evaluate(node => node.scrollHeight - node.clientHeight - node.scrollTop <= 2),
       'Later planning progress continues to tail at width ' + width);
 

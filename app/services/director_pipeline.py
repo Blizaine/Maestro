@@ -877,6 +877,9 @@ def _director_apply_omni_drive_audio(params: dict) -> None:
         references, list
     ):
         return
+    from services.h3_reference_audio import measure_video_audio_metadata
+    references = measure_video_audio_metadata(references)
+    params["minimax_h3_references"] = references
     _runtime, drive_path, _ordinal = split_exact_drive_audio_reference(
         references
     )
@@ -1423,6 +1426,7 @@ def _save_pipeline_state_locked(pid: str) -> bool:
             "_director_speaker_registry": plan.get("_director_speaker_registry"),
             "_director_project_context": plan.get("_director_project_context"),
             "_director_environment": plan.get("_director_environment"),
+            "_director_visual_style": plan.get("_director_visual_style"),
             "_director_opening_blocking": plan.get("_director_opening_blocking"),
             "_director_closing_blocking": plan.get("_director_closing_blocking"),
             "_director_audio_plan": plan.get("_director_audio_plan"),
@@ -1507,6 +1511,7 @@ def _save_pipeline_state_locked(pid: str) -> bool:
         "director_ui_snapshot": params.get("director_ui_snapshot", {}),
         "asset_manifest": params.get("_director_asset_manifest", {}),
         "llm_log": p.get("_llm_log"),
+        "llm_drafts": copy.deepcopy(p.get("_llm_drafts") or []),
         # Long-form planners publish completed outline/sequence batches as
         # they go.  Keeping this separate from final clip_plans lets a failed
         # or interrupted planning run resume at the first unfinished unit
@@ -2865,6 +2870,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             or snapshot.get("scene_description")
             or ""
         ),
+        "_director_visual_style": clip.get("_director_visual_style", ""),
         "_director_opening_blocking": clip.get("_director_opening_blocking", ""),
         "_director_closing_blocking": clip.get("_director_closing_blocking", ""),
         "_director_audio_plan": clip.get("_director_audio_plan") or {},
@@ -3400,6 +3406,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             "_director_h3_model_family",
             "_director_speaker_registry",
             "_director_project_context",
+            "_director_visual_style",
             "_director_opening_blocking",
             "_director_closing_blocking",
             "_director_audio_plan",
@@ -5168,6 +5175,14 @@ def get_pipeline(pid: str) -> Optional[dict]:
         return dict(p) if p else None
 
 
+def get_pipeline_drafts(pid: str, out_dir: str) -> Optional[list]:
+    live = get_pipeline(pid)
+    if live is not None:
+        return copy.deepcopy(live.get("_llm_drafts") or [])
+    saved = load_pipeline_state(out_dir, pid)
+    return copy.deepcopy(saved.get("llm_drafts") or []) if saved else None
+
+
 def get_pipeline_status(pid: str, out_dir: str) -> Optional[dict]:
     """Return live status or a terminal disk snapshot after a UI reconnect.
 
@@ -5258,6 +5273,10 @@ def get_pipeline_status(pid: str, out_dir: str) -> Optional[dict]:
             "video_prompt": clip.get("video_prompt", ""),
             "window_prompts": clip.get("window_prompts", []) or [],
             "keyframe_prompts": clip.get("keyframe_prompts", []) or [],
+            "_director_prompt_user_edited": bool(
+                clip.get("_director_prompt_user_edited")
+            ),
+            "_director_visual_style": clip.get("_director_visual_style", ""),
         } for clip in clips],
         "planned_clips": [
             copy.deepcopy(clip.get("planned_clip"))
@@ -5441,6 +5460,7 @@ def _resume_pipeline_reserved(pid: str, out_dir: str) -> tuple[bool, str]:
         "_director_speaker_registry": c.get("_director_speaker_registry"),
         "_director_project_context": c.get("_director_project_context"),
         "_director_environment": c.get("_director_environment"),
+        "_director_visual_style": c.get("_director_visual_style", ""),
         "_director_opening_blocking": c.get("_director_opening_blocking"),
         "_director_closing_blocking": c.get("_director_closing_blocking"),
         "_director_audio_plan": c.get("_director_audio_plan"),
@@ -5474,6 +5494,7 @@ def _resume_pipeline_reserved(pid: str, out_dir: str) -> tuple[bool, str]:
         ],
         "output_files": data.get("output_files", []) or [],
         "_llm_log": data.get("llm_log"),
+        "_llm_drafts": copy.deepcopy(data.get("llm_drafts") or []),
         "_planning_checkpoint": copy.deepcopy(
             data.get("planning_checkpoint") or {}
         ),
@@ -5541,6 +5562,28 @@ def stop_pipeline(pid: str) -> bool:
     return True
 
 
+def _with_pipeline_diagnostics(function):
+    @wraps(function)
+    def run(pid, *args, **kwargs):
+        from services.enhancement_diagnostics import capture_drafts
+
+        def save_drafts(drafts):
+            with _pipeline_lock:
+                record = _pipelines.get(pid)
+                if record is None:
+                    return
+                if drafts == (record.get("_llm_drafts") or []):
+                    return
+                record["_llm_drafts"] = drafts
+            _save_pipeline_state(pid)
+
+        previous = (get_pipeline(pid) or {}).get("_llm_drafts") or []
+        with capture_drafts(previous, on_change=save_drafts):
+            return function(pid, *args, **kwargs)
+    return run
+
+
+@_with_pipeline_diagnostics
 def _run_pipeline(pid: str, resume: bool = False):
     """Main pipeline thread — runs the full Director flow.
 
@@ -5635,6 +5678,8 @@ def _run_pipeline(pid: str, resume: bool = False):
                 _save_pipeline_state(pid)
                 return
             except Exception as plan_err:
+                from services.enhancement_diagnostics import record_rejection
+                record_rejection([str(plan_err)], stage="Director planning")
                 print(f"[Pipeline] Planning error: {plan_err}")
                 import traceback
                 traceback.print_exc()
@@ -6717,6 +6762,11 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
                 shot, "spatial_setup", ""
             ),
             "_director_closing_blocking": closing_blocking,
+            # Style is explicit per shot so the compiler can apply it to the
+            # complete frame without expanding the project-wide story brief.
+            "_director_visual_style": str(
+                getattr(shot, "visual_style", "") or ""
+            ).strip(),
             # Retain the structured H3 speech contract through prompt polish,
             # persistence, resume, and Dashboard reruns. The final preflight
             # compiler uses these fields as the authoritative dialogue source.

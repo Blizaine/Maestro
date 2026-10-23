@@ -61,7 +61,7 @@ export function DirectorMusicClipLength({disabled = false}: {disabled?: boolean}
         onChange={event => setSeconds(Number(event.target.value) / limits.fps)} />}
       <p className="text-[10px] leading-relaxed text-text-muted">
         {seamless ? 'Separate-clip length is available when Seamless is off.' : effective
-          ? <>Maximum per clip; cuts follow the music. At least {Math.ceil((analysis?.duration || duration) / effective)} clips.
+          ? <>Maximum per clip; cuts follow the music. This track needs at least {Math.ceil((analysis?.duration || duration) / effective)} clips at this length.
             {!automatic && limits && <> {recommendationLabel}: {formatSeconds(limits.recommended_seconds)}.</>}</>
           : error || 'Reading model limits…'}
       </p>

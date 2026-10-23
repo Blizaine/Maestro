@@ -1,25 +1,28 @@
-import { useEffect } from 'react'
+import { lazy, Suspense, useEffect } from 'react'
 import { Menu, Settings } from 'lucide-react'
 import { Sidebar } from './components/Sidebar/Sidebar'
 import { MainContent } from './components/MainContent/MainContent'
-import { SettingsDrawer } from './components/SettingsDrawer/SettingsDrawer'
-import { LoraBrowser } from './components/LoraBrowser/LoraBrowser'
-import { DirectorDashboard } from './components/DirectorDashboard/DirectorDashboard'
-import { StorageDashboard } from './components/StorageDashboard/StorageDashboard'
-import { RetakeDialog } from './components/RetakeDialog'
 import { OomRecoveryBanner } from './components/OomRecoveryBanner'
 import { DownloadStatusBanner } from './components/DownloadStatusBanner'
 import { PreflightBanner } from './components/PreflightBanner'
 import { WelcomeModal } from './components/WelcomeModal'
-import { RecipesOverlay } from './components/Recipes/RecipesOverlay'
 import { GlobalQueuePopover } from './components/GlobalQueuePopover'
 import { NotificationCoordinator } from './components/NotificationCoordinator'
 import { NotificationToastHost } from './components/NotificationToastHost'
-import { EditorWorkspace } from './editor/EditorWorkspace'
 import { MaestroBrand } from './components/AppModeNavigation'
 import { EditorRoundTripBanner } from './editor/EditorRoundTripBanner'
 import { useStore } from './stores/useStore'
 import { useIsMobileSidecar } from './lib/useIsMobile'
+import { DeferredPanel } from './components/DeferredPanel'
+import { createAppStartup, RETRY_STARTUP_EVENT } from './lib/appStartup'
+
+const SettingsDrawer = lazy(() => import('./components/SettingsDrawer/SettingsDrawer').then(module => ({default: module.SettingsDrawer})))
+const LoraBrowser = lazy(() => import('./components/LoraBrowser/LoraBrowser').then(module => ({default: module.LoraBrowser})))
+const DirectorDashboard = lazy(() => import('./components/DirectorDashboard/DirectorDashboard').then(module => ({default: module.DirectorDashboard})))
+const StorageDashboard = lazy(() => import('./components/StorageDashboard/StorageDashboard').then(module => ({default: module.StorageDashboard})))
+const RetakeDialog = lazy(() => import('./components/RetakeDialog').then(module => ({default: module.RetakeDialog})))
+const RecipesOverlay = lazy(() => import('./components/Recipes/RecipesOverlay').then(module => ({default: module.RecipesOverlay})))
+const EditorWorkspace = lazy(() => import('./editor/EditorWorkspace').then(module => ({default: module.EditorWorkspace})))
 
 function App() {
   const loadModels = useStore(s => s.loadModels)
@@ -35,20 +38,65 @@ function App() {
   const setSidebarOpen = useStore(s => s.setSidebarOpen)
   const toggleSettings = useStore(s => s.toggleSettings)
   const sidebarMode = useStore(s => s.sidebarMode)
+  const settingsOpen = useStore(s => s.settingsOpen)
+  const loraBrowserOpen = useStore(s => s.loraBrowserOpen)
+  const dashboardOpen = useStore(s => s.dashboardOpen)
+  const storageOpen = useStore(s => s.storageDashboardOpen)
+  const recipesOpen = useStore(s => s.recipesOpen)
+  const retakeOpen = useStore(s => s.retakeDialogOpen)
+  const controlsReady = useStore(s => s.modelsLoaded && !s.modelsLoading && !s.modelsLoadError)
   const isMobile = useIsMobileSidecar()
   const isEditor = sidebarMode === 'editor'
 
   useEffect(() => {
-    loadModels()
-    // Resolve the saved folder before querying its media. Otherwise the
-    // default-folder response can become stale during workspace hydration.
-    void loadWorkspaces().then(() => loadOutputs())
-    loadSystemConfig()
-    loadServicesConfig()
-    loadLlmStatus()
-    loadLlmModels()
-    loadPipelineList()
+    const startup = createAppStartup({
+      loadControls: async cancelled => {
+        useStore.setState({modelsLoading: true, modelsLoadError: null})
+        await loadServicesConfig()
+        if (cancelled()) return
+        if (!useStore.getState().servicesConfig) {
+          useStore.setState({modelsLoading: false})
+          throw new Error('Maestro is not ready yet. Reconnecting…')
+        }
+        await loadModels({recoverOnly: true})
+      },
+      controlsReady: () => useStore.getState().modelsLoaded && !useStore.getState().modelsLoadError,
+      onError: message => useStore.setState({modelsLoading: false, modelsLoadError: useStore.getState().modelsLoadError || message}),
+      loadBackground: () => {
+        // Restore the saved folder before listing media; optional scans and
+        // remote writer discovery never gate the model controls.
+        void (async () => {
+          try {
+            await loadWorkspaces()
+            await loadOutputs()
+          } finally {
+            useStore.setState({galleryInitializing: false})
+          }
+        })()
+        void loadSystemConfig()
+        void loadLlmStatus()
+        void loadLlmModels()
+        void loadPipelineList()
+      },
+    })
+    void startup.run()
+    const recover = () => {
+      if (!useStore.getState().modelsLoaded || useStore.getState().modelsLoadError) void startup.retry()
+    }
+    const visible = () => { if (document.visibilityState === 'visible') recover() }
+    window.addEventListener('online', recover)
+    window.addEventListener('pageshow', recover)
+    window.addEventListener(RETRY_STARTUP_EVENT, recover)
+    document.addEventListener('visibilitychange', visible)
+    // Queue ownership/status remains immediate even while controls reconnect.
     reconnectJobs()
+    return () => {
+      startup.dispose()
+      window.removeEventListener('online', recover)
+      window.removeEventListener('pageshow', recover)
+      window.removeEventListener(RETRY_STARTUP_EVENT, recover)
+      document.removeEventListener('visibilitychange', visible)
+    }
   }, [loadModels, loadWorkspaces, loadOutputs, loadSystemConfig, loadServicesConfig, loadLlmStatus, loadLlmModels, loadPipelineList, reconnectJobs])
 
   // Poll LLM status to stay in sync with backend auto-load/unload
@@ -84,19 +132,19 @@ function App() {
       )}
 
       {isEditor ? (
-        <EditorWorkspace />
+        <Suspense fallback={<p role="status" className="m-auto text-sm text-text-muted">Loading editor…</p>}><EditorWorkspace /></Suspense>
       ) : (
         <>
           <Sidebar />
           <MainContent />
         </>
       )}
-      <SettingsDrawer />
-      <LoraBrowser />
-      <DirectorDashboard />
-      <StorageDashboard />
-      <RecipesOverlay />
-      <RetakeDialog />
+      <DeferredPanel active={settingsOpen}><SettingsDrawer /></DeferredPanel>
+      <DeferredPanel active={loraBrowserOpen}><LoraBrowser /></DeferredPanel>
+      <DeferredPanel active={dashboardOpen}><DirectorDashboard /></DeferredPanel>
+      <DeferredPanel active={storageOpen}><StorageDashboard /></DeferredPanel>
+      <DeferredPanel active={recipesOpen}><RecipesOverlay /></DeferredPanel>
+      <DeferredPanel active={retakeOpen}><RetakeDialog /></DeferredPanel>
       {/* OomRecoveryBanner is a fixed-position overlay — renders nothing
           unless the latest job/pipeline failure has oom_info attached.
           Lives at the App root so it floats above whichever screen the
@@ -105,13 +153,13 @@ function App() {
       {/* PreflightBanner — fixed top overlay shown once on startup if the
           environment is missing ffmpeg / CUDA or low on disk. Renders
           nothing when everything checks out. */}
-      <PreflightBanner />
+      <DeferredPanel active={controlsReady}><PreflightBanner /></DeferredPanel>
       {/* DownloadStatusBanner — fixed bottom-right overlay, long-polls
           /api/v1/downloads/active. Renders nothing unless
           a model file is being downloaded. Highlights stalled
           downloads in amber so users know the system is recovering
           rather than frozen. */}
-      <DownloadStatusBanner />
+      <DeferredPanel active={controlsReady}><DownloadStatusBanner /></DeferredPanel>
       {/* WelcomeModal — one-time first-run orientation (localStorage-gated). */}
       <WelcomeModal />
       {/* One observer covers Studio, Director, and the universal queue.
