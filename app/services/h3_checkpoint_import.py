@@ -103,6 +103,8 @@ for _identity, _int8_identity, _digest in (
     }
 
 _SUPPORTED_CONVROT_GROUPS = {64, 256}
+_SUPPORTED_W4A8_WEIGHT_GROUPS = {4, 8, 16}
+_MIXED_W4A8_INT8_FORMAT = "mixed_w4a8_int8_convrot"
 _GGUF_PACKED_DTYPES = {"GGUF_" + name for name in (
     "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K",
 )}
@@ -474,6 +476,8 @@ def _quant_text_class(value: str):
     text = str(value or "").strip().lower().replace("-", "_")
     if not text:
         return None
+    if "w4a8" in text and "int8" in text and "convrot" in text:
+        return _MIXED_W4A8_INT8_FORMAT
     if text in {"none", "unquantized", "bf16", "bfloat16", "fp16", "float16"}:
         return "plain"
     if text in {"asym_w4a8_int8", "w4a8_int8", "w4a8"}:
@@ -532,6 +536,27 @@ def _descriptor_convrot_fields(descriptor, format_class, *, layer, error_code):
         if len(set(groups)) != 1:
             _fail(f"INT8 ConvRot descriptor for {layer!r} has conflicting group sizes.", "quantization_conflict", layer=layer)
         return convrot, groups[0]
+    if format_class == "asym_w4a8_int8":
+        weight_group = descriptor.get("group_size")
+        if type(weight_group) is not int or weight_group not in _SUPPORTED_W4A8_WEIGHT_GROUPS:
+            _fail(
+                f"W4A8 descriptor for {layer!r} needs a supported integer weight group size.",
+                error_code,
+                layer=layer,
+                group_size=weight_group,
+                supported=sorted(_SUPPORTED_W4A8_WEIGHT_GROUPS),
+            )
+        convrot_group = descriptor.get("convrot_groupsize")
+        if type(convrot_group) is not int:
+            _fail(
+                f"W4A8 descriptor for {layer!r} needs the explicit convrot_groupsize field used by this loader.",
+                error_code,
+                layer=layer,
+            )
+        alias_group = descriptor.get("convrot_group_size")
+        if alias_group is not None and alias_group != convrot_group:
+            _fail(f"W4A8 descriptor for {layer!r} has conflicting ConvRot group sizes.", "quantization_conflict", layer=layer)
+        return convrot, convrot_group
     # W4A8's group_size describes weight packing, separate from its ConvRot
     # group. FP8 descriptors need no ConvRot group when rotation is disabled.
     group = next((descriptor[key] for key in group_keys if key in descriptor), None)
@@ -634,7 +659,18 @@ def _read_small_payload(reader, info, *, limit, label):
     try:
         payload = reader(info["raw_name"])
     except Exception as exc:
-        _fail(f"Could not read small {label} tensor {info['raw_name']!r}.", "small_tensor_read_failed", tensor=info["raw_name"], reason=str(exc))
+        safe_reason = getattr(exc, "public_message", None) if exc.__class__.__name__ == "CivitaiCheckpointError" else None
+        if not isinstance(safe_reason, str) or len(safe_reason) > 300:
+            safe_reason = None
+        message = f"Could not read small {label} tensor {info['raw_name']!r}."
+        if safe_reason:
+            message += f" {safe_reason}"
+        _fail(
+            message,
+            "small_tensor_read_failed",
+            tensor=info["raw_name"],
+            reason=safe_reason or exc.__class__.__name__,
+        )
     if isinstance(payload, str):
         payload = payload.encode("utf-8")
     if not isinstance(payload, (bytes, bytearray, memoryview)):
@@ -684,6 +720,7 @@ def _quant_descriptor_from_tensor(reader, info):
         "format": fmt,
         "convrot": convrot,
         "group_size": group,
+        "weight_group_size": value.get("group_size") if fmt == "asym_w4a8_int8" else None,
         "orig_dtype": _normalize_dtype(value.get("orig_dtype")),
     }
 
@@ -715,6 +752,9 @@ def _quantization_profile(tensors, metadata, tensor_reader, *, file_format="safe
             if any(
                 marker[field] != reference[field]
                 for field in ("format", "convrot", "group_size")
+            ) or (
+                marker["format"] == "asym_w4a8_int8"
+                and marker.get("weight_group_size") != reference.get("weight_group_size")
             ) or (marker["orig_dtype"] and reference["orig_dtype"] and marker["orig_dtype"] != reference["orig_dtype"]):
                 _fail(
                     f"Comfy quantization tensor and _quantization_metadata disagree for {name!r}.",
@@ -725,7 +765,6 @@ def _quantization_profile(tensors, metadata, tensor_reader, *, file_format="safe
                 )
             if not marker["orig_dtype"]:
                 marker["orig_dtype"] = reference["orig_dtype"]
-
     descriptors = marker_metadata or quant_metadata
     int8_weights = any(
         tensors.get(f"blocks.{index}.{suffix}.weight", {}).get("dtype") == "I8"
@@ -758,16 +797,115 @@ def _quantization_profile(tensors, metadata, tensor_reader, *, file_format="safe
             "qkv_layout": None, "qkv_layout_evidence": None,
         }
 
-    if descriptors and {v["format"] for v in descriptors.values()} == {"asym_w4a8_int8"}:
+    expected = _expected_quant_layers()
+    descriptor_formats = {v["format"] for v in descriptors.values()} if descriptors else set()
+
+    if descriptor_formats == {"asym_w4a8_int8", "int8_convrot"}:
+        if set(descriptors) != expected:
+            _fail(
+                "Mixed W4A8/INT8 H3 requires one recognized descriptor for each of its 200 main-block linear layers.",
+                "incomplete_quantization_metadata",
+                missing=sorted(expected - set(descriptors))[:8],
+                extra=sorted(set(descriptors) - expected)[:8],
+            )
+        if any(not value["convrot"] for value in descriptors.values()):
+            _fail("Mixed W4A8/INT8 H3 requires ConvRot on every quantized layer.", "unsupported_quantization")
+        groups = {value["group_size"] for value in descriptors.values()}
+        if len(groups) != 1 or None in groups or not groups <= _SUPPORTED_CONVROT_GROUPS:
+            _fail(
+                "Mixed W4A8/INT8 H3 requires one supported ConvRot group size (64 or 256).",
+                "unsupported_convrot_group_size",
+                group_sizes=sorted(str(value) for value in groups),
+            )
+        if top_format and top_format != _MIXED_W4A8_INT8_FORMAT:
+            _fail("Header format conflicts with mixed W4A8/INT8 layer descriptors.", "quantization_conflict")
+        w4a8_layers = {name for name, value in descriptors.items() if value["format"] == "asym_w4a8_int8"}
+        if w4a8_layers and (
+            not quant_metadata
+            or not w4a8_layers.issubset(quant_metadata)
+        ):
+            _fail(
+                "H3 W4A8 layers require matching per-layer _quantization_metadata so the runtime can apply the verified ConvRot group.",
+                "quantization_evidence_required",
+                layers_missing_runtime_metadata=sorted(w4a8_layers - set(quant_metadata or {}))[:8],
+            )
+        int8_layers = expected - w4a8_layers
+        weight_groups = {descriptors[name]["weight_group_size"] for name in w4a8_layers}
+        if not weight_groups or None in weight_groups or not weight_groups <= _SUPPORTED_W4A8_WEIGHT_GROUPS:
+            _fail(
+                "Mixed H3 W4A8 layers require supported per-layer weight group sizes (4, 8 or 16).",
+                "unsupported_quantization",
+                weight_group_sizes=sorted(str(value) for value in weight_groups),
+            )
+        convrot_group = next(iter(groups))
+        for name in sorted(expected):
+            info = tensors.get(name + ".weight")
+            if info is None or info["dtype"] != "I8" or len(info["shape"]) != 2:
+                _fail("Mixed H3 quantized weights must use rank-2 INT8 storage.", "unsupported_quantization", tensor=name + ".weight")
+            rows, stored_columns = info["shape"]
+            if name in int8_layers:
+                _require_tensor(tensors, name + ".weight_scale", (rows, 1), {"F32"})
+                if any(name + suffix in tensors for suffix in (
+                    ".weight_s_rel", ".weight_s_channel", ".weight_codebook", ".weight_correction",
+                )):
+                    _fail("INT8 ConvRot layers cannot also contain W4A8 scale tensors.", "quantization_conflict", layer=name)
+                marker = tensors.get(name + ".comfy_quant")
+                if marker is not None and (
+                    marker["dtype"] != "U8" or len(marker["shape"]) != 1
+                    or math.prod(marker["shape"]) <= 0
+                    or math.prod(marker["shape"]) > _MAX_QUANT_DESCRIPTOR_BYTES
+                ):
+                    _fail("INT8 H3 layers need a small one-dimensional U8 Comfy descriptor tensor.", "invalid_quantization_descriptor", tensor=name + ".comfy_quant")
+                continue
+
+            weight_group = descriptors[name]["weight_group_size"]
+            logical_columns = stored_columns * 2
+            if logical_columns % weight_group or logical_columns % convrot_group:
+                _fail("W4A8 input width must align with its weight and ConvRot groups.", "invalid_tensor_shape", tensor=name + ".weight")
+            _require_tensor(tensors, name + ".weight_s_rel", (rows, logical_columns // weight_group), _FP8_DTYPES)
+            _require_tensor(tensors, name + ".weight_s_channel", (rows,), {"F32"})
+            if name + ".weight_codebook" in tensors:
+                _require_tensor(tensors, name + ".weight_codebook", (16,), {"F32"})
+            if name + ".weight_correction" in tensors:
+                _require_tensor(tensors, name + ".weight_correction", (logical_columns // weight_group, rows), {"F32"})
+            if name + ".weight_scale" in tensors:
+                _fail("W4A8 layers cannot also contain INT8 row scales.", "quantization_conflict", layer=name)
+            marker = tensors.get(name + ".comfy_quant")
+            if marker is not None and (
+                marker["dtype"] != "U8" or len(marker["shape"]) != 1
+                or math.prod(marker["shape"]) <= 0
+                or math.prod(marker["shape"]) > _MAX_QUANT_DESCRIPTOR_BYTES
+            ):
+                _fail("W4A8 H3 layers need a small one-dimensional U8 Comfy descriptor tensor.", "invalid_quantization_descriptor", tensor=name + ".comfy_quant")
+        return {
+            "quantization_format": _MIXED_W4A8_INT8_FORMAT,
+            "convrot": True,
+            "convrot_group_size": convrot_group,
+            "weight_group_size": next(iter(weight_groups)) if len(weight_groups) == 1 else None,
+            "weight_group_sizes": sorted(weight_groups),
+            "w4a8_layers": w4a8_layers,
+            "quantized_layers": len(descriptors),
+            "tensor_dtypes": sorted({info["dtype"] for info in tensors.values()}),
+            "qkv_layout": "grouped",
+            "qkv_layout_evidence": "Comfy W4A8 and INT8 ConvRot exports store contiguous grouped Q/K/V rows",
+        }
+
+    if descriptors and descriptor_formats == {"asym_w4a8_int8"}:
         expected = _expected_quant_layers()
         if set(descriptors) != expected:
             _fail("W4A8 H3 requires descriptors for all 200 main-block linear layers.", "incomplete_quantization_metadata")
+        if not quant_metadata or not expected.issubset(quant_metadata):
+            _fail(
+                "H3 W4A8 layers require matching per-layer _quantization_metadata so the runtime can apply the verified ConvRot group.",
+                "quantization_evidence_required",
+                layers_missing_runtime_metadata=sorted(expected - set(quant_metadata or {}))[:8],
+            )
         groups = {v["group_size"] for v in descriptors.values()}
         weight_groups = {v["weight_group_size"] for v in descriptors.values()}
         if any(not v["convrot"] for v in descriptors.values()) or len(groups) != 1 or not groups <= _SUPPORTED_CONVROT_GROUPS:
             _fail("H3 W4A8 requires a consistent supported ConvRot group size (64 or 256).", "unsupported_convrot_group_size")
-        if weight_groups != {16}:
-            _fail("H3 W4A8 currently requires the verified weight group size 16.", "unsupported_quantization")
+        if not weight_groups or None in weight_groups or not weight_groups <= _SUPPORTED_W4A8_WEIGHT_GROUPS:
+            _fail("H3 W4A8 requires supported per-layer weight group sizes (4, 8 or 16).", "unsupported_quantization")
         if top_format and top_format != "asym_w4a8_int8":
             _fail("Header format conflicts with W4A8 layer descriptors.", "quantization_conflict")
         for name in sorted(expected):
@@ -776,19 +914,32 @@ def _quantization_profile(tensors, metadata, tensor_reader, *, file_format="safe
                 _fail("W4A8 weights must use packed two-dimensional INT8 storage.", "unsupported_quantization", tensor=name + ".weight")
             rows, packed_columns = info["shape"]
             columns = 2 * packed_columns
+            value = descriptors[name]
             if columns % 16 or columns % next(iter(groups)):
                 _fail("W4A8 input width must align with its weight and ConvRot groups.", "invalid_tensor_shape", tensor=name + ".weight")
-            _require_tensor(tensors, name + ".weight_s_rel", (rows, columns // 16), _FP8_DTYPES)
+            weight_group = value["weight_group_size"]
+            if columns % weight_group:
+                _fail("W4A8 input width must align with its weight group.", "invalid_tensor_shape", tensor=name + ".weight")
+            _require_tensor(tensors, name + ".weight_s_rel", (rows, columns // weight_group), _FP8_DTYPES)
             _require_tensor(tensors, name + ".weight_s_channel", (rows,), {"F32"})
             if name + ".weight_codebook" in tensors:
                 _require_tensor(tensors, name + ".weight_codebook", (16,), {"F32"})
             if name + ".weight_correction" in tensors:
-                _require_tensor(tensors, name + ".weight_correction", (columns // 16, rows), {"F32"})
-            if name + ".weight_scale" in tensors or name + ".comfy_quant" in tensors:
+                _require_tensor(tensors, name + ".weight_correction", (columns // weight_group, rows), {"F32"})
+            if name + ".weight_scale" in tensors:
                 _fail("W4A8 cannot also contain a different quantized layout for the same layer.", "quantization_conflict", layer=name)
+            marker = tensors.get(name + ".comfy_quant")
+            if marker is not None and (
+                marker["dtype"] != "U8" or len(marker["shape"]) != 1
+                or math.prod(marker["shape"]) <= 0
+                or math.prod(marker["shape"]) > _MAX_QUANT_DESCRIPTOR_BYTES
+            ):
+                _fail("W4A8 H3 layers need a small one-dimensional U8 Comfy descriptor tensor.", "invalid_quantization_descriptor", tensor=name + ".comfy_quant")
         return {
             "quantization_format": "asym_w4a8_int8", "convrot": True,
-            "convrot_group_size": next(iter(groups)), "weight_group_size": 16,
+            "convrot_group_size": next(iter(groups)),
+            "weight_group_size": next(iter(weight_groups)) if len(weight_groups) == 1 else None,
+            "weight_group_sizes": sorted(weight_groups),
             "quantized_layers": len(descriptors), "tensor_dtypes": sorted({info["dtype"] for info in tensors.values()}),
             "qkv_layout": "grouped", "qkv_layout_evidence": "WanGP/DaSiWa W4A8 ConvRot export uses contiguous grouped Q/K/V rows",
         }
@@ -906,9 +1057,10 @@ def _require_tensor(tensors, name, shape, dtypes=None):
     return info
 
 
-def _validate_shape_groups(tensors, *, compressed, quantization_format):
+def _validate_shape_groups(tensors, *, compressed, quantization_format, w4a8_layers=None):
+    w4a8_layers = set(w4a8_layers or ())
     modulation_dim = _CURVE_DIM if compressed else _FULL_TIME_DIM
-    main_weight_dtypes = {"I8"} if quantization_format == "int8_tensorwise" else (
+    main_weight_dtypes = {"I8"} if quantization_format in {"int8_tensorwise", _MIXED_W4A8_INT8_FORMAT} else (
         _FP8_DTYPES if quantization_format == "scaled_fp8" else _FLOAT_PARAMETER_DTYPES
     )
     dense_dtypes = _FLOAT_PARAMETER_DTYPES
@@ -923,7 +1075,12 @@ def _validate_shape_groups(tensors, *, compressed, quantization_format):
     def require(name, shape, dtypes):
         if quantization_format == "gguf" and name.endswith(".weight") and len(shape) == 2:
             dtypes = dtypes | _GGUF_PACKED_DTYPES
-        if quantization_format == "asym_w4a8_int8" and name.removesuffix(".weight") in _expected_quant_layers():
+        layer_name = name.removesuffix(".weight")
+        if (
+            quantization_format == "asym_w4a8_int8" and layer_name in _expected_quant_layers()
+        ) or (
+            quantization_format == _MIXED_W4A8_INT8_FORMAT and layer_name in w4a8_layers
+        ):
             shape = (shape[0], shape[1] // 2)
         return _require_tensor(tensors, name, shape, dtypes)
 
@@ -967,7 +1124,7 @@ def _validate_shape_groups(tensors, *, compressed, quantization_format):
     table_info = tensors.get("adaln_t_table")
     if compressed:
         table_info = _require_tensor(tensors, "adaln_t_table", (_CURVE_GRID, _CURVE_DIM),
-                                     {"F32", "F16", "BF16"} if quantization_format == "gguf" else {"F32"})
+                                     {"F32", "F16", "BF16"})
     elif table_info is not None:
         _fail("A full H3 checkpoint cannot also contain a compressed AdaLN table.", "adaln_layout_conflict")
 
@@ -1013,7 +1170,7 @@ def _validate_shape_groups(tensors, *, compressed, quantization_format):
                 # exporters retain FP32 master weights with FP16 biases.
                 weight_dtypes = dense_dtypes | {"F32"}
             require(prefix + relative, shape, weight_dtypes)
-        if quantization_format == "int8_tensorwise":
+        if quantization_format in {"int8_tensorwise", _MIXED_W4A8_INT8_FORMAT}:
             for relative, rows in (
                 ("attn.qkv_proj", _QKV_ROWS),
                 ("attn.out_proj", _HIDDEN),
@@ -1021,6 +1178,8 @@ def _validate_shape_groups(tensors, *, compressed, quantization_format):
                 ("mlp.fc2", _HIDDEN),
             ):
                 base = prefix + relative
+                if quantization_format == _MIXED_W4A8_INT8_FORMAT and base in w4a8_layers:
+                    continue
                 _require_tensor(tensors, base + ".weight_scale", (rows, 1), {"F32"})
                 marker = tensors.get(base + ".comfy_quant")
                 # The quantization profile already requires all 200 ConvRot
@@ -1123,8 +1282,18 @@ def _validate_shape_groups(tensors, *, compressed, quantization_format):
                 "unsupported_tensor_dtype",
                 dtypes=unsupported,
             )
-    elif quantization_format == "asym_w4a8_int8":
-        allowed_all = _FLOAT_PARAMETER_DTYPES | {"F32", "I8"} | _FP8_DTYPES
+    elif quantization_format in {"asym_w4a8_int8", _MIXED_W4A8_INT8_FORMAT}:
+        unexpected_u8 = sorted(
+            name for name, info in tensors.items()
+            if info["dtype"] == "U8" and not name.endswith(".comfy_quant")
+        )
+        if unexpected_u8:
+            _fail(
+                "W4A8 H3 may use U8 storage only for verified Comfy quantization descriptors.",
+                "unsupported_tensor_dtype",
+                tensors=unexpected_u8[:8],
+            )
+        allowed_all = _FLOAT_PARAMETER_DTYPES | {"F32", "I8", "U8"} | _FP8_DTYPES
         unsupported = sorted({info["dtype"] for info in tensors.values()} - allowed_all)
         if unsupported:
             _fail("W4A8 H3 contains unsupported tensor storage types.", "unsupported_tensor_dtype", dtypes=unsupported)
@@ -1455,6 +1624,7 @@ def inspect_h3_header(
         tensors,
         compressed=compressed,
         quantization_format=quantization["quantization_format"],
+        w4a8_layers=quantization.get("w4a8_layers"),
     )
     if compressed:
         _validate_modulation_payload(tensor_reader, table_info)
@@ -1564,6 +1734,7 @@ def inspect_h3_header(
         "quantization_format": quantization["quantization_format"],
         "file_format": file_format,
         "weight_group_size": quantization.get("weight_group_size"),
+        "weight_group_sizes": quantization.get("weight_group_sizes"),
         "gguf_quant_types": quantization.get("gguf_quant_types", []),
         "convrot": quantization["convrot"],
         "convrot_group_size": quantization["convrot_group_size"],

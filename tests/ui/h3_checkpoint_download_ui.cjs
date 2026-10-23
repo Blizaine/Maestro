@@ -115,8 +115,11 @@ async function testH3ChoicesAreSubmittedAndHttp400IsVisible() {
   const requests = [];
   const inspectionRequests = [];
   const errorText = 'Select the creator-listed H3 workflow and sampling recipe.';
-  const api = loadTypeScript('ui/src/api/client.ts', () => {
-    throw new Error('client.ts unexpectedly imported a runtime module');
+  const api = loadTypeScript('ui/src/api/client.ts', name => {
+    if (name === './readRequest') return {
+      getJson: () => { throw new Error('Unexpected GET request in checkpoint POST regression'); },
+    };
+    throw new Error(`client.ts unexpectedly imported runtime module ${name}`);
   }, {
     fetch: async (url, init = {}) => {
       requests.push({url, init});

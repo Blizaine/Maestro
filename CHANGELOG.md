@@ -8,6 +8,23 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 Public Main and Dev release, including the 20–22 October Dev preview fixes. See the
 [v3.2.0 release notes](docs/RELEASE_NOTES_V3.2.0.md).
 
+Dev follow-up fixes, 23 October:
+
+- Adjust Auto-owned native H3 placement on Windows 16GB RTX 50-series / 64GB
+  RAM hosts: use Profile 4 and retain the existing workspace guard's feasible
+  residency allowance instead of imposing an additional 3 GiB ceiling. Preserve
+  manual settings, clamped-workload protection and the other hardware tiers.
+  This addresses identified placement differences; recovery of the reported
+  RTX 5080 slowdown still needs a matched hardware test. See the
+  [16GB H3 placement review](docs/H3-16GB-placement.md).
+- Support the mixed W4A8/INT8 ConvRot layout used by the 13GB Eros Max beta5
+  checkpoint, including per-layer W4A8 weight groups of 4, 8 and 16. Preserve
+  per-layer validation and reject conflicting descriptors. Accept finite
+  BF16/FP16 AdaLN curves through the runtime's existing FP32 interpolation.
+  Retry transient bounded descriptor reads once and show specific
+  access/network/range failures. See the
+  [H3 checkpoint import guide](docs/H3-checkpoint-import.md).
+
 Dev follow-up fixes, 22 October:
 
 - Prioritize Studio/Director model controls during UI startup, defer gallery
