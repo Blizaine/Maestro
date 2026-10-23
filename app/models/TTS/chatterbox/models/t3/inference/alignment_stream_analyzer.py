@@ -37,8 +37,15 @@ def forward_eager(
     attention_mask,
     past_key_value = None,
     cache_position= None,
+    past_key_values = None,
     **kwargs,
 ):
+    # transformers >= 4.56 passes the cache as past_key_values (Maestro pins
+    # 4.57.1). Reading only the old name left the probed layers without their
+    # KV cache: they attended to the current token alone, the alignment chunk
+    # came back empty and torch.cat failed on the first cached step.
+    if past_key_value is None:
+        past_key_value = past_key_values
 
     def rotate_half(x):
         x1 = x[..., : x.shape[-1] // 2]

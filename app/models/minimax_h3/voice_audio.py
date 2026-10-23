@@ -7,7 +7,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, replace
 
-from services.dialogue_timing import DIALOGUE_DEFAULT_WORDS_PER_SECOND, DIALOGUE_MAX_WORDS_PER_SECOND
+from services.dialogue_timing import DIALOGUE_MAX_WORDS_PER_SECOND
 
 
 MIN_AUDIO_SECONDS = 5.0
@@ -120,10 +120,11 @@ def _parse_turns(text):
 
 
 def _natural_seconds(text):
-    # Speech itself uses the shared 2.8 w/s pace. A brief lead-in/tail allowance
-    # avoids chopping the last word; confident Whisper alignment removes it.
-    return max(MIN_AUDIO_SECONDS, len(normalized_words(text)) / DIALOGUE_DEFAULT_WORDS_PER_SECOND
-               + len(re.findall(r"[.!?;:\u3002\uff01\uff1f]", text)) * 0.12 + 1.4)
+    # Plan at the 3 w/s ceiling, not the shared 2.8 w/s dialogue pace: H3
+    # speaks cloned voices faster than that and fills unused seconds before
+    # the script with invented speech, which Whisper then cannot trim. A short
+    # tail still protects the last word.
+    return max(MIN_AUDIO_SECONDS, len(normalized_words(text)) / DIALOGUE_MAX_WORDS_PER_SECOND + 0.6)
 
 
 def _split_turn(turn):

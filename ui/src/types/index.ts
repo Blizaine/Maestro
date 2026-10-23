@@ -189,7 +189,9 @@ export interface GenerateParams {
   duration_seconds?: number
   pause_seconds?: number
   temperature?: number
-  model_mode?: number
+  // Numeric for image/music modes (Krea 2, Qwen 2.1, YuE 2); a language or
+  // speaker id for speech models (Qwen3 TTS, Chatterbox).
+  model_mode?: number | string
   custom_settings?: Record<string, unknown>
   temporal_upsampling?: string
   // Loose params: backend accepts additional optional fields. Declared
@@ -1131,8 +1133,8 @@ export interface ModelOptions {
   qwen21_turbo_checkpoint?: boolean
   image_ref_inpaint?: boolean
   model_modes?: {
-    choices: [string, number][]
-    default: number
+    choices: [string, number | string][]
+    default: number | string
     label: string
     image_modes?: number[]
   } | null

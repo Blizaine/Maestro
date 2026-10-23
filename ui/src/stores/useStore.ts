@@ -977,6 +977,17 @@ function _applyModelDefaults(
         overrides[field] = (d as Record<string, unknown>)[field]
       }
     }
+    // model_mode is model-owned and its type differs per model: YuE 2's
+    // numeric planning mode, Krea 2's edit mode, a Qwen3/Chatterbox language
+    // or speaker. Carrying the previous model's value sent YuE's 2 to Qwen3
+    // Base, which crashed on .lower(). Take the new model's default, or drop
+    // the key so the server's fix_settings default applies.
+    if (!preserveEditsSince || Object.is(
+      (state.params as unknown as Record<string, unknown>).model_mode,
+      (preserveEditsSince as unknown as Record<string, unknown>).model_mode,
+    )) {
+      overrides.model_mode = (d as Record<string, unknown>).model_mode ?? undefined
+    }
     if (!preserveEditsSince || state.params.custom_settings === preserveEditsSince.custom_settings) {
       overrides.custom_settings = _kreaCustomSettingsForModel(state.params.custom_settings, modelType, state.kreaIdentitySettingsPerModel)
     }
