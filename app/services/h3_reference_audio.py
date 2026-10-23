@@ -189,7 +189,14 @@ def _extract_full_audio(source: str, cache_dir: str | os.PathLike[str] | None) -
         )
         if not temporary.is_file() or temporary.stat().st_size <= 0:
             raise ValueError("FFmpeg produced an empty soundtrack WAV.")
-        os.replace(temporary, destination)
+        try:
+            os.replace(temporary, destination)
+        except PermissionError:
+            # Windows can deny replacing a cache another concurrent request
+            # has just published while its first reader still holds it open.
+            if destination.is_file() and destination.stat().st_size > 0:
+                return str(destination)
+            raise
     except FileNotFoundError as error:
         raise ValueError("FFmpeg is required to extract audio from the selected video.") from error
     except subprocess.CalledProcessError as error:

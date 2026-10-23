@@ -21,6 +21,10 @@ preview fixes. FastH3 models retain their experimental status.
   transport/access errors in the browser. The real file's header and markers
   were inspected; a complete weight download and GPU render were not performed.
   See [supported formats and verification limits](H3-checkpoint-import.md).
+- **Concurrent soundtrack preparation:** on Windows, reuse an already published
+  nonempty WAV when another window's reader prevents replacing it. Preserve
+  atomic publication and temporary-file cleanup; permission errors still fail
+  when no usable cache exists.
 
 ## Dev follow-up fixes — 22 October
 

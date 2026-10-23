@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -23,6 +24,7 @@ from services.h3_performance_audio import (
     performance_audio_duration_seconds,
 )
 from services.h3_reference_audio import (
+    _extract_full_audio,
     canonicalize_video_audio_roles,
     measure_video_audio_metadata,
     normalize_video_audio_role,
@@ -44,6 +46,56 @@ class H3VideoAudioRoleTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_concurrent_audio_cache_publication_reuses_winner_after_replace_error(self):
+        cache = self.root / "cache-winner"
+        real_replace = os.replace
+
+        def fake_ffmpeg(command, **kwargs):
+            Path(command[-1]).write_bytes(b"complete local temp wav")
+
+        def publish_winner_then_fail(temporary, destination):
+            winner = Path(destination).with_name("winner.wav.tmp")
+            winner.write_bytes(b"complete published wav")
+            real_replace(winner, destination)
+            raise PermissionError(5, "Access is denied", str(destination))
+
+        with (
+            patch("services.h3_reference_audio.subprocess.run", side_effect=fake_ffmpeg),
+            patch("services.h3_reference_audio.os.replace", side_effect=publish_winner_then_fail),
+        ):
+            result = _extract_full_audio(str(self.video), cache)
+
+        self.assertEqual(Path(result).read_bytes(), b"complete published wav")
+        self.assertEqual(len(list(cache.glob("*.wav"))), 1)
+        self.assertFalse(list(cache.glob("*.tmp")))
+
+    def test_replace_permission_error_propagates_without_nonempty_winner(self):
+        for state in ("absent", "empty"):
+            with self.subTest(state=state):
+                cache = self.root / f"cache-{state}"
+
+                def fake_ffmpeg(command, **kwargs):
+                    Path(command[-1]).write_bytes(b"complete local temp wav")
+
+                def fail_replace(temporary, destination):
+                    if state == "empty":
+                        Path(destination).write_bytes(b"")
+                    raise PermissionError(5, "Access is denied", str(destination))
+
+                with (
+                    patch("services.h3_reference_audio.subprocess.run", side_effect=fake_ffmpeg),
+                    patch("services.h3_reference_audio.os.replace", side_effect=fail_replace),
+                    self.assertRaises(PermissionError),
+                ):
+                    _extract_full_audio(str(self.video), cache)
+
+                self.assertFalse(list(cache.glob("*.tmp")))
+                if state == "empty":
+                    self.assertEqual(len(list(cache.glob("*.wav"))), 1)
+                    self.assertEqual(next(cache.glob("*.wav")).stat().st_size, 0)
+                else:
+                    self.assertEqual(list(cache.glob("*.wav")), [])
 
     def _video_ref(self, **kwargs):
         return {

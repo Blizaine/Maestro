@@ -24,6 +24,9 @@ Dev follow-up fixes, 23 October:
   Retry transient bounded descriptor reads once and show specific
   access/network/range failures. See the
   [H3 checkpoint import guide](docs/H3-checkpoint-import.md).
+- Reuse a completed soundtrack cache entry when concurrent preparation windows
+  collide on Windows. Failed publication still raises when no usable cache
+  exists, and each request cleans up its own temporary file.
 
 Dev follow-up fixes, 22 October:
 
