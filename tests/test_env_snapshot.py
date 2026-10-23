@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / 'app'))
 from app.services.env_snapshot import (
     build_env_snapshot,
     config_digest,
+    current_env_snapshot,
     _strip_secrets,
 )
 
@@ -196,6 +197,33 @@ class BuildEnvSnapshotTests(unittest.TestCase):
     def test_a_broken_config_never_costs_us_the_sidecar(self):
         for bad in (None, {}, {"services": "not-a-dict"}):
             self.assertIsInstance(build_env_snapshot(bad, ""), dict)
+
+
+class CurrentEnvSnapshotTests(unittest.TestCase):
+    def setUp(self):
+        self._saved = sys.modules.get("wgp")
+
+    def tearDown(self):
+        if self._saved is None:
+            sys.modules.pop("wgp", None)
+        else:
+            sys.modules["wgp"] = self._saved
+
+    def test_reads_the_loaded_engine_config_and_repo_version(self):
+        engine = type(sys)("wgp")
+        engine.server_config = {"vram_allocator": "vmm", "openai_api_key": "sk-x"}
+        sys.modules["wgp"] = engine
+        snapshot = current_env_snapshot()
+        version = (Path(__file__).parents[1] / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertEqual(snapshot["maestro_version"], version)
+        self.assertEqual(snapshot["vram_allocator"], "vmm")
+        self.assertNotIn("sk-x", json.dumps(snapshot))
+
+    def test_works_without_the_engine_loaded(self):
+        sys.modules.pop("wgp", None)
+        snapshot = current_env_snapshot()
+        self.assertIsInstance(snapshot, dict)
+        self.assertIn("config_digest", snapshot)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,8 @@ matching the convention the settings API already uses.
 import hashlib
 import json
 import re
+import sys
+from pathlib import Path
 
 # A key whose name looks like a credential never has its value copied.
 _SECRET_NAME = re.compile(
@@ -206,5 +208,25 @@ def build_env_snapshot(server_config: dict, app_version: str = "") -> dict:
                 snapshot["h3_optimizations"] = _strip_secrets(h3)
 
         return snapshot
+    except Exception:
+        return {}
+
+
+def current_env_snapshot() -> dict:
+    """Snapshot of the running Maestro, for a sidecar written in launch.py.
+
+    Reads the already-imported engine's config and the repo VERSION file
+    instead of launch.py globals, so a sidecar writer can import this
+    locally and still run when a test executes that one function alone.
+    Never raises.
+    """
+    try:
+        wgp = sys.modules.get("wgp")
+        config = getattr(wgp, "server_config", None) or {}
+        try:
+            version = (Path(__file__).resolve().parents[2] / "VERSION").read_text(encoding="utf-8").strip()
+        except OSError:
+            version = ""
+        return build_env_snapshot(config, version)
     except Exception:
         return {}

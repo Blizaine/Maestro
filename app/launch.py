@@ -6929,8 +6929,8 @@ def _env_snapshot() -> dict:
     wgp_config.json is global and mutable, so a run is only reproducible
     later if the settings in force at write time travel with the output.
     """
-    from services.env_snapshot import build_env_snapshot
-    return build_env_snapshot(wgp.server_config, _APP_VERSION)
+    from services.env_snapshot import current_env_snapshot
+    return current_env_snapshot()
 
 
 @api.get("/api/v1/system-config")
@@ -24885,6 +24885,8 @@ def _write_tool_sidecar(
 ):
     """Write a .meta.json sidecar so a Tools output shows up in the gallery
     with the right mode + edit_sub_mode tag (mirrors _run_sfx_generation)."""
+    # Local import: upstream tests execute this writer on its own.
+    from services.env_snapshot import current_env_snapshot as _env_snapshot
     sidecar = {
         "params": {**params, "edit_sub_mode": tool},
         "generation_mode": media_type,
@@ -28936,6 +28938,8 @@ def _write_recast_shot_aware_sidecar(
 ):
     """Persist restorable settings without leaking disposable shot paths."""
     import copy
+    # Local import: upstream tests execute this writer on its own.
+    from services.env_snapshot import current_env_snapshot as _env_snapshot
 
     output_name = os.path.basename(output_path)
     params = copy.deepcopy(job.get("params") or {})
@@ -29186,6 +29190,8 @@ def _write_repaint_shot_aware_sidecar(
 ):
     """Persist mapped Repaint settings without disposable shot artifacts."""
     import copy
+    # Local import: upstream tests execute this writer on its own.
+    from services.env_snapshot import current_env_snapshot as _env_snapshot
 
     output_name = os.path.basename(output_path)
     params = copy.deepcopy(job.get("params") or {})
@@ -29442,6 +29448,8 @@ def _write_outpaint_shot_aware_sidecar(
 ):
     """Persist restorable Outpaint settings without private shot paths."""
     import copy
+    # Local import: upstream tests execute this writer on its own.
+    from services.env_snapshot import current_env_snapshot as _env_snapshot
 
     output_name = os.path.basename(output_path)
     params = copy.deepcopy(job.get("params") or {})
