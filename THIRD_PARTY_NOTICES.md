@@ -49,7 +49,7 @@ v12.72, commit `057f9ecab9ad57dfbec9768b2daf7a4426ce986c`, under the WanGP
 Community License 2.0 preserved at `app/LICENSES/WanGP-Community-2.0.txt`.
 This includes fixed-prompt reference ordering, control-window slicing and the
 rank-8 affine compatibility map. Model assets are downloaded on demand from
-`DeepBeepMeep/MiniMax-H3`, revision `fa7ed035f21d341439d4dd763a020fc4a2482c43`.
+`DeepBeepMeep/MiniMax-H3`, revision `630975da14fd3c84169d6cd5092da3ce1287d137`.
 The dedicated Viggle weights retain their upstream MiniMax H3 Community model
 terms; they are not bundled in Maestro.
 
