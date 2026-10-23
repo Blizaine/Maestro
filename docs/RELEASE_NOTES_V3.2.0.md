@@ -1,6 +1,7 @@
 # Maestro v3.2.0
 
-20 October 2026. Public **Dev** preview for testing. Main remains v3.1.0.
+22 October 2026. Public Main and Dev release, including the 20–22 October Dev
+preview fixes. FastH3 models retain their experimental status.
 
 ## Dev follow-up fixes — 22 October
 
@@ -180,14 +181,14 @@ formats, hardware requirements and validation scope.
 
 See the [Qwen 2.1 guide](Qwen-Image-2.1.md) for workflow and measurement details.
 
-## Updating the Dev build
+## Updating to v3.2.0
 
-1. Let current work finish, then stop Maestro and use **Update** for your Dev
+1. Let current work finish, then stop Maestro and use **Update** for your
    installation in Pinokio.
 2. Restart Maestro, refresh the browser and confirm **v3.2.0** beside the title.
 3. Enable the desired experimental FastH3 model through **Manage models**.
    Weights download when requested; saved model visibility and user preferences
    are retained.
 
-This push updates public Dev only. It does not publish a stable GitHub release,
-move Main or change existing user duration recommendations.
+This release is available on public Main and Dev. Existing user duration
+recommendations are unchanged; experimental model limits remain as described above.

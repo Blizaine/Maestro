@@ -150,8 +150,16 @@ Runtime upgrades are explicit menu actions. A missing performance-runtime marker
 does not automatically run Update when you open the launcher. If offered,
 **Start with Compatibility Runtime** keeps the existing runtime available.
 
-### v3.2.0 Dev preview (2026-10-20)
+### v3.2.0 (2026-10-22)
 
+- **Startup and mobile:** prioritize model controls, recover interrupted startup,
+  keep mobile controls visible without a refresh, and show workspace loading
+  continuously while the saved folder and gallery are restored.
+- **Director and H3 references:** improve source-action extraction, outline
+  compatibility and style handoff; retain rejected writer drafts with reasons,
+  preserve accepted multi-window prompts during repairs, and add explicit video
+  soundtrack roles in Studio and Director. Repair Animate trim bounds and H3 VDN,
+  Music3 and local-writer downloads. [Audio and drafts](docs/H3-Reference-Audio-and-Drafts.md).
 - **21 October fixes:** multi-window Face Refiner blending, visible warnings
   when optional finishing fails, native DLSS availability checks, large-input
   WGPKernels preparation, preserved manual INT8 choices during Auto-tune, and
@@ -166,7 +174,7 @@ does not automatically run Update when you open the launcher. If offered,
   memory; improve overlapping tiles to address thin boundary lines in
   lower-memory decode modes. [Qwen guide](docs/Qwen-Image-2.1.md).
 
-Available on **Dev** for testing. Update the idle Dev installation in Pinokio,
+Available on **Main and Dev**. Update the idle installation in Pinokio,
 restart Maestro and refresh the browser. New FastH3 variants remain experimental;
 consumer real-time speed and complete renders with the new BF16/FP8/NVFP4 formats
 are not yet verified. See the [v3.2.0 notes](docs/RELEASE_NOTES_V3.2.0.md).

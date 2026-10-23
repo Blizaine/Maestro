@@ -3,9 +3,9 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## [3.2.0] - 2026-10-20
+## [3.2.0] - 2026-10-22
 
-Public **Dev** preview. Main remains v3.1.0. See the
+Public Main and Dev release, including the 20–22 October Dev preview fixes. See the
 [v3.2.0 release notes](docs/RELEASE_NOTES_V3.2.0.md).
 
 Dev follow-up fixes, 22 October:
