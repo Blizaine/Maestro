@@ -5,6 +5,16 @@ preview fixes. FastH3 models retain their experimental status.
 
 ## Dev follow-up fixes — 23 October
 
+- **Eros Max beta6:** validate its mixed dense/INT8 layout and quantized
+  condition, output and refiner projections. The known file's published
+  identity/checksum selects both Frames and References, retaining the FL2VA
+  basis and creator's baked Turbo recipe: Euler, 8–12 steps, shifts 10/3.
+  Quantized output heads preserve their FP32 compute lock; BF16 CPU forwards
+  retain the original FP32 scale storage. These paths have numeric CPU coverage.
+- **One H3 import, both modes:** clarify the checkpoint's native-basis selector
+  and enable newly imported Frames/References companions even when old scoped
+  visibility defaults contain their IDs. Both entries share one weight file;
+  existing visibility choices for known models remain unchanged.
 - **16GB H3 placement:** for Auto-owned native H3 video on Windows 16GB
   Blackwell / nominal 64GB RAM hosts, use Profile 4 and retain a feasible
   guard-approved residency allowance instead of the extra 3 GiB ceiling.

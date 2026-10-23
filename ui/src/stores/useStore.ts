@@ -5378,8 +5378,18 @@ export const useStore = create<AppState>((set, get) => ({
                   if (imported.length === 0) return state
                   const enabledModels = new Set(state.enabledModels)
                   imported.forEach(modelType => enabledModels.add(modelType))
-                  _saveEnabledModels(enabledModels)
-                  return { enabledModels }
+                  // A scoped default/reset can contain a disabled entry for an
+                  // ID absent from the current catalog. It must not mask the
+                  // newly imported companions' global enablement. Existing
+                  // catalog entries are excluded above, preserving opt-outs.
+                  const importedIds = new Set(imported)
+                  const modelVisibilityOverrides = Object.fromEntries(
+                    Object.entries(state.modelVisibilityOverrides).map(([scope, choices]) => [scope,
+                      Object.fromEntries(Object.entries(choices).filter(([id]) => !importedIds.has(id))),
+                    ]),
+                  ) as ModelVisibilityOverrides
+                  _saveEnabledModels(enabledModels, modelVisibilityOverrides)
+                  return { enabledModels, modelVisibilityOverrides }
                 })
                 completedCheckpoints.forEach(download => {
                   _civitRefreshedCheckpointDownloads.add(download.id)

@@ -112,7 +112,7 @@ function fixture({
   }
   const exported = load(path.join(root, 'ui/src/stores/useStore.ts'));
   return {
-    store: exported.useStore, calls, storage,
+    store: exported.useStore, calls, storage, enabledModelsForContext: exported.enabledModelsForContext,
     settle: async () => {for (let i = 0; i < 50; i++) await Promise.resolve();},
   };
 }
@@ -213,6 +213,10 @@ async function testCompletedCheckpointRefreshPreservesUserStateAndOptOuts() {
     visibility: {
       configured: true, defaults_version: 999,
       enabled_models: [imageId], initialized_mature_models: [],
+      mode_overrides: {
+        'video:frames': {[framesId]: false, [existingCheckpointId]: false},
+        'video:references': {[referencesId]: false},
+      },
     },
     studioPreferences: {
       configured: true, generation_mode: 'image', studio_image_workflow: 'generate',
@@ -256,6 +260,22 @@ async function testCompletedCheckpointRefreshPreservesUserStateAndOptOuts() {
   assert.equal(store.getState().params.num_inference_steps, expected.steps, 'Refresh preserves the remembered steps');
   assert.equal(store.getState().enabledModels.has(framesId), true, 'Newly discovered Frames model is enabled');
   assert.equal(store.getState().enabledModels.has(referencesId), true, 'Newly discovered References companion is enabled');
+  assert.notEqual(store.getState().modelVisibilityOverrides['video:frames']?.[framesId], false,
+    'A stale scoped default must not mask a new Frames companion');
+  assert.notEqual(store.getState().modelVisibilityOverrides['video:references']?.[referencesId], false,
+    'A stale scoped default must not mask a new References companion');
+  assert.ok(f.enabledModelsForContext(store.getState(), 'video:frames').has(framesId),
+    'The Frames selector can use its newly imported companion');
+  assert.ok(f.enabledModelsForContext(store.getState(), 'video:references').has(referencesId),
+    'The References selector can use its newly imported companion');
+  assert.equal(store.getState().modelVisibilityOverrides['video:frames'][existingCheckpointId], false,
+    'The existing checkpoint retains its explicit per-workflow opt-out');
+  await f.settle();
+  assert.ok(f.calls.visibilityUpdates.some(update => update.enabled_models.includes(framesId)
+    && update.enabled_models.includes(referencesId)
+    && update.mode_overrides['video:frames']?.[framesId] !== false
+    && update.mode_overrides['video:references']?.[referencesId] !== false),
+    'Both companions remain enabled after durable visibility persistence');
   assert.equal(store.getState().enabledModels.has(existingCheckpointId), false,
     'An older completed download record does not undo the user’s opt-out');
 }

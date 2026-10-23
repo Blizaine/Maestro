@@ -1097,7 +1097,7 @@ class QLinearInt8ConvRot(QModuleMixin, torch.nn.Linear):
             weight_dtype = module.bias.dtype
         else:
             weight_dtype = torch.float16
-        return cls(
+        qmodule = cls(
             module.in_features,
             module.out_features,
             module.bias is not None,
@@ -1108,6 +1108,9 @@ class QLinearInt8ConvRot(QModuleMixin, torch.nn.Linear):
             optimizer=optimizer,
             quantize_input=True,
         )
+        if hasattr(module, "_lock_dtype"):
+            qmodule._lock_dtype = module._lock_dtype
+        return qmodule
 
     def __init__(
         self,
@@ -1137,7 +1140,7 @@ class QLinearInt8ConvRot(QModuleMixin, torch.nn.Linear):
         self._mm_requires_native_linear_forward = True
 
     def set_default_dtype(self, dtype):
-        self._convrot_default_dtype = dtype
+        self._convrot_default_dtype = getattr(self, "_lock_dtype", None) or dtype
 
     def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
         if getattr(self, "_maestro_kitchen_prequantized_input", None) is not None:
@@ -1165,6 +1168,28 @@ class QLinearInt8ConvRot(QModuleMixin, torch.nn.Linear):
                 self._convrot_group_size,
             )
         _debug_forward_dtype(self, original_input, input_tensor, qweight)
+        if (
+            input_tensor.device.type == "cpu"
+            and input_tensor.dtype == torch.bfloat16
+            and self.weight_qtype == _QINT8_CONVROT_QTYPE
+            and isinstance(qweight, WeightQBytesTensor)
+            and qweight._data.dtype == torch.int8
+            and qweight._scale.dtype != input_tensor.dtype
+        ):
+            # Quanto's CPU int8pack kernel requires its per-row output scales
+            # to match the BF16 activation dtype. Keep the checkpoint scales
+            # in FP32 and round only the temporary kernel argument; CUDA and
+            # other CPU paths continue through Quanto's normal dispatch.
+            input_width = input_tensor.shape[-1]
+            output_shape = input_tensor.shape[:-1] + (qweight.shape[0],)
+            output = torch.ops.quanto.qbytes_mm(
+                input_tensor.reshape(-1, input_width),
+                qweight._data,
+                qweight._scale.to(dtype=input_tensor.dtype),
+            ).reshape(output_shape)
+            if self.bias is not None:
+                output = output + self.bias
+            return output
         return torch.nn.functional.linear(input_tensor, qweight, bias=self.bias)
 
     def _load_from_state_dict(

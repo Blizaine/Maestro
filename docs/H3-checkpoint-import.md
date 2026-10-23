@@ -4,6 +4,15 @@ Open **Model Browser → Checkpoints**, filter to **MiniMax H3**, and open a mod
 
 Check the file selection: one CivitAI version can contain several formats, or even VAE components. The selected file's actual tensor index determines compatibility. Imported model names include their quantization so different files from the same release are distinguishable.
 
+**Import once for both modes:** a Ref2VA or verified reference-capable hybrid checkpoint registers and enables
+both Frames and References entries sharing the same transformer file. There is
+no second download for the companion mode. When the file omits its native
+identity, **Checkpoint basis** asks which base the creator used, rather than
+which mode you want to enable. That choice determines compatible conditioning
+and LoRAs; an ordinary native FL2VA checkpoint is registered for Frames only. Existing
+model visibility choices remain yours, while newly imported companions are
+enabled without stale scoped defaults hiding them.
+
 ## Supported files and workflows
 
 The importer supports individual joint video/audio H3 transformer checkpoints that match Maestro's loader:
@@ -31,7 +40,13 @@ the runtime retains the verified weight and ConvRot groups. Optional
 `.comfy_quant` markers must use small, one-dimensional U8 tensors and agree
 with that header. A file's browser label cannot override its tensor layout.
 
-Native **FL2VA** checkpoints receive a **Frames** entry. Native **Ref2VA/hybrid** checkpoints receive **Frames and References** entries sharing one transformer file. Both use the checkpoint's native Ref2VA LoRA basis, including when the UI is in Frames mode. Full and pruned files retain their actual architectures.
+Native **FL2VA** checkpoints normally receive a **Frames** entry and retain
+their FL2VA LoRA basis. Native **Ref2VA** checkpoints receive **Frames and
+References** entries sharing one transformer file and their Ref2VA LoRA basis,
+including in Frames mode. A separately verified hybrid can support both modes
+while retaining its FL2VA basis, as Eros Max beta6 does. Mode availability never
+silently changes the checkpoint's adapter basis. Full and pruned files retain
+their actual architectures.
 
 Entries are labeled with the creator's model and version and appear in the Studio selectors after import. Version and file IDs distinguish standard/Turbo releases and quantizations. Switching between imported companion workflows retains the same checkpoint edition. Import completion refreshes the catalog without replacing a current prompt, selected model or generation settings.
 
@@ -147,5 +162,26 @@ This file resolves to the standard sampling recipe, distinct from the separate
 Turbo INT8 exports above. Preflight asks for its creator's native workflow
 (FL2VA or Ref2VA); selecting either explicitly completes structural verification.
 Forcing the Turbo recipe conflicts with the file's metadata and remains blocked.
+
+Eros Max beta6 INT8 file `3283276` retains all four main projections in blocks
+0, 1, 48 and 49 as BF16. Its other 184 main projections and 11 condition,
+output-head and token-refiner projections use INT8 ConvRot group 256. Maestro
+validates every quantized projection's descriptor, shape and FP32 row scales,
+and checks that the dense projections have no conflicting quantization data.
+It does not require a descriptor for a BF16 weight or ignore extra descriptors.
+Tiny actual H3 models loaded through MMGP exercise the mixed projections and
+QKV splitting against independent numeric references. Quantized output heads
+retain H3's FP32 compute lock. The BF16 CPU fallback adapts a temporary scale
+argument to its kernel while preserving checkpoint scales in FP32; CUDA dispatch
+is unchanged.
+
+The exact CivitAI model/version/file identity and published SHA-256 identify
+this beta6 edition. Its creator describes a FL2VA base with added reference
+deltas; both modes are enabled while retaining the FL2VA adapter basis. The
+pinned recipe is baked Turbo, Euler, 8 steps by default (8–12), video shift 10
+and audio shift 3. See the [creator's notes](https://huggingface.co/TenStrip/10Eros-Max).
+Other FL2VA files do not inherit reference capability from a model name or a
+client flag. Structural checks and the downloaded-file SHA-256 gate still apply;
+header and CPU tests do not certify a complete GPU render or output quality.
 
 The existing live INT8 import was verified to reuse installed weights and register both workflows. New W4A8 CUDA tests compare real Triton decoding and chunked INT8 multiplication against an independent CPU reference, including FP32/BF16, both ConvRot groups, codebooks and corrections. Tiny real GGUF files exercise the registered MMGP loader, all ten supported quantizations against the official GGUF dequantizer, CUDA linear execution, BF16 activations, both fused H3 attention layouts and CPU/CUDA tensor offloading. These imports retain their original GGUF container; conversion to MMGP's serialized Quanto SafeTensor format is outside this pipeline. GGUF parser tests cover nonseekable streams, malformed metadata, shapes, types, offsets, overlap, truncation and bounded reads. Workflow/receipt tests cover layout selection, restart revalidation, atomic publication and preservation of existing SafeTensor imports. The backend regressions, UI regression suites, production build and changed-file lint remain part of verification. Full new-format generation quality should be checked with a short creator checkpoint render.

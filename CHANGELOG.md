@@ -10,6 +10,15 @@ Public Main and Dev release, including the 20–22 October Dev preview fixes. Se
 
 Dev follow-up fixes, 23 October:
 
+- Support Eros Max beta6's retained BF16 main layers and 11 additional INT8
+  projections, validating every quantized layer. Identify the verified beta6
+  hybrid by its file identity/checksum, enable both modes with its original
+  FL2VA adapter basis, and apply its creator's 8–12-step 10/3 recipe.
+  Preserve FP32 output-head compute locks through quantized loading and retain
+  FP32 scale storage when adapting the BF16 CPU fallback.
+- Clarify that importing a Ref2VA/hybrid H3 checkpoint enables Frames and
+  References with one shared file. Prevent stale per-workflow visibility
+  defaults from hiding newly imported companions; preserve existing opt-outs.
 - Adjust Auto-owned native H3 placement on Windows 16GB RTX 50-series / 64GB
   RAM hosts: use Profile 4 and retain the existing workspace guard's feasible
   residency allowance instead of imposing an additional 3 GiB ceiling. Preserve

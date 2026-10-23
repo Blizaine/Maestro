@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import json
+import math
 import sys
 import tempfile
 import unittest
@@ -602,6 +603,309 @@ class H3HeaderInt8RuntimeTests(unittest.TestCase):
                 if handler not in registered:
                     quant_router.unregister_handler(handler)
             temporary_directory.cleanup()
+
+    def test_mmgp_loads_beta6_mixed_h3_auxiliaries_and_preserves_head_precision(self):
+        import torch
+
+        from mmgp import offload, quant_router
+        from models.minimax_h3.transformer import (
+            MiniMaxH3Transformer,
+            _project_selected_rows,
+            get_linear_split_map,
+        )
+        from safetensors.torch import save_file
+        from shared.qtypes import int8_convrot
+
+        handler_name = "shared.qtypes.int8_convrot"
+        registered = set(getattr(quant_router, "_HANDLER_MODULES", ()))
+        quant_router.register_handler(handler_name)
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        model = None
+        try:
+            torch.manual_seed(63821)
+            hidden_size = group_size = 256
+            model = MiniMaxH3Transformer(
+                hidden_size=hidden_size,
+                num_layers=3,
+                token_refiner_layers=2,
+                num_attention_heads=4,
+                attention_head_dim=64,
+                ffn_dim=512,
+                video_channels=4,
+                audio_channels=32,
+                patch_size=(1, 1, 1),
+                text_dim=hidden_size,
+                curve_grid=1025,
+                curve_dim=8,
+                timestep_input_dim=hidden_size,
+                time_embed_hidden_size=hidden_size,
+                rope_freq_dim=4,
+                dtype=torch.bfloat16,
+            )
+            state = {}
+            dense_sources = {}
+            int8_sources = {}
+            linear_shapes = {
+                "attn.qkv_proj": (hidden_size * 3, hidden_size),
+                "attn.out_proj": (hidden_size, hidden_size),
+                "mlp.fc1": (1024, hidden_size),
+                "mlp.fc2": (hidden_size, 512),
+            }
+
+            for block_index in (0, 1):
+                for suffix, shape in linear_shapes.items():
+                    key = f"blocks.{block_index}.{suffix}.weight"
+                    source = torch.arange(math.prod(shape), dtype=torch.int32)
+                    source = source.remainder(31).sub(15).reshape(shape).to(torch.bfloat16)
+                    state[key] = source
+                    dense_sources[key] = source
+
+            def add_int8_layer(base, rows, columns, *, bias_dtype=None):
+                source_weight = torch.randint(
+                    -12, 13, (rows, columns), dtype=torch.int8
+                )
+                source_scale = torch.linspace(
+                    0.002, 0.006, rows, dtype=torch.float32
+                ).reshape(rows, 1)
+                config = {
+                    "format": "int8_tensorwise",
+                    "convrot": True,
+                    "convrot_groupsize": group_size,
+                    "per_row": True,
+                }
+                state[base + ".weight"] = source_weight
+                state[base + ".weight_scale"] = source_scale
+                state[base + ".comfy_quant"] = torch.tensor(
+                    list(json.dumps(config, separators=(",", ":")).encode("utf-8")),
+                    dtype=torch.uint8,
+                )
+                if bias_dtype is not None:
+                    bias = torch.linspace(
+                        -0.03, 0.04, rows, dtype=torch.float32
+                    ).to(bias_dtype)
+                    state[base + ".bias"] = bias
+                int8_sources[base] = (source_weight, source_scale)
+
+            # The actual beta6 header has dense BF16 main blocks alongside
+            # INT8 main blocks, plus the same 11 quantized auxiliary modules.
+            for suffix, shape in linear_shapes.items():
+                add_int8_layer(f"blocks.2.{suffix}", *shape)
+            add_int8_layer(
+                "condition_proj", hidden_size, hidden_size, bias_dtype=torch.bfloat16
+            )
+            add_int8_layer(
+                "final_layer.video_out", 4, hidden_size, bias_dtype=torch.float32
+            )
+            add_int8_layer(
+                "final_layer.audio_out", 32, hidden_size, bias_dtype=torch.float32
+            )
+            for layer_index in range(2):
+                prefix = f"token_refiner.blocks.{layer_index}"
+                for suffix, shape in {
+                    "attn.qkv_proj": (hidden_size * 3, hidden_size),
+                    "attn.out_proj": (hidden_size, hidden_size),
+                    "mlp.fc1": (1024, hidden_size),
+                    "mlp.fc2": (hidden_size, 512),
+                }.items():
+                    add_int8_layer(prefix + "." + suffix, *shape)
+
+            checkpoint = Path(temporary_directory.name) / "beta6-mixed-runtime.safetensors"
+            save_file(state, str(checkpoint))
+            split_map = get_linear_split_map(
+                hidden_size,
+                interleaved=False,
+                num_attention_heads=4,
+                attention_head_dim=64,
+            )
+            offload.split_linear_modules(model, split_map)
+            offload.load_model_data(
+                model,
+                str(checkpoint),
+                default_dtype=torch.bfloat16,
+                fused_split_map=split_map,
+                verboseLevel=0,
+                ignore_missing_keys=True,
+            )
+
+            for key, source in dense_sources.items():
+                module_name, _ = key.rsplit(".weight", 1)
+                if module_name.endswith("attn.qkv_proj"):
+                    base = module_name[:-len("qkv_proj")]
+                    for projection_index, projection_name in enumerate(
+                        ("q_proj", "k_proj", "v_proj")
+                    ):
+                        start = projection_index * hidden_size
+                        module = model.get_submodule(base + projection_name)
+                        self.assertIsInstance(module.weight, torch.nn.Parameter)
+                        self.assertEqual(module.weight.dtype, torch.bfloat16)
+                        self.assertTrue(
+                            torch.equal(
+                                module.weight,
+                                source[start:start + hidden_size],
+                            ),
+                            base + projection_name,
+                        )
+                else:
+                    module = model.get_submodule(module_name)
+                    self.assertIsInstance(module.weight, torch.nn.Parameter)
+                    self.assertEqual(module.weight.dtype, torch.bfloat16)
+                    self.assertTrue(torch.equal(module.weight, source), module_name)
+
+            self.assertEqual(len(int8_sources), 15)
+            hadamard = explicit_hadamard(torch, group_size).to(torch.bfloat16)
+            sample = torch.linspace(
+                -0.75, 0.8, 2 * hidden_size, dtype=torch.float32
+            ).reshape(1, 2, hidden_size)
+
+            def assert_int8_projection(module_name, input_rows, *, expected_rows=None):
+                module = model.get_submodule(module_name)
+                if isinstance(expected_rows, tuple):
+                    source_base, start, end = expected_rows
+                    source_weight, source_scale = int8_sources[source_base]
+                    source_weight = source_weight[start:end]
+                    source_scale = source_scale[start:end]
+                else:
+                    source_weight, source_scale = int8_sources[expected_rows or module_name]
+                self.assertIsInstance(module.weight, int8_convrot.Int8ConvRotWeightTensor)
+                self.assertEqual(module._convrot_group_size, group_size)
+                self.assertTrue(torch.equal(module.weight._data, source_weight))
+                self.assertTrue(torch.equal(module.weight._scale, source_scale))
+                self.assertEqual(module.weight._scale.dtype, torch.float32)
+                compute_dtype = module.weight.dtype
+                self.assertEqual(compute_dtype, module.bias.dtype if module.bias is not None else torch.bfloat16)
+                prepared = input_rows.to(compute_dtype)
+                rotation = hadamard.to(compute_dtype)
+                rotated = (
+                    prepared.reshape(-1, 1, group_size) @ rotation
+                ).reshape_as(prepared)
+                bias = None if module.bias is None else module.bias.to(compute_dtype)
+                if compute_dtype == torch.bfloat16:
+                    accumulation = torch.nn.functional.linear(
+                        rotated.float(), source_weight.float()
+                    )
+                    expected = (
+                        accumulation
+                        * source_scale.to(compute_dtype).float().reshape(1, -1)
+                    ).reshape(*prepared.shape[:-1], source_weight.shape[0]).to(compute_dtype)
+                    if bias is not None:
+                        expected = expected + bias
+                else:
+                    effective_weight = (
+                        source_weight.to(compute_dtype)
+                        * source_scale.to(compute_dtype)
+                    )
+                    expected = torch.nn.functional.linear(
+                        rotated, effective_weight, bias
+                    )
+                actual = module(prepared)
+                self.assertEqual(actual.dtype, compute_dtype)
+                torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.02)
+                return actual
+
+            with torch.inference_mode():
+                assert_int8_projection("condition_proj", sample)
+                for block_index in (2,):
+                    fused_base = f"blocks.{block_index}.attn.qkv_proj"
+                    fused_weight, fused_scale = int8_sources[fused_base]
+                    for projection_index, projection_name in enumerate(("q_proj", "k_proj", "v_proj")):
+                        start = projection_index * hidden_size
+                        module_name = f"blocks.{block_index}.attn.{projection_name}"
+                        actual = assert_int8_projection(
+                            module_name,
+                            sample,
+                            expected_rows=(
+                                fused_base,
+                                start,
+                                start + hidden_size,
+                            ),
+                        )
+
+                for layer_index in range(2):
+                    prefix = f"token_refiner.blocks.{layer_index}"
+                    fused_base = prefix + ".attn.qkv_proj"
+                    fused_weight, fused_scale = int8_sources[fused_base]
+                    for projection_index, projection_name in enumerate(("q_proj", "k_proj", "v_proj")):
+                        start = projection_index * hidden_size
+                        module_name = prefix + ".attn." + projection_name
+                        module = model.get_submodule(module_name)
+                        self.assertIsInstance(module.weight, int8_convrot.Int8ConvRotWeightTensor)
+                        self.assertTrue(
+                            torch.equal(module.weight._data, fused_weight[start:start + hidden_size])
+                        )
+                        self.assertTrue(
+                            torch.equal(module.weight._scale, fused_scale[start:start + hidden_size])
+                        )
+                        assert_int8_projection(
+                            module_name,
+                            sample,
+                            expected_rows=(
+                                fused_base,
+                                start,
+                                start + hidden_size,
+                            ),
+                        )
+                    for suffix in ("attn.out_proj", "mlp.fc1", "mlp.fc2"):
+                        module_name = prefix + "." + suffix
+                        module = model.get_submodule(module_name)
+                        width = module.in_features
+                        rows = torch.linspace(
+                            -0.5, 0.5, 2 * width, dtype=torch.float32
+                        ).reshape(1, 2, width)
+                        assert_int8_projection(module_name, rows)
+
+                packed = torch.linspace(
+                    -0.6, 0.6, 3 * hidden_size, dtype=torch.float32
+                ).reshape(1, 3, hidden_size).to(torch.bfloat16)
+                curve = torch.linspace(-0.2, 0.3, 16, dtype=torch.float32).reshape(2, 8)
+                modulated = model.final_layer(
+                    packed, curve, ((0, 1, 0), (1, 3, 1))
+                )
+                self.assertEqual(modulated.dtype, torch.bfloat16)
+                for name, indices in (
+                    ("video_out", torch.tensor([0, 2])),
+                    ("audio_out", torch.tensor([1, 2])),
+                ):
+                    module_name = "final_layer." + name
+                    module = model.get_submodule(module_name)
+                    self.assertEqual(module._lock_dtype, torch.float32)
+                    self.assertEqual(module.weight.dtype, torch.float32)
+                    selected = modulated.index_select(1, indices).float()
+                    actual = _project_selected_rows(module, modulated, indices)
+                    self.assertEqual(actual.dtype, torch.float32)
+                    source_weight, source_scale = int8_sources[module_name]
+                    rotated = (
+                        selected.reshape(-1, 1, group_size)
+                        @ explicit_hadamard(torch, group_size)
+                    ).reshape_as(selected)
+                    expected = torch.nn.functional.linear(
+                        rotated,
+                        source_weight.float() * source_scale,
+                        module.bias.float(),
+                    )
+                    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+            self.assertFalse(
+                any(key.endswith(".comfy_quant") for key in model.state_dict())
+            )
+            model = None
+            state.clear()
+            int8_sources.clear()
+            dense_sources.clear()
+            gc.collect()
+        finally:
+            if handler_name not in registered:
+                quant_router.unregister_handler(handler_name)
+            if "module" in locals():
+                del module
+            model = None
+            if "state" in locals():
+                state.clear()
+            if "int8_sources" in locals():
+                int8_sources.clear()
+            if "dense_sources" in locals():
+                dense_sources.clear()
+            gc.collect()
 
 
 if __name__ == "__main__":

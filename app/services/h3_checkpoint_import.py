@@ -53,6 +53,17 @@ _DTYPE_BYTES = {
     "F8_E5M2": 1,
 }
 _PINNED_CIVITAI_PROFILES = {
+    # Creator's beta6 version notes identify a FL2VA base with reference deltas.
+    # Keep the adapter basis separate from the trained conditioning capability.
+    # Recipe: https://huggingface.co/TenStrip/10Eros-Max (beta_6, 8-12 steps, 10/3).
+    (2851079, 3393047, 3283276): {
+        "sha256": "e2c5493e5997726ab12f17caecd6fe88c7e64b135bd3435c0f158c8f1b632a5f",
+        "sampling_profile": "turbo", "native_workflow": "fl2va",
+        "supports_references": True, "quantization_format": "int8_tensorwise",
+        "sampler": "euler", "video_shift": 10, "audio_shift": 3,
+        "default_steps": 8, "min_steps": 8, "max_steps": 12,
+        "baked_turbo": True, "fused_turbo": False,
+    },
     # DaSiWa v3 releases.  A source name/version alone is not a pin: all three
     # numeric identities and the advertised SHA-256 must match.
     (2877206, 3374445, 3263052): {
@@ -642,6 +653,27 @@ def _expected_quant_layers():
     }
 
 
+def _supported_int8_auxiliary_layers():
+    """H3 linears outside the 50 main blocks supported by the INT8 runtime."""
+
+    layers = {
+        "condition_proj": (_HIDDEN, 5120),
+        "final_layer.video_out": (96, _HIDDEN),
+        "final_layer.audio_out": (32, _HIDDEN),
+    }
+    for index in range(_TOKEN_REFINER_LAYERS):
+        prefix = f"token_refiner.blocks.{index}."
+        layers.update(
+            {
+                prefix + "attn.qkv_proj": (_QKV_ROWS, _HIDDEN),
+                prefix + "attn.out_proj": (_HIDDEN, _ATTENTION_INNER),
+                prefix + "mlp.fc1": (2 * _FFN, _HIDDEN),
+                prefix + "mlp.fc2": (_HIDDEN, _FFN),
+            }
+        )
+    return layers
+
+
 def _read_small_payload(reader, info, *, limit, label):
     if reader is None:
         _fail(
@@ -735,6 +767,18 @@ def _quantization_profile(tensors, metadata, tensor_reader, *, file_format="safe
     }
     marker_metadata = None
     if marker_infos:
+        for name, info in marker_infos.items():
+            if (
+                info["dtype"] != "U8"
+                or len(info["shape"]) != 1
+                or math.prod(info["shape"]) <= 0
+                or math.prod(info["shape"]) > _MAX_QUANT_DESCRIPTOR_BYTES
+            ):
+                _fail(
+                    f"Comfy quantization descriptor {info['raw_name']!r} must be a small one-dimensional U8 tensor.",
+                    "invalid_quantization_descriptor",
+                    tensor=info["raw_name"],
+                )
         marker_metadata = {
             name: _quant_descriptor_from_tensor(tensor_reader, info)
             for name, info in marker_infos.items()
@@ -766,11 +810,12 @@ def _quantization_profile(tensors, metadata, tensor_reader, *, file_format="safe
             if not marker["orig_dtype"]:
                 marker["orig_dtype"] = reference["orig_dtype"]
     descriptors = marker_metadata or quant_metadata
-    int8_weights = any(
-        tensors.get(f"blocks.{index}.{suffix}.weight", {}).get("dtype") == "I8"
-        for index in range(_LAYERS)
-        for suffix in _QUANT_MODULE_SUFFIXES
-    )
+    int8_weight_layers = {
+        name.removesuffix(".weight")
+        for name, info in tensors.items()
+        if name.endswith(".weight") and info["dtype"] == "I8"
+    }
+    int8_weights = bool(int8_weight_layers)
     fp8_weights = any(
         tensors.get(f"blocks.{index}.{suffix}.weight", {}).get("dtype") in _FP8_DTYPES
         for index in range(_LAYERS)
@@ -951,17 +996,59 @@ def _quantization_profile(tensors, metadata, tensor_reader, *, file_format="safe
                 "quantization_evidence_required",
             )
         expected = _expected_quant_layers()
-        if set(descriptors) != expected:
+        auxiliary_shapes = _supported_int8_auxiliary_layers()
+        int8_main_layers = set()
+        dense_main_layers = set()
+        unsupported_main_layers = set()
+        for name in expected:
+            info = tensors.get(name + ".weight")
+            if info is None:
+                _fail(
+                    f"INT8 H3 is missing main-block linear weight {name + '.weight'!r}.",
+                    "missing_tensor",
+                    tensor=name + ".weight",
+                )
+            if info["dtype"] == "I8":
+                int8_main_layers.add(name)
+            elif info["dtype"] in _FLOAT_PARAMETER_DTYPES:
+                dense_main_layers.add(name)
+            else:
+                unsupported_main_layers.add(name)
+        if unsupported_main_layers:
             _fail(
-                "INT8 H3 requires one recognized quantization descriptor for each of its 200 main-block linear layers.",
+                "INT8 H3 main-block linears may use only verified ConvRot INT8 or dense BF16/FP16 storage.",
+                "unsupported_quantization",
+                layers=sorted(unsupported_main_layers)[:8],
+            )
+
+        auxiliary_int8_layers = int8_weight_layers - expected
+        unsupported_auxiliary = auxiliary_int8_layers - set(auxiliary_shapes)
+        if unsupported_auxiliary:
+            _fail(
+                "INT8 H3 contains quantized linears outside the main blocks that are not supported by this loader.",
+                "unsupported_quantization",
+                layers=sorted(unsupported_auxiliary)[:8],
+            )
+        unknown_descriptor_layers = set(descriptors) - expected - set(auxiliary_shapes)
+        if unknown_descriptor_layers:
+            _fail(
+                "INT8 H3 contains descriptors for unsupported components outside its main blocks.",
+                "unsupported_quantization",
+                layers=sorted(unknown_descriptor_layers)[:8],
+            )
+
+        int8_layers = int8_main_layers | auxiliary_int8_layers
+        if set(descriptors) != int8_layers:
+            _fail(
+                "Every INT8 H3 weight needs exactly one recognized ConvRot descriptor, and dense main-block weights must not have one.",
                 "incomplete_quantization_metadata",
-                missing=sorted(expected - set(descriptors))[:8],
-                extra=sorted(set(descriptors) - expected)[:8],
+                missing=sorted(int8_layers - set(descriptors))[:8],
+                extra=sorted(set(descriptors) - int8_layers)[:8],
             )
         formats = {value["format"] for value in descriptors.values()}
         groups = {value["group_size"] for value in descriptors.values()}
         if formats != {"int8_convrot"} or any(not value["convrot"] for value in descriptors.values()):
-            _fail("H3 INT8 is supported only when every main-block linear descriptor proves ConvRot INT8.", "unsupported_quantization")
+            _fail("H3 INT8 is supported only when every quantized linear descriptor proves ConvRot INT8.", "unsupported_quantization")
         if len(groups) != 1 or None in groups:
             _fail("H3 ConvRot descriptors must agree on one explicit group size.", "quantization_conflict", group_sizes=sorted(str(v) for v in groups))
         group_size = next(iter(groups))
@@ -976,6 +1063,75 @@ def _quantization_profile(tensors, metadata, tensor_reader, *, file_format="safe
             _fail("Header-level quantization format conflicts with INT8 ConvRot descriptors.", "quantization_conflict")
         if fp8_weights:
             _fail("A checkpoint cannot mix INT8 ConvRot and FP8 transformer weights.", "mixed_quantization")
+
+        for name in sorted(int8_layers):
+            weight = tensors[name + ".weight"]
+            if len(weight["shape"]) != 2:
+                _fail(
+                    f"INT8 ConvRot weight {name + '.weight'!r} must be rank 2.",
+                    "unsupported_quantization",
+                    tensor=name + ".weight",
+                )
+            rows, columns = weight["shape"]
+            _require_tensor(tensors, name + ".weight_scale", (rows, 1), {"F32"})
+            if columns % group_size:
+                _fail(
+                    f"INT8 ConvRot input width for {name!r} must be divisible by group size {group_size}.",
+                    "invalid_tensor_shape",
+                    tensor=name + ".weight",
+                )
+            if any(
+                name + suffix in tensors
+                for suffix in (
+                    ".weight_s_rel",
+                    ".weight_s_channel",
+                    ".weight_codebook",
+                    ".weight_correction",
+                )
+            ):
+                _fail(
+                    f"INT8 ConvRot layer {name!r} cannot also contain W4A8 scale tensors.",
+                    "quantization_conflict",
+                    layer=name,
+                )
+        for name in sorted(dense_main_layers):
+            if any(
+                name + suffix in tensors
+                for suffix in (
+                    ".weight_scale",
+                    ".comfy_quant",
+                    ".weight_s_rel",
+                    ".weight_s_channel",
+                    ".weight_codebook",
+                    ".weight_correction",
+                )
+            ):
+                _fail(
+                    f"Dense H3 main-block weight {name!r} cannot also declare quantization data.",
+                    "quantization_conflict",
+                    layer=name,
+                )
+
+        unexpected_scales = sorted(
+            name[: -len(".weight_scale")]
+            for name in tensors
+            if name.endswith(".weight_scale")
+            and name[: -len(".weight_scale")] not in int8_layers
+        )
+        if unexpected_scales:
+            _fail(
+                "INT8 H3 has row-scale tensors without a matching quantized weight and descriptor.",
+                "quantization_conflict",
+                layers=unexpected_scales[:8],
+            )
+        if any(
+            info["dtype"] == "U8" and not name.endswith(".comfy_quant")
+            for name, info in tensors.items()
+        ):
+            _fail(
+                "INT8 H3 may use U8 storage only for verified Comfy quantization descriptors.",
+                "unsupported_tensor_dtype",
+            )
         for name, value in descriptors.items():
             if value["orig_dtype"] and value["orig_dtype"] not in {"BF16", "F16"}:
                 _fail(f"ConvRot source dtype for {name!r} must be BF16 or FP16.", "unsupported_quantization", layer=name, orig_dtype=value["orig_dtype"])
@@ -984,6 +1140,13 @@ def _quantization_profile(tensors, metadata, tensor_reader, *, file_format="safe
             "convrot": True,
             "convrot_group_size": group_size,
             "quantized_layers": len(descriptors),
+            "int8_main_layers": int8_main_layers,
+            "dense_main_layers": dense_main_layers,
+            "int8_auxiliary_layers": auxiliary_int8_layers,
+            "int8_main_layer_count": len(int8_main_layers),
+            "dense_main_layer_count": len(dense_main_layers),
+            "int8_auxiliary_layer_count": len(auxiliary_int8_layers),
+            "int8_auxiliary_layer_names": sorted(auxiliary_int8_layers),
             "tensor_dtypes": sorted({info["dtype"] for info in tensors.values()}),
             "qkv_layout": "grouped",
             "qkv_layout_evidence": "Comfy INT8 ConvRot stores contiguous grouped Q/K/V rows",
@@ -1057,8 +1220,20 @@ def _require_tensor(tensors, name, shape, dtypes=None):
     return info
 
 
-def _validate_shape_groups(tensors, *, compressed, quantization_format, w4a8_layers=None):
+def _validate_shape_groups(
+    tensors,
+    *,
+    compressed,
+    quantization_format,
+    w4a8_layers=None,
+    int8_main_layers=None,
+    dense_main_layers=None,
+    int8_auxiliary_layers=None,
+):
     w4a8_layers = set(w4a8_layers or ())
+    int8_main_layers = set(int8_main_layers or ())
+    dense_main_layers = set(dense_main_layers or ())
+    int8_auxiliary_layers = set(int8_auxiliary_layers or ())
     modulation_dim = _CURVE_DIM if compressed else _FULL_TIME_DIM
     main_weight_dtypes = {"I8"} if quantization_format in {"int8_tensorwise", _MIXED_W4A8_INT8_FORMAT} else (
         _FP8_DTYPES if quantization_format == "scaled_fp8" else _FLOAT_PARAMETER_DTYPES
@@ -1111,7 +1286,13 @@ def _validate_shape_groups(tensors, *, compressed, quantization_format, w4a8_lay
             # H3's loader preserves these small I/O projections in FP32,
             # including mixed-precision BF16 community exports. This does not
             # admit FP32 for large condition/time, norm or block linears.
-            allowed = retained_projection_dtypes
+            allowed = retained_projection_dtypes | (
+                {"I8"} if name.removesuffix(".weight") in int8_auxiliary_layers else set()
+            )
+        elif name == "condition_proj.weight":
+            allowed = dense_dtypes | (
+                {"I8"} if name.removesuffix(".weight") in int8_auxiliary_layers else set()
+            )
         else:
             allowed = dense_dtypes
         require(name, shape, allowed)
@@ -1165,6 +1346,16 @@ def _validate_shape_groups(tensors, *, compressed, quantization_format, w4a8_lay
         ):
             quantized_linear = relative.startswith(("attn.qkv_proj.", "attn.out_proj.", "mlp."))
             weight_dtypes = main_weight_dtypes if relative.endswith(".weight") and quantized_linear else dense_dtypes
+            if (
+                quantization_format == "int8_tensorwise"
+                and relative.endswith(".weight")
+                and quantized_linear
+            ):
+                base = prefix + relative.removesuffix(".weight")
+                if base in int8_main_layers:
+                    weight_dtypes = {"I8"}
+                elif base in dense_main_layers:
+                    weight_dtypes = _FLOAT_PARAMETER_DTYPES
             if compressed and relative == "adaln_proj.linear.weight":
                 # Compressed curve projections are evaluated in FP32. Some
                 # exporters retain FP32 master weights with FP16 biases.
@@ -1180,10 +1371,15 @@ def _validate_shape_groups(tensors, *, compressed, quantization_format, w4a8_lay
                 base = prefix + relative
                 if quantization_format == _MIXED_W4A8_INT8_FORMAT and base in w4a8_layers:
                     continue
+                if (
+                    quantization_format == "int8_tensorwise"
+                    and base in dense_main_layers
+                ):
+                    continue
                 _require_tensor(tensors, base + ".weight_scale", (rows, 1), {"F32"})
                 marker = tensors.get(base + ".comfy_quant")
-                # The quantization profile already requires all 200 ConvRot
-                # descriptors, either in _quantization_metadata or in marker
+                # The profile already requires a ConvRot descriptor for every
+                # INT8 weight, either in _quantization_metadata or in marker
                 # tensors. Header-based exports need no redundant marker, but
                 # any marker that is present must retain its bounded U8 shape.
                 if marker is not None and (
@@ -1226,7 +1422,37 @@ def _validate_shape_groups(tensors, *, compressed, quantization_format, w4a8_lay
             ("mlp.fc1.weight", (2 * _FFN, _HIDDEN)),
             ("mlp.fc2.weight", (_HIDDEN, _FFN)),
         ):
-            require(prefix + relative, shape, dense_dtypes)
+            base = prefix + relative.removesuffix(".weight")
+            allowed = (
+                {"I8"}
+                if relative.endswith(".weight") and base in int8_auxiliary_layers
+                else dense_dtypes
+            )
+            require(prefix + relative, shape, allowed)
+
+    auxiliary_shapes = _supported_int8_auxiliary_layers()
+    for base in sorted(int8_auxiliary_layers):
+        if base not in auxiliary_shapes:
+            _fail(
+                "INT8 H3 contains an auxiliary layer that is not supported by this loader.",
+                "unsupported_quantization",
+                layer=base,
+            )
+        rows, columns = auxiliary_shapes[base]
+        _require_tensor(tensors, base + ".weight", (rows, columns), {"I8"})
+        _require_tensor(tensors, base + ".weight_scale", (rows, 1), {"F32"})
+        marker = tensors.get(base + ".comfy_quant")
+        if marker is not None and (
+            marker["dtype"] != "U8"
+            or len(marker["shape"]) != 1
+            or math.prod(marker["shape"]) <= 0
+            or math.prod(marker["shape"]) > _MAX_QUANT_DESCRIPTOR_BYTES
+        ):
+            _fail(
+                f"INT8 H3 auxiliary layer {base!r} needs a small one-dimensional U8 Comfy descriptor tensor.",
+                "invalid_quantization_descriptor",
+                tensor=base + ".comfy_quant",
+            )
 
     block_numbers = set()
     for name in tensors:
@@ -1625,6 +1851,9 @@ def inspect_h3_header(
         compressed=compressed,
         quantization_format=quantization["quantization_format"],
         w4a8_layers=quantization.get("w4a8_layers"),
+        int8_main_layers=quantization.get("int8_main_layers"),
+        dense_main_layers=quantization.get("dense_main_layers"),
+        int8_auxiliary_layers=quantization.get("int8_auxiliary_layers"),
     )
     if compressed:
         _validate_modulation_payload(tensor_reader, table_info)
@@ -1715,9 +1944,15 @@ def inspect_h3_header(
     else:
         fl2va_model_type = "minimax_h3_full"
         ref2va_model_type = "minimax_h3_ref2va_full"
+    # Some verified hybrids add reference conditioning to an FL2VA base.
+    # Do not change their native AdaLN/LoRA basis to expose the References UI.
+    # Generic client/source prose cannot grant this additional capability.
+    supports_references = chosen_workflow == "ref2va" or bool(
+        source_pin and source_pin.get("supports_references")
+    )
     supported_architectures = (
         [fl2va_model_type, ref2va_model_type]
-        if chosen_workflow == "ref2va"
+        if supports_references
         else ([fl2va_model_type] if chosen_workflow == "fl2va" else [])
     )
     template_model_type = (
@@ -1742,6 +1977,7 @@ def inspect_h3_header(
         "qkv_layout_evidence": qkv_evidence,
         "qkv_layout_selection": normalized_qkv or "auto",
         "native_workflow": chosen_workflow,
+        "supports_references": supports_references,
         "sampling_profile": chosen_sampling,
         "template_model_type": template_model_type,
         "architectures": supported_architectures,
@@ -1772,6 +2008,16 @@ def inspect_h3_header(
             if source.get(key) is not None
         },
     }
+    if quantization["quantization_format"] == "int8_tensorwise":
+        profile.update(
+            {
+                "main_int8_layers": quantization["int8_main_layer_count"],
+                "main_dense_layers": quantization["dense_main_layer_count"],
+                "main_dense_layer_names": sorted(quantization["dense_main_layers"]),
+                "auxiliary_int8_layers": quantization["int8_auxiliary_layer_count"],
+                "auxiliary_int8_layer_names": quantization["int8_auxiliary_layer_names"],
+            }
+        )
     profile["model_overrides"] = {
         "architecture": template_model_type,
         "minimax_h3_qkv_layout": qkv_layout,
