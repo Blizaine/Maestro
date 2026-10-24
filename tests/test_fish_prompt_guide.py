@@ -16,6 +16,7 @@ sys.path.insert(0, str(APP))
 from models.TTS.fish_audio.help import DIALOGUE_ENHANCER, ENHANCER
 from models.TTS.fish_audio.prompt import check_paired_tags, drama3_text_chunks
 from services import llm_service, speech_writer
+from test_speech_performance import SCRIPT
 
 
 @contextmanager
@@ -101,6 +102,55 @@ class FishPromptGuideTests(unittest.TestCase):
                 model_type="fish_drama3_int4", tts_enhance_mode="monologue",
             )
         self.assertEqual(result, script)
+
+    def test_substantial_plain_fish_draft_gets_insertion_only_performance_review(self):
+        edits = '{"edits":[{"anchor":"It was mine","tag":"emphasis","cue":"stunned"}]}'
+        with fish_native_writer([SCRIPT, edits]) as writer:
+            result = llm_service.enhance_prompt(
+                "Tell a spooky story.", mode="audio", model_type="fish_drama3_int4",
+                tts_enhance_mode="monologue",
+            )
+        self.assertEqual(result, SCRIPT.replace("It was mine", "[stunned] <emphasis>It was mine</emphasis>"))
+        self.assertEqual(writer.call_count, 2)
+        self.assertFalse(writer.call_args.kwargs["enable_thinking"])
+        self.assertLessEqual(writer.call_args.kwargs["max_new_tokens"], 1024)
+
+    def test_single_call_fish_writing_normalizes_clear_model_authored_angle_cues(self):
+        script = "<screams, abruptly> Wait! <whispers, briefly> Stay close."
+        with fish_native_writer([script]) as writer:
+            result = llm_service.enhance_prompt(
+                "Write a brief frightened reaction.", mode="audio", model_type="fish_drama3_int4",
+                tts_enhance_mode="monologue",
+            )
+        self.assertEqual(result, "[screams, abruptly] Wait! [whispers, briefly] Stay close.")
+        writer.assert_called_once()
+
+    def test_format_normalization_preserves_exact_tokens_in_user_source(self):
+        script = "<whispers, briefly> Stay close."
+        with fish_native_writer([script]):
+            result = llm_service.enhance_prompt(
+                "Keep this verbatim: " + script, mode="audio", model_type="fish_drama3_int4",
+                tts_enhance_mode="monologue",
+            )
+        self.assertEqual(result, script)
+
+    def test_longform_native_performance_review_uses_shared_section_call_path(self):
+        second = "The letter was a reply from my brother. " + SCRIPT
+
+        def reply(*, prompt, system_prompt, **kwargs):
+            if "You direct a Fish Audio Drama 3 voice performance" in system_prompt:
+                return '{"edits":[{"anchor":"every lock","tag":"stress"}]}'
+            if prompt.startswith("Prepare private planning notes"):
+                return "Find the letter, then discover its sender."
+            return SCRIPT if "Current section: 1 of 2" in prompt else second
+
+        with fish_native_writer(reply) as writer, patch.object(speech_writer, "MIN_SECTION_COVERAGE", 0.0):
+            result = llm_service.enhance_prompt(
+                "Tell a ten-minute story that is spooky.", mode="audio", model_type="fish_drama3_int4",
+                tts_enhance_mode="monologue", max_new_tokens=2048,
+            )
+        self.assertEqual(result, (SCRIPT + "\n" + second).replace("every lock", "<stress>every lock</stress>"))
+        self.assertEqual(writer.call_count, 5)
 
 
 if __name__ == "__main__":

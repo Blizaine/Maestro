@@ -2,6 +2,7 @@ import { useStore } from '../../stores/useStore'
 import { DurationPresetControl } from './DurationPresetControl'
 import { formatDuration } from '../../lib/durationPlanning'
 import { FishSpeechDuration } from './FishSpeechDuration'
+import { isFishSpeechArchitecture } from '../../lib/fishSpeech'
 
 export function AudioDurationControl() {
   const modelOptions = useStore(s => s.modelOptions)
@@ -9,7 +10,7 @@ export function AudioDurationControl() {
   const setDuration = useStore(s => s.setDurationSeconds)
   const slider = modelOptions?.duration_slider
   if (!slider) return null
-  if (modelOptions.architecture === 'fish_drama3' && modelOptions.speech_auto_duration) return <FishSpeechDuration />
+  if (isFishSpeechArchitecture(modelOptions.architecture) && modelOptions.speech_auto_duration) return <FishSpeechDuration />
 
   const minimum = Number(slider.min || 1)
   const maximum = Number(slider.max || 60)
@@ -24,14 +25,14 @@ export function AudioDurationControl() {
       maxSeconds={maximum}
       showSingleWindow={false}
       quantizeToWindows={false}
-      durationIsMaximum={modelOptions.architecture === 'fish_drama3' || !!segmentMaximum || !!modelOptions?.duration_is_maximum}
+      durationIsMaximum={isFishSpeechArchitecture(modelOptions.architecture) || !!segmentMaximum || !!modelOptions?.duration_is_maximum}
       durationPresets={segmentMaximum ? [
         { label: '15s', seconds: 15 }, { label: '30s', seconds: 30 },
         { label: '45s', seconds: 45 }, { label: '1m', seconds: 60 },
         { label: '2m', seconds: 120 }, { label: '3m', seconds: 180 },
         { label: '4m', seconds: 240 }, { label: '5m', seconds: 300 },
       ] : undefined}
-      modelLimitLabel={modelOptions.architecture === 'fish_drama3'
+      modelLimitLabel={isFishSpeechArchitecture(modelOptions.architecture)
         ? 'Maximum speech length. Speech can finish earlier.'
         : segmentMaximum
         ? `Up to ${formatDuration(segmentMaximum)} per segment, ${formatDuration(maximum)} per output. Long scripts split automatically; short speech ends when the script finishes.`

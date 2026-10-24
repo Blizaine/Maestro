@@ -129,7 +129,13 @@ class FullAttention(nn.Module):
         attended = attention_kit.qkv_attention([x], self.query_proj, self.k_proj, self.v_proj, self.num_heads, self.head_dim,
             normalize, kv_heads=self.num_kv_heads,
             attention_group_fn=lambda qkv, group: cached_attention(
-                qkv, group, cache, context.input_pos, context.kv_len, self.engine
+                qkv,
+                group,
+                cache,
+                context.input_pos,
+                context.kv_len,
+                self.engine,
+                attention_backend="sdpa",
             ))
         return self.o_proj(attended.reshape(batch, length, -1) * gate.sigmoid())
 

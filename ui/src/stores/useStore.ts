@@ -986,7 +986,7 @@ function _applyModelDefaults(
     // startup. Never inherit another speech model's duration or overwrite a
     // limit edited while this defaults request was in flight.
     let fishDuration: number | undefined
-    if ((modelType === 'fish_drama3' || modelType === 'fish_drama3_int4')
+    if ((modelType === 'fish_drama3' || modelType === 'fish_drama3_int4' || modelType === 'fish_drama3_small')
       && typeof d.duration_seconds === 'number' && Number.isFinite(d.duration_seconds)
       && d.duration_seconds >= 0
       && Object.is(state.params.duration_seconds, (preserveEditsSince ?? before.params).duration_seconds)) {
@@ -6013,7 +6013,7 @@ export const useStore = create<AppState>((set, get) => ({
   setDurationSeconds: (requested) => {
     const state = get()
     const options = state.modelOptions
-    if (options?.audio_only && options.architecture === 'fish_drama3' && options.duration_slider) {
+    if (options?.audio_only && options.speech_auto_duration && options.duration_slider) {
       if (!Number.isFinite(requested)) return
       const ds = options.duration_slider
       const seconds = requested === 0 && options.speech_auto_duration
@@ -8340,7 +8340,7 @@ export const useStore = create<AppState>((set, get) => ({
           // back to `max` then 600.
           const ds = state.modelOptions.duration_slider
           const sliderDefault = ds?.default ?? ds?.max ?? 600
-          params.duration_seconds = ds && state.modelOptions.architecture === 'fish_drama3'
+          params.duration_seconds = ds && state.modelOptions.speech_auto_duration
             ? state.durationSeconds === 0 && state.modelOptions.speech_auto_duration
               ? 0 : Math.max(1, Math.min(ds.max, state.durationSeconds))
             : ds && (state.modelOptions.audio_segment_max_seconds || ds.max <= 15)
@@ -9971,7 +9971,7 @@ export const useStore = create<AppState>((set, get) => ({
       const ttsDefaults: Record<string, unknown> = {}
       if (options.audio_only && options.duration_slider) {
         const ds = options.duration_slider
-        ttsDefaults.durationSeconds = options.architecture === 'fish_drama3'
+        ttsDefaults.durationSeconds = options.speech_auto_duration
           ? (() => {
               const requested = typeof activeState.params.duration_seconds === 'number'
                 ? activeState.params.duration_seconds : ds.default
@@ -13826,8 +13826,7 @@ export const useStore = create<AppState>((set, get) => ({
 
     // Restore duration from metadata
     const restoredDuration = Number(p.duration_seconds ?? p._duration_seconds ?? 0) || 0
-    const restoredFishAutoDuration = restoredModelOptions?.architecture === 'fish_drama3'
-      && restoredModelOptions.speech_auto_duration === true && p.duration_seconds === 0
+    const restoredFishAutoDuration = restoredModelOptions?.speech_auto_duration === true && p.duration_seconds === 0
     // Restore post-processing settings from metadata
     const restoredSpatialUpsampling = (p.spatial_upsampling as string) || ''
     const restoredFilmGrainIntensity = (p.film_grain_intensity as number) || 0

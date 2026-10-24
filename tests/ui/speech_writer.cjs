@@ -6,7 +6,10 @@ const root=path.resolve(__dirname,'../..');
 const esbuild=require(path.join(root,'ui/node_modules/esbuild'));
 const {chromium}=require(process.env.MAESTRO_PLAYWRIGHT||'playwright');
 const origin='http://speech-writer.test';
-const output=path.join(root,'.codex-tmp/fish-longform-20261023');
+const small=process.env.MAESTRO_TEST_FISH_SMALL==='1';
+const modelType=small?'fish_drama3_small':'fish_drama3_int4';
+const architecture=small?'fish_drama3_small':'fish_drama3';
+const output=path.join(root,'.codex-tmp/fish-longform-20261023',small?'small':'full');
 fs.mkdirSync(output,{recursive:true});
 
 (async()=>{
@@ -17,14 +20,14 @@ fs.mkdirSync(output,{recursive:true});
     import {OutputFormatControls} from './src/components/Sidebar/OutputFormatControls';
     import {PromptInput} from './src/components/Sidebar/PromptInput';
     window.store=useStore;
-    const options={model_type:'fish_drama3_int4',architecture:'fish_drama3',audio_only:true,
+    const options={model_type:${JSON.stringify(modelType)},architecture:${JSON.stringify(architecture)},audio_only:true,
       max_voice_count:3,audio_mode_from_voice_count:true,speech_auto_duration:true,speech_longform:true,speech_writer_controls:true,
       duration_slider:{min:0,max:3600,default:0,increment:1}};
     useStore.setState(s=>({generationMode:'audio',audioSubMode:'speech',durationSeconds:0,
-      params:{...s.params,model_type:'fish_drama3_int4',prompt:'Write a ten-minute story about a lighthouse.',
+      params:{...s.params,model_type:${JSON.stringify(modelType)},prompt:'Write a ten-minute story about a lighthouse.',
         activated_loras:[],loras_multipliers:''},modelOptions:options,
-      models:[{model_type:'fish_drama3_int4',architecture:'fish_drama3',family:'tts',is_downloaded:true}],
-      enabledModels:new Set(['fish_drama3_int4']),ttsVoices:[],ttsVoiceCount:0,
+      models:[{model_type:${JSON.stringify(modelType)},architecture:${JSON.stringify(architecture)},family:'tts',is_downloaded:true}],
+      enabledModels:new Set([${JSON.stringify(modelType)}]),ttsVoices:[],ttsVoiceCount:0,
       activeWorkspace:'test',jobs:[],loadLoras:async()=>{},
       loadModelOptions:async()=>useStore.setState({modelOptions:options})}));
     createRoot(document.getElementById('root')).render(<div style={{padding:20,maxWidth:440}}><SpeechWriterSettings/><PromptInput/><OutputFormatControls/></div>);
@@ -91,6 +94,7 @@ fs.mkdirSync(output,{recursive:true});
       assert.equal(drafts.at(-1).tts_target_minutes,12,'explicit writer override remains independent');
       await page.evaluate(()=>window.store.getState().startGeneration('queue'));
       assert.equal(jobs.at(-1).duration_seconds,1200,'long manual maximum reaches generation');
+      assert.equal(jobs.at(-1).model_type,modelType,'selected runtime family reaches generation');
       assert.equal(jobs.at(-1)._speech_writer_target_minutes,12,'writer preferences saved with output settings');
       await dialog.getByRole('button',{name:'Close Speech length',exact:true}).click();
 

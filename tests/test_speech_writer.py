@@ -8,6 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 from services import llm_service, speech_writer
+from services.fish_script_format import FishScriptFormat
 from services.studio_enhancement import enhancement_context, enhancement_warnings
 
 
@@ -285,6 +286,53 @@ class SpeechTargetTests(unittest.TestCase):
         self.assertTrue(did_truncate)
 
 
+class ScriptContextTests(unittest.TestCase):
+    def test_orphan_closing_cue_is_flagged_without_rewriting_text(self):
+        script = "[steady] I found the letter. A voice echoed] behind the door."
+        self.assertTrue(speech_writer._has_unclosed_native_syntax(script))
+        self.assertFalse(speech_writer._has_unclosed_native_syntax("[steady] I found <emphasis>the letter</emphasis>."))
+        self.assertEqual(script, "[steady] I found the letter. A voice echoed] behind the door.")
+
+    def test_prefers_complete_recent_paragraph_and_preserves_partial_ending(self):
+        recent = "[calm] The next sound is [my breath"
+        value = "Old context that will not fit. " * 10 + "\n\n" + recent
+        self.assertEqual(speech_writer._bounded_script_context(value, len(recent) + 4), recent)
+        self.assertEqual(speech_writer._bounded_script_context(recent), recent)
+
+    def test_never_starts_inside_a_spoken_word_or_native_direction(self):
+        cases = (
+            ("heavy binoculars guide us home.", "eavy", "binoculars guide us home."),
+            ("[hands steady while I reach across the desk] The message is clear.", "while", "The message is clear."),
+            ("<emphasis>the light holds steady</emphasis> We can go home.", "light", "We can go home."),
+            ("<|phoneme_start|>first second<|phoneme_end|> Stay here.", "second", "Stay here."),
+        )
+        for tail, clipped_start, expected in cases:
+            value = "Old context. " * 10 + tail
+            limit = len(value) - value.index(clipped_start)
+            with self.subTest(tail=tail):
+                actual = speech_writer._bounded_script_context(value, limit)
+                self.assertEqual(actual, expected)
+                self.assertLessEqual(len(actual), limit)
+                self.assertTrue(value.endswith(actual))
+
+    def test_omits_an_unsafe_oversized_scope_without_altering_script(self):
+        value = "Before [" + "a long unfinished direction " * 30
+        original = value
+        self.assertEqual(speech_writer._bounded_script_context(value, 60), "")
+        self.assertEqual(value, original)
+        self.assertEqual(speech_writer._bounded_script_context(value, 0), "")
+
+    def test_clipped_speaker_label_does_not_orphan_the_first_dialogue_turn(self):
+        for label in ("Speaker 1:", "Mara:"):
+            with self.subTest(label=label):
+                value = "Earlier context. " * 10 + "\n" + label + " This turn is too long for the excerpt."
+                floor = value.index(label) + 2
+                self.assertEqual(speech_writer._bounded_script_context(value, len(value) - floor), "")
+                next_turn = "\nSpeaker 2: We can go home."
+                value += next_turn
+                self.assertEqual(speech_writer._bounded_script_context(value, len(value) - floor), next_turn.lstrip())
+
+
 class LongFormGenerationTests(unittest.TestCase):
     def setUp(self):
         self.target = speech_writer.resolve_speech_target("", 10)
@@ -292,7 +340,7 @@ class LongFormGenerationTests(unittest.TestCase):
 
     def run_writer(
         self, generator, target=None, truncated=None, max_new_tokens=2_048,
-        *, coverage_repairs=False,
+        *, coverage_repairs=False, finalize_section=None, script_format=None,
     ):
         # Most legacy fixtures are short on purpose and cover call sequencing.
         # Dedicated coverage tests below exercise the production repair threshold.
@@ -306,6 +354,8 @@ class LongFormGenerationTests(unittest.TestCase):
                 max_new_tokens=max_new_tokens,
                 temperature=0.6,
                 is_truncated=truncated,
+                finalize_section=finalize_section,
+                script_format=script_format,
             )
 
     def test_spoken_word_count_excludes_directions_tags_and_speaker_labels(self):
@@ -347,39 +397,40 @@ class LongFormGenerationTests(unittest.TestCase):
         self.assertEqual(len(generator.calls), 4)
         self.assertEqual(result, f"{first}\n{replacement}")
         self.assertEqual(generator.outputs[2], duplicate)
-        self.assertIn(duplicate[-speech_writer.MAX_PRIOR_TEXT_CHARS:], generator.calls[3]["prompt"])
+        repair_prompt = generator.calls[3]["prompt"]
+        # Keep the exact recent wording/ending without copying a raw tail that
+        # starts inside "remembers" at this fixture's character bound.
+        self.assertIn("Mara remembers the old street while detail12", repair_prompt)
+        self.assertIn(duplicate[-90:], repair_prompt)
+        self.assertNotIn("\nbers the old street", repair_prompt)
         self.assertIn("already part of the script", generator.calls[2]["prompt"])
         self.assertTrue(any("remains short" in warning for warning in warnings))
 
-    def test_finish_stop_short_final_section_gets_a_bounded_ending_expansion(self):
+    def test_finished_short_final_section_keeps_its_ending_without_expansion(self):
         first = spoken_fixture("Mara", 600)
         final_excerpt = spoken_fixture("Len", 100)
-        expansion = spoken_fixture("Len", 500, offset=20)
         generator = FakeGenerator([
             "Plan: The friends reopen the bakery together.",
             first,
             final_excerpt,
-            expansion,
         ])
         with enhancement_context({}, lambda: False):
             result = self.run_writer(generator, coverage_repairs=True)
             warnings = enhancement_warnings()
 
-        self.assertEqual(len(generator.calls), 4)
-        self.assertTrue(result.startswith(first))
-        self.assertIn(final_excerpt, result)
-        self.assertIn("coherent, satisfying ending", generator.calls[3]["prompt"])
-        self.assertIn("about 550 spoken words", generator.calls[3]["prompt"])
+        self.assertEqual(len(generator.calls), 3)
+        self.assertEqual(result, f"{first}\n{final_excerpt}")
+        self.assertTrue(any("without a length-only expansion" in warning for warning in warnings))
         self.assertTrue(any("remains short" in warning for warning in warnings))
 
-    def test_cue_only_expansion_does_not_count_as_spoken_progress(self):
-        first = spoken_fixture("Mara", 600)
-        final_excerpt = spoken_fixture("Len", 100)
+    def test_cue_only_nonfinal_expansion_does_not_count_as_spoken_progress(self):
+        first = spoken_fixture("Mara", 100)
+        final_excerpt = spoken_fixture("Len", 100, offset=30)
         generator = FakeGenerator([
             "Plan: The friends resolve their disagreement and reopen the bakery.",
             first,
-            final_excerpt,
             "[warmly]",
+            final_excerpt,
         ])
         with enhancement_context({}, lambda: False):
             result = self.run_writer(generator, coverage_repairs=True)
@@ -387,6 +438,144 @@ class LongFormGenerationTests(unittest.TestCase):
 
         self.assertEqual(result, f"{first}\n{final_excerpt}")
         self.assertTrue(any("focused expansion made no distinct progress" in warning for warning in warnings))
+
+    def test_token_limited_repair_is_continued_until_it_finishes(self):
+        first = spoken_fixture("Mara", 100)
+        final_section = spoken_fixture("Len", 600)
+        partial_expansion = "Mara: The door opened and the old house breathed in"
+        generator = FakeGenerator([
+            "Plan: The friends leave the house together.",
+            first,
+            partial_expansion,
+            "the last of the daylight. We ran for the gate, and reached it before the lock turned.",
+            final_section,
+        ])
+        truncated_states = iter([False, False, True, False, False])
+        with enhancement_context({}, lambda: False):
+            result = self.run_writer(
+                generator,
+                truncated=lambda: next(truncated_states),
+                coverage_repairs=True,
+            )
+            warnings = enhancement_warnings()
+
+        self.assertEqual(len(generator.calls), 5)
+        self.assertIn(partial_expansion, result)
+        self.assertIn("the last of the daylight", result)
+        self.assertIn("Continue the same spoken script", generator.calls[3]["prompt"])
+        self.assertFalse(any("may be incomplete" in warning for warning in warnings))
+
+    def test_unfinished_expansion_is_not_appended_after_a_complete_section(self):
+        first = spoken_fixture("Mara", 100)
+        partial_expansion = "Len: We opened the gate and saw the road ahead"
+        final_section = spoken_fixture("Len", 600)
+        generator = FakeGenerator([
+            "Plan: The friends make it home.",
+            first,
+            partial_expansion,
+            partial_expansion,
+            final_section,
+        ])
+        truncated_states = iter([False, False, True, False, False])
+        with enhancement_context({}, lambda: False):
+            result = self.run_writer(
+                generator,
+                truncated=lambda: next(truncated_states),
+                coverage_repairs=True,
+            )
+            warnings = enhancement_warnings()
+
+        self.assertEqual(result, f"{first}\n{final_section}")
+        self.assertNotIn(partial_expansion, result)
+        self.assertTrue(any("focused expansion and its continuation could not finish" in warning for warning in warnings))
+
+    def test_multi_part_token_limited_repair_stays_inside_the_global_call_cap(self):
+        first = spoken_fixture("Mara", 100)
+        final_section = spoken_fixture("Len", 600)
+        generator = FakeGenerator([
+            "Plan: The friends find a way out.",
+            first,
+            "Mara: The passage narrowed around us",
+            "until the stone touched our shoulders. We kept moving",
+            "and found the morning beyond the gate.",
+            final_section,
+        ])
+        truncated_states = iter([False, False, True, True, False, False])
+        result = self.run_writer(
+            generator,
+            truncated=lambda: next(truncated_states),
+            coverage_repairs=True,
+        )
+
+        self.assertEqual(len(generator.calls), 6)
+        self.assertIn("stone touched our shoulders", result)
+        self.assertIn("found the morning beyond the gate", result)
+        self.assertLessEqual(len(generator.calls), speech_writer.MAX_GENERATION_CALLS)
+
+    def test_finalizer_uses_shared_call_budget_and_reserves_future_finishing(self):
+        first = spoken_fixture("Mara", 600)
+        final_section = spoken_fixture("Len", 100)
+        generator = FakeGenerator([
+            "Plan: The friends repair the bakery.",
+            first,
+            "[warmly]",
+            final_section,
+            "[quietly]",
+        ])
+        observations = []
+
+        def finalize(**kwargs):
+            observations.append({
+                "text": kwargs["text"],
+                "remaining_calls": kwargs["remaining_calls"](),
+                "reserve_calls": kwargs["reserve_calls"],
+                "section_incomplete": kwargs["section_incomplete"],
+                "max_new_tokens": kwargs["max_new_tokens"],
+            })
+            addition, was_truncated = kwargs["generate"](
+                prompt="Add supported performance cues.",
+                system_prompt=self.system,
+                max_new_tokens=kwargs["max_new_tokens"],
+                temperature=0.35,
+            )
+            self.assertFalse(was_truncated)
+            return kwargs["text"] + "\n" + addition
+
+        result = self.run_writer(generator, finalize_section=finalize)
+
+        self.assertEqual(len(observations), 2)
+        self.assertEqual(observations[0]["reserve_calls"], 3)
+        self.assertGreater(observations[0]["remaining_calls"], 0)
+        self.assertEqual(observations[1]["reserve_calls"], 0)
+        self.assertFalse(observations[0]["section_incomplete"])
+        self.assertLessEqual(observations[0]["max_new_tokens"], 1_024)
+        self.assertIn("[warmly]", result)
+        self.assertIn("[quietly]", result)
+        self.assertEqual(len(generator.calls), 5)
+        self.assertEqual(generator.calls[2]["temperature"], 0.35)
+
+    def test_finalizer_exception_retains_section_and_cancellation_propagates(self):
+        script = spoken_fixture("Mara", 300)
+        generator = FakeGenerator(["Plan: The bakery opens.", script])
+
+        def fail_finalization(**_kwargs):
+            raise RuntimeError("annotation unavailable")
+
+        with enhancement_context({}, lambda: False):
+            result = self.run_writer(generator, finalize_section=fail_finalization)
+            warnings = enhancement_warnings()
+        self.assertEqual(result, script)
+        self.assertTrue(any("finalization failed" in warning for warning in warnings))
+
+        cancelled_generator = FakeGenerator(["Plan: The bakery opens.", script])
+        with enhancement_context({}, lambda: False):
+            with self.assertRaisesRegex(InterruptedError, "cancelled"):
+                self.run_writer(
+                    cancelled_generator,
+                    finalize_section=lambda **_kwargs: (_ for _ in ()).throw(
+                        InterruptedError("cancelled")
+                    ),
+                )
 
     def test_duplicate_repair_failure_retains_raw_section_and_warns(self):
         first = spoken_fixture("Mara", 600)
@@ -525,6 +714,146 @@ class LongFormGenerationTests(unittest.TestCase):
         self.assertIn("But the bridge is still ahead", result)
         self.assertIn("Continue the same spoken script", generator.calls[2]["prompt"])
 
+    def test_token_limited_partial_angle_tag_joins_inside_the_tag_name(self):
+        generator = FakeGenerator([
+            "Cast: Mara returns to the bridge.",
+            "Mara: Wait here <whis",
+            "per> until I return.</whisper>",
+            "Len: I will watch the road until you come back.",
+        ])
+        truncated_states = iter([False, True, False, False])
+        with enhancement_context({}, lambda: False):
+            result = self.run_writer(generator, truncated=lambda: next(truncated_states))
+            warnings = enhancement_warnings()
+
+        self.assertIn("Wait here <whisper> until I return.</whisper>", result)
+        self.assertFalse(any("unclosed native TTS tag or cue" in warning for warning in warnings))
+        self.assertFalse(any("may be incomplete in native TTS syntax" in warning for warning in warnings))
+
+    def test_token_limited_partial_bracket_cue_preserves_its_leading_space(self):
+        generator = FakeGenerator([
+            "Cast: Mara returns to the bridge.",
+            "Mara: Stay close [voice starts",
+            " to shake] until I return.",
+            "Len: I will watch the road until you come back.",
+        ])
+        truncated_states = iter([False, True, False, False])
+        result = self.run_writer(generator, truncated=lambda: next(truncated_states))
+
+        self.assertIn("[voice starts to shake]", result)
+        self.assertNotIn("[voice startsto shake]", result)
+
+    def test_fish_normalization_runs_before_finalizer_and_syntax_review(self):
+        target = speech_writer.SpeechTarget(minutes=0.01, words=1)
+        generator = FakeGenerator([
+            "Plan: Mara finds a letter.",
+            "Mara: <screams, abruptly> Wait! <whispers, briefly> Stay close.",
+        ])
+        reviewed = []
+
+        def finalize(**kwargs):
+            reviewed.append(kwargs["text"])
+            self.assertFalse(kwargs["section_incomplete"])
+            return kwargs["text"]
+
+        with enhancement_context({}, lambda: False):
+            result = self.run_writer(
+                generator,
+                target=target,
+                finalize_section=finalize,
+                script_format=FishScriptFormat(),
+            )
+            warnings = enhancement_warnings()
+
+        expected = "Mara: [screams, abruptly] Wait! [whispers, briefly] Stay close."
+        self.assertEqual(result, expected)
+        self.assertEqual(reviewed, [expected])
+        self.assertFalse(any("unclosed native TTS syntax" in warning for warning in warnings))
+
+    def test_fish_focused_completion_closes_old_cue_before_new_native_directive(self):
+        target = speech_writer.SpeechTarget(minutes=0.01, words=1)
+        generator = FakeGenerator([
+            "Plan: Mara finds a letter.",
+            "Mara: Listen. [my breath catches",
+            "<forceful>Wait!</forceful> We move.",
+        ])
+        with enhancement_context({}, lambda: False):
+            result = self.run_writer(
+                generator,
+                target=target,
+                script_format=FishScriptFormat(),
+            )
+            warnings = enhancement_warnings()
+
+        self.assertIn("[my breath catches]", result)
+        self.assertIn("<forceful>Wait!</forceful> We move.", result)
+        self.assertEqual(len(generator.calls), 3)
+        self.assertFalse(any("retains an unclosed native TTS" in warning for warning in warnings))
+
+    def test_fish_finalizer_cannot_hide_unresolved_unknown_markup(self):
+        target = speech_writer.SpeechTarget(minutes=0.01, words=1)
+        generator = FakeGenerator([
+            "Plan: Mara finds a letter.",
+            "Mara: Listen <custom>closely.",
+        ])
+        observed_incomplete = []
+
+        def finalize(**kwargs):
+            observed_incomplete.append(kwargs["section_incomplete"])
+            return kwargs["text"] + "</custom>"
+
+        with patch.object(speech_writer, "MAX_GENERATION_CALLS", 2):
+            with enhancement_context({}, lambda: False):
+                result = self.run_writer(
+                    generator,
+                    target=target,
+                    finalize_section=finalize,
+                    script_format=FishScriptFormat(),
+                )
+                warnings = enhancement_warnings()
+
+        self.assertEqual(observed_incomplete, [True])
+        self.assertIn("Mara: Listen <custom>closely.", result)
+        self.assertNotIn("</custom>", result)
+        self.assertTrue(any("finalization changed an incomplete draft" in warning for warning in warnings))
+
+    def test_plain_prose_continuation_uses_a_safe_break_and_warns_about_word_seam(self):
+        generator = FakeGenerator([
+            "Cast: Mara returns to the bridge.",
+            "Mara: The old",
+            "door opened before dawn.",
+            "Len: I will watch the road until you come back.",
+        ])
+        truncated_states = iter([False, True, False, False])
+        with enhancement_context({}, lambda: False):
+            result = self.run_writer(generator, truncated=lambda: next(truncated_states))
+            warnings = enhancement_warnings()
+
+        self.assertIn("The old\ndoor opened", result)
+        self.assertNotIn("The olddoor", result)
+        self.assertTrue(any("intended word boundary is uncertain" in warning for warning in warnings))
+
+    def test_unclosed_paired_tag_is_reported_to_finalizer_and_retained(self):
+        generator = FakeGenerator([
+            "Cast: Mara and Len return to the bridge.",
+            "Mara: Listen <whisper>stay close.",
+            "please follow me.",  # does not close the unbalanced native tag
+            "Len: I will watch the road until you come back.",
+        ])
+        incomplete_flags = []
+
+        def finalize(**kwargs):
+            incomplete_flags.append(kwargs["section_incomplete"])
+            return kwargs["text"]
+
+        with enhancement_context({}, lambda: False):
+            result = self.run_writer(generator, finalize_section=finalize)
+            warnings = enhancement_warnings()
+
+        self.assertIn("Mara: Listen <whisper>stay close.", result)
+        self.assertEqual(incomplete_flags, [True, False])
+        self.assertTrue(any("retains an unclosed native TTS tag or cue" in warning for warning in warnings))
+
     def test_sixty_minute_limit_stays_under_call_and_output_budgets(self):
         target = speech_writer.resolve_speech_target("Write a 90-minute story.", 0)
         generator = FakeGenerator(["A complete plan."] + ["Speaker 1: A complete section." for _ in range(12)])
@@ -552,9 +881,10 @@ class LongFormGenerationTests(unittest.TestCase):
             "Cast: Inez and Sol. Section 1 is the departure; section 2 is the return.",
             "Inez: The train left before sunrise.",
             "Inez: The train left before sunrise.",  # duplicate continuation: no progress
+            "",  # incomplete-section repair: no progress
             "",  # empty second section
         ])
-        truncated_states = iter([False, True, False, False])
+        truncated_states = iter([False, True, False, False, False])
         with enhancement_context({}, lambda: False):
             result = self.run_writer(generator, truncated=lambda: next(truncated_states))
             warnings = enhancement_warnings()

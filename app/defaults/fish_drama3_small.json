@@ -1,0 +1,23 @@
+{
+    "model": {
+        "name": "TTS Fish Drama 3 Small (Streaming)",
+        "architecture": "fish_drama3_small",
+        "description": "Built with Fish Audio. Community pruned and distilled IQ3 Drama 3 for English and Japanese speech and voice cloning. Uses a separate, pinned audio.cpp runtime and bounded streaming decode. Delivery and pronunciation can differ from the full model.",
+        "model_size_gb": 12,
+        "license_name": "Fish Audio Community License 1.0",
+        "selector_help": "10.46 GB GGUF download plus a native CUDA runtime on first use. Streaming limits codec memory growth; smaller GPUs cache selected experts for GPU calculation. Voice references must be 1–30 seconds. Lower VRAM does not guarantee faster generation. This community derivative supports English and Japanese; the full Fish model remains available.",
+        "URLs": [
+            "https://huggingface.co/pentacoxian-dev/drama3-small-GGUF/resolve/4a3078e885344bb9b24d511cec389d2726854d15/drama3-small-IQ3_XXS.gguf"
+        ]
+    },
+    "prompt": "[warm, conversational] The lantern is glowing, and the path is clear. I will be waiting by the old gate.",
+    "alt_prompt": "",
+    "audio_prompt_type": "",
+    "duration_seconds": 0,
+    "temperature": 0.7,
+    "top_k": 0,
+    "top_p": 0.7,
+    "guidance_scale": 1.0,
+    "num_inference_steps": 1,
+    "prompt_enhancer": ""
+}

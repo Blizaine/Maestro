@@ -1,6 +1,6 @@
 # Fish Audio Drama 3
 
-Enable **Fish Audio Drama 3** or **INT4 Experts** in the Audio → Speech model
+Enable **Fish Audio Drama 3**, **INT4 Experts** or **Fish Drama 3 Small (Streaming)** in the Audio → Speech model
 picker. Models download only on explicit download or first generation. Each
 uses the same expressive script format:
 
@@ -39,6 +39,22 @@ should occur. Paired delivery tags target a selected word or phrase:
 <whisper>Stay here.</whisper> [urgent] I'll be right back.
 ```
 
+For substantial passages that omit word-level controls, **Write** can make one
+bounded performance review per section. It suggests directions against exact
+phrases; Maestro inserts only verified native markup and preserves the spoken
+words, punctuation, speaker labels and existing cues. It inspects a bounded
+set of suggestions and applies up to eight valid edits; an oversized list no
+longer discards every safe edit. Skipped suggestions and applied counts remain
+in draft history. A response with no usable edits carries a review warning.
+Plain/verbatim/no-tag requests
+skip this step. Long drafts share the existing thirty-call allowance, reserving
+calls for later sections. The review adds writing latency and is not a guarantee
+that Fish will perform every suggested emotion.
+
+Bracket cues should describe an audible performance, such as a hesitant tone,
+and remain short. Gestures, scenery and plot developments belong in the spoken
+story; placing those words inside brackets can hide intended narration.
+
 The paired tags are `<whisper>`, `<emphasis>`, `<soft>`, `<fast>`, `<slow>`,
 `<stress>` and `<forceful>`. Close each tag and nest overlapping scopes
 correctly. Maestro preserves these scopes across automatic cuts. For deliberate
@@ -47,6 +63,16 @@ pronunciation, the local tokenizer also has `<|phoneme_start|>` and
 [Fish's Drama 3 guide](https://docs.fish.audio/features/text-to-speech/drama-3)
 for its language-specific phoneme notation. Experimental language-switch tags
 from the hosted service are not advertised by Maestro's local guide.
+
+While writing, Maestro converts clear model-authored one-off directions such
+as `<screams, startled>` to `[screams, startled]`. It leaves supported paired
+tags, pronunciation markers, unknown markup and exact user-supplied tokens
+unchanged. At a continuation boundary it can close an unfinished bracket cue
+when the new fragment starts a separate complete direction. Ambiguous syntax
+still needs review; raw responses and recovery counts remain in draft history.
+Recovery declines a boundary that may split a word, including when the new
+syllable is wrapped in a delivery tag. It does not infer missing narration or
+remove repeated passages automatically.
 
 Prefer a few purposeful changes over a different voice description on every
 paragraph. Keep the same speaker number, cloned identity, habitual register
@@ -133,8 +159,11 @@ a fallback. Only selected experts execute at each call. Missing native runtime
 libraries select the fallback and the console identifies the actual backend.
 CPU and RAM bandwidth still matter substantially.
 
-**vLLM** appears only when the runtime passes the Triton and FlashAttention 2
-checks and has both required FLA DeltaNet kernels. Experts remain on the CPU unless a full-model
+**vLLM** appears when the Fish runtime has Triton, PyTorch SDPA and both required
+FLA DeltaNet kernels. Fish explicitly uses SDPA for full attention; it does not
+require the Windows FlashAttention wheel, which cannot run on every GPU that
+can import it. Other model families keep their own engine requirements. An
+explicit **Legacy** selection is respected. Experts remain on the CPU unless a full-model
 VRAM profile has enough measured free VRAM to stage the complete bank while
 reserving space for caches and activations. Low-memory profiles keep CPU
 experts as the fallback. When the full bank does not fit, vLLM can instead
@@ -176,8 +205,8 @@ On the RTX 4090 with Torch 2.7.1/CUDA 12.8, short INT4 speech tests passed with
 both engines. Legacy with native CPU experts peaked at 3.74 GiB allocated;
 vLLM with the complete GPU expert bank peaked at 19.43 GiB. Both generated the
 requested sentence, independently checked with transcription. These first-use
-checks are not comparative speed benchmarks. Physical 12-GB generation,
-three-voice cloning fidelity and long-script media quality still need testing.
+checks are not comparative speed benchmarks. Three-voice cloning fidelity and
+long-script media quality still need testing.
 
 The optional upstream silence classifier was not published with these assets.
 Generation uses EOS, cancellation and the chosen duration limit instead.
@@ -228,15 +257,55 @@ smaller-memory cache/tower-graph path. Native INT4 kernel/cache checks passed on
 the 4090, 3080 Ti and 5070 Laptop. The isolated expert-kernel ratios were 2.05x,
 1.25x and 1.08x; these are not whole-speech speedups. A complete-model profile4
 check on the 4090 used the cached path and tower graph, produced both requested
-sentences and sampled 9.68 GB peak device VRAM. Physical 8GB/12GB full speech
-tests remain pending model/runtime setup. The cache is sized from each GPU's
-remaining memory; this 4090 check does not establish that a complete speech
-job fits an 8GB card or predict its throughput.
+sentences and sampled 9.68 GB peak device VRAM. The cache is sized from each
+GPU's remaining memory. Follow-up full-speech checks completed on the 12GB
+3080 Ti and 8GB 5070 Laptop. The 3080 Ti activated a 64-slot expert cache and
+tower graph; its warm take generated 9.24 seconds of speech in 32 active
+seconds. The laptop used a tower graph but kept CPU experts because the host
+RAM guard found too little free memory; its cold take took 101 active seconds
+for 9.61 seconds of speech. These short tests do not predict long-script speed.
+
+## Fish Drama 3 Small (Streaming)
+
+The optional [community Small checkpoint](https://huggingface.co/pentacoxian-dev/drama3-small-GGUF)
+is a pruned, distilled English/Japanese derivative. It is a separate model;
+the full Fish checkpoints remain available. Its 10.46 GB IQ3 GGUF includes the
+codec and uses [audio.cpp](https://github.com/0xShug0/audio.cpp/releases/tag/v0.9.2-drama3-base-small),
+not Maestro's PyTorch/MMGP expert loader. We pin both the checkpoint revision
+and native release. The native runtime downloads lazily on first Small use,
+checks its archive hashes and runs as a model-owned loopback-only process.
+It is released when the model is released; it does not replace Maestro's server.
+
+Small consumes incremental waveform chunks while bounding each native request
+to about 30 seconds, then joins script parts into the final file. This limits
+codec memory growth; it does not make the entire checkpoint fit in an 8GB GPU.
+Smaller devices keep full expert banks in the GGUF and cache selected experts
+for GPU calculation. Actual memory placement, stream
+counts and completion evidence are recorded with the output. A manual duration
+is a whole-output maximum, and Auto remains a script-derived safety ceiling.
+Cancellation ends the owned native request; partial or cap-limited speech is
+identified rather than silently presented as a finished script.
+
+Sampling, inline performance directions and up to three voice references use
+the familiar Fish controls. Each Small voice reference must be 1–30 seconds;
+supported audio formats are converted locally to mono PCM WAV for the native
+runtime. Trim longer recordings before adding them. Quantization, expert pruning and the different
+runtime can change pronunciation or delivery. The model author's 4090/5090
+results are not speed guarantees for 8GB or 12GB machines. Streaming here is the
+internal synthesis/codec path; the gallery receives the assembled output file.
+
+Short cloned-voice checks completed with both requested sentences: the 3080 Ti
+produced 13.70 seconds of speech in 42 active seconds, peaking at a sampled
+6.07 GB VRAM; the 5070 Laptop produced 10.08 seconds in 30 active seconds,
+peaking at 5.44 GB. Both streamed two parts to a complete WAV. Different
+deliveries have different lengths, so these are absolute observations rather
+than matched speedup claims. Model/runtime downloads are excluded from active
+time. These checks establish basic operation, not long-story or voice quality.
 
 ## API
 
 Use `/api/v1/generate` with `model_type: "fish_drama3_int4"` (or
-`"fish_drama3"`), `generation_mode: "audio"`, the script in `prompt`,
+`"fish_drama3"` or `"fish_drama3_small"`), `generation_mode: "audio"`, the script in `prompt`,
 `duration_seconds: 0` for Auto (or a positive maximum in seconds), and optional
 `audio_guide`, `audio_guide2`, `audio_guide3`.
 Set `audio_prompt_type` to `A`, `AB`, or `ABD` for one, two, or three references;

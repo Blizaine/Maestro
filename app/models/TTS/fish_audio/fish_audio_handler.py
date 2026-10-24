@@ -65,7 +65,8 @@ class family_handler:
             "speech_longform": True, "audio_segment_max_seconds": 120,
             # The shared graph toggle stays disabled: Fish manages a part-local
             # whole-frame graph itself after verifying complete GPU residency.
-            # vLLM requires passing Triton, FlashAttention 2 and FLA checks.
+            # Fish's accelerated path uses PyTorch SDPA for full attention and
+            # the shared FLA kernels for DeltaNet.
             "profiles_dir": [ARCHITECTURE], "lm_engines": lm_engines, "lm_engine_supports_offload": True,
             "max_voice_count": 3, "audio_mode_from_voice_count": True,
             "image_prompt_types_allowed": "", "any_audio_prompt": True, "audio_prompt_choices": True,
@@ -83,6 +84,38 @@ class family_handler:
             "text_prompt_enhancer_instructions1": DIALOGUE_ENHANCER, "text_prompt_enhancer_max_tokens1": 2048,
             "infos": INFOS, "prompt_infos": PROMPT_INFOS, "deepy_infos": DEEPY_INFOS, "deepy_prompt_infos": DEEPY_PROMPT_INFOS,
         }
+
+    @staticmethod
+    def resolve_lm_decoder_engine(requested_engine, engines_available=()):
+        from .runtime_support import fish_vllm_availability
+
+        requested = str(requested_engine or "").strip().lower()
+        available = {str(engine).strip().lower() for engine in (engines_available or ())}
+        if requested == "legacy":
+            return "legacy"
+        if requested not in ("", "auto", "vllm"):
+            if requested != "cg":
+                print(f"[Fish Audio] Unknown decoder engine '{requested}'; using Legacy.")
+            return "legacy"
+        if "vllm" not in available:
+            _, reason = fish_vllm_availability()
+            reason = reason or "vLLM is not declared as available for this Fish model"
+            if requested == "vllm":
+                print(f"[Fish Audio] Requested vLLM engine is unavailable ({reason}); using Legacy.")
+            elif requested in ("", "auto"):
+                print(f"[Fish Audio] Auto engine selected Legacy because vLLM is unavailable ({reason}).")
+            return "legacy"
+
+        supported, reason = fish_vllm_availability(verify_runtime=True)
+        if supported:
+            return "vllm"
+
+        reason = reason or "Fish's accelerated runtime checks did not pass"
+        if requested == "vllm":
+            print(f"[Fish Audio] Requested vLLM engine is unavailable ({reason}); using Legacy.")
+        else:
+            print(f"[Fish Audio] Auto engine selected Legacy because vLLM is unavailable ({reason}).")
+        return "legacy"
 
     @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):

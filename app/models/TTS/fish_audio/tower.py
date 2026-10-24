@@ -124,7 +124,13 @@ class TowerAttention(nn.Module):
         out = attention_kit.qkv_attention([x], self.wq, self.wk, self.wv, cfg.n_head, cfg.head_dim, normalize,
             kv_heads=cfg.n_local_heads,
             attention_group_fn=lambda qkv, group: cached_attention(
-                qkv, group, cache, positions, kv_len, self.engine
+                qkv,
+                group,
+                cache,
+                positions,
+                kv_len,
+                self.engine,
+                attention_backend="sdpa",
             ))
         return self.wo(out.reshape(*x.shape[:-1], -1) * gate.sigmoid())
 

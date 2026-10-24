@@ -4035,6 +4035,22 @@ def enhance_prompt(
         else:
             prompt_thinking_budget = 0
 
+    fish_performance = None
+    fish_script_format = None
+    if speech_writer_active and str(model_type or "").lower().startswith("fish_drama3"):
+        from functools import partial
+        from services.fish_script_format import FishScriptFormat
+        from services.speech_performance import direct_fish_section
+
+        fish_script_format = FishScriptFormat(
+            source_text=prompt + "\n" + speech_writer_instructions,
+        )
+        fish_performance = partial(
+            direct_fish_section,
+            brief=prompt,
+            instructions=speech_writer_instructions,
+        )
+
     if speech_writer_active and speech_target and speech_target.is_long_form:
         from services.speech_writer import generate_long_form_script
 
@@ -4046,6 +4062,8 @@ def enhance_prompt(
             max_new_tokens=effective_max_tokens,
             temperature=temperature,
             is_truncated=lambda: bool(_last_generation_metrics.get("truncated")),
+            finalize_section=fish_performance,
+            script_format=fish_script_format,
         )).strip()
 
     if speech_writer_active and speech_target and speech_target.words:
@@ -4068,11 +4086,43 @@ def enhance_prompt(
         presence_penalty=0.1,   # encourage variety
     )
     result = repair_text(result)
+    if fish_script_format and result:
+        result, converted_cues = fish_script_format.normalize_fragment(result)
+        if converted_cues:
+            from services.enhancement_diagnostics import record_advisory
+
+            record_advisory("fish_script_format", {"converted_angle_cues": len(converted_cues)})
     if speech_writer_active and _last_generation_metrics.get("truncated"):
         from services.speech_writer import record_speech_writer_warning
 
         record_speech_writer_warning(
             "The speech script reached the model's output token limit; the available draft was retained and may be incomplete."
+        )
+
+    if fish_performance and result:
+        speech_incomplete = bool(_last_generation_metrics.get("truncated"))
+        performance_calls = 0
+
+        def performance_call(*, prompt, system_prompt, max_new_tokens, temperature, **_options):
+            nonlocal performance_calls
+            from services.studio_enhancement import check_cancelled
+
+            check_cancelled()
+            if performance_calls >= 1:
+                return "", False
+            performance_calls += 1
+            output = generate(
+                prompt=prompt, system_prompt=system_prompt,
+                max_new_tokens=max_new_tokens, temperature=temperature,
+                image_paths=None, enable_thinking=False, thinking_budget=0,
+            )
+            return str(output or ""), bool(_last_generation_metrics.get("truncated"))
+
+        result = fish_performance(
+            text=result, generate=performance_call,
+            remaining_calls=lambda: 1 - performance_calls,
+            max_new_tokens=effective_max_tokens, temperature=temperature,
+            section_incomplete=speech_incomplete,
         )
 
     if is_moss_image:

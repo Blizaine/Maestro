@@ -124,6 +124,15 @@ def record_rejection(reasons, *, stage=""):
     _changed()
 
 
+def record_advisory(stage: str, details: dict) -> None:
+    """Retain auxiliary review decisions without rejecting a usable draft."""
+    scope = _scope.get()
+    if not scope or not scope["drafts"]:
+        return
+    scope["drafts"][-1].setdefault("advisories", {})[stage] = deepcopy(details)
+    _changed()
+
+
 def diagnostic_call(function):
     """Record each transport call once, including delegated streaming calls."""
     @wraps(function)

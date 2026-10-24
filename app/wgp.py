@@ -2194,6 +2194,7 @@ def update_generation_status(html_content):
         return gr.update(value=html_content)
 
 family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx25.ltx25_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.minimax_h3.minimax_h3_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.flux3.flux3_handler", "models.moss_image.moss_image_handler", "models.qwen.qwen_handler", "models.qwen21.qwen21_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.yue2.yue2_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.minimax_music3_handler", "models.TTS.index_tts2_handler", "models.TTS.fish_audio.fish_audio_handler"]
+family_handlers.append("models.TTS.fish_audio_small.fish_audio_small_handler")
 DEFAULT_LORA_ROOT = "loras"
 
 def register_family_lora_args(parser, lora_root):
@@ -4684,7 +4685,8 @@ def load_models(model_type, override_profile = -1, output_type="video", preview_
 
 
     profile = compute_profile(override_profile, output_type)
-    lm_decoder_engine_obtained = resolve_lm_decoder_engine(lm_decoder_engine, model_def.get("lm_engines", []) )
+    lm_engine_resolver = getattr(model_type_handler, "resolve_lm_decoder_engine", resolve_lm_decoder_engine)
+    lm_decoder_engine_obtained = lm_engine_resolver(lm_decoder_engine, model_def.get("lm_engines", []) )
     lm_engine_supports_profile_offload = (
         lm_decoder_engine_obtained == "vllm"
         and model_def.get("lm_engine_supports_offload") is True
@@ -8226,13 +8228,19 @@ def generate_video(
             send_cmd("status", f"Downloading model {_model_label} (first use, may take several minutes)...")
         else:
             send_cmd("status", f"Loading model {_model_label}...")
+        model_load_kwargs = dict(model_kwargs)
+        if model_def.get("external_runtime") == "fish_small":
+            model_load_kwargs.update(
+                check_cancelled=lambda: bool(gen.get("abort", False)),
+                set_progress_status=set_progress_status,
+            )
         wan_model, offloadobj = load_models(
             model_type,
             override_profile,
             output_type=output_type,
             preview_mode=generation_preview_mode,
             preview_gen=gen,
-            **model_kwargs,
+            **model_load_kwargs,
         )
         send_cmd("status", "Model loaded")
         send_cmd("refresh_models", get_unique_id())
@@ -10138,7 +10146,7 @@ def generate_video(
                     )
                     overridden_inputs = samples.get("overridden_inputs", None)
                     artifact_metadata = samples.get("artifact_metadata")
-                    if model_def.get("architecture") == "fish_drama3":
+                    if model_def.get("architecture") in ("fish_drama3", "fish_drama3_small"):
                         speech_generation = samples.get("speech_generation")
                         if isinstance(speech_generation, dict):
                             artifact_metadata = dict(artifact_metadata or {})

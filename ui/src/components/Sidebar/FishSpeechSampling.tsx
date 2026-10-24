@@ -1,11 +1,12 @@
 import { useStore } from '../../stores/useStore'
+import { isFishSpeechArchitecture } from '../../lib/fishSpeech'
 
 export function FishSpeechSampling() {
   const architecture = useStore(s => s.modelOptions?.architecture)
   const topK = useStore(s => s.params.top_k ?? 0)
   const topP = useStore(s => s.params.top_p ?? 0.95)
   const setParam = useStore(s => s.setParam)
-  if (architecture !== 'fish_drama3') return null
+  if (!isFishSpeechArchitecture(architecture)) return null
 
   return <div className="space-y-3">
     <label className="block">

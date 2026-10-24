@@ -37,6 +37,26 @@ could stop before the whole script is spoken. Maestro retains the text for revie
 Review the complete script and
 speaker assignments before generating audio. Writing does not start synthesis.
 
+Token-limited continuations share the same thirty-call bound and can continue
+until the response finishes or stops making progress. Completion takes priority
+over adding words to an approximate target: a final section that finishes
+normally is kept without a length-only expansion. An unfinished repair cannot
+replace a usable section; the original stays in the script and the partial
+repair remains in draft history with a warning. A normal model stop still does
+not establish a satisfying story ending; review the handoffs and resolution.
+
+Fish-specific recovery also checks generated delivery markup before deciding
+whether a section needs completion. Clear one-off angle cues become square
+brackets, and an inherited open bracket can close at a verified continuation
+boundary. These repairs preserve spoken words and exact source tokens. Unknown
+or ambiguous markup remains flagged instead of being silently rewritten.
+Recent continuity excerpts start at complete paragraph, line or word boundaries
+outside native cues, rather than cutting into a word or tag. The ending stays
+intact for continuation. A scope too large to excerpt safely is omitted from
+that private context; the user's script and saved raw responses are unchanged.
+Stray closing brackets also retain a syntax warning. Repeated model-authored
+passages still need review when one focused repair cannot resolve them.
+
 Speech cleanup preserves repeated phrases and refrains instead of applying the
 generic video-prompt repetition cutoff. A normal rhetorical repetition must not
 silently remove the remaining story or later dialogue turns. The complete raw

@@ -55,7 +55,7 @@ class FishAudioPipeline:
         if lm_decoder_engine not in ("legacy", "vllm"):
             raise ValueError("Fish Audio Drama 3 supports the Legacy engine and a capability-gated vLLM engine")
         if lm_decoder_engine == "vllm":
-            supported, reason = fish_vllm_availability()
+            supported, reason = fish_vllm_availability(verify_runtime=True)
             if not supported:
                 raise RuntimeError(f"Fish Audio vLLM engine is unavailable: {reason}")
         self.engine = lm_decoder_engine
@@ -74,7 +74,11 @@ class FishAudioPipeline:
         # What a voice reference gives, by file (path, size, modification time): its encoded audio codes, and the Whisper transcript
         # of a reference given without one.
         self.reference_cache = TextEncoderCache()
-        print(f"[Fish Audio] Drama 3 - {self.engine}; CPU expert kernels remain available as a fallback")
+        deltanet_backend = "FLA kernels" if self.engine == "vllm" else "PyTorch reference"
+        print(
+            f"[Fish Audio] Drama 3 - {self.engine}; full attention: PyTorch SDPA; "
+            f"DeltaNet: {deltanet_backend}; CPU expert kernels remain available as a fallback"
+        )
         self.last_duration_budget_frames = None
         self.last_duration_is_auto = False
         self.last_duration_context_limited = False

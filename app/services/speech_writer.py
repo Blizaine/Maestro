@@ -12,6 +12,9 @@ import math
 import re
 from typing import Callable
 
+from services.enhancement_diagnostics import record_advisory
+from services.fish_script_format import FishScriptFormat
+
 
 WORDS_PER_MINUTE = 130
 MAX_TARGET_MINUTES = 60
@@ -25,7 +28,7 @@ MAX_PLAN_CHARS = 6_000
 MAX_PRIOR_TEXT_CHARS = 3_600
 MAX_PLAN_TOKENS = 768
 MAX_SECTION_TOKENS = 1_280
-MIN_SECTION_COVERAGE = 0.90
+MIN_SECTION_COVERAGE = 0.85
 MIN_OVERALL_COVERAGE = 0.95
 DUPLICATE_MIN_COVERAGE = 0.80
 DUPLICATE_MIN_WORDS = 80
@@ -159,6 +162,7 @@ _PART_HEADING_RE = re.compile(
 _WORD_RE = re.compile(r"\b[\w][\w'’\-]*\b", re.UNICODE)
 _SPEECH_CUE_RE = re.compile(r"\[[^\]\r\n]*\]")
 _TTS_TAG_RE = re.compile(r"<[^>\r\n]*>")
+_TTS_TAG_TOKEN_RE = re.compile(r"<\s*(/?)\s*([A-Za-z][\w:.-]*)\b([^<>]*?)>")
 _SPEAKER_LABEL_RE = re.compile(
     r"(?im)^[ \t]*(?:(?:speaker|voice|character)[ _-]*\d+(?:[ \t]*\{[^}\r\n]*\})?"
     r"|[A-Z][\w'’\-]{0,39}(?:[ \t]+[A-Z][\w'’\-]{0,39})?)[ \t]*:[ \t]*"
@@ -397,6 +401,53 @@ def _without_part_headings(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _without_part_headings_preserve_leading_space(text: str) -> tuple[str, str]:
+    """Strip headings while retaining the continuation's original left seam."""
+    raw = str(text or "")
+    lines = raw.splitlines(keepends=True)
+    body = "".join(
+        line for line in lines
+        if not _PART_HEADING_RE.match(line.strip())
+    )
+    leading = re.match(r"[ \t\r\n]*", body)
+    leading_whitespace = leading.group(0) if leading else ""
+    return body.strip(), leading_whitespace
+
+
+def _bounded_script_context(text: str, limit: int = MAX_PRIOR_TEXT_CHARS) -> str:
+    """Keep an exact recent excerpt without starting inside words or TTS cues.
+
+    Only the private context is shortened. Prefer complete paragraphs, then
+    lines, then a safe word boundary; retain the exact ending for continuation.
+    An unsafe scope longer than the allowance is omitted rather than fabricated.
+    """
+    value = str(text or "")
+    if limit <= 0:
+        return ""
+    if len(value) <= limit:
+        return value
+    floor = len(value) - limit
+    seen: set[int] = set()
+    for pattern in (r"\n[ \t]*\n", r"[\r\n]+", r"\s+"):
+        inspected = 0
+        for match in re.finditer(pattern, value[floor:]):
+            cut = floor + match.end()
+            if cut in seen:
+                continue
+            seen.add(cut)
+            inspected += 1
+            prefix = value[:cut]
+            line_start = value.rfind("\n", 0, cut) + 1
+            label = _SPEAKER_LABEL_RE.match(value, line_start)
+            inside_labeled_turn = label is not None and label.start() < cut
+            if (not inside_labeled_turn and not _has_unclosed_native_syntax(prefix)
+                    and prefix.count("<|phoneme_start|>") == prefix.count("<|phoneme_end|>")):
+                return value[cut:]
+            if inspected >= 64:
+                break
+    return ""
+
+
 def _remove_repeated_prefix(previous: str, continuation: str) -> str:
     """Remove exact word overlap when a model repeats its continuation cue."""
     previous_tokens = list(re.finditer(r"\S+", previous or ""))
@@ -416,6 +467,112 @@ def _remove_repeated_prefix(previous: str, continuation: str) -> str:
     return str(continuation or "").strip()
 
 
+def _has_open_native_token(text: str) -> bool:
+    """Detect an unfinished bracket cue or angle-tag token at a text seam."""
+    value = str(text or "")
+    open_angles = 0
+    open_brackets = 0
+    for index, character in enumerate(value):
+        if character == "<" and (
+            index + 1 == len(value)
+            or re.match(r"[A-Za-z/]", value[index + 1])
+        ):
+            open_angles += 1
+        elif character == ">" and open_angles:
+            open_angles -= 1
+        elif character == "[":
+            open_brackets += 1
+        elif character == "]" and open_brackets:
+            open_brackets -= 1
+    return bool(open_angles or open_brackets)
+
+
+def _has_open_angle_token(text: str) -> bool:
+    """Detect an unfinished angle-tag token, whose name may span the seam."""
+    value = str(text or "")
+    open_angles = 0
+    for index, character in enumerate(value):
+        if character == "<" and (
+            index + 1 == len(value)
+            or re.match(r"[A-Za-z/]", value[index + 1])
+        ):
+            open_angles += 1
+        elif character == ">" and open_angles:
+            open_angles -= 1
+    return bool(open_angles)
+
+
+def _has_unclosed_native_syntax(text: str) -> bool:
+    """Check for unfinished cue tokens and unbalanced paired TTS tags."""
+    value = str(text or "")
+    if _has_open_native_token(value):
+        return True
+
+    cue_depth = 0
+    for character in value:
+        if character == "[":
+            cue_depth += 1
+        elif character == "]":
+            if not cue_depth:
+                return True
+            cue_depth -= 1
+
+    stack: list[str] = []
+    malformed = False
+    for match in _TTS_TAG_TOKEN_RE.finditer(value):
+        closing, raw_name, attributes = match.groups()
+        name = raw_name.casefold()
+        if closing:
+            if stack and stack[-1] == name:
+                stack.pop()
+            else:
+                malformed = True
+        elif not attributes.rstrip().endswith("/"):
+            stack.append(name)
+    return bool(stack or malformed)
+
+
+def _join_script_continuation(
+    previous: str,
+    addition: str,
+    *,
+    leading_whitespace: str = "",
+) -> str:
+    """Join native syntax fragments directly and keep prose on a word seam."""
+    left = str(previous or "").rstrip()
+    right = str(addition or "").lstrip()
+    if not left:
+        return right
+    if leading_whitespace:
+        separator = leading_whitespace
+    elif _has_open_angle_token(left):
+        separator = ""
+    elif _has_open_native_token(left) and right.startswith(("]", ">")):
+        separator = ""
+    else:
+        separator = "\n"
+    return (left + separator + right).strip()
+
+
+def _has_uncertain_word_boundary(
+    previous: str,
+    addition: str,
+    *,
+    leading_whitespace: str = "",
+) -> bool:
+    """Report a token-limit seam that may have split a word without whitespace."""
+    left = str(previous or "").rstrip()
+    right = str(addition or "").lstrip()
+    return bool(
+        left
+        and right
+        and not leading_whitespace
+        and not _has_open_angle_token(left)
+        and left[-1].isalnum()
+        and right[0].isalnum()
+    )
+
+
 def _format_minutes(minutes: float) -> str:
     return f"{minutes:g}"
 
@@ -429,13 +586,16 @@ def generate_long_form_script(
     max_new_tokens: int,
     temperature: float,
     is_truncated: Callable[[], bool] | None = None,
+    finalize_section: Callable[..., str] | None = None,
+    script_format: FishScriptFormat | None = None,
 ) -> str:
     """Generate one assembled TTS script through a bounded plan and sections.
 
-    Planning, section drafts, truncation continuations, and one focused repair
-    per section share a hard thirty-call cap. Previous model-authored speech
-    supplied as context is limited to a short rolling tail, while the complete
-    source brief and bounded plan remain available to every section.
+    Planning, section drafts, truncation continuations, focused repairs, and
+    optional section finalization share a hard thirty-call cap. Previous
+    model-authored speech supplied as context is limited to a short rolling
+    tail, while the complete source brief and bounded plan remain available to
+    every section.
     """
     target_words = min(max(1, int(target.words)), MAX_TARGET_WORDS)
     target_minutes = min(max(0.01, float(target.minutes)), float(MAX_TARGET_MINUTES))
@@ -450,7 +610,39 @@ def generate_long_form_script(
     section_words = math.ceil(target_words / section_count)
     calls = 0
 
-    def call(call_prompt: str, call_system: str, token_budget: int) -> tuple[str, bool]:
+    def normalize_script_fragment(text: str, *, stage: str) -> str:
+        if script_format is None:
+            return str(text or "")
+        normalized, changed_cues = script_format.normalize_fragment(str(text or ""))
+        if changed_cues:
+            record_advisory("fish_script_format_normalization", {
+                "stage": stage,
+                "converted_delivery_cues": len(changed_cues),
+            })
+        return normalized
+
+    def recover_script_continuation(
+        previous: str, addition: str, *, stage: str
+    ) -> tuple[str, str]:
+        if script_format is None:
+            return previous, addition
+        recovered_previous, recovered_addition, recovered = script_format.recover_continuation(
+            previous, addition
+        )
+        if recovered:
+            record_advisory("fish_script_format_seam_recovery", {
+                "stage": stage,
+                "boundary": "independent_native_directive",
+            })
+        return recovered_previous, recovered_addition
+
+    def call(
+        call_prompt: str,
+        call_system: str,
+        token_budget: int,
+        *,
+        call_temperature: float | None = None,
+    ) -> tuple[str, bool]:
         nonlocal calls
         if calls >= MAX_GENERATION_CALLS:
             return "", False
@@ -460,12 +652,94 @@ def generate_long_form_script(
             prompt=call_prompt,
             system_prompt=call_system,
             max_new_tokens=max(1, min(int(token_budget), per_call_token_limit)),
-            temperature=temperature,
+            temperature=temperature if call_temperature is None else call_temperature,
             image_paths=None,
             enable_thinking=False,
             thinking_budget=0,
         ) or "")
         return output, bool(is_truncated and is_truncated())
+
+    def continue_partial_output(
+        output: str,
+        was_truncated: bool,
+        *,
+        section_index: int,
+        output_kind: str,
+    ) -> tuple[str, bool, str, bool]:
+        """Finish a token-limited output while retaining its exact useful text."""
+        current = str(output or "").strip()
+        pending = bool(was_truncated)
+        failure = ""
+        uncertain_word_boundary = False
+        while pending:
+            if calls >= MAX_GENERATION_CALLS:
+                failure = "call_limit"
+                break
+            final_section = section_index == section_count - 1
+            continuation_prompt = (
+                "Continue the same spoken script from the exact point where the preceding response stops. "
+                "That response reached its output token limit. If it ended inside a sentence, speaker turn, "
+                "native TTS tag, or performance cue, finish that syntax naturally before adding new material. "
+                "Preserve the cast, story state, language, and native speaker/tag format. Do not repeat any "
+                "words from the excerpt and do not add a heading. "
+                + (
+                    "Finish the complete story with a clear, coherent ending."
+                    if final_section else
+                    "Finish this section's assigned beat and reach a natural handoff into the next section."
+                )
+                + f"\n\nOriginal brief:\n{prompt}\n\nPlan:\n{plan}\n\n"
+                + f"Partial {output_kind} response to continue:\n"
+                + _bounded_script_context(current)
+            )
+            try:
+                continuation_raw, pending = call(
+                    continuation_prompt, section_system, MAX_SECTION_TOKENS
+                )
+            except InterruptedError:
+                raise
+            except Exception:
+                failure = "call_failed"
+                break
+
+            continuation, leading_whitespace = _without_part_headings_preserve_leading_space(
+                continuation_raw
+            )
+            continuation = normalize_script_fragment(
+                continuation, stage=f"{output_kind} continuation"
+            )
+            addition = _remove_repeated_prefix(current, continuation)
+            syntax_was_open = _has_unclosed_native_syntax(current)
+            join_previous, addition = recover_script_continuation(
+                current, addition, stage=f"{output_kind} continuation"
+            )
+            joined = _join_script_continuation(
+                join_previous, addition, leading_whitespace=leading_whitespace
+            )
+            syntax_progress = (
+                syntax_was_open and not _has_unclosed_native_syntax(joined)
+            )
+            if (
+                not addition
+                or (
+                    not _spoken_word_count(addition)
+                    and not syntax_progress
+                )
+                or (
+                    _has_substantial_duplicate(current, addition)
+                    and not syntax_progress
+                )
+            ):
+                pending = True
+                failure = "no_progress"
+                break
+            uncertain_word_boundary = uncertain_word_boundary or _has_uncertain_word_boundary(
+                current, addition, leading_whitespace=leading_whitespace
+            )
+            current = joined
+
+        if not pending and _has_unclosed_native_syntax(current):
+            failure = failure or "native_syntax"
+        return current, pending or _has_unclosed_native_syntax(current), failure, uncertain_word_boundary
 
     plan_prompt = (
         "Prepare private planning notes for a complete spoken script. This planning response will not be "
@@ -522,6 +796,7 @@ def generate_long_form_script(
     empty_sections: list[int] = []
     truncated_sections: list[int] = []
     duplicate_sections: list[int] = []
+    uncertain_boundary_sections: list[int] = []
     stopped_early = False
 
     for index in range(section_count):
@@ -533,7 +808,7 @@ def generate_long_form_script(
 
         beat_start = index * section_words + 1
         beat_end = min(target_words, (index + 1) * section_words)
-        previous_context = "\n".join(sections)[-MAX_PRIOR_TEXT_CHARS:]
+        previous_context = _bounded_script_context("\n".join(sections))
         section_prompt = (
             "Write the next portion of the complete spoken script from this brief. Output only speech in the "
             "model's required native TTS format, including the speaker labels and performance controls "
@@ -578,7 +853,9 @@ def generate_long_form_script(
                 "the available script draft was retained for review."
             )
             break
-        section = _without_part_headings(output)
+        section = _without_part_headings(
+            normalize_script_fragment(output, stage=f"section {index + 1}")
+        )
         if not section or not _spoken_word_count(section):
             empty_sections.append(index + 1)
             record_speech_writer_warning(
@@ -591,49 +868,58 @@ def generate_long_form_script(
                 )
             continue
 
+        section_incomplete = False
+        section_boundary_uncertain = False
+        completion_failure = ""
         if was_truncated:
-            continuation_prompt = (
-                "Continue the same spoken script from the exact point where the excerpt stops. Use the same cast, "
-                "story state, language, writing style, and model-native TTS speaker/tag format. Do not repeat any "
-                "words from the excerpt and do not add a heading. Continue this section's assigned beat. "
-                + ("Finish the complete story with a clear ending." if index == section_count - 1 else
-                   "Reach a natural handoff into the next planned section.")
-                + f"\n\nOriginal brief:\n{prompt}\n\nPlan:\n{plan}\n\n"
-                + f"Section excerpt to continue:\n{section[-MAX_PRIOR_TEXT_CHARS:]}"
+            section, section_incomplete, completion_failure, section_boundary_uncertain = continue_partial_output(
+                section,
+                was_truncated,
+                section_index=index,
+                output_kind="section excerpt",
             )
-            try:
-                continuation, continuation_truncated = call(
-                    continuation_prompt, section_system, MAX_SECTION_TOKENS
-                )
-            except InterruptedError:
-                raise
-            except Exception:
-                continuation = ""
-                continuation_truncated = False
-                record_speech_writer_warning(
-                    f"Long-form speech section {index + 1} continuation failed; its available excerpt was retained for review."
-                )
-            continuation = _without_part_headings(continuation)
-            continuation = _remove_repeated_prefix(section, continuation)
-            if continuation:
-                section = (section.rstrip() + "\n" + continuation.lstrip()).strip()
-            else:
-                record_speech_writer_warning(
-                    f"Long-form speech section {index + 1} reached its token limit and its continuation made no progress; the available draft was retained."
-                )
+            if section_incomplete:
                 truncated_sections.append(index + 1)
-            if continuation_truncated:
-                if index + 1 not in truncated_sections:
-                    truncated_sections.append(index + 1)
-                record_speech_writer_warning(
-                    f"Long-form speech section {index + 1} also reached the token limit during continuation; review the assembled ending and handoff."
-                )
+                if completion_failure == "no_progress":
+                    record_speech_writer_warning(
+                        f"Long-form speech section {index + 1} reached its token limit and its continuation made no progress; the available draft was retained."
+                    )
+                elif completion_failure == "call_limit":
+                    record_speech_writer_warning(
+                        f"Long-form speech section {index + 1} continuation could not finish within the {MAX_GENERATION_CALLS}-call limit; its available draft was retained."
+                    )
+                elif completion_failure == "native_syntax":
+                    record_speech_writer_warning(
+                        f"Long-form speech section {index + 1} continuation left native TTS syntax open; the available draft was retained for review."
+                    )
+                else:
+                    record_speech_writer_warning(
+                        f"Long-form speech section {index + 1} continuation failed before the token-limited excerpt could be completed; its available draft was retained."
+                    )
+                if completion_failure not in {"no_progress", "native_syntax"}:
+                    record_speech_writer_warning(
+                        f"Long-form speech section {index + 1} also reached the token limit during continuation; review the assembled ending and handoff."
+                    )
+        if _has_unclosed_native_syntax(section):
+            section_incomplete = True
+            if index + 1 not in truncated_sections:
+                truncated_sections.append(index + 1)
+        if section_boundary_uncertain:
+            uncertain_boundary_sections.append(index + 1)
+            record_speech_writer_warning(
+                f"Long-form speech section {index + 1} crossed a token-limit seam without whitespace between ordinary words; a safe line break was retained, but the intended word boundary is uncertain."
+            )
 
         prior_text = "\n".join(sections)
         section_words_actual = _spoken_word_count(section)
         duplicate = _has_substantial_duplicate(prior_text, section)
         below_target = section_words_actual < math.ceil(section_words * MIN_SECTION_COVERAGE)
-        if duplicate or below_target:
+        preserve_finished_ending = (
+            index == section_count - 1 and not section_incomplete and not duplicate
+        )
+        needs_completion_repair = section_incomplete and not duplicate
+        repair_attempted = False
+        if duplicate or needs_completion_repair or (below_target and not preserve_finished_ending):
             if calls >= MAX_GENERATION_CALLS:
                 reason = "repeated earlier wording" if duplicate else "below its spoken-word target"
                 record_speech_writer_warning(
@@ -651,15 +937,34 @@ def generate_long_form_script(
                         f"{section_words} spoken words. Return only the replacement section.\n\n"
                         f"Original brief:\n{prompt}\n\nPlan:\n{plan}\n\n"
                         "Earlier model-authored script (continuity only; already included in the final script):\n"
-                        f"{prior_text[-MAX_PRIOR_TEXT_CHARS:]}\n\n"
+                        f"{_bounded_script_context(prior_text)}\n\n"
                         "Current section draft to revise; retain its new details where possible:\n"
-                        f"{section[-MAX_PRIOR_TEXT_CHARS:]}"
+                        f"{_bounded_script_context(section)}"
                     )
                     repair_budget = min(
                         MAX_SECTION_TOKENS,
                         max(768, int(section_words * 1.75 + 192)),
                     )
                     repair_kind = "replacement"
+                elif needs_completion_repair:
+                    finish_instruction = (
+                        "Complete the story with a coherent ending and resolve the main conflict."
+                        if index == section_count - 1 else
+                        "Complete this section's assigned beat and reach a natural handoff."
+                    )
+                    repair_prompt = (
+                        "Focused section completion: the current spoken draft reached a token limit or could not be "
+                        "continued. Preserve every existing line exactly as written and return only new speech to "
+                        "append from its exact ending. If the last sentence, speaker turn, native TTS tag, or "
+                        "performance cue is incomplete, finish that syntax naturally. Do not recap, repeat, or add "
+                        "speech after the requested ending. Preserve the original brief's facts, names, user-supplied "
+                        "exact wording, explicit TTS cues, speaker identities, accents, baseline registers, and native "
+                        f"tag format. {finish_instruction}\n\n"
+                        f"Original brief:\n{prompt}\n\nPlan:\n{plan}\n\n"
+                        f"Current section to complete:\n{_bounded_script_context(section)}"
+                    )
+                    repair_budget = MAX_SECTION_TOKENS
+                    repair_kind = "completion"
                 else:
                     missing_words = max(1, section_words - section_words_actual)
                     finish_instruction = (
@@ -677,9 +982,9 @@ def generate_long_form_script(
                         f"{finish_instruction}\n\n"
                         f"Original brief:\n{prompt}\n\nPlan:\n{plan}\n\n"
                         "Earlier model-authored script (continuity only; already included in the final script):\n"
-                        f"{prior_text[-MAX_PRIOR_TEXT_CHARS:]}\n\n"
+                        f"{_bounded_script_context(prior_text)}\n\n"
                         "Current section to continue from:\n"
-                        f"{section[-MAX_PRIOR_TEXT_CHARS:]}"
+                        f"{_bounded_script_context(section)}"
                     )
                     repair_budget = min(
                         MAX_SECTION_TOKENS,
@@ -688,48 +993,186 @@ def generate_long_form_script(
                     repair_kind = "expansion"
 
                 try:
-                    repair_output, repair_truncated = call(
+                    repair_output_raw, repair_truncated = call(
                         repair_prompt, section_system, repair_budget
                     )
+                    repair_output, repair_leading_whitespace = _without_part_headings_preserve_leading_space(
+                        repair_output_raw
+                    )
+                    repair_output = normalize_script_fragment(
+                        repair_output, stage=f"focused {repair_kind} section {index + 1}"
+                    )
+                    repair_attempted = True
                 except InterruptedError:
                     raise
                 except Exception:
                     repair_output = ""
+                    repair_leading_whitespace = ""
                     repair_truncated = False
                     record_speech_writer_warning(
                         f"Long-form speech section {index + 1} focused {repair_kind} failed; its original draft was retained."
                     )
 
-                repair_output = _without_part_headings(repair_output)
                 if repair_truncated:
-                    if index + 1 not in truncated_sections:
-                        truncated_sections.append(index + 1)
+                    repair_output, repair_incomplete, _repair_completion_failure, repair_boundary_uncertain = continue_partial_output(
+                        repair_output,
+                        repair_truncated,
+                        section_index=index,
+                        output_kind=f"focused {repair_kind}",
+                    )
+                    section_boundary_uncertain = section_boundary_uncertain or repair_boundary_uncertain
+                else:
+                    repair_incomplete = False
+                if repair_kind == "replacement" and _has_unclosed_native_syntax(repair_output):
+                    repair_incomplete = True
+                if repair_incomplete:
                     record_speech_writer_warning(
-                        f"Long-form speech section {index + 1} focused repair reached the token limit; its available text was reviewed and retained only if it made progress."
+                        f"Long-form speech section {index + 1} focused {repair_kind} and its continuation could not finish; the original section was retained and the partial repair remains available in generation history."
                     )
 
-                if duplicate:
+                if repair_incomplete:
+                    pass
+                elif duplicate:
                     if (
                         _spoken_word_count(repair_output) > 0
                         and not _has_substantial_duplicate(prior_text, repair_output)
+                        and not _has_unclosed_native_syntax(repair_output)
                     ):
                         section = repair_output
+                        section_incomplete = False
+                        if index + 1 in truncated_sections:
+                            truncated_sections.remove(index + 1)
                         duplicate = False
                     else:
                         record_speech_writer_warning(
                             f"Long-form speech section {index + 1} still substantially repeats earlier text after one focused revision; its original draft was retained for review."
                         )
+                elif needs_completion_repair:
+                    addition = _remove_repeated_prefix(section, repair_output)
+                    join_previous, addition = recover_script_continuation(
+                        section, addition, stage=f"focused completion section {index + 1}"
+                    )
+                    candidate = _join_script_continuation(
+                        join_previous, addition,
+                        leading_whitespace=repair_leading_whitespace,
+                    )
+                    syntax_progress = (
+                        _has_unclosed_native_syntax(section)
+                        and not _has_unclosed_native_syntax(candidate)
+                    )
+                    section_boundary_uncertain = section_boundary_uncertain or _has_uncertain_word_boundary(
+                        section, addition,
+                        leading_whitespace=repair_leading_whitespace,
+                    )
+                    if (
+                        (_spoken_word_count(addition) > 0 or syntax_progress)
+                        and not _has_substantial_duplicate(f"{prior_text}\n{section}", addition)
+                        and not _has_unclosed_native_syntax(candidate)
+                    ):
+                        section = candidate
+                        section_incomplete = False
+                        if index + 1 in truncated_sections:
+                            truncated_sections.remove(index + 1)
+                    else:
+                        record_speech_writer_warning(
+                            f"Long-form speech section {index + 1} completion made no distinct progress or left native TTS syntax open; its available draft was retained."
+                        )
                 else:
                     addition = _remove_repeated_prefix(section, repair_output)
+                    join_previous, addition = recover_script_continuation(
+                        section, addition, stage=f"focused expansion section {index + 1}"
+                    )
+                    candidate = _join_script_continuation(
+                        join_previous, addition,
+                        leading_whitespace=repair_leading_whitespace,
+                    )
+                    section_boundary_uncertain = section_boundary_uncertain or _has_uncertain_word_boundary(
+                        section, addition,
+                        leading_whitespace=repair_leading_whitespace,
+                    )
                     if (
                         _spoken_word_count(addition) > 0
                         and not _has_substantial_duplicate(f"{prior_text}\n{section}", addition)
+                        and not _has_unclosed_native_syntax(candidate)
                     ):
-                        section = (section.rstrip() + "\n" + addition.lstrip()).strip()
+                        section = candidate
                     else:
                         record_speech_writer_warning(
-                            f"Long-form speech section {index + 1} focused expansion made no distinct progress; its original draft was retained."
+                            f"Long-form speech section {index + 1} focused expansion made no distinct progress or left native TTS syntax open; its original draft was retained."
                         )
+
+        if _has_unclosed_native_syntax(section):
+            section_incomplete = True
+            if index + 1 not in truncated_sections:
+                truncated_sections.append(index + 1)
+            record_speech_writer_warning(
+                f"Long-form speech section {index + 1} retains an unclosed native TTS tag or cue; the available draft was kept for review."
+            )
+
+        if section_boundary_uncertain and index + 1 not in uncertain_boundary_sections:
+            uncertain_boundary_sections.append(index + 1)
+            record_speech_writer_warning(
+                f"Long-form speech section {index + 1} crossed a token-limit seam without whitespace between ordinary words; a safe line break was retained, but the intended word boundary is uncertain."
+            )
+
+        if finalize_section is not None:
+            remaining_sections = section_count - index - 1
+            reserve_calls = 2 * remaining_sections + (1 if remaining_sections else 0)
+            finalizer_limit = MAX_GENERATION_CALLS - reserve_calls
+
+            def remaining_finalizer_calls() -> int:
+                return max(0, finalizer_limit - calls)
+
+            def bounded_finalizer_call(
+                *,
+                prompt: str,
+                system_prompt: str,
+                max_new_tokens: int,
+                temperature: float,
+                **_options: object,
+            ) -> tuple[str, bool]:
+                if remaining_finalizer_calls() <= 0:
+                    return "", False
+                return call(
+                    prompt, system_prompt, max_new_tokens,
+                    call_temperature=temperature,
+                )
+
+            try:
+                finalized = finalize_section(
+                    text=section,
+                    generate=bounded_finalizer_call,
+                    remaining_calls=remaining_finalizer_calls,
+                    reserve_calls=reserve_calls,
+                    max_new_tokens=min(1_024, per_call_token_limit),
+                    temperature=temperature,
+                    section_incomplete=section_incomplete,
+                )
+            except InterruptedError:
+                raise
+            except Exception:
+                record_speech_writer_warning(
+                    f"Long-form speech section {index + 1} finalization failed; its available draft was retained."
+                )
+            else:
+                if isinstance(finalized, str) and finalized.strip():
+                    candidate = normalize_script_fragment(
+                        finalized.strip(), stage=f"finalized section {index + 1}"
+                    )
+                    if section_incomplete and candidate != section:
+                        record_speech_writer_warning(
+                            f"Long-form speech section {index + 1} finalization changed an incomplete draft; its prior text was retained."
+                        )
+                    elif _has_unclosed_native_syntax(candidate):
+                        record_speech_writer_warning(
+                            f"Long-form speech section {index + 1} finalization left native TTS syntax open; its prior draft was retained."
+                        )
+                    else:
+                        section = candidate
+                elif finalized is not None:
+                    record_speech_writer_warning(
+                        f"Long-form speech section {index + 1} finalization returned no usable text; its available draft was retained."
+                    )
 
         section_words_actual = _spoken_word_count(section)
         duplicate = _has_substantial_duplicate(prior_text, section)
@@ -739,10 +1182,21 @@ def generate_long_form_script(
                 f"Long-form speech section {index + 1} remains a substantial repetition of earlier text; its words are not counted twice toward target coverage."
             )
         if section_words_actual < math.ceil(section_words * MIN_SECTION_COVERAGE):
-            record_speech_writer_warning(
-                f"Long-form speech section {index + 1} contains approximately {section_words_actual} spoken words against a target of "
-                f"{section_words}; its available draft was retained after one bounded repair attempt."
-            )
+            if preserve_finished_ending and not repair_attempted:
+                record_speech_writer_warning(
+                    f"Long-form speech section {index + 1} contains approximately {section_words_actual} spoken words against a target of "
+                    f"{section_words}; it ended without a token-limit signal, so the draft was retained without a length-only expansion."
+                )
+            elif repair_attempted:
+                record_speech_writer_warning(
+                    f"Long-form speech section {index + 1} contains approximately {section_words_actual} spoken words against a target of "
+                    f"{section_words}; its available draft was retained after one bounded repair attempt."
+                )
+            else:
+                record_speech_writer_warning(
+                    f"Long-form speech section {index + 1} contains approximately {section_words_actual} spoken words against a target of "
+                    f"{section_words}; its available draft was retained because the call limit or a model error prevented repair."
+                )
 
         sections.append(section)
         section_coverage_words.append(0 if duplicate else section_words_actual)
@@ -771,7 +1225,7 @@ def generate_long_form_script(
         )
     if stopped_early or truncated_sections:
         record_speech_writer_warning(
-            "The final speech draft may be incomplete in native TTS syntax or end before its planned resolution because a model call failed or the last section was token-limited; review its speaker tags and ending."
+            "The final speech draft may be incomplete in native TTS syntax or end before its planned resolution because a model call failed, output reached a token limit, or native syntax remained open; review its speaker tags and ending."
         )
 
     if not assembled:

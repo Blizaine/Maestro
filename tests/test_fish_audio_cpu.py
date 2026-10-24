@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import inspect
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 import os
 import sys
@@ -75,6 +77,7 @@ from models.TTS.fish_audio.prompt import (
     reference_transcripts,
     speaker_lines_to_tags,
 )
+from models.TTS.fish_audio import runtime_support as fish_runtime_support
 from models.TTS.fish_audio.runtime_support import (
     can_place_gpu_experts,
     fish_vllm_availability,
@@ -467,18 +470,166 @@ class FishScriptContractTests(unittest.TestCase):
         with patch("models.TTS.fish_audio.prompt.dialogue_parts") as dialogue_parts:
             self.assertIsNotNone(dialogue_parts)
 
+    def test_layerwise_vllm_keeps_flash_strict_by_default_and_fish_can_force_sdpa(self):
+        query = torch.tensor(
+            [[[[1.0, 0.0, 0.5, -0.5], [0.0, 1.0, -0.5, 0.5]],
+              [[0.5, 0.5, 1.0, 0.0], [1.0, -0.5, 0.0, 0.5]]]],
+            dtype=torch.float32,
+        )
+        key = torch.tensor(
+            [[[[1.0, 0.0, 0.0, 1.0]], [[0.0, 1.0, 1.0, 0.0]]]],
+            dtype=torch.float32,
+        )
+        value = torch.tensor(
+            [[[[0.0, 1.0, 2.0, 3.0]], [[3.0, 2.0, 1.0, 0.0]]]],
+            dtype=torch.float32,
+        )
+        group = types.SimpleNamespace(kv=types.SimpleNamespace(start=0, stop=1))
+        positions = torch.tensor([0, 1], dtype=torch.long)
+        strict_cache = (
+            torch.zeros((1, 4, 1, 4), dtype=torch.float32),
+            torch.zeros((1, 4, 1, 4), dtype=torch.float32),
+        )
+        with (
+            patch.object(shared_vllm_attention, "_DEFAULT_FLASH_ATTN_WITH_KVCACHE", None),
+            self.assertRaisesRegex(RuntimeError, "requires FlashAttention 2"),
+        ):
+            shared_vllm_layerwise.cached_attention(
+                [query.clone(), key.clone(), value.clone()],
+                group,
+                strict_cache,
+                positions,
+                2,
+                "vllm",
+            )
+
+        key_cache = torch.zeros((1, 4, 1, 4), dtype=torch.float32)
+        value_cache = torch.zeros_like(key_cache)
+        flash_call = Mock(side_effect=AssertionError("Fish must keep using SDPA"))
+        with patch.object(shared_vllm_attention, "_DEFAULT_FLASH_ATTN_WITH_KVCACHE", flash_call):
+            prefill = shared_vllm_layerwise.cached_attention(
+                [query.clone(), key.clone(), value.clone()],
+                group,
+                (key_cache, value_cache),
+                positions,
+                2,
+                "vllm",
+                attention_backend="sdpa",
+            )
+            prefill_keys = key_cache[:, :2].repeat_interleave(2, dim=2)
+            prefill_values = value_cache[:, :2].repeat_interleave(2, dim=2)
+            prefill_mask = (
+                torch.arange(2)[None, :] <= positions[:, None]
+            )[None, None, :, :]
+            expected_prefill = F.scaled_dot_product_attention(
+                query.transpose(1, 2),
+                prefill_keys.transpose(1, 2),
+                prefill_values.transpose(1, 2),
+                attn_mask=prefill_mask,
+            ).transpose(1, 2)
+            torch.testing.assert_close(prefill, expected_prefill)
+
+            decode_query = torch.tensor(
+                [[[[0.0, 0.5, 1.0, 0.5], [0.5, 1.0, 0.0, 0.5]]]],
+                dtype=torch.float32,
+            )
+            decode_key = torch.tensor([[[[0.5, 0.5, 0.0, 1.0]]]], dtype=torch.float32)
+            decode_value = torch.tensor([[[[1.0, 3.0, 2.0, 0.0]]]], dtype=torch.float32)
+            decode_positions = torch.tensor([2], dtype=torch.long)
+            decoded = shared_vllm_layerwise.cached_attention(
+                [decode_query, decode_key, decode_value],
+                group,
+                (key_cache, value_cache),
+                decode_positions,
+                3,
+                "vllm",
+                attention_backend="sdpa",
+            )
+            decode_keys = key_cache[:, :3].repeat_interleave(2, dim=2)
+            decode_values = value_cache[:, :3].repeat_interleave(2, dim=2)
+            expected_decode = F.scaled_dot_product_attention(
+                decode_query.transpose(1, 2),
+                decode_keys.transpose(1, 2),
+                decode_values.transpose(1, 2),
+            ).transpose(1, 2)
+            torch.testing.assert_close(decoded, expected_decode)
+            flash_call.assert_not_called()
+
     def test_vllm_capability_gate_reports_shared_runtime_failures(self):
         with patch.object(
-            shared_vllm_support,
-            "probe_vllm_runtime",
-            return_value={
-                "supported": False,
-                "checks": {"triton": {"ok": False, "message": "CUDA is not available"}},
-            },
+            fish_runtime_support,
+            "_triton_import_status",
+            return_value=(False, "Triton import failed: unavailable"),
         ):
             available, reason = fish_vllm_availability()
         self.assertFalse(available)
-        self.assertIn("CUDA is not available", reason)
+        self.assertIn("Triton import failed", reason)
+
+    def test_vllm_capability_gate_accepts_sdpa_without_flash_attention_2(self):
+        with (
+            patch.object(fish_runtime_support, "_triton_import_status", return_value=(True, None)),
+            patch.object(shared_vllm_attention, "_DEFAULT_FLASH_ATTN_VARLEN_FUNC", None),
+            patch.object(shared_vllm_attention, "_DEFAULT_FLASH_ATTN_WITH_KVCACHE", None),
+            patch.object(shared_qwen3_5, "_DEFAULT_FAST_CHUNK_GATED_DELTA_RULE", Mock()),
+            patch.object(shared_qwen3_5, "_DEFAULT_FAST_RECURRENT_GATED_DELTA_RULE", Mock()),
+            patch.object(torch.cuda, "is_available", side_effect=AssertionError("model discovery must not query CUDA")),
+            patch.object(torch, "zeros", side_effect=AssertionError("model discovery must not allocate tensors")),
+        ):
+            available, reason = fish_vllm_availability()
+            model_def = family_handler.query_model_def("fish_drama3", {})
+
+        self.assertTrue(available, reason)
+        self.assertIn("vllm", model_def["lm_engines"])
+
+    def test_fish_runtime_smoke_is_deferred_until_engine_selection(self):
+        with (
+            patch.object(fish_runtime_support, "_triton_import_status", return_value=(True, None)),
+            patch.object(shared_qwen3_5, "_DEFAULT_FAST_CHUNK_GATED_DELTA_RULE", Mock()),
+            patch.object(shared_qwen3_5, "_DEFAULT_FAST_RECURRENT_GATED_DELTA_RULE", Mock()),
+            patch.object(fish_runtime_support, "_check_fla_delta_runtime", return_value=(False, "CUDA smoke failed")) as smoke,
+        ):
+            available, reason = fish_vllm_availability()
+            smoke.assert_not_called()
+            selected, selected_reason = fish_vllm_availability(verify_runtime=True)
+
+        self.assertTrue(available, reason)
+        self.assertFalse(selected)
+        self.assertIn("CUDA smoke failed", selected_reason)
+        smoke.assert_called_once()
+
+    def test_shared_vllm_resolver_still_requires_flash_attention(self):
+        with patch.object(
+            shared_vllm_support,
+            "probe_vllm_runtime",
+            return_value={"supported": False, "checks": {"triton": {"ok": True}, "flash_attention_2": {"ok": False}}},
+        ):
+            selected = shared_vllm_support.resolve_lm_decoder_engine("auto", ["legacy", "vllm"])
+
+        self.assertEqual(selected, "legacy")
+
+    def test_fish_engine_resolver_respects_legacy_and_selects_vllm_for_auto(self):
+        with patch.object(fish_runtime_support, "fish_vllm_availability", return_value=(True, None)) as availability:
+            self.assertEqual(family_handler.resolve_lm_decoder_engine("", ["legacy", "vllm"]), "vllm")
+            self.assertEqual(family_handler.resolve_lm_decoder_engine("auto", ["legacy", "vllm"]), "vllm")
+            self.assertEqual(family_handler.resolve_lm_decoder_engine("vllm", ["legacy", "vllm"]), "vllm")
+            availability.assert_called()
+
+        with patch.object(fish_runtime_support, "fish_vllm_availability") as availability:
+            self.assertEqual(family_handler.resolve_lm_decoder_engine("legacy", ["legacy", "vllm"]), "legacy")
+            availability.assert_not_called()
+
+    def test_fish_engine_resolver_explains_unavailable_auto_and_vllm(self):
+        output = StringIO()
+        with (
+            patch.object(fish_runtime_support, "fish_vllm_availability", return_value=(False, "FLA kernels are missing")),
+            redirect_stdout(output),
+        ):
+            auto = family_handler.resolve_lm_decoder_engine("auto", ["legacy"])
+            requested = family_handler.resolve_lm_decoder_engine("vllm", ["legacy"])
+
+        self.assertEqual(auto, "legacy")
+        self.assertEqual(requested, "legacy")
+        self.assertIn("FLA kernels are missing", output.getvalue())
 
     def test_vllm_pipeline_rejects_an_unavailable_engine_before_loading(self):
         with patch.object(fish_pipeline_module, "fish_vllm_availability", return_value=(False, "FLA missing")):
@@ -502,9 +653,7 @@ class FishScriptContractTests(unittest.TestCase):
 
     def test_vllm_gate_rejects_missing_fla_delta_kernels(self):
         with (
-            patch.object(shared_vllm_support, "probe_vllm_runtime", return_value={"supported": True, "checks": {}}),
-            patch.object(shared_vllm_attention, "_DEFAULT_FLASH_ATTN_VARLEN_FUNC", Mock()),
-            patch.object(shared_vllm_attention, "_DEFAULT_FLASH_ATTN_WITH_KVCACHE", Mock()),
+            patch.object(fish_runtime_support, "_triton_import_status", return_value=(True, None)),
             patch.object(shared_qwen3_5, "_DEFAULT_FAST_CHUNK_GATED_DELTA_RULE", None),
             patch.object(shared_qwen3_5, "_DEFAULT_FAST_RECURRENT_GATED_DELTA_RULE", None),
         ):
@@ -625,9 +774,10 @@ class FishScriptContractTests(unittest.TestCase):
 
     def test_model_definition_exposes_three_voice_slots_and_complete_assets(self):
         model_def = family_handler.query_model_def("fish_drama3", {})
+        accelerated_available, _ = fish_vllm_availability()
         self.assertEqual(model_def["max_voice_count"], 3)
         self.assertTrue(model_def["audio_mode_from_voice_count"])
-        self.assertEqual(model_def["lm_engines"], ["legacy"])
+        self.assertEqual(model_def["lm_engines"], ["legacy", "vllm"] if accelerated_available else ["legacy"])
         self.assertFalse(model_def["cuda_graphs"])
         self.assertTrue(model_def["top_k_slider"])
         self.assertTrue(model_def["top_p_slider"])

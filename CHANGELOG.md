@@ -10,6 +10,14 @@ Public Main and Dev release, including the 20–22 October Dev preview fixes. Se
 
 Dev follow-up fixes, 23–24 October:
 
+- Enable full Fish acceleration on supported RTX 30-series runtimes with
+  Fish-specific SDPA attention, Triton and FLA checks. Preserve explicit Legacy
+  choices and the existing GPU cache/graph memory guards.
+- Add Fish Drama 3 Small with a pinned audio.cpp runtime, bounded streaming
+  synthesis, expert offload for smaller GPUs, voice references, Auto duration
+  and explicit native completion/cap evidence. Keep the full Fish models.
+- Improve speech draft recovery and exact-anchor performance directions;
+  retain incomplete drafts, skipped edits and clear review reasons.
 - Let Speech Write follow the selected clip duration unless the brief or a
   positive draft-length override supplies a target. Count spoken words without
   cues, attempt bounded short/repeated-section recovery, and warn about

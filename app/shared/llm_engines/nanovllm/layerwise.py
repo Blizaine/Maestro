@@ -13,7 +13,16 @@ import torch
 from shared.attention import pay_attention
 
 
-def cached_attention(qkv, group, cache, positions, kv_len: int, engine: str):
+def cached_attention(
+    qkv,
+    group,
+    cache,
+    positions,
+    kv_len: int,
+    engine: str,
+    *,
+    attention_backend: str | None = None,
+):
     query, key, value = qkv
     qkv.clear()
     key_cache, value_cache = cache
@@ -30,11 +39,13 @@ def cached_attention(qkv, group, cache, positions, kv_len: int, engine: str):
         raise ValueError("attention cache received the wrong number of key/value heads")
     key_cache[:, :, start:stop].index_copy_(1, positions, key)
     value_cache[:, :, start:stop].index_copy_(1, positions, value)
-    if engine == "vllm":
+    if attention_backend not in (None, "sdpa"):
+        raise ValueError(f"unsupported layerwise attention backend: {attention_backend}")
+    if engine == "vllm" and attention_backend != "sdpa":
         from .layers.attention import _DEFAULT_FLASH_ATTN_WITH_KVCACHE
 
         if _DEFAULT_FLASH_ATTN_WITH_KVCACHE is None:
-            raise RuntimeError("Fish Audio's accelerated engine requires FlashAttention 2")
+            raise RuntimeError("the vLLM layerwise engine requires FlashAttention 2")
         lengths = (positions[-1:] + 1).to(dtype=torch.int32).expand(query.shape[0]).contiguous()
         return _DEFAULT_FLASH_ATTN_WITH_KVCACHE(
             query,

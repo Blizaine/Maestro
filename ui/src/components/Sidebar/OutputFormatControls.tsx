@@ -9,6 +9,7 @@ import { H3MultiWindowControls } from './H3MultiWindowControls'
 import { formatDuration } from '../../lib/durationPlanning'
 import { SidebarDialog } from './SidebarPanels'
 import { SidebarMenu } from './SidebarMenu'
+import { isFishSpeechArchitecture } from '../../lib/fishSpeech'
 
 /** The everyday canvas choices stay one tap away, without a permanent grid. */
 export function OutputFormatControls() {
@@ -27,7 +28,7 @@ export function OutputFormatControls() {
   const durationMode = useStore(s => s.params._duration_planning_mode ?? 'auto')
   const imageMode = useStore(s => s.params.image_mode)
   const audioMode = useStore(s => s.audioSubMode)
-  const fishSpeech = mode === 'audio' && options?.architecture === 'fish_drama3'
+  const fishSpeech = mode === 'audio' && isFishSpeechArchitecture(options?.architecture)
   const fishAuto = fishSpeech && options?.speech_auto_duration && duration === 0
   const durationLabel = fishSpeech ? fishAuto ? 'Auto' : `Max ${formatDuration(duration, true)}`
     : `${durationMode === 'auto' ? 'Auto · ' : ''}${formatDuration(duration, true)}`
