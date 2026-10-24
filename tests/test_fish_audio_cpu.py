@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import sys
@@ -57,7 +58,7 @@ from models.TTS.fish_audio.codec import ModelArgs as CodecModelArgs
 from models.TTS.fish_audio.codec import WindowLimitedTransformer
 from models.TTS.fish_audio.config import AudioDecoderConfig, FishOmniTextConfig
 from models.TTS.fish_audio.layers import FullAttention, LayerContext
-from models.TTS.fish_audio.tower import FishOmniAudioDecoder, TowerAttention
+from models.TTS.fish_audio.tower import FishOmniAudioDecoder, TowerAttention, sample_top_k_top_p
 from models.TTS.fish_audio.expert_formats import (
     EXPERT_FORMATS,
     FishSwiGLUExperts,
@@ -79,6 +80,29 @@ from models.TTS.fish_audio.runtime_support import (
     fish_vllm_availability,
     runtime as fish_runtime,
 )
+
+
+class FishSamplingTests(unittest.TestCase):
+    def test_zero_top_k_keeps_candidates_and_positive_top_k_still_caps(self):
+        logits = torch.ones((128, 2), dtype=torch.float32)
+
+        torch.manual_seed(271828)
+        uncapped = sample_top_k_top_p(logits, 1.0, 0, 1.0)
+        self.assertEqual(set(uncapped.tolist()), {0, 1})
+
+        torch.manual_seed(271828)
+        top_one = sample_top_k_top_p(logits, 1.0, 1, 1.0)
+        self.assertTrue(torch.equal(top_one, torch.zeros_like(top_one)))
+
+    def test_scalar_and_tensor_top_k_have_identical_sampling(self):
+        logits = torch.tensor([[2.0, 1.0, 0.0]] * 32)
+        for top_k in (0, 2):
+            with self.subTest(top_k=top_k):
+                torch.manual_seed(12345)
+                scalar = sample_top_k_top_p(logits, 0.8, top_k, 0.95)
+                torch.manual_seed(12345)
+                tensor = sample_top_k_top_p(logits, 0.8, torch.tensor(top_k), 0.95)
+                self.assertTrue(torch.equal(scalar, tensor))
 
 
 class FishExpertMathTests(unittest.TestCase):
@@ -605,7 +629,19 @@ class FishScriptContractTests(unittest.TestCase):
         self.assertTrue(model_def["audio_mode_from_voice_count"])
         self.assertEqual(model_def["lm_engines"], ["legacy"])
         self.assertFalse(model_def["cuda_graphs"])
+        self.assertTrue(model_def["top_k_slider"])
+        self.assertTrue(model_def["top_p_slider"])
         self.assertEqual(model_def["audio_prompt_type_sources"]["selection"], ["", "A", "AB", "ABD"])
+
+        ui_defaults = {}
+        family_handler.update_default_settings("fish_drama3", model_def, ui_defaults)
+        self.assertEqual(ui_defaults["top_k"], 0)
+        self.assertEqual(ui_defaults["top_p"], 0.95)
+        self.assertEqual(inspect.signature(FishAudioPipeline.generate).parameters["top_k"].default, 0)
+        for name in ("fish_drama3", "fish_drama3_int4"):
+            with self.subTest(defaults=name):
+                defaults = json.loads((ROOT / "app/defaults" / f"{name}.json").read_text(encoding="utf-8"))
+                self.assertEqual(defaults["top_k"], 0)
 
         downloads = family_handler.query_model_files([], "fish_drama3")
         self.assertEqual(downloads[0]["revision"], "b0cc2d3cf0752bc0d8c704562c95d4d2564e6f8e")

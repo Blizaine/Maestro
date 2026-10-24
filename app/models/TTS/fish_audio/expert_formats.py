@@ -9,9 +9,7 @@ Python/Torch installations do not need a compiler or shipped native library.
 from __future__ import annotations
 
 import torch
-
 from mmgp.expert_compute import ExpertFormat, SwiGLUExperts
-
 
 _REPORTED_BACKENDS = set()
 
@@ -103,6 +101,8 @@ class FishSwiGLUExperts(SwiGLUExperts):
         self._fish_gpu_tensors = None
         self._fish_gpu_pointers = None
         self._fish_gpu_device = None
+        self._fish_gpu_cache = None
+        self._fish_decode_workspace = None
 
     @property
     def execution_backend(self) -> str:
@@ -114,6 +114,46 @@ class FishSwiGLUExperts(SwiGLUExperts):
         self._fish_gpu_tensors = None
         self._fish_gpu_pointers = None
         self._fish_gpu_device = None
+        self._fish_gpu_cache = None
+        self._fish_decode_workspace = None
+
+    def release_decode_cache(self):
+        self._fish_gpu_cache = None
+        self._fish_decode_workspace = None
+
+    def supports_gpu_device(self, device: torch.device) -> bool:
+        """Return whether this packed expert format is supported by Triton on a device."""
+
+        device = torch.device(device)
+        if device.type != "cuda" or self.format is None:
+            return False
+        if self.format.name == "fp8_block":
+            return torch.cuda.get_device_capability(device) >= (8, 9)
+        return self.format.name == "int4_group"
+
+    def _require_gpu_format_support(self, device: torch.device) -> None:
+        if self.supports_gpu_device(device):
+            return
+        if self.format is not None and self.format.name == "fp8_block":
+            raise ValueError(
+                "FP8 Triton expert kernels require CUDA compute capability 8.9 or newer; "
+                "use the CPU fallback on this device"
+            )
+        kind = "unloaded" if self.format is None else self.format.name
+        raise ValueError(
+            f"Fish {kind} Triton expert placement is unsupported on {device}; "
+            "use the CPU fallback"
+        )
+
+    def place_cached_experts(self, capacity, topk, device):
+        device = self._canonical_cuda_device(device)
+        if device.type != "cuda":
+            raise ValueError("Fish GPU expert cache placement requires a CUDA device")
+        if not self.use_triton:
+            raise RuntimeError("Fish GPU experts are available only for the vLLM engine")
+        self._require_gpu_format_support(device)
+        from .expert_cache import PackedExpertCache
+        self._fish_gpu_cache = PackedExpertCache(self, capacity, topk, device)
 
     @staticmethod
     def _canonical_cuda_device(device: torch.device) -> torch.device:
@@ -132,6 +172,7 @@ class FishSwiGLUExperts(SwiGLUExperts):
             raise ValueError("Fish GPU expert placement requires a CUDA device")
         if not self.use_triton:
             raise RuntimeError("Fish GPU experts are available only for the vLLM engine")
+        self._require_gpu_format_support(device)
         if self._fish_gpu_tensors is not None:
             if self._fish_gpu_device != device:
                 raise RuntimeError("Fish expert bank is already placed on another CUDA device")
@@ -147,9 +188,10 @@ class FishSwiGLUExperts(SwiGLUExperts):
         self._fish_gpu_device = tensors[0].device
         return self.expert_nbytes
 
-    def _gpu_forward(self, x, topk_ids, topk_weights):
+    def _gpu_forward(self, x, topk_ids, topk_weights, *, check_route_bounds=True,
+                     gpu_pointers=None, gpu_device=None):
         activation_device = self._canonical_cuda_device(x.device)
-        expert_device = self._canonical_cuda_device(self._fish_gpu_device)
+        expert_device = self._canonical_cuda_device(gpu_device if gpu_device is not None else self._fish_gpu_device)
         if not x.is_cuda or activation_device != expert_device:
             raise RuntimeError(
                 "Fish GPU expert weights and activations must be on the same CUDA device "
@@ -163,28 +205,55 @@ class FishSwiGLUExperts(SwiGLUExperts):
         probabilities = topk_weights.reshape(flat.shape[0], -1).float().contiguous()
         if ids.shape != probabilities.shape:
             raise ValueError("topk_ids and topk_weights must have the same shape")
-        if ids.numel() and (int(ids.min()) < 0 or int(ids.max()) >= self.num_experts):
+        if (
+            check_route_bounds
+            and ids.numel()
+            and (int(ids.min()) < 0 or int(ids.max()) >= self.num_experts)
+        ):
             raise ValueError("routed expert id is outside the loaded bank")
+        workspace = {}
+        if flat.shape[0] == 1:
+            key = (flat.device, flat.dtype, ids.shape[-1])
+            if self._fish_decode_workspace is None or self._fish_decode_workspace[0] != key:
+                self._fish_decode_workspace = (key, {
+                    "mid": torch.empty((ids.shape[-1], self.intermediate), dtype=torch.float32, device=flat.device),
+                    "out": torch.empty_like(flat),
+                    "down_scratch": torch.empty((ids.shape[-1], self.hidden), dtype=torch.float32, device=flat.device),
+                })
+            workspace = self._fish_decode_workspace[1]
         result = triton_forward(
             self.format.name,
-            flat.float().contiguous(),
+            flat.contiguous(),
             ids,
             probabilities,
-            self._fish_gpu_pointers,
+            self._fish_gpu_pointers if gpu_pointers is None else gpu_pointers,
             self.intermediate,
             128,
             rotation=self.rotation,
+            single_token_rows=16,
+            parallel_single_token_down=flat.shape[0] == 1,
+            **workspace,
         )
         return result.to(dtype=x.dtype).reshape(shape)
 
     @torch.inference_mode()
-    def forward(self, x, topk_ids, topk_weights, packed=None):
+    def forward(self, x, topk_ids, topk_weights, packed=None, *, check_route_bounds=True):
         if self._fish_gpu_tensors is not None:
             self._fish_execution_backend = "gpu_triton"
             if self._fish_execution_backend not in _REPORTED_BACKENDS:
                 print("[Fish Audio] Routed expert backend: gpu_triton (full bank resident)")
                 _REPORTED_BACKENDS.add(self._fish_execution_backend)
-            return self._gpu_forward(x, topk_ids, topk_weights)
+            return self._gpu_forward(
+                x,
+                topk_ids,
+                topk_weights,
+                check_route_bounds=check_route_bounds,
+            )
+        if self._fish_gpu_cache is not None and x.is_cuda and x.numel() == self.hidden:
+            self._fish_execution_backend = "gpu_cached_triton"
+            pointers = self._fish_gpu_cache.prepare(topk_ids.reshape(1, -1))
+            return self._gpu_forward(x, topk_ids, topk_weights, check_route_bounds=False,
+                                     gpu_pointers=pointers, gpu_device=self._fish_gpu_cache.device)
         from .native_cpu import forward as native_forward
 
         result = native_forward(self, x, topk_ids, topk_weights)

@@ -2339,6 +2339,8 @@ export async function llmEnhancePrompt(params: {
   window_size_seconds?: number
   activated_loras?: string[]
   tts_enhance_mode?: string
+  tts_writer_instructions?: string
+  tts_target_minutes?: number
   tts_voice_count?: number
   max_new_tokens?: number
   reference_context?: string

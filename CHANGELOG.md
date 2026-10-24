@@ -8,8 +8,47 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 Public Main and Dev release, including the 20–22 October Dev preview fixes. See the
 [v3.2.0 release notes](docs/RELEASE_NOTES_V3.2.0.md).
 
-Dev follow-up fixes, 23 October:
+Dev follow-up fixes, 23–24 October:
 
+- Tune Fish one-frame expert execution with reusable scratch, direct output
+  casting and parallel down projections with ordered FP32 reduction. Add bounded
+  packed-expert GPU caching when the complete bank does not fit, and a separate
+  audio-tower sampling graph while CPU routing/cache transfers remain eager.
+  Verify placement and preserve cache/RNG rollback, with CPU/eager fallbacks.
+  Honor Fish's declared vLLM offload support instead of silently selecting
+  Legacy outside profiles 1/3. Keep unsupported FP8 formats on CPU and leave
+  GPU/staging-RAM headroom. Native INT4/cache checks passed on 24GB, 12GB and
+  8GB cards; complete speech on the smaller cards still requires model setup.
+- Preserve complete enhanced speech scripts when normal storytelling phrases
+  or dialogue refrains repeat. The generic prompt repetition cleaner could
+  truncate Fish narration mid-sentence and discard its ending.
+- Add native whole-frame CUDA Graph decoding for Fish's vLLM engine when all
+  dense decode weights and complete expert banks are resident on one GPU.
+  Capture each speech part after prefill, restoring caches and RNG after warmup;
+  retain eager decoding for offloaded profiles or unavailable capture. Preserve
+  EOS, uncapped sampling, cancellation, duration bounds and long-form reports.
+  Traverse MMGP's parent references and tied weights once, so empty LoRA hooks
+  cannot cause a recursion error and silently disable graph capture.
+- In one matched short RTX 4090 take, graph decoding took 1.66s instead of
+  26.76s for the same 131 frames; decoded audio samples matched exactly.
+  Whole-job time was 21s instead of 45s, including loading/reference work.
+- Remove redundant GPU-to-CPU expert-ID bound checks from Fish's internal
+  top-k routing path, avoiding eighty CUDA scalar reads per decoded frame.
+  Preserve direct-call validation and CPU behavior. The isolated speedup from
+  this bound-check change alone has not been measured.
+- Add saved Speech writer instructions and approximate draft-length targets.
+  Long stories/dialogues use bounded planning and section drafting with
+  continuity, continuation and review warnings instead of a single 2k response.
+  Fish synthesizes long scripts in safe chunks into one file with a one-hour
+  whole-output bound, bounded codec/history context and incomplete-part reports.
+- Add Fish-only Auto speech length with a script/context-bounded safety budget
+  and an optional manual maximum. Preserve saved positive limits and fix the UI
+  replacing sub-30-second Fish limits with the model's longer default. Duration
+  is a maximum rather than a pacing target; natural pauses still depend on Fish.
+- Fix Fish Drama 3's Top-k 0 path to disable the cap instead of becoming
+  greedy. Use no-cap defaults for new Fish speech settings and expose Top-k /
+  Top-p in Advanced Generation. This addresses an upstream-documented silence
+  trigger; complete speech and voice similarity still need a matched render.
 - Support Eros Max beta6's retained BF16 main layers and 11 additional INT8
   projections, validating every quantized layer. Identify the verified beta6
   hybrid by its file identity/checksum, enable both modes with its original

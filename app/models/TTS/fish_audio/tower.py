@@ -45,6 +45,7 @@ def sample_top_k_top_p(
 ) -> Tensor:
     """One id per row; drops the token crossing top_p, except the highest-ranked one.
 
+    Non-positive top_k disables the rank cap; positive values retain it.
     Sampling parameters may be 0-dim device tensors (CUDA graphs); check_finite
     syncs with the host.
     """
@@ -56,7 +57,11 @@ def sample_top_k_top_p(
         raise FloatingPointError("non-finite logits; refusing to sample invalid audio")
     values, ids = torch.sort(logits.float() / temperature, descending=True, dim=-1)
     ranks = torch.arange(values.shape[-1], device=values.device)
-    dropped = (values.softmax(-1).cumsum(-1) > top_p) | (ranks >= top_k)
+    if isinstance(top_k, Tensor):
+        top_k_dropped = (top_k > 0) & (ranks >= top_k)
+    else:
+        top_k_dropped = ranks >= top_k if top_k > 0 else False
+    dropped = (values.softmax(-1).cumsum(-1) > top_p) | top_k_dropped
     dropped[..., 0] = False
     probabilities = values.masked_fill(dropped, -torch.inf).softmax(-1)
     noise = torch.empty_like(probabilities).exponential_()
@@ -343,6 +348,14 @@ class FishOmniAudioDecoder(nn.Module):
             self.check_abort()
             hidden = layer(hidden, next_frames[:, index + 1], semantic, positions, self.cache[len(self.shared_layers) + index], kv_len)
 
+    def prepare_sampling(self):
+        """Create immutable candidate tables before any CUDA graph capture."""
+        if self.main_candidates is None:
+            eos = torch.tensor([self.eos_id], device=self.device)
+            band = torch.arange(self.semantic_begin, self.semantic_end + 1, device=self.device)
+            self.main_candidates = torch.cat((eos, band)).sort().values
+            self.candidate_rows = self.main_candidates - self.logit_start
+
     def decode_step(
         self,
         logits: Tensor,
@@ -362,20 +375,13 @@ class FishOmniAudioDecoder(nn.Module):
         the frames, a 0-dim device flag (False when any sampled logits were non-finite:
         the caller checks it with the frame, in one host sync per frame), and for the
         backbone's next step the summed embeddings of codes 1..K and the semantic flags
-        (FishOmniBackbone.mix_embeddings). Generation runs eagerly so routed expert
-        execution has an ordinary per-layer call boundary.
+        (FishOmniBackbone.mix_embeddings). The eager path also supports offloaded
+        expert execution; the resident graph calls sample_frame directly.
         """
-        if self.main_candidates is None:  # released with the caches
-            eos = torch.tensor([self.eos_id], device=self.device)
-            band = torch.arange(
-                self.semantic_begin, self.semantic_end + 1, device=self.device
-            )
-            self.main_candidates = torch.cat((eos, band)).sort().values
-            self.candidate_rows = self.main_candidates - self.logit_start
+        self.prepare_sampling()
         kv_len = self.kv_length(end, len(positions))
-        # Fish never captures generation in a CUDA graph: expert execution may
-        # use a synchronous CPU kernel or a per-layer Triton launch, and both
-        # require an ordinary eager call boundary.
+        # CPU expert execution remains eager. The whole-frame graph uses these
+        # same sampling operations only after proving full GPU residency.
         return self.sample_frame(
             logits, hidden, positions, frames, history[-RAS_WINDOW_FRAMES:], self.kv,
             self.main_candidates, self.candidate_rows, kv_len, temperature, top_k, top_p,

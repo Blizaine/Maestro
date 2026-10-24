@@ -4685,7 +4685,15 @@ def load_models(model_type, override_profile = -1, output_type="video", preview_
 
     profile = compute_profile(override_profile, output_type)
     lm_decoder_engine_obtained = resolve_lm_decoder_engine(lm_decoder_engine, model_def.get("lm_engines", []) )
-    if lm_decoder_engine_obtained in ("cg", "vllm") and int(profile) not in [ 1, 3]:
+    lm_engine_supports_profile_offload = (
+        lm_decoder_engine_obtained == "vllm"
+        and model_def.get("lm_engine_supports_offload") is True
+    )
+    if (
+        lm_decoder_engine_obtained in ("cg", "vllm")
+        and int(profile) not in [ 1, 3]
+        and not lm_engine_supports_profile_offload
+    ):
         print(f"Unable to use LM Engine '{lm_decoder_engine_obtained}' as it requires a Memory Profile such as 1,3 or 3+ that loads entirely the Main Models in VRAM. Switching to Legacy LM Engine...")
         lm_decoder_engine_obtained = "legacy"
     torch.set_default_device(None)
@@ -9855,6 +9863,7 @@ def generate_video(
                     ] = recast_warmup_frames
                 overridden_inputs = None
                 artifact_metadata = None
+                speech_generation = None
                 samples = call_with_sticky_interrupt(
                     gen,
                     wan_model,
@@ -10129,6 +10138,14 @@ def generate_video(
                     )
                     overridden_inputs = samples.get("overridden_inputs", None)
                     artifact_metadata = samples.get("artifact_metadata")
+                    if model_def.get("architecture") == "fish_drama3":
+                        speech_generation = samples.get("speech_generation")
+                        if isinstance(speech_generation, dict):
+                            artifact_metadata = dict(artifact_metadata or {})
+                            artifact_metadata["speech_generation"] = speech_generation
+                        for warning in samples.get("generation_warnings") or []:
+                            if isinstance(warning, str) and warning.strip():
+                                send_cmd("generation_warning", warning)
                     if generated_audio is not None:
                         input_fills_window = (
                             input_waveform is not None
@@ -10634,6 +10651,8 @@ def generate_video(
                     configs["enhanced_prompt"] = "\n".join(prompts)
                 configs["generation_time"] = generation_elapsed_seconds
                 configs["generation_time_basis"] = "active"
+                if isinstance(speech_generation, dict):
+                    configs["speech_generation"] = speech_generation
                 configs["creation_date"] = datetime.fromtimestamp(end_time).isoformat(timespec="seconds")
                 configs["creation_timestamp"] = int(end_time)
                 if inline_processing:

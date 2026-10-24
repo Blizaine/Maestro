@@ -3443,6 +3443,8 @@ def enhance_prompt(
     system_override: Optional[str] = None,
     tts_enhance_mode: Optional[str] = None,
     tts_voice_count: int = 2,
+    tts_writer_instructions: str = "",
+    tts_target_minutes: float = 0,
     lora_system_hint: str = "",
     raw_enhancer_mode: bool = False,
     reference_context: Optional[str] = None,
@@ -3544,6 +3546,39 @@ def enhance_prompt(
     # Dedicated per-model enhancer (e.g. Sulphur's uncensored enhancer): the
     # model is trained to enhance directly. Send the user's prompt (+ optional
     # image) with NO system prompt / guide and no thinking.
+    speech_writer_active = mode == "audio" and bool(tts_enhance_mode)
+    speech_target = None
+    speech_writer_instructions = ""
+    speech_writer_controls_active = False
+    if speech_writer_active:
+        from services.speech_writer import (
+            bound_writer_instructions,
+            record_speech_writer_warning,
+            resolve_speech_target,
+        )
+
+        speech_target = resolve_speech_target(prompt, tts_target_minutes)
+        speech_writer_instructions, style_truncated = bound_writer_instructions(
+            tts_writer_instructions
+        )
+        speech_writer_controls_active = bool(
+            speech_writer_instructions or speech_target.words
+        )
+        if speech_target.capped:
+            record_speech_writer_warning(
+                "The requested speech runtime exceeded 60 minutes; the writer is capped at "
+                "approximately 7,800 words and the final runtime is only an estimate."
+            )
+        if style_truncated:
+            record_speech_writer_warning(
+                "Writer style instructions were limited to 8,000 characters."
+            )
+        # Raw fine-tuned enhancers return before the native TTS guide is
+        # selected. When the user asks for writer guidance or a sized script,
+        # route through the selected TTS model's own format contract instead.
+        if speech_writer_instructions or speech_target.words:
+            raw_enhancer_mode = False
+
     if raw_enhancer_mode:
         # The fine-tuned enhancer (a) doesn't reliably honor a "write N
         # paragraphs" instruction and (b) likes to prepend a bogus "rendered
@@ -3683,22 +3718,30 @@ def enhance_prompt(
                 # before falling back to the generic Qwen-style template.
                 system = model_specific_dialogue or TTS_QWEN3_DIALOGUE_PROMPT
             else:
-                # Multi-speaker (3-6): adapt the dialogue template. Both
-                # Scenema and Kugel cap at 2 voices, so this branch is for
-                # legacy TTS engines that support 3+ speakers (Qwen3-TTS et al).
-                system = (
-                    f"You are a creative dialogue writer for a text-to-speech model. "
-                    f"Write an engaging, natural conversation with exactly {voice_count} characters based on the user prompt.\n\n"
-                    f"Output rules:\n"
-                    f"- Output ONLY dialogue lines. No explanations, stage directions, or narration.\n"
-                    f"- Every line must start with a character name followed by a colon.\n"
-                    f"- Use exactly {voice_count} characters. Use names from the prompt, or invent fitting names.\n"
-                    f"- NO brackets, NO emotion tags, NO parenthetical directions.\n"
-                    f"- Write NATURAL, REALISTIC dialogue with interruptions, reactions, varied sentence lengths.\n"
-                    f"- Write a FULL conversation (20-40+ lines) unless the user specifies shorter.\n"
-                    f"- Use clear punctuation. Commas and periods create natural pauses.\n"
-                    f"- Make sure all {voice_count} characters participate meaningfully — don't let any character fade out.\n"
-                )
+                # Multi-speaker writing follows the model's own format when
+                # available (for example, Fish's speaker-reference syntax).
+                # Keep the names-and-colons fallback for engines without one.
+                if model_specific_dialogue:
+                    system = (
+                        model_specific_dialogue
+                        + f"\n\nEXACT SPEAKER COUNT: Write exactly {voice_count} distinct speakers. "
+                        "Use the speaker labels, voice references, and any tags required by this model's "
+                        "native format. Keep the same format throughout the complete dialogue."
+                    )
+                else:
+                    system = (
+                        f"You are a creative dialogue writer for a text-to-speech model. "
+                        f"Write an engaging, natural conversation with exactly {voice_count} characters based on the user prompt.\n\n"
+                        f"Output rules:\n"
+                        f"- Output ONLY dialogue lines. No explanations, stage directions, or narration.\n"
+                        f"- Every line must start with a character name followed by a colon.\n"
+                        f"- Use exactly {voice_count} characters. Use names from the prompt, or invent fitting names.\n"
+                        f"- NO brackets, NO emotion tags, NO parenthetical directions.\n"
+                        f"- Write NATURAL, REALISTIC dialogue with interruptions, reactions, varied sentence lengths.\n"
+                        f"- Write a FULL conversation (20-40+ lines) unless the user specifies shorter.\n"
+                        f"- Use clear punctuation. Commas and periods create natural pauses.\n"
+                        f"- Make sure all {voice_count} characters participate meaningfully — don't let any character fade out.\n"
+                    )
         else:
             # Monologue path. Model-specific prompt wins over the generic
             # TTS_MONOLOGUE_PROMPT (so Scenema speech rules get used).
@@ -3707,6 +3750,15 @@ def enhance_prompt(
         if model_specific_dialogue or model_specific_monologue:
             picked = "dialogue" if (tts_enhance_mode in ("dialogue", "dialogue_fast") and tts_voice_count == 2 and model_specific_dialogue) else ("monologue" if model_specific_monologue else "generic")
             print(f"[Enhance] Using model-specific {picked} prompt for {model_type}")
+
+    if speech_writer_active and speech_writer_instructions:
+        system += (
+            "\n\nUSER-REQUESTED WRITER STYLE (supplementary guidance):\n"
+            f"{speech_writer_instructions}\n\n"
+            "Use these notes to shape the script's personality, voice, tone, and storytelling style. "
+            "They do not change the model's required language, speaker count, speaker labels, voice "
+            "syntax, tags, or other output-format rules. Never include these instructions in the spoken script."
+        )
 
     # Inject NSFW enhance guidance when mature mode is on. Uses a SHARED,
     # VERSION-CONTROLLED guide (llm_guides/enhance/nsfw_shared.md) so it ships
@@ -3749,6 +3801,12 @@ def enhance_prompt(
         model_type,
         planning_style,
     )
+    if speech_writer_active and speech_target and speech_target.words and not speech_target.is_long_form:
+        user_prompt += (
+            f"\n\nRequested spoken-script size: about {speech_target.words} words, "
+            f"or {speech_target.minutes:g} minutes at roughly 130 words per minute. "
+            "This is a runtime estimate, not a guaranteed audio duration. Do not mention the estimate in the script."
+        )
     if is_moss_image:
         from services.moss_image_prompt import enhancement_canvas_context
         user_prompt = f"{enhancement_canvas_context(resolution)}\n\n{user_prompt}"
@@ -3897,6 +3955,12 @@ def enhance_prompt(
             "centered-pixel boxes. JSON keys and exact text fields are required model syntax. "
             "No reference-image tokens, pixel masks, Markdown fences or explanations."
         )
+    elif speech_writer_controls_active:
+        system += (
+            "\n\nCRITICAL SPEECH SCRIPT OUTPUT CONTRACT: Output only the complete requested spoken script. "
+            "No introductory text, explanations, markdown, production notes, or part/section headings. "
+            "Preserve the selected model's native language, speaker, voice, and tag conventions exactly."
+        )
     else:
         system += "\n\nCRITICAL: Output ONLY the enhanced prompt text. No headers, no labels, no markdown, no explanation, no \"Enhancement Logic\", no \"Edit Prompt:\". No LoRA filenames or display names; exact creator-declared trainedWords tokens from active-LoRA guidance may appear when relevant. Just the raw prompt text."
 
@@ -3966,6 +4030,27 @@ def enhance_prompt(
         else:
             prompt_thinking_budget = 0
 
+    if speech_writer_active and speech_target and speech_target.is_long_form:
+        from services.speech_writer import generate_long_form_script
+
+        return repair_text(generate_long_form_script(
+            generate=generate,
+            prompt=user_prompt,
+            system_prompt=system,
+            target=speech_target,
+            max_new_tokens=effective_max_tokens,
+            temperature=temperature,
+            is_truncated=lambda: bool(_last_generation_metrics.get("truncated")),
+        )).strip()
+
+    if speech_writer_active and speech_target and speech_target.words:
+        # A short explicit target gets enough room for its approximate word
+        # count while staying on the familiar one-call TTS enhancement path.
+        effective_max_tokens = max(
+            effective_max_tokens,
+            min(2048, max(256, int(speech_target.words * 2 + 128))),
+        )
+
     result = generate(
         prompt=user_prompt,
         system_prompt=system,
@@ -3978,6 +4063,12 @@ def enhance_prompt(
         presence_penalty=0.1,   # encourage variety
     )
     result = repair_text(result)
+    if speech_writer_active and _last_generation_metrics.get("truncated"):
+        from services.speech_writer import record_speech_writer_warning
+
+        record_speech_writer_warning(
+            "The speech script reached the model's output token limit; the available draft was retained and may be incomplete."
+        )
 
     if is_moss_image:
         from services.moss_image_prompt import finalize_enhancement_output
@@ -4010,14 +4101,17 @@ def enhance_prompt(
                     thinking_budget=0,
                 ))
 
-    # Post-process ordinary prose aggressively, but preserve H3's required field
-    # labels and media tags. The old substring-loop cleaner could truncate a
-    # valid Context-IR response at its first repeated <Picture>/<Audio> mapping.
+    # Preserve native structure and complete spoken scripts. Repeated words or
+    # whole refrains are legitimate speech: the generic substring-loop heuristic
+    # must never discard a story's remainder on a phrase such as "I told myself".
     if result:
         # Repeated source-binding phrases in a multi-reference caption are
         # legitimate. The ordinary substring-loop heuristic can cut the
         # caption halfway through a <ref_image_N> token and drop later subjects.
-        result = _clean_enhance_output(result, preserve_structure=is_h3_structured or is_flux3_image or is_moss_image)
+        result = _clean_enhance_output(
+            result,
+            preserve_structure=is_h3_structured or is_flux3_image or is_moss_image or speech_writer_active,
+        )
     if is_h3_context_ir and result:
         # Adaptive dialogue may compile named cues into tags. For ordinary
         # locked user dialogue, compile only when the writer already returned
