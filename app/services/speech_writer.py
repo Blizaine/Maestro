@@ -3,7 +3,7 @@
 Runtime is estimated from script words at 130 words per minute. This is a
 planning estimate only; generated speech duration depends on the voice and
 delivery. Qualitative requests for a long story/script default to about ten
-minutes unless the brief supplies an explicit shorter or longer target.
+minutes unless the brief or selected clip supplies a target.
 """
 from __future__ import annotations
 
@@ -25,6 +25,12 @@ MAX_PLAN_CHARS = 6_000
 MAX_PRIOR_TEXT_CHARS = 3_600
 MAX_PLAN_TOKENS = 768
 MAX_SECTION_TOKENS = 1_280
+MIN_SECTION_COVERAGE = 0.90
+MIN_OVERALL_COVERAGE = 0.95
+DUPLICATE_MIN_COVERAGE = 0.80
+DUPLICATE_MIN_WORDS = 80
+MIN_DUPLICATE_TEXT_VARIETY = 0.08
+MAX_DUPLICATE_CONTEXT_WORDS = 1_200
 
 
 @dataclass(frozen=True)
@@ -131,8 +137,11 @@ _HYPHENATED_WORDS_RE = re.compile(
     rf"\b(?P<value>\d[\d,]*)[- ]word\s+(?:{_DURATION_MEDIA})\b", re.IGNORECASE
 )
 _QUALITATIVE_LONG_RE = re.compile(
-    r"\b(?:long(?:[ -]form)?|extended|full[ -]length)\s+"
-    r"(?:form\s+)?(?:story|dialogue|conversation|monologue|script|speech)\b",
+    r"\b(?:long(?:[ -]form)?|extended|full[ -]length)"
+    r"(?P<modifiers>(?:(?:[ \t]+|[ \t]*[,;:()—–][ \t]*)"
+    r"(?:(?:and|or|but|yet|&)[ \t]+)?[\w][\w'’\-]*){0,6}?)"
+    r"(?:[ \t]+|[ \t]*[,;:()—–][ \t]*)"
+    r"(?:form[ \t]+)?(?:story|dialogue|conversation|monologue|script|speech)\b",
     re.IGNORECASE,
 )
 _QUALITATIVE_SHORT_RE = re.compile(
@@ -148,6 +157,52 @@ _PART_HEADING_RE = re.compile(
     re.IGNORECASE,
 )
 _WORD_RE = re.compile(r"\b[\w][\w'’\-]*\b", re.UNICODE)
+_SPEECH_CUE_RE = re.compile(r"\[[^\]\r\n]*\]")
+_TTS_TAG_RE = re.compile(r"<[^>\r\n]*>")
+_SPEAKER_LABEL_RE = re.compile(
+    r"(?im)^[ \t]*(?:(?:speaker|voice|character)[ _-]*\d+(?:[ \t]*\{[^}\r\n]*\})?"
+    r"|[A-Z][\w'’\-]{0,39}(?:[ \t]+[A-Z][\w'’\-]{0,39})?)[ \t]*:[ \t]*"
+)
+_QUALITATIVE_MODIFIER_LINK_WORDS = frozenset({"and", "or", "but", "yet"})
+_QUALITATIVE_MODIFIER_WORDS = frozenset({
+    "bad", "big", "bold", "bright", "cool", "dark", "deep", "dry", "fair",
+    "fun", "good", "great", "grim", "hard", "hot", "large", "light", "loud",
+    "mild", "new", "odd", "old", "plain", "real", "red", "rich", "safe",
+    "sharp", "small", "soft", "tall", "true", "warm", "weak", "weird", "wide",
+    "wild", "wise", "young", "eerie", "spooky", "full", "complete", "fresh",
+    "ghost", "halloween", "science", "fiction", "horror", "fantasy", "mystery",
+})
+_QUALITATIVE_NONLENGTH_NOUNS = frozenset({"hair", "hall", "hallway", "life", "lifetime"})
+_QUALITATIVE_ADJECTIVE_SUFFIXES = (
+    "able", "ible", "al", "ary", "ed", "ent", "ful", "ic", "ing", "ish",
+    "ive", "less", "like", "ly", "ory", "ous", "some", "y",
+)
+
+
+def _is_qualitative_modifier(word: str) -> bool:
+    """Recognize common adjectives and genres while rejecting incidental nouns."""
+    parts = word.casefold().strip("-'’").split("-")
+    if any(part in _QUALITATIVE_NONLENGTH_NOUNS for part in parts):
+        return False
+    return any(
+        part in _QUALITATIVE_MODIFIER_WORDS
+        or part.endswith(_QUALITATIVE_ADJECTIVE_SUFFIXES)
+        for part in parts
+        if part
+    )
+
+
+def _has_qualitative_long_request(prompt: str) -> bool:
+    """Match a bounded adjective phrase between a length cue and speech type."""
+    for match in _QUALITATIVE_LONG_RE.finditer(prompt):
+        modifiers = _WORD_RE.findall(match.group("modifiers"))
+        if all(
+            word.casefold() in _QUALITATIVE_MODIFIER_LINK_WORDS
+            or _is_qualitative_modifier(word)
+            for word in modifiers
+        ):
+            return True
+    return False
 
 
 def _parse_number(match: re.Match | None) -> float:
@@ -176,18 +231,23 @@ def _target_from_minutes(minutes: float, source: str) -> SpeechTarget:
     return SpeechTarget(minutes=minutes, words=words, source=source, capped=capped)
 
 
-def resolve_speech_target(prompt: str, requested_minutes: object = 0) -> SpeechTarget:
+def resolve_speech_target(
+    prompt: str,
+    requested_minutes: object = 0,
+    *,
+    clip_duration_seconds: object = None,
+) -> SpeechTarget:
     """Resolve explicit targets and qualitative long-form requests.
 
-    A positive setting wins. With a zero setting, explicit minutes take
-    precedence over explicit word counts. A qualitative "long story/dialogue"
-    request defaults to ten minutes. Clear short/brief requests keep the
-    ordinary one-call behavior unless they also contain an explicit size.
-    Every inferred target is capped at sixty minutes.
+    A positive setting wins, followed by numeric size in the brief. Clear
+    short/brief requests keep the ordinary one-call behavior. Otherwise a
+    selected clip duration sets the target before qualitative long-form
+    requests fall back to ten minutes. Every inferred target is capped at
+    sixty minutes.
     """
     try:
         configured = float(requested_minutes or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         configured = 0.0
     if math.isfinite(configured) and configured > 0:
         return _target_from_minutes(configured, "setting")
@@ -235,7 +295,19 @@ def resolve_speech_target(prompt: str, requested_minutes: object = 0) -> SpeechT
 
     if _QUALITATIVE_SHORT_RE.search(source_text):
         return SpeechTarget()
-    if _QUALITATIVE_LONG_RE.search(source_text):
+
+    try:
+        clip_seconds = (
+            0.0
+            if isinstance(clip_duration_seconds, bool)
+            else float(clip_duration_seconds or 0)
+        )
+    except (TypeError, ValueError, OverflowError):
+        clip_seconds = 0.0
+    if math.isfinite(clip_seconds) and clip_seconds > 0:
+        return _target_from_minutes(clip_seconds / 60, "clip_duration")
+
+    if _has_qualitative_long_request(source_text):
         return _target_from_minutes(
             DEFAULT_QUALITATIVE_LONG_MINUTES, "prompt_qualitative_long"
         )
@@ -272,6 +344,48 @@ def _check_cancelled() -> None:
 
 def _word_count(text: str) -> int:
     return len(_WORD_RE.findall(str(text or "")))
+
+
+def _spoken_tokens(text: str) -> list[str]:
+    """Return words that will be spoken, excluding TTS directions and labels."""
+    value = _without_part_headings(text)
+    value = _SPEECH_CUE_RE.sub(" ", value)
+    value = _TTS_TAG_RE.sub(" ", value)
+    value = _SPEAKER_LABEL_RE.sub("", value)
+    return [token.casefold() for token in _WORD_RE.findall(value)]
+
+
+def _spoken_word_count(text: str) -> int:
+    return len(_spoken_tokens(text))
+
+
+def _has_substantial_duplicate(previous: str, current: str) -> bool:
+    """Detect a section that substantially repeats earlier spoken wording.
+
+    A long exact run of normalized spoken words is resilient to cue, tag,
+    punctuation, and case changes while ignoring short repeated refrains. The
+    comparison is bounded to recent context and deliberately conservative.
+    """
+    prior_words = _spoken_tokens(previous)[-MAX_DUPLICATE_CONTEXT_WORDS:]
+    current_words = _spoken_tokens(current)
+    if len(current_words) < DUPLICATE_MIN_WORDS:
+        return False
+    if len(set(current_words)) / len(current_words) < MIN_DUPLICATE_TEXT_VARIETY:
+        return False
+
+    longest = 0
+    lengths = [0] * (len(current_words) + 1)
+    for prior_word in prior_words:
+        for index in range(len(current_words) - 1, -1, -1):
+            if prior_word == current_words[index]:
+                lengths[index + 1] = lengths[index] + 1
+                longest = max(longest, lengths[index + 1])
+            else:
+                lengths[index + 1] = 0
+    return longest >= max(
+        DUPLICATE_MIN_WORDS,
+        math.ceil(len(current_words) * DUPLICATE_MIN_COVERAGE),
+    )
 
 
 def _without_part_headings(text: str) -> str:
@@ -318,10 +432,10 @@ def generate_long_form_script(
 ) -> str:
     """Generate one assembled TTS script through a bounded plan and sections.
 
-    The planner plus section drafts and one continuation per section stay
-    below thirty calls for the sixty-minute cap. Previous spoken text supplied
-    as context is limited to a short rolling tail, while the complete source
-    brief and bounded plan remain available to every section.
+    Planning, section drafts, truncation continuations, and one focused repair
+    per section share a hard thirty-call cap. Previous model-authored speech
+    supplied as context is limited to a short rolling tail, while the complete
+    source brief and bounded plan remain available to every section.
     """
     target_words = min(max(1, int(target.words)), MAX_TARGET_WORDS)
     target_minutes = min(max(0.01, float(target.minutes)), float(MAX_TARGET_MINUTES))
@@ -368,9 +482,20 @@ def generate_long_form_script(
         "PLANNING CALL ONLY: Return concise private planning notes, not spoken lines or narration. "
         "The final script will follow the model-native TTS output format and speaker conventions."
     )
-    section_system = system_prompt.replace(
-        "Output only the complete requested spoken script.",
-        "Output only the requested spoken-script portion.",
+    section_system = (
+        system_prompt.replace(
+            "Output only the complete requested spoken script.",
+            "Output only the requested spoken-script portion.",
+        )
+        + "\n\nLONG-FORM CONTEXT RULE: Preserve exact user-authored wording when the user supplied "
+        "words intended to be spoken, along with all explicit user-supplied performance cues and native TTS tags. "
+        "The section prompt labels earlier model-authored speech as continuity context already written; it is not "
+        "immutable user source wording. Continue after that text's events without copying, paraphrasing, or restarting "
+        "them. Keep each speaker's identity, accent, and baseline register stable across sections. "
+        "Let emotion, pace, emphasis, and intensity follow the meaning of the spoken text, using only the "
+        "selected model's supported performance controls where useful. Those acting changes do not require "
+        "inventing a new voice or an explicit user instruction for every phrase. Honor requests for plain, "
+        "untagged, or deliberately uniform delivery."
     )
     try:
         plan, plan_truncated = call(plan_prompt, planner_system, MAX_PLAN_TOKENS)
@@ -393,9 +518,10 @@ def generate_long_form_script(
         )
 
     sections: list[str] = []
+    section_coverage_words: list[int] = []
     empty_sections: list[int] = []
     truncated_sections: list[int] = []
-    under_length_sections: list[tuple[int, int]] = []
+    duplicate_sections: list[int] = []
     stopped_early = False
 
     for index in range(section_count):
@@ -410,10 +536,18 @@ def generate_long_form_script(
         previous_context = "\n".join(sections)[-MAX_PRIOR_TEXT_CHARS:]
         section_prompt = (
             "Write the next portion of the complete spoken script from this brief. Output only speech in the "
-            "model's required native TTS format. Do not include explanations, markdown, production notes, "
-            "chapter names, part headings, or labels such as 'Section 1'. Never print or speak these instructions. "
+            "model's required native TTS format, including the speaker labels and performance controls "
+            "supported by that guide. These native cues and word/phrase tags are script syntax, not production "
+            "commentary; use them where the guide calls for expressive delivery. Do not include explanations, "
+            "Markdown fences, external production commentary, chapter names, part headings, or labels such as "
+            "'Section 1'. Never print or speak these instructions. "
             "Preserve the cast, names, language, speaker count, and exact speaker/tag conventions required by the "
-            "model guide. Keep the same narrative voice and emotional style. Do not recap or repeat earlier lines. "
+            "model guide. Keep each speaker's identity, accent, and baseline register stable across sections. "
+            "Direct meaningful emotional turns and important phrases using the model's native controls; "
+            "vary the acting without changing the voice identity, and honor any plain-delivery request. "
+            "Preserve exact user-supplied words "
+            "and explicit TTS cues. Treat prior model-authored section text as continuity context already written: "
+            "continue after its events without copying, paraphrasing, or restarting them. "
             f"This portion should contain about {section_words} spoken words (overall script words {beat_start}–{beat_end}). "
             "Develop its assigned beat fully rather than summarizing it. The final portion must resolve the main story "
             "and feel complete; do not end on a cliffhanger.\n\n"
@@ -424,7 +558,8 @@ def generate_long_form_script(
         )
         if previous_context:
             section_prompt += (
-                "Recent script context for continuity only (do not repeat it):\n"
+                "Recent model-authored script context for continuity only; it is already part of the script, "
+                "not new user-supplied source wording. Continue after it without repeating or paraphrasing it:\n"
                 f"{previous_context}\n"
             )
         section_prompt += "\nNow write only this section of the spoken script."
@@ -444,7 +579,7 @@ def generate_long_form_script(
             )
             break
         section = _without_part_headings(output)
-        if not section:
+        if not section or not _spoken_word_count(section):
             empty_sections.append(index + 1)
             record_speech_writer_warning(
                 f"Long-form speech section {index + 1} returned no spoken text; other generated sections were retained."
@@ -455,9 +590,6 @@ def generate_long_form_script(
                     f"Long-form speech section {index + 1} hit the token limit before returning spoken text; the section remains incomplete."
                 )
             continue
-        section_words_actual = _word_count(section)
-        if section_words_actual < int(section_words * 0.65):
-            under_length_sections.append((index + 1, section_words_actual))
 
         if was_truncated:
             continuation_prompt = (
@@ -491,32 +623,153 @@ def generate_long_form_script(
                 )
                 truncated_sections.append(index + 1)
             if continuation_truncated:
-                truncated_sections.append(index + 1)
+                if index + 1 not in truncated_sections:
+                    truncated_sections.append(index + 1)
                 record_speech_writer_warning(
                     f"Long-form speech section {index + 1} also reached the token limit during continuation; review the assembled ending and handoff."
                 )
 
+        prior_text = "\n".join(sections)
+        section_words_actual = _spoken_word_count(section)
+        duplicate = _has_substantial_duplicate(prior_text, section)
+        below_target = section_words_actual < math.ceil(section_words * MIN_SECTION_COVERAGE)
+        if duplicate or below_target:
+            if calls >= MAX_GENERATION_CALLS:
+                reason = "repeated earlier wording" if duplicate else "below its spoken-word target"
+                record_speech_writer_warning(
+                    f"Long-form speech section {index + 1} could not be repaired because the "
+                    f"{MAX_GENERATION_CALLS}-call limit was reached; its available draft was retained despite {reason}."
+                )
+            else:
+                if duplicate:
+                    repair_prompt = (
+                        "Focused section revision: this section substantially repeats earlier model-authored text. "
+                        "Replace only the current section with a distinct continuation that starts after the earlier "
+                        "events. Preserve the original brief's facts, names, user-supplied exact wording, explicit TTS "
+                        "cues, speaker identities, accents, baseline registers, and native tag format. Keep any useful "
+                        "new details from the current draft when they do not repeat earlier material. Aim for about "
+                        f"{section_words} spoken words. Return only the replacement section.\n\n"
+                        f"Original brief:\n{prompt}\n\nPlan:\n{plan}\n\n"
+                        "Earlier model-authored script (continuity only; already included in the final script):\n"
+                        f"{prior_text[-MAX_PRIOR_TEXT_CHARS:]}\n\n"
+                        "Current section draft to revise; retain its new details where possible:\n"
+                        f"{section[-MAX_PRIOR_TEXT_CHARS:]}"
+                    )
+                    repair_budget = min(
+                        MAX_SECTION_TOKENS,
+                        max(768, int(section_words * 1.75 + 192)),
+                    )
+                    repair_kind = "replacement"
+                else:
+                    missing_words = max(1, section_words - section_words_actual)
+                    finish_instruction = (
+                        "Finish the complete story with a coherent, satisfying ending; resolve the main conflict and do not end on a cliffhanger."
+                        if index == section_count - 1 else
+                        "Reach a natural handoff into the next planned section."
+                    )
+                    repair_prompt = (
+                        "Focused section expansion: preserve every existing line exactly as written and return only "
+                        "new speech to append to the current section. Continue from its exact ending; do not recap or "
+                        "repeat the current section or earlier sections. Preserve the original brief's facts, names, "
+                        "user-supplied exact wording, explicit TTS cues, speaker identities, accents, baseline registers, "
+                        "and native tag format. Add about "
+                        f"{missing_words} spoken words, developing the assigned beat instead of summarizing it. "
+                        f"{finish_instruction}\n\n"
+                        f"Original brief:\n{prompt}\n\nPlan:\n{plan}\n\n"
+                        "Earlier model-authored script (continuity only; already included in the final script):\n"
+                        f"{prior_text[-MAX_PRIOR_TEXT_CHARS:]}\n\n"
+                        "Current section to continue from:\n"
+                        f"{section[-MAX_PRIOR_TEXT_CHARS:]}"
+                    )
+                    repair_budget = min(
+                        MAX_SECTION_TOKENS,
+                        max(384, int(missing_words * 1.75 + 128)),
+                    )
+                    repair_kind = "expansion"
+
+                try:
+                    repair_output, repair_truncated = call(
+                        repair_prompt, section_system, repair_budget
+                    )
+                except InterruptedError:
+                    raise
+                except Exception:
+                    repair_output = ""
+                    repair_truncated = False
+                    record_speech_writer_warning(
+                        f"Long-form speech section {index + 1} focused {repair_kind} failed; its original draft was retained."
+                    )
+
+                repair_output = _without_part_headings(repair_output)
+                if repair_truncated:
+                    if index + 1 not in truncated_sections:
+                        truncated_sections.append(index + 1)
+                    record_speech_writer_warning(
+                        f"Long-form speech section {index + 1} focused repair reached the token limit; its available text was reviewed and retained only if it made progress."
+                    )
+
+                if duplicate:
+                    if (
+                        _spoken_word_count(repair_output) > 0
+                        and not _has_substantial_duplicate(prior_text, repair_output)
+                    ):
+                        section = repair_output
+                        duplicate = False
+                    else:
+                        record_speech_writer_warning(
+                            f"Long-form speech section {index + 1} still substantially repeats earlier text after one focused revision; its original draft was retained for review."
+                        )
+                else:
+                    addition = _remove_repeated_prefix(section, repair_output)
+                    if (
+                        _spoken_word_count(addition) > 0
+                        and not _has_substantial_duplicate(f"{prior_text}\n{section}", addition)
+                    ):
+                        section = (section.rstrip() + "\n" + addition.lstrip()).strip()
+                    else:
+                        record_speech_writer_warning(
+                            f"Long-form speech section {index + 1} focused expansion made no distinct progress; its original draft was retained."
+                        )
+
+        section_words_actual = _spoken_word_count(section)
+        duplicate = _has_substantial_duplicate(prior_text, section)
+        if duplicate:
+            duplicate_sections.append(index + 1)
+            record_speech_writer_warning(
+                f"Long-form speech section {index + 1} remains a substantial repetition of earlier text; its words are not counted twice toward target coverage."
+            )
+        if section_words_actual < math.ceil(section_words * MIN_SECTION_COVERAGE):
+            record_speech_writer_warning(
+                f"Long-form speech section {index + 1} contains approximately {section_words_actual} spoken words against a target of "
+                f"{section_words}; its available draft was retained after one bounded repair attempt."
+            )
+
         sections.append(section)
+        section_coverage_words.append(0 if duplicate else section_words_actual)
 
     assembled = "\n".join(section for section in sections if section).strip()
-    actual_words = _word_count(assembled)
+    actual_words = _spoken_word_count(assembled)
+    covered_words = sum(section_coverage_words)
     if empty_sections:
         record_speech_writer_warning(
             "The assembled long-form speech draft has missing section(s) "
             + ", ".join(map(str, empty_sections))
             + "; review it before synthesis."
         )
-    for section_number, section_words_actual in under_length_sections:
+    if covered_words < int(target_words * MIN_OVERALL_COVERAGE):
+        coverage_label = "distinct spoken words" if duplicate_sections else "spoken words"
+        coverage_percent = int(round(covered_words / max(1, target_words) * 100))
         record_speech_writer_warning(
-            f"Long-form speech section {section_number} contains approximately {section_words_actual} words against a target of "
-            f"{section_words}; the section draft was retained for review."
+            f"The long-form speech draft contains approximately {covered_words} {coverage_label} against a target of "
+            f"{target_words} ({coverage_percent}% coverage); the requested spoken runtime is approximate and the draft remains short."
         )
-    if actual_words < int(target_words * 0.75):
+    if actual_words > math.ceil(target_words * 1.25):
         record_speech_writer_warning(
-            f"The long-form speech draft contains approximately {actual_words} words against a target of "
-            f"{target_words}; the requested spoken runtime is approximate and the draft may be incomplete."
+            f"The long-form speech draft contains approximately {actual_words} spoken words against a target of "
+            f"{target_words}; it is substantially longer than requested. The complete text was retained. "
+            "Review its length against the synthesis maximum, which could stop before the full script is spoken."
         )
-    if stopped_early or section_count in truncated_sections:
+    if stopped_early or truncated_sections:
         record_speech_writer_warning(
             "The final speech draft may be incomplete in native TTS syntax or end before its planned resolution because a model call failed or the last section was token-limited; review its speaker tags and ending."
         )
@@ -528,7 +781,8 @@ def generate_long_form_script(
         )
 
     print(
-        f"[SpeechWriter] Long-form draft: {calls} model call(s), {actual_words}/{target_words} words, "
+        f"[SpeechWriter] Long-form draft: {calls} model call(s), {covered_words}/{target_words} distinct spoken words "
+        f"({actual_words} including repeated sections), "
         f"{section_count} planned section(s)"
     )
     return assembled

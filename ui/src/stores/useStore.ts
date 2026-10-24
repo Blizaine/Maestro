@@ -10678,7 +10678,9 @@ export const useStore = create<AppState>((set, get) => ({
         max_new_tokens: maxTokens,
         resolution: generationMode === 'image' ? params.resolution : undefined,
         image_paths: imagePaths.length > 0 ? imagePaths : undefined,
-        duration_seconds: (generationMode === 'video' || generationMode === 'avatar') ? state.durationSeconds : undefined,
+        duration_seconds: (generationMode === 'video' || generationMode === 'avatar'
+          || (generationMode === 'audio' && state.audioSubMode === 'speech'))
+          ? state.durationSeconds : undefined,
         window_count: (generationMode === 'video' || generationMode === 'avatar') ? windowCount : undefined,
         window_size_seconds: (generationMode === 'video' || generationMode === 'avatar') ? state.slidingWindowSeconds : undefined,
         activated_loras: params.activated_loras.length > 0 ? params.activated_loras : undefined,

@@ -17,8 +17,66 @@ on first use. Check the transcript when words are unclear.
 
 Advanced settings offer **Cut Script Every N Lines** and **History Kept at Each
 Cut**. Each part keeps recent generated speech and text as context for the
-next part. Use temperature 0.8, top-p 0.95 and **Top-k 0 (no cap)**
+next part. New settings allow up to 60 seconds of recent complete turns;
+explicitly saved values, including 0 or 20 seconds, remain unchanged. Use
+temperature 0.8, top-p 0.95 and **Top-k 0 (no cap)**
 as a starting point. Diffusion steps and CFG do not apply.
+
+### Directing the performance
+
+Use brief square-bracket directions near the words they affect, including
+within a sentence. When **Write** authors or enhances a scene, it can infer
+purposeful delivery changes from the story's events and emotional movement;
+the user does not need to prescribe every cue. In a long passage, place
+occasional directions at meaningful turns, including mid-sentence, instead of
+leaving them all at paragraph openings. Ordinary lines can stay plain when
+their delivery does not change. There is no tag quota, and sound effects should
+not be added just to decorate the script. A sound or pause belongs where it
+should occur. Paired delivery tags target a selected word or phrase:
+
+```text
+[calm] I checked <emphasis>every</emphasis> door, [my confidence slips] and none were locked.
+<whisper>Stay here.</whisper> [urgent] I'll be right back.
+```
+
+The paired tags are `<whisper>`, `<emphasis>`, `<soft>`, `<fast>`, `<slow>`,
+`<stress>` and `<forceful>`. Close each tag and nest overlapping scopes
+correctly. Maestro preserves these scopes across automatic cuts. For deliberate
+pronunciation, the local tokenizer also has `<|phoneme_start|>` and
+`<|phoneme_end|>` markers; keep a complete pronunciation span on one line. See
+[Fish's Drama 3 guide](https://docs.fish.audio/features/text-to-speech/drama-3)
+for its language-specific phoneme notation. Experimental language-switch tags
+from the hosted service are not advertised by Maestro's local guide.
+
+Prefer a few purposeful changes over a different voice description on every
+paragraph. Keep the same speaker number, cloned identity, habitual register
+and accent; change emotion, emphasis or pace when the scene needs it. Instructions
+such as “raspy” followed by “deep and resonant” can ask for the very delivery
+change you are trying to avoid. **Write** follows this distinction while retaining
+the user's explicit performance choices. Bracket directions influence delivery;
+they do not lock a voice or guarantee exact pauses.
+
+The broader [Fish emotion guide](https://docs.fish.audio/developer-guide/core-features/emotions)
+describes S2/S2.1 too. Maestro uses the Drama 3 format above; hosted-service
+features should not be assumed to work identically in the local engine.
+
+### Consistency between parts
+
+Every part uses the same supplied voice references and transcripts. With history
+enabled, the prompt also includes a bounded first-part voice anchor and recent
+generated text paired with its audio. History retains complete turns: a turn
+longer than the configured time allowance cannot be included as recent history.
+The new 60-second default accommodates more ordinary narration turns than the
+previous 20-second default. Text/audio context limits can still reduce the
+history actually used; output details record the effective recent-turn count,
+duration and anchor for each part. More history adds prompt processing time.
+Setting history to 0 disables both generated-history sources.
+
+A fixed seed seeds the random stream once for the entire job. Maestro does not
+restart that stream at every cut. Reusing the same seed on every part would not
+guarantee matching register with different text and conditioning. References,
+performance cues and recent audio context remain important. These changes need
+listening tests on your voice and script; they do not establish seamless delivery.
 
 ### Speech length
 
@@ -56,8 +114,8 @@ documents this failure with Top-k 30 and removes that cap. Maestro now treats
 0 as unlimited candidates rather than accidentally selecting only the most
 likely token. This is a sampling mitigation, not proof of complete speech or
 voice fidelity on every script. EOS and the overall duration bound still apply.
-For difficult delivery changes, keep one short direction at the start of each
-line; the existing Cut Script Every N Lines option can generate lines in parts.
+For a script that stops early, simplify the directions and test changes one at
+a time; Cut Script Every N Lines can add earlier whole-line boundaries.
 Do not treat trimmed silence as recovered dialogue.
 
 ## Resource requirements and current engine

@@ -9443,7 +9443,7 @@ async def _llm_enhance_prompt_payload(body: dict):
             prompt=prompt,
             lora_system_hint=lora_hint_text,
             mode=body.get("mode", "video"),
-            max_new_tokens=body.get("max_new_tokens", 512),
+            max_new_tokens=body.get("max_new_tokens", 2048 if needs_speech_writer else 512),
             temperature=body.get("temperature", 0.6),
             nsfw=nsfw,
             model_type=model_type,

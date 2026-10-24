@@ -24,7 +24,7 @@ ASSETS = ["tokenizer.json", "Fish_Drama3_codec_bf16.safetensors"]
 DIALOGUE_CUT_LINES = {"id": "dialogue_cut_lines", "label": "Cut Script Every N Lines (0 = Automatic)", "name": "Cut Every N Lines", "type": "int",
                       "default": 0, "min": 0, "max": 50, "inc": 1}
 DIALOGUE_HISTORY_SECONDS = {"id": "dialogue_history_seconds", "label": "History Kept at Each Cut (seconds)", "name": "Cut History", "type": "int",
-                            "default": 20, "min": 0, "max": 120, "inc": 5}
+                            "default": 60, "min": 0, "max": 120, "inc": 5}
 
 
 class family_handler:

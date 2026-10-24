@@ -10,6 +10,16 @@ Public Main and Dev release, including the 20–22 October Dev preview fixes. Se
 
 Dev follow-up fixes, 23–24 October:
 
+- Let Speech Write follow the selected clip duration unless the brief or a
+  positive draft-length override supplies a target. Count spoken words without
+  cues, attempt bounded short/repeated-section recovery, and warn about
+  incomplete or substantially overlong drafts while preserving available text.
+- Improve Fish's writer guide and output contracts for inline delivery cues
+  and word-level performance tags. Preserve all seven paired delivery tags
+  and local phoneme spans through cuts, keep speaker cues correctly scoped,
+  and allow 60 seconds of recent complete-turn history for new settings.
+  Preserve saved history choices and record effective per-part conditioning.
+  Native writer compliance and voice continuity still need listening tests.
 - Tune Fish one-frame expert execution with reusable scratch, direct output
   casting and parallel down projections with ordered FP32 reduction. Add bounded
   packed-expert GPU caching when the complete bank does not fit, and a separate

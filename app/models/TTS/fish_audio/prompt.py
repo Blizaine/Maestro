@@ -10,7 +10,12 @@ import torch
 from tokenizers import Tokenizer
 
 from .config import FishOmniConfig
-from .duration import LONGFORM_CHUNK_MAX_UNITS
+from .duration import (
+    DRAMA3_PAIRED_TAGS,
+    DRAMA3_PHONEME_END,
+    DRAMA3_PHONEME_START,
+    LONGFORM_CHUNK_MAX_UNITS,
+)
 
 DRAMA3_TTS_INSTRUCTION = "convert the provided text to speech"
 DRAMA3_REFERENCE_INSTRUCTION = (
@@ -68,17 +73,70 @@ SPEAKER_LINE_PATTERN = re.compile(r"^([ \t]*)Speaker[ \t]*(\d+)[ \t]*:[ \t]*", r
 
 
 # Drama 3's paired tags apply to the words between them; an unclosed one spoils the speech that follows.
-PAIRED_TAGS = ("whisper", "stress", "slow")
+PAIRED_TAGS = DRAMA3_PAIRED_TAGS
+_PAIRED_TAG_NAMES = "|".join(PAIRED_TAGS)
+_PHONEME_MARKER_NAMES = (
+    re.escape(DRAMA3_PHONEME_START) + "|" + re.escape(DRAMA3_PHONEME_END)
+)
 
 
-def check_paired_tags(text: str, location: str) -> None:
-    """Only Drama 3's paired tags may use angle brackets (besides <|...|> tokens), each one closed."""
-    for match in re.finditer(r"</?([A-Za-z][^<>|]*)>?", text):  # tag-like: "<" before a letter (not "x < y" or "3<4")
-        if match.group(1) not in PAIRED_TAGS or not match.group(0).endswith(">"):
-            raise ValueError(f"{location}: {match.group(0)!r} is not a Drama 3 tag; tags are <whisper>, <stress> and <slow> around words, other directions go in square brackets such as [smiling]")
-    for tag in PAIRED_TAGS:
-        if text.count(f"<{tag}>") != text.count(f"</{tag}>"):
-            raise ValueError(f"{location}: close each <{tag}> with </{tag}> after the words it applies to")
+def check_paired_tags(text: str, location: str, tokenizer: Tokenizer | None = None) -> None:
+    """Validate supported delivery tags and local phoneme-marker spans."""
+    tag_pattern = re.compile(r"<(/?)([A-Za-z][^<>|]*)(>?)")
+    stack = []
+    for match in tag_pattern.finditer(text):
+        raw, slash, name, closing = match.group(0), match.group(1), match.group(2), match.group(3)
+        if closing != ">":
+            raise ValueError(f"{location}: unclosed tag-like text {raw!r}")
+        is_close = bool(slash)
+        normalized = name.lower()
+        if normalized not in PAIRED_TAGS:
+            names = ", ".join(f"<{tag}>" for tag in PAIRED_TAGS)
+            raise ValueError(
+                f"{location}: {raw!r} is not a supported Drama 3 tag; "
+                f"paired tags are {names}, and other directions go in square brackets"
+            )
+        if is_close:
+            if not stack or stack[-1] != normalized:
+                expected = f"</{stack[-1]}>" if stack else "no closing tag"
+                raise ValueError(
+                    f"{location}: {raw!r} is out of order; expected {expected}"
+                )
+            stack.pop()
+        else:
+            stack.append(normalized)
+    if stack:
+        raise ValueError(f"{location}: close <{stack[-1]}> with </{stack[-1]}> after the words it applies to")
+
+    marker_pattern = re.compile(_PHONEME_MARKER_NAMES)
+    phoneme_open = False
+    for match in marker_pattern.finditer(text):
+        marker = match.group(0)
+        if tokenizer is not None:
+            token_to_id = getattr(tokenizer, "token_to_id", None)
+            if token_to_id is None or token_to_id(marker) is None:
+                raise ValueError(
+                    f"{location}: {marker} is not available in this local tokenizer"
+                )
+        if marker == DRAMA3_PHONEME_START:
+            if phoneme_open:
+                raise ValueError(f"{location}: phoneme spans cannot be nested")
+            phoneme_open = True
+        else:
+            if not phoneme_open:
+                raise ValueError(f"{location}: {DRAMA3_PHONEME_END} has no matching start")
+            phoneme_open = False
+    if phoneme_open:
+        raise ValueError(f"{location}: close the phoneme span with {DRAMA3_PHONEME_END}")
+    for span in re.finditer(
+        re.escape(DRAMA3_PHONEME_START) + r"(.*?)" + re.escape(DRAMA3_PHONEME_END),
+        text,
+        re.DOTALL,
+    ):
+        if not span.group(1).strip():
+            raise ValueError(f"{location}: phoneme spans must contain pronunciation text")
+        if "\n" in span.group(1) or "\r" in span.group(1):
+            raise ValueError(f"{location}: keep each phoneme span on one line")
 
 
 def speaker_lines_to_tags(text: str) -> str:
@@ -110,8 +168,15 @@ def dialogue_parts(text: str, lines_per_part: int) -> list[str]:
 
 
 _SQUARE_CUE = re.compile(r"\[[^\]]*\]", re.DOTALL)
-_DRAMA3_TAG_TOKEN = re.compile(r"<\|speaker:\d+\|>|</?(?:whisper|stress|slow)>", re.IGNORECASE)
-_PAIRED_TAG_TOKEN = re.compile(r"<(\/)?(whisper|stress|slow)>", re.IGNORECASE)
+_DRAMA3_TAG_TOKEN = re.compile(
+    rf"<\|speaker:\d+\|>|</?(?:{_PAIRED_TAG_NAMES})>|{_PHONEME_MARKER_NAMES}",
+    re.IGNORECASE,
+)
+_PAIRED_TAG_TOKEN = re.compile(rf"<(\/)?({_PAIRED_TAG_NAMES})>", re.IGNORECASE)
+_PHONEME_SPAN = re.compile(
+    re.escape(DRAMA3_PHONEME_START) + r".*?" + re.escape(DRAMA3_PHONEME_END),
+    re.DOTALL,
+)
 _SENTENCE_ENDINGS = ".!?…。！？؟"
 _SENTENCE_CLOSERS = "'\"’”»)]}」』"
 
@@ -169,10 +234,12 @@ def _safe_unicode_boundary(text: str, position: int) -> bool:
 def _chunk_boundaries(text: str) -> tuple[list[int], list[int], list[int]]:
     """Return sentence/line, whitespace, and grapheme-safe split offsets."""
     atoms = []
-    for pattern in (SPEAKER_LINE_PATTERN, _SQUARE_CUE, _DRAMA3_TAG_TOKEN):
+    for pattern in (SPEAKER_LINE_PATTERN, _SQUARE_CUE, _DRAMA3_TAG_TOKEN, _PHONEME_SPAN):
         atoms.extend(pattern.finditer(text))
     atoms.sort(key=lambda match: (match.start(), -match.end()))
-    atom_at = {match.start(): match.end() for match in atoms}
+    atom_at = {}
+    for match in atoms:
+        atom_at[match.start()] = max(atom_at.get(match.start(), match.end()), match.end())
     natural, whitespace, fallback = set(), set(), set()
     index = 0
     while index < len(text):
@@ -238,28 +305,35 @@ def _speaker_before(text: str, offset: int) -> int:
     return max(events, default=(-1, 0))[1]
 
 
-def _opening_cues_before_line_offset(text: str, offset: int) -> list[str]:
-    line_start = text.rfind("\n", 0, offset) + 1
-    prefix = text[line_start:offset]
-    match = SPEAKER_LINE_PATTERN.match(prefix)
-    cursor = match.end() if match else 0
-    if match is None:
-        native_speaker = SPEAKER_TAG_PATTERN.match(prefix.lstrip(UNICODE_WHITE_SPACE))
-        if native_speaker:
-            leading = len(prefix) - len(prefix.lstrip(UNICODE_WHITE_SPACE))
-            cursor = leading + native_speaker.end()
-    cues = []
-    while cursor < len(prefix) and prefix[cursor].isspace():
-        cursor += 1
-    while cursor < len(prefix) and prefix[cursor] == "[":
-        close = prefix.find("]", cursor + 1)
-        if close < 0:
-            break
-        cues.append(prefix[cursor:close + 1])
-        cursor = close + 1
-        while cursor < len(prefix) and prefix[cursor].isspace():
-            cursor += 1
-    return cues
+_ONE_OFF_CUE = re.compile(
+    r"\b(?:pause|silence|sighs?|laughs?|chuckles?|giggles?|gasps?|"
+    r"sobs?|coughs?|sneezes?|sniffs?|groans?|grunts?|screams?|yells?|"
+    r"footsteps?|knocks?|door\s+(?:opens?|closes?)|phone\s+rings?|"
+    r"bell\s+rings?|alarms?|crashes?|applause)\b",
+    re.IGNORECASE,
+)
+
+
+def _active_cues_before(text: str, offset: int) -> list[str]:
+    """Carry the most recent direction for this speaker, but not a one-off event."""
+    speaker_events = [
+        (match.start(), match.end())
+        for match in SPEAKER_LINE_PATTERN.finditer(text, 0, offset)
+        if match.end() <= offset
+    ]
+    speaker_events.extend(
+        (match.start(), match.end())
+        for match in SPEAKER_TAG_PATTERN.finditer(text, 0, offset)
+        if match.end() <= offset
+    )
+    scope_start = max(speaker_events, default=(-1, 0))[1]
+    latest = None
+    for match in _SQUARE_CUE.finditer(text, scope_start, offset):
+        cue = match.group(0)
+        if _ONE_OFF_CUE.search(cue):
+            continue
+        latest = cue
+    return [latest] if latest else []
 
 
 def _active_paired_tags(text: str, offset: int) -> list[str]:
@@ -267,10 +341,8 @@ def _active_paired_tags(text: str, offset: int) -> list[str]:
     for match in _PAIRED_TAG_TOKEN.finditer(text, 0, offset):
         tag = match.group(2).lower()
         if match.group(1):
-            for index in range(len(active) - 1, -1, -1):
-                if active[index] == tag:
-                    del active[index]
-                    break
+            if active and active[-1] == tag:
+                active.pop()
         else:
             active.append(tag)
     return active
@@ -362,15 +434,17 @@ def drama3_text_chunks(
             # The first unlabelled turn defaults to Speaker 1; later chunks
             # carry the most recent explicit speaker across the cut.
             prefix += f"<|speaker:{_speaker_before(text, start)}|> "
-        if start > 0:
-            prefix += " ".join(_opening_cues_before_line_offset(text, start))
+        if start > 0 and not has_speaker:
+            prefix += " ".join(_active_cues_before(text, start))
             if prefix and not prefix.endswith(" "):
                 prefix += " "
         active_at_start = _active_paired_tags(text, start)
         active_at_end = _active_paired_tags(text, end)
         prefix += "".join(f"<{tag}>" for tag in active_at_start)
         suffix = "".join(f"</{tag}>" for tag in reversed(active_at_end))
-        prompt_text = speaker_lines_to_tags(prefix + source + suffix)
+        # Convert the source's line-leading speaker labels before adding
+        # conditioning tags, which could otherwise hide a label from the regex.
+        prompt_text = prefix + speaker_lines_to_tags(source) + suffix
         chunks.append(
             Drama3TextChunk(
                 index=index,

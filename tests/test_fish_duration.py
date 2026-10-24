@@ -33,8 +33,12 @@ sys.modules["models.TTS"] = tts_package
 models.TTS = tts_package
 
 from models.TTS.fish_audio import pipeline as fish_pipeline_module
-from models.TTS.fish_audio.duration import duration_frame_budget, script_speech_units
-from models.TTS.fish_audio.fish_audio_handler import family_handler
+from models.TTS.fish_audio.duration import (
+    DRAMA3_PAIRED_TAGS,
+    duration_frame_budget,
+    script_speech_units,
+)
+from models.TTS.fish_audio.fish_audio_handler import DIALOGUE_HISTORY_SECONDS, family_handler
 from models.TTS.fish_audio.pipeline import FishAudioPipeline
 
 
@@ -46,6 +50,12 @@ class FishDurationBudgetTests(unittest.TestCase):
         script = "Speaker 1: [calm] Hello <whisper>你好🙂!</whisper>\n<|speaker:1|> こんにちは。"
 
         self.assertEqual(script_speech_units(script), 15)
+
+    def test_estimator_ignores_every_supported_tag_and_phoneme_markers_but_counts_phones(self):
+        tagged = " ".join(f"<{tag}>x</{tag}>" for tag in DRAMA3_PAIRED_TAGS)
+        script = f"{tagged} <|phoneme_start|>K W IY1 N<|phoneme_end|>"
+
+        self.assertEqual(script_speech_units(script), len(DRAMA3_PAIRED_TAGS) + len("KWIY1N"))
 
     def test_auto_budget_uses_the_documented_formula_and_caps_at_one_hour(self):
         short = duration_frame_budget(0, "hello", self.sample_rate, self.frame_length)
@@ -83,6 +93,9 @@ class FishDurationBudgetTests(unittest.TestCase):
         self.assertTrue(model_def["speech_longform"])
         self.assertEqual(model_def["audio_segment_max_seconds"], 120)
         self.assertEqual(defaults["duration_seconds"], 0)
+        custom_settings = {setting["id"]: setting["default"] for setting in model_def["custom_settings"]}
+        self.assertEqual(DIALOGUE_HISTORY_SECONDS["default"], 60)
+        self.assertEqual(custom_settings["dialogue_history_seconds"], 60)
         self.assertEqual(
             inspect.signature(FishAudioPipeline.generate).parameters["duration_seconds"].default,
             0,

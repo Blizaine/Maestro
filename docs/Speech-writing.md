@@ -8,20 +8,33 @@ format rules. They go to the writing LLM, and are not prepended to the spoken
 script or used as a Fish voice reference.
 The preferences are remembered in this browser and retained in output settings.
 
-**Draft length (minutes)** is an approximate writing target, separate from the
-speech generator's maximum duration. Set it to 0 to follow the brief. You can
-also ask for a ten-minute story, a twelve-minute dialogue, or a word count in
-the prompt. An unqualified “long story” requests a bounded ten-minute draft;
-explicit short or sized requests take precedence. The writer estimates about
-130 words per minute, so actual audio duration varies with language, voice,
-pauses and delivery.
+**Write** uses the selected speech duration as its approximate draft target by
+default. For example, selecting 20 minutes requests about 2,600 spoken words.
+The writer estimates 130 words per minute; actual audio duration varies with
+language, voice, pauses and delivery. For audio generation, that same duration
+remains a maximum, so the output can finish earlier.
+
+An explicit length in the brief takes precedence: a ten-minute story, a
+twelve-minute dialogue, a word count, or an explicit short/brief request.
+**Draft length override (minutes)** in Speech writer takes highest priority
+when positive; leave it at 0 to use the brief or selected speech duration.
+With **Auto** speech length, the writer follows the brief, and an unqualified
+“long story” requests a bounded ten-minute draft. There is no fixed 600-word
+or 3,000-character limit on the assembled draft.
 
 Use **Write** to draft a monologue or dialogue. Long requests are planned and
 written in sections with a bounded continuity context, then returned as one
 editable script. The current limit is an approximate sixty-minute draft and
-thirty model calls. Sections that reach the model's answer limit get a bounded
-continuation. Empty, short or still-truncated drafts carry review warnings;
-the raw drafts remain in enhancement history. Review the complete script and
+thirty model calls. Word estimates exclude performance cues and speaker labels.
+Sections that reach the model's answer limit get a bounded continuation. A
+section that stops far below its word target can also receive a bounded expansion;
+a repeated section gets a focused repair instead of counting as new story.
+Previously generated text is continuity context, not new verbatim source text.
+Empty, short, repeated or still-truncated drafts carry review warnings when the
+bounded recovery cannot resolve them; raw drafts remain in enhancement history.
+Substantially overlong drafts also show a warning: a fixed synthesis maximum
+could stop before the whole script is spoken. Maestro retains the text for review.
+Review the complete script and
 speaker assignments before generating audio. Writing does not start synthesis.
 
 Speech cleanup preserves repeated phrases and refrains instead of applying the
@@ -52,10 +65,16 @@ Draft with `POST /api/v1/llm/enhance-prompt`:
   "prompt": "Write a dialogue about two lighthouse keepers discovering a letter.",
   "tts_enhance_mode": "dialogue",
   "tts_voice_count": 2,
+  "duration_seconds": 1200,
   "tts_writer_instructions": "Warm, witty characters and a satisfying ending.",
   "tts_target_minutes": 12
 }
 ```
+
+For drafting, `duration_seconds` supplies the default target when the brief has
+no explicit size and `tts_target_minutes` is 0; a positive `tts_target_minutes`
+overrides both. Auto duration (0) follows the brief. The example uses the
+explicit twelve-minute writer override rather than its twenty-minute clip.
 
 The response includes `enhanced`, `warnings` and the saved draft history ID.
 Submit the reviewed script through `POST /api/v1/generate` with

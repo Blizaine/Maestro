@@ -72,6 +72,7 @@ fs.mkdirSync(output,{recursive:true});
       for(const mode of ['monologue','dialogue_fast']){
         await page.evaluate(mode=>window.store.getState().enhancePrompt(mode),mode);
         assert.equal(drafts.at(-1).tts_target_minutes,12);
+        assert.equal(drafts.at(-1).duration_seconds,0,'Auto duration reaches the writer without a guessed target');
         assert.equal(drafts.at(-1).tts_writer_instructions,'Warm, wry narrator; concise dialogue with distinct personalities.');
         assert.ok(!drafts.at(-1).prompt.includes('Warm, wry'),'writing instructions are separate from spoken brief');
       }
@@ -85,10 +86,27 @@ fs.mkdirSync(output,{recursive:true});
       const dialog=page.getByRole('dialog',{name:'Speech length'});
       await dialog.getByRole('button',{name:'Maximum length',exact:true}).click();
       await dialog.getByRole('button',{name:'20m',exact:true}).click();
+      await page.evaluate(()=>window.store.getState().enhancePrompt('monologue'));
+      assert.equal(drafts.at(-1).duration_seconds,1200,'selected clip duration reaches Write');
+      assert.equal(drafts.at(-1).tts_target_minutes,12,'explicit writer override remains independent');
       await page.evaluate(()=>window.store.getState().startGeneration('queue'));
       assert.equal(jobs.at(-1).duration_seconds,1200,'long manual maximum reaches generation');
       assert.equal(jobs.at(-1)._speech_writer_target_minutes,12,'writer preferences saved with output settings');
       await dialog.getByRole('button',{name:'Close Speech length',exact:true}).click();
+
+      await target.fill('0');
+      await page.evaluate(()=>{
+        window.store.getState().setParam('prompt','Tell a story about a lighthouse.');
+        // A restored/stale parameter must not replace the currently visible20m.
+        window.store.setState(s=>({params:{...s.params,duration_seconds:0}}));
+      });
+      await page.evaluate(()=>window.store.getState().enhancePrompt('monologue'));
+      assert.equal(drafts.at(-1).duration_seconds,1200,'Write follows the visible duration');
+      assert.equal(drafts.at(-1).tts_target_minutes,0,'zero keeps clip duration as the default');
+      await page.evaluate(()=>window.store.getState().setDurationSeconds(0));
+      await page.evaluate(()=>window.store.getState().enhancePrompt('monologue'));
+      assert.equal(drafts.at(-1).duration_seconds,0,'Auto follows the brief again');
+      assert.equal(drafts.at(-1).tts_target_minutes,0);
 
       await page.evaluate(async()=>{
         const s=window.store.getState();
@@ -104,13 +122,14 @@ fs.mkdirSync(output,{recursive:true});
       await page.evaluate(()=>window.store.getState().enhancePrompt());
       assert.ok(!('tts_writer_instructions' in drafts.at(-1)));
       assert.ok(!('tts_target_minutes' in drafts.at(-1)));
+      assert.ok(!('duration_seconds' in drafts.at(-1)),'speech duration does not leak into music writing');
       await page.evaluate(()=>window.store.getState().startGeneration('queue'));
       assert.ok(!('_speech_writer_instructions' in jobs.at(-1)),'speech preferences excluded from music output');
       assert.deepEqual(errors,[]);
       await page.evaluate(()=>window.store.setState(s=>({audioSubMode:'speech',modelOptions:{...s.modelOptions,speech_writer_controls:false}})));
       assert.equal(await instructions.count(),0,'old backend cannot silently ignore visible controls');
       await page.close();
-      console.log('Speech writer '+width+'px: saved style/target, writer-only request, refresh/sidecar restoration, long maximum and music isolation passed');
+      console.log('Speech writer '+width+'px: clip-duration default, Auto/override, saved style, refresh/sidecar restoration and music isolation passed');
     }
   }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

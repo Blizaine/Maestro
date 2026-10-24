@@ -33,8 +33,12 @@ models.TTS = tts_package
 from models.TTS.fish_audio import pipeline as fish_pipeline_module
 from models.TTS.fish_audio.backbone import GenerationCancelled
 from models.TTS.fish_audio.duration import (
+    DRAMA3_PAIRED_TAGS,
+    DRAMA3_PHONEME_END,
+    DRAMA3_PHONEME_START,
     LONGFORM_CHUNK_MAX_SECONDS,
     duration_frame_budget,
+    script_speech_units,
 )
 from models.TTS.fish_audio.pipeline import (
     CODEC_CONTEXT_FRAMES,
@@ -42,8 +46,11 @@ from models.TTS.fish_audio.pipeline import (
     FishAudioPipeline,
 )
 from models.TTS.fish_audio.prompt import (
+    build_drama3_prompt,
     DRAMA3_GENERATION_START,
     DRAMA3_MESSAGE_END,
+    PAIRED_TAGS,
+    check_paired_tags,
     drama3_text_chunks,
     fit_history_to_prompt_rows,
     with_speaker_tag,
@@ -53,6 +60,19 @@ from models.TTS.fish_audio.prompt import (
 class FakeTokenizer:
     def encode(self, text):
         return types.SimpleNamespace(ids=list(range(len(text))))
+
+
+class FakeDramaTokenizer(FakeTokenizer):
+    _tokens = {
+        "<|semantic:0|>": 100,
+        "<|semantic:7|>": 101,
+        "<|im_end|>": 102,
+        DRAMA3_PHONEME_START: 103,
+        DRAMA3_PHONEME_END: 104,
+    }
+
+    def token_to_id(self, token):
+        return self._tokens.get(token)
 
 
 class FishLongformChunkTests(unittest.TestCase):
@@ -81,6 +101,98 @@ class FishLongformChunkTests(unittest.TestCase):
         for chunk in chunks:
             self.assertEqual(chunk.prompt_text.count("<whisper>"), chunk.prompt_text.count("</whisper>"))
         self.assertTrue(any(chunk.source_start > 0 and "<whisper>" in chunk.prompt_text for chunk in chunks))
+
+    def test_all_documented_paired_tags_validate_and_remain_balanced_in_each_chunk(self):
+        opening = "".join(f"<{tag}>" for tag in PAIRED_TAGS)
+        closing = "".join(f"</{tag}>" for tag in reversed(PAIRED_TAGS))
+        script = f"{opening}" + " ".join(["Choose each word carefully."] * 8) + closing
+
+        check_paired_tags(script, "script", tokenizer=FakeDramaTokenizer())
+        chunks = drama3_text_chunks(script, max_speech_units=30)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("".join(chunk.source_text for chunk in chunks), script)
+        for chunk in chunks:
+            check_paired_tags(chunk.prompt_text, "chunk")
+            for tag in DRAMA3_PAIRED_TAGS:
+                self.assertEqual(
+                    chunk.prompt_text.count(f"<{tag}>"),
+                    chunk.prompt_text.count(f"</{tag}>"),
+                )
+
+    def test_paired_tag_errors_cover_crossing_unclosed_or_unknown_markup(self):
+        for script in (
+            "<whisper><slow>crossed</whisper></slow>",
+            "<soft>missing close",
+            "</fast>orphan close",
+            "<bold>unknown</bold>",
+        ):
+            with self.subTest(script=script), self.assertRaises(ValueError):
+                check_paired_tags(script, "script")
+
+    def test_phoneme_spans_are_lossless_atomic_counted_and_one_line(self):
+        pronunciation = f"{DRAMA3_PHONEME_START}K W IY1 N{DRAMA3_PHONEME_END}"
+        script = f"Speaker 1: Say {pronunciation} clearly, then repeat {pronunciation} once."
+        check_paired_tags(script, "script", tokenizer=FakeDramaTokenizer())
+
+        chunks = drama3_text_chunks(script, max_speech_units=8)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("".join(chunk.source_text for chunk in chunks), script)
+        self.assertEqual(sum(chunk.speech_units for chunk in chunks), script_speech_units(script))
+        self.assertEqual(
+            sum(chunk.source_text.count(DRAMA3_PHONEME_START) for chunk in chunks),
+            2,
+        )
+        for chunk in chunks:
+            self.assertEqual(
+                chunk.source_text.count(DRAMA3_PHONEME_START),
+                chunk.source_text.count(DRAMA3_PHONEME_END),
+            )
+
+        multiline = f"{DRAMA3_PHONEME_START}K W\nIY1 N{DRAMA3_PHONEME_END}"
+        with self.assertRaisesRegex(ValueError, "one line"):
+            check_paired_tags(multiline, "script", tokenizer=FakeDramaTokenizer())
+        with self.assertRaisesRegex(ValueError, "not available in this local tokenizer"):
+            check_paired_tags(
+                f"{DRAMA3_PHONEME_START}K W IY1 N{DRAMA3_PHONEME_END}",
+                "script",
+                tokenizer=FakeTokenizer(),
+            )
+
+    def test_continuing_midline_cue_carries_but_one_off_sound_does_not(self):
+        event = "[laughs]"
+        script = (
+            "Speaker 1: [low register, steady accent] First sentence ends here. "
+            "[nervous but controlled] The next sentence changes the acting. "
+            f"{event} "
+            + " ".join(["The story continues without a new direction."] * 8)
+        )
+
+        chunks = drama3_text_chunks(script, max_speech_units=20)
+
+        after_event = [
+            chunk for chunk in chunks
+            if chunk.source_start >= script.index(event) + len(event)
+        ]
+        self.assertTrue(after_event)
+        self.assertTrue(all("[nervous but controlled]" in chunk.prompt_text for chunk in after_event))
+        self.assertTrue(all(event not in chunk.prompt_text for chunk in after_event))
+
+    def test_new_speaker_at_cut_keeps_its_label_and_does_not_inherit_other_voice_cue(self):
+        script = (
+            "Speaker 1: [tense] The first voice finishes its turn.\n"
+            "Speaker 2: [calm] A different voice answers the question."
+        )
+
+        chunks = drama3_text_chunks(script, lines_per_part=1, max_speech_units=1000)
+
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual("".join(chunk.source_text for chunk in chunks), script)
+        self.assertTrue(chunks[1].prompt_text.startswith("<|speaker:1|>"))
+        self.assertIn("[calm]", chunks[1].prompt_text)
+        self.assertNotIn("[tense]", chunks[1].prompt_text)
+        self.assertNotIn("Speaker 2:", chunks[1].prompt_text)
 
     def test_a_long_single_paragraph_splits_on_sentence_boundaries(self):
         script = " ".join(["The lantern flickers before the door opens."] * 12)
@@ -156,6 +268,38 @@ class FishLongformChunkTests(unittest.TestCase):
         self.assertEqual(fitted[0][0], "recent chunk")
         self.assertIs(fitted[0][1], recent)
 
+    def test_history_metadata_reports_whole_turns_after_fitting_and_actual_prompt_rows(self):
+        pipeline = object.__new__(FishAudioPipeline)
+        pipeline.sample_rate = 1000
+        pipeline.frame_length = 100
+        pipeline.tokenizer = FakeDramaTokenizer()
+        pipeline.config = types.SimpleNamespace(
+            audio_decoder=types.SimpleNamespace(num_codebooks=2, vocab_size=8),
+            semantic_start_token_id=100,
+            semantic_end_token_id=101,
+            eos_token_id=102,
+        )
+        recent = ("recent complete turn", torch.ones((2, 450), dtype=torch.long))
+        anchor = ("first chunk anchor", torch.full((2, 500), 2, dtype=torch.long))
+
+        base = build_drama3_prompt("current", pipeline.tokenizer, pipeline.config)
+        prompt = pipeline._build_bounded_prompt("current", [], [], [recent], 60, anchor)
+        metadata = pipeline._last_prompt_history_context
+
+        self.assertEqual(metadata["recent_turn_count"], 1)
+        self.assertEqual(metadata["recent_audio_seconds"], 45.0)
+        self.assertTrue(metadata["anchor_included"])
+        self.assertEqual(metadata["anchor_audio_seconds"], 50.0)
+        self.assertEqual(metadata["total_audio_seconds"], 95.0)
+        self.assertEqual(metadata["history_prompt_rows"], len(prompt) - len(base))
+        self.assertGreater(metadata["history_prompt_rows"], 950)
+
+        pipeline._build_bounded_prompt("current", [], [], [recent], 20, anchor)
+        self.assertEqual(pipeline._last_prompt_history_context["recent_turn_count"], 0)
+        self.assertTrue(pipeline._last_prompt_history_context["anchor_included"])
+        pipeline._build_bounded_prompt("current", [], [], [recent], 0, anchor)
+        self.assertEqual(pipeline._last_prompt_history_context["total_turn_count"], 0)
+
 
 def unicodedata_mark(character):
     return unicodedata.category(character).startswith("M")
@@ -203,6 +347,42 @@ class FishLongformPipelineTests(unittest.TestCase):
                 duration_seconds=duration_seconds,
                 **kwargs,
             )
+
+    def test_history_defaults_to_sixty_seconds_and_preserves_saved_overrides_and_rng_metadata(self):
+        expected_values = ((None, 60), (20, 20), (0, 0))
+        for configured, expected in expected_values:
+            with self.subTest(configured=configured):
+                seen_history_windows = []
+
+                def prompt_builder(_text, _transcripts, _references, _turns, history_seconds, _anchor):
+                    seen_history_windows.append(history_seconds)
+                    return torch.zeros((12, 2), dtype=torch.long)
+
+                pipeline = self.make_pipeline(prompt_builder=prompt_builder)
+                settings = {"dialogue_cut_lines": 1}
+                if configured is not None:
+                    settings["dialogue_history_seconds"] = configured
+                with patch.object(fish_pipeline_module.torch, "manual_seed") as manual_seed:
+                    result = self.generate(
+                        pipeline,
+                        "Speaker 1: First line.\nSpeaker 2: Second line.",
+                        duration_seconds=60,
+                        custom_settings=settings,
+                        seed=42,
+                    )
+
+                report = result["speech_generation"]
+                self.assertEqual(seen_history_windows, [expected, expected])
+                self.assertEqual(report["history_recent_max_seconds"], expected)
+                manual_seed.assert_called_once_with(42)
+                self.assertEqual(
+                    report["rng"],
+                    {
+                        "strategy": "torch_manual_seed_once_per_job",
+                        "seed": 42,
+                        "reseed_per_chunk": False,
+                    },
+                )
 
     def test_eos_chunks_assemble_one_audio_tensor_and_keep_codec_context_bounded(self):
         script = " ".join(["The lantern flickers before the old door opens."] * 100)

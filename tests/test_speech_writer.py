@@ -29,13 +29,27 @@ class FakeGenerator:
     def __init__(self, replies):
         self.replies = iter(replies)
         self.calls = []
+        self.outputs = []
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
         reply = next(self.replies)
+        self.outputs.append(reply)
         if isinstance(reply, Exception):
             raise reply
         return reply
+
+
+def spoken_fixture(topic, word_count, *, offset=0):
+    """Create distinct, countable speech without invoking a model."""
+    tokens = []
+    detail = offset
+    while len(tokens) < word_count:
+        tokens.extend(
+            f"{topic} remembers the old street while detail{detail} changes everything.".split()
+        )
+        detail += 1
+    return "[steady] Speaker 1{voice=sample}: " + " ".join(tokens[:word_count])
 
 
 class SpeechTargetTests(unittest.TestCase):
@@ -141,6 +155,130 @@ class SpeechTargetTests(unittest.TestCase):
         )
         self.assertEqual(narrative_time.words, 0)
 
+    def test_qualitative_long_request_accepts_bounded_adjective_phrases(self):
+        prompts = [
+            "tell a long, interesting and spooky story for halloween. Be creative.",
+            "Write a long and suspenseful story about two sisters.",
+            "Write a long story about another story.",
+            "Write a long ghost story.",
+            "Write a long Halloween story.",
+            "Write a long science fiction story.",
+            "Write an extended—carefully paced and character-focused—dialogue.",
+            "Write a full-length, richly detailed monologue.",
+        ]
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                target = speech_writer.resolve_speech_target(prompt, 0)
+                self.assertEqual(target.minutes, 10)
+                self.assertEqual(target.words, 1_300)
+                self.assertEqual(target.source, "prompt_qualitative_long")
+
+    def test_qualitative_long_request_rejects_noun_phrases_before_story(self):
+        prompts = [
+            "Tell me the long and flowing hair story of an old portrait.",
+            "Tell me the long, empty hallway story of its caretaker.",
+            "Tell me the long and fulfilling life story of a lighthouse keeper.",
+        ]
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                self.assertEqual(speech_writer.resolve_speech_target(prompt, 0).words, 0)
+
+    def test_short_and_explicit_size_controls_still_override_qualitative_long(self):
+        prompt = "Tell a long, interesting and spooky story"
+
+        explicit_short = speech_writer.resolve_speech_target(
+            f"{prompt}, but keep it brief.", 0
+        )
+        self.assertEqual(explicit_short.words, 0)
+
+        explicit_minutes = speech_writer.resolve_speech_target(
+            f"{prompt} for about 2 minutes.", 0
+        )
+        self.assertEqual(explicit_minutes.minutes, 2)
+        self.assertEqual(explicit_minutes.source, "prompt_minutes")
+
+        explicit_words = speech_writer.resolve_speech_target(
+            f"Write exactly 500 words: {prompt}.", 0
+        )
+        self.assertEqual(explicit_words.words, 500)
+        self.assertEqual(explicit_words.source, "prompt_words")
+
+        configured_minutes = speech_writer.resolve_speech_target(prompt, 2)
+        self.assertEqual(configured_minutes.minutes, 2)
+        self.assertEqual(configured_minutes.source, "setting")
+
+    def test_clip_duration_fills_default_after_explicit_size_and_short_requests(self):
+        clip = speech_writer.resolve_speech_target(
+            "Two friends prepare a meal together.",
+            0,
+            clip_duration_seconds=1_200,
+        )
+        self.assertEqual(clip.minutes, 20)
+        self.assertEqual(clip.words, 2_600)
+        self.assertEqual(clip.source, "clip_duration")
+
+        qualitative_long = speech_writer.resolve_speech_target(
+            "Write a long, interesting and spooky story.",
+            0,
+            clip_duration_seconds=1_200,
+        )
+        self.assertEqual(qualitative_long.minutes, 20)
+        self.assertEqual(qualitative_long.words, 2_600)
+        self.assertEqual(qualitative_long.source, "clip_duration")
+
+        explicit_setting = speech_writer.resolve_speech_target(
+            "Write exactly 500 words.",
+            12,
+            clip_duration_seconds=1_200,
+        )
+        self.assertEqual(explicit_setting.minutes, 12)
+        self.assertEqual(explicit_setting.words, 1_560)
+        self.assertEqual(explicit_setting.source, "setting")
+
+        explicit_prompt = speech_writer.resolve_speech_target(
+            "Write exactly 500 words.",
+            0,
+            clip_duration_seconds=1_200,
+        )
+        self.assertEqual(explicit_prompt.words, 500)
+        self.assertEqual(explicit_prompt.source, "prompt_words")
+
+        explicit_short = speech_writer.resolve_speech_target(
+            "Keep this speech brief.",
+            0,
+            clip_duration_seconds=1_200,
+        )
+        self.assertEqual(explicit_short, speech_writer.SpeechTarget())
+
+    def test_invalid_clip_durations_do_not_create_a_target(self):
+        for duration in (None, 0, -1, float("nan"), float("inf"), "invalid", True):
+            with self.subTest(duration=duration):
+                target = speech_writer.resolve_speech_target(
+                    "Two friends prepare a meal together.",
+                    0,
+                    clip_duration_seconds=duration,
+                )
+                self.assertEqual(target, speech_writer.SpeechTarget())
+
+        qualitative_long = speech_writer.resolve_speech_target(
+            "Write a long story about two friends.",
+            0,
+            clip_duration_seconds=float("nan"),
+        )
+        self.assertEqual(qualitative_long.minutes, 10)
+        self.assertEqual(qualitative_long.source, "prompt_qualitative_long")
+
+    def test_clip_duration_uses_the_existing_sixty_minute_cap(self):
+        target = speech_writer.resolve_speech_target(
+            "A generic spoken script.",
+            0,
+            clip_duration_seconds=7_200,
+        )
+        self.assertEqual(target.minutes, 60)
+        self.assertEqual(target.words, 7_800)
+        self.assertEqual(target.source, "clip_duration")
+        self.assertTrue(target.capped)
+
     def test_writer_instructions_are_bounded(self):
         shortened, did_truncate = speech_writer.bound_writer_instructions("x" * 8_100)
         self.assertEqual(len(shortened), 8_000)
@@ -152,16 +290,186 @@ class LongFormGenerationTests(unittest.TestCase):
         self.target = speech_writer.resolve_speech_target("", 10)
         self.system = "Native guide: Speaker 1: / Speaker 2: with model tags."
 
-    def run_writer(self, generator, target=None, truncated=None, max_new_tokens=2_048):
-        return speech_writer.generate_long_form_script(
-            generate=generator,
-            prompt="Two sisters discover a letter in their bakery.",
-            system_prompt=self.system,
-            target=target or self.target,
-            max_new_tokens=max_new_tokens,
-            temperature=0.6,
-            is_truncated=truncated,
+    def run_writer(
+        self, generator, target=None, truncated=None, max_new_tokens=2_048,
+        *, coverage_repairs=False,
+    ):
+        # Most legacy fixtures are short on purpose and cover call sequencing.
+        # Dedicated coverage tests below exercise the production repair threshold.
+        minimum_coverage = speech_writer.MIN_SECTION_COVERAGE if coverage_repairs else 0.0
+        with patch.object(speech_writer, "MIN_SECTION_COVERAGE", minimum_coverage):
+            return speech_writer.generate_long_form_script(
+                generate=generator,
+                prompt="Two sisters discover a letter in their bakery.",
+                system_prompt=self.system,
+                target=target or self.target,
+                max_new_tokens=max_new_tokens,
+                temperature=0.6,
+                is_truncated=truncated,
+            )
+
+    def test_spoken_word_count_excludes_directions_tags_and_speaker_labels(self):
+        script = (
+            "[slowly, gently] Speaker 1{voice=sample}: Wait <whisper>for me</whisper>, "
+            "Mara! [sighing] Old friend."
         )
+
+        self.assertEqual(speech_writer._spoken_word_count(script), 6)
+
+    def test_duplicate_detector_ignores_cue_changes_and_short_refrains(self):
+        first = spoken_fixture("Mara", 600)
+        duplicate = first.replace("[steady]", "[urgent]").replace(
+            "Speaker 1{voice=sample}:", "Speaker 2:"
+        )
+        refrain = "[insistent] Speaker 1: We go home. We go home. " * 30
+        mostly_new = spoken_fixture("Mara", 120) + " " + spoken_fixture(
+            "Len", 480, offset=500
+        )
+
+        self.assertTrue(speech_writer._has_substantial_duplicate(first, duplicate))
+        self.assertFalse(speech_writer._has_substantial_duplicate(refrain, refrain))
+        self.assertFalse(speech_writer._has_substantial_duplicate(first, mostly_new))
+
+    def test_duplicate_section_gets_one_focused_replacement_and_raw_draft_is_kept(self):
+        first = spoken_fixture("Mara", 600)
+        duplicate = first.replace("[steady]", "[tense]")
+        replacement = spoken_fixture("Len", 600)
+        generator = FakeGenerator([
+            "Plan: Mara leaves the bakery; Len helps her finish the repairs.",
+            first,
+            duplicate,
+            replacement,
+        ])
+        with enhancement_context({}, lambda: False):
+            result = self.run_writer(generator, coverage_repairs=True)
+            warnings = enhancement_warnings()
+
+        self.assertEqual(len(generator.calls), 4)
+        self.assertEqual(result, f"{first}\n{replacement}")
+        self.assertEqual(generator.outputs[2], duplicate)
+        self.assertIn(duplicate[-speech_writer.MAX_PRIOR_TEXT_CHARS:], generator.calls[3]["prompt"])
+        self.assertIn("already part of the script", generator.calls[2]["prompt"])
+        self.assertTrue(any("remains short" in warning for warning in warnings))
+
+    def test_finish_stop_short_final_section_gets_a_bounded_ending_expansion(self):
+        first = spoken_fixture("Mara", 600)
+        final_excerpt = spoken_fixture("Len", 100)
+        expansion = spoken_fixture("Len", 500, offset=20)
+        generator = FakeGenerator([
+            "Plan: The friends reopen the bakery together.",
+            first,
+            final_excerpt,
+            expansion,
+        ])
+        with enhancement_context({}, lambda: False):
+            result = self.run_writer(generator, coverage_repairs=True)
+            warnings = enhancement_warnings()
+
+        self.assertEqual(len(generator.calls), 4)
+        self.assertTrue(result.startswith(first))
+        self.assertIn(final_excerpt, result)
+        self.assertIn("coherent, satisfying ending", generator.calls[3]["prompt"])
+        self.assertIn("about 550 spoken words", generator.calls[3]["prompt"])
+        self.assertTrue(any("remains short" in warning for warning in warnings))
+
+    def test_cue_only_expansion_does_not_count_as_spoken_progress(self):
+        first = spoken_fixture("Mara", 600)
+        final_excerpt = spoken_fixture("Len", 100)
+        generator = FakeGenerator([
+            "Plan: The friends resolve their disagreement and reopen the bakery.",
+            first,
+            final_excerpt,
+            "[warmly]",
+        ])
+        with enhancement_context({}, lambda: False):
+            result = self.run_writer(generator, coverage_repairs=True)
+            warnings = enhancement_warnings()
+
+        self.assertEqual(result, f"{first}\n{final_excerpt}")
+        self.assertTrue(any("focused expansion made no distinct progress" in warning for warning in warnings))
+
+    def test_duplicate_repair_failure_retains_raw_section_and_warns(self):
+        first = spoken_fixture("Mara", 600)
+        duplicate = spoken_fixture("Mara", 600, offset=0)
+        generator = FakeGenerator([
+            "Plan: They leave the bakery together.",
+            first,
+            duplicate,
+            duplicate,
+        ])
+        with enhancement_context({}, lambda: False):
+            result = self.run_writer(generator, coverage_repairs=True)
+            warnings = enhancement_warnings()
+
+        self.assertEqual(result, f"{first}\n{duplicate}")
+        self.assertIn(duplicate, generator.outputs)
+        self.assertTrue(any("after one focused revision" in warning for warning in warnings))
+        self.assertTrue(any("distinct spoken words" in warning for warning in warnings))
+
+    def test_cue_only_duplicate_repair_cannot_replace_spoken_section(self):
+        first = spoken_fixture("Mara", 600)
+        duplicate = spoken_fixture("Mara", 600)
+        generator = FakeGenerator([
+            "Plan: They leave the bakery together.",
+            first,
+            duplicate,
+            "[urgent]",
+        ])
+        with enhancement_context({}, lambda: False):
+            result = self.run_writer(generator, coverage_repairs=True)
+            warnings = enhancement_warnings()
+
+        self.assertEqual(result, f"{first}\n{duplicate}")
+        self.assertNotIn("[urgent]", result)
+        self.assertTrue(any("still substantially repeats" in warning for warning in warnings))
+
+    def test_empty_sections_do_not_shift_duplicate_coverage_indexes(self):
+        first = spoken_fixture("Mara", 500)
+        duplicate = spoken_fixture("Mara", 500)
+        target = speech_writer.SpeechTarget(
+            minutes=2_000 / speech_writer.WORDS_PER_MINUTE,
+            words=2_000,
+            source="test",
+        )
+        generator = FakeGenerator([
+            "Plan: Mara leaves, returns, and reopens the bakery.",
+            first,
+            "",
+            duplicate,
+            duplicate,
+            "",
+        ])
+        with enhancement_context({}, lambda: False):
+            result = self.run_writer(
+                generator,
+                target=target,
+                coverage_repairs=True,
+            )
+            warnings = enhancement_warnings()
+
+        self.assertEqual(len(generator.calls), 6)
+        self.assertEqual(result, f"{first}\n{duplicate}")
+        self.assertTrue(any(
+            "approximately 500 distinct spoken words against a target of 2000" in warning
+            for warning in warnings
+        ))
+
+    def test_continuations_and_repairs_share_the_thirty_call_cap(self):
+        generator = FakeGenerator(["Plan: A long journey."] + ["Mara: The road continued."] * 100)
+        target = speech_writer.resolve_speech_target("Write a 60-minute story.", 0)
+
+        with enhancement_context({}, lambda: False):
+            result = self.run_writer(
+                generator,
+                target=target,
+                truncated=lambda: True,
+                coverage_repairs=True,
+            )
+            warnings = enhancement_warnings()
+
+        self.assertTrue(result)
+        self.assertEqual(len(generator.calls), speech_writer.MAX_GENERATION_CALLS)
+        self.assertTrue(any("30-call limit" in warning for warning in warnings))
 
     def test_plan_and_sections_keep_native_grammar_and_continuity(self):
         generator = FakeGenerator([
@@ -175,12 +483,32 @@ class LongFormGenerationTests(unittest.TestCase):
         self.assertIn("Ada: The letter", result)
         self.assertIn("tomorrow, we begin again", result)
         self.assertIn("Cast: Ada and Jo", generator.calls[1]["prompt"])
-        self.assertIn("Recent script context", generator.calls[2]["prompt"])
+        self.assertIn("Recent model-authored script context", generator.calls[2]["prompt"])
         self.assertIn("Ada: The letter was tucked", generator.calls[2]["prompt"])
         self.assertIn("model's required native TTS format", generator.calls[1]["prompt"])
-        self.assertTrue(all(call["system_prompt"] == self.system for call in generator.calls[1:]))
+        self.assertIn("LONG-FORM CONTEXT RULE", generator.calls[1]["system_prompt"])
+        self.assertIn("baseline register stable across sections", generator.calls[1]["system_prompt"])
+        self.assertIn("Let emotion, pace, emphasis, and intensity follow the meaning", generator.calls[1]["system_prompt"])
+        self.assertIn("Honor requests for plain", generator.calls[1]["system_prompt"])
+        self.assertNotIn("only when the user brief calls for a performance shift", generator.calls[1]["system_prompt"])
+        self.assertTrue(all(call["system_prompt"].startswith(self.system) for call in generator.calls[1:]))
         self.assertTrue(all(call["max_new_tokens"] <= 1_280 for call in generator.calls))
         self.assertIn("Develop its assigned beat fully rather than summarizing it", generator.calls[1]["prompt"])
+
+    def test_overlong_draft_warns_without_truncating_spoken_text(self):
+        first = " ".join(f"first{i}" for i in range(900))
+        second = " ".join(f"second{i}" for i in range(900))
+        generator = FakeGenerator(["Plan: departure, then return.", first, second])
+        with enhancement_context({}, lambda: False):
+            result = self.run_writer(generator, coverage_repairs=True)
+            warnings = enhancement_warnings()
+
+        self.assertEqual(result, first + "\n" + second)
+        self.assertEqual(len(generator.calls), 3)
+        self.assertTrue(any(
+            "approximately 1800 spoken words against a target of 1300" in warning
+            and "substantially longer" in warning for warning in warnings
+        ))
 
     def test_token_limited_section_gets_one_continuation_without_repeated_words(self):
         generator = FakeGenerator([
@@ -392,7 +720,8 @@ class EnhancePromptIntegrationTests(unittest.TestCase):
         writer.assert_called_once()
         self.assertEqual(writer.call_args.kwargs["max_new_tokens"], 2_048)
         self.assertNotIn("USER-REQUESTED WRITER STYLE", writer.call_args.kwargs["system_prompt"])
-        self.assertNotIn("CRITICAL SPEECH SCRIPT OUTPUT CONTRACT", writer.call_args.kwargs["system_prompt"])
+        self.assertIn("CRITICAL SPEECH SCRIPT OUTPUT CONTRACT", writer.call_args.kwargs["system_prompt"])
+        self.assertIn("Supported native performance controls belong in the script", writer.call_args.kwargs["system_prompt"])
 
     def test_target_only_control_bypasses_raw_enhancer_and_adds_size(self):
         with fake_tts_prompt_modules(), \
@@ -457,7 +786,8 @@ class EnhancePromptIntegrationTests(unittest.TestCase):
             "Uma: The map says the orchard used to touch the river.\nKit: Then we follow the old fence.",
             "Uma: We made it back before dark.\nKit: And brought home the story with us.",
         ]
-        with fake_tts_prompt_modules(), patch.object(llm_service, "_last_generation_metrics", {}), \
+        with fake_tts_prompt_modules(), patch.object(speech_writer, "MIN_SECTION_COVERAGE", 0.0), \
+                patch.object(llm_service, "_last_generation_metrics", {}), \
                 patch.object(llm_service, "generate", side_effect=replies) as writer:
             result = llm_service.enhance_prompt(
                 "Write a long dialogue about two friends finding an old map.",
@@ -476,18 +806,75 @@ class EnhancePromptIntegrationTests(unittest.TestCase):
         self.assertIn("Output only the requested spoken-script portion", writer.call_args_list[1].kwargs["system_prompt"])
         self.assertTrue(all(call.kwargs["max_new_tokens"] <= 1_280 for call in writer.call_args_list))
 
-    def test_other_enhancement_modes_ignore_speech_writer_controls(self):
-        with patch.object(llm_service, "generate", return_value="A clear video prompt.") as writer:
+    def test_modified_halloween_story_request_uses_bounded_long_form_path(self):
+        replies = [
+            "Plan: The narrator finds a lantern, hears a voice upstairs, and discovers why the house is haunted.",
+            "At dusk, I found a lantern waiting on the porch. A voice upstairs whispered my name before I reached the door.",
+            "By morning, the house stood silent beneath the autumn sky. I kept the lantern, knowing the voice would return.",
+        ]
+        with fake_tts_prompt_modules(), patch.object(speech_writer, "MIN_SECTION_COVERAGE", 0.0), \
+                patch.object(llm_service, "_last_generation_metrics", {}), \
+                patch.object(llm_service, "generate", side_effect=replies) as writer:
             result = llm_service.enhance_prompt(
-                "A quiet train station.",
-                mode="video",
-                tts_writer_instructions="This is audio-only guidance.",
-                tts_target_minutes=10,
+                "tell a long, interesting and spooky story for halloween. Be creative.",
+                mode="audio",
+                tts_enhance_mode="monologue",
+                max_new_tokens=2_048,
+                raw_enhancer_mode=True,
             )
 
-        self.assertEqual(result, "A clear video prompt.")
-        writer.assert_called_once()
-        self.assertNotIn("audio-only guidance", writer.call_args.kwargs["system_prompt"])
+        self.assertEqual(writer.call_count, 3)
+        self.assertIn("Approximate target: 1300 spoken words", writer.call_args_list[0].kwargs["prompt"])
+        self.assertIn("At dusk, I found a lantern", result)
+        self.assertIn("knowing the voice would return", result)
+        self.assertTrue(all(call.kwargs["max_new_tokens"] <= 1_280 for call in writer.call_args_list))
+
+    def test_selected_clip_duration_sets_generic_speech_plan_and_sections(self):
+        replies = [
+            "Plan: The neighbors prepare a meal and share what they learned.",
+            "Uma: We set the table before the rain arrived.",
+            "Kit: The soup warmed everyone while we traded stories.",
+            "Uma: By evening, the clouds had cleared above the garden.",
+            "Kit: We walked home together, already planning the next meal.",
+        ]
+        with fake_tts_prompt_modules(), patch.object(speech_writer, "MIN_SECTION_COVERAGE", 0.0), \
+                patch.object(llm_service, "_last_generation_metrics", {}), \
+                patch.object(llm_service, "generate", side_effect=replies) as writer:
+            result = llm_service.enhance_prompt(
+                "Two neighbors prepare a meal together.",
+                mode="audio",
+                duration_seconds=1_200,
+                tts_enhance_mode="monologue",
+                max_new_tokens=2_048,
+                raw_enhancer_mode=True,
+            )
+
+        self.assertIn("We set the table", result)
+        self.assertEqual(writer.call_count, 5)
+        self.assertIn("Approximate target: 2600 spoken words", writer.call_args_list[0].kwargs["prompt"])
+        self.assertIn("4 chronological section beats", writer.call_args_list[0].kwargs["prompt"])
+        self.assertTrue(all(call.kwargs["max_new_tokens"] <= 1_280 for call in writer.call_args_list))
+
+    def test_other_enhancement_modes_ignore_speech_writer_controls(self):
+        for mode in ("image", "video"):
+            with self.subTest(mode=mode), \
+                    patch.object(speech_writer, "resolve_speech_target", wraps=speech_writer.resolve_speech_target) as resolver, \
+                    patch.object(llm_service, "generate", return_value="A clear prompt.") as writer:
+                result = llm_service.enhance_prompt(
+                    "A quiet train station.",
+                    mode=mode,
+                    duration_seconds=1_200,
+                    tts_enhance_mode="monologue",
+                    tts_writer_instructions="This is audio-only guidance.",
+                    tts_target_minutes=10,
+                )
+
+            self.assertEqual(result, "A clear prompt.")
+            writer.assert_called_once()
+            resolver.assert_not_called()
+            self.assertNotIn("audio-only guidance", writer.call_args.kwargs["system_prompt"])
+            self.assertNotIn("spoken-script size", writer.call_args.kwargs["prompt"])
+            self.assertNotIn("Approximate target:", writer.call_args.kwargs["prompt"])
 
 
 if __name__ == "__main__":

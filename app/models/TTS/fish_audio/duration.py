@@ -2,9 +2,10 @@
 
 Auto is a generous generation ceiling, not a pacing target. It counts printable
 Unicode code points after removing speaker labels/tags, square-bracket cues,
-and paired delivery tags, then budgets ``min(3600, 8 + ceil(units / 4))``
-seconds. The text itself is never rewritten here; EOS and cancellation still
-end a take.
+all seven paired delivery tags, and phoneme delimiters (the pronunciation
+spelling itself remains counted), then budgets ``min(3600, 8 + ceil(units /
+4))`` seconds. The text itself is never rewritten here; EOS and cancellation
+still end a take.
 """
 
 from __future__ import annotations
@@ -27,7 +28,22 @@ _SPEAKER_LABELS = re.compile(
 )
 _SPEAKER_TAGS = re.compile(r"<\|speaker:\d+\|>")
 _DIRECTION_CUES = re.compile(r"\[[^\]]*\]", re.DOTALL)
-_DELIVERY_TAGS = re.compile(r"</?(?:whisper|stress|slow)>", re.IGNORECASE)
+DRAMA3_PAIRED_TAGS = (
+    "whisper",
+    "emphasis",
+    "soft",
+    "fast",
+    "slow",
+    "stress",
+    "forceful",
+)
+DRAMA3_PHONEME_START = "<|phoneme_start|>"
+DRAMA3_PHONEME_END = "<|phoneme_end|>"
+
+_DELIVERY_TAGS = re.compile(
+    rf"</?(?:{'|'.join(DRAMA3_PAIRED_TAGS)})>", re.IGNORECASE
+)
+_PHONEME_MARKERS = re.compile(r"<\|phoneme_(?:start|end)\|>")
 
 
 @dataclass(frozen=True)
@@ -44,6 +60,9 @@ def script_speech_units(script: str) -> int:
     analysis_text = _SPEAKER_TAGS.sub(" ", analysis_text)
     analysis_text = _DIRECTION_CUES.sub(" ", analysis_text)
     analysis_text = _DELIVERY_TAGS.sub(" ", analysis_text)
+    # Markers are syntax, while the pronunciation spelling between them is
+    # still speech input and must keep contributing to the generation budget.
+    analysis_text = _PHONEME_MARKERS.sub(" ", analysis_text)
     return sum(
         not character.isspace()
         and not unicodedata.category(character).startswith("C")

@@ -477,20 +477,73 @@ class FishAudioPipeline:
         base = build_drama3_prompt(
             text, self.tokenizer, self.config, transcripts, references, ()
         )
+        recent_history = []
         if history_seconds <= 0:
+            self._last_prompt_history_context = {
+                "recent_turn_count": 0,
+                "recent_audio_seconds": 0.0,
+                "anchor_included": False,
+                "anchor_audio_seconds": 0.0,
+                "total_turn_count": 0,
+                "total_audio_seconds": 0.0,
+                "history_prompt_rows": 0,
+            }
             return base
-        history = self._history(turns, history_seconds)
+        recent_history = self._history(turns, history_seconds)
+        history = list(recent_history)
         if anchor_turn is not None:
-            history.insert(0, anchor_turn)
+            if not any(codes is anchor_turn[1] for _, codes in recent_history):
+                history.insert(0, anchor_turn)
         if not history:
+            self._last_prompt_history_context = {
+                "recent_turn_count": 0,
+                "recent_audio_seconds": 0.0,
+                "anchor_included": False,
+                "anchor_audio_seconds": 0.0,
+                "total_turn_count": 0,
+                "total_audio_seconds": 0.0,
+                "history_prompt_rows": 0,
+            }
             return base
         available = DRAMA3_MAX_PROMPT_ROWS - len(base)
         bounded_history = fit_history_to_prompt_rows(history, self.tokenizer, available)
-        if not bounded_history:
-            return base
-        return build_drama3_prompt(
-            text, self.tokenizer, self.config, transcripts, references, bounded_history
+        anchor_included = bool(
+            anchor_turn is not None
+            and any(codes is anchor_turn[1] for _, codes in bounded_history)
         )
+        recent_kept = [
+            (turn_text, codes)
+            for turn_text, codes in bounded_history
+            if any(codes is recent_codes for _, recent_codes in recent_history)
+        ]
+        def audio_seconds(turns_to_measure):
+            frames = sum(int(codes.shape[-1]) for _, codes in turns_to_measure)
+            return frames * self.frame_length / self.sample_rate
+
+        anchor_seconds = (
+            int(anchor_turn[1].shape[-1]) * self.frame_length / self.sample_rate
+            if anchor_included
+            else 0.0
+        )
+        recent_seconds = audio_seconds(recent_kept)
+        total_seconds = audio_seconds(bounded_history)
+        bounded_prompt = (
+            build_drama3_prompt(
+                text, self.tokenizer, self.config, transcripts, references, bounded_history
+            )
+            if bounded_history
+            else base
+        )
+        self._last_prompt_history_context = {
+            "recent_turn_count": len(recent_kept),
+            "recent_audio_seconds": round(recent_seconds, 3),
+            "anchor_included": anchor_included,
+            "anchor_audio_seconds": round(anchor_seconds, 3),
+            "total_turn_count": len(bounded_history),
+            "total_audio_seconds": round(total_seconds, 3),
+            "history_prompt_rows": len(bounded_prompt) - len(base),
+        }
+        return bounded_prompt
 
     @torch.inference_mode()
     @generation_progress
@@ -521,7 +574,7 @@ class FishAudioPipeline:
                     "printable script units; 8s + ceil(units / 4), capped at 3600s)."
                 )
             validate_drama3_text(speaker_lines_to_tags(input_prompt), "Speech Script")
-            check_paired_tags(input_prompt, "Speech Script")
+            check_paired_tags(input_prompt, "Speech Script", tokenizer=self.tokenizer)
             lines_per_part = int(settings.get(DIALOGUE_CUT_LINES["id"], DIALOGUE_CUT_LINES["default"]))
             if not 0 <= lines_per_part <= DIALOGUE_CUT_LINES["max"]:
                 raise ValueError(f"{DIALOGUE_CUT_LINES['id']} must be between 0 and {DIALOGUE_CUT_LINES['max']}")
@@ -550,6 +603,15 @@ class FishAudioPipeline:
                     "cap_reasons": [],
                     "status": "pending",
                     "eos_completed": False,
+                    "history_context": {
+                        "recent_turn_count": 0,
+                        "recent_audio_seconds": 0.0,
+                        "anchor_included": False,
+                        "anchor_audio_seconds": 0.0,
+                        "total_turn_count": 0,
+                        "total_audio_seconds": 0.0,
+                        "history_prompt_rows": 0,
+                    },
                 }
                 for chunk in chunks
             ]
@@ -566,6 +628,12 @@ class FishAudioPipeline:
                 "covered_source_span": {"start": 0, "end": 0},
                 "history_recent_max_seconds": history_seconds,
                 "history_anchor_max_seconds": LONGFORM_CHUNK_MAX_SECONDS,
+                "history_policy": "complete_turns_fitted_to_prompt_rows",
+                "rng": {
+                    "strategy": "torch_manual_seed_once_per_job" if seed >= 0 else "ambient_torch_rng_state",
+                    "seed": int(seed) if seed >= 0 else None,
+                    "reseed_per_chunk": False,
+                },
                 "completion_basis": "Every completed chunk ended with EOS; generated speech is not verified word-by-word.",
                 "warnings": [],
                 "chunks": chunk_reports,
@@ -606,6 +674,15 @@ class FishAudioPipeline:
                         break
 
                     try:
+                        self._last_prompt_history_context = {
+                            "recent_turn_count": 0,
+                            "recent_audio_seconds": 0.0,
+                            "anchor_included": False,
+                            "anchor_audio_seconds": 0.0,
+                            "total_turn_count": 0,
+                            "total_audio_seconds": 0.0,
+                            "history_prompt_rows": 0,
+                        }
                         prompt = self._build_bounded_prompt(
                             chunk.prompt_text,
                             transcripts,
@@ -613,6 +690,9 @@ class FishAudioPipeline:
                             history_turns,
                             history_seconds,
                             history_anchor,
+                        )
+                        chunk_report["history_context"] = dict(
+                            self._last_prompt_history_context
                         )
                     except ValueError:
                         chunk_report["status"] = "context_incomplete"

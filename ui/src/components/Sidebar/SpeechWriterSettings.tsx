@@ -19,13 +19,13 @@ export function SpeechWriterSettings() {
     </label>
     <p className="text-[10px] leading-relaxed text-text-muted">Used by Write for speech and dialogue. These instructions guide the writer and are not spoken. The selected voice and speech model still control delivery.</p>
     <label className="flex items-center justify-between gap-3 text-xs text-text-secondary">
-      Draft length (minutes)
+      Draft length override (minutes)
       <input aria-label="Speech draft length in minutes" type="number" min={0} max={60} step={1} value={target}
         onChange={event => {
           const value = Number(event.target.value)
           if (Number.isFinite(value)) setParam('_speech_writer_target_minutes', Math.max(0, Math.min(60, value)))
         }} className="w-20 rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-text-primary" />
     </label>
-    <p className="text-[10px] leading-relaxed text-text-muted">0 follows your brief. For example, request a ten-minute story or dialogue. Long drafts are written in sections and returned as one editable script. Length is approximate; this does not set the audio generation limit.</p>
+    <p className="text-[10px] leading-relaxed text-text-muted">0 follows the selected speech duration unless your brief specifies a length. Auto follows your brief. A positive override takes priority. Long drafts are written in sections; spoken length is approximate.</p>
   </fieldset>
 }

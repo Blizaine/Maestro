@@ -3549,7 +3549,6 @@ def enhance_prompt(
     speech_writer_active = mode == "audio" and bool(tts_enhance_mode)
     speech_target = None
     speech_writer_instructions = ""
-    speech_writer_controls_active = False
     if speech_writer_active:
         from services.speech_writer import (
             bound_writer_instructions,
@@ -3557,12 +3556,13 @@ def enhance_prompt(
             resolve_speech_target,
         )
 
-        speech_target = resolve_speech_target(prompt, tts_target_minutes)
+        speech_target = resolve_speech_target(
+            prompt,
+            tts_target_minutes,
+            clip_duration_seconds=duration_seconds,
+        )
         speech_writer_instructions, style_truncated = bound_writer_instructions(
             tts_writer_instructions
-        )
-        speech_writer_controls_active = bool(
-            speech_writer_instructions or speech_target.words
         )
         if speech_target.capped:
             record_speech_writer_warning(
@@ -3955,10 +3955,15 @@ def enhance_prompt(
             "centered-pixel boxes. JSON keys and exact text fields are required model syntax. "
             "No reference-image tokens, pixel masks, Markdown fences or explanations."
         )
-    elif speech_writer_controls_active:
+    elif speech_writer_active:
         system += (
             "\n\nCRITICAL SPEECH SCRIPT OUTPUT CONTRACT: Output only the complete requested spoken script. "
-            "No introductory text, explanations, markdown, production notes, or part/section headings. "
+            "Supported native performance controls belong in the script: model-native speaker labels, "
+            "delivery cues, and word/phrase tags allowed by the selected model guide are valid script syntax, "
+            "not forbidden production notes or commentary. Include them where that guide calls for them, "
+            "unless the user requests plain or untagged speech. Count only the actual spoken words toward "
+            "the requested length. Do not add explanations, Markdown fences, production commentary, "
+            "or part/section headings outside the required native syntax. "
             "Preserve the selected model's native language, speaker, voice, and tag conventions exactly."
         )
     else:
