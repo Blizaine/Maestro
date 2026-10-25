@@ -103,6 +103,10 @@ Updates promoted from Dev, 23–24 October:
 - Preserve manual Fish duration selections when a newer UI connects to an older
   backend without the newer speech capability fields. Keep Auto unavailable
   there and clamp zero to the supported minimum before submission.
+- Avoid a native CPU BF16 INT8 kernel crash exposed by the mixed-checkpoint
+  regression. Use bounded blocks of explicit CPU math while preserving stored
+  FP32 scales, BF16 rounding and bias behavior. CUDA execution is unchanged.
+  Retain numeric loader coverage and expose native fault traces in CI.
 
 ## [3.2.0] - 2026-10-22
 

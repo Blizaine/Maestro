@@ -36,6 +36,8 @@ _QINT8_CONVROT_QTYPE = _quanto_qtypes[_QTYPE_NAME]
 
 _HADAMARD_CACHE = {}
 _DTYPE_DEBUG_COUNT = 0
+_CPU_INT8_MM_OUTPUT_BLOCK_SIZE = 256
+_CPU_INT8_MM_INPUT_BLOCK_SIZE = 256
 _FUSED_SPLIT_MARKER_SUFFIX = ".qweight"
 _HEADER_INT8_FORMATS = {"int8_tensorwise", "int8_convrot"}
 _HEADER_W4A8_FORMATS = {"asym_w4a8_int8", "w4a8_int8"}
@@ -316,6 +318,57 @@ def _rotate_activation(input_tensor, group_size):
         input_tensor.reshape(-1, features // group_size, group_size),
         hadamard,
     ).reshape(shape)
+
+
+def _cpu_bf16_int8_linear(input_tensor, qweight, bias=None):
+    """Compute BF16-by-INT8 linear on CPU without Quanto's unsafe int8pack op.
+
+    Keep the serialized row scales untouched, but apply the same BF16 scale
+    rounding and output cast as Quanto's packed path. Dequantize only a bounded
+    block of weight rows at a time so a full H3 projection is never expanded to
+    an FP32 matrix in host memory.
+    """
+    input_width = int(input_tensor.shape[-1])
+    input_rows = input_tensor.reshape(-1, input_width)
+    output_features = int(qweight.shape[0])
+    stored_scales = qweight._scale.reshape(-1)
+    if stored_scales.numel() == 1:
+        scales = stored_scales.expand(output_features)
+    elif stored_scales.numel() == output_features:
+        scales = stored_scales
+    else:
+        raise ValueError(
+            "INT8 ConvRot CPU fallback expected one scale or one scale per weight row"
+        )
+
+    # Quanto's qbytes_int8pack_mm path first rounds scales to the activation
+    # dtype. Round only this temporary view; checkpoint scales remain FP32.
+    scales = scales.to(dtype=input_tensor.dtype).to(dtype=torch.float32)
+    output = torch.empty(
+        (input_rows.shape[0], output_features),
+        dtype=input_tensor.dtype,
+        device=input_tensor.device,
+    )
+    for output_start in range(0, output_features, _CPU_INT8_MM_OUTPUT_BLOCK_SIZE):
+        output_end = min(
+            output_start + _CPU_INT8_MM_OUTPUT_BLOCK_SIZE, output_features
+        )
+        weight_block = qweight._data[output_start:output_end].to(torch.float32)
+        scale_block = scales[output_start:output_end].reshape(1, -1)
+        for input_start in range(0, input_rows.shape[0], _CPU_INT8_MM_INPUT_BLOCK_SIZE):
+            input_end = min(
+                input_start + _CPU_INT8_MM_INPUT_BLOCK_SIZE, input_rows.shape[0]
+            )
+            activations = input_rows[input_start:input_end].to(torch.float32)
+            accumulated = torch.nn.functional.linear(activations, weight_block)
+            output[input_start:input_end, output_start:output_end] = (
+                accumulated * scale_block
+            ).to(dtype=input_tensor.dtype)
+
+    output = output.reshape(*input_tensor.shape[:-1], output_features)
+    if bias is not None:
+        output = output + bias
+    return output
 
 
 def _dtype_debug_enabled():
@@ -1174,22 +1227,10 @@ class QLinearInt8ConvRot(QModuleMixin, torch.nn.Linear):
             and self.weight_qtype == _QINT8_CONVROT_QTYPE
             and isinstance(qweight, WeightQBytesTensor)
             and qweight._data.dtype == torch.int8
-            and qweight._scale.dtype != input_tensor.dtype
         ):
-            # Quanto's CPU int8pack kernel requires its per-row output scales
-            # to match the BF16 activation dtype. Keep the checkpoint scales
-            # in FP32 and round only the temporary kernel argument; CUDA and
-            # other CPU paths continue through Quanto's normal dispatch.
-            input_width = input_tensor.shape[-1]
-            output_shape = input_tensor.shape[:-1] + (qweight.shape[0],)
-            output = torch.ops.quanto.qbytes_mm(
-                input_tensor.reshape(-1, input_width),
-                qweight._data,
-                qweight._scale.to(dtype=input_tensor.dtype),
-            ).reshape(output_shape)
-            if self.bias is not None:
-                output = output + self.bias
-            return output
+            # Torch 2.7.1's CPU BF16 int8pack kernel can segfault. The
+            # blockwise fallback preserves its BF16 scale/output rounding.
+            return _cpu_bf16_int8_linear(input_tensor, qweight, self.bias)
         return torch.nn.functional.linear(input_tensor, qweight, bias=self.bias)
 
     def _load_from_state_dict(

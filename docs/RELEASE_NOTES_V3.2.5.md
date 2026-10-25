@@ -62,6 +62,9 @@ See [Speech writing](Speech-writing.md).
   enable Frames and References using the same downloaded file. Existing opt-outs
   are preserved. This does not make every Frames-only checkpoint compatible
   with References.
+- **Safe CPU INT8 fallback:** avoid the BF16 native matrix-kernel crash found
+  during mixed-checkpoint release tests. Bounded CPU blocks preserve scale
+  storage, output rounding and bias behavior. CUDA execution is unchanged.
 - **Windows 16GB RTX 50-series / 64GB RAM:** Auto-owned native H3 jobs use Profile
   4 and retain the workspace guard's feasible residency allowance instead of
   an additional 3 GiB ceiling. Manual placement, clamped-workload protection and

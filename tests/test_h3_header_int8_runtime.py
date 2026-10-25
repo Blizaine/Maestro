@@ -8,6 +8,7 @@ import math
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +54,94 @@ def explicit_hadamard(torch, group_size):
 
 
 class H3HeaderInt8RuntimeTests(unittest.TestCase):
+    def test_cpu_bf16_convrot_uses_safe_blocked_math_without_int8pack(self):
+        import torch
+
+        from shared.qtypes import int8_convrot
+
+        in_features = 64
+        out_features = 257  # Cross the fallback's output-row block boundary.
+        qtype = int8_convrot._QINT8_CONVROT_QTYPE
+        weight_data = (
+            torch.arange(out_features * in_features, dtype=torch.int32)
+            .reshape(out_features, in_features)
+            .remainder(15)
+            .sub(7)
+            .to(torch.int8)
+        )
+        input_tensor = (
+            torch.arange(2 * 131 * in_features, dtype=torch.float32)
+            .remainder(23)
+            .sub(11)
+            .to(torch.bfloat16)
+            .reshape(2, 131, in_features)
+        )
+        rotated = int8_convrot._rotate_activation(input_tensor, in_features)
+        accumulated = torch.nn.functional.linear(
+            rotated.reshape(-1, in_features).float(), weight_data.float()
+        )
+
+        scale_cases = (
+            (
+                "per-row",
+                torch.linspace(0.002, 0.03, out_features, dtype=torch.float32).reshape(
+                    out_features, 1
+                ),
+            ),
+            ("broadcast", torch.tensor([0.0137], dtype=torch.float32)),
+        )
+        for name, stored_scales in scale_cases:
+            with self.subTest(scale_storage=name):
+                original_scales = stored_scales.clone()
+                module = int8_convrot.QLinearInt8ConvRot(
+                    in_features,
+                    out_features,
+                    bias=True,
+                    device="cpu",
+                    dtype=torch.bfloat16,
+                    weights=qtype,
+                    quantize_input=True,
+                )
+                delattr(module, "weight")
+                module.weight = int8_convrot.Int8ConvRotWeightTensor.create(
+                    qtype,
+                    0,
+                    tuple(weight_data.shape),
+                    tuple(weight_data.stride()),
+                    weight_data,
+                    stored_scales,
+                    compute_dtype=torch.bfloat16,
+                )
+                module._convrot_group_size = in_features
+                bias = torch.linspace(-0.25, 0.25, out_features, dtype=torch.float32)
+                module.bias = torch.nn.Parameter(bias, requires_grad=False)
+
+                reference_scales = (
+                    stored_scales.reshape(-1)
+                    .expand(out_features)
+                    .to(torch.bfloat16)
+                    .float()
+                    .reshape(1, -1)
+                )
+                expected = (accumulated * reference_scales).to(torch.bfloat16)
+                expected = expected.reshape(2, 131, out_features) + bias
+
+                with mock.patch.object(
+                    torch,
+                    "_weight_int8pack_mm",
+                    side_effect=AssertionError(
+                        "unsafe CPU int8pack kernel was called"
+                    ),
+                ) as int8pack:
+                    actual = module(input_tensor)
+
+                int8pack.assert_not_called()
+                self.assertEqual(actual.shape, (2, 131, out_features))
+                self.assertEqual(actual.dtype, torch.float32)
+                self.assertEqual(module.qweight._scale.dtype, torch.float32)
+                self.assertTrue(torch.equal(module.qweight._scale, original_scales))
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_bf16_curve_table_loads_and_runtime_promotes_exact_values_before_interpolation(self):
         import torch
 
