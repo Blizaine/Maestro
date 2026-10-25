@@ -23,6 +23,8 @@ available.
   limits. An optional manual maximum, including short limits, is preserved.
   Duration is a cap rather than a pacing control. Long scripts are chunked and
   joined, with incomplete-part reports and a one-hour whole-output bound.
+  Manual limits also remain usable with older Fish backends; Auto is shown only
+  when the backend advertises support.
 - **Sampling and conditioning** correct Top-k 0 to mean no cap, expose Top-k and
   Top-p, preserve native paired tags and record effective per-part conditioning.
   Recent complete-turn history can help consistency, but does not guarantee an

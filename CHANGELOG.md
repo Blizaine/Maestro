@@ -100,6 +100,9 @@ Updates promoted from Dev, 23–24 October:
   keep strict validation and retain failures when metadata cannot be repaired.
 - Update the speech result wiring regression to cover both full Fish and Small
   partial-output reports and warnings after the shared architecture path changed.
+- Preserve manual Fish duration selections when a newer UI connects to an older
+  backend without the newer speech capability fields. Keep Auto unavailable
+  there and clamp zero to the supported minimum before submission.
 
 ## [3.2.0] - 2026-10-22
 

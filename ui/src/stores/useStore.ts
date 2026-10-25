@@ -7,6 +7,7 @@ import {
   normalizeModelVisibilityOverrides, type ModelVisibilityOverrides, type ModelVisibilityScope,
 } from '../lib/modelVisibility'
 import { isDirectorRenderChild } from '../lib/directorJobs'
+import { isFishSpeechArchitecture } from '../lib/fishSpeech'
 import { loadSpeechWriterPreferences, saveSpeechWriterPreferences, speechWriterPreferences } from '../lib/speechWriter'
 import {
   directorGalleryGroupKey,
@@ -6031,7 +6032,9 @@ export const useStore = create<AppState>((set, get) => ({
         params: {...state.params, video_length: frames, sliding_window_size: 124}})
       return
     }
-    if (options?.audio_only && options.audio_segment_max_seconds && options.duration_slider) {
+    // Legacy Fish backends expose a manual audio slider without Auto/segment flags.
+    if (options?.audio_only && options.duration_slider
+      && (options.audio_segment_max_seconds || isFishSpeechArchitecture(options.architecture))) {
       const ds = options.duration_slider
       const seconds = Math.max(ds.min, Math.min(ds.max,
         Number.isFinite(requested) ? requested : ds.default ?? ds.min))
@@ -8343,7 +8346,8 @@ export const useStore = create<AppState>((set, get) => ({
           params.duration_seconds = ds && state.modelOptions.speech_auto_duration
             ? state.durationSeconds === 0 && state.modelOptions.speech_auto_duration
               ? 0 : Math.max(1, Math.min(ds.max, state.durationSeconds))
-            : ds && (state.modelOptions.audio_segment_max_seconds || ds.max <= 15)
+            : ds && (state.modelOptions.audio_segment_max_seconds || ds.max <= 15
+              || isFishSpeechArchitecture(state.modelOptions.architecture))
             ? Math.max(ds.min, Math.min(ds.max, state.durationSeconds))
             : state.durationSeconds < 30 ? sliderDefault : state.durationSeconds
         }
@@ -9978,7 +9982,7 @@ export const useStore = create<AppState>((set, get) => ({
               return requested === 0 && options.speech_auto_duration
                 ? 0 : Math.max(1, Math.min(ds.max, requested || ds.default || 60))
             })()
-          : options.audio_segment_max_seconds
+          : (options.audio_segment_max_seconds || isFishSpeechArchitecture(options.architecture))
           && activeState.modelOptions?.architecture === options.architecture
           ? Math.max(ds.min, Math.min(ds.max, durationSeconds))
           : ds.default ?? ds.max ?? 600
