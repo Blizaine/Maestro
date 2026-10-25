@@ -150,6 +150,29 @@ Runtime upgrades are explicit menu actions. A missing performance-runtime marker
 does not automatically run Update when you open the launcher. If offered,
 **Start with Compatibility Runtime** keeps the existing runtime available.
 
+### v3.2.5 (2026-10-24)
+
+- **Faster Fish speech:** whole-frame CUDA Graph decoding when the full model
+  fits, cached experts and partial acceleration for smaller GPUs, and compatible
+  RTX 30-series attention. Add **Fish Drama 3 Small** with voice references and
+  streaming synthesis assembled into one gallery audio file.
+- **Long-form speech writing:** saved style/personality instructions, draft
+  targets based on the selected duration, bounded section writing and recovery,
+  richer Fish performance cues, and retained incomplete drafts with clear reasons.
+  Fish Auto length lets the script finish naturally within safety limits.
+- **H3 checkpoints and memory:** support Eros Max beta5/beta6 mixed layouts,
+  share compatible imports across Frames and References, and correct Auto-owned
+  H3 placement on Windows 16GB RTX 50-series / 64GB RAM systems.
+- **Director recovery:** repair repeated source-action allocations and missing
+  physical-continuity metadata without rewriting accepted shot content. Fix
+  concurrent Windows soundtrack-cache publication.
+
+Available on **Main and Dev**. Update the idle installation in Pinokio,
+restart Maestro and refresh the browser. Short Fish tests completed on 24GB,
+12GB and 8GB GPUs; speed and delivery depend on hardware and the script. The
+reported RTX 5080 regression still needs a matched hardware comparison.
+See the [v3.2.5 release notes](docs/RELEASE_NOTES_V3.2.5.md).
+
 ### v3.2.0 (2026-10-22)
 
 - **Startup and mobile:** prioritize model controls, recover interrupted startup,

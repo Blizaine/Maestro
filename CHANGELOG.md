@@ -3,12 +3,12 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## [3.2.0] - 2026-10-22
+## [3.2.5] - 2026-10-24
 
-Public Main and Dev release, including the 20–22 October Dev preview fixes. See the
-[v3.2.0 release notes](docs/RELEASE_NOTES_V3.2.0.md).
+Public Main and Dev release of the 23–24 October Dev updates. See the
+[v3.2.5 release notes](docs/RELEASE_NOTES_V3.2.5.md).
 
-Dev follow-up fixes, 23–24 October:
+Updates promoted from Dev, 23–24 October:
 
 - Enable full Fish acceleration on supported RTX 30-series runtimes with
   Fish-specific SDPA attention, Triton and FLA checks. Preserve explicit Legacy
@@ -36,7 +36,8 @@ Dev follow-up fixes, 23–24 October:
   Honor Fish's declared vLLM offload support instead of silently selecting
   Legacy outside profiles 1/3. Keep unsupported FP8 formats on CPU and leave
   GPU/staging-RAM headroom. Native INT4/cache checks passed on 24GB, 12GB and
-  8GB cards; complete speech on the smaller cards still requires model setup.
+  8GB cards; short full and Small speech runs subsequently completed on both
+  smaller workstations. See the release notes for measured scope and limits.
 - Preserve complete enhanced speech scripts when normal storytelling phrases
   or dialogue refrains repeat. The generic prompt repetition cleaner could
   truncate Fish narration mid-sentence and discard its ending.
@@ -93,6 +94,17 @@ Dev follow-up fixes, 23–24 October:
 - Reuse a completed soundtrack cache entry when concurrent preparation windows
   collide on Windows. Failed publication still raises when no usable cache
   exists, and each request cleans up its own temporary file.
+- Recover H3 Director plans with repeated source-action allocations or missing
+  physical-continuity metadata using at most two compact repair requests.
+  Preserve accepted shot content, timing, dialogue and camera instructions;
+  keep strict validation and retain failures when metadata cannot be repaired.
+- Update the speech result wiring regression to cover both full Fish and Small
+  partial-output reports and warnings after the shared architecture path changed.
+
+## [3.2.0] - 2026-10-22
+
+Public Main and Dev release, including the 20–22 October Dev preview fixes. See the
+[v3.2.0 release notes](docs/RELEASE_NOTES_V3.2.0.md).
 
 Dev follow-up fixes, 22 October:
 

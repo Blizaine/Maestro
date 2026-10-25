@@ -14,9 +14,10 @@ def block(path, condition):
 
 class SpeechResultWiringTests(unittest.TestCase):
     def test_native_partial_report_is_attached_and_warnings_are_emitted_only_for_fish(self):
-        code = block("app/wgp.py", "model_def.get('architecture') == 'fish_drama3'")
+        fish_architectures = ("fish_drama3", "fish_drama3_small")
+        code = block("app/wgp.py", "model_def.get('architecture') in ('fish_drama3', 'fish_drama3_small')")
         report = {"incomplete": True, "completed_chunks": 1, "total_chunks": 2}
-        for architecture in ("fish_drama3", "other_tts"):
+        for architecture in (*fish_architectures, "other_tts"):
             with self.subTest(architecture=architecture):
                 commands = []
                 ns = {"model_def": {"architecture": architecture}, "artifact_metadata": {"sample_rate": 44100},
@@ -24,7 +25,7 @@ class SpeechResultWiringTests(unittest.TestCase):
                       "send_cmd": lambda *args: commands.append(args)}
                 exec(code, ns)
                 self.assertEqual(ns["artifact_metadata"]["sample_rate"], 44100)
-                if architecture == "fish_drama3":
+                if architecture in fish_architectures:
                     self.assertEqual(ns["artifact_metadata"]["speech_generation"], report)
                     self.assertEqual(commands, [("generation_warning", "Part 2 reached its limit")])
                 else:
