@@ -4186,6 +4186,30 @@ def _plan_pipeline_repair(out_dir: str, pid: str, state: dict) -> dict:
         raise ValueError(f"Pipeline {pid} not found")
     clip_out_dir = os.path.dirname(pipeline_file)
     clips = state.get("clips") or []
+    if not clips:
+        raise ValueError(
+            "No accepted shot plan is saved. Check + Repair repairs generated media, "
+            "not unfinished planning. Use Resume to continue the saved planning "
+            "checkpoint; the original planning error remains available."
+        )
+    if (state.get("_params_snapshot") or {}).get("planning_only") is True:
+        # Diagnostic productions must remain non-rendering under every entry
+        # point, including Dashboard Check + Repair.
+        candidate = copy.deepcopy(clips)
+        _preflight_h3_director_prompts(state.get("video_model", ""), candidate, pid=pid)
+        from services.director.source_contract import source_contract_issues
+        from services.director.physical_continuity import validate_physical_state_sequence
+        rows = [{**clip, "source_event_ids": clip.get("_director_source_event_ids") or [],
+                 "physical_state": clip.get("_director_physical_state"),
+                 "subjects_on_screen": clip.get("_director_subjects_on_screen") or []}
+                for clip in candidate]
+        contract = candidate[0].get("_director_source_contract")
+        issues = source_contract_issues(rows, contract, require_ids=True) if contract else []
+        issues.extend(validate_physical_state_sequence(rows))
+        if issues:
+            raise ValueError("Saved planning checkpoint failed validation: " + "; ".join(issues))
+        return {"validation_only": True, "image_indices": [], "video_indices": [],
+                "should_rejoin": False, "clip_count": len(clips), "total": 0}
 
     requires_shot_images = shot_images_required(
         _saved_pipeline_shot_image_policy(state)
@@ -4257,6 +4281,8 @@ def _plan_pipeline_repair(out_dir: str, pid: str, state: dict) -> dict:
 
 
 def _repair_queue_message(plan: dict) -> str:
+    if plan.get("validation_only"):
+        return "Validate saved planning checkpoint; no media generation"
     parts = []
     image_count = len(plan["image_indices"])
     video_count = len(plan["video_indices"])
@@ -4384,6 +4410,11 @@ def _run_pipeline_repair(
     result_filename = None
     try:
         _raise_if_repair_cancelled(control)
+        if plan.get("validation_only"):
+            _finish_pipeline_repair(out_dir, pid, control, status="completed",
+                phase="completed", current=0, total=0,
+                message="Saved planning checkpoint passed validation; no media generation requested.")
+            return
         _persist_repair_state(
             out_dir,
             pid,
@@ -5895,6 +5926,18 @@ def _run_pipeline(pid: str, resume: bool = False):
 
         _update_pipeline(pid, clip_plans=clip_plans, llm_streaming=False)
         _save_pipeline_state(pid)  # Save after planning
+
+        # Explicit diagnostic mode exercises the real Auto planner and all
+        # prompt preflights, but cannot enqueue image/video generation. Keep
+        # this flag in the saved params so Resume remains planning-only too.
+        if params.get("planning_only") is True:
+            _update_pipeline(
+                pid, status="completed", phase="planning_ready", _completed_at=time.time(),
+                progress={"current": len(clip_plans), "total": len(clip_plans),
+                          "message": "Planning verified and saved; planning-only mode queues no media."},
+            )
+            _save_pipeline_state(pid)
+            return
 
         # Check cancellation
         if _pipelines[pid]["status"] == "cancelled":

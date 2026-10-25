@@ -145,12 +145,12 @@ def _physical_fact_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "properties": {
-            "subject_id": {"type": "string", "maxLength": 80},
+            "subject_id": {"type": "string", "minLength": 1, "maxLength": 80},
             "predicate": {
                 "type": "string",
                 "enum": list(PHYSICAL_STATE_PREDICATES),
             },
-            "value": {"type": "string", "maxLength": MAX_PHYSICAL_VALUE_CHARS},
+            "value": {"type": "string", "minLength": 1, "maxLength": MAX_PHYSICAL_VALUE_CHARS},
         },
         "required": ["subject_id", "predicate", "value"],
         "additionalProperties": False,
@@ -161,20 +161,20 @@ def _physical_transition_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "properties": {
-            "subject_id": {"type": "string", "maxLength": 80},
+            "subject_id": {"type": "string", "minLength": 1, "maxLength": 80},
             "predicate": {
                 "type": "string",
                 "enum": list(PHYSICAL_STATE_PREDICATES),
             },
             "from_value": {
-                "type": ["string", "null"],
+                "type": ["string", "null"], "minLength": 1,
                 "maxLength": MAX_PHYSICAL_VALUE_CHARS,
                 "description": "Null only when operation is establish.",
             },
-            "to_value": {"type": "string", "maxLength": MAX_PHYSICAL_VALUE_CHARS},
-            "action": {"type": "string", "maxLength": MAX_PHYSICAL_TEXT_CHARS},
+            "to_value": {"type": "string", "minLength": 1, "maxLength": MAX_PHYSICAL_VALUE_CHARS},
+            "action": {"type": "string", "minLength": 1, "maxLength": MAX_PHYSICAL_TEXT_CHARS},
             "operation": {"type": "string", "enum": ["establish"]},
-            "event_id": {"type": "string", "maxLength": 80},
+            "event_id": {"type": "string", "minLength": 1, "maxLength": 80},
         },
         "required": [
             "subject_id", "predicate", "from_value", "to_value", "action",
