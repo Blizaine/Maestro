@@ -9,6 +9,7 @@ import { H3MultiWindowControls } from './H3MultiWindowControls'
 import { formatDuration } from '../../lib/durationPlanning'
 import { SidebarDialog } from './SidebarPanels'
 import { SidebarMenu } from './SidebarMenu'
+import { isFishSpeechArchitecture } from '../../lib/fishSpeech'
 
 /** The everyday canvas choices stay one tap away, without a permanent grid. */
 export function OutputFormatControls() {
@@ -27,6 +28,10 @@ export function OutputFormatControls() {
   const durationMode = useStore(s => s.params._duration_planning_mode ?? 'auto')
   const imageMode = useStore(s => s.params.image_mode)
   const audioMode = useStore(s => s.audioSubMode)
+  const fishSpeech = mode === 'audio' && isFishSpeechArchitecture(options?.architecture)
+  const fishAuto = fishSpeech && options?.speech_auto_duration && duration === 0
+  const durationLabel = fishSpeech ? fishAuto ? 'Auto' : `Max ${formatDuration(duration, true)}`
+    : `${durationMode === 'auto' ? 'Auto · ' : ''}${formatDuration(duration, true)}`
   const hasDuration = (mode === 'video' && imageMode !== 4)
     || (mode === 'audio' && !['sfx', 'mixer', 'revoice'].includes(audioMode) && !!options?.duration_slider)
   if ((mode === 'audio' && !hasDuration) || mode === 'tools'
@@ -51,14 +56,16 @@ export function OutputFormatControls() {
           className={`${chip} ${expanded === 'aspect' && !sourceAspect ? 'border-accent-blue bg-accent-blue/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-secondary hover:border-border-light'}`}>
           <RectangleHorizontal size={13} className="studio-setting-icon" /><span>{sourceAspect ? 'Source' : ratio === 'auto' ? 'Auto' : ratio}</span>
         </button>}
-        {hasDuration && <button ref={setDurationAnchor} type="button" aria-label={`Duration: ${durationMode === 'auto' ? 'Auto · ' : ''}${formatDuration(duration, true)}`} aria-expanded={expanded === 'duration'} aria-haspopup="dialog"
+        {hasDuration && <button ref={setDurationAnchor} type="button" aria-label={`Duration: ${durationLabel}`} aria-expanded={expanded === 'duration'} aria-haspopup="dialog"
           aria-controls={`${id}-duration`}
-          onClick={() => toggle('duration')} title={`${durationMode === 'auto' ? 'Auto · ' : ''}${formatDuration(duration, true)} · duration and window settings`}
+          onClick={() => toggle('duration')} title={fishSpeech ? `${durationLabel} · speech length` : `${durationLabel} · duration and window settings`}
           className={`${chip} ${expanded === 'duration' ? 'border-accent-blue bg-accent-blue/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-secondary hover:border-border-light'}`}>
           <Clock size={13} className="studio-setting-icon"/>
           <span className="flex flex-col items-center tabular-nums leading-3">
-            {durationMode === 'auto' && <span className="text-[9px] leading-[10px] text-text-muted">Auto</span>}
-            <span>{formatDuration(duration, true)}</span>
+            {fishSpeech ? <span>{durationLabel}</span> : <>
+              {durationMode === 'auto' && <span className="text-[9px] leading-[10px] text-text-muted">Auto</span>}
+              <span>{formatDuration(duration, true)}</span>
+            </>}
           </span>
         </button>}
       <SidebarMenu id={`${id}-resolution`} anchor={resolutionAnchor} open={expanded === 'resolution' && canResolve} label="Resolution" width="content" align="start" onClose={() => setExpanded(null)}>
@@ -68,7 +75,7 @@ export function OutputFormatControls() {
         <AspectRatioGrid menu onSelect={() => setExpanded(null)} />
       </SidebarMenu>
       {/* Duration owns automatic window sizing. Keep it mounted while hidden. */}
-      {hasDuration && <SidebarDialog id={`${id}-duration`} variant="settings" anchor={durationAnchor} hideHeader={mode === 'video'} fixedHeight={mode === 'video' ? 360 : undefined} open={expanded === 'duration'} title="Duration & windows" onClose={() => setExpanded(null)}><div className="space-y-3">
+      {hasDuration && <SidebarDialog id={`${id}-duration`} variant="settings" anchor={durationAnchor} hideHeader={mode === 'video'} fixedHeight={mode === 'video' ? 360 : undefined} open={expanded === 'duration'} title={fishSpeech ? 'Speech length' : 'Duration & windows'} onClose={() => setExpanded(null)}><div className="space-y-3">
         {mode === 'audio' ? <AudioDurationControl/> : <><DurationSlider includeWindowSettings/><H3MultiWindowControls section="continuity"/></>}
       </div></SidebarDialog>}
     </>

@@ -21,6 +21,54 @@ class TestEnhancementProviderRouting(unittest.TestCase):
             node.decorator_list = []
         cls.code = compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec")
 
+    def test_speech_writer_controls_reach_native_writer_even_with_legacy_enhancer_enabled(self):
+        from services import llm_service
+
+        namespace = {
+            "wgp": SimpleNamespace(server_config={"enhancer_enabled": 1, "services": {}},
+                                   get_model_def=lambda _: {}),
+            "enhancement_settings": lambda settings: settings,
+            "enhancement_warnings": lambda: [],
+            "_PUBLIC_LLM_PROVIDERS": {"openai", "anthropic"},
+        }
+        exec(self.code, namespace)
+        legacy = AsyncMock(return_value={"enhanced": "Wrong cinematic path"})
+        namespace.update(_ensure_llm_loaded=Mock(), _active_lora_hint=lambda *args: "",
+                         _enhance_with_wangp=legacy)
+        with patch.object(llm_service, "enhance_prompt", return_value="Speaker 1: Hello.") as writer:
+            result = asyncio.run(namespace["_llm_enhance_prompt_payload"]({
+                "prompt": "A lighthouse story.", "mode": "audio", "model_type": "fish_drama3_int4",
+                "tts_enhance_mode": "monologue", "tts_voice_count": 1,
+                "tts_writer_instructions": "A warm narrator", "tts_target_minutes": 12,
+            }))
+        legacy.assert_not_called()
+        self.assertEqual(result["enhanced"], "Speaker 1: Hello.")
+        self.assertEqual(writer.call_args.kwargs["tts_writer_instructions"], "A warm narrator")
+        self.assertEqual(writer.call_args.kwargs["tts_target_minutes"], 12)
+        self.assertEqual(writer.call_args.kwargs["max_new_tokens"], 2048)
+
+    def test_speech_writer_receives_selected_duration_without_an_override(self):
+        from services import llm_service
+
+        namespace = {
+            "wgp": SimpleNamespace(server_config={"enhancer_enabled": 0, "services": {}},
+                                   get_model_def=lambda _: {}),
+            "enhancement_settings": lambda settings: settings,
+            "enhancement_warnings": lambda: [],
+            "_PUBLIC_LLM_PROVIDERS": {"openai", "anthropic"},
+        }
+        exec(self.code, namespace)
+        namespace.update(_ensure_llm_loaded=Mock(), _active_lora_hint=lambda *args: "")
+        with patch.object(llm_service, "enhance_prompt", return_value="A lighthouse story.") as writer:
+            asyncio.run(namespace["_llm_enhance_prompt_payload"]({
+                "prompt": "Tell a story about a lighthouse.", "mode": "audio",
+                "model_type": "fish_drama3_int4", "tts_enhance_mode": "monologue",
+                "duration_seconds": 1200, "tts_target_minutes": 0, "max_new_tokens": 1600,
+            }))
+        self.assertEqual(writer.call_args.kwargs["duration_seconds"], 1200)
+        self.assertEqual(writer.call_args.kwargs["tts_target_minutes"], 0)
+        self.assertEqual(writer.call_args.kwargs["max_new_tokens"], 1600)
+
     def test_flux3_uses_native_guide_when_legacy_cinematic_enhancer_is_enabled(self):
         from services import llm_service
 

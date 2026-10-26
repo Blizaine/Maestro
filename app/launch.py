@@ -6804,6 +6804,9 @@ def get_model_options(model_type: str):
         "duration_slider": md.get("duration_slider"),
         "audio_segment_max_seconds": md.get("audio_segment_max_seconds"),
         "duration_is_maximum": md.get("duration_is_maximum", False),
+        "speech_auto_duration": md.get("speech_auto_duration", False),
+        "speech_longform": md.get("speech_longform", False),
+        "speech_writer_controls": bool(md.get("audio_only")),
         "yue2_composition": md.get("yue2_composition", False),
         "pause_between_sentences": md.get("pause_between_sentences", False),
         "temperature_enabled": md.get("temperature", False),
@@ -9392,6 +9395,7 @@ async def _llm_enhance_prompt_payload(body: dict):
     needs_moss_image_guide = (
         model_type.lower().startswith("moss_image") and generation_mode == "image"
     )
+    needs_speech_writer = generation_mode == "audio" and bool(body.get("tts_enhance_mode"))
     try:
         requested_window_count = max(1, int(body.get("window_count") or 1))
     except (TypeError, ValueError):
@@ -9415,6 +9419,7 @@ async def _llm_enhance_prompt_payload(body: dict):
         and not needs_ltx_window_plan
         and not needs_flux3_image_guide
         and not needs_moss_image_guide
+        and not needs_speech_writer
     ):
         try:
             # Support both single image_path and array image_paths
@@ -9437,6 +9442,8 @@ async def _llm_enhance_prompt_payload(body: dict):
             print("[Enhance] FLUX 3 uses native image captions and reference bindings; using Maestro's model-specific LLM guide")
         elif needs_moss_image_guide:
             print("[Enhance] MOSS Image uses native captions and centered-pixel layouts; using Maestro's model-specific LLM guide")
+        elif needs_speech_writer:
+            print("[Enhance] Speech writing uses its native model guide and saved writing instructions")
 
     # Use our local LLM service
     from services import llm_service
@@ -9501,7 +9508,7 @@ async def _llm_enhance_prompt_payload(body: dict):
             prompt=prompt,
             lora_system_hint=lora_hint_text,
             mode=body.get("mode", "video"),
-            max_new_tokens=body.get("max_new_tokens", 512),
+            max_new_tokens=body.get("max_new_tokens", 2048 if needs_speech_writer else 512),
             temperature=body.get("temperature", 0.6),
             nsfw=nsfw,
             model_type=model_type,
@@ -9511,6 +9518,8 @@ async def _llm_enhance_prompt_payload(body: dict):
             window_size_seconds=body.get("window_size_seconds"),
             tts_enhance_mode=body.get("tts_enhance_mode"),
             tts_voice_count=body.get("tts_voice_count", 2),
+            tts_writer_instructions=body.get("tts_writer_instructions", ""),
+            tts_target_minutes=body.get("tts_target_minutes", 0),
             raw_enhancer_mode=raw_enhancer_mode,
             reference_context=body.get("reference_context"),
             planning_style=str(body.get("planning_style") or "faithful"),
@@ -27707,6 +27716,13 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         _generation_previews.set_notice(job_id, data)
                     elif cmd == "preview":
                         _consume_generation_preview(job_id, data, params.get("model_type"))
+                    elif cmd == "generation_warning":
+                        if isinstance(data, str) and data.strip():
+                            finishing_warnings = list(job.get("finishing_warnings") or [])
+                            if data not in finishing_warnings:
+                                finishing_warnings.append(data)
+                                update_job(job, finishing_warnings=finishing_warnings)
+                                print(f"\n  [Generation] Warning: {data}")
                     elif cmd == "artifact_metadata":
                         if isinstance(data, dict) and isinstance(data.get("metadata"), dict):
                             for output_path in data.get("outputs") or []:

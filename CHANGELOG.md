@@ -3,13 +3,71 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## [3.2.0] - 2026-10-22
+## [3.2.5] - 2026-10-24
 
-Public Main and Dev release, including the 20–22 October Dev preview fixes. See the
-[v3.2.0 release notes](docs/RELEASE_NOTES_V3.2.0.md).
+Public Main and Dev release of the 23–24 October Dev updates. See the
+[v3.2.5 release notes](docs/RELEASE_NOTES_V3.2.5.md).
 
-Dev follow-up fixes, 23 October:
+Updates promoted from Dev, 23–24 October:
 
+- Enable full Fish acceleration on supported RTX 30-series runtimes with
+  Fish-specific SDPA attention, Triton and FLA checks. Preserve explicit Legacy
+  choices and the existing GPU cache/graph memory guards.
+- Add Fish Drama 3 Small with a pinned audio.cpp runtime, bounded streaming
+  synthesis, expert offload for smaller GPUs, voice references, Auto duration
+  and explicit native completion/cap evidence. Keep the full Fish models.
+- Improve speech draft recovery and exact-anchor performance directions;
+  retain incomplete drafts, skipped edits and clear review reasons.
+- Let Speech Write follow the selected clip duration unless the brief or a
+  positive draft-length override supplies a target. Count spoken words without
+  cues, attempt bounded short/repeated-section recovery, and warn about
+  incomplete or substantially overlong drafts while preserving available text.
+- Improve Fish's writer guide and output contracts for inline delivery cues
+  and word-level performance tags. Preserve all seven paired delivery tags
+  and local phoneme spans through cuts, keep speaker cues correctly scoped,
+  and allow 60 seconds of recent complete-turn history for new settings.
+  Preserve saved history choices and record effective per-part conditioning.
+  Native writer compliance and voice continuity still need listening tests.
+- Tune Fish one-frame expert execution with reusable scratch, direct output
+  casting and parallel down projections with ordered FP32 reduction. Add bounded
+  packed-expert GPU caching when the complete bank does not fit, and a separate
+  audio-tower sampling graph while CPU routing/cache transfers remain eager.
+  Verify placement and preserve cache/RNG rollback, with CPU/eager fallbacks.
+  Honor Fish's declared vLLM offload support instead of silently selecting
+  Legacy outside profiles 1/3. Keep unsupported FP8 formats on CPU and leave
+  GPU/staging-RAM headroom. Native INT4/cache checks passed on 24GB, 12GB and
+  8GB cards; short full and Small speech runs subsequently completed on both
+  smaller workstations. See the release notes for measured scope and limits.
+- Preserve complete enhanced speech scripts when normal storytelling phrases
+  or dialogue refrains repeat. The generic prompt repetition cleaner could
+  truncate Fish narration mid-sentence and discard its ending.
+- Add native whole-frame CUDA Graph decoding for Fish's vLLM engine when all
+  dense decode weights and complete expert banks are resident on one GPU.
+  Capture each speech part after prefill, restoring caches and RNG after warmup;
+  retain eager decoding for offloaded profiles or unavailable capture. Preserve
+  EOS, uncapped sampling, cancellation, duration bounds and long-form reports.
+  Traverse MMGP's parent references and tied weights once, so empty LoRA hooks
+  cannot cause a recursion error and silently disable graph capture.
+- In one matched short RTX 4090 take, graph decoding took 1.66s instead of
+  26.76s for the same 131 frames; decoded audio samples matched exactly.
+  Whole-job time was 21s instead of 45s, including loading/reference work.
+- Remove redundant GPU-to-CPU expert-ID bound checks from Fish's internal
+  top-k routing path, avoiding eighty CUDA scalar reads per decoded frame.
+  Preserve direct-call validation and CPU behavior. The isolated speedup from
+  this bound-check change alone has not been measured.
+- Add saved Speech writer instructions and approximate draft-length targets.
+  Long stories/dialogues use bounded planning and section drafting with
+  continuity, continuation and review warnings instead of a single 2k response.
+  Fish synthesizes long scripts in safe chunks into one file with a one-hour
+  whole-output bound, bounded codec/history context and incomplete-part reports.
+- Add Fish-only Auto speech length with a script/context-bounded safety budget
+  and an optional manual maximum. Preserve saved positive limits and fix the UI
+  replacing sub-30-second Fish limits with the model's longer default. Duration
+  is a maximum rather than a pacing target; natural pauses still depend on Fish.
+- Fix Fish Drama 3's Top-k 0 path to disable the cap instead of becoming
+  greedy. Use no-cap defaults for new Fish speech settings and expose Top-k /
+  Top-p in Advanced Generation. This addresses an upstream-documented silence
+  trigger; complete speech and voice similarity still need a matched render.
 - Support Eros Max beta6's retained BF16 main layers and 11 additional INT8
   projections, validating every quantized layer. Identify the verified beta6
   hybrid by its file identity/checksum, enable both modes with its original
@@ -36,6 +94,24 @@ Dev follow-up fixes, 23 October:
 - Reuse a completed soundtrack cache entry when concurrent preparation windows
   collide on Windows. Failed publication still raises when no usable cache
   exists, and each request cleans up its own temporary file.
+- Recover H3 Director plans with repeated source-action allocations or missing
+  physical-continuity metadata using at most two compact repair requests.
+  Preserve accepted shot content, timing, dialogue and camera instructions;
+  keep strict validation and retain failures when metadata cannot be repaired.
+- Update the speech result wiring regression to cover both full Fish and Small
+  partial-output reports and warnings after the shared architecture path changed.
+- Preserve manual Fish duration selections when a newer UI connects to an older
+  backend without the newer speech capability fields. Keep Auto unavailable
+  there and clamp zero to the supported minimum before submission.
+- Avoid a native CPU BF16 INT8 kernel crash exposed by the mixed-checkpoint
+  regression. Use bounded blocks of explicit CPU math while preserving stored
+  FP32 scales, BF16 rounding and bias behavior. CUDA execution is unchanged.
+  Retain numeric loader coverage and expose native fault traces in CI.
+
+## [3.2.0] - 2026-10-22
+
+Public Main and Dev release, including the 20–22 October Dev preview fixes. See the
+[v3.2.0 release notes](docs/RELEASE_NOTES_V3.2.0.md).
 
 Dev follow-up fixes, 22 October:
 

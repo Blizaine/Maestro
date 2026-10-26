@@ -156,6 +156,22 @@ phase. Values, including zero, are saved and carried into Director projects.
 Older empty weight arrays recover serialized strengths where available, or
 use 1.0 when no strength was saved.
 
+## Story planning recovery
+
+H3 checks action ownership and physical continuity before queuing video jobs.
+When a complete shot plan has an action-allocation or continuity-ledger error,
+Director can repair that metadata while preserving the shot text, dialogue,
+camera, cast and timing. This applies to single-action stories and stories with
+speech as well as silent ones. The same focused recovery is available when a
+larger shot-plan repair leaves metadata errors behind.
+
+Recovery is bounded and the repaired plan is checked again. If it still
+contradicts the source or leaves physical state unresolved, planning stops
+before video generation. Review the planning log for the response and repair
+feedback. Share that log, the original concept and the selected
+Director LLM when reporting a persistent failure; the error does not by itself
+indicate a GPU or model-download problem.
+
 ## Recommended next UI pass
 
 These are proposed changes, not yet implemented:

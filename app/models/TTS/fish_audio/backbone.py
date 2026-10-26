@@ -70,15 +70,17 @@ class DecoderLayer(nn.Module):
         mixer = self.self_attn if self.layer_type == "full_attention" else self.linear_attn
         residual = x + mixer(self.input_layernorm(x), context, cache)
         flat, ids, weights, shared = self.mlp.route(self.post_attention_layernorm(residual))
-        routed = self.mlp.experts(flat, ids, weights)
+        # Router top-k positions are bounded by this bank's expert dimension.
+        routed = self.mlp.experts(flat, ids, weights, check_route_bounds=False)
         return residual + (routed + shared).reshape_as(residual)
 
     def decode(self, x, context, cache):
-        """Synchronous decode step; Fish deliberately does not capture expert execution in CUDA graphs."""
+        """A decode layer; resident expert kernels also support whole-frame capture."""
         mixer = self.self_attn if self.layer_type == "full_attention" else self.linear_attn
         residual = x + mixer(self.input_layernorm(x), context, cache)
         flat, ids, weights, shared = self.mlp.route(self.post_attention_layernorm(residual))
-        routed = self.mlp.experts(flat, ids, weights)
+        # Router top-k positions are bounded by this bank's expert dimension.
+        routed = self.mlp.experts(flat, ids, weights, check_route_bounds=False)
         return residual + (routed + shared).reshape_as(residual)
 
 
@@ -177,13 +179,15 @@ class FishOmniBackbone(nn.Module):
         hidden = self.forward(self.mix_embeddings(tokens, extra, semantic)[None], input_pos, start)[0]
         return hidden, self.lm_head(hidden)
 
-    def decode_token(self, tokens, extra, semantic, input_pos, kv_len, continue_state, kv, conv, state):
+    def decode_token(self, tokens, extra, semantic, input_pos, kv_len, continue_state, kv, conv, state, *, return_logits=True):
         hidden = self.mix_embeddings(tokens, extra, semantic)[None]
         context = self.layer_context(input_pos, kv_len, continue_state)
         for layer, cache in zip(self.model.layers, self.layer_caches(kv, conv, state)):
             hidden = layer.decode(hidden, context, cache)
         hidden = self.model.norm(hidden)[0]
-        return hidden, self.lm_head(hidden)
+        # A whole-frame replay evaluates the head at its next transition's
+        # entrance. Avoid capturing an additional unused head projection.
+        return hidden, self.lm_head(hidden) if return_logits else None
 
     def raise_expert_errors(self):
         """Report asynchronous expert errors, when an implementation provides them."""

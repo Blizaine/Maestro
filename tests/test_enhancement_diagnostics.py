@@ -15,13 +15,29 @@ from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 from promptbench.trace import record_payload, record_response, traced
-from services.enhancement_diagnostics import DraftHistoryArchive, capture_drafts, record_rejection
+from services.enhancement_diagnostics import DraftHistoryArchive, capture_drafts, record_advisory, record_rejection
 from services.studio_enhancement import (
     StudioJobArchive, enhancement_context, new_enhancement, public_enhancement,
 )
 
 
 class DraftHistoryTests(unittest.TestCase):
+    def test_auxiliary_review_is_saved_without_rejecting_usable_raw_reply(self):
+        @traced
+        def writer():
+            return '{"edits":[]}'
+        with tempfile.TemporaryDirectory() as directory:
+            archive = DraftHistoryArchive(directory)
+            with capture_drafts(on_change=lambda drafts: archive.save("abc123", {"drafts": drafts})):
+                writer()
+                details = {"applied": 8, "skipped_reasons": ["extra suggestion"]}
+                record_advisory("fish_performance", details)
+                details["skipped_reasons"].append("later mutation")
+            draft = archive.load("abc123")["drafts"][0]
+        self.assertEqual(draft["status"], "received")
+        self.assertEqual(draft["response_text"], '{"edits":[]}')
+        self.assertEqual(draft["advisories"]["fish_performance"]["skipped_reasons"], ["extra suggestion"])
+
     def test_rejected_draft_is_not_overwritten_by_repair_and_survives_reload(self):
         @traced
         def stream(text):
