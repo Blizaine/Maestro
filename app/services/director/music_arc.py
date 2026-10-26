@@ -950,7 +950,10 @@ def normalize_music_arc(rows: Any, clips: Any, contract: Any) -> list[dict[str, 
         if hard_issues:
             raise ValueError(hard_issues[0])
     if [event_id for row in normalized for event_id in row["source_event_ids"]] != expected_ids:
-        raise ValueError("music arc must assign every contract source_event_id exactly once and in source order")
+        from .music_arc_repair import allocation_report, allocation_error
+        report = allocation_report(arc_allocation(normalized), contract, clip_count)
+        raise ValueError("music arc must assign every contract source_event_id exactly once and in source order; "
+                         + allocation_error(report))
     return normalized
 
 
