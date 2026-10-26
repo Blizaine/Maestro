@@ -23,7 +23,8 @@ from services.optional_acceleration import (  # noqa: E402
     flash_attention_wheel_compatibility,
     prepare_optional_flash_attention,
 )
-from scripts.install_gguf_kernels import _pick_wheel_url  # noqa: E402
+from scripts.install_gguf_kernels import VERSION as GGUF_KERNELS_VERSION  # noqa: E402
+from scripts.install_gguf_kernels import _wheel_spec  # noqa: E402
 
 
 class TestRuntimeCompatibility(unittest.TestCase):
@@ -280,10 +281,29 @@ class TestH3LoraPinnedMemoryFallback(unittest.TestCase):
 
 class TestCuda13GgufKernelSelection(unittest.TestCase):
     def test_python311_torch210_cuda13_has_both_platform_wheels(self):
-        windows = _pick_wheel_url(11, "2.10", "13.0", "windows")
-        linux = _pick_wheel_url(11, "2.10", "13.0", "linux")
-        self.assertIn("win_amd64.whl", windows or "")
-        self.assertIn("linux_x86_64.whl", linux or "")
+        windows = _wheel_spec(
+            11, "2.10.0", "13.0", "windows", "AMD64", "cpython", None
+        )
+        linux = _wheel_spec(
+            11, "2.10.0", "13.0", "linux", "x86_64", "cpython", ("glibc", "2.36")
+        )
+
+        self.assertIsNotNone(windows)
+        self.assertIsNotNone(linux)
+        windows_url, windows_version = windows
+        linux_url, linux_version = linux
+        expected_version = f"{GGUF_KERNELS_VERSION}+torch210cu130py311"
+        self.assertEqual(windows_version, expected_version)
+        self.assertEqual(linux_version, expected_version)
+        self.assertIn("win_amd64.whl#sha256=", windows_url)
+        self.assertIn("linux_x86_64.whl#sha256=", linux_url)
+
+    def test_linux_wheel_requires_the_published_glibc_floor(self):
+        self.assertIsNone(
+            _wheel_spec(
+                11, "2.10.0", "13.0", "linux", "x86_64", "cpython", ("glibc", "2.27")
+            )
+        )
 
 
 if __name__ == "__main__":

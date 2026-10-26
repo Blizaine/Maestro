@@ -63,9 +63,12 @@ class StudioImageWorkflowUiTests(unittest.TestCase):
 
     def test_image_upscale_has_still_safe_methods(self):
         tools = _read(TOOLS_PATH)
-        self.assertIn("imageUpscaleMethods", tools)
-        self.assertIn("FlashVSR 2x (AI detail)", tools)
-        self.assertIn("Lanczos 4x (fast)", tools)
+        self.assertIn("const imageUpscaleMethods = [", tools)
+        image_methods = tools.split("const imageUpscaleMethods = [", 1)[1].split("\n]\n", 1)[0]
+        self.assertIn("value: 'flashvsr2'", image_methods)
+        self.assertIn("value: 'flashvsrplus2'", image_methods)
+        self.assertIn("value: 'lanczos4'", image_methods)
+        self.assertIn("mediaKind === 'image' ? imageUpscaleMethods : upscaleMethods", tools)
         self.assertIn("storedUpscaleMedia", tools)
 
     def test_image_inpaint_cannot_enter_video_multiclip_branch(self):
