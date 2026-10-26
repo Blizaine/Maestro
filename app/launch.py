@@ -8608,7 +8608,23 @@ async def llm_generate(request: Request):
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
 
+    image_paths = [str(p) for p in (body.get("image_paths") or []) if p]
+    for image_path in image_paths:
+        if not os.path.isfile(image_path):
+            raise HTTPException(status_code=400, detail=f"Image not found: {image_path}")
+
     _ensure_llm_loaded()
+
+    # A text-only model drops the images and describes one it never saw,
+    # which reads exactly like a real answer. Say so rather than invent.
+    if image_paths and not llm_service.get_status().get("vision"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The loaded model cannot accept images. Load a vision-capable "
+                "model to send one."
+            ),
+        )
 
     try:
         result = llm_service.generate(
@@ -8618,6 +8634,7 @@ async def llm_generate(request: Request):
             temperature=body.get("temperature", 0.7),
             top_p=body.get("top_p", 0.9),
             seed=body.get("seed"),
+            image_paths=image_paths or None,
         )
         return {"text": result}
     except Exception as e:

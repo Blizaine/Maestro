@@ -1255,6 +1255,7 @@ def get_status() -> dict:
         "device": _device if loaded else None,
         "provider": _provider,
         "mtp_acceleration": bool(loaded and _mtp_acceleration),
+        "vision": bool(loaded and _vision_available),
     }
 
 
@@ -8419,14 +8420,26 @@ def describe_image(
     prompt: str = "Describe this image in detail for use as a video generation prompt.",
     max_new_tokens: int = 256,
 ) -> str:
-    """Describe an image. Vision support requires multimodal GGUF (future)."""
+    """Describe an image by sending the image itself to a vision model.
+
+    This used to pass only the file's *name* to a text model, which duly
+    returned a confident description of a picture it had never seen. A
+    text-only model is refused instead: an invented description is worse
+    than an error, because nothing downstream can tell the two apart.
+    """
     if not os.path.isfile(image_path):
         raise FileNotFoundError(f"Image not found: {image_path}")
 
-    basename = os.path.basename(image_path)
+    if is_loaded() and not _vision_available:
+        raise RuntimeError(
+            f"The loaded model ({_model_id or 'unknown'}) cannot accept images. "
+            "Load a vision-capable model to describe one."
+        )
+
     return generate(
-        prompt=f"The user has an image file named '{basename}'. {prompt}",
+        prompt=prompt,
         system_prompt="You are a helpful assistant that generates creative, detailed video prompts.",
+        image_paths=[image_path],
         max_new_tokens=max_new_tokens,
         temperature=0.4,
     )
