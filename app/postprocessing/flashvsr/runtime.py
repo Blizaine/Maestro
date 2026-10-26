@@ -8,7 +8,7 @@ import math
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
@@ -18,7 +18,6 @@ from safetensors.torch import load_file
 from tqdm import tqdm
 
 from mmgp import offload
-from models.wan.modules.vae import WanVAE
 from .attention_backend import log_sparse_backend, require_sparge_attention
 from .tcdecoder import build_tcdecoder
 from .utils import Causal_LQ4x_Proj
@@ -28,6 +27,9 @@ from .wan_video_dit import (
     structural_block_candidates,
     structural_block_mask,
 )
+
+if TYPE_CHECKING:
+    from models.wan.modules.vae import WanVAE
 
 
 FLASHVSR_VARIANT_TINY_LONG = "tiny-long"
@@ -714,6 +716,8 @@ class FlashVSRRuntime:
             self.tcdecoder.requires_grad_(False)
             pipe["tcdecoder"] = self.tcdecoder
         else:
+            from models.wan.modules.vae import WanVAE
+
             if model == FLASHVSR_MODEL_PLUS_TURBO:
                 vae_state = _load_safe_checkpoint_state_dict(paths.vae, "FlashVSR+ WanVAE")
                 self.vae = WanVAE(vae_pth=vae_state, dtype=self.dtype, upsampler_factor=1, device="cpu")

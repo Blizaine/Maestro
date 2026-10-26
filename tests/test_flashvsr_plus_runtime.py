@@ -4,10 +4,12 @@ from __future__ import annotations
 import sys
 import hashlib
 import os
+import subprocess
 import tempfile
 import unittest
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -23,6 +25,129 @@ from postprocessing.flashvsr.wan_video_dit import (
     structural_block_mask,
 )
 from postprocessing.flashvsr.wgp_bridge import FlashVSRBridge
+
+
+class FlashVSRRuntimeImportTests(unittest.TestCase):
+    def test_runtime_import_does_not_require_optional_wan_pose_dependencies(self):
+        script = """
+import importlib.abc
+import sys
+
+blocked = []
+class BlockOptionalWanImports(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "models.wan" or fullname.startswith("models.wan.") or fullname == "smplfitter" or fullname.startswith("smplfitter."):
+            blocked.append(fullname)
+            raise ModuleNotFoundError("optional Wan pose dependency blocked for import regression")
+
+sys.meta_path.insert(0, BlockOptionalWanImports())
+import postprocessing.flashvsr.runtime
+assert not blocked, f"runtime attempted optional Wan imports: {blocked}"
+assert not any(name == "models.wan" or name.startswith("models.wan.") for name in sys.modules)
+"""
+        env = os.environ.copy()
+        env.update(
+            {
+                "PYTHONPATH": str(ROOT / "app"),
+                "CUDA_VISIBLE_DEVICES": "-1",
+                "HF_HUB_OFFLINE": "1",
+                "TRANSFORMERS_OFFLINE": "1",
+            }
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}")
+
+    def test_full_loader_imports_vae_only_when_constructing_it(self):
+        class FakeComponent:
+            def eval(self):
+                return self
+
+            def requires_grad_(self, _enabled):
+                return self
+
+        class FakeWanModel(FakeComponent):
+            def __init__(self, **_kwargs):
+                self.freqs = None
+
+        class FakeProjection(FakeComponent):
+            def __init__(self, **_kwargs):
+                pass
+
+        class FakeWanVAE:
+            def __init__(self, **kwargs):
+                vae_calls.append(kwargs)
+                self.device = None
+                self.model = FakeComponent()
+
+        def fake_package(name):
+            module = ModuleType(name)
+            module.__path__ = []
+            return module
+
+        for model in (runtime.FLASHVSR_MODEL_V11, runtime.FLASHVSR_MODEL_PLUS_TURBO):
+            with self.subTest(model=model):
+                vae_calls = []
+                fake_modules = {
+                    "models": fake_package("models"),
+                    "models.wan": fake_package("models.wan"),
+                    "models.wan.modules": fake_package("models.wan.modules"),
+                    "models.wan.modules.vae": ModuleType("models.wan.modules.vae"),
+                }
+                fake_modules["models.wan.modules.vae"].WanVAE = FakeWanVAE
+                with ExitStack() as stack:
+                    stack.enter_context(patch.dict(sys.modules, fake_modules))
+                    stack.enter_context(patch.object(runtime, "require_sparge_attention"))
+                    stack.enter_context(patch.object(runtime, "log_sparse_backend"))
+                    stack.enter_context(patch.object(runtime, "init_empty_weights", side_effect=lambda **_kwargs: nullcontext()))
+                    stack.enter_context(patch.object(runtime, "_default_dtype", side_effect=lambda _dtype: nullcontext()))
+                    stack.enter_context(patch.object(runtime, "WanModel", FakeWanModel))
+                    stack.enter_context(patch.object(runtime, "Causal_LQ4x_Proj", FakeProjection))
+                    stack.enter_context(patch.object(runtime, "precompute_freqs_cis_3d", return_value=torch.zeros(1)))
+                    stack.enter_context(patch.object(runtime, "_load_prompt_context", return_value=torch.zeros(1)))
+                    stack.enter_context(patch.object(runtime.offload, "load_model_data"))
+                    stack.enter_context(patch.object(runtime.offload, "profile", return_value=SimpleNamespace(release=lambda: None)))
+                    stack.enter_context(patch.object(runtime.torch.cuda, "is_available", return_value=False))
+                    stack.enter_context(patch.object(FlashVSRBridge, "verify_plus_assets"))
+                    stack.enter_context(
+                        patch.object(
+                            runtime,
+                            "_load_safe_checkpoint_state_dict",
+                            return_value={"weight": torch.ones(1)},
+                        )
+                    )
+
+                    initialized = {}
+                    instance = runtime.FlashVSRRuntime()
+                    instance.load(
+                        runtime.FlashVSRPaths(
+                            transformer="transformer.safetensors",
+                            lq_proj="lq_proj.safetensors",
+                            posi_prompt="prompt.safetensors",
+                            vae="vae.pth",
+                        ),
+                        runtime.FLASHVSR_VARIANT_FULL,
+                        profile="test-profile",
+                        init_pipe=lambda pipe, _kwargs, _profile: initialized.update(pipe) or "profile-id",
+                        model=model,
+                    )
+
+                self.assertEqual(len(vae_calls), 1)
+                self.assertEqual(vae_calls[0]["dtype"], torch.bfloat16)
+                self.assertEqual(vae_calls[0]["upsampler_factor"], 1)
+                self.assertEqual(vae_calls[0]["device"], "cpu")
+                self.assertEqual(instance.device, torch.device("cpu"))
+                self.assertIs(initialized["vae"], instance.vae.model)
+                if model == runtime.FLASHVSR_MODEL_PLUS_TURBO:
+                    self.assertIsInstance(vae_calls[0]["vae_pth"], dict)
+                else:
+                    self.assertEqual(vae_calls[0]["vae_pth"], "vae.pth")
 
 
 class _FilesLocator:
