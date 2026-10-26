@@ -3,7 +3,10 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## Unreleased
+## [3.3.0] - 2026-10-26
+
+Public Dev testing release of the first October WanGP porting batch. Main
+remains v3.2.5. See the [v3.3.0 Dev release notes](docs/RELEASE_NOTES_V3.3.0.md).
 
 - Add optional WGPKernels 1.4.2 / GGUF CUDA 1.0.29 installers with supported-stack
   checks, hash-pinned assets, stale-version upgrades and newer-manual-pin retention.

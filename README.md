@@ -35,6 +35,24 @@ Runtime upgrades are explicit menu actions. A missing performance-runtime marker
 does not automatically run Update when you open the launcher. If offered,
 **Start with Compatibility Runtime** keeps the existing runtime available.
 
+### v3.3.0 (2026-10-26) — Dev testing
+
+- **Qwen Image 2.1 reference caching:** optional INT8 caches in VRAM or system
+  RAM, with memory guards and separate positive/negative guidance caches.
+  Disabled remains the default; RAM transfers can trade speed for lower VRAM.
+- **H3 LightX2V accelerators:** four new workflow-matched four/eight-step
+  presets, with pinned weights and their correct video sampling shifts.
+- **FlashVSR+ Turbo:** a separate upscaler in Post Processing, Tools and Editor.
+  Existing FlashVSR selections keep v1.1 and its original behavior.
+- **Optional kernel updates:** compatible WGPKernels 1.4.2 and GGUF CUDA
+  1.0.29 installers, with hash-pinned downloads and existing fallbacks.
+
+Available on **Dev for testing**; Main remains v3.2.5. Update the idle Dev
+installation in Pinokio, restart Maestro and refresh the browser. CPU tests
+and the UI build passed; GPU speed, memory and output quality still need
+validation, including on 12GB and 8GB GPUs. See the
+[v3.3.0 Dev release notes](docs/RELEASE_NOTES_V3.3.0.md).
+
 ### v3.2.5 (2026-10-24)
 
 - **Faster Fish speech:** whole-frame CUDA Graph decoding when the full model
@@ -264,21 +282,6 @@ Includes the full v2.2.0 feature release and v2.2.1–v2.2.3 fixes below. **New 
 Use **Update** in Pinokio, restart Maestro and refresh the browser. Existing models, characters, outputs and projects stay in place. New models and optional music tools download their assets when used. YuE2 model/tokenizer weights have separate noncommercial terms; see the [music guide](docs/YuE2-music.md).
 
 [Full release notes and issue status](docs/RELEASE_NOTES_V2.2.0.md) · [Validation and known limits](docs/VALIDATION_V2.2.0.md)
-
-### v2.1.6 (2026-09-11)
-
-**Better H3/Viggle memory use, detailed-prompt fixes, and simpler reference controls**
-
-- **Faster streaming H3/Viggle jobs:** the per-job memory planner now passes its transformer allowance to MMGP so eligible profiles can retain more weights in VRAM.
-- **Detailed action prompts stay out of the dialogue budget:** AI Faithful recognizes production headings, Role A/B descriptions and titled time ranges in imported briefs. Visual directions no longer trigger false “too much dialogue” errors for those formats, while actual spoken lines keep their timing checks.
-- **Reference editing beside the thumbnails:** name and type fields expand beneath the selected reference row. Drag thumbnails to reorder them; saved character appearance and voice stay together. Preview, replacement and soundtrack controls remain available.
-- **H3 Fused steps up to 12:** both Frames and References allow **4–12 total steps**, with four still the default. Studio remembers the last selected or used step count for each model across restarts, including when the browser port changes.
-
-Use Pinokio's **Update**, restart Maestro and refresh the browser. Run Enhance again from the original prompt to apply the parsing fixes. Existing models and saved projects stay in place; these changes require no new dependencies or model downloads.
-
-[Full release notes](docs/RELEASE_NOTES_V2.1.6.md) · [Validation and measured limits](docs/VALIDATION_V2.1.6.md)
-
-[Read earlier updates and the complete history →](docs/UPDATE_HISTORY.md)
 
 ## Requirements
 
