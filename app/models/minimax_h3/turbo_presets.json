@@ -167,6 +167,98 @@
       "runtime": "pdd",
       "reference_detail": "max",
       "description": "Maestro's default Ref2VA Turbo recipe and Alibaba PAI's official Parallel Decoding Distillation adapter for H3 Omni. Maestro applies its required 32-interval, four-at-a-time head fusion and eight model evaluations at strength 1.0. The official recipe recommends 2048px-short-edge references; Match output remains available as a faster no-upscale option. Published Ref2VA PDD examples currently cover clips through 10.13 seconds, so longer accelerated clips remain experimental."
+    },
+    {
+      "id": "lightx2v-fl2va-4step-v1.3-768p",
+      "label": "LightX2V FL2VA — 4-step v1.3 (768p)",
+      "status": "experimental",
+      "filename": "minimax_h3_lightx2v_fl2v_turbo_4step_alpha8_v1.3_768p_bf16.safetensors",
+      "remote_path": "loras/minimax_h3_lightx2v_fl2v_turbo_4step_alpha8_v1.3_768p_bf16.safetensors",
+      "repo_id": "DeepBeepMeep/MiniMax-H3",
+      "model_card_url": "https://huggingface.co/DeepBeepMeep/MiniMax-H3",
+      "revision": "de1028e84b0fd5e7f15b2684b704d8c7289b02be",
+      "sha256": "25257cb9ebeae78f96101c3352a19fa487c5fa0434a4c33c88ae2c565e3b7de9",
+      "size": 1383712904,
+      "steps": 4,
+      "weight": 1.0,
+      "weight_min": 0.0,
+      "weight_max": 2.0,
+      "workflow": "fl2va",
+      "runtime": "standard_lora",
+      "generation_settings": {
+        "guidance_scale": 1.0,
+        "flow_shift": 6.0
+      },
+      "description": "Pinned LightX2V FL2VA v1.3 768p adapter. The upstream First/Last profile uses four evaluations, CFG 1 and flow shift 6."
+    },
+    {
+      "id": "lightx2v-fl2va-8step-v1.1-768p",
+      "label": "LightX2V FL2VA — 8-step v1.1 (768p)",
+      "status": "experimental",
+      "filename": "minimax_h3_lightx2v_fl2v_turbo_8step_alpha8_v1.1_768p_bf16.safetensors",
+      "remote_path": "loras/minimax_h3_lightx2v_fl2v_turbo_8step_alpha8_v1.1_768p_bf16.safetensors",
+      "repo_id": "DeepBeepMeep/MiniMax-H3",
+      "model_card_url": "https://huggingface.co/DeepBeepMeep/MiniMax-H3",
+      "revision": "de1028e84b0fd5e7f15b2684b704d8c7289b02be",
+      "sha256": "6e2c616eb0adf03ab8eaa0113ec0c42ca0fa7073354eef01aa305fc7afb9861b",
+      "size": 1383712904,
+      "steps": 8,
+      "weight": 1.0,
+      "weight_min": 0.0,
+      "weight_max": 2.0,
+      "workflow": "fl2va",
+      "runtime": "standard_lora",
+      "generation_settings": {
+        "guidance_scale": 1.0,
+        "flow_shift": 6.0
+      },
+      "description": "Pinned LightX2V FL2VA v1.1 768p adapter. The upstream First/Last profile uses eight evaluations, CFG 1 and flow shift 6."
+    },
+    {
+      "id": "lightx2v-ref2va-4step-v1.0-768p",
+      "label": "LightX2V Ref2VA — 4-step v1.0 (768p)",
+      "status": "experimental",
+      "filename": "minimax_h3_lightx2v_ref2v_turbo_4step_alpha8_v1.0_768p_bf16.safetensors",
+      "remote_path": "loras/minimax_h3_lightx2v_ref2v_turbo_4step_alpha8_v1.0_768p_bf16.safetensors",
+      "repo_id": "DeepBeepMeep/MiniMax-H3",
+      "model_card_url": "https://huggingface.co/DeepBeepMeep/MiniMax-H3",
+      "revision": "de1028e84b0fd5e7f15b2684b704d8c7289b02be",
+      "sha256": "92e8e2f987eea03955e5731df0baf1255460ccffc44ead94e05ca505f0e8579e",
+      "size": 1383712904,
+      "steps": 4,
+      "weight": 1.0,
+      "weight_min": 0.0,
+      "weight_max": 2.0,
+      "workflow": "ref2va",
+      "runtime": "standard_lora",
+      "generation_settings": {
+        "guidance_scale": 1.0,
+        "flow_shift": 12.0
+      },
+      "description": "Pinned LightX2V Ref2VA v1.0 768p adapter. The upstream References profile uses four evaluations, CFG 1 and flow shift 12."
+    },
+    {
+      "id": "lightx2v-ref2va-8step-v1.1-768p",
+      "label": "LightX2V Ref2VA — 8-step v1.1 (768p)",
+      "status": "experimental",
+      "filename": "minimax_h3_lightx2v_ref2v_turbo_8step_alpha8_v1.1_768p_bf16.safetensors",
+      "remote_path": "loras/minimax_h3_lightx2v_ref2v_turbo_8step_alpha8_v1.1_768p_bf16.safetensors",
+      "repo_id": "DeepBeepMeep/MiniMax-H3",
+      "model_card_url": "https://huggingface.co/DeepBeepMeep/MiniMax-H3",
+      "revision": "de1028e84b0fd5e7f15b2684b704d8c7289b02be",
+      "sha256": "e7493e07d90cb98798d34aba2afc0dcf24dd14304d83c8a9b95c3548f6ad8d30",
+      "size": 1383712904,
+      "steps": 8,
+      "weight": 1.0,
+      "weight_min": 0.0,
+      "weight_max": 2.0,
+      "workflow": "ref2va",
+      "runtime": "standard_lora",
+      "generation_settings": {
+        "guidance_scale": 1.0,
+        "flow_shift": 12.0
+      },
+      "description": "Pinned LightX2V Ref2VA v1.1 768p adapter. The upstream References profile uses eight evaluations, CFG 1 and flow shift 12."
     }
   ]
 }

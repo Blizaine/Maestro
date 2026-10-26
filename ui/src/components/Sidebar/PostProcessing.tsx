@@ -12,6 +12,7 @@ import {
   supportsH3VaeUpsampling,
 } from '../../lib/h3VaeUpsampling'
 import { GalleryInput } from '../shared/GalleryInput'
+import { flashvsrOptions } from '../../lib/flashvsr'
 
 const baseOptions = [
   { value: '', label: 'None' },
@@ -28,13 +29,7 @@ const vaeOptions = [
 // Wan2GP. These values route to the FlashVSR bridge in wgp.py's
 // perform_spatial_upsampling(); the model auto-downloads (~GB) on first use.
 // "Two Pass" = higher quality, ~2x slower.
-const flashvsrOptions = [
-  { value: 'flashvsr2', label: 'FlashVSR 2x' },
-  { value: 'flashvsr3', label: 'FlashVSR 3x' },
-  { value: 'flashvsr4', label: 'FlashVSR 4x' },
-  { value: 'flashvsr2pass2', label: 'FlashVSR Two Pass 2x' },
-  { value: 'flashvsr2pass4', label: 'FlashVSR Two Pass 4x' },
-]
+// Versioned options are shared with Tools and Editor exports.
 
 export function PostProcessing({ expanded = false }: { expanded?: boolean }) {
   const dlss = useDlssAvailability()

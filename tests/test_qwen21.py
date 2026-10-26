@@ -275,6 +275,19 @@ class JobAdapterTests(unittest.TestCase):
         self.assertFalse(instance.text_encoder.language_model.layers[0]._forward_pre_hooks)
         instance.vae.clear_cache.assert_called_once()
 
+    def test_each_cache_storage_mode_is_disabled_for_changing_lora_weights(self):
+        for mode in ("Disabled", "Enabled", "INT8", "INT8_RAM"):
+            for scheduled in (False, True):
+                instance = self.runtime()
+                schedule = {"phase1": [[1.0, 0.5]]} if scheduled else None
+                with patch("shared.utils.loras_mutipliers.update_loras_slists"), \
+                     patch("models.qwen21.runtime.offload.set_step_no_for_lora"):
+                    instance.generate(input_prompt="Test", custom_settings={"qwen21_kv_cache": mode},
+                                      loras_slists=schedule)
+                call = instance.pipeline.call_args.kwargs
+                self.assertEqual(call["kv_cache_storage"], mode)
+                self.assertEqual(call["use_kv_cache"], mode != "Disabled" and not scheduled)
+
     def test_cancellation_during_prompt_encoding(self):
         instance = self.runtime()
         def cancel(**_):

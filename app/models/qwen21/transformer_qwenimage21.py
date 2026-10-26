@@ -54,32 +54,18 @@ except ImportError:
     flex_attention_module = None
 
 
-class QwenImage21KVLayerCache:
-    """Per-layer KV cache for text and condition-image prefix tokens.
+from shared.reference_cache import ReferenceKVLayerCache
 
-    Stores K and V projections (post-RoPE) for the prefix extracted during the first denoising step. Tensor format:
-    ``(batch_size, num_prefix_tokens, num_heads, head_dim)``.
-    """
 
-    def __init__(self):
-        self.k: torch.Tensor | None = None
-        self.v: torch.Tensor | None = None
-
-    def store(self, k: torch.Tensor, v: torch.Tensor):
-        self.k = k
-        self.v = v
-
-    def get(self) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.k is None:
-            raise RuntimeError("KV cache has not been populated yet.")
-        return self.k, self.v
+class QwenImage21KVLayerCache(ReferenceKVLayerCache):
+    """Per-layer prefix storage; default precision preserves existing behavior."""
 
 
 class QwenImage21KVCache:
-    """Container for all transformer blocks' prefix KV caches."""
+    """Container for all transformer blocks' text/reference prefix caches."""
 
-    def __init__(self, num_layers: int):
-        self.layer_caches = [QwenImage21KVLayerCache() for _ in range(num_layers)]
+    def __init__(self, num_layers: int, storage_mode="Enabled"):
+        self.layer_caches = [QwenImage21KVLayerCache(storage_mode) for _ in range(num_layers)]
 
     def get_layer(self, layer_idx: int) -> QwenImage21KVLayerCache:
         return self.layer_caches[layer_idx]
@@ -355,11 +341,11 @@ def _qwenimage21_prepare_qkv(
             # (size-1 dims are ignored), so `contiguous()` returns the same view and the cache would pin the
             # whole prefill K/V for every step of the denoising loop.
             layer_cache.store(
-                key[:, cache_write_slice].clone(),
-                value[:, cache_write_slice].clone(),
+                key[:, cache_write_slice],
+                value[:, cache_write_slice],
             )
         elif kv_cache_mode == "cached":
-            cached_k, cached_v = layer_cache.get()
+            cached_k, cached_v = layer_cache.get(device=key.device, dtype=key.dtype)
             key = torch.cat([cached_k, key], dim=1)
             value = torch.cat([cached_v, value], dim=1)
 

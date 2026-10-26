@@ -240,8 +240,9 @@ class model_factory:
                 # The model-specific cache flag is opt-in and remains subject
                 # to the pipeline's conservative per-reference VRAM budget.
                 # Scheduled/fused adapter changes invalidate cached prefix K/V.
-                use_kv_cache=(custom_settings or {}).get("qwen21_kv_cache", "Disabled") == "Enabled"
+                use_kv_cache=(custom_settings or {}).get("qwen21_kv_cache", "Disabled") != "Disabled"
                 and not _has_scheduled_lora_weights(loras_slists),
+                kv_cache_storage=(custom_settings or {}).get("qwen21_kv_cache", "Disabled"),
                 output_type="uint8",
             ).images
             check_cancel()

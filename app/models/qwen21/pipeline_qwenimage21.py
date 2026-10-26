@@ -686,6 +686,7 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         callback_on_step_end_tensor_inputs: list[str] = ["latents"],
         output_resolution: int = 1024,
         use_kv_cache: bool = True,
+        kv_cache_storage: str = "Enabled",
         sample_solver: str = "default",
         qwen21_turbo_checkpoint: bool | None = None,
         mask_image: Any | None = None,
@@ -1027,7 +1028,9 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         # Text and condition-image keys and values are step-independent under `causal_condition`, so the first step
         # prefills them and later steps only recompute the target image's tokens.
         num_blocks = len(self.transformer.transformer_blocks)
-        cache_enabled = use_kv_cache and self.transformer.config.causal_condition
+        from shared.reference_cache import normalize_cache_mode
+        kv_cache_storage = normalize_cache_mode(kv_cache_storage)
+        cache_enabled = use_kv_cache and kv_cache_storage != "Disabled" and self.transformer.config.causal_condition
         if cache_enabled:
             required, budget = reference_cache_plan(
                 self.transformer, prompt_embeds, image_pad_mask,
@@ -1035,14 +1038,15 @@ class QwenImage21Pipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                 latents.shape[1], device,
                 negative_prompt_embeds if do_true_cfg else None,
                 negative_image_pad_mask if do_true_cfg else None,
+                cache_mode=kv_cache_storage,
             )
             cache_enabled = required <= budget
             if not cache_enabled:
                 print(f"[Qwen Image 2.1 Memory] Reference KV cache needs {required / GIB:.1f} GB; "
                       f"safe cache budget is {budget / GIB:.1f} GB. Recomputing the prefix "
                       "each step; all references and output dimensions are preserved.")
-        cond_cache = QwenImage21KVCache(num_blocks) if cache_enabled else None
-        neg_cache = QwenImage21KVCache(num_blocks) if cache_enabled and do_true_cfg else None
+        cond_cache = QwenImage21KVCache(num_blocks, kv_cache_storage) if cache_enabled else None
+        neg_cache = QwenImage21KVCache(num_blocks, kv_cache_storage) if cache_enabled and do_true_cfg else None
 
         # 5. Denoising loop
         has_mask = latent_mask is not None

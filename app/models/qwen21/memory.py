@@ -58,7 +58,7 @@ def model_storage_bytes(model):
 
 def reference_cache_plan(transformer, prompt_embeds, image_mask, reference_rows,
                          target_rows, device, negative_prompt_embeds=None,
-                         negative_image_mask=None):
+                         negative_image_mask=None, *, cache_mode="Enabled"):
     """Return cache bytes and a conservative budget before any cache allocation.
 
     MMGP manages weights, not the per-layer K/V tensors. Count the actual
@@ -79,6 +79,18 @@ def reference_cache_plan(transformer, prompt_embeds, image_mask, reference_rows,
         cache_rows += negative_rows
         largest_prefix = max(largest_prefix, negative_rows)
     required = 2 * layers * width * itemsize * batch * cache_rows
+    if cache_mode in ("INT8", "INT8_RAM"):
+        from shared.reference_cache import quantized_storage_bytes
+        encoded = 2 * layers * quantized_storage_bytes((batch, cache_rows,
+            transformer.config.num_attention_heads, transformer.config.attention_head_dim))
+        # RAM storage still needs one complete layer's dequantized K/V on GPU.
+        # The workspace reserve below covers the joined prefix/target copies
+        # as well as quantization/dequantization scratch.
+        required = encoded if cache_mode == "INT8" else 2 * batch * largest_prefix * width * itemsize
+        if cache_mode == "INT8_RAM":
+            import psutil
+            if encoded > max(0, psutil.virtual_memory().available - 2 * GIB):
+                return float("inf"), 0
     if torch.device(device).type != "cuda":
         return required, float("inf")
 

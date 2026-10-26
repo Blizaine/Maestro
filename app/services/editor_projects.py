@@ -48,6 +48,7 @@ _EDITOR_AI_TOOLS = {
 _EDITOR_UPSCALE_METHODS = {
     "", "flashvsr2", "flashvsr3", "flashvsr4", "flashvsr2pass2",
     "flashvsr2pass4",
+    "flashvsrplus2", "flashvsrplus3", "flashvsrplus4", "flashvsrplus2pass2", "flashvsrplus2pass4",
 }
 _EDITOR_FONT_FAMILIES = {
     "Arial",

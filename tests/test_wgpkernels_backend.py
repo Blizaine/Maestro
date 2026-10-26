@@ -51,6 +51,23 @@ class TestWgpBackendSelection(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown INT8 kernel backend"):
             self.backend.resolve_backend("unknown")
 
+    def test_probe_uses_the_package_loader_and_selftest_for_abi_compatibility(self):
+        module = SimpleNamespace(
+            _lib=None,
+            load_library=mock.Mock(),
+            selftest=mock.Mock(return_value=None),
+        )
+        with mock.patch.object(torch.cuda, "is_available", return_value=True):
+            with mock.patch.object(torch.cuda, "current_device", return_value=0):
+                with mock.patch.object(torch.cuda, "get_device_capability", return_value=(8, 0)):
+                    with mock.patch.object(self.backend.importlib, "import_module", return_value=module):
+                        loaded, reason = self.backend._probe_wgpkernels()
+
+        self.assertIs(loaded, module)
+        self.assertEqual(reason, "available")
+        module.load_library.assert_called_once_with()
+        module.selftest.assert_called_once_with()
+
 
 class TestWgpLinearDispatch(unittest.TestCase):
     def setUp(self):

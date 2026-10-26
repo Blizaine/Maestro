@@ -29,6 +29,7 @@ import {
   previousEditorItemEnd,
 } from './editorUtils'
 import { DEFAULT_EDITOR_FONT } from './editorFonts'
+import { flashvsrScale } from '../lib/flashvsr'
 import { invalidateEditorMediaPreview } from './editorMediaPreview'
 
 const HISTORY_LIMIT = 60
@@ -2411,14 +2412,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
               const serverRecord = serverProject.exports.find(record => record.filename === outputFile)
                 || serverProject.exports[0]
               const fallbackDimensions = editorExportDimensions(project)
-              const fallbackUpscaleScale = project.export.spatial_upsampling === 'flashvsr3'
-                ? 3
-                : project.export.spatial_upsampling === 'flashvsr4'
-                  || project.export.spatial_upsampling === 'flashvsr2pass4'
-                  ? 4
-                  : project.export.spatial_upsampling
-                    ? 2
-                    : 1
+              const fallbackUpscaleScale = flashvsrScale(project.export.spatial_upsampling)
               const fallbackRecord: EditorExportRecord | null = outputFile ? {
                 id: `export-${result.job_id}`,
                 filename: outputFile,

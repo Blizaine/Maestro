@@ -1,0 +1,5 @@
+Reference K/V storage adapted from the per-token/per-head 32-channel INT8 prefix-cache approach in WanGP
+https://github.com/deepbeepmeep/WanGP/blob/9905f0df941e5ec7b0c80e32555d3a61fe415726/shared/attention_kit.py
+The portable implementation retains FP32 scales, existing attention backends, and bounded dequantization scratch.
+WanGP copyright DeepBeepMeep; additions governed by WanGP Community License 2.0.
+The license is preserved in app/LICENSES/WanGP-Community-2.0.txt.

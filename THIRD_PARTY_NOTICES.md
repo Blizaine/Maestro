@@ -4,6 +4,30 @@ This file supplements the license files distributed with Maestro and is not
 an exhaustive replacement for dependency-specific notices in installed Python
 or JavaScript packages.
 
+## FlashVSR+ Turbo
+
+Maestro's FlashVSR+ Turbo scheduler and hybrid attention port adapt the
+official **OpenImagingLab/FlashVSR_Plus** project, licensed under Apache-2.0,
+and the matching streaming integration in **deepbeepmeep/WanGP** commit
+`9905f0df941e5ec7b0c80e32555d3a61fe415726`. WanGP-derived changes retain the
+license at `app/LICENSES/WanGP-Community-2.0.txt`; Apache-2.0 applies to the
+FlashVSR+ source portions. The Apache license text is available at
+https://www.apache.org/licenses/LICENSE-2.0.
+
+The Plus Turbo transformer, conditioning projection, TCDecoder, and optional
+Wan VAE are downloaded on demand from
+`ruchangyao/FlashVSR_plus`, pinned to revision
+`46b79520946ac67dec94d1566490690953c7debc`. Their sizes and LFS SHA-256
+identities are recorded in `app/postprocessing/flashvsr/wgp_bridge.py`. The
+Plus prompt tensor is pinned to official code commit
+`b548a2cc2c929d3d4676f2973abe27876ec4dee7` and checked against its Git blob
+SHA-1 before it is saved. The FlashVSR+ model files are not bundled; their
+upstream model terms remain applicable.
+
+- FlashVSR+ source: https://github.com/OpenImagingLab/FlashVSR_Plus/tree/b548a2cc2c929d3d4676f2973abe27876ec4dee7
+- WanGP source: https://github.com/deepbeepmeep/WanGP/tree/9905f0df941e5ec7b0c80e32555d3a61fe415726
+- Plus Turbo checkpoints: https://huggingface.co/ruchangyao/FlashVSR_plus/tree/46b79520946ac67dec94d1566490690953c7debc
+
 ## FastVideo FastH3 V2
 
 The experimental native VSA-H3 routing, pooled compression semantics and
@@ -239,3 +263,18 @@ WGPKernels is an optional separately downloaded package; its upstream package
 license applies. Model weights retain their respective model licenses.
 
 Source: https://github.com/deepbeepmeep/WanGP/tree/de302eec64b692dc83949d687cadf7d60bd74091
+
+## WanGP October 2026 feature ports
+
+The portable quantized reference-cache layout and FlashVSR+ runtime changes
+adapt WanGP revision `9905f0df941e5ec7b0c80e32555d3a61fe415726`.
+WanGP additions retain its Community License 2.0, preserved at
+`app/LICENSES/WanGP-Community-2.0.txt`. Existing Diffusers and FlashVSR
+Apache-2.0 notices remain in place. Component provenance is in
+`app/shared/reference_cache.NOTICE` and `docs/FlashVSR.md`.
+
+Source: https://github.com/deepbeepmeep/WanGP/tree/9905f0df941e5ec7b0c80e32555d3a61fe415726
+
+The optional kernel wheels and H3/FlashVSR+ model assets download separately;
+this source change redistributes none of those weights or wheels. See
+`docs/optional-kernel-pins.md` and `docs/H3-LightX2V-Accelerators.md` for pins.

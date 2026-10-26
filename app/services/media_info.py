@@ -74,10 +74,11 @@ def record_upload(path, original_name):
 
 def spatial_details(method):
     method = str(method or "")
-    match = re.fullmatch(r"(dlss5\*|lanczos|flashvsr2pass|flashvsr)([0-9.]+)", method)
+    match = re.fullmatch(r"(dlss5\*|lanczos|flashvsrplus2pass|flashvsrplus|flashvsr2pass|flashvsr)([0-9.]+)", method)
     if match and (scale := _positive(match[2])):
         label = {"dlss5*": "DLSS 5 Neural Rendering", "lanczos": "Lanczos",
-                 "flashvsr": "FlashVSR", "flashvsr2pass": "FlashVSR (two passes)"}[match[1]]
+                 "flashvsr": "FlashVSR v1.1", "flashvsr2pass": "FlashVSR v1.1 (two passes)",
+                 "flashvsrplus": "FlashVSR+ Turbo", "flashvsrplus2pass": "FlashVSR+ Turbo (two passes)"}[match[1]]
         return {"method": method, "method_label": label, "multiplier": scale}
     if method == "h3_vae*2":
         return {"method": method, "method_label": "H3 VAE 2×", "multiplier": 2,

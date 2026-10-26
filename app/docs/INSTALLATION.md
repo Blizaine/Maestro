@@ -320,33 +320,53 @@ For more troubleshooting, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
 
 ## Optional Kernels
 
-### GGUF llama.cpp CUDA Kernels
+Pinokio's Install and Update scripts run the version-aware optional installers after PyTorch setup. They select a wheel only for the supported stacks listed below; an unsupported stack or failed optional install keeps the existing fallback. Manual commands use `--no-deps` so they do not change PyTorch. See [optional kernel pins](../../docs/optional-kernel-pins.md) for release provenance and wheel SHA-256 values.
 
-These kernels are only useful for GGUF models. 
+### WGPKernels 1.4.2 (NVIDIA CUDA)
 
-### GGUF Kernels Wheels for Python 3.11 / Pytorch 2.10 / Cuda 13
+Use the wheel matching your Python and PyTorch CUDA build. Linux wheels require glibc 2.34 or newer.
 
-- Windows
-   ```
-  pip install https://github.com/deepbeepmeep/kernels/releases/download/GGUF_Kernels/llamacpp_gguf_cuda-1.0.2+torch210cu13py311-cp311-cp311-win_amd64.whl
-   ```
+Python 3.10 / PyTorch 2.7.1 / CUDA 12.8:
 
-- Linux
-   ```
-  # placeholder: Linux GGUF wheel for Python 3.11 / PyTorch 2.10 / CUDA 13 not published yet
-   ```
+```bash
+# Windows x86_64
+python -m pip install --no-deps "https://github.com/deepbeepmeep/WGPKernels/releases/download/v1.4.2/wgpkernels-1.4.2%2Bcu128-py3-none-win_amd64.whl#sha256=9b9747595b3e89cec7c8bf74499bf3f36988f5dc23100797f643fcbd4e2feca7"
+# Linux x86_64
+python -m pip install --no-deps "https://github.com/deepbeepmeep/WGPKernels/releases/download/v1.4.2/wgpkernels-1.4.2%2Bcu128-py3-none-linux_x86_64.whl#sha256=6b63bd5434ddad45d45276782872f88fe8015fe9f1ac56b168ea5d48b5c7f5bb"
+```
 
-### GGUF Kernels Wheels for Python 3.10 / Pytorch 2.7.1 / Cuda 12.8
+Python 3.11 / PyTorch 2.10.0 / CUDA 13.0:
 
-- Windows
-   ```
-  pip install https://github.com/deepbeepmeep/kernels/releases/download/GGUF_Kernels/llamacpp_gguf_cuda-1.0.2+torch271cu128py310-cp310-cp310-win_amd64.whl
-   ```
+```bash
+# Windows x86_64
+python -m pip install --no-deps "https://github.com/deepbeepmeep/WGPKernels/releases/download/v1.4.2/wgpkernels-1.4.2%2Bcu130-py3-none-win_amd64.whl#sha256=2fa49576514987fd6725b21b6317cfae1e7856ef54fbbeb22e2cfe50e4fcf88b"
+# Linux x86_64
+python -m pip install --no-deps "https://github.com/deepbeepmeep/WGPKernels/releases/download/v1.4.2/wgpkernels-1.4.2%2Bcu130-py3-none-linux_x86_64.whl#sha256=a33354ea1326c57340172eea86dc4a5f3559ba24665f24746eca7d0ad7d9a3c9"
+```
 
-- Linux
-   ```
-  # placeholder: Linux GGUF wheel for Python 3.10 / PyTorch 2.7.1 / CUDA 12.8 not published yet
-   ```
+Maestro's current WGPKernels INT8 dispatch requires NVIDIA SM 8.0 or newer. WGPKernels 1.4.2 also contains SM 7.5 INT8 code, but this version of Maestro does not select it on Turing. Its new FP8-weight/W8A16 API is separate from the current `wgpkernels.int8` path.
+
+### GGUF llama.cpp CUDA kernels 1.0.29
+
+These kernels accelerate GGUF models. Linux wheels require glibc 2.28 or newer.
+
+Python 3.10 / PyTorch 2.7.1 / CUDA 12.8:
+
+```bash
+# Windows x86_64
+python -m pip install --no-deps "https://github.com/deepbeepmeep/kernels/releases/download/gguf-v1.0.29/llamacpp_gguf_cuda-1.0.29%2Btorch271cu128py310-cp310-cp310-win_amd64.whl#sha256=42ed4fd96ee9756b89b1c27cb85836bbe1eec09501da6df3410c7db9df82cf4d"
+# Linux x86_64
+python -m pip install --no-deps "https://github.com/deepbeepmeep/kernels/releases/download/gguf-v1.0.29/llamacpp_gguf_cuda-1.0.29%2Btorch271cu128py310-cp310-cp310-linux_x86_64.whl#sha256=72da2794ff79bef5e7d2db41959382a1dfb5ad6a3797c58b5abeb5b6247b50f2"
+```
+
+Python 3.11 / PyTorch 2.10.0 / CUDA 13.0:
+
+```bash
+# Windows x86_64
+python -m pip install --no-deps "https://github.com/deepbeepmeep/kernels/releases/download/gguf-v1.0.29/llamacpp_gguf_cuda-1.0.29%2Btorch210cu130py311-cp311-cp311-win_amd64.whl#sha256=6ea255647d2b9ee6143b975af6b1f1abc6d7256622fd8e212000d46bb4ca641b"
+# Linux x86_64
+python -m pip install --no-deps "https://github.com/deepbeepmeep/kernels/releases/download/gguf-v1.0.29/llamacpp_gguf_cuda-1.0.29%2Btorch210cu130py311-cp311-cp311-linux_x86_64.whl#sha256=9509d38b737e9b825dd8d523e27a74d534eec2d30394b0c2c3fe7381011ea014"
+```
 
 ### INT4 / FP4 quantized support
 

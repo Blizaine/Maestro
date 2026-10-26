@@ -1,2 +1,2 @@
-"""FlashVSR v1.1 postprocessing integration."""
+"""FlashVSR v1.1 and FlashVSR+ Turbo postprocessing integrations."""
 

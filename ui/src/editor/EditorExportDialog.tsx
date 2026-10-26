@@ -15,6 +15,7 @@ import { useStore } from '../stores/useStore'
 import type { EditorExportCapabilities, EditorExportSettings, EditorUpscaleMethod } from '../types'
 import { editorExportDimensions, editorExportFps, editorProjectDuration, formatEditorTime } from './editorUtils'
 import { useEditorStore } from './useEditorStore'
+import { flashvsrOptions } from '../lib/flashvsr'
 
 const RESOLUTIONS: Array<{ value: EditorExportSettings['resolution']; label: string; detail: string }> = [
   { value: 'canvas', label: 'Project', detail: 'Match the edit canvas' },
@@ -32,11 +33,7 @@ const QUALITY: Array<{ value: EditorExportSettings['quality']; label: string; de
 
 const UPSCALE_OPTIONS: Array<{ value: EditorUpscaleMethod; label: string; scale: number }> = [
   { value: '', label: 'Off', scale: 1 },
-  { value: 'flashvsr2', label: 'FlashVSR 2×', scale: 2 },
-  { value: 'flashvsr3', label: 'FlashVSR 3×', scale: 3 },
-  { value: 'flashvsr4', label: 'FlashVSR 4×', scale: 4 },
-  { value: 'flashvsr2pass2', label: 'FlashVSR two-pass 2×', scale: 2 },
-  { value: 'flashvsr2pass4', label: 'FlashVSR two-pass 4×', scale: 4 },
+  ...flashvsrOptions,
 ]
 
 function safeFilename(value: string): string {

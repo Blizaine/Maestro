@@ -7818,6 +7818,7 @@ def get_services_config():
         # 3=tiny-long (tiny for long videos). topk_ratio 0..4 controls sparse-
         # attention density (higher = more motion fidelity, slower). backend:
         # auto / triton_sparse (bundled) / sparge (optional install, best motion).
+        "flashvsr_model": services.get("flashvsr_model", "v1_1"),
         "flashvsr_mode": services.get("flashvsr_mode", 1),
         "flashvsr_topk_ratio": services.get("flashvsr_topk_ratio", 0.0),
         "flashvsr_backend": services.get("flashvsr_backend", "auto"),
@@ -7841,7 +7842,7 @@ async def update_services_config(request: Request):
         "civitai_api_key", "voice_reference_enabled", "ltx_progressive_pipeline",
         "show_experimental", "auto_performance", "storage_allow_linked_removal",
         "director_multishot_lora_mode",
-        "flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend",
+        "flashvsr_model", "flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend",
     }
 
     previous_services = wgp.server_config.get("services", {})
@@ -7856,6 +7857,8 @@ async def update_services_config(request: Request):
             raise HTTPException(status_code=400, detail="Fidelity retries must be a whole number from 0 to 5.")
         if key == "enhance_fidelity_auto_continue" and type(value) is not bool:
             raise HTTPException(status_code=400, detail="Continue after fidelity warnings must be true or false.")
+        if key == "flashvsr_model" and value not in ("v1_1", "plus_turbo"):
+            raise HTTPException(status_code=400, detail="FlashVSR model must be v1_1 or plus_turbo.")
         if key == "llm_mtp_acceleration" and type(value) is not bool:
             raise HTTPException(status_code=400, detail="MTP acceleration must be true or false.")
         if key.endswith("_api_key"):
@@ -24563,7 +24566,7 @@ def _chunked_flashvsr_upscale(video_path: str, method: str, *, job: dict = None,
     import torch
 
     from shared.utils.utils import get_video_info
-    from postprocessing.flashvsr.runtime import FLASHVSR_CONTINUE_CACHE_FRAMES
+    from postprocessing.flashvsr.runtime import continue_cache_frames
 
     fps, width, height, total_frames = get_video_info(video_path)
     scale = wgp.flashvsr.scale_for_upsampling(method) or 2.0
@@ -24574,7 +24577,7 @@ def _chunked_flashvsr_upscale(video_path: str, method: str, *, job: dict = None,
     # the top-level keys the bridge reads — BEFORE the variant-dependent
     # chunk sizing below.
     _svc = wgp.server_config.get("services", {})
-    for _k in ("flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend"):
+    for _k in ("flashvsr_model", "flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend"):
         if _k in _svc:
             wgp.server_config[_k] = _svc[_k]
 
@@ -24586,7 +24589,7 @@ def _chunked_flashvsr_upscale(video_path: str, method: str, *, job: dict = None,
     bytes_per_out_frame = 3 * out_h * out_w * (1 if _variant in ("tiny-long", "full") else 4)
     chunk_frames = int(8e9 // max(1, bytes_per_out_frame))
     chunk_frames = max(49, min(chunk_frames, 1200))
-    overlap = FLASHVSR_CONTINUE_CACHE_FRAMES
+    overlap = continue_cache_frames(wgp.flashvsr.model_for_upsampling(method))
     n_chunks = max(1, math.ceil(max(1, int(total_frames)) / chunk_frames))
 
     # Free generation-model cache before loading FlashVSR.
@@ -24918,7 +24921,7 @@ def _run_tool_upscale(job_id: str):
                 )
                 if wgp.flashvsr.is_upsampling(method):
                     services = wgp.server_config.get("services", {})
-                    for key in ("flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend"):
+                    for key in ("flashvsr_model", "flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend"):
                         if key in services:
                             wgp.server_config[key] = services[key]
 

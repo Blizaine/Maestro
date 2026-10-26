@@ -1,6 +1,6 @@
-##### Enjoy this spagheti VRAM optimizations done by DeepBeepMeep !
-# I am sure you are a nice person and as you copy this code, you will give me officially proper credits:
-# Please link to https://github.com/deepbeepmeep/Wan2GP and @deepbeepmeep on twitter  
+# Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt).
+# FlashVSR+ inference settings are adapted from OpenImagingLab/FlashVSR_Plus, Apache License 2.0.
+# Please link to https://github.com/deepbeepmeep/Wan2GP and @deepbeepmeep on twitter.
 from __future__ import annotations
 
 import gc
@@ -22,17 +22,38 @@ from models.wan.modules.vae import WanVAE
 from .attention_backend import log_sparse_backend, require_sparge_attention
 from .tcdecoder import build_tcdecoder
 from .utils import Causal_LQ4x_Proj
-from .wan_video_dit import WanModel, precompute_freqs_cis_3d
+from .wan_video_dit import (
+    WanModel,
+    precompute_freqs_cis_3d,
+    structural_block_candidates,
+    structural_block_mask,
+)
 
 
 FLASHVSR_VARIANT_TINY_LONG = "tiny-long"
 FLASHVSR_VARIANT_TINY = "tiny"
 FLASHVSR_VARIANT_FULL = "full"
 
+FLASHVSR_MODEL_V11 = "v1_1"
+FLASHVSR_MODEL_PLUS_TURBO = "plus_turbo"
+FLASHVSR_PLUS_MODELS = (FLASHVSR_MODEL_PLUS_TURBO,)
+
 FLASHVSR_TOPK_RATIO = 0.0  # 0 = auto area-scaled ratio; >0 = fixed sparse attention ratio.
 FLASHVSR_FULL_MIN_AUTO_TOPK_RATIO = 1.5
 FLASHVSR_KV_CACHE_WINDOWS = 1  # Stream cache windows kept between denoise chunks; each window is two latent frames.
 FLASHVSR_CONTINUE_CACHE_FRAMES = 11
+FLASHVSR_PLUS_CHUNK_LATENTS = 4
+FLASHVSR_PLUS_TOPK_RATIO = 2.5
+FLASHVSR_PLUS_TOPK_GROUP_WINDOWS = 2
+FLASHVSR_PLUS_HALF_WINDOW_BUDGET = 2
+FLASHVSR_PLUS_LOCAL_RANGE = 11
+FLASHVSR_PLUS_CACHE_WINDOWS = 3
+FLASHVSR_PLUS_LOCAL_LAYER_RANGE = 3
+FLASHVSR_PLUS_LOCAL_LAYER_CACHE_WINDOWS = 1
+FLASHVSR_PLUS_LOCAL_LAYERS = {
+    FLASHVSR_MODEL_PLUS_TURBO: frozenset(layer for layer in range(30) if layer % 6),
+}
+FLASHVSR_PLUS_CONTINUE_CACHE_FRAMES = 19
 FLASHVSR_COTENANTS_MAP = {"lq_proj": ["transformer"]}
 FLASHVSR_SAVE_STILL_IMAGE_DEBUG_VIDEO = False
 FLASHVSR_DISABLE_STILL_IMAGE_OPTIMIZATIONS = False
@@ -69,6 +90,44 @@ def _default_dtype(dtype: torch.dtype):
         torch.set_default_dtype(previous_dtype)
 
 
+def _load_safe_checkpoint_state_dict(path: str, label: str) -> dict[str, torch.Tensor]:
+    """Load a tensor-only checkpoint without enabling pickle object loading."""
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError(f"{label} checkpoint is missing: {path}")
+    state_dict = torch.load(path, map_location="cpu", weights_only=True)
+    if isinstance(state_dict, dict) and isinstance(state_dict.get("module"), dict):
+        state_dict = state_dict["module"]
+    if not isinstance(state_dict, dict) or not state_dict:
+        raise ValueError(f"{label} checkpoint must contain a non-empty tensor state dictionary")
+    if any(not isinstance(key, str) or not torch.is_tensor(value) for key, value in state_dict.items()):
+        raise ValueError(f"{label} checkpoint contains non-tensor state entries")
+    return state_dict
+
+
+def _load_prompt_context(path: str, model: str, dtype: torch.dtype) -> torch.Tensor:
+    if model == FLASHVSR_MODEL_V11:
+        return load_file(path, device="cpu")["context"].to(dtype)
+
+    # The official Plus prompt is a raw tensor saved in a .pth file. Its
+    # published 4 MiB payload is [1, 512, 4096] in a 16-bit float dtype.
+    context = torch.load(path, map_location="cpu", weights_only=True)
+    if not torch.is_tensor(context):
+        raise ValueError("FlashVSR+ prompt checkpoint must contain a tensor")
+    if tuple(context.shape) != (1, 512, 4096):
+        raise ValueError(
+            "FlashVSR+ prompt tensor has an incompatible shape: "
+            f"expected (1, 512, 4096), got {tuple(context.shape)}"
+        )
+    if context.dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError(
+            "FlashVSR+ prompt tensor must use float16 or bfloat16, "
+            f"got {context.dtype}"
+        )
+    if not torch.isfinite(context).all():
+        raise ValueError("FlashVSR+ prompt tensor contains non-finite values")
+    return context.to(dtype)
+
+
 @dataclass
 class FlashVSRPaths:
     transformer: str
@@ -76,6 +135,103 @@ class FlashVSRPaths:
     posi_prompt: str
     tcdecoder: str | None = None
     vae: str | None = None
+
+
+@dataclass(frozen=True)
+class StreamStep:
+    latents: tuple[int, int]
+    lq_clips: list[tuple[int, int]]
+    lq_end: int
+    rope_start: int
+
+
+@dataclass(frozen=True)
+class StreamSchedule:
+    steps: list[StreamStep]
+    latent_frames: int
+    still_frames: int
+
+
+def _plus_schedule(input_frames: int) -> StreamSchedule:
+    """FlashVSR+ Turbo schedule: four latent frames per step with repeated-tail conditioning."""
+    input_frames = max(1, int(input_frames))
+    latent_frames = (input_frames - 1 + 3) // 4 + 1
+    chunk_count = (latent_frames + FLASHVSR_PLUS_CHUNK_LATENTS - 1) // FLASHVSR_PLUS_CHUNK_LATENTS
+    steps = []
+    for process_idx in range(chunk_count):
+        first_latent = process_idx * FLASHVSR_PLUS_CHUNK_LATENTS
+        lq_clips = [(0, 1)] if process_idx == 0 else []
+        lq_clips.extend(
+            (1 + 4 * latent, 5 + 4 * latent)
+            for latent in range(first_latent, first_latent + FLASHVSR_PLUS_CHUNK_LATENTS)
+        )
+        steps.append(StreamStep(
+            (first_latent, first_latent + FLASHVSR_PLUS_CHUNK_LATENTS),
+            lq_clips,
+            4 * (first_latent + FLASHVSR_PLUS_CHUNK_LATENTS) - 3,
+            first_latent,
+        ))
+    return StreamSchedule(steps, chunk_count * FLASHVSR_PLUS_CHUNK_LATENTS, 4 * FLASHVSR_PLUS_CHUNK_LATENTS - 3)
+
+
+def _plus_local_layers_structural(block_h: int, block_w: int, seqlen: int, cached_windows: int, topk: int) -> bool:
+    _, candidates, entries = structural_block_candidates(
+        block_h, block_w, seqlen, cached_windows, FLASHVSR_PLUS_LOCAL_LAYER_RANGE
+    )
+    return candidates <= min(entries - 1, int(topk))
+
+
+def _select_topk_ratio(model: str, configured_ratio: float, variant: str, output_height: int, output_width: int) -> float:
+    """Keep Plus Turbo's attention budget fixed while honoring the v1.1 slider."""
+    if model == FLASHVSR_MODEL_PLUS_TURBO:
+        print(f"[FlashVSR] FlashVSR+ sparse top-k ratio fixed to {FLASHVSR_PLUS_TOPK_RATIO:.3f}")
+        return FLASHVSR_PLUS_TOPK_RATIO
+    configured_ratio = max(0.0, min(4.0, float(configured_ratio or 0.0)))
+    if configured_ratio > 0:
+        print(f"[FlashVSR] Sparse top-k ratio fixed to {configured_ratio:.3f}")
+        return configured_ratio
+    if variant == FLASHVSR_VARIANT_FULL:
+        raw_ratio = min(2.0, 2.0 * 768 * 1280 / max(int(output_height) * int(output_width), 1))
+        ratio = max(raw_ratio, FLASHVSR_FULL_MIN_AUTO_TOPK_RATIO)
+        if ratio != raw_ratio:
+            print(f"[FlashVSR] Sparse top-k ratio adjusted to {ratio:.3f} for {output_width}x{output_height} (minimum; raw auto {raw_ratio:.3f})")
+        elif ratio < 2.0:
+            print(f"[FlashVSR] Sparse top-k ratio adjusted to {ratio:.3f} for {output_width}x{output_height}")
+        return ratio
+    return FLASHVSR_TOPK_RATIO
+
+
+def _plus_layer_configs(dit: WanModel, model: str, block_h: int, block_w: int, seqlen: int, chunk_index: int, cache_windows: int, topk: int, device) -> list[dict[str, Any]]:
+    """Per-layer hybrid attention policy from the FlashVSR+ Turbo inference preset."""
+    local_layers = FLASHVSR_PLUS_LOCAL_LAYERS[model]
+    if seqlen % FLASHVSR_PLUS_TOPK_GROUP_WINDOWS:
+        raise ValueError("FlashVSR+ temporal windows must divide into two-window top-k groups")
+    groups = seqlen // FLASHVSR_PLUS_TOPK_GROUP_WINDOWS
+    draft = {
+        "local_range": FLASHVSR_PLUS_LOCAL_RANGE,
+        "kv_len": cache_windows,
+        "topk_groups": groups,
+        "block_mask": None,
+    }
+    cached = 0 if chunk_index == 0 else FLASHVSR_PLUS_LOCAL_LAYER_CACHE_WINDOWS
+    topk_mask = None
+    if _plus_local_layers_structural(block_h, block_w, seqlen, cached, topk):
+        topk_mask = structural_block_mask(
+            block_h,
+            block_w,
+            seqlen,
+            cached,
+            FLASHVSR_PLUS_LOCAL_LAYER_RANGE,
+            dit.blocks[0].self_attn.num_heads,
+            device,
+        )
+    local = {
+        "local_range": FLASHVSR_PLUS_LOCAL_LAYER_RANGE,
+        "kv_len": FLASHVSR_PLUS_LOCAL_LAYER_CACHE_WINDOWS,
+        "topk_groups": groups,
+        "block_mask": topk_mask,
+    }
+    return [local if block_id in local_layers else draft for block_id in range(len(dit.blocks))]
 
 
 def _preprocess_transformer_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -324,6 +480,11 @@ def _make_continue_cache(frames: torch.Tensor, scale: float, variant: str, overl
     return {"tail_frames": tail.contiguous(), "scale": scale, "variant": variant}
 
 
+def continue_cache_frames(model: str) -> int:
+    """Number of output frames a continuation chunk regenerates for this model."""
+    return FLASHVSR_PLUS_CONTINUE_CACHE_FRAMES if model in FLASHVSR_PLUS_MODELS else FLASHVSR_CONTINUE_CACHE_FRAMES
+
+
 def _wavelet_color_fix(frames: torch.Tensor, lq_video: torch.Tensor) -> torch.Tensor:
     if frames.shape != lq_video[:, :, :frames.shape[2]].shape:
         return frames
@@ -387,21 +548,45 @@ def _denoise_stream_chunk(
     local_range: int = 9,
     cache_next: bool = True,
     allow_short_start: bool = False,
+    rope_start: int | None = None,
+    plus_model: str | None = None,
     abort_callback=None,
 ) -> tuple[torch.Tensor | None, list[torch.Tensor | None], list[torch.Tensor | None]]:
     x, (frames, height, width) = dit.patchify(x)
     win = (2, 8, 8)
     seqlen = frames // win[0]
     window_size = win[0] * height * width // 128
-    topk = int(window_size * window_size * topk_ratio) - 1
+    window_topk = int(window_size * window_size * topk_ratio) - 1
+    topk = int(window_size * window_size * topk_ratio * FLASHVSR_PLUS_HALF_WINDOW_BUDGET) - 1 if plus_model else window_topk
     kv_len = max(1, int(kv_ratio))
-    if chunk_index == 0:
-        freqs_t = dit.freqs[0][:frames]
+    if rope_start is not None:
+        start = int(rope_start)
+    elif chunk_index == 0:
+        start = 0
     else:
         start = 4 + chunk_index * 2
-        freqs_t = dit.freqs[0][start:start + frames]
+    freqs_t = dit.freqs[0][start:start + frames]
     freqs = tuple((freq.real.to(device=x.device, dtype=x.dtype), freq.imag.to(device=x.device, dtype=x.dtype)) for freq in (freqs_t, dit.freqs[1][:height], dit.freqs[2][:width]))
+    layer_configs = None
+    if plus_model:
+        layer_configs = _plus_layer_configs(
+            dit,
+            plus_model,
+            height // 8,
+            width // 8,
+            seqlen,
+            chunk_index,
+            kv_len,
+            window_topk,
+            x.device,
+        )
     for block_id, block in enumerate(dit.blocks):
+        layer = layer_configs[block_id] if layer_configs else {
+            "local_range": local_range,
+            "kv_len": kv_len,
+            "topk_groups": None,
+            "block_mask": None,
+        }
         if _abort_requested(abort_callback):
             return None, block_cache_k, block_cache_v
         if block_id < len(lq_layer_chunks[0]):
@@ -422,8 +607,9 @@ def _denoise_stream_chunk(
         x = None
         x, next_cache_k, next_cache_v = block(
             x_ref, context, timestep_mod, freqs, frames, height, width, seqlen, topk,
-            block_id=block_id, kv_len=kv_len, is_stream=True,
-            pre_cache_refs=cache_refs, local_range=local_range, cache_next=cache_next, allow_short_start=allow_short_start,
+            block_id=block_id, kv_len=layer["kv_len"], is_stream=True,
+            pre_cache_refs=cache_refs, local_range=layer["local_range"], cache_next=cache_next, allow_short_start=allow_short_start,
+            topk_groups=layer["topk_groups"], block_mask=layer["block_mask"],
         )
         x_ref.clear()
         block_cache_k[block_id] = next_cache_k
@@ -451,15 +637,33 @@ class FlashVSRRuntime:
         self.timestep_embed: torch.Tensor | None = None
         self.timestep_mod: torch.Tensor | None = None
         self.profile = None
+        self.model = FLASHVSR_MODEL_V11
+        self.transformer_path: str | None = None
+        self.asset_paths: tuple[str | None, ...] | None = None
 
-    def load(self, paths: FlashVSRPaths, variant: str, profile, init_pipe) -> None:
+    def load(self, paths: FlashVSRPaths, variant: str, profile, init_pipe, model: str = FLASHVSR_MODEL_V11) -> None:
         require_sparge_attention()
         variant = variant or FLASHVSR_VARIANT_TINY_LONG
-        if self.dit is not None and self.variant == variant and self.profile == profile:
+        model = str(model or FLASHVSR_MODEL_V11)
+        if model not in (FLASHVSR_MODEL_V11, *FLASHVSR_PLUS_MODELS):
+            raise ValueError(f"Unknown FlashVSR model: {model}")
+        if model == FLASHVSR_MODEL_PLUS_TURBO:
+            from .wgp_bridge import FlashVSRBridge
+
+            FlashVSRBridge.verify_plus_assets(paths, variant)
+        transformer_path = os.path.abspath(paths.transformer)
+        asset_paths = tuple(
+            os.path.abspath(path) if path else None
+            for path in (paths.transformer, paths.lq_proj, paths.posi_prompt, paths.tcdecoder, paths.vae)
+        )
+        if self.dit is not None and self.variant == variant and self.profile == profile and self.model == model and self.asset_paths == asset_paths:
             return
         self.release()
         self.variant = variant
         self.profile = profile
+        self.model = model
+        self.transformer_path = transformer_path
+        self.asset_paths = asset_paths
         with init_empty_weights(include_buffers=True), _default_dtype(self.dtype):
             self.dit = WanModel(**WAN_1_3B_CONFIG).eval()
             self.lq_proj = Causal_LQ4x_Proj(in_dim=3, out_dim=1536, layer_num=1).eval()
@@ -470,16 +674,26 @@ class FlashVSRRuntime:
         offload.load_model_data(self.lq_proj, paths.lq_proj, writable_tensors=False, default_dtype=self.dtype, verboseLevel=-1)
         self.dit.requires_grad_(False)
         self.lq_proj.requires_grad_(False)
-        self.prompt_context = load_file(paths.posi_prompt, device="cpu")["context"].to(self.dtype)
+        self.prompt_context = _load_prompt_context(paths.posi_prompt, model, self.dtype)
         pipe = {"transformer": self.dit, "lq_proj": self.lq_proj}
         if variant in (FLASHVSR_VARIANT_TINY, FLASHVSR_VARIANT_TINY_LONG):
             self.tcdecoder = build_tcdecoder(new_channels=[512, 256, 128, 128], device="cpu", dtype=self.dtype, new_latent_channels=16 + 768).eval()
             self.tcdecoder._offload_hooks = ["decode_video"]
-            offload.load_model_data(self.tcdecoder, paths.tcdecoder, writable_tensors=False, default_dtype=self.dtype, ignore_unused_weights=True, verboseLevel=-1)
+            if model == FLASHVSR_MODEL_PLUS_TURBO:
+                decoder_state = _load_safe_checkpoint_state_dict(paths.tcdecoder, "FlashVSR+ TCDecoder")
+                offload.load_model_data(self.tcdecoder, decoder_state, writable_tensors=False, default_dtype=self.dtype, ignore_unused_weights=True, verboseLevel=-1)
+                del decoder_state
+            else:
+                offload.load_model_data(self.tcdecoder, paths.tcdecoder, writable_tensors=False, default_dtype=self.dtype, ignore_unused_weights=True, verboseLevel=-1)
             self.tcdecoder.requires_grad_(False)
             pipe["tcdecoder"] = self.tcdecoder
         else:
-            self.vae = WanVAE(vae_pth=paths.vae, dtype=self.dtype, upsampler_factor=1, device="cpu")
+            if model == FLASHVSR_MODEL_PLUS_TURBO:
+                vae_state = _load_safe_checkpoint_state_dict(paths.vae, "FlashVSR+ WanVAE")
+                self.vae = WanVAE(vae_pth=vae_state, dtype=self.dtype, upsampler_factor=1, device="cpu")
+                del vae_state
+            else:
+                self.vae = WanVAE(vae_pth=paths.vae, dtype=self.dtype, upsampler_factor=1, device="cpu")
             self.vae.device = self.device
             self.vae.model.requires_grad_(False)
             pipe["vae"] = self.vae.model
@@ -589,6 +803,9 @@ class FlashVSRRuntime:
         self.timestep_mod = None
         self.variant = None
         self.profile = None
+        self.model = FLASHVSR_MODEL_V11
+        self.transformer_path = None
+        self.asset_paths = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -618,26 +835,22 @@ class FlashVSRRuntime:
             return None, None
 
         input_frames = sample.shape[1]
-        num_frames = _next_conditioning_frame_count(input_frames)
+        plus = self.model in FLASHVSR_PLUS_MODELS
+        schedule = _plus_schedule(input_frames) if plus else None
+        num_frames = None if plus else _next_conditioning_frame_count(input_frames)
         output_height, output_width, padded_output_height, padded_output_width = _conditioning_sizes(sample, scale)
-        configured_topk_ratio = max(0.0, min(4.0, float(topk_ratio or 0.0)))
-        if configured_topk_ratio > 0:
-            topk_ratio = configured_topk_ratio
-            print(f"[FlashVSR] Sparse top-k ratio fixed to {topk_ratio:.3f}")
-        else:
-            raw_topk_ratio = min(2.0, 2.0 * 768 * 1280 / max(int(padded_output_height) * int(padded_output_width), 1))
-            topk_ratio = max(raw_topk_ratio, FLASHVSR_FULL_MIN_AUTO_TOPK_RATIO)
-            if topk_ratio != raw_topk_ratio:
-                print(f"[FlashVSR] Sparse top-k ratio adjusted to {topk_ratio:.3f} for {padded_output_width}x{padded_output_height} (minimum; raw auto {raw_topk_ratio:.3f})")
-            elif topk_ratio < 2.0:
-                print(f"[FlashVSR] Sparse top-k ratio adjusted to {topk_ratio:.3f} for {padded_output_width}x{padded_output_height}")
+        topk_ratio = _select_topk_ratio(self.model, topk_ratio, self.variant, padded_output_height, padded_output_width)
         self._prepare_run_state()
         self.lq_proj.clear_cache()
         if self.tcdecoder is not None:
             self.tcdecoder.clean_mem()
         if self.vae is not None:
             self.vae.model.clear_cache()
-        print(f"[FlashVSR] Stream KV cache windows: {max(1, int(FLASHVSR_KV_CACHE_WINDOWS))}")
+        cache_windows = (
+            max(1, min(FLASHVSR_PLUS_CACHE_WINDOWS, int(FLASHVSR_PLUS_CACHE_WINDOWS)))
+            if plus else max(1, int(FLASHVSR_KV_CACHE_WINDOWS))
+        )
+        print(f"[FlashVSR] Stream KV cache windows: {cache_windows}")
         tcdecoder_tile_size = int(vae_tile_size or 0) if self.tcdecoder is not None else 0
         tcdecoder_tile_mems = None
         if self.tcdecoder is not None:
@@ -650,18 +863,35 @@ class FlashVSRRuntime:
         still_image = bool(still_image and input_frames == 1)
         self.lq_proj.shift_start_prefix = still_image
         optimize_still_image = still_image and not FLASHVSR_DISABLE_STILL_IMAGE_OPTIMIZATIONS
-        first_chunk_latent_frames = 2 if optimize_still_image else 6
+        first_chunk_latent_frames = schedule.steps[0].latents[1] if plus else (2 if optimize_still_image else 6)
         first_chunk_lq_steps = first_chunk_latent_frames + 1 if optimize_still_image else 7
-        still_debug_frame_count = (first_chunk_latent_frames - 1) * 4 + 1
+        still_debug_frame_count = schedule.still_frames if plus else (first_chunk_latent_frames - 1) * 4 + 1
         still_output_frame = still_debug_frame_count - 1 if still_image and FLASHVSR_STILL_IMAGE_RETURN_WARMED_FRAME else 0
-        if optimize_still_image:
+        if plus:
+            block_h, block_w = padded_output_height // 128, padded_output_width // 128
+            structural = all(
+                _plus_local_layers_structural(block_h, block_w, FLASHVSR_PLUS_CHUNK_LATENTS // 2, cached, int(block_h * block_w * block_h * block_w * topk_ratio) - 1)
+                for cached in (0, FLASHVSR_PLUS_LOCAL_LAYER_CACHE_WINDOWS)
+            )
+            local_layers = len(FLASHVSR_PLUS_LOCAL_LAYERS[self.model])
+            print(
+                f"[FlashVSR] FlashVSR+ Turbo hybrid attention: {local_layers} local layers "
+                f"({FLASHVSR_PLUS_LOCAL_LAYER_RANGE}x{FLASHVSR_PLUS_LOCAL_LAYER_RANGE} windows, "
+                f"{FLASHVSR_PLUS_LOCAL_LAYER_CACHE_WINDOWS} cached window, "
+                f"{'structural map' if structural else 'scored draft: small canvas'}), "
+                f"{len(self.dit.blocks) - local_layers} draft top-k layers "
+                f"({FLASHVSR_PLUS_LOCAL_RANGE}x{FLASHVSR_PLUS_LOCAL_RANGE} windows, {cache_windows} cached windows)"
+            )
+            if still_image:
+                print(f"[FlashVSR] Still image mode: denoising one {first_chunk_latent_frames}-latent chunk; returning decoded frame {still_output_frame}")
+        elif optimize_still_image:
             print(f"[FlashVSR] Still image mode: denoising {first_chunk_latent_frames} startup latent frames instead of 6; returning decoded frame {still_output_frame}")
         elif still_image and FLASHVSR_DISABLE_STILL_IMAGE_OPTIMIZATIONS:
             print(f"[FlashVSR] Still image debug mode: image optimizations disabled; denoising original 6 startup latent frames; returning decoded frame {still_output_frame}")
-        latent_frame_count = first_chunk_latent_frames if still_image else (num_frames - 1) // 4
+        latent_frame_count = schedule.latent_frames if plus else (first_chunk_latent_frames if still_image else (num_frames - 1) // 4)
         latents = torch.empty((1, 16, latent_frame_count, padded_output_height // 8, padded_output_width // 8), device="cpu", dtype=self.dtype)
         latents.normal_(generator=generator)
-        process_total = (num_frames - 1) // 8 - 2
+        process_total = len(schedule.steps) if plus else (num_frames - 1) // 8 - 2
         pre_cache_k = [None] * len(self.dit.blocks)
         pre_cache_v = [None] * len(self.dit.blocks)
         frames_out = None
@@ -674,7 +904,22 @@ class FlashVSRRuntime:
                 return abort_result()
             lq_layer_chunks = []
             _maybe_empty_cache()
-            if process_idx == 0:
+            step = schedule.steps[process_idx] if plus else None
+            if plus:
+                for lq_start, lq_end in step.lq_clips:
+                    if _abort_requested(abort_callback):
+                        return abort_result()
+                    lq_chunk = _prepare_conditioning_range(sample, lq_start, lq_end, output_height, output_width, padded_output_height, padded_output_width, dtype=self.dtype, device=self.device).unsqueeze(0).to(self.device, dtype=self.dtype)
+                    lq_list = [lq_chunk]
+                    del lq_chunk
+                    cur = self.lq_proj.stream_forward(lq_list)
+                    if cur is not None:
+                        lq_layer_chunks.append(cur)
+                    del cur
+                lq_cur_idx = step.lq_end
+                latent_start, latent_end = step.latents
+                cur_latents = latents[:, :, latent_start:latent_end].to(self.device, dtype=self.dtype)
+            elif process_idx == 0:
                 for inner_idx in range(first_chunk_lq_steps):
                     if _abort_requested(abort_callback):
                         return abort_result()
@@ -707,7 +952,10 @@ class FlashVSRRuntime:
 
             noise_pred, pre_cache_k, pre_cache_v = _denoise_stream_chunk(
                 self.dit, cur_latents, None, lq_layer_chunks, pre_cache_k, pre_cache_v, process_idx,
-                self.timestep_embed, self.timestep_mod, topk_ratio=topk_ratio, cache_next=process_idx + 1 < process_total, allow_short_start=optimize_still_image and process_idx == 0, abort_callback=abort_callback,
+                self.timestep_embed, self.timestep_mod, topk_ratio=topk_ratio, kv_ratio=cache_windows,
+                cache_next=process_idx + 1 < process_total, allow_short_start=optimize_still_image and process_idx == 0,
+                rope_start=step.rope_start if plus else None, plus_model=self.model if plus else None,
+                abort_callback=abort_callback,
             )
             if noise_pred is None:
                 return abort_result()
@@ -762,7 +1010,11 @@ class FlashVSRRuntime:
                 for decode_idx in range(process_total):
                     if _abort_requested(abort_callback):
                         return abort_result()
-                    if decode_idx == 0:
+                    if plus:
+                        step = schedule.steps[decode_idx]
+                        lq_cur_idx = step.lq_end
+                        latent_start, latent_end = step.latents
+                    elif decode_idx == 0:
                         lq_cur_idx = 1 if optimize_still_image else 21
                         latent_start, latent_end = 0, first_chunk_latent_frames
                     else:
@@ -824,7 +1076,7 @@ class FlashVSRRuntime:
         if frames.dtype != torch.uint8:
             frames.clamp_(-1.0, 1.0)
         frames = _apply_continue_cache(frames, continue_cache)
-        cache = _make_continue_cache(frames, scale, self.variant) if return_continue_cache else None
+        cache = _make_continue_cache(frames, scale, self.variant, continue_cache_frames(self.model)) if return_continue_cache else None
         sample = None
         self._unload_mmgp()
         if not persistent_models:
@@ -841,6 +1093,7 @@ def upscale_video(
     paths: FlashVSRPaths,
     *,
     variant: str = FLASHVSR_VARIANT_TINY_LONG,
+    model: str = FLASHVSR_MODEL_V11,
     seed: int = 0,
     continue_cache: Any = None,
     return_continue_cache: bool = False,
@@ -856,7 +1109,7 @@ def upscale_video(
 ) -> tuple[torch.Tensor | None, dict[str, Any] | None]:
     _report_progress(progress_callback, "Caching")
     try:
-        _RUNTIME.load(paths, variant, profile=profile, init_pipe=init_pipe)
+        _RUNTIME.load(paths, variant, profile=profile, init_pipe=init_pipe, model=model)
         shift_correction = bool(
             FLASHVSR_STILL_IMAGE_SHIFT_CORRECTION
             and two_pass

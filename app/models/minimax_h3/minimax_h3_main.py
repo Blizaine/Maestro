@@ -112,6 +112,53 @@ from .video_vae import AutoencoderKLMiniMaxH3
 from .video_vae_assets import is_light_video_vae_checkpoint
 
 
+def _set_h3_generation_shifts(
+    video_scheduler,
+    audio_scheduler,
+    *,
+    default_video_shift: float,
+    default_audio_shift: float,
+    model_def: dict | None = None,
+    turbo_lora_paths=(),
+    requested_video_shift=None,
+    allow_video_shift_override: bool = True,
+) -> None:
+    """Reset reusable H3 schedulers and apply a recipe-owned video shift."""
+
+    video_scheduler.set_shift(default_video_shift)
+    audio_scheduler.set_shift(default_audio_shift)
+    if not allow_video_shift_override:
+        return
+    recipe_shift = None
+    for path in turbo_lora_paths or ():
+        preset = minimax_h3_turbo_preset_for_path(str(path))
+        if not preset or str(preset.get("runtime") or "standard_lora") != "standard_lora":
+            continue
+        settings = preset.get("generation_settings") or {}
+        if isinstance(settings, dict) and "flow_shift" in settings:
+            recipe_shift = settings["flow_shift"]
+            break
+    if recipe_shift is not None:
+        requested_video_shift = recipe_shift
+    elif not bool((model_def or {}).get("flow_shift", False)):
+        # WanGP has a generic hidden flow_shift fallback even for models that
+        # do not expose that control. It is not an H3 request override.
+        return
+    if requested_video_shift in (None, ""):
+        return
+    if isinstance(requested_video_shift, bool):
+        raise ValueError("MiniMax H3 flow shift must be a positive number.")
+    try:
+        shift = float(requested_video_shift)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "MiniMax H3 flow shift must be a positive number."
+        ) from error
+    if not math.isfinite(shift) or shift <= 0:
+        raise ValueError("MiniMax H3 flow shift must be a positive number.")
+    video_scheduler.set_shift(shift)
+
+
 VIDEO_LATENTS_MEAN = (
     0.858090341091156,
     -0.9606591463088989,
@@ -1562,7 +1609,9 @@ class MiniMaxH3Model:
             shift=3.0 if self.viggle else float(model_def.get("minimax_h3_video_shift", 12.0)),
             solver=self.sample_solver,
         )
+        self._default_video_shift = self.scheduler.shift
         self.audio_scheduler = MiniMaxH3Scheduler(shift=float(model_def.get("minimax_h3_audio_shift", 3.0)))
+        self._default_audio_shift = self.audio_scheduler.shift
         self._turbo_lora_active = False
         self._turbo_lora_paths: tuple[str, ...] = ()
         self._pdd_lora_active = False
@@ -2929,6 +2978,30 @@ class MiniMaxH3Model:
             int(sampling_steps),
             turbo_active=self._turbo_lora_active,
         )
+        # WanGP forwards flow_shift as `shift`, but also supplies a generic
+        # hidden fallback when the model does not expose that control. Reset
+        # both schedulers each job; only a manifest-owned standard accelerator
+        # recipe or a model-enabled control may override the model default.
+        fixed_schedule = bool(
+            self.viggle
+            or self._fused_turbo
+            or self.fasth3
+            or self.vdn
+            or self._baked_turbo
+            or self.dasiwa
+            or self.audio_only
+            or self._pdd_lora_active
+        )
+        _set_h3_generation_shifts(
+            self.scheduler,
+            self.audio_scheduler,
+            default_video_shift=self._default_video_shift,
+            default_audio_shift=self._default_audio_shift,
+            model_def=self.model_def,
+            turbo_lora_paths=self._turbo_lora_paths,
+            requested_video_shift=_kwargs.get("shift"),
+            allow_video_shift_override=not fixed_schedule,
+        )
         self.scheduler.set_solver(self.sample_solver)
         self.scheduler.set_timesteps(scheduler_points, device=self.device)
         self.audio_scheduler.set_timesteps(scheduler_points, device=self.device)
@@ -2991,10 +3064,19 @@ class MiniMaxH3Model:
             else 0
         )
         if self._turbo_lora_active:
+            schedule_shifts = (
+                "video shift 12 / audio shift 3 schedules"
+                if self.scheduler.shift == 12.0
+                and self.audio_scheduler.shift == 3.0
+                else (
+                    f"video shift {self.scheduler.shift:g} / audio shift "
+                    f"{self.audio_scheduler.shift:g} schedules"
+                )
+            )
             print(
                 "[MiniMax H3 Turbo] Using "
                 f"{len(timesteps)} denoising evaluations with independent "
-                "video shift 12 / audio shift 3 schedules."
+                f"{schedule_shifts}."
             )
         row_plan = [
             tuple(

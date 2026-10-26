@@ -1,4 +1,7 @@
-##### Enjoy this spagheti VRAM optimizations done by DeepBeepMeep !
+# Adapted from FlashVSR (https://github.com/OpenImagingLab/FlashVSR), Copyright (c) its authors, Apache License 2.0.
+# FlashVSR+ hybrid attention contracts are adapted from https://github.com/OpenImagingLab/FlashVSR_Plus, Apache License 2.0.
+# WanGP modifications Copyright (c) 2026 DeepBeepMeep; retain their project license and attribution.
+# ##### Enjoy this spagheti VRAM optimizations done by DeepBeepMeep !
 # I am sure you are a nice person and as you copy this code, you will give me officially proper credits:
 # Please link to https://github.com/deepbeepmeep/Wan2GP and @deepbeepmeep on twitter  
 import torch
@@ -139,7 +142,7 @@ def _topk_threshold_mask(flat: torch.Tensor, apply_topk: int) -> torch.Tensor:
 
 @torch.no_grad()
 def generate_draft_block_mask(batch_size, nheads, seqlen,
-                              qk_list, topk=10, local_attn_mask=None):
+                              qk_list, topk=10, local_attn_mask=None, groups=None):
     assert batch_size == 1, "Only batch_size=1 supported for now"
     assert local_attn_mask is not None, "local_attn_mask must be provided"
     q_w, k_w = qk_list
@@ -165,19 +168,86 @@ def generate_draft_block_mask(batch_size, nheads, seqlen,
 
     attn_map = torch.softmax(scores, dim=-1)
     del scores
-    attn_map = rearrange(attn_map, 'h (it s1) s2 -> (h it) s1 s2', it=seqlen)
+    groups = seqlen if groups is None else int(groups)
+    if groups <= 0 or seqlen % groups:
+        raise ValueError(f"top-k groups ({groups}) must divide temporal windows ({seqlen})")
+    attn_map = rearrange(attn_map, 'h (it s1) s2 -> (h it) s1 s2', it=groups)
     loop_num, s1, s2 = attn_map.shape
     flat = attn_map.reshape(loop_num, -1)
     apply_topk = min(flat.shape[1]-1, topk)
     mask_new = _topk_threshold_mask(flat, apply_topk)
     del flat, attn_map
-    mask_new = mask_new.reshape(nheads, seqlen * s1, s2)
+    mask_new = mask_new.reshape(nheads, -1, s2)
     return mask_new.unsqueeze(0)
 
 
 @torch.no_grad()
+def _draft_block_mask(q_heads, k_heads_doubled, seqlen, topk, local_attn_mask, groups=None):
+    """Rank local half-window key blocks per temporal slab and attention head."""
+    nheads, head_dim = q_heads.shape[0], q_heads.shape[-1]
+    k_heads_1, k_heads_2 = torch.chunk(k_heads_doubled, 2, dim=1)
+    scores_1 = torch.einsum("hld,hmd->hlm", q_heads, k_heads_1)
+    scores_1.mul_(1 / math.sqrt(head_dim))
+    scores_2 = torch.einsum("hld,hmd->hlm", q_heads, k_heads_2)
+    scores_2.mul_(1 / math.sqrt(head_dim))
+    scores = torch.cat([scores_1, scores_2], dim=-1)
+    del scores_1, scores_2
+
+    local_h, local_w = local_attn_mask.shape
+    repeat_len = scores.shape[1] // local_h
+    repeat_num = (scores.shape[2] // 2) // local_w
+    scores = scores.reshape(nheads, repeat_len, local_h, repeat_num, local_w, 2)
+    scores.masked_fill_(~local_attn_mask.view(1, 1, local_h, 1, local_w, 1), -float("inf"))
+    scores = scores.reshape(nheads, repeat_len * local_h, repeat_num * local_w * 2)
+
+    attn_map = torch.softmax(scores, dim=-1)
+    del scores
+    groups = seqlen if groups is None else int(groups)
+    if groups <= 0 or seqlen % groups:
+        raise ValueError(f"top-k groups ({groups}) must divide temporal windows ({seqlen})")
+    attn_map = rearrange(attn_map, "h (it s1) s2 -> (h it) s1 s2", it=groups)
+    loop_num, query_blocks, key_blocks = attn_map.shape
+    flat = attn_map.reshape(loop_num, -1)
+    apply_topk = min(flat.shape[1] - 1, int(topk))
+    mask_new = _topk_threshold_mask(flat, apply_topk)
+    del flat, attn_map
+    mask_new = mask_new.reshape(nheads, -1, key_blocks).to(torch.int8)
+    return mask_new.unsqueeze(0)
+
+
+@torch.no_grad()
+def structural_block_candidates(block_h, block_w, seqlen, cached_windows, local_range, device=None):
+    """Return the local (query window, key window) relation and its count/entry budget."""
+    if block_h <= 0 or block_w <= 0 or seqlen <= 0 or cached_windows < 0:
+        raise ValueError("spatial dimensions and query windows must be positive; cached windows cannot be negative")
+    local = build_local_block_mask_shifted_vec_normal_slide(
+        block_h, block_w, local_range, local_range, include_self=True, device=device
+    )
+    key_windows = int(cached_windows) + int(seqlen)
+    candidates = local.repeat(int(seqlen), key_windows)
+    candidate_count = int(local.sum().item()) * int(seqlen) * key_windows
+    return candidates, candidate_count, candidates.numel()
+
+
+@torch.no_grad()
+def structural_block_mask(block_h, block_w, seqlen, cached_windows, local_range, nheads, device):
+    """Expand a structural window map to FlashVSR's two 64-token key half-windows."""
+    if nheads <= 0:
+        raise ValueError("nheads must be positive")
+    candidates, _, _ = structural_block_candidates(block_h, block_w, seqlen, cached_windows, local_range, device)
+    return (
+        candidates.repeat_interleave(2, dim=1)
+        .to(torch.int8)
+        .unsqueeze(0)
+        .expand(int(nheads), -1, -1)
+        .contiguous()
+        .unsqueeze(0)
+    )
+
+
+@torch.no_grad()
 def generate_draft_block_mask_sage(batch_size, nheads, seqlen,
-                                      qk_list, topk=10, local_attn_mask=None):
+                                      qk_list, topk=10, local_attn_mask=None, groups=None):
     assert batch_size == 1, "Only batch_size=1 supported for now"
     assert local_attn_mask is not None, "local_attn_mask must be provided"
     
@@ -196,35 +266,7 @@ def generate_draft_block_mask_sage(batch_size, nheads, seqlen,
     avgpool_k_refined = rearrange(avgpool_k_refined, 's (h d) -> s h d', h=nheads) # shape: (s*2, h, d)
     k_heads_doubled = avgpool_k_refined.permute(1, 0, 2) # shape: (h, s*2, d)
     
-    k_heads_1, k_heads_2 = torch.chunk(k_heads_doubled, 2, dim=1)
-    scores_1 = torch.einsum("hld,hmd->hlm", q_heads, k_heads_1)
-    scores_1.mul_(1 / math.sqrt(D))
-    scores_2 = torch.einsum("hld,hmd->hlm", q_heads, k_heads_2)
-    scores_2.mul_(1 / math.sqrt(D))
-    scores = torch.cat([scores_1, scores_2], dim=-1)
-    del scores_1, scores_2
-
-    repeat_head = scores.shape[0]
-    local_h, local_w = local_attn_mask.shape
-    repeat_len = scores.shape[1] // local_h
-    repeat_num = (scores.shape[2] // 2) // local_w
-    scores = scores.reshape(repeat_head, repeat_len, local_h, repeat_num, local_w, 2)
-    scores.masked_fill_(~local_attn_mask.view(1, 1, local_h, 1, local_w, 1), -float('inf'))
-    scores = scores.reshape(repeat_head, repeat_len * local_h, repeat_num * local_w * 2)
-
-    attn_map = torch.softmax(scores, dim=-1)
-    del scores
-    attn_map = rearrange(attn_map, 'h (it s1) s2 -> (h it) s1 s2', it=seqlen)
-    loop_num, s1, s2 = attn_map.shape
-    flat = attn_map.reshape(loop_num, -1)
-    apply_topk = min(flat.shape[1]-1, topk)
-
-    mask_new = _topk_threshold_mask(flat, apply_topk)
-    del flat, attn_map
-    mask_new = mask_new.reshape(loop_num, s1, s2)
-    mask_new = mask_new.reshape(nheads, seqlen * s1, s2)
-    mask_new = mask_new.to(torch.int8)
-    return mask_new.unsqueeze(0)
+    return _draft_block_mask(q_heads, k_heads_doubled, seqlen, topk, local_attn_mask, groups=groups)
 
 
 # ----------------------------
@@ -399,7 +441,7 @@ class SelfAttention(nn.Module):
     def forward(self, x, freqs, f=None, h=None, w=None, local_num=None, topk=None,
                 train_img=False, block_id=None, kv_len=None, is_full_block=False,
                 is_stream=False, pre_cache_k=None, pre_cache_v=None, pre_cache_refs=None, local_range = 9, cache_next=True,
-                allow_short_start=False):
+                allow_short_start=False, topk_groups=None, block_mask=None):
         if isinstance(x, list):
             x_ref = x
             x = x_ref[0]
@@ -407,10 +449,13 @@ class SelfAttention(nn.Module):
         if pre_cache_refs is not None:
             pre_cache_k, pre_cache_v = pre_cache_refs
         B, L, D = x.shape
-        if is_stream and pre_cache_k is not None and pre_cache_v is not None:
-            assert f==2, "f must be 2"
-        if is_stream and (pre_cache_k is None or pre_cache_v is None):
-            assert f==6 or (allow_short_start and f==2), " start f must be 6"
+        plus_chunk = topk_groups is not None
+        if is_stream and plus_chunk:
+            assert f == 4, "FlashVSR+ streams four latent frames per chunk"
+        elif is_stream and pre_cache_k is not None and pre_cache_v is not None:
+            assert f == 2, "v1.1 continuation chunks contain two latent frames"
+        elif is_stream and (pre_cache_k is None or pre_cache_v is None):
+            assert f == 6 or (allow_short_start and f == 2), "v1.1 startup chunk contains six latent frames"
         assert L == f * h * w, "Sequence length mismatch with provided (f,h,w)."
 
         win = (2, 8, 8)
@@ -463,19 +508,21 @@ class SelfAttention(nn.Module):
 
         window_size = win[0]*h*w//128
 
-        if self.local_attn_mask is None or self.local_attn_mask_h!=h//8 or self.local_attn_mask_w!=w//8 or self.local_range!=local_range:
-            self.local_attn_mask = build_local_block_mask_shifted_vec_normal_slide(h//8, w//8, local_range, local_range, include_self=True, device=k_w.device)
-            self.local_attn_mask_h = h//8
-            self.local_attn_mask_w = w//8
-            self.local_range = local_range
-        if USE_BLOCK_ATTN and BLOCK_ATTN_AVAILABLE:
-            qk_list = [q_w, k_w]
+        if block_mask is not None:
+            attention_mask = block_mask
             q_w = k_w = None
-            attention_mask = generate_draft_block_mask(B, self.num_heads, seqlen, qk_list, topk=topk, local_attn_mask=self.local_attn_mask)
         else:
+            if self.local_attn_mask is None or self.local_attn_mask_h!=h//8 or self.local_attn_mask_w!=w//8 or self.local_range!=local_range:
+                self.local_attn_mask = build_local_block_mask_shifted_vec_normal_slide(h//8, w//8, local_range, local_range, include_self=True, device=k_w.device)
+                self.local_attn_mask_h = h//8
+                self.local_attn_mask_w = w//8
+                self.local_range = local_range
             qk_list = [q_w, k_w]
             q_w = k_w = None
-            attention_mask = generate_draft_block_mask_sage(B, self.num_heads, seqlen, qk_list, topk=topk, local_attn_mask=self.local_attn_mask)
+            if USE_BLOCK_ATTN and BLOCK_ATTN_AVAILABLE:
+                attention_mask = generate_draft_block_mask(B, self.num_heads, seqlen, qk_list, topk=topk, local_attn_mask=self.local_attn_mask, groups=topk_groups)
+            else:
+                attention_mask = generate_draft_block_mask_sage(B, self.num_heads, seqlen, qk_list, topk=topk, local_attn_mask=self.local_attn_mask, groups=topk_groups)
         qkv_list = [reorder_q, reorder_k, reorder_v]
         attention_mask_list = [attention_mask]
         del reorder_q, reorder_k, reorder_v, attention_mask
@@ -583,7 +630,7 @@ class DiTBlock(nn.Module):
     def forward(self, x, context, t_mod, freqs, f, h, w, local_num=None, topk=None,
                 train_img=False, block_id=None, kv_len=None, is_full_block=False,
                 is_stream=False, pre_cache_k=None, pre_cache_v=None, pre_cache_refs=None, local_range = 9, cache_next=True,
-                allow_short_start=False):
+                allow_short_start=False, topk_groups=None, block_mask=None):
         if isinstance(x, list):
             x_ref = x
             x = x_ref[0]
@@ -597,7 +644,7 @@ class DiTBlock(nn.Module):
             x_list , freqs, f, h, w, local_num, topk, train_img, block_id,
             kv_len=kv_len, is_full_block=is_full_block, is_stream=is_stream,
             pre_cache_k=pre_cache_k, pre_cache_v=pre_cache_v, pre_cache_refs=pre_cache_refs, local_range = local_range, cache_next=cache_next,
-            allow_short_start=allow_short_start)
+            allow_short_start=allow_short_start, topk_groups=topk_groups, block_mask=block_mask)
 
         x = self.gate(x, gate_msa, self_attn_output)
         del self_attn_output

@@ -140,6 +140,18 @@ class TestApiKeySaving(unittest.TestCase):
         self.assertEqual(self.services, {})
         self.assertFalse(self.path.exists())
 
+    def test_flashvsr_model_default_roundtrip_and_reject_invalid_atomically(self):
+        self.assertEqual(self.namespace["get_services_config"]()["flashvsr_model"], "v1_1")
+        self.save({"flashvsr_model": "plus_turbo"})
+        self.assertEqual(self.namespace["get_services_config"]()["flashvsr_model"], "plus_turbo")
+        previous = self.path.read_bytes()
+        for value in ("unknown", None, [], True, 1):
+            with self.subTest(value=value), self.assertRaises(HTTPError) as error:
+                self.save({"llm_device": "cpu", "flashvsr_model": value})
+            self.assertEqual(error.exception.status_code, 400)
+            self.assertEqual(self.path.read_bytes(), previous)
+        self.assertNotIn("llm_device", self.services)
+
 
 if __name__ == "__main__":
     unittest.main()

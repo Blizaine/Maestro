@@ -3,6 +3,19 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## Unreleased
+
+- Add optional WGPKernels 1.4.2 / GGUF CUDA 1.0.29 installers with supported-stack
+  checks, hash-pinned assets, stale-version upgrades and newer-manual-pin retention.
+- Add opt-in Qwen Image 2.1 INT8 VRAM/RAM reference caches with conservative
+  memory guards, independent CFG branches and scheduled-LoRA invalidation.
+- Add four pinned LightX2V H3 standard accelerator recipes and apply their
+  video flow shifts at runtime without changing fixed distilled schedules.
+- Add separate FlashVSR+ Turbo upscaling through Post Processing, Tools and
+  Editor, retaining saved FlashVSR v1.1 selections and model-specific caches.
+- These ports have CPU regression/build coverage; matched GPU speed, memory
+  and quality validation is pending. See [port scope](docs/WanGP-October-2026-Ports.md).
+
 ## [3.2.5] - 2026-10-24
 
 Public Main and Dev release of the 23–24 October Dev updates. See the

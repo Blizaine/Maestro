@@ -6467,7 +6467,7 @@ def perform_spatial_upsampling(sample, spatial_upsampling, seed=0, abort_callbac
         # by the React Settings panel) onto the top-level keys the bridge reads.
         # Done at upscale time so changes apply live without a restart.
         _svc = server_config.get("services", {})
-        for _k in ("flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend"):
+        for _k in ("flashvsr_model", "flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend"):
             if _k in _svc:
                 server_config[_k] = _svc[_k]
         profile = loaded_profile if loaded_profile >= 0 else get_default_profile("video")

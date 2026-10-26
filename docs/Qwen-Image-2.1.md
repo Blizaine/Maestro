@@ -112,5 +112,17 @@ Inpainting uses `image_mode: 2`, `image_guide`, `image_mask`, `video_prompt_type
 "VAG"` (or `VAGI` with references), and `model_mode: 0` for masked denoising or
 2/3/4/5 for LanPaint. Turbo uses `sample_solver: "viggle_v01"`, `"viggle_v02"`,
 or `"viggle_v021"`. Cache control is
-`custom_settings: {"qwen21_kv_cache": "Enabled"}`; omit it to use the low-memory
-default.
+`custom_settings: {"qwen21_kv_cache": "Enabled"}` for 16-bit storage, `"INT8"`
+for quantized VRAM storage, or `"INT8_RAM"` for quantized CPU-RAM storage.
+Omit it or select `"Disabled"` to keep the low-memory default. Caches are
+request-local and disabled when LoRA weights change across steps. Both CFG
+branches have separate caches. Memory guards may recompute the full prefix
+instead; they retain every reference and the requested output dimensions.
+
+The INT8 layout uses 32-channel groups and FP32 scales. With 128-channel heads,
+storage is 56.25% of the 16-bit K/V cache, with a small precision tradeoff.
+This does not halve total model or job memory. The portable path materializes
+one cached layer before the existing attention call, and RAM mode adds CPU/GPU
+transfers. The native staged Sage cache kernels are not included. GPU speed and
+visual fidelity need matched local testing; caching can be slower for a short
+prefix, especially from RAM.

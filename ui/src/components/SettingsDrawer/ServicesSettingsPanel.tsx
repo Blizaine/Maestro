@@ -615,7 +615,7 @@ export function ServicesSettingsPanel() {
       <div className="space-y-3">
         <h3 className="text-[11px] text-text-secondary uppercase tracking-wider font-medium">FlashVSR Upscaling</h3>
         <p className="text-[10px] text-text-muted -mt-1">
-          DiT super-resolution. Pick it per generation in Post Processing → Spatial Upsampling. First use downloads ~4 GB of weights.
+          Choose FlashVSR v1.1 or FlashVSR+ Turbo in Post Processing, Tools, or Editor export. Saved selections keep their model version. Weights download on first use.
         </p>
 
         <div>
@@ -652,7 +652,7 @@ export function ServicesSettingsPanel() {
             onChange={e => updateConfig({ flashvsr_topk_ratio: parseFloat(e.target.value) })}
           />
           <p className="text-[10px] text-text-muted mt-1">
-            Higher computes more attention → better motion fidelity, slower. 0 = sparsest (fastest).
+            v1.1 attention density: higher computes more attention and is slower. Plus Turbo uses its own fixed hybrid attention recipe.
           </p>
         </div>
 

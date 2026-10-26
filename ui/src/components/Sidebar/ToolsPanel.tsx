@@ -7,24 +7,22 @@ import { MediaFinishingControls } from './MediaFinishingControls'
 import { dlssSpatialOptions, useDlssAvailability } from '../../lib/mediaFlow'
 import { FaceRefinerButton } from '../Characters/FaceRefiner'
 import { GalleryInput } from '../shared/GalleryInput'
+import { flashvsrOptions } from '../../lib/flashvsr'
 
 // Upscale methods — same set as Post Processing's Spatial Upsampling, minus the
 // VAE options (those are tied to the generation pipeline, not a standalone clip).
 const upscaleMethods = [
   { value: '', label: 'Original size (temporal only)' },
   ...dlssSpatialOptions,
-  { value: 'flashvsr2', label: 'FlashVSR 2x' },
-  { value: 'flashvsr3', label: 'FlashVSR 3x' },
-  { value: 'flashvsr4', label: 'FlashVSR 4x' },
-  { value: 'flashvsr2pass2', label: 'FlashVSR Two Pass 2x' },
-  { value: 'flashvsr2pass4', label: 'FlashVSR Two Pass 4x' },
+  ...flashvsrOptions,
   { value: 'lanczos1.5', label: 'Lanczos 1.5x (fast)' },
   { value: 'lanczos2', label: 'Lanczos 2x (fast)' },
 ]
 
 const imageUpscaleMethods = [
   ...dlssSpatialOptions,
-  { value: 'flashvsr2', label: 'FlashVSR 2x (AI detail)' },
+  { value: 'flashvsr2', label: 'FlashVSR v1.1 2× (AI detail)' },
+  { value: 'flashvsrplus2', label: 'FlashVSR+ Turbo 2× (AI detail)' },
   { value: 'lanczos1.5', label: 'Lanczos 1.5x (fast)' },
   { value: 'lanczos2', label: 'Lanczos 2x (fast)' },
   { value: 'lanczos3', label: 'Lanczos 3x (fast)' },

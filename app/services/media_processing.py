@@ -77,6 +77,7 @@ def validate_methods(spatial="", temporal="", *, image=False, options=None, chec
     if spatial and scale is None and spatial not in (
         "lanczos1.5", "lanczos2", "lanczos3", "lanczos4", "vae1", "vae2",
         "flashvsr2", "flashvsr3", "flashvsr4", "flashvsr2pass2", "flashvsr2pass4",
+        "flashvsrplus2", "flashvsrplus3", "flashvsrplus4", "flashvsrplus2pass2", "flashvsrplus2pass4",
     ):
         raise ValueError(f"Unknown spatial processor: {spatial}")
     if temporal not in TEMPORAL_METHODS:

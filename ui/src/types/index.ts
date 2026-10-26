@@ -742,6 +742,11 @@ export type EditorUpscaleMethod =
   | 'flashvsr4'
   | 'flashvsr2pass2'
   | 'flashvsr2pass4'
+  | 'flashvsrplus2'
+  | 'flashvsrplus3'
+  | 'flashvsrplus4'
+  | 'flashvsrplus2pass2'
+  | 'flashvsrplus2pass4'
 
 export interface EditorExportSettings {
   quality: 'draft' | 'balanced' | 'high'
@@ -1441,6 +1446,7 @@ export interface ServicesConfig {
   /** FlashVSR (DiT super-resolution) spatial-upsampling settings.
    *  flashvsr_mode: 1=tiny, 2=full, 3=tiny-long. topk_ratio 0..4 (sparse-attn
    *  density). backend: 'auto' | 'triton_sparse' | 'sparge'. */
+  flashvsr_model?: 'v1_1' | 'plus_turbo'
   flashvsr_mode: number
   flashvsr_topk_ratio: number
   flashvsr_backend: string

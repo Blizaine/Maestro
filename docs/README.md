@@ -13,6 +13,7 @@ Start with the [README](../README.md) for installation and the feature overview.
 ## Video and reference workflows
 
 - [FastH3](FastH3.md) — V2, OmniRef, supported formats and experimental limits.
+- [H3 LightX2V accelerators](H3-LightX2V-Accelerators.md) — workflow-matched four/eight-step recipes.
 - [H3 Fused LoRAs](H3-Fused-LoRAs.md) — adapter compatibility and sampling guidance.
 - [H3 community checkpoints](H3-checkpoint-import.md) — supported imports, verification and workflow pairing.
 - [DaSiWa models](DaSiWa-models.md) — checkpoint variants and native formats.
@@ -23,6 +24,7 @@ Start with the [README](../README.md) for installation and the feature overview.
 - [TaoMate H3](TaoMate-H3.md) — the optional three-step Frames recipe.
 - [H3 Singularity](H3-Singularity.md) — experimental reference-generation workflow.
 - [Generation previews](Generation-preview.md) — live video and frame preview choices.
+- [FlashVSR](FlashVSR.md) — v1.1 and Plus Turbo upscaling.
 - [DLSS finishing](DLSS5.md) — optional neural rendering and frame generation on supported systems.
 
 ## Image models
@@ -40,6 +42,7 @@ Start with the [README](../README.md) for installation and the feature overview.
 
 ## Performance and access
 
+- [Optional CUDA kernels](optional-kernel-pins.md) — supported stacks, pinned downloads and fallbacks.
 - [Performance Auto-Tune](Performance-auto-tune.md) — hardware recommendations and manual controls.
 - [Duration recommendations](Duration-recommendations.md) — tested and estimated starting points by hardware and workload.
 - [H3 on 16GB GPUs](H3-16GB-placement.md) — memory placement and the reported regression.
@@ -51,6 +54,7 @@ Start with the [README](../README.md) for installation and the feature overview.
 ## Updates and development
 
 - [Complete update history](UPDATE_HISTORY.md) — every dated update announcement, including those summarized in the README.
+- [WanGP October ports](WanGP-October-2026-Ports.md) — first-batch scope and validation limits.
 - [Detailed changelog](../CHANGELOG.md) — development changes and release entries.
 - [Current release notes](RELEASE_NOTES_V3.2.5.md) — v3.2.5 behavior, validation and known limits.
 - [API examples](../README.md#notification-and-remote-access-api) and [developer prompt bench](../README.md#developer-prompt-bench).

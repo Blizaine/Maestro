@@ -804,7 +804,7 @@ def _video_vae(pretrained_path=None, z_dim=None, device='cpu', **kwargs):
 
     from mmgp import offload
     # load checkpoint
-    logging.info(f'loading {pretrained_path}')
+    logging.info('loading VAE checkpoint state dict' if isinstance(pretrained_path, dict) else f'loading {pretrained_path}')
     # model.load_state_dict(
     #     torch.load(pretrained_path, map_location=device), assign=True)
     # offload.load_model_data(model, pretrained_path.replace(".pth", "_bf16.safetensors"), writable_tensors= False)    
