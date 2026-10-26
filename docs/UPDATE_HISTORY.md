@@ -18,8 +18,11 @@ Every dated update announcement from Maestro's first public release onward, newe
 
 Available on **Dev for testing**; Main remains v3.2.5. Update the idle Dev
 installation in Pinokio, restart Maestro and refresh the browser. CPU tests
-and the UI build passed; GPU speed, memory and output quality still need
-validation, including on 12GB and 8GB GPUs. See the
+and the UI build passed. Functional GPU checks now cover the RTX 4090, 12GB
+RTX 3080 Ti and 8GB RTX 5070 Laptop. Follow-up fixes restore v1.1 sparse
+attention and load the official Plus checkpoint names correctly; all 12 latest
+FlashVSR image/video checks passed. These bounded checks are not a matched
+speed or general quality benchmark. See the
 [v3.3.0 Dev release notes](RELEASE_NOTES_V3.3.0.md).
 
 ### v3.2.5 (2026-10-24)

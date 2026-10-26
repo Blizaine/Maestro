@@ -41,3 +41,17 @@ the pinned Wan VAE; `tiny` and `tiny-long` use the pinned TCDecoder.
 No model weights are included in the source tree. FlashVSR+ source is licensed
 under Apache-2.0; the WanGP-derived streaming and application portions remain
 subject to the WanGP Community License 2.0. See [third-party notices](../THIRD_PARTY_NOTICES.md).
+
+
+## Dev repair validation — 26 October 2026
+
+The v3.3.0 follow-up restores v1.1's automatic sparse-attention ratio for all
+variants, including its existing minimum at larger canvases. It also translates
+the official Plus output-head and projection-normalization parameter names at
+load time. Valid cached checkpoints can be reused after updating and restarting.
+
+Twenty-seven CPU regressions and twelve latest image/video checks passed across
+the RTX 4090, 12GB RTX 3080 Ti and 8GB RTX 5070 Laptop. The GPU cases cover 2x
+upscaling to 512x512 and 33-frame video at 24 fps through TCDecoder. Full software
+decoding and visual spot checks passed; tiny lettering and checker detail may
+change, and this does not establish long-video, full-VAE or 4K performance.

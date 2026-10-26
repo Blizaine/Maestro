@@ -3,8 +3,10 @@
 This batch adapts selected features from [WanGP revision
 9905f0d](https://github.com/deepbeepmeep/WanGP/tree/9905f0df941e5ec7b0c80e32555d3a61fe415726),
 reviewed on 26 October 2026. It preserves existing defaults and saved workflows.
-It has CPU regression coverage and a successful UI build; consumer-GPU speed,
-peak memory and visual quality have not been benchmarked for these new paths.
+It has CPU regression coverage and a successful UI build. Bounded functional
+GPU checks now cover 24GB, 12GB and 8GB NVIDIA workstations; they do not establish
+a matched speedup or general quality claim. See the updated
+[v3.3.0 validation notes](RELEASE_NOTES_V3.3.0.md).
 
 ## Available changes
 
@@ -27,7 +29,9 @@ peak memory and visual quality have not been benchmarked for these new paths.
   These are preflight checks rather than memory reservations; an actual
   allocation failure can still fail the job instead of retrying it.
   CFG caches are independent, request-local, and disabled for scheduled LoRAs.
-  INT8 introduces a small numerical change; local visual comparison is pending.
+  INT8 introduces a small numerical change. The bounded robot-edit comparisons
+  retained the requested content; cache fallback and activation limits are
+  recorded in the release notes.
 - **H3 LightX2V standard accelerators:** four explicit workflow-matched recipes
   add FL2VA 4-step v1.3 / 8-step v1.1 and Ref2VA 4-step v1.0 / 8-step v1.1.
   Pinned weights and hashes are in the manifest. Their video shifts reach the
@@ -40,8 +44,12 @@ peak memory and visual quality have not been benchmarked for these new paths.
   configuration. First use downloads its separate assets. See
   [FlashVSR workflows](FlashVSR.md).
 
-No running Maestro instance or saved user settings were changed during this
-implementation. No weights, optional wheels or generation jobs were started.
+Initial source implementation was followed by user-authorized GPU validation.
+Saved preferences and unrelated local changes were preserved. The FlashVSR
+follow-up fixes restore the legacy automatic attention ratio and normalize the
+official Plus transformer and projection names; all 12 latest image/video
+checks passed after 27 CPU regressions. The earlier failed attempts remain
+part of the private evidence.
 
 ## Next batches
 
