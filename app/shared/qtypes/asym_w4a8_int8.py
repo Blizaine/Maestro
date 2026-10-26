@@ -15,7 +15,7 @@ from optimum.quanto.tensor.qtensor import QTensor
 from optimum.quanto.tensor.qtype import qtype as _quanto_qtype, qtypes as _quanto_qtypes
 from torch.utils import _pytree as pytree
 
-from .int8_convrot import _rotate_activation
+from .int8_convrot import _rotate_activation, _w4a8_marker_names
 
 
 HANDLER_NAME = "asym_w4a8_int8"
@@ -161,6 +161,9 @@ def _collect_specs(state_dict, metadata=None):
             raise ValueError(f"Invalid W4A8 correction for '{base}': expected float32[{logical_k // group_size}, {rows}], got {shape}")
         specs.append({"name": base, "weight": weight, "s_rel": s_rel, "s_channel": s_channel, "codebook": codebook,
                       "correction": correction, "group_size": group_size, "convrot_group_size": convrot_group_size})
+    # Validate Comfy descriptors before consuming them so the W4A8 handler,
+    # which owns these layers, also owns their marker cleanup.
+    _w4a8_marker_names(state_dict, metadata)
     return specs
 
 
@@ -195,6 +198,7 @@ def convert_to_quanto(state_dict, default_dtype, verboseLevel=1, detection=None,
     quant_map = {}
     for spec in specs:
         base = spec["name"]
+        state_dict.pop(base + ".comfy_quant", None)
         state_dict[base + ".weight._data"] = state_dict.pop(base + ".weight")
         state_dict[base + ".weight._s_rel"] = state_dict.pop(base + ".weight_s_rel")
         state_dict[base + ".weight._s_channel"] = state_dict.pop(base + ".weight_s_channel")

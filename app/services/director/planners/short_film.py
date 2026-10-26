@@ -76,6 +76,20 @@ _VIDEO_PASS2_GUIDE_MAP = {
     "ltxv": "ltx2_shot_breakdown.md",
 }
 
+_H3_UNPATCHABLE_SOURCE_DIALOGUE_ISSUES = (
+    "dialogue-bearing video_prompt omits assigned source motion",
+    "dialogue-bearing video_prompt omits assigned source prop operation",
+)
+
+
+def _h3_source_physical_patch_is_applicable(issues: Sequence[str]) -> bool:
+    """Keep fixed-shot metadata repair away from authored dialogue prose."""
+    return bool(issues) and not any(
+        marker in issue
+        for issue in issues
+        for marker in _H3_UNPATCHABLE_SOURCE_DIALOGUE_ISSUES
+    )
+
 
 # ── Pass 2 JSON output schemas (llama-server grammar constraint) ──────
 # These mirror the JSON examples embedded in the Pass 2 / fallback system
@@ -9930,6 +9944,79 @@ SCREENPLAY:
 
         return shots, title
 
+    def _repair_h3_source_physical_plan(
+        self,
+        rows: list[dict],
+        source_contract: dict,
+        issues: list[str],
+        *,
+        planner_token_budget: int,
+        request_budget: int,
+    ) -> tuple[list[dict], int]:
+        """Repair only event ownership and typed state for the fixed shots.
+
+        The compact repair API derives complete opening and closing ledgers by
+        replaying event-keyed transitions. It preserves every other field in
+        each row, including authored dialogue, prose, duration, cast and camera.
+        A planner invocation can spend at most two compact requests across all
+        entry points.
+        """
+        from ..contract_repair import (
+            build_compact_source_physical_repair_request,
+            apply_validated_compact_patch,
+        )
+
+        request_budget = max(0, min(2, int(request_budget)))
+        if request_budget == 0:
+            raise RuntimeError(
+                "MiniMax H3 could not repair the source/physical contract: "
+                "no compact repair requests remain. No video jobs were queued."
+            )
+
+        patch_issues = list(issues)
+        for patch_attempt in range(request_budget):
+            patch_system, patch_user, patch_schema = build_compact_source_physical_repair_request(
+                rows, source_contract, patch_issues,
+            )
+            patches = self._call_llm_json(
+                user_prompt=patch_user,
+                system_prompt=patch_system,
+                max_tokens=planner_token_budget,
+                thinking_budget=0,
+                temperature=0.3,
+                image_paths=[],
+                json_schema=patch_schema,
+            )
+            try:
+                proposal = patches[0] if isinstance(patches, list) and len(patches) == 1 else patches
+                repaired_rows = apply_validated_compact_patch(rows, proposal, source_contract)
+            except (TypeError, ValueError) as error:
+                # The patch is atomic. Feedback stays tied to the original rows
+                # and never treats a rejected proposal as the new baseline.
+                patch_issues = [
+                    "Compact patch was not applied: " + str(error),
+                    *["Unrepaired original-plan issue: " + issue for issue in issues],
+                ]
+            else:
+                patch_issues = source_contract_issues(
+                    repaired_rows, source_contract, require_ids=True,
+                )
+                patch_issues.extend(validate_physical_state_sequence(repaired_rows))
+                if not patch_issues:
+                    return repaired_rows, patch_attempt + 1
+
+            if patch_attempt + 1 < request_budget:
+                print(
+                    "[ShortFilmPlanner] Retrying the fixed-shot contract patch "
+                    "with validator feedback."
+                )
+
+        raise RuntimeError(
+            "MiniMax H3 could not repair the source/physical contract: "
+            + "; ".join(patch_issues)
+            + ". No video jobs were queued."
+        )
+
     def _plan_story_h3_native(
         self,
         *,
@@ -10637,7 +10724,17 @@ SCREENPLAY:
         self._save_story_stage("native_shots", raw_shot_dicts)
         shot_dicts = _normalize_native_shots(raw_shot_dicts)
         schedule = _apply_native_schedule(shot_dicts)
-        semantic_issues = source_contract_issues(shot_dicts, source_contract, require_ids=require_source_contract)
+        # Presence of source_event_ids opts a plan into source ownership even
+        # when this entry point did not require the field. Keep that opt-in
+        # through whole-plan repair if a later response drops the field.
+        source_contract_active = bool(
+            require_source_contract
+            or any("source_event_ids" in row for row in shot_dicts)
+        )
+        compact_source_physical_requests = 0
+        semantic_issues = source_contract_issues(
+            shot_dicts, source_contract, require_ids=source_contract_active,
+        )
         semantic_issues.extend(validate_physical_state_sequence(shot_dicts))
 
         dialogue_integrity_error: Optional[str] = None
@@ -10672,6 +10769,12 @@ SCREENPLAY:
                     "[ShortFilmPlanner] Deterministic H3 dialogue compiler "
                     f"{repair_mode}; skipped the whole-plan LLM repair."
                 )
+        # Dialogue compilation may allocate additional visual slots. Validate
+        # metadata against those current rows, never stale pre-allocation rows.
+        semantic_issues = source_contract_issues(
+            shot_dicts, source_contract, require_ids=source_contract_active,
+        )
+        semantic_issues.extend(validate_physical_state_sequence(shot_dicts))
         if structure_issues or semantic_issues or dialogue_integrity_error or dialogue_violations:
             original_shot_dicts = copy.deepcopy(shot_dicts)
             issue_messages = [
@@ -10714,8 +10817,9 @@ For a silent source, video_prompt must be empty: Maestro compiles it from
 structured fields and immutable actions. Otherwise put the complete native
 description with the locked dialogue in video_prompt."""
             used_contract_patch = bool(
-                not structure_issues and semantic_issues and require_source_contract
-                and source_contract["audio_policy"].get("generated_speech_allowed") is False
+                not structure_issues and source_contract_active
+                and not dialogue_integrity_error and not dialogue_violations
+                and _h3_source_physical_patch_is_applicable(semantic_issues)
             )
             print(
                 "[ShortFilmPlanner] Requesting a bounded compact source/physical patch with fixed shots."
@@ -10723,53 +10827,12 @@ description with the locked dialogue in video_prompt."""
                 "[ShortFilmPlanner] Requesting one whole-plan completeness/dialogue/pacing repair."
             )
             if used_contract_patch:
-                from ..contract_repair import (
-                    build_compact_source_physical_repair_request,
-                    apply_validated_compact_patch,
+                repaired_raw, requests_used = self._repair_h3_source_physical_plan(
+                    original_shot_dicts, source_contract, semantic_issues,
+                    planner_token_budget=planner_token_budget,
+                    request_budget=2 - compact_source_physical_requests,
                 )
-                patch_issues = list(semantic_issues)
-                # A malformed state atom must receive its actual validator
-                # feedback. Keep both attempts confined to the same immutable
-                # shots; never replace the film or silently accept a bad patch.
-                for patch_attempt in range(2):
-                    patch_system, patch_user, patch_schema = build_compact_source_physical_repair_request(
-                        original_shot_dicts, source_contract, patch_issues,
-                    )
-                    patches = self._call_llm_json(
-                        user_prompt=patch_user,
-                        system_prompt=patch_system,
-                        max_tokens=planner_token_budget,
-                        thinking_budget=0,
-                        temperature=0.3,
-                        image_paths=[],
-                        json_schema=patch_schema,
-                    )
-                    try:
-                        proposal = patches[0] if isinstance(patches, list) and len(patches) == 1 else patches
-                        repaired_raw = apply_validated_compact_patch(original_shot_dicts, proposal, source_contract)
-                    except (TypeError, ValueError) as error:
-                        # The patch is atomic. These are still the original
-                        # rows' issues, not findings about the rejected proposal.
-                        patch_issues = [
-                            "Compact patch was not applied: " + str(error),
-                            *[
-                                "Unrepaired original-plan issue: " + issue
-                                for issue in semantic_issues
-                            ],
-                        ]
-                    else:
-                        patch_issues = source_contract_issues(
-                            repaired_raw, source_contract, require_ids=True,
-                        )
-                        patch_issues.extend(validate_physical_state_sequence(repaired_raw))
-                    if not patch_issues:
-                        break
-                    if patch_attempt == 1:
-                        raise RuntimeError(
-                            "MiniMax H3 could not repair the source/physical contract: "
-                            + "; ".join(patch_issues) + ". No video jobs were queued."
-                        )
-                    print("[ShortFilmPlanner] Retrying the fixed-shot contract patch with validator feedback.")
+                compact_source_physical_requests += requests_used
             else:
                 repaired_raw = self._call_llm_json(
                     user_prompt=repair_user,
@@ -11033,8 +11096,30 @@ description with the locked dialogue in video_prompt."""
                     shot_dict["long_form_quality_warnings"] = list(
                         quality_warnings
                     )
-        semantic_issues = source_contract_issues(shot_dicts, source_contract, require_ids=require_source_contract)
+        source_contract_active = source_contract_active or any(
+            "source_event_ids" in row for row in shot_dicts
+        )
+        semantic_issues = source_contract_issues(
+            shot_dicts, source_contract, require_ids=source_contract_active,
+        )
         semantic_issues.extend(validate_physical_state_sequence(shot_dicts))
+        if (source_contract_active
+                and compact_source_physical_requests < 2
+                and _h3_source_physical_patch_is_applicable(semantic_issues)):
+            # A full-plan completeness/dialogue repair can return valid shots
+            # while leaving the same event IDs or state omissions behind.
+            # Repair only that metadata, with the remaining shared budget.
+            print("[ShortFilmPlanner] Repairing remaining source/physical metadata in the verified shots.")
+            shot_dicts, requests_used = self._repair_h3_source_physical_plan(
+                shot_dicts, source_contract, semantic_issues,
+                planner_token_budget=planner_token_budget,
+                request_budget=2 - compact_source_physical_requests,
+            )
+            compact_source_physical_requests += requests_used
+            semantic_issues = source_contract_issues(
+                shot_dicts, source_contract, require_ids=True,
+            )
+            semantic_issues.extend(validate_physical_state_sequence(shot_dicts))
         if semantic_issues:
             raise RuntimeError("H3 story/physical plan did not validate after its bounded repair: "
                                + "; ".join(semantic_issues) + ". No video jobs were queued.")

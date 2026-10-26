@@ -770,6 +770,11 @@ def apply_validated_compact_patch(rows: list[dict], response: dict, contract: di
     issues.extend(validate_physical_state_sequence(candidate))
     if issues:
         raise ValueError("; ".join(issues))
+    for original, repaired in zip(rows, candidate):
+        if "_director_source_contract" not in original:
+            # The replay needs the authoritative contract as temporary
+            # context; do not add unrelated fields to the accepted shots.
+            repaired.pop("_director_source_contract", None)
     return candidate
 
 

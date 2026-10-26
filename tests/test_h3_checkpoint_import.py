@@ -156,6 +156,113 @@ def make_header(*, compressed=True, quantization="plain", native="ref2va", qkv=N
     return header, reader_payloads
 
 
+def make_beta6_int8_header(*, group_size=256):
+    """Model beta6's 184 INT8 + 16 dense main linears and 11 INT8 auxiliaries."""
+
+    header, payloads = make_header(
+        compressed=True, quantization="plain", native="hybrid", qkv="grouped"
+    )
+    marker_bytes = json.dumps(
+        {
+            "format": "int8_tensorwise",
+            "convrot": True,
+            "convrot_groupsize": group_size,
+            "per_row": True,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8").ljust(89, b"\0")
+
+    def quantize(base):
+        weight = header[base + ".weight"]
+        rows, columns = weight["shape"]
+        weight["dtype"] = "I8"
+        header[base + ".weight_scale"] = descriptor("F32", (rows, 1))
+        marker = base + ".comfy_quant"
+        header[marker] = descriptor("U8", (len(marker_bytes),))
+        payloads[marker] = marker_bytes
+        return rows, columns
+
+    for index in range(50):
+        if index in {0, 1, 48, 49}:
+            continue
+        for suffix in QUANT_SUFFIXES:
+            quantize(f"blocks.{index}.{suffix}")
+
+    auxiliary = (
+        "condition_proj",
+        "final_layer.video_out",
+        "final_layer.audio_out",
+        *(
+            f"token_refiner.blocks.{index}.{suffix}"
+            for index in range(2)
+            for suffix in QUANT_SUFFIXES
+        ),
+    )
+    for base in auxiliary:
+        quantize(base)
+    return header, payloads
+
+
+def make_mixed_w4a8_int8_header(
+    *, convrot_group_size=256, w4a8_group_size=4, int8_block_count=5,
+    include_metadata=True, w4a8_group_sizes=None,
+):
+    """Model the bounded descriptors and tensor shapes of the ErosMax beta5 export."""
+    header, payloads = make_header(compressed=True, native="ref2va", qkv="grouped")
+    layers = {}
+    w4_index = 0
+    for index in range(50):
+        prefix = f"blocks.{index}."
+        for suffix in QUANT_SUFFIXES:
+            base = prefix + suffix
+            weight = header[base + ".weight"]
+            rows, columns = weight["shape"]
+            if index < int8_block_count:
+                marker = {
+                    "format": "int8_tensorwise",
+                    "convrot": True,
+                    "convrot_groupsize": convrot_group_size,
+                    "per_row": True,
+                }
+                weight["dtype"] = "I8"
+                header[base + ".weight_scale"] = descriptor("F32", (rows, 1))
+                layers[base] = {
+                    "format": "int8_tensorwise",
+                    "convrot": True,
+                    "convrot_groupsize": convrot_group_size,
+                    "orig_dtype": "torch.bfloat16",
+                }
+            else:
+                group_size = (
+                    w4a8_group_sizes[w4_index]
+                    if w4a8_group_sizes is not None
+                    else w4a8_group_size
+                )
+                w4_index += 1
+                marker = {
+                    "format": "asym_w4a8_int8",
+                    "group_size": group_size,
+                    "convrot": True,
+                    "convrot_groupsize": convrot_group_size,
+                }
+                weight.update(dtype="I8", shape=[rows, columns // 2])
+                header[base + ".weight_s_rel"] = descriptor(
+                    "F8_E4M3", (rows, columns // group_size)
+                )
+                header[base + ".weight_s_channel"] = descriptor("F32", (rows,))
+                header[base + ".weight_codebook"] = descriptor("F32", (16,))
+                layers[base] = marker.copy()
+            marker_name = base + ".comfy_quant"
+            payload = json.dumps(marker, separators=(",", ":")).encode("utf-8")
+            header[marker_name] = descriptor("U8", (len(payload),))
+            payloads[marker_name] = payload
+    if include_metadata:
+        header["__metadata__"]["_quantization_metadata"] = json.dumps(
+            {"format_version": "1.0", "layers": layers}, separators=(",", ":")
+        )
+    return header, payloads
+
+
 def source_record(*, turbo=False):
     return {
         "modelId": 2877206,
@@ -176,6 +283,303 @@ def source_record(*, turbo=False):
 
 
 class H3CheckpointImportTests(unittest.TestCase):
+    def test_beta6_mixed_dense_int8_layout_matches_the_header_and_runtime_profile(self):
+        header, payloads = make_beta6_int8_header()
+        reads = []
+        profile = inspect_h3_header(
+            header,
+            tensor_reader=lambda key: reads.append(key) or payloads[key],
+            native_workflow="fl2va",
+            sampling_profile="standard",
+            qkv_layout="grouped",
+        )
+        dense_layers = {
+            f"blocks.{index}.{suffix}"
+            for index in (0, 1, 48, 49)
+            for suffix in QUANT_SUFFIXES
+        }
+        auxiliary_layers = {
+            "condition_proj",
+            "final_layer.video_out",
+            "final_layer.audio_out",
+            *(
+                f"token_refiner.blocks.{index}.{suffix}"
+                for index in range(2)
+                for suffix in QUANT_SUFFIXES
+            ),
+        }
+        self.assertEqual(profile["status"], "verified")
+        self.assertEqual(profile["quantization_format"], "int8_tensorwise")
+        self.assertEqual(profile["convrot_group_size"], 256)
+        self.assertEqual(profile["quantized_layers"], 195)
+        self.assertEqual(profile["main_int8_layers"], 184)
+        self.assertEqual(profile["main_dense_layers"], 16)
+        self.assertEqual(profile["main_dense_layer_names"], sorted(dense_layers))
+        self.assertEqual(profile["auxiliary_int8_layers"], 11)
+        self.assertEqual(profile["auxiliary_int8_layer_names"], sorted(auxiliary_layers))
+        self.assertEqual(
+            len([key for key in reads if key.endswith(".comfy_quant")]), 195
+        )
+        self.assertEqual(reads.count("adaln_t_table"), 1)
+        self.assertTrue(
+            all(key.endswith(".comfy_quant") or key == "adaln_t_table" for key in reads)
+        )
+
+    def test_beta6_int8_layout_rejects_missing_dense_or_extra_descriptors(self):
+        cases = (
+            ("blocks.2.attn.qkv_proj", "missing_quantized_descriptor"),
+            ("blocks.0.attn.qkv_proj", "descriptor_for_dense_weight"),
+            ("token_refiner.blocks.0.mlp.fc2", "missing_auxiliary_descriptor"),
+        )
+        for base, case in cases:
+            with self.subTest(case=case):
+                header, payloads = make_beta6_int8_header()
+                marker_name = base + ".comfy_quant"
+                if case == "descriptor_for_dense_weight":
+                    marker = json.dumps(
+                        {
+                            "format": "int8_tensorwise",
+                            "convrot": True,
+                            "convrot_groupsize": 256,
+                        },
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    header[marker_name] = descriptor("U8", (len(marker),))
+                    payloads[marker_name] = marker
+                else:
+                    header.pop(marker_name)
+                    payloads.pop(marker_name)
+                with self.assertRaises(H3CheckpointError) as caught:
+                    inspect_h3_header(
+                        header,
+                        tensor_reader=payloads.__getitem__,
+                        native_workflow="fl2va",
+                        sampling_profile="standard",
+                        qkv_layout="grouped",
+                    )
+                self.assertEqual(
+                    caught.exception.code, "incomplete_quantization_metadata"
+                )
+
+    def test_beta6_int8_layout_rejects_unknown_auxiliary_and_conflicting_groups(self):
+        header, payloads = make_beta6_int8_header()
+        marker = json.dumps(
+            {
+                "format": "int8_tensorwise",
+                "convrot": True,
+                "convrot_groupsize": 256,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        header["unknown_projection.weight"] = descriptor("I8", (4, 256))
+        header["unknown_projection.weight_scale"] = descriptor("F32", (4, 1))
+        header["unknown_projection.comfy_quant"] = descriptor("U8", (len(marker),))
+        payloads["unknown_projection.comfy_quant"] = marker
+        with self.assertRaises(H3CheckpointError) as caught:
+            inspect_h3_header(
+                header,
+                tensor_reader=payloads.__getitem__,
+                native_workflow="fl2va",
+                sampling_profile="standard",
+                qkv_layout="grouped",
+            )
+        self.assertEqual(caught.exception.code, "unsupported_quantization")
+
+        header, payloads = make_beta6_int8_header()
+        name = "condition_proj.comfy_quant"
+        conflicting = json.dumps(
+            {
+                "format": "int8_tensorwise",
+                "convrot": True,
+                "convrot_groupsize": 64,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        header[name] = descriptor("U8", (len(conflicting),))
+        payloads[name] = conflicting
+        with self.assertRaises(H3CheckpointError) as caught:
+            inspect_h3_header(
+                header,
+                tensor_reader=payloads.__getitem__,
+                native_workflow="fl2va",
+                sampling_profile="standard",
+                qkv_layout="grouped",
+            )
+        self.assertEqual(caught.exception.code, "quantization_conflict")
+
+    def test_beta6_int8_layout_rejects_malformed_auxiliary_scales_and_markers(self):
+        header, payloads = make_beta6_int8_header()
+        header["final_layer.video_out.weight_scale"]["shape"] = [96]
+        with self.assertRaises(H3CheckpointError) as caught:
+            inspect_h3_header(
+                header,
+                tensor_reader=payloads.__getitem__,
+                native_workflow="fl2va",
+                sampling_profile="standard",
+                qkv_layout="grouped",
+            )
+        self.assertEqual(caught.exception.code, "tensor_shape_mismatch")
+
+        header, payloads = make_beta6_int8_header()
+        marker = "token_refiner.blocks.1.attn.qkv_proj.comfy_quant"
+        payload = payloads[marker]
+        header[marker]["dtype"] = "F32"
+        with self.assertRaises(H3CheckpointError) as caught:
+            inspect_h3_header(
+                header,
+                tensor_reader=lambda key: payload if key == marker else payloads[key],
+                native_workflow="fl2va",
+                sampling_profile="standard",
+                qkv_layout="grouped",
+            )
+        self.assertEqual(caught.exception.code, "invalid_quantization_descriptor")
+
+    def test_verified_mixed_w4a8_int8_layout_uses_per_layer_shape_contracts(self):
+        header, payloads = make_mixed_w4a8_int8_header()
+        reads = []
+        profile = inspect_h3_header(
+            header,
+            tensor_reader=lambda key: reads.append(key) or payloads[key],
+            sampling_profile="standard",
+        )
+        self.assertEqual(profile["status"], "verified")
+        self.assertEqual(profile["quantization_format"], "mixed_w4a8_int8_convrot")
+        self.assertEqual(profile["quantized_layers"], 200)
+        self.assertEqual(profile["convrot_group_size"], 256)
+        self.assertEqual(profile["weight_group_size"], 4)
+        self.assertEqual(profile["weight_group_sizes"], [4])
+        self.assertEqual(profile["qkv_layout"], "grouped")
+        self.assertEqual(len([key for key in reads if key.endswith(".comfy_quant")]), 200)
+        self.assertEqual(len(reads), 201)
+
+    def test_mixed_w4a8_int8_descriptors_must_match_their_shapes_and_scales(self):
+        valid, payloads = make_mixed_w4a8_int8_header()
+        w4_base = "blocks.10.attn.out_proj"
+        int8_base = "blocks.0.attn.out_proj"
+        cases = (
+            (w4_base + ".weight_s_rel", "shape", [5376, 1791], "tensor_shape_mismatch"),
+            (w4_base + ".weight_s_channel", "dtype", "BF16", "unsupported_tensor_dtype"),
+            (int8_base + ".weight_scale", "shape", [5376], "tensor_shape_mismatch"),
+        )
+        for name, field, value, code in cases:
+            with self.subTest(name=name):
+                header = json.loads(json.dumps(valid))
+                header[name][field] = value
+                with self.assertRaises(H3CheckpointError) as caught:
+                    inspect_h3_header(
+                        header,
+                        tensor_reader=lambda key: payloads[key],
+                        sampling_profile="standard",
+                    )
+                self.assertEqual(caught.exception.code, code)
+
+    def test_mixed_w4a8_int8_rejects_conflicting_descriptors_and_groups(self):
+        valid, payloads = make_mixed_w4a8_int8_header()
+        header = json.loads(json.dumps(valid))
+        w4_base = "blocks.10.attn.out_proj"
+        marker = json.loads(payloads[w4_base + ".comfy_quant"])
+        marker["group_size"] = 16
+        marker_payload = json.dumps(marker, separators=(",", ":")).encode("utf-8")
+        header[w4_base + ".comfy_quant"]["shape"] = [len(marker_payload)]
+        with self.assertRaises(H3CheckpointError) as caught:
+            inspect_h3_header(
+                header,
+                tensor_reader=lambda key: (
+                    marker_payload
+                    if key == w4_base + ".comfy_quant"
+                    else payloads[key]
+                ),
+                sampling_profile="standard",
+            )
+        self.assertEqual(caught.exception.code, "quantization_conflict")
+
+        malformed, payloads = make_mixed_w4a8_int8_header()
+        marker["group_size"] = 8
+        marker_payload = json.dumps(marker, separators=(",", ":")).encode("utf-8")
+        malformed[w4_base + ".comfy_quant"]["shape"] = [len(marker_payload)]
+        with self.assertRaises(H3CheckpointError) as caught:
+            inspect_h3_header(
+                malformed,
+                tensor_reader=lambda key: (
+                    marker_payload
+                    if key == w4_base + ".comfy_quant"
+                    else payloads[key]
+                ),
+                sampling_profile="standard",
+            )
+        self.assertEqual(caught.exception.code, "quantization_conflict")
+
+        header, payloads = make_mixed_w4a8_int8_header(w4a8_group_size=12)
+        with self.assertRaises(H3CheckpointError) as caught:
+            inspect_h3_header(
+                header,
+                tensor_reader=lambda key: payloads[key],
+                sampling_profile="standard",
+            )
+        self.assertEqual(caught.exception.code, "invalid_quantization_metadata")
+
+    def test_mixed_profile_accepts_observed_heterogeneous_w4_groups(self):
+        group_sizes = [4] * 45 + [8] * 53 + [16] * 82
+        header, payloads = make_mixed_w4a8_int8_header(w4a8_group_sizes=group_sizes)
+        reads = []
+        profile = inspect_h3_header(
+            header,
+            tensor_reader=lambda key: reads.append(key) or payloads[key],
+            sampling_profile="standard",
+        )
+        self.assertEqual(profile["status"], "verified")
+        self.assertEqual(profile["quantization_format"], "mixed_w4a8_int8_convrot")
+        self.assertEqual(profile["quantized_layers"], 200)
+        self.assertIsNone(profile["weight_group_size"])
+        self.assertEqual(profile["weight_group_sizes"], [4, 8, 16])
+        self.assertEqual(len([key for key in reads if key.endswith(".comfy_quant")]), 200)
+
+    def test_uniform_w4a8_group_four_uses_packed_geometry_and_comfy_markers(self):
+        header, payloads = make_mixed_w4a8_int8_header(int8_block_count=0)
+        profile = inspect_h3_header(
+            header,
+            tensor_reader=lambda key: payloads[key],
+            sampling_profile="standard",
+        )
+        self.assertEqual(profile["status"], "verified")
+        self.assertEqual(profile["quantization_format"], "asym_w4a8_int8")
+        self.assertEqual(profile["weight_group_size"], 4)
+        self.assertEqual(profile["weight_group_sizes"], [4])
+
+    def test_w4a8_requires_runtime_metadata_and_rejects_unrelated_u8(self):
+        marker_only, payloads = make_mixed_w4a8_int8_header(include_metadata=False)
+        with self.assertRaises(H3CheckpointError) as caught:
+            inspect_h3_header(
+                marker_only,
+                tensor_reader=lambda key: payloads[key],
+                sampling_profile="standard",
+            )
+        self.assertEqual(caught.exception.code, "quantization_evidence_required")
+
+        header, payloads = make_mixed_w4a8_int8_header()
+        header["unrelated.u8"] = descriptor("U8", (1,))
+        with self.assertRaises(H3CheckpointError) as caught:
+            inspect_h3_header(
+                header,
+                tensor_reader=lambda key: payloads[key],
+                sampling_profile="standard",
+            )
+        self.assertEqual(caught.exception.code, "unsupported_tensor_dtype")
+
+        header, payloads = make_mixed_w4a8_int8_header()
+        marker_name = "blocks.10.attn.out_proj.comfy_quant"
+        payload = payloads[marker_name]
+        padded = payload + b"\0" * (-len(payload) % 4)
+        header[marker_name]["dtype"] = "F32"
+        header[marker_name]["shape"] = [len(padded) // 4]
+        with self.assertRaises(H3CheckpointError) as caught:
+            inspect_h3_header(
+                header,
+                tensor_reader=lambda key: padded if key == marker_name else payloads[key],
+                sampling_profile="standard",
+            )
+        self.assertEqual(caught.exception.code, "invalid_quantization_descriptor")
+
     def test_pinned_dasiwa_standard_and_turbo_headers_verify_without_weight_reads(self):
         for turbo in (False, True):
             with self.subTest(turbo=turbo):
@@ -541,6 +945,41 @@ class H3CheckpointImportTests(unittest.TestCase):
                 sampling_profile="standard",
             )
         self.assertEqual(caught.exception.code, "nonfinite_adaln_table")
+
+    def test_accepts_f16_and_bf16_rank8_tables_but_rejects_nonfinite_or_integer_data(self):
+        count = 1025 * 8
+        finite_words = {"F16": (0x3C00, 0xC000), "BF16": (0x3F80, 0xC000)}
+        nan_words = {"F16": 0x7E00, "BF16": 0x7FC0}
+        for dtype, (positive_one, negative_two) in finite_words.items():
+            with self.subTest(dtype=dtype):
+                header, payloads = make_header(qkv="grouped")
+                header["adaln_t_table"]["dtype"] = dtype
+                finite = struct.pack("<HH", positive_one, negative_two) * (count // 2)
+                profile = inspect_h3_header(
+                    header,
+                    tensor_reader=lambda key: finite if key == "adaln_t_table" else payloads[key],
+                    sampling_profile="standard",
+                )
+                self.assertEqual(profile["status"], "verified")
+
+                nonfinite = struct.pack("<H", nan_words[dtype]) + finite[2:]
+                with self.assertRaises(H3CheckpointError) as caught:
+                    inspect_h3_header(
+                        header,
+                        tensor_reader=lambda key: nonfinite if key == "adaln_t_table" else payloads[key],
+                        sampling_profile="standard",
+                    )
+                self.assertEqual(caught.exception.code, "nonfinite_adaln_table")
+
+        header, payloads = make_header(qkv="grouped")
+        header["adaln_t_table"]["dtype"] = "I8"
+        with self.assertRaises(H3CheckpointError) as caught:
+            inspect_h3_header(
+                header,
+                tensor_reader=lambda key: payloads[key],
+                sampling_profile="standard",
+            )
+        self.assertEqual(caught.exception.code, "unsupported_tensor_dtype")
 
     def test_rejects_missing_misshapen_or_video_only_h3_anchors(self):
         cases = (

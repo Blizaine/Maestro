@@ -36,8 +36,11 @@ _QINT8_CONVROT_QTYPE = _quanto_qtypes[_QTYPE_NAME]
 
 _HADAMARD_CACHE = {}
 _DTYPE_DEBUG_COUNT = 0
+_CPU_INT8_MM_OUTPUT_BLOCK_SIZE = 256
+_CPU_INT8_MM_INPUT_BLOCK_SIZE = 256
 _FUSED_SPLIT_MARKER_SUFFIX = ".qweight"
 _HEADER_INT8_FORMATS = {"int8_tensorwise", "int8_convrot"}
+_HEADER_W4A8_FORMATS = {"asym_w4a8_int8", "w4a8_int8"}
 _SUPPORTED_HEADER_CONVROT_GROUPS = {64, 256}
 _METADATA_WRAPPER_PREFIXES = (
     "model.diffusion_model.",
@@ -315,6 +318,57 @@ def _rotate_activation(input_tensor, group_size):
         input_tensor.reshape(-1, features // group_size, group_size),
         hadamard,
     ).reshape(shape)
+
+
+def _cpu_bf16_int8_linear(input_tensor, qweight, bias=None):
+    """Compute BF16-by-INT8 linear on CPU without Quanto's unsafe int8pack op.
+
+    Keep the serialized row scales untouched, but apply the same BF16 scale
+    rounding and output cast as Quanto's packed path. Dequantize only a bounded
+    block of weight rows at a time so a full H3 projection is never expanded to
+    an FP32 matrix in host memory.
+    """
+    input_width = int(input_tensor.shape[-1])
+    input_rows = input_tensor.reshape(-1, input_width)
+    output_features = int(qweight.shape[0])
+    stored_scales = qweight._scale.reshape(-1)
+    if stored_scales.numel() == 1:
+        scales = stored_scales.expand(output_features)
+    elif stored_scales.numel() == output_features:
+        scales = stored_scales
+    else:
+        raise ValueError(
+            "INT8 ConvRot CPU fallback expected one scale or one scale per weight row"
+        )
+
+    # Quanto's qbytes_int8pack_mm path first rounds scales to the activation
+    # dtype. Round only this temporary view; checkpoint scales remain FP32.
+    scales = scales.to(dtype=input_tensor.dtype).to(dtype=torch.float32)
+    output = torch.empty(
+        (input_rows.shape[0], output_features),
+        dtype=input_tensor.dtype,
+        device=input_tensor.device,
+    )
+    for output_start in range(0, output_features, _CPU_INT8_MM_OUTPUT_BLOCK_SIZE):
+        output_end = min(
+            output_start + _CPU_INT8_MM_OUTPUT_BLOCK_SIZE, output_features
+        )
+        weight_block = qweight._data[output_start:output_end].to(torch.float32)
+        scale_block = scales[output_start:output_end].reshape(1, -1)
+        for input_start in range(0, input_rows.shape[0], _CPU_INT8_MM_INPUT_BLOCK_SIZE):
+            input_end = min(
+                input_start + _CPU_INT8_MM_INPUT_BLOCK_SIZE, input_rows.shape[0]
+            )
+            activations = input_rows[input_start:input_end].to(torch.float32)
+            accumulated = torch.nn.functional.linear(activations, weight_block)
+            output[input_start:input_end, output_start:output_end] = (
+                accumulated * scale_block
+            ).to(dtype=input_tensor.dtype)
+
+    output = output.reshape(*input_tensor.shape[:-1], output_features)
+    if bias is not None:
+        output = output + bias
+    return output
 
 
 def _dtype_debug_enabled():
@@ -625,20 +679,143 @@ def _marker_matches_header(marker_config, header_config, base):
         raise ValueError(f"Comfy marker and _quantization_metadata disagree for '{base}'")
 
 
+def _header_w4a8_config(descriptor, base, state_dict=None):
+    """Normalize W4A8 fields used to detect conflicts with Comfy markers.
+
+    The W4A8 handler owns its tensor and metadata validation. Keep this
+    classifier compatible with that handler's defaults: group size is inferred
+    from scales when omitted, and ConvRot defaults to 256 (while zero and any
+    power-of-four group are supported by the peer).
+    """
+
+    if not isinstance(descriptor, Mapping):
+        return None
+    quant_format = str(descriptor.get("format") or "").strip().lower().replace("-", "_")
+    if quant_format not in _HEADER_W4A8_FORMATS:
+        if "w4a8" in quant_format:
+            raise ValueError(f"Unsupported W4A8 ConvRot format for '{base}': {quant_format!r}")
+        return None
+    weight_group = descriptor.get("group_size")
+    if weight_group is not None:
+        try:
+            weight_group = int(weight_group)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(f"Invalid W4A8 group size for '{base}'") from None
+    elif state_dict is not None:
+        weight_group = _infer_w4a8_group_size(state_dict, base)
+    if weight_group is not None and (weight_group <= 0 or weight_group % 2):
+        raise ValueError(f"W4A8 metadata for '{base}' needs a positive even weight group size")
+    try:
+        convrot_group = int(descriptor.get("convrot_groupsize", 256))
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"Invalid W4A8 ConvRot group size for '{base}'") from None
+    reduced_group = convrot_group
+    while reduced_group > 1 and reduced_group % 4 == 0:
+        reduced_group //= 4
+    if convrot_group < 0 or (convrot_group and (convrot_group < 4 or reduced_group != 1)):
+        raise ValueError(f"Unsupported W4A8 ConvRot group size for '{base}': {convrot_group}")
+    declared_convrot = descriptor.get("convrot")
+    if declared_convrot is not None and type(declared_convrot) is not bool:
+        raise ValueError(f"Invalid W4A8 ConvRot flag for '{base}'")
+    return {
+        "format": "asym_w4a8_int8",
+        "group_size": weight_group,
+        "convrot_groupsize": convrot_group,
+        "convrot": declared_convrot,
+    }
+
+
+def _infer_w4a8_group_size(state_dict, base):
+    weight = state_dict.get(base + ".weight")
+    scales = state_dict.get(base + ".weight_s_rel")
+    if weight is None:
+        weight = state_dict.get(base + ".weight._data")
+    if scales is None:
+        scales = state_dict.get(base + ".weight._s_rel")
+    if (
+        torch.is_tensor(weight)
+        and weight.ndim == 2
+        and torch.is_tensor(scales)
+        and scales.ndim == 2
+        and scales.shape[0] == weight.shape[0]
+        and scales.shape[1] > 0
+    ):
+        logical_k = int(weight.shape[1]) * 2
+        if logical_k % int(scales.shape[1]) == 0:
+            return logical_k // int(scales.shape[1])
+    return None
+
+
+def _validate_w4a8_marker_tensors(state_dict, base):
+    weight = state_dict.get(base + ".weight")
+    if weight is None:
+        weight = state_dict.get(base + ".weight._data")
+    relative_scales = state_dict.get(base + ".weight_s_rel")
+    if relative_scales is None:
+        relative_scales = state_dict.get(base + ".weight._s_rel")
+    channel_scales = state_dict.get(base + ".weight_s_channel")
+    if channel_scales is None:
+        channel_scales = state_dict.get(base + ".weight._s_channel")
+    if not torch.is_tensor(weight) or weight.dtype != torch.int8 or weight.ndim != 2:
+        raise ValueError(f"W4A8 ConvRot weight for '{base}' must be a rank-2 int8 tensor")
+    if not torch.is_tensor(relative_scales):
+        raise ValueError(f"W4A8 ConvRot layer '{base}' is missing weight_s_rel")
+    if not torch.is_tensor(channel_scales):
+        raise ValueError(f"W4A8 ConvRot layer '{base}' is missing weight_s_channel")
+    if base + ".weight" in state_dict:
+        return _infer_w4a8_group_size(state_dict, base)
+    logical_k = int(weight.shape[1]) * 2
+    if relative_scales.ndim == 2 and relative_scales.shape[0] == weight.shape[0] and relative_scales.shape[1] > 0:
+        if logical_k % int(relative_scales.shape[1]) == 0:
+            return logical_k // int(relative_scales.shape[1])
+    return None
+
+
+def _marker_matches_w4a8_metadata(marker_config, metadata_config, base):
+    for field in ("group_size", "convrot_groupsize"):
+        if (
+            marker_config.get(field) is not None
+            and metadata_config.get(field) is not None
+            and marker_config[field] != metadata_config[field]
+        ):
+            raise ValueError(f"Comfy W4A8 marker and _quantization_metadata disagree for '{base}'")
+    if (
+        marker_config.get("convrot") is not None
+        and metadata_config.get("convrot") is not None
+        and marker_config["convrot"] != metadata_config["convrot"]
+    ):
+        raise ValueError(f"Comfy W4A8 marker and _quantization_metadata disagree for '{base}'")
+
+
 def _collect_specs(state_dict, metadata=None):
     metadata_layers = _quantization_metadata_layers(metadata)
     metadata_configs = {}
+    metadata_w4a8_configs = {}
     state_bases = {}
     for key, tensor in state_dict.items():
-        if not key.endswith(".weight") or getattr(tensor, "dtype", None) != torch.int8:
+        if key.endswith(".weight") and getattr(tensor, "dtype", None) == torch.int8:
+            raw_base = key[:-7]
+        elif key.endswith(".weight._data") and getattr(tensor, "dtype", None) == torch.int8:
+            raw_base = key[: -len(".weight._data")]
+        else:
             continue
-        raw_base = key[:-7]
         canonical_base = _normalize_metadata_layer_name(raw_base)
         state_bases.setdefault(canonical_base, []).append(raw_base)
 
     for canonical_base, descriptor in metadata_layers.items():
         config = _header_int8_config(descriptor, canonical_base)
         if config is None:
+            w4a8_config = _header_w4a8_config(descriptor, canonical_base, state_dict)
+            if w4a8_config is None:
+                continue
+            candidates = state_bases.get(canonical_base, [])
+            if len(candidates) != 1:
+                label = "missing" if not candidates else "ambiguous"
+                raise ValueError(f"{label.capitalize()} W4A8 ConvRot state-dict layer for '{canonical_base}'")
+            inferred_group = _validate_w4a8_marker_tensors(state_dict, candidates[0])
+            if w4a8_config["group_size"] is None:
+                w4a8_config["group_size"] = inferred_group
+            metadata_w4a8_configs[canonical_base] = w4a8_config
             continue
         candidates = state_bases.get(canonical_base, [])
         if len(candidates) != 1:
@@ -663,14 +840,33 @@ def _collect_specs(state_dict, metadata=None):
         header_config = metadata_configs.get(canonical_base)
         if quant_config is not None:
             if not torch.is_tensor(quant_config):
-                if header_config is not None:
+                if header_config is not None or canonical_base in metadata_w4a8_configs or base + ".weight_s_rel" in state_dict:
                     raise ValueError(f"Invalid Comfy quantization marker for '{base}'")
                 continue
             config = _decode_json_tensor(quant_config)
             if not isinstance(config, dict):
-                if header_config is not None:
+                if header_config is not None or canonical_base in metadata_w4a8_configs or base + ".weight_s_rel" in state_dict:
                     raise ValueError(f"Invalid Comfy quantization marker for '{base}'")
                 continue
+            marker_format = str(config.get("format") or "").strip().lower().replace("-", "_")
+            if marker_format in _HEADER_W4A8_FORMATS:
+                marker_w4a8 = _header_w4a8_config(config, base, state_dict)
+                if header_config is not None:
+                    raise ValueError(f"Comfy marker format conflicts with INT8 ConvRot metadata for '{base}'")
+                inferred_group = _validate_w4a8_marker_tensors(state_dict, base)
+                if marker_w4a8["group_size"] is None:
+                    marker_w4a8["group_size"] = inferred_group
+                if canonical_base in metadata_layers:
+                    if canonical_base not in metadata_w4a8_configs:
+                        raise ValueError(f"Comfy marker and _quantization_metadata use different formats for '{base}'")
+                    _marker_matches_w4a8_metadata(marker_w4a8, metadata_w4a8_configs[canonical_base], base)
+                elif marker_w4a8["convrot_groupsize"] != 256:
+                    raise ValueError(
+                        f"W4A8 ConvRot marker for '{base}' needs _quantization_metadata to preserve its non-default group size"
+                    )
+                continue
+            if canonical_base in metadata_w4a8_configs or base + ".weight_s_rel" in state_dict:
+                raise ValueError(f"W4A8 ConvRot layer '{base}' needs a recognized W4A8 Comfy marker")
             if header_config is not None:
                 _marker_matches_header(config, header_config, base)
                 _validate_header_int8_tensors(base, tensor, scale, header_config)
@@ -699,8 +895,68 @@ def _collect_specs(state_dict, metadata=None):
     return specs
 
 
+def _w4a8_marker_names(state_dict, metadata=None):
+    """Return verified W4A8 markers that this handler should consume."""
+
+    metadata_layers = _quantization_metadata_layers(metadata)
+    names = []
+    for key, marker_tensor in state_dict.items():
+        if not key.endswith(".comfy_quant"):
+            continue
+        base = key[: -len(".comfy_quant")]
+        canonical_base = _normalize_metadata_layer_name(base)
+        marker = _decode_json_tensor(marker_tensor)
+        has_w4_data = any(
+            name in state_dict
+            for name in (
+                base + ".weight_s_rel",
+                base + ".weight._s_rel",
+            )
+        )
+        if not isinstance(marker, Mapping):
+            metadata_config = (
+                _header_w4a8_config(
+                    metadata_layers[canonical_base], canonical_base, state_dict
+                )
+                if canonical_base in metadata_layers
+                else None
+            )
+            if has_w4_data or metadata_config is not None:
+                raise ValueError(
+                    f"W4A8 ConvRot marker for '{base}' must be a JSON object"
+                )
+            continue
+        marker_format = str(marker.get("format") or "").strip().lower().replace("-", "_")
+        if marker_format not in _HEADER_W4A8_FORMATS:
+            if has_w4_data or canonical_base in metadata_layers and _header_w4a8_config(metadata_layers[canonical_base], canonical_base):
+                raise ValueError(f"W4A8 ConvRot layer '{base}' needs a recognized W4A8 Comfy marker")
+            continue
+        if base + ".weight" not in state_dict and base + ".weight._data" not in state_dict:
+            raise ValueError(f"W4A8 Comfy marker for '{base}' has no matching packed weight")
+        marker_config = _header_w4a8_config(marker, base, state_dict)
+        inferred_group = _validate_w4a8_marker_tensors(state_dict, base)
+        if marker_config["group_size"] is None:
+            marker_config["group_size"] = inferred_group
+        if canonical_base in metadata_layers:
+            metadata_config = _header_w4a8_config(
+                metadata_layers[canonical_base], canonical_base, state_dict
+            )
+            if metadata_config is None:
+                raise ValueError(f"Comfy marker and _quantization_metadata use different formats for '{base}'")
+            if metadata_config["group_size"] is None:
+                metadata_config["group_size"] = inferred_group
+            _marker_matches_w4a8_metadata(marker_config, metadata_config, base)
+        elif marker_config["convrot_groupsize"] != 256:
+            raise ValueError(
+                f"W4A8 ConvRot marker for '{base}' needs _quantization_metadata to preserve its non-default group size"
+            )
+        names.append(base)
+    return names
+
+
 def detect(state_dict, verboseLevel=1, metadata=None):
     specs = _collect_specs(state_dict, metadata)
+    w4a8_markers = _w4a8_marker_names(state_dict, metadata)
     if not specs:
         return {"matched": False, "kind": "none", "details": {}}
     names = [spec["name"] for spec in specs[:8]]
@@ -714,6 +970,7 @@ def detect(state_dict, verboseLevel=1, metadata=None):
             "count": len(specs),
             "convrot_count": convrot_count,
             "names": names,
+            "w4a8_markers": w4a8_markers[:8],
         },
     }
 
@@ -722,6 +979,7 @@ def convert_to_quanto(state_dict, default_dtype, verboseLevel=1, detection=None,
     if detection is not None and not detection.get("matched", False):
         return {"state_dict": state_dict, "quant_map": {}}
     specs = _collect_specs(state_dict, metadata)
+    _w4a8_marker_names(state_dict, metadata)
     if not specs:
         return {"state_dict": state_dict, "quant_map": {}}
     quant_map = {}
@@ -892,7 +1150,7 @@ class QLinearInt8ConvRot(QModuleMixin, torch.nn.Linear):
             weight_dtype = module.bias.dtype
         else:
             weight_dtype = torch.float16
-        return cls(
+        qmodule = cls(
             module.in_features,
             module.out_features,
             module.bias is not None,
@@ -903,6 +1161,9 @@ class QLinearInt8ConvRot(QModuleMixin, torch.nn.Linear):
             optimizer=optimizer,
             quantize_input=True,
         )
+        if hasattr(module, "_lock_dtype"):
+            qmodule._lock_dtype = module._lock_dtype
+        return qmodule
 
     def __init__(
         self,
@@ -932,7 +1193,7 @@ class QLinearInt8ConvRot(QModuleMixin, torch.nn.Linear):
         self._mm_requires_native_linear_forward = True
 
     def set_default_dtype(self, dtype):
-        self._convrot_default_dtype = dtype
+        self._convrot_default_dtype = getattr(self, "_lock_dtype", None) or dtype
 
     def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
         if getattr(self, "_maestro_kitchen_prequantized_input", None) is not None:
@@ -960,6 +1221,16 @@ class QLinearInt8ConvRot(QModuleMixin, torch.nn.Linear):
                 self._convrot_group_size,
             )
         _debug_forward_dtype(self, original_input, input_tensor, qweight)
+        if (
+            input_tensor.device.type == "cpu"
+            and input_tensor.dtype == torch.bfloat16
+            and self.weight_qtype == _QINT8_CONVROT_QTYPE
+            and isinstance(qweight, WeightQBytesTensor)
+            and qweight._data.dtype == torch.int8
+        ):
+            # Torch 2.7.1's CPU BF16 int8pack kernel can segfault. The
+            # blockwise fallback preserves its BF16 scale/output rounding.
+            return _cpu_bf16_int8_linear(input_tensor, qweight, self.bias)
         return torch.nn.functional.linear(input_tensor, qweight, bias=self.bias)
 
     def _load_from_state_dict(

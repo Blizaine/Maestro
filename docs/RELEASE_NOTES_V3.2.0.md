@@ -3,6 +3,71 @@
 22 October 2026. Public Main and Dev release, including the 20–22 October Dev
 preview fixes. FastH3 models retain their experimental status.
 
+## Dev follow-up fixes — 23–24 October
+
+- **Fish smaller-memory acceleration:** reusable single-frame expert scratch,
+  packed GPU expert caching and a partial audio-tower graph. Honor declared
+  vLLM offload support, preserve CPU/eager fallbacks and report the actual
+  backend. Kernel/cache checks passed on 24GB, 12GB and 8GB GPUs; complete
+  speech on the smaller cards remains pending setup. See [Fish details](Fish-Drama-3.md).
+- **Fish whole-frame CUDA Graphs:** eligible vLLM profiles replay the codebook
+  tower, sampling and next backbone step together. Capture runs once per speech
+  part, with the prompt caches and random state restored after warmup. All
+  decode weights and expert banks must fit on one GPU; offloaded profiles and
+  unavailable capture retain eager decoding. Fix a traversal recursion caused by
+  MMGP's parent references, including with no LoRAs selected. One matched RTX 4090
+  short take decoded in 1.66s versus 26.76s with identical audio samples; total
+  job time was 21s versus 45s. This is a single-take result, not a general speed claim.
+- **Fish decoding overhead:** remove redundant expert-ID bound checks from
+  the internal GPU router path, avoiding eighty CUDA scalar reads per decoded
+  frame. Direct expert calls retain validation and CPU math is unchanged.
+  A GPU speedup from the bound-check change alone is not yet measured.
+- **Long-form speech:** saved writing instructions control the speech writer's
+  personality and style. Long story/dialogue drafts are assembled from bounded
+  sections; requested runtime is approximate. Fish automatically chunks long
+  scripts and assembles one file, retaining incomplete-part warnings and a
+  whole-output limit up to one hour. See [speech writing](Speech-writing.md).
+- **Fish speech length:** Auto lets the model finish naturally under a generous
+  script/context safety budget and a one-hour total bound. Maximum length
+  remains optional, and short manual limits now reach generation unchanged.
+  Saved positive limits are preserved. Auto does not force pacing or remove
+  model-generated pauses; these changes have CPU and mocked browser coverage.
+- **Fish speech sampling:** Top-k 0 correctly removes the sampling cap rather
+  than becoming greedy. New Fish Drama 3 defaults use no cap, matching the
+  mitigation in Fish's demo for speech that falls silent after a short opening.
+  Advanced Generation exposes Top-k and Top-p, preserving saved positive values.
+  Completion and voice fidelity still need confirmation with an actual render.
+- **Eros Max beta6:** validate its mixed dense/INT8 layout and quantized
+  condition, output and refiner projections. The known file's published
+  identity/checksum selects both Frames and References, retaining the FL2VA
+  basis and creator's baked Turbo recipe: Euler, 8–12 steps, shifts 10/3.
+  Quantized output heads preserve their FP32 compute lock; BF16 CPU forwards
+  retain the original FP32 scale storage. These paths have numeric CPU coverage.
+- **One H3 import, both modes:** clarify the checkpoint's native-basis selector
+  and enable newly imported Frames/References companions even when old scoped
+  visibility defaults contain their IDs. Both entries share one weight file;
+  existing visibility choices for known models remain unchanged.
+- **16GB H3 placement:** for Auto-owned native H3 video on Windows 16GB
+  Blackwell / nominal 64GB RAM hosts, use Profile 4 and retain a feasible
+  guard-approved residency allowance instead of the extra 3 GiB ceiling.
+  Manual placement remains authoritative; clamped jobs retain streaming
+  defaults and other hardware tiers keep their existing policy. CPU regressions
+  cover the guard-to-loader handoff, cached-model reload/reuse and restoration.
+  The reported RTX 5080 slowdown has not been reproduced or benchmarked on that
+  machine. See [the diagnosis and reporter test](H3-16GB-placement.md).
+- **Eros Max import:** support the beta5 file's mixed W4A8/INT8 ConvRot layers
+  and per-layer weight groups of 4, 8 and 16, while retaining strict verification.
+  Let both quantization handlers load their own layers in the same model.
+  Accept finite BF16/FP16 AdaLN tables for the native FP32 interpolation path.
+  Bounded descriptor reads retry a transient failure once and preserve specific
+  transport/access errors in the browser. The real file's header and markers
+  were inspected; a complete weight download and GPU render were not performed.
+  See [supported formats and verification limits](H3-checkpoint-import.md).
+- **Concurrent soundtrack preparation:** on Windows, reuse an already published
+  nonempty WAV when another window's reader prevents replacing it. Preserve
+  atomic publication and temporary-file cleanup; permission errors still fail
+  when no usable cache exists.
+
 ## Dev follow-up fixes — 22 October
 
 - **UI startup:** prioritize service preferences, model controls and saved

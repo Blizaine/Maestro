@@ -136,7 +136,10 @@ function useEnhanceStatus(isEnhancing: boolean) {
             } else if (!streamStarted) {
               setStatus({ phase: 'loading', chars: 0 })
             }
-            if (data.done) break
+            // This finishes one model call. A long script or a repair can
+            // start another call while the outer enhancement is still active.
+            // Poll until isEnhancing changes, including stale done responses
+            // from the previous request while a new model is loading.
           }
         } catch { /* ignore */ }
         await new Promise(r => setTimeout(r, 800))

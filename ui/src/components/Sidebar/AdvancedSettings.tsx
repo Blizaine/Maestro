@@ -6,6 +6,8 @@ import { PostProcessing } from './PostProcessing'
 import { ControlVideoSection } from './ControlVideoSection'
 import { Qwen21Controls } from './Qwen21Controls'
 import { KreaIdentityControls } from './KreaIdentityControls'
+import { FishSpeechSampling } from './FishSpeechSampling'
+import { SpeechWriterSettings } from './SpeechWriterSettings'
 import { LoraSelector } from '../SettingsDrawer/LoraSelector'
 import { Yue2LoraSelector } from './Yue2LoraSelector'
 import { selectedMusicStyles } from '../../lib/musicStyles'
@@ -881,6 +883,9 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
                       />
                     </div>
                   )}
+
+                  <FishSpeechSampling />
+                  <SpeechWriterSettings />
 
                   {/* Guidance Scale */}
                   <div>

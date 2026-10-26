@@ -1,9 +1,19 @@
 # Copyright (c) 2026 DeepBeepMeep - WanGP Community License 2.0 (see LICENSE.txt)
 import os
 from pathlib import Path
+
 import torch
 from shared.utils import files_locator as fl
-from .help import INFOS, PROMPT_INFOS, DEEPY_INFOS, DEEPY_PROMPT_INFOS, ENHANCER, DIALOGUE_ENHANCER, DEFAULT_PROMPT
+
+from .help import (
+    DEEPY_INFOS,
+    DEEPY_PROMPT_INFOS,
+    DEFAULT_PROMPT,
+    DIALOGUE_ENHANCER,
+    ENHANCER,
+    INFOS,
+    PROMPT_INFOS,
+)
 
 ARCHITECTURE = "fish_drama3"
 ASSET_REPOSITORY = "DeepBeepMeep/TTS"
@@ -11,10 +21,10 @@ ASSET_REPOSITORY = "DeepBeepMeep/TTS"
 ASSET_REVISION = "b0cc2d3cf0752bc0d8c704562c95d4d2564e6f8e"
 ASSETS = ["tokenizer.json", "Fish_Drama3_codec_bf16.safetensors"]
 # Optional cuts of long scripts at whole lines; each part is prompted with the last parts (text and generated audio) as history.
-DIALOGUE_CUT_LINES = {"id": "dialogue_cut_lines", "label": "Cut Script Every N Lines (0 = One Pass)", "name": "Cut Every N Lines", "type": "int",
+DIALOGUE_CUT_LINES = {"id": "dialogue_cut_lines", "label": "Cut Script Every N Lines (0 = Automatic)", "name": "Cut Every N Lines", "type": "int",
                       "default": 0, "min": 0, "max": 50, "inc": 1}
 DIALOGUE_HISTORY_SECONDS = {"id": "dialogue_history_seconds", "label": "History Kept at Each Cut (seconds)", "name": "Cut History", "type": "int",
-                            "default": 20, "min": 0, "max": 120, "inc": 5}
+                            "default": 60, "min": 0, "max": 120, "inc": 5}
 
 
 class family_handler:
@@ -49,9 +59,14 @@ class family_handler:
             "group": "tts", "audio_only": True, "image_outputs": False, "sliding_window": False,
             "device_explicit": True, "dtype": "bf16", "auto_quantize": False,
             "no_negative_prompt": True, "inference_steps": False, "guidance_max_phases": 0,
-            "temperature": True, "compile": False, "cuda_graphs": False, "supports_early_stop": True,
-            # Fish's accelerated path is per-step and graph-free. It is exposed
-            # only when this platform passes Triton, FlashAttention 2 and FLA checks.
+            "temperature": True, "top_k_slider": True, "top_p_slider": True,
+            "compile": False, "cuda_graphs": False, "supports_early_stop": True,
+            "speech_auto_duration": True, "duration_is_maximum": True,
+            "speech_longform": True, "audio_segment_max_seconds": 120,
+            # The shared graph toggle stays disabled: Fish manages a part-local
+            # whole-frame graph itself after verifying complete GPU residency.
+            # Fish's accelerated path uses PyTorch SDPA for full attention and
+            # the shared FLA kernels for DeltaNet.
             "profiles_dir": [ARCHITECTURE], "lm_engines": lm_engines, "lm_engine_supports_offload": True,
             "max_voice_count": 3, "audio_mode_from_voice_count": True,
             "image_prompt_types_allowed": "", "any_audio_prompt": True, "audio_prompt_choices": True,
@@ -61,7 +76,7 @@ class family_handler:
             "alt_prompt": {"label": "Reference Transcripts", "name": "Reference Transcripts", "lines": 3, "audio_prompt_type": "A",
                            "placeholder": "Exact words of each voice reference, one 'Speaker N: ...' line per reference. Leave empty to transcribe them with Whisper."},
             "custom_settings": [dict(DIALOGUE_CUT_LINES), dict(DIALOGUE_HISTORY_SECONDS)],
-            "duration_slider": {"label": "Maximum Speech Duration (seconds)", "name": "Maximum Speech Duration", "min": 1, "max": 300, "increment": 1, "default": 60},
+            "duration_slider": {"label": "Speech Duration (0 = Auto; otherwise maximum seconds)", "name": "Speech Duration", "min": 0, "max": 3600, "increment": 1, "default": 0},
             "prompt_class": "Speech", "preserve_empty_prompt_lines": True,
             "prompt_enhancer_def": {"selection": ["T", "T1"], "labels": {"T": "A Speech based on current Prompt", "T1": "A Dialogue based on current Prompt"}, "default": ""},
             "prompt_enhancer_button_label": "Write",
@@ -69,6 +84,38 @@ class family_handler:
             "text_prompt_enhancer_instructions1": DIALOGUE_ENHANCER, "text_prompt_enhancer_max_tokens1": 2048,
             "infos": INFOS, "prompt_infos": PROMPT_INFOS, "deepy_infos": DEEPY_INFOS, "deepy_prompt_infos": DEEPY_PROMPT_INFOS,
         }
+
+    @staticmethod
+    def resolve_lm_decoder_engine(requested_engine, engines_available=()):
+        from .runtime_support import fish_vllm_availability
+
+        requested = str(requested_engine or "").strip().lower()
+        available = {str(engine).strip().lower() for engine in (engines_available or ())}
+        if requested == "legacy":
+            return "legacy"
+        if requested not in ("", "auto", "vllm"):
+            if requested != "cg":
+                print(f"[Fish Audio] Unknown decoder engine '{requested}'; using Legacy.")
+            return "legacy"
+        if "vllm" not in available:
+            _, reason = fish_vllm_availability()
+            reason = reason or "vLLM is not declared as available for this Fish model"
+            if requested == "vllm":
+                print(f"[Fish Audio] Requested vLLM engine is unavailable ({reason}); using Legacy.")
+            elif requested in ("", "auto"):
+                print(f"[Fish Audio] Auto engine selected Legacy because vLLM is unavailable ({reason}).")
+            return "legacy"
+
+        supported, reason = fish_vllm_availability(verify_runtime=True)
+        if supported:
+            return "vllm"
+
+        reason = reason or "Fish's accelerated runtime checks did not pass"
+        if requested == "vllm":
+            print(f"[Fish Audio] Requested vLLM engine is unavailable ({reason}); using Legacy.")
+        else:
+            print(f"[Fish Audio] Auto engine selected Legacy because vLLM is unavailable ({reason}).")
+        return "legacy"
 
     @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):
@@ -98,7 +145,7 @@ class family_handler:
     @staticmethod
     def update_default_settings(base_model_type, model_def, ui_defaults):
         ui_defaults.update(prompt=DEFAULT_PROMPT, alt_prompt="", audio_prompt_type="",
-            duration_seconds=60, temperature=0.8, top_k=30, top_p=0.95, prompt_enhancer="", guidance_scale=1.0,
+            duration_seconds=0, temperature=0.8, top_k=0, top_p=0.95, prompt_enhancer="", guidance_scale=1.0,
             num_inference_steps=1, video_length=0, repeat_generation=1, multi_prompts_gen_type="FG")
 
     @staticmethod
@@ -107,7 +154,12 @@ class family_handler:
 
     @staticmethod
     def validate_generative_prompt(base_model_type, model_def, inputs, one_prompt):
-        from .prompt import check_paired_tags, reference_transcripts, speaker_lines_to_tags, validate_drama3_text
+        from .prompt import (
+            check_paired_tags,
+            reference_transcripts,
+            speaker_lines_to_tags,
+            validate_drama3_text,
+        )
         try:
             validate_drama3_text(speaker_lines_to_tags(one_prompt), "Speech Script")
             check_paired_tags(one_prompt, "Speech Script")

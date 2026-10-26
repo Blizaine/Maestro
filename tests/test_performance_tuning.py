@@ -20,7 +20,7 @@ from services.perf_recommend import apply_auto_performance  # noqa: E402
 
 def setup(ram=128, vram=24):
     hw = {"cuda_available": True, "gpu_name": "Test GPU", "gpu_vram_gb": vram,
-          "ram_gb": ram, "ram_tier": "high" if ram >= 64 else "low",
+          "ram_gb": ram, "ram_tier": "high" if ram >= 63.5 else "low",
           "vram_tier": "high" if vram >= 24 else "low" if vram >= 12 else "tight",
           "platform": "win32"}
     config = {}
@@ -34,11 +34,43 @@ PARAMS = {"model_type": "test_h3", "resolution": "1280x704", "video_length": 243
 GUARD = {"h3_weight_budget_gb": 12, "effective_coef": .75}
 
 
+def blackwell_setup(ram=63.7, vram=16, *, capability="sm120", gpu_name="NVIDIA GeForce RTX 5080", platform="win32"):
+    hw, config = setup(ram, vram)
+    hw.update(gpu_name=gpu_name, platform=platform,
+              ram_tier="high" if ram >= 63.5 else "low")
+    if capability is None:
+        hw.pop("gpu_capability", None)
+    else:
+        hw["gpu_capability"] = capability
+    return hw, config
+
+
+def guard_with_candidate(weight_budget_gb=9.5):
+    return {
+        "h3_weight_budget_gb": weight_budget_gb,
+        "effective_coef": weight_budget_gb / 16,
+        "h3_residency_candidate_mb": int(weight_budget_gb * 1024 * .97),
+    }
+
+
 class PlannerTests(unittest.TestCase):
     def plan(self, ram=128, vram=24, **kwargs):
         hw, config = setup(ram, vram)
         return build_performance_plan(hw, config, MODEL, PARAMS, GUARD,
                                       profile=config["video_profile"], **kwargs)
+
+    def blackwell_plan(self, *, ram=63.7, vram=16, adjustment=None, model=None,
+                       params=None, output_type="video", hardware=None, config=None,
+                       **kwargs):
+        if hardware is None or config is None:
+            hardware, config = blackwell_setup(ram, vram)
+        plan = build_performance_plan(
+            hardware, config, model or MODEL, params or PARAMS, adjustment,
+            output_type=output_type,
+            profile=config.get(f"{output_type}_profile", config["video_profile"]),
+            **kwargs,
+        )
+        return plan, hardware, config
 
     def test_ram_allocator_separates_performance_evidence(self):
         hw, _ = setup(32, 12)
@@ -70,6 +102,167 @@ class PlannerTests(unittest.TestCase):
                                          {**GUARD, "h3_activation_reserve_clamped": True})
         self.assertEqual(clamped["transformer_budget_mb"], 0)
         self.assertTrue(clamped["warnings"])
+
+    def test_blackwell_h3_autotune_preserves_guard_candidate_at_637_and_640_gb_ram(self):
+        adjustment = guard_with_candidate(9.5)
+        for ram in (63.7, 64.0):
+            with self.subTest(ram=ram):
+                plan, _, config = self.blackwell_plan(ram=ram, adjustment=adjustment)
+                self.assertTrue(plan["applied"])
+                self.assertEqual(plan["profile"], 4)
+                self.assertEqual(plan["transformer_budget_mb"], adjustment["h3_residency_candidate_mb"])
+                self.assertEqual(config["video_profile"], 2)
+                self.assertTrue(any("pre-load workspace guard" in reason for reason in plan["reasons"]))
+                self.assertTrue(any("selected Profile 4" in reason for reason in plan["reasons"]))
+
+    def test_blackwell_h3_clamped_jobs_keep_profile_default_budget(self):
+        adjustment = {
+            **guard_with_candidate(3.5),
+            "h3_activation_reserve_clamped": True,
+            "h3_residency_policy": "profile_default",
+            "h3_residency_candidate_mb": 0,
+        }
+        plan, _, _ = self.blackwell_plan(adjustment=adjustment)
+        self.assertEqual(plan["profile"], 4)
+        self.assertEqual(plan["transformer_budget_mb"], 0)
+        self.assertTrue(plan["warnings"])
+
+    def test_blackwell_h3_candidate_is_capped_by_foreign_vram(self):
+        adjustment = guard_with_candidate(9.5)
+        plan, _, _ = self.blackwell_plan(adjustment=adjustment, external_vram_gb=4)
+        self.assertLess(plan["transformer_budget_mb"], adjustment["h3_residency_candidate_mb"])
+        self.assertEqual(plan["transformer_budget_mb"], int((9.5 * .97 - 3.25) * 1024))
+        self.assertTrue(plan["warnings"])
+
+    def test_blackwell_h3_missing_or_invalid_candidate_uses_existing_fallback(self):
+        guard = guard_with_candidate(9.5)
+        missing = dict(guard)
+        missing.pop("h3_residency_candidate_mb")
+        missing_plan, _, _ = self.blackwell_plan(adjustment=missing)
+        self.assertEqual(missing_plan["transformer_budget_mb"], 3072)
+
+        invalid_candidates = (None, 0, -1, 512.5, "nan", float("inf"), True)
+        for candidate in invalid_candidates:
+            with self.subTest(candidate=candidate):
+                adjustment = dict(guard)
+                adjustment["h3_residency_candidate_mb"] = candidate
+                plan, _, _ = self.blackwell_plan(adjustment=adjustment)
+                self.assertEqual(plan["profile"], 4)
+                self.assertEqual(plan["transformer_budget_mb"], 3072)
+
+    def test_blackwell_h3_history_cannot_restore_profile2(self):
+        class HistoryProbe:
+            allowed_profiles = None
+
+            def choose(self, plan, vram, ram, allowed_profiles, *, max_budget_mb, clamped=False):
+                self.allowed_profiles = list(allowed_profiles)
+                return {"profile": 4.5, "budget": min(4096, max_budget_mb)}, 2
+
+        history = HistoryProbe()
+        plan, _, _ = self.blackwell_plan(
+            adjustment=guard_with_candidate(9.5), history=history
+        )
+        self.assertEqual(history.allowed_profiles, [4, 4.5, 5])
+        self.assertNotIn(2, history.allowed_profiles)
+        self.assertEqual(plan["profile"], 4.5)
+
+    def test_blackwell_h3_host_pressure_can_select_profile5(self):
+        plan, _, _ = self.blackwell_plan(
+            adjustment=guard_with_candidate(9.5), available_ram_gb=2
+        )
+        self.assertEqual(plan["profile"], 5)
+        self.assertEqual(plan["transformer_budget_mb"], guard_with_candidate(9.5)["h3_residency_candidate_mb"])
+
+    def test_blackwell_h3_requires_standard_video_and_explicit_model_modes(self):
+        cases = (
+            ({"minimax_h3_fasth3": True}, PARAMS, "video"),
+            ({"minimax_h3_fasth3_omniref": True}, PARAMS, "video"),
+            ({"minimax_h3_viggle": True}, PARAMS, "video"),
+            ({"minimax_h3_audio_only": True}, PARAMS, "video"),
+            ({"minimax_h3_image_only": True}, PARAMS, "video"),
+            ({"architecture": "minimax_h3_fasth3"}, PARAMS, "video"),
+            ({"architecture": "minimax_h3_viggle"}, PARAMS, "video"),
+            ({"architecture": "minimax_h3_voice_audio"}, PARAMS, "video"),
+            ({"architecture": "minimax_h3_image"}, PARAMS, "video"),
+            ({}, {**PARAMS, "audio_only": True}, "video"),
+            ({}, {**PARAMS, "image_mode": 1}, "video"),
+            ({}, PARAMS, "audio"),
+            ({}, PARAMS, "image"),
+        )
+        for model, params, output_type in cases:
+            with self.subTest(model=model, params={key: params.get(key) for key in ("image_mode", "audio_only")}, output_type=output_type):
+                plan, _, config = self.blackwell_plan(
+                    model={**MODEL, **model}, params=params, output_type=output_type,
+                    adjustment=guard_with_candidate(9.5),
+                )
+                self.assertEqual(plan["profile"], config.get(f"{output_type}_profile", config["video_profile"]))
+                self.assertEqual(plan["transformer_budget_mb"], 3072)
+
+    def test_blackwell_h3_policy_requires_target_hardware_and_memory_class(self):
+        variants = (
+            blackwell_setup(capability="sm89"),
+            blackwell_setup(platform="linux"),
+            blackwell_setup(ram=32),
+            blackwell_setup(ram=63.4),
+            blackwell_setup(ram=64.5),
+            blackwell_setup(vram=14.9),
+            blackwell_setup(vram=16.6),
+            blackwell_setup(capability=None, gpu_name="Unknown GPU"),
+            blackwell_setup(capability=None, gpu_name="NVIDIA RTX 5000 Ada Generation Laptop GPU"),
+        )
+        for hardware, config in variants:
+            with self.subTest(hardware={key: hardware.get(key) for key in ("gpu_name", "gpu_vram_gb", "gpu_capability", "ram_gb", "platform")}):
+                before_profile = config["video_profile"]
+                plan, _, _ = self.blackwell_plan(
+                    hardware=hardware, config=config, adjustment=guard_with_candidate(9.5)
+                )
+                generic_hw = {**hardware, "gpu_capability": "sm89"}
+                baseline = build_performance_plan(
+                    generic_hw, config, MODEL, PARAMS, guard_with_candidate(9.5),
+                    profile=config["video_profile"],
+                )
+                self.assertEqual(plan["profile"], before_profile)
+                self.assertEqual(plan["profile"], baseline["profile"])
+                self.assertEqual(plan["transformer_budget_mb"], baseline["transformer_budget_mb"])
+
+        # When capability is absent, an explicit RTX 50-series product name is enough.
+        hw, config = blackwell_setup(capability=None)
+        plan, _, _ = self.blackwell_plan(hardware=hw, config=config, adjustment=guard_with_candidate(9.5))
+        self.assertEqual(plan["profile"], 4)
+        self.assertEqual(plan["transformer_budget_mb"], guard_with_candidate(9.5)["h3_residency_candidate_mb"])
+
+    def test_blackwell_h3_policy_leaves_8_12_and_24_gb_profiles_unchanged(self):
+        for vram in (8, 12, 24):
+            with self.subTest(vram=vram):
+                hw, config = blackwell_setup(ram=64, vram=vram)
+                generic_hw = {**hw, "gpu_name": "Other GPU", "gpu_capability": "sm89"}
+                special = build_performance_plan(
+                    hw, config, MODEL, PARAMS, GUARD, profile=config["video_profile"]
+                )
+                baseline = build_performance_plan(
+                    generic_hw, config, MODEL, PARAMS, GUARD, profile=config["video_profile"]
+                )
+                self.assertEqual(special["profile"], baseline["profile"])
+                self.assertEqual(special["transformer_budget_mb"], baseline["transformer_budget_mb"])
+
+    def test_blackwell_h3_policy_respects_manual_profile_preload_and_auto_off(self):
+        hw, config = blackwell_setup()
+        params_before = copy.deepcopy(PARAMS)
+        config["video_profile"] = 5
+        manual_profile = build_performance_plan(hw, config, MODEL, params_before, GUARD, profile=5)
+        self.assertFalse(manual_profile["applied"])
+        self.assertEqual(manual_profile["profile"], 5)
+
+        _, config = blackwell_setup()
+        config["video_preload_mode"] = "manual"
+        manual_preload = build_performance_plan(hw, config, MODEL, params_before, GUARD, profile=config["video_profile"])
+        self.assertFalse(manual_preload["applied"])
+
+        _, config = blackwell_setup()
+        config["services"]["auto_performance"] = False
+        auto_off = build_performance_plan(hw, config, MODEL, params_before, GUARD, profile=config["video_profile"])
+        self.assertFalse(auto_off["applied"])
+        self.assertEqual(params_before, PARAMS)
 
     def test_manual_and_cli_choices_preserved(self):
         hw, original = setup()

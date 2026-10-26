@@ -95,7 +95,10 @@ def _load_with_qmodule(
     error_msgs,
 ):
     device = module.weight.device if torch.is_tensor(module.weight) else None
-    if torch.is_tensor(module.weight) and module.weight.dtype.is_floating_point:
+    locked_dtype = getattr(module, "_lock_dtype", None)
+    if locked_dtype is not None:
+        weight_dtype = locked_dtype
+    elif torch.is_tensor(module.weight) and module.weight.dtype.is_floating_point:
         weight_dtype = module.weight.dtype
     elif torch.is_tensor(getattr(module, "bias", None)) and module.bias.dtype.is_floating_point:
         weight_dtype = module.bias.dtype
@@ -112,9 +115,11 @@ def _load_with_qmodule(
         optimizer=module.optimizer,
         quantize_input=True,
     )
+    if locked_dtype is not None:
+        tmp._lock_dtype = locked_dtype
     setter = getattr(tmp, "set_default_dtype", None)
     if callable(setter):
-        setter(getattr(module, "_router_default_dtype", None) or module.weight.dtype)
+        setter(locked_dtype or getattr(module, "_router_default_dtype", None) or module.weight.dtype)
     tmp._load_from_state_dict(
         state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
     )
@@ -148,13 +153,16 @@ class QLinearQuantoRouter(QModuleMixin, torch.nn.Linear):
         optimizer=None,
         device=None,
     ):
-        if torch.is_tensor(module.weight) and module.weight.dtype.is_floating_point:
+        locked_dtype = getattr(module, "_lock_dtype", None)
+        if locked_dtype is not None:
+            weight_dtype = locked_dtype
+        elif torch.is_tensor(module.weight) and module.weight.dtype.is_floating_point:
             weight_dtype = module.weight.dtype
         elif torch.is_tensor(getattr(module, "bias", None)) and module.bias.dtype.is_floating_point:
             weight_dtype = module.bias.dtype
         else:
             weight_dtype = torch.float16
-        return cls(
+        qmodule = cls(
             module.in_features,
             module.out_features,
             module.bias is not None,
@@ -165,6 +173,9 @@ class QLinearQuantoRouter(QModuleMixin, torch.nn.Linear):
             optimizer=optimizer,
             quantize_input=True,
         )
+        if hasattr(module, "_lock_dtype"):
+            qmodule._lock_dtype = module._lock_dtype
+        return qmodule
 
     def __init__(
         self,
@@ -192,7 +203,7 @@ class QLinearQuantoRouter(QModuleMixin, torch.nn.Linear):
         self._router_default_dtype = dtype
 
     def set_default_dtype(self, dtype):
-        self._router_default_dtype = dtype
+        self._router_default_dtype = getattr(self, "_lock_dtype", None) or dtype
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         impl = getattr(self, "_router_forward_impl", None)

@@ -7,6 +7,8 @@ import {
   normalizeModelVisibilityOverrides, type ModelVisibilityOverrides, type ModelVisibilityScope,
 } from '../lib/modelVisibility'
 import { isDirectorRenderChild } from '../lib/directorJobs'
+import { isFishSpeechArchitecture } from '../lib/fishSpeech'
+import { loadSpeechWriterPreferences, saveSpeechWriterPreferences, speechWriterPreferences } from '../lib/speechWriter'
 import {
   directorGalleryGroupKey,
   flattenDirectorGalleryOutputs,
@@ -980,8 +982,27 @@ function _applyModelDefaults(
     if (!preserveEditsSince || state.params.custom_settings === preserveEditsSince.custom_settings) {
       overrides.custom_settings = _kreaCustomSettingsForModel(state.params.custom_settings, modelType, state.kreaIdentitySettingsPerModel)
     }
+    // Fish's saved duration is an optional maximum, with zero selecting Auto.
+    // Hydrate it alongside the visible seconds so saved positive limits survive
+    // startup. Never inherit another speech model's duration or overwrite a
+    // limit edited while this defaults request was in flight.
+    let fishDuration: number | undefined
+    if ((modelType === 'fish_drama3' || modelType === 'fish_drama3_int4' || modelType === 'fish_drama3_small')
+      && typeof d.duration_seconds === 'number' && Number.isFinite(d.duration_seconds)
+      && d.duration_seconds >= 0
+      && Object.is(state.params.duration_seconds, (preserveEditsSince ?? before.params).duration_seconds)) {
+      overrides.duration_seconds = d.duration_seconds
+      const options = state.modelOptions?.model_type === modelType ? state.modelOptions : null
+      if (d.duration_seconds > 0 || options) {
+        fishDuration = d.duration_seconds === 0 && options?.speech_auto_duration
+          ? 0 : Math.max(1, Math.min(options?.duration_slider?.max ?? 300,
+            d.duration_seconds || options?.duration_slider?.default || 60))
+      }
+    }
     if (Object.keys(overrides).length > 0) {
-      storeSet(s => ({ params: { ...s.params, ...overrides } as GenerateParams }))
+      storeSet(s => ({ params: { ...s.params, ...overrides } as GenerateParams,
+        ...(fishDuration != null ? {durationSeconds: fishDuration} : {}),
+      }))
     }
     return true
   }).then(loaded => {
@@ -4259,6 +4280,7 @@ export const useStore = create<AppState>((set, get) => ({
       // separate stores on top, plus the special image_mode logic.
       params: {
         ...defaultParams,
+        ...(mode === 'audio' ? loadSpeechWriterPreferences() : {}),
         ...restoredParams,
         // Sol / First Block are durable Video preferences, not project
         // inputs. Reapply them when returning from Audio/Image after a
@@ -4307,7 +4329,7 @@ export const useStore = create<AppState>((set, get) => ({
     _persistStickyStudioPreferences(get())
   },
 
-  params: { ...defaultParams },
+  params: { ...defaultParams, ...loadSpeechWriterPreferences() },
   setParam: (key, value) => {
     // Per-sub-mode isolation: remember the outgoing sub-mode BEFORE the
     // param write flips image_mode (see videoSubModeStash).
@@ -4381,6 +4403,9 @@ export const useStore = create<AppState>((set, get) => ({
     // ttsVoiceCount > 0 means at least one voice clone is active.
     if (key === 'prompt' && typeof value === 'string' && get().generationMode === 'audio' && get().ttsVoiceCount > 0) {
       get()._autoParseSpkeakerNames(value)
+    }
+    if (key === '_speech_writer_instructions' || key === '_speech_writer_target_minutes') {
+      saveSpeechWriterPreferences(get().params)
     }
     // Handle sub-mode transitions (Frames / Multi-Shot / Extend / Blend)
     if (key === 'image_mode') {
@@ -5378,8 +5403,18 @@ export const useStore = create<AppState>((set, get) => ({
                   if (imported.length === 0) return state
                   const enabledModels = new Set(state.enabledModels)
                   imported.forEach(modelType => enabledModels.add(modelType))
-                  _saveEnabledModels(enabledModels)
-                  return { enabledModels }
+                  // A scoped default/reset can contain a disabled entry for an
+                  // ID absent from the current catalog. It must not mask the
+                  // newly imported companions' global enablement. Existing
+                  // catalog entries are excluded above, preserving opt-outs.
+                  const importedIds = new Set(imported)
+                  const modelVisibilityOverrides = Object.fromEntries(
+                    Object.entries(state.modelVisibilityOverrides).map(([scope, choices]) => [scope,
+                      Object.fromEntries(Object.entries(choices).filter(([id]) => !importedIds.has(id))),
+                    ]),
+                  ) as ModelVisibilityOverrides
+                  _saveEnabledModels(enabledModels, modelVisibilityOverrides)
+                  return { enabledModels, modelVisibilityOverrides }
                 })
                 completedCheckpoints.forEach(download => {
                   _civitRefreshedCheckpointDownloads.add(download.id)
@@ -5979,6 +6014,15 @@ export const useStore = create<AppState>((set, get) => ({
   setDurationSeconds: (requested) => {
     const state = get()
     const options = state.modelOptions
+    if (options?.audio_only && options.speech_auto_duration && options.duration_slider) {
+      if (!Number.isFinite(requested)) return
+      const ds = options.duration_slider
+      const seconds = requested === 0 && options.speech_auto_duration
+        ? 0 : Math.max(1, Math.min(ds.max, requested))
+      if (state.durationSeconds === seconds && state.params.duration_seconds === seconds) return
+      set({ durationSeconds: seconds, params: { ...state.params, duration_seconds: seconds } })
+      return
+    }
     if (state.params.model_type === 'viggle_animate' && Number.isFinite(requested)) {
       const range = viggleTimeline(state.params, state.activeWorkspace)
       const frames = Math.max(1, Math.floor(Math.min(requested, range.length || 3600, 3600) * 24 + 1e-6))
@@ -5988,7 +6032,9 @@ export const useStore = create<AppState>((set, get) => ({
         params: {...state.params, video_length: frames, sliding_window_size: 124}})
       return
     }
-    if (options?.audio_only && options.audio_segment_max_seconds && options.duration_slider) {
+    // Legacy Fish backends expose a manual audio slider without Auto/segment flags.
+    if (options?.audio_only && options.duration_slider
+      && (options.audio_segment_max_seconds || isFishSpeechArchitecture(options.architecture))) {
       const ds = options.duration_slider
       const seconds = Math.max(ds.min, Math.min(ds.max,
         Number.isFinite(requested) ? requested : ds.default ?? ds.min))
@@ -8222,6 +8268,11 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
 
+    // Writing preferences belong only to speech outputs and writer requests.
+    if (state.generationMode !== 'audio' || state.audioSubMode !== 'speech') {
+      delete params._speech_writer_instructions
+      delete params._speech_writer_target_minutes
+    }
     // Audio mode: branch by sub-mode (Speech/Music vs SFX)
     if (state.generationMode === 'audio') {
       // Record the active sub-tab in the request so it lands in the
@@ -8292,7 +8343,11 @@ export const useStore = create<AppState>((set, get) => ({
           // back to `max` then 600.
           const ds = state.modelOptions.duration_slider
           const sliderDefault = ds?.default ?? ds?.max ?? 600
-          params.duration_seconds = ds && (state.modelOptions.audio_segment_max_seconds || ds.max <= 15)
+          params.duration_seconds = ds && state.modelOptions.speech_auto_duration
+            ? state.durationSeconds === 0 && state.modelOptions.speech_auto_duration
+              ? 0 : Math.max(1, Math.min(ds.max, state.durationSeconds))
+            : ds && (state.modelOptions.audio_segment_max_seconds || ds.max <= 15
+              || isFishSpeechArchitecture(state.modelOptions.architecture))
             ? Math.max(ds.min, Math.min(ds.max, state.durationSeconds))
             : state.durationSeconds < 30 ? sliderDefault : state.durationSeconds
         }
@@ -9920,7 +9975,14 @@ export const useStore = create<AppState>((set, get) => ({
       const ttsDefaults: Record<string, unknown> = {}
       if (options.audio_only && options.duration_slider) {
         const ds = options.duration_slider
-        ttsDefaults.durationSeconds = options.audio_segment_max_seconds
+        ttsDefaults.durationSeconds = options.speech_auto_duration
+          ? (() => {
+              const requested = typeof activeState.params.duration_seconds === 'number'
+                ? activeState.params.duration_seconds : ds.default
+              return requested === 0 && options.speech_auto_duration
+                ? 0 : Math.max(1, Math.min(ds.max, requested || ds.default || 60))
+            })()
+          : (options.audio_segment_max_seconds || isFishSpeechArchitecture(options.architecture))
           && activeState.modelOptions?.architecture === options.architecture
           ? Math.max(ds.min, Math.min(ds.max, durationSeconds))
           : ds.default ?? ds.max ?? 600
@@ -10598,7 +10660,8 @@ export const useStore = create<AppState>((set, get) => ({
       if (retryFlaggedWindows) {
         throw new Error('The window settings changed. Create a new draft for these settings.')
       }
-      // TTS dialogue needs more tokens for longer conversations
+      // Ordinary drafts retain their allowance; the speech writer plans long
+      // requests in bounded sections instead of relying on one huge response.
       const maxTokens = (generationMode === 'audio' && ttsMode) ? 2048 : undefined
       const ltxEnhanceSource = (
         generationMode === 'video'
@@ -10619,11 +10682,17 @@ export const useStore = create<AppState>((set, get) => ({
         max_new_tokens: maxTokens,
         resolution: generationMode === 'image' ? params.resolution : undefined,
         image_paths: imagePaths.length > 0 ? imagePaths : undefined,
-        duration_seconds: (generationMode === 'video' || generationMode === 'avatar') ? state.durationSeconds : undefined,
+        duration_seconds: (generationMode === 'video' || generationMode === 'avatar'
+          || (generationMode === 'audio' && state.audioSubMode === 'speech'))
+          ? state.durationSeconds : undefined,
         window_count: (generationMode === 'video' || generationMode === 'avatar') ? windowCount : undefined,
         window_size_seconds: (generationMode === 'video' || generationMode === 'avatar') ? state.slidingWindowSeconds : undefined,
         activated_loras: params.activated_loras.length > 0 ? params.activated_loras : undefined,
         tts_enhance_mode: ttsMode || undefined,
+        ...(generationMode === 'audio' && state.audioSubMode === 'speech' ? {
+          tts_writer_instructions: params._speech_writer_instructions || '',
+          tts_target_minutes: params._speech_writer_target_minutes || 0,
+        } : {}),
         tts_voice_count: ttsSpeakingVoiceCount(state.ttsVoiceCount, state.modelOptions, String(params.audio_prompt_type || '')) || undefined,
         reference_context: referenceContext,
         planning_style: planningStyle,
@@ -13390,6 +13459,7 @@ export const useStore = create<AppState>((set, get) => ({
     newParams.video_source = (p.video_source as string) || undefined
     newParams.video_guide_outpainting = (p.video_guide_outpainting as string) || undefined
     newParams.duration_seconds = (p.duration_seconds as number) ?? undefined
+    Object.assign(newParams, speechWriterPreferences(p as Partial<GenerateParams>))
     newParams.pause_seconds = (p.pause_seconds as number) ?? undefined
     newParams.tts_dynaudnorm = (p.tts_dynaudnorm as boolean) ?? undefined
     newParams.tts_comp_threshold = (p.tts_comp_threshold as number) ?? undefined
@@ -13759,6 +13829,7 @@ export const useStore = create<AppState>((set, get) => ({
 
     // Restore duration from metadata
     const restoredDuration = Number(p.duration_seconds ?? p._duration_seconds ?? 0) || 0
+    const restoredFishAutoDuration = restoredModelOptions?.speech_auto_duration === true && p.duration_seconds === 0
     // Restore post-processing settings from metadata
     const restoredSpatialUpsampling = (p.spatial_upsampling as string) || ''
     const restoredFilmGrainIntensity = (p.film_grain_intensity as number) || 0
@@ -14019,7 +14090,7 @@ export const useStore = create<AppState>((set, get) => ({
       blendMotionSuffixSec: Number(p._blend_motion_suffix_sec ?? 1),
       blendAnchorStrength: Number(p._blend_anchor_strength ?? p.input_video_strength ?? 0.7),
       outputCount: newParams.repeat_generation || 1,
-      ...(restoredDuration > 0 ? { durationSeconds: restoredDuration } : {}),
+      ...(restoredDuration > 0 || restoredFishAutoDuration ? { durationSeconds: restoredDuration } : {}),
       spatialUpsampling: restoredSpatialUpsampling,
       filmGrainIntensity: restoredFilmGrainIntensity,
       filmGrainSaturation: restoredFilmGrainSaturation,
@@ -14147,7 +14218,7 @@ export const useStore = create<AppState>((set, get) => ({
     // the authoritative seconds separately. Only derive from frames for old
     // video sidecars that predate those fields.
     const frames = newParams.video_length || 81
-    if (restoredDuration > 0) {
+    if (restoredDuration > 0 || restoredFishAutoDuration) {
       set({ durationSeconds: isDirectorClip ? restoredDuration : Math.round(restoredDuration * 10) / 10 })
     } else if (restoredModelMode === 'video' || restoredModelMode === 'avatar') {
       set({ durationSeconds: Math.round((frames / fps) * 10) / 10 })

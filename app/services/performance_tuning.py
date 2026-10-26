@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import sqlite3
 import statistics
 import threading
@@ -47,6 +48,59 @@ def auto_owns(config, key):
     defaults = services.get("auto_performance_defaults", {})
     return bool(services.get("auto_performance", True) and key in defaults
                 and config.get(key) == defaults[key])
+
+
+def _blackwell_16gb_h3_video_class(hardware, model_def, params, output_type):
+    """Match the reported Windows RTX 50 16-GB / 64-GB H3 compatibility class."""
+    architecture = str(model_def.get("architecture") or "").strip().lower()
+    if not architecture.startswith("minimax_h3") or str(output_type or "video").lower() != "video":
+        return False
+    excluded_tokens = ("fasth3", "viggle", "voice_audio", "audio_only", "image")
+    if any(token in architecture for token in excluded_tokens):
+        return False
+
+    excluded_flags = (
+        "minimax_h3_viggle",
+        "minimax_h3_fasth3",
+        "minimax_h3_fasth3_omniref",
+        "audio_only",
+        "minimax_h3_audio_only",
+        "image_only",
+        "minimax_h3_image_only",
+    )
+    if any(bool(model_def.get(key)) for key in excluded_flags):
+        return False
+
+    def enabled(value):
+        if isinstance(value, str):
+            return value.strip().lower() not in ("", "0", "false", "no", "none", "off")
+        return bool(value)
+
+    model_type = str(params.get("model_type") or "").strip().lower()
+    if (enabled(params.get("audio_only")) or enabled(params.get("image_mode"))
+            or any(token in model_type for token in excluded_tokens)):
+        return False
+
+    if str(hardware.get("platform") or "").lower() != "win32":
+        return False
+    vram = _number(hardware.get("gpu_vram_gb"))
+    ram = _number(hardware.get("ram_gb"))
+    if not (15 <= vram <= 16.5 and 63.5 <= ram < 64.5):
+        return False
+
+    capability_tuple = hardware.get("gpu_capability_tuple")
+    if isinstance(capability_tuple, (tuple, list)) and len(capability_tuple) >= 2:
+        return capability_tuple[0] == 12 and capability_tuple[1] == 0
+
+    capability = str(hardware.get("gpu_capability") or "").strip().lower().replace("_", "")
+    if capability:
+        return capability in ("sm120", "120", "12.0")
+
+    # Some hardware snapshots omit CUDA capability. Fall back only to an
+    # unambiguous GeForce RTX 50-series name. RTX 5000 Ada is a different
+    # product generation and must not match this fallback.
+    name = str(hardware.get("gpu_name") or "")
+    return bool(re.search(r"\bgeforce\s+rtx[\s-]*50[1-9]\d\b", name, flags=re.IGNORECASE))
 
 
 def hardware_key(hardware):
@@ -233,8 +287,21 @@ def build_performance_plan(hardware, config, model_def, params, adjustment=None,
     if external_vram_gb > 2:
         plan["warnings"].append("Other GPU activity is using VRAM before model loading; close other GPU applications if memory is tight.")
     allowed_profiles = [profile]
+    blackwell_16gb_h3_video = is_h3 and _blackwell_16gb_h3_video_class(
+        hardware, model_def, params, output_type
+    )
     if is_h3:
-        if ram >= 96 and vram >= 20:
+        if blackwell_16gb_h3_video:
+            # The previous RAM-tier boundary classified a 63.7-GB host as
+            # low-RAM and used Profile 4. Keep this narrow Auto-owned class
+            # on transformer-only pinning; local evidence may choose only
+            # the similarly conservative profiles below.
+            plan["profile"] = 4
+            allowed_profiles = [4, 4.5, 5]
+            plan["reasons"].append(
+                "H3 Auto uses Profile 4 as the baseline on Windows 16 GB Blackwell / 64 GB hosts."
+            )
+        elif ram >= 96 and vram >= 20:
             plan["profile"] = 2
             allowed_profiles = [2, 5]
             plan["reasons"].append("H3 streams transformer weights while keeping host models pinned (Profile 2).")
@@ -248,8 +315,27 @@ def build_performance_plan(hardware, config, model_def, params, adjustment=None,
             plan["warnings"].append("The requested H3 workspace is tight for this GPU. Profile defaults are retained; a shorter window or lower resolution may be needed.")
         else:
             target = vram / 3 if ram >= 96 else min(3, vram / 5)
-            plan["transformer_budget_mb"] = max(0, int(min(target, cap_gb) * 1024) // 256 * 256)
-            plan["reasons"].append(f"Transformer allowance {plan['transformer_budget_mb'] / 1024:g} GB; activation and reference reserves remain protected.")
+            fallback_budget_mb = max(0, int(min(target, cap_gb) * 1024) // 256 * 256)
+            raw_guard_candidate_mb = adjustment.get("h3_residency_candidate_mb")
+            guard_candidate_mb = _number(raw_guard_candidate_mb, 0)
+            has_guard_candidate = (
+                not isinstance(raw_guard_candidate_mb, bool)
+                and guard_candidate_mb > 0
+                and guard_candidate_mb.is_integer()
+            )
+            if blackwell_16gb_h3_video and has_guard_candidate:
+                # The pre-load H3 guard already sized residency against the
+                # packed-sequence workspace. Reuse its candidate, while
+                # honoring any additional VRAM occupied by other processes.
+                plan["transformer_budget_mb"] = min(
+                    int(guard_candidate_mb), max(0, int(cap_gb * 1024))
+                )
+                plan["reasons"].append(
+                    "H3 Auto preserves the pre-load workspace guard's residency allowance, bounded by currently available VRAM."
+                )
+            else:
+                plan["transformer_budget_mb"] = fallback_budget_mb
+                plan["reasons"].append(f"Transformer allowance {plan['transformer_budget_mb'] / 1024:g} GB; activation and reference reserves remain protected.")
     # Available RAM includes reclaimable MMGP-owned pinned buffers. Do not
     # mistake our warm model cache for an unrelated application's memory.
     if available_ram_gb is not None and ram > 0:
@@ -274,6 +360,10 @@ def build_performance_plan(hardware, config, model_def, params, adjustment=None,
         if choice:
             plan.update(profile=choice["profile"], transformer_budget_mb=choice["budget"], source="local_history")
             plan["reasons"].append("Placement selected from repeated matching local renders with memory headroom.")
+    if blackwell_16gb_h3_video:
+        plan["reasons"].append(
+            f"H3 Auto selected Profile {plan['profile']:g} for this Windows 16 GB Blackwell / 64 GB host."
+        )
     return plan
 
 

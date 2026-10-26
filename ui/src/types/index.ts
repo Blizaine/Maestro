@@ -187,8 +187,13 @@ export interface GenerateParams {
   audio_guide5?: string
   audio_guide6?: string
   duration_seconds?: number
+  /** Speech writing preferences; never part of the spoken text. */
+  _speech_writer_instructions?: string
+  _speech_writer_target_minutes?: number
   pause_seconds?: number
   temperature?: number
+  top_k?: number
+  top_p?: number
   model_mode?: number
   custom_settings?: Record<string, unknown>
   temporal_upsampling?: string
@@ -1174,6 +1179,10 @@ export interface ModelOptions {
   duration_slider: { label: string; min: number; max: number; increment: number; default: number } | null
   audio_segment_max_seconds?: number | null
   duration_is_maximum?: boolean
+  /** Zero duration requests native, bounded automatic speech length. */
+  speech_auto_duration?: boolean
+  speech_longform?: boolean
+  speech_writer_controls?: boolean
   yue2_composition?: boolean
   pause_between_sentences: boolean
   temperature_enabled: boolean
@@ -1284,6 +1293,13 @@ export interface OutputProcessingInfo {
 
 export interface OutputMetadata {
   model_details?: {
+    speech_generation?: {
+      status?: string
+      total_chunks?: number
+      completed_chunks?: number
+      incomplete?: boolean
+      warnings?: string[]
+    }
     architecture?: string
     sample_rate?: number
     channels?: number

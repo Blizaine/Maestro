@@ -91,7 +91,9 @@ jobs:
           "gguf==0.17.1"
           "triton==3.3.1"
       - name: Python unit tests
-        run: python -m unittest discover -s tests -p "test_*.py"
+        # Native-library failures need an active test name and Python stack,
+        # rather than an anonymous exit 139 after buffered progress dots.
+        run: python -u -X faulthandler -m unittest discover -v -s tests -p "test_*.py"
       - name: JSON grammar regression tests
         # These are standalone test functions, so unittest discovery does not
         # execute them yet. Keep this explicit runner until they are migrated.
@@ -130,6 +132,10 @@ jobs:
         run: |
           node tests/ui/read_requests.cjs
           node tests/ui/startup_controller.cjs
+      - name: H3 checkpoint import UI regressions
+        run: |
+          node tests/ui/h3_checkpoint_import.cjs
+          node tests/ui/h3_checkpoint_download_ui.cjs
       - name: Type-check + build (tsc -b && vite build)
         working-directory: ui
         run: npm run build

@@ -115,8 +115,11 @@ async function testH3ChoicesAreSubmittedAndHttp400IsVisible() {
   const requests = [];
   const inspectionRequests = [];
   const errorText = 'Select the creator-listed H3 workflow and sampling recipe.';
-  const api = loadTypeScript('ui/src/api/client.ts', () => {
-    throw new Error('client.ts unexpectedly imported a runtime module');
+  const api = loadTypeScript('ui/src/api/client.ts', name => {
+    if (name === './readRequest') return {
+      getJson: () => { throw new Error('Unexpected GET request in checkpoint POST regression'); },
+    };
+    throw new Error(`client.ts unexpectedly imported runtime module ${name}`);
   }, {
     fetch: async (url, init = {}) => {
       requests.push({url, init});
@@ -140,8 +143,9 @@ async function testH3ChoicesAreSubmittedAndHttp400IsVisible() {
       supported: !choicesRemain,
       status: choicesRemain ? 'needs_selection' : 'verified',
       reason: choicesRemain ? 'Select the creator-listed workflow and sampling recipe.' : null,
-      architectures: choicesRemain ? [] : [architecture],
-      suggested_architecture: choicesRemain ? null : architecture.architecture,
+      architectures: choicesRemain ? [] : [architecture,
+        {...architecture, architecture: 'minimax_h3_ref2va', name: 'MiniMax H3 References'}],
+      suggested_architecture: choicesRemain ? null : 'minimax_h3_ref2va',
       profile: {
         native_workflow: params.h3_native_workflow,
         sampling_profile: params.h3_sampling_profile,
@@ -217,12 +221,14 @@ async function testH3ChoicesAreSubmittedAndHttp400IsVisible() {
   assert.equal(initialImportButton.props.disabled, true, 'Unresolved H3 metadata keeps import disabled');
 
   const nativeLabel = findAll(tree, element => element.type === 'label'
-    && textContent(element).includes('Native workflow (as listed by the creator)'))[0];
+    && textContent(element).includes('Checkpoint basis (as listed by the creator)'))[0];
   const samplingLabel = findAll(tree, element => element.type === 'label'
     && textContent(element).includes('Sampling recipe (as listed by the creator)'))[0];
   const nativeSelect = findAll(nativeLabel, element => element.type === 'select')[0];
   const samplingSelect = findAll(samplingLabel, element => element.type === 'select')[0];
   assert.ok(nativeSelect, 'The backend-requested native workflow selector is shown');
+  assert.ok(textContent(nativeSelect).includes('Ref2VA / hybrid — Frames + References'),
+    'The workflow choice explains that a hybrid checkpoint imports both modes');
   assert.ok(samplingSelect, 'The backend-requested sampling recipe selector is shown');
   nativeSelect.props.onChange({target: {value: 'ref2va'}});
   tree = await renderUntilSettled();
@@ -252,6 +258,8 @@ async function testH3ChoicesAreSubmittedAndHttp400IsVisible() {
     && textContent(element).includes('Import h3-fixture.safetensors'))[0];
   assert.ok(importButton, 'The import button is present after verification');
   assert.equal(importButton.props.disabled, false, 'Verified H3 selections enable import');
+  assert.ok(textContent(tree).includes('Adds Frames and References models sharing one checkpoint.'),
+    'The verified hybrid import advertises both companion modes');
   await importButton.props.onClick();
   tree = await renderUntilSettled();
 
@@ -264,7 +272,7 @@ async function testH3ChoicesAreSubmittedAndHttp400IsVisible() {
   assert.equal(body.model_id, 900001);
   assert.equal(body.version_id, 900002);
   assert.equal(body.file_id, 900003);
-  assert.equal(body.target_architecture, 'minimax_h3');
+  assert.equal(body.target_architecture, 'minimax_h3_ref2va');
   assert.equal(body.h3_native_workflow, 'ref2va');
   assert.equal(body.h3_sampling_profile, 'turbo');
   assert.equal(body.h3_qkv_layout, 'auto');
