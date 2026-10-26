@@ -49,6 +49,7 @@ from ..music_narrative import (
     format_music_narrative_context,
     music_narrative_row_issue,
     validate_music_narrative_allocation,
+    reconcile_music_narrative_checkpoint,
 )
 from ..lyrics_context import lyrics_context_enabled, lyric_visual_policy
 
@@ -2306,6 +2307,9 @@ class MusicVideoPlanner(BasePlanner):
                 ],
             )
             if video_model.lower().startswith("minimax_h3") else {"events": [], "source": scene_description}
+        )
+        self._planning_resume_checkpoint = reconcile_music_narrative_checkpoint(
+            self._planning_resume_checkpoint, self._music_narrative_contract,
         )
         self._music_arc = self._plan_music_arc(
             clips, scene_description, lyrics=lyrics,
