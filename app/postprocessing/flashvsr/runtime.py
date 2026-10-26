@@ -250,6 +250,22 @@ def _preprocess_transformer_state_dict(state_dict: dict[str, torch.Tensor]) -> d
     return normalized_state_dict
 
 
+def _preprocess_lq_proj_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    normalized_state_dict = dict(state_dict)
+    for source_name, target_name in (
+        ("norm1.weight", "norm1.gamma"),
+        ("norm2.weight", "norm2.gamma"),
+    ):
+        if source_name not in normalized_state_dict:
+            continue
+        if target_name in normalized_state_dict:
+            raise ValueError(
+                f"FlashVSR LQ projection checkpoint contains both {source_name} and {target_name}"
+            )
+        normalized_state_dict[target_name] = normalized_state_dict.pop(source_name)
+    return normalized_state_dict
+
+
 def _sinusoidal_embedding_1d(dim: int, position: torch.Tensor) -> torch.Tensor:
     sinusoid = torch.outer(position.type(torch.float64), torch.pow(10000, -torch.arange(dim // 2, dtype=torch.float64, device=position.device).div(dim // 2)))
     return torch.cat([torch.cos(sinusoid), torch.sin(sinusoid)], dim=1).to(position.dtype)
@@ -681,7 +697,7 @@ class FlashVSRRuntime:
         self.lq_proj._offload_hooks = ["stream_forward"]
         offload.load_model_data(self.dit, paths.transformer, writable_tensors=False, preprocess_sd=_preprocess_transformer_state_dict, default_dtype=self.dtype, ignore_unused_weights=True, verboseLevel=-1)
         self.dit.freqs = precompute_freqs_cis_3d(WAN_1_3B_CONFIG["dim"] // WAN_1_3B_CONFIG["num_heads"])
-        offload.load_model_data(self.lq_proj, paths.lq_proj, writable_tensors=False, default_dtype=self.dtype, verboseLevel=-1)
+        offload.load_model_data(self.lq_proj, paths.lq_proj, writable_tensors=False, preprocess_sd=_preprocess_lq_proj_state_dict, default_dtype=self.dtype, verboseLevel=-1)
         self.dit.requires_grad_(False)
         self.lq_proj.requires_grad_(False)
         self.prompt_context = _load_prompt_context(paths.posi_prompt, model, self.dtype)

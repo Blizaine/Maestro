@@ -288,6 +288,49 @@ class FlashVSRRuntimeContractTests(unittest.TestCase):
                     {source_name: value, target_name: torch.randn_like(value)}
                 )
 
+    def test_plus_lq_rmsnorm_weight_aliases_are_normalized_without_copying(self):
+        norm1 = torch.randn(2048, 1, 1, 1)
+        norm2 = torch.randn(3072, 1, 1, 1)
+        normalized = runtime._preprocess_lq_proj_state_dict(
+            {"norm1.weight": norm1, "norm2.weight": norm2}
+        )
+        self.assertEqual(tuple(normalized["norm1.gamma"].shape), (2048, 1, 1, 1))
+        self.assertEqual(tuple(normalized["norm2.gamma"].shape), (3072, 1, 1, 1))
+        self.assertIs(normalized["norm1.gamma"], norm1)
+        self.assertIs(normalized["norm2.gamma"], norm2)
+        self.assertTrue(torch.equal(normalized["norm1.gamma"], norm1))
+        self.assertTrue(torch.equal(normalized["norm2.gamma"], norm2))
+        self.assertNotIn("norm1.weight", normalized)
+        self.assertNotIn("norm2.weight", normalized)
+
+    def test_lq_rmsnorm_legacy_keys_and_unrelated_names_are_noop(self):
+        norm1 = torch.randn(2048, 1, 1, 1)
+        norm2 = torch.randn(3072, 1, 1, 1)
+        unrelated = torch.randn(8)
+        normalized = runtime._preprocess_lq_proj_state_dict(
+            {
+                "norm1.gamma": norm1,
+                "norm2.gamma": norm2,
+                "other.norm1.weight": unrelated,
+            }
+        )
+        self.assertIs(normalized["norm1.gamma"], norm1)
+        self.assertIs(normalized["norm2.gamma"], norm2)
+        self.assertIs(normalized["other.norm1.weight"], unrelated)
+
+    def test_lq_rmsnorm_alias_conflicts_are_rejected(self):
+        aliases = (
+            ("norm1.weight", "norm1.gamma", torch.randn(2048, 1, 1, 1)),
+            ("norm2.weight", "norm2.gamma", torch.randn(3072, 1, 1, 1)),
+        )
+        for source_name, target_name, value in aliases:
+            with self.subTest(source=source_name), self.assertRaisesRegex(
+                ValueError, f"both {source_name} and {target_name}"
+            ):
+                runtime._preprocess_lq_proj_state_dict(
+                    {source_name: value, target_name: torch.randn_like(value)}
+                )
+
     def test_structural_mask_has_two_half_windows_per_key_window(self):
         candidates, count, entries = structural_block_candidates(2, 2, 2, 1, 3)
         self.assertEqual(tuple(candidates.shape), (8, 12))
