@@ -26,3 +26,32 @@ https://github.com/OpenMOSS/MOSS-Image/tree/95559c93ce9f85967de70435deefc1153a1a
 Maestro's in-process compiler applies the documented top-left-pixel draft to
 centered-pixel model-prompt conversion; existing compiled layouts retain their
 original dialect.
+
+Reference editor additions reviewed against WanGP revision:
+https://github.com/deepbeepmeep/WanGP/tree/9905f0df941e5ec7b0c80e32555d3a61fe415726/models/moss_image
+Maestro adapts the reference-isolated timestep-zero conditioning contract to
+its existing attention API. No Chenkin-x GPL implementation is copied.
+The original editor uses shared reference states; HQ uses the ai-toolkit
+indexed reference positions, prompt-length text axis and independent guidance
+branches, including the skipped negative layer. Cached K/V are per request.
+
+Original editing adapter by chinoll:
+https://huggingface.co/chinoll/Moss-Image-Edit/tree/3be9c40037e1b89b17aa85ff6f8ee805872aa558
+Prepared BF16 adapter (rank and alpha preserved):
+https://huggingface.co/DeepBeepMeep/Moss/tree/66a563156a744feba3806b3528b560bdf6f59fb6
+The original adapter repository does not declare weight-license terms. The
+base model's Apache-2.0 notice does not establish terms for that adapter.
+
+HQ armV5 community adapter by akhaliq, not an official OpenMOSS model:
+https://huggingface.co/akhaliq/MOSS-Image-Edit-HQ/tree/b4114b929f5e24904ae72697d9a719810aac1da9
+Pinned native file: weights/armV5/armV5.safetensors
+SHA256: 1fbfae4eaaafc62c66a298e63e16fc5211566e1e3de1c58f83c35c6bc226c9f9
+The repository declares Apache-2.0. The recommended v5 is selected instead
+of experimental v6. Native adapter tensors retain alpha/rank=1: rank 192 for
+q/k/v projections and rank 64 for output/FFN projections.
+
+Reference editing additionally loads only the encoder from the full Flux2 VAE:
+https://huggingface.co/DeepBeepMeep/Flux2/tree/c976cb238dbf2bee48f0bd65eeb14c039cf45e03
+File: flux2_vae.safetensors
+SHA256: 868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3
+The original MOSS small decoder and normalization statistics remain in use.

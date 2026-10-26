@@ -6781,7 +6781,11 @@ def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image
         prompt_enhancer_instructions = model_def.get(prompt_instructions_key, model_def.get("text_prompt_enhancer_instructions", prompt_enhancer_instructions))
         text_encoder_max_tokens = model_def.get(prompt_max_tokens_key, model_def.get("text_prompt_enhancer_max_tokens", text_encoder_max_tokens))
 
-    if model_def.get("architecture") == "moss_image":
+    moss_image_layout = (
+        model_def.get("architecture") == "moss_image"
+        and model_def.get("moss_edit") is not True
+    )
+    if moss_image_layout:
         from services.moss_image_prompt import render_layout_instructions
         prompt_enhancer_instructions = render_layout_instructions(prompt_enhancer_instructions, resolution)
 
@@ -6792,7 +6796,15 @@ def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image
             if not isinstance(image_start, list): image_start= [image_start] 
             prompt_images += image_start[:1]
         if original_image_refs != None:
-            prompt_images += original_image_refs[:1]
+            # The generic native enhancer has historically consumed one
+            # reference. MOSS edit's contract is explicitly ordered and
+            # multi-reference, so pass its declared conditioning set through
+            # the existing WGP_TI vision transport.
+            ref_limit = (
+                max(1, int(model_def.get("max_image_refs", 4)))
+                if model_def.get("moss_edit") is True else 1
+            )
+            prompt_images += original_image_refs[:ref_limit]
     prompt_images = [Image.open(img) if isinstance(img,str) else img for img in prompt_images]
     if len(original_prompts) == 0 and "T" not in prompt_enhancer_mode:
         return None
@@ -6826,9 +6838,9 @@ def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image
             seed = enhancer_seed,
             post_image_caption_hook = post_image_caption_hook,
             thinking_enabled = "K" in prompt_enhancer_mode,
-            literal_prompt = model_def.get("architecture") == "moss_image",
+            literal_prompt = moss_image_layout,
         )
-        if model_def.get("architecture") == "moss_image":
+        if moss_image_layout:
             from services.moss_image_prompt import finalize_enhancement_output
             prompts = [finalize_enhancement_output(prompt, resolution) for prompt in prompts]
         return prompts

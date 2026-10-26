@@ -3470,9 +3470,12 @@ def enhance_prompt(
     )
     is_h3_structured = is_h3_context_ir or is_h3_ref2va
     is_flux3_image = mode == "image" and (model_type or "").lower().startswith("flux3")
-    is_moss_image = mode == "image" and (model_type or "").lower().startswith("moss_image")
-    if is_moss_image:
-        # A general cinematic writer cannot safely strip MOSS's layout fields.
+    from services.enhance_guides import moss_image_enhancement_kind
+    moss_enhancement_kind = moss_image_enhancement_kind(model_type or "", mode)
+    is_moss_image_edit = moss_enhancement_kind == "edit"
+    is_moss_image = moss_enhancement_kind == "layout"
+    if is_moss_image or is_moss_image_edit:
+        # A general writer cannot safely rewrite either native MOSS prompt contract.
         raw_enhancer_mode = False
     audio_driven = is_h3_ref2va and has_h3_performance_audio(reference_context)
     needs_h3_dialogue = is_h3_structured and not audio_driven
@@ -3849,6 +3852,17 @@ def enhance_prompt(
                 "unseen image content. Do not render the reference tokens as visible lettering.\n\n"
                 f"{user_prompt}"
             )
+        elif is_moss_image_edit:
+            ordered_map = reference_context.strip() if reference_context else "\n".join(
+                f"Reference image {index + 1} is the attached image in position {index + 1}."
+                for index in range(len(image_paths))
+            )
+            user_prompt = (
+                "Use these MOSS Image Edit references in their attachment order. "
+                "Follow any image roles the user assigns in the brief; the numbered "
+                "map identifies order only and does not assign extra roles.\n\n"
+                f"{ordered_map}\n\n{user_prompt}"
+            )
         elif mode == "image":
             user_prompt = f"I have attached a reference image. Enhance this prompt based on what you see in the image:\n\n{user_prompt}"
         else:
@@ -3945,6 +3959,15 @@ def enhance_prompt(
             "IDs, reference bindings and all coordinates after the caption. Retain each <id> tag. "
             "Only clarify the caption and descriptions; never change, omit or invent layout boxes. "
             "Boxes use [top,left,bottom,right], integers from 0 to 1000, and guide composition rather than exact pixel masks."
+        )
+    elif is_moss_image_edit:
+        system += (
+            "\n\nMOSS IMAGE EDIT OUTPUT CONTRACT: Return one concise, natural-language "
+            "instruction for the requested edit. Honor the user's ordered image roles "
+            "and change only what they asked to change. Preserve unrequested identity, "
+            "composition, visible text, and relevant source details. Do not invent a "
+            "full scene; when a composite is requested, use only the specified elements. "
+            "Do not add image tokens, layout JSON, masks, coordinates, or explanations."
         )
     elif is_moss_image:
         system += (
@@ -4165,7 +4188,10 @@ def enhance_prompt(
         # caption halfway through a <ref_image_N> token and drop later subjects.
         result = _clean_enhance_output(
             result,
-            preserve_structure=is_h3_structured or is_flux3_image or is_moss_image or speech_writer_active,
+            preserve_structure=(
+                is_h3_structured or is_flux3_image or is_moss_image
+                or is_moss_image_edit or speech_writer_active
+            ),
         )
     if is_h3_context_ir and result:
         # Adaptive dialogue may compile named cues into tags. For ordinary

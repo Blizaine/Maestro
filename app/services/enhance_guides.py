@@ -45,6 +45,9 @@ _ARCHITECTURE_MAP = {
 
     # Flux 3 image models — resolve before the generic Flux-family guide.
     "flux3": ("flux3_image_edit.md", "flux3_image.md"),
+    # MOSS reference editors use a natural-language edit contract; the Base
+    # and SFT text-to-image models keep their native caption/layout guide.
+    "moss_image_edit": "moss_image_edit.md",
     "moss_image": "moss_image.md",
 
     # Flux image models — edit guide when reference image exists, gen guide otherwise
@@ -68,6 +71,34 @@ _MODE_FALLBACK = {
     "audio": "audio_tts.md",
     "avatar": "generic_video.md",
 }
+
+
+def moss_image_enhancement_kind(model_type: str, generation_mode: str = "image") -> Optional[str]:
+    """Return the MOSS prompt contract for a registered image model.
+
+    MOSS Base/SFT use the layout-aware text-to-image contract, while the
+    separately registered edit adapters use ordered visual references and
+    plain-language edits. Keep that distinction metadata-driven so extending
+    the MOSS family cannot accidentally route an editor through the layout
+    compiler.
+    """
+    model_type = str(model_type or "").strip().lower()
+    if generation_mode != "image":
+        return None
+    try:
+        from wgp import get_model_def
+
+        model_def = get_model_def(model_type) or {}
+    except Exception:
+        model_def = {}
+    if not (
+        model_type.startswith("moss_image")
+        or model_def.get("architecture") == "moss_image"
+    ):
+        return None
+    if model_def.get("moss_edit") is True or model_type.startswith("moss_image_edit"):
+        return "edit"
+    return "layout"
 
 
 def _load_guide(filename: str) -> Optional[str]:
@@ -105,6 +136,7 @@ def get_enhance_guide(model_type: str, generation_mode: str, has_images: bool = 
     # imported early during server startup, before wgp's full model
     # definitions are populated. Lazy keeps the import cheap.
     inline_delta = ""
+    md = None
     try:
         from wgp import get_model_def
         md = get_model_def(model_type)
@@ -137,8 +169,17 @@ def get_enhance_guide(model_type: str, generation_mode: str, has_images: bool = 
         # from running — fall through to architecture mapping.
         print(f"[Enhance] Per-model guide lookup failed for {model_type}: {e}")
 
-    # 2. Architecture-specific match (longest prefix first)
+    # Custom editor IDs may not carry the MOSS prefix. Their registered
+    # architecture and edit contract still select the native prose guide.
     base = None
+    if generation_mode == "image" and md and md.get("architecture") == "moss_image":
+        guide_file = "moss_image_edit.md" if md.get("moss_edit") is True else "moss_image.md"
+        guide = _load_guide(guide_file)
+        if guide:
+            print(f"[Enhance] Loaded MOSS metadata guide: {guide_file} for {model_type}")
+            base = guide
+
+    # 2. Architecture-specific match (longest prefix first)
     model_lower = model_type.lower()
     best_match = None
     best_len = 0
@@ -147,7 +188,7 @@ def get_enhance_guide(model_type: str, generation_mode: str, has_images: bool = 
             best_match = guide_entry
             best_len = len(prefix)
 
-    if best_match:
+    if base is None and best_match:
         # Resolve tuple: (with_images_guide, without_images_guide)
         if isinstance(best_match, tuple):
             guide_file = best_match[0] if has_images else best_match[1]

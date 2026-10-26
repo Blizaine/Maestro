@@ -233,7 +233,13 @@ def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
         if params.get("image_guide") and "V" in str(params.get("video_prompt_type") or ""):
             images.append(params["image_guide"])
             context.append("Picture 1 is the source/control image. Preserve the requested structure and change only what the user asks to edit.")
-        images.extend(params.get("image_refs") or [])
+        image_refs = params.get("image_refs") or []
+        images.extend(image_refs)
+        if model.get("moss_edit") and image_refs:
+            context.append(
+                "The MOSS Image Edit reference attachments follow image_refs order. "
+                "The brief assigns their roles; the order map itself does not assign roles."
+            )
     else:
         for field, time in (("image_start", "0.00"), ("image_end", f"{total / fps:.2f}")):
             if params.get(field):

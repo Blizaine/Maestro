@@ -15,6 +15,12 @@ export function ImageRefSection() {
   const imageGuide = useStore(s => s.params.image_guide)
   const videoPromptType = useStore(s => s.params.video_prompt_type)
   const imageRefs = useStore(s => s.imageRefs)
+  const isInstructionImageEditor = useStore(s => (
+    s.models.find(model => model.model_type === s.params.model_type)?.supports_instruction_image_edit === true
+  ))
+  const requiresImageReference = useStore(s => (
+    s.models.find(model => model.model_type === s.params.model_type)?.requires_image_reference === true
+  ))
   const imageRefType = useStore(s => s.imageRefType)
   const removeBackgroundRefs = useStore(s => s.removeBackgroundRefs)
   const addImageRef = useStore(s => s.addImageRef)
@@ -30,12 +36,21 @@ export function ImageRefSection() {
   // max_image_refs is the model's total conditioning-image budget. In Edit
   // mode the uploaded source already consumes one slot.
   const configuredMaxRefs = modelOptions?.max_image_refs ?? null
+  // Generate remains a shared T2I/I2I surface. A text-only model reports zero
+  // refs, but the first upload lets the selector switch to a compatible editor.
+  const bootstrapReferenceSlot = isAdaptiveImageGenerate
+    && configuredMaxRefs === 0
+    && imageRefs.length <= 1
   const qwenHasSource = modelOptions?.architecture === 'qwen_image_21_7B' && (
     imageWorkflow === 'inpaint' || imageWorkflow === 'outpaint'
     || (!!imageGuide && String(videoPromptType || '').includes('V'))
   )
   const sourceSlots = imageMode === 2 || qwenHasSource ? 1 : 0
-  const maxRefs = configuredMaxRefs == null ? null : Math.max(0, configuredMaxRefs - sourceSlots)
+  const maxRefs = configuredMaxRefs == null
+    ? null
+    : bootstrapReferenceSlot
+      ? 1
+      : Math.max(0, configuredMaxRefs - sourceSlots)
   const canAddMore = maxRefs == null || imageRefs.length < maxRefs
 
   const addFiles = useCallback((files: File[]) => {
@@ -70,7 +85,11 @@ export function ImageRefSection() {
         getImages={() => imageRefs}
         disabledReason={!canAddMore ? 'Reference image limit reached.' : undefined} />
       <label className="text-[11px] text-text-muted uppercase tracking-wider block">
-        {isAdaptiveImageGenerate ? 'Source / Reference Images (Optional)' : 'Reference Images'}
+        {isInstructionImageEditor
+          ? `Reference Images (${requiresImageReference ? 'Required' : 'Optional'})`
+          : isAdaptiveImageGenerate
+            ? `Source / Reference Images (${requiresImageReference ? 'Required' : 'Optional'})`
+            : 'Reference Images'}
       </label>
 
       {/* Thumbnails + add button in a unified row */}
@@ -110,7 +129,7 @@ export function ImageRefSection() {
                 Main
               </div>
             )}
-            {i === 0 && isAdaptiveImageGenerate && !qwenHasSource && (
+            {i === 0 && isAdaptiveImageGenerate && !qwenHasSource && !isInstructionImageEditor && (
               <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-[8px] text-white text-center py-0.5">
                 Source
               </div>
@@ -131,7 +150,7 @@ export function ImageRefSection() {
 
         {/* Add button / drop zone */}
         {canAddMore && (
-          <MediaAddTile label={isAdaptiveImageGenerate && !imageRefs.length ? 'Add source image' : 'Add reference'} hint="Drop or choose an image"
+          <MediaAddTile label={isAdaptiveImageGenerate && !imageRefs.length && !isInstructionImageEditor ? 'Add source image' : 'Add reference'} hint="Drop or choose an image"
             accept=".png,.jpg,.jpeg,.webp,.bmp" onFiles={files => addFiles(files.filter(file => file.type.startsWith('image/') || /\.(png|jpe?g|webp|bmp)$/i.test(file.name)))}/>
         )}
       </div>
@@ -154,7 +173,9 @@ export function ImageRefSection() {
 
       {isAdaptiveImageGenerate && imageRefs.length > 0 && (
         <p className="text-[10px] text-text-muted">
-          Describe the finished image below. Add more images when the model supports multi-reference editing.
+          {isInstructionImageEditor
+            ? 'Describe the requested changes below. References stay in upload order; number each image and explain its role.'
+            : 'Describe the finished image below. Add more images when the model supports multi-reference editing.'}
         </p>
       )}
 

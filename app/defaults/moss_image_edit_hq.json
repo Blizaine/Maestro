@@ -1,0 +1,59 @@
+{
+    "model": {
+        "name": "MOSS Image Edit HQ v5",
+        "architecture": "moss_image",
+        "description": "Instruction-based edits on the SFT transformer with 1–4 ordered references. HQ armV5 targets localized changes; single-source edits are recommended.",
+        "selector_help": "Edit existing images using 1–4 ordered references and natural-language instructions. Selected canvas sets output dimensions. No masks; unchanged pixels are not guaranteed. Reuses the MOSS SFT transformer and encoder; additionally downloads a full VAE encoder and the required editor adapter. Optional request-local reference cache is disabled by default. Unofficial HQ armV5 adapter, Apache 2.0.",
+        "URLs": [
+            "moss_image_sft_bf16.safetensors",
+            "moss_image_sft_int8_convrot.safetensors"
+        ],
+        "download_sources": {
+            "moss_image_sft_bf16.safetensors": {
+                "url": "https://huggingface.co/DeepBeepMeep/Moss/resolve/0a508e986e920c8051b99df98d27329742fc3d0e/moss_image_sft_bf16.safetensors",
+                "sha256": "374d9fcbf4fc74613d72b10100e1afc18a03a6f0064fe4ec6172418a7067e430",
+                "size_bytes": 10164668176,
+                "anonymous": true
+            },
+            "moss_image_sft_int8_convrot.safetensors": {
+                "url": "https://huggingface.co/DeepBeepMeep/Moss/resolve/0a508e986e920c8051b99df98d27329742fc3d0e/moss_image_sft_int8_convrot.safetensors",
+                "sha256": "c3c532ba7707210f57756f5d7b9aee5a2bd24b8061fdaa14b5503507356662ca",
+                "size_bytes": 5413734367,
+                "anonymous": true
+            }
+        },
+        "source_repo": "https://huggingface.co/akhaliq/MOSS-Image-Edit-HQ",
+        "license_name": "Apache 2.0",
+        "license_url": "https://huggingface.co/akhaliq/MOSS-Image-Edit-HQ",
+        "model_size_gb": 26,
+        "parent_model_type": "moss_image_edit",
+        "moss_edit": true,
+        "moss_edit_variant": "hq_v5",
+        "loras": [
+            "https://huggingface.co/akhaliq/MOSS-Image-Edit-HQ/resolve/b4114b929f5e24904ae72697d9a719810aac1da9/weights/armV5/armV5.safetensors"
+        ],
+        "bundled_lora_provenance": {
+            "armV5.safetensors": {
+                "url": "https://huggingface.co/akhaliq/MOSS-Image-Edit-HQ/resolve/b4114b929f5e24904ae72697d9a719810aac1da9/weights/armV5/armV5.safetensors",
+                "sha256": "1fbfae4eaaafc62c66a298e63e16fc5211566e1e3de1c58f83c35c6bc226c9f9",
+                "size_bytes": 495514936
+            }
+        }
+    },
+    "prompt": "Change only the jacket to dark blue. Preserve the person's face, hair, pose, background and lighting.",
+    "negative_prompt": "",
+    "resolution": "1024x1024",
+    "image_mode": 1,
+    "batch_size": 1,
+    "num_inference_steps": 50,
+    "guidance_scale": 3,
+    "flow_shift": 5,
+    "sample_solver": "default",
+    "video_prompt_type": "I",
+    "prompt_enhancer": "",
+    "multi_prompts_gen_type": "FG",
+    "remove_background_images_ref": 0,
+    "custom_settings": {
+        "moss_image_kv_cache": "Disabled"
+    }
+}

@@ -20,6 +20,10 @@ TOKENIZER_FILES = (
     "chat_template.jinja",
 )
 VAE_FILE = "flux2_small_decoder_bf16.safetensors"
+EDIT_ASSET_REVISION = "66a563156a744feba3806b3528b560bdf6f59fb6"
+VAE_ENCODER_REPO = "DeepBeepMeep/Flux2"
+VAE_ENCODER_REVISION = "c976cb238dbf2bee48f0bd65eeb14c039cf45e03"
+VAE_ENCODER_FILE = "flux2_vae.safetensors"
 
 
 def _hf_url(folder, filename):
@@ -47,11 +51,12 @@ class family_handler:
     def query_model_def(base_model_type, model_def):
         from .prompts import CLASSIC, STRUCTURED
 
+        model_def = model_def or {}
         required_assets = [
             *(os.path.join(TEXT_FOLDER, name) for name in TOKENIZER_FILES),
             os.path.join("moss_image", VAE_FILE),
         ]
-        return {
+        definition = {
             "image_outputs": True,
             "device_explicit": True,
             "group": MODEL_TYPE,
@@ -107,16 +112,27 @@ class family_handler:
                 "Keep every box inside the selected dimensions. The model has no reference-image inputs."
             ),
         }
+        if model_def.get("moss_edit", False):
+            definition.update(_editing_definition(model_def))
+        return definition
 
     @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):
-        return [{
+        files = [{
             "repoId": REPO,
             "revision": REVISION,
             "sourceFolderList": [TEXT_FOLDER, "moss_image"],
             "targetFolderList": [None, None],
             "fileList": [list(TOKENIZER_FILES), [VAE_FILE]],
         }]
+        if (model_def or {}).get("moss_edit", False):
+            files.append({
+                "repoId": VAE_ENCODER_REPO,
+                "revision": VAE_ENCODER_REVISION,
+                "sourceFolderList": [""],
+                "fileList": [[VAE_ENCODER_FILE]],
+            })
+        return files
 
     @staticmethod
     def get_lora_dir(base_model_type, args, lora_root):
@@ -152,6 +168,7 @@ class family_handler:
 
     @staticmethod
     def update_default_settings(base_model_type, model_def, ui_defaults):
+        model_def = model_def or {}
         ui_defaults.update({
             "image_mode": 1,
             "resolution": "1024x1024",
@@ -163,15 +180,72 @@ class family_handler:
             "video_prompt_type": "",
             "multi_prompts_gen_type": "FG",
         })
+        if model_def.get("moss_edit", False):
+            ui_defaults.update({
+                "guidance_scale": 3 if str(model_def.get("moss_edit_variant", "")).startswith("hq_") else 4,
+                "video_prompt_type": "I",
+                "remove_background_images_ref": 0,
+                "custom_settings": {"moss_image_kv_cache": "Disabled"},
+            })
 
     @staticmethod
     def validate_generative_settings(base_model_type, model_def, inputs):
         from .pipeline import validate_generation_inputs
 
-        return validate_generation_inputs(inputs)
+        return validate_generation_inputs(inputs, model_def=model_def)
 
     @staticmethod
     def get_rgb_factors(base_model_type):
         from shared.RGB_factors import get_rgb_factors
 
         return get_rgb_factors("flux", sub_family="flux2")
+
+
+def _editing_definition(model_def):
+    """Native ordered-reference edits are separate from layout generation."""
+    from .prompts import EDITING
+
+    hq = str(model_def.get("moss_edit_variant", "")).startswith("hq_")
+    return {
+        "moss_edit": True,
+        "moss_image_prompt_helper": False,
+        "max_image_refs": 4,
+        "at_least_one_image_ref_needed": True,
+        "inpaint_support": False,
+        "image_ref_choices": {"choices": [("Ordered reference images (1–4)", "I")], "letters_filter": "I", "default": "I"},
+        "required_model_assets": [
+            *(os.path.join(TEXT_FOLDER, name) for name in TOKENIZER_FILES),
+            os.path.join("moss_image", VAE_FILE), VAE_ENCODER_FILE,
+        ],
+        "moss_vae_encoder_file": VAE_ENCODER_FILE,
+        "moss_edit_reference_size": 384 if hq else 1024,
+        "custom_settings": [{
+            "id": "moss_image_kv_cache", "name": "Reference KV cache", "label": "Reference KV cache",
+            "type": "dropdown", "default": "Disabled",
+            "choices": [
+                ("Disabled — recompute references", "Disabled"),
+                ("Enabled — full precision in VRAM", "Enabled"),
+                ("INT8 — compressed in VRAM", "INT8"),
+                ("INT8 in RAM — lower VRAM, transfer overhead", "INT8_RAM"),
+            ],
+            "info": "Reuse reference keys and values within this generation. More or larger references increase memory. INT8 changes numerical precision; RAM streaming can be slower. Memory checks or step-varying LoRAs can disable caching; the runtime log records the actual path.",
+        }],
+        "text_prompt_enhancer_max_tokens": 768,
+        "image_prompt_enhancer_max_tokens": 768,
+        "text_prompt_enhancer_instructions": EDITING,
+        "image_prompt_enhancer_instructions": EDITING,
+        "text_prompt_enhancer_instructions1": EDITING,
+        "text_prompt_enhancer_max_tokens1": 768,
+        "prompt_enhancer_def": {
+            "selection": ["T", "TI"],
+            "labels": {"T": "An Image Editing Instruction", "TI": "An Image Edit using {image_inputs}"},
+            "default": "",
+        },
+        "infos": (
+            ("MOSS Edit HQ v5 is an unofficial community editor on MOSS SFT. Start with one source and a bounded edit, 50 steps, CFG 3, shift 5. References are fitted within 384 pixels per side. " if hq else
+             "MOSS Edit SFT uses the original community editing adapter on MOSS SFT. Start at 50 steps, CFG 4, shift 5. References are fitted within 1024 pixels per side. ")
+            + "Provide 1–4 images in order, describe what to change and what to preserve, and explain each image's role. The selected canvas sets output dimensions. Surrounding details may change; there is no mask or exact pixel-preservation workflow. Optional reference caching uses extra memory and is disabled by default. Reduce canvas size and batch size for limited VRAM."
+        ),
+        "prompt_infos": "Use concise edit instructions, for example: Change only the jacket to dark blue; preserve the person's face, pose, background and lighting. For multiple images, say image 1, image 2, etc. in upload order and specify each role. Quote exact lettering. These are natural-language instructions, not special image tokens or layout boxes.",
+        "deepy_infos": "Native image-reference editing: image_mode=1, video_prompt_type=I, 1–4 ordered image_refs; output dimensions follow the selected canvas. No masks, inpainting, outpainting, audio or video. 50 Euler steps and shift 5; CFG 3 for HQ v5 or 4 for Edit SFT. Optional custom_settings.moss_image_kv_cache: Disabled, Enabled, INT8, INT8_RAM. Caches last only this request; HQ guidance branches remain independent. Cache fallback is logged. Unchanged pixels are not guaranteed.",
+    }

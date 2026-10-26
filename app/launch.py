@@ -732,6 +732,28 @@ def _check_model_downloaded(model_type: str) -> bool:
         return False
 
 
+def _requires_image_reference(model_def: dict) -> bool:
+    """Expose both exact-one and minimum-one native image-ref requirements."""
+    return bool(
+        model_def.get("one_image_ref_needed", False)
+        or model_def.get("at_least_one_image_ref_needed", False)
+    )
+
+
+_MANAGED_MOSS_EDIT_LORAS = {
+    "moss_image_edit_lora_bf16.safetensors",
+    "armv5.safetensors",
+}
+
+
+def _is_managed_moss_edit_lora(model_def: dict, filename: str) -> bool:
+    """Keep the MOSS edit adapters out of the optional user-LoRA picker."""
+    return (
+        (model_def or {}).get("architecture") == "moss_image"
+        and os.path.basename(str(filename or "")).casefold() in _MANAGED_MOSS_EDIT_LORAS
+    )
+
+
 @api.get("/api/v1/models")
 def list_models():
     """List available model families and model types."""
@@ -788,7 +810,8 @@ def list_models():
             # Studio's Image workflow selector uses the model definition's
             # native capabilities instead of name/architecture heuristics.
             "supports_image_edit": bool(md.get("image_ref_choices")),
-            "requires_image_reference": bool(md.get("one_image_ref_needed", False)),
+            "supports_instruction_image_edit": bool(md.get("moss_edit")),
+            "requires_image_reference": _requires_image_reference(md),
             "supports_image_inpaint": bool(md.get("inpaint_support", False)),
             "supports_image_outpaint": bool(
                 md.get("inpaint_support", False)
@@ -2438,6 +2461,8 @@ def list_loras(model_type: str):
     if os.path.isdir(lora_dir):
         for search_dir in wgp.get_lora_search_dirs(model_type):
             for f in glob.glob(os.path.join(search_dir, "*.safetensors")) + glob.glob(os.path.join(search_dir, "*.sft")):
+                if _is_managed_moss_edit_lora(md, f):
+                    continue
                 if not _lora_is_compatible_with_model(md, f):
                     continue
                 names.add(os.path.basename(f))
@@ -2487,6 +2512,8 @@ def list_loras_details(model_type: str):
                 glob.glob(os.path.join(_search_dir, "*.safetensors"))
                 + glob.glob(os.path.join(_search_dir, "*.sft"))
             ):
+                if _is_managed_moss_edit_lora(md, f):
+                    continue
                 if not _lora_is_compatible_with_model(md, f):
                     continue
                 _b = os.path.basename(f)
@@ -9330,9 +9357,10 @@ async def _llm_enhance_prompt_payload(body: dict):
     needs_flux3_image_guide = (
         model_type.lower().startswith("flux3") and generation_mode == "image"
     )
-    needs_moss_image_guide = (
-        model_type.lower().startswith("moss_image") and generation_mode == "image"
-    )
+    from services.enhance_guides import moss_image_enhancement_kind
+    moss_enhancement_kind = moss_image_enhancement_kind(model_type, generation_mode)
+    needs_moss_image_guide = moss_enhancement_kind == "layout"
+    needs_moss_image_edit_guide = moss_enhancement_kind == "edit"
     needs_speech_writer = generation_mode == "audio" and bool(body.get("tts_enhance_mode"))
     try:
         requested_window_count = max(1, int(body.get("window_count") or 1))
@@ -9357,6 +9385,7 @@ async def _llm_enhance_prompt_payload(body: dict):
         and not needs_ltx_window_plan
         and not needs_flux3_image_guide
         and not needs_moss_image_guide
+        and not needs_moss_image_edit_guide
         and not needs_speech_writer
     ):
         try:
@@ -9380,6 +9409,8 @@ async def _llm_enhance_prompt_payload(body: dict):
             print("[Enhance] FLUX 3 uses native image captions and reference bindings; using Maestro's model-specific LLM guide")
         elif needs_moss_image_guide:
             print("[Enhance] MOSS Image uses native captions and centered-pixel layouts; using Maestro's model-specific LLM guide")
+        elif needs_moss_image_edit_guide:
+            print("[Enhance] MOSS Image Edit uses ordered visual references and concise edit instructions; using its model-specific guide")
         elif needs_speech_writer:
             print("[Enhance] Speech writing uses its native model guide and saved writing instructions")
 

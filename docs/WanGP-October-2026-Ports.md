@@ -51,9 +51,22 @@ official Plus transformer and projection names; all 12 latest image/video
 checks passed after 27 CPU regressions. The earlier failed attempts remain
 part of the private evidence.
 
+## MOSS editing follow-up
+
+The next implementation adds separate MOSS Edit SFT and HQ armV5 presets,
+ordered image references, the full VAE encoder, edit-specific enhancement and
+request-local reference K/V caching. Base/SFT text-to-image and their layout
+helper stay separate. The adapters and companion VAE have been checked against
+the actual released file headers. See [MOSS editing and cache controls](MOSS-Image.md#reference-editing).
+
+This follow-up has passed 248 targeted CPU regressions and the UI build, and has
+not been published with the FlashVSR repairs. GPU editing quality, cache activation, memory use and speed on
+the three workstation configurations remain to be measured. An available cache
+option must not be reported as a demonstrated speedup.
+
 ## Next batches
 
-The saved review still covers MOSS reference editing, Fibo 2.0, H3 PTD,
+The saved review still covers Fibo 2.0, H3 PTD,
 two-pass refinement, Profile 0, Worlds and a media assistant. Those are separate
 runtime/product integrations. MOSS caching depends on its editing integration;
 the Qwen cache controls do not add references to text-only MOSS models.

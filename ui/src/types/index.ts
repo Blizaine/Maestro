@@ -63,6 +63,8 @@ export interface ModelDef {
   h3_companion_models?: { frames?: string; references?: string }
   /** Image-suite capability flags published by the model definition. */
   supports_image_edit?: boolean
+  /** Uses concise natural-language edit instructions with ordered references. */
+  supports_instruction_image_edit?: boolean
   requires_image_reference?: boolean
   supports_image_inpaint?: boolean
   supports_image_outpaint?: boolean
