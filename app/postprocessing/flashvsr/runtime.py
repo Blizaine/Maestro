@@ -182,7 +182,7 @@ def _plus_local_layers_structural(block_h: int, block_w: int, seqlen: int, cache
 
 
 def _select_topk_ratio(model: str, configured_ratio: float, variant: str, output_height: int, output_width: int) -> float:
-    """Keep Plus Turbo's attention budget fixed while honoring the v1.1 slider."""
+    """Keep Plus Turbo fixed and apply v1.1's configured or legacy auto ratio."""
     if model == FLASHVSR_MODEL_PLUS_TURBO:
         print(f"[FlashVSR] FlashVSR+ sparse top-k ratio fixed to {FLASHVSR_PLUS_TOPK_RATIO:.3f}")
         return FLASHVSR_PLUS_TOPK_RATIO
@@ -190,15 +190,13 @@ def _select_topk_ratio(model: str, configured_ratio: float, variant: str, output
     if configured_ratio > 0:
         print(f"[FlashVSR] Sparse top-k ratio fixed to {configured_ratio:.3f}")
         return configured_ratio
-    if variant == FLASHVSR_VARIANT_FULL:
-        raw_ratio = min(2.0, 2.0 * 768 * 1280 / max(int(output_height) * int(output_width), 1))
-        ratio = max(raw_ratio, FLASHVSR_FULL_MIN_AUTO_TOPK_RATIO)
-        if ratio != raw_ratio:
-            print(f"[FlashVSR] Sparse top-k ratio adjusted to {ratio:.3f} for {output_width}x{output_height} (minimum; raw auto {raw_ratio:.3f})")
-        elif ratio < 2.0:
-            print(f"[FlashVSR] Sparse top-k ratio adjusted to {ratio:.3f} for {output_width}x{output_height}")
-        return ratio
-    return FLASHVSR_TOPK_RATIO
+    raw_ratio = min(2.0, 2.0 * 768 * 1280 / max(int(output_height) * int(output_width), 1))
+    ratio = max(raw_ratio, FLASHVSR_FULL_MIN_AUTO_TOPK_RATIO)
+    if ratio != raw_ratio:
+        print(f"[FlashVSR] Sparse top-k ratio adjusted to {ratio:.3f} for {output_width}x{output_height} (minimum; raw auto {raw_ratio:.3f})")
+    elif ratio < 2.0:
+        print(f"[FlashVSR] Sparse top-k ratio adjusted to {ratio:.3f} for {output_width}x{output_height}")
+    return ratio
 
 
 def _plus_layer_configs(dit: WanModel, model: str, block_h: int, block_w: int, seqlen: int, chunk_index: int, cache_windows: int, topk: int, device) -> list[dict[str, Any]]:
@@ -236,8 +234,20 @@ def _plus_layer_configs(dit: WanModel, model: str, block_h: int, block_w: int, s
 
 def _preprocess_transformer_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     converter = WanModel.state_dict_converter()
-    state_dict, _ = converter.from_civitai(state_dict)
-    return state_dict
+    normalized_state_dict = dict(state_dict)
+    for source_name, target_name in (
+        ("head.proj.weight", "head.head.weight"),
+        ("head.proj.bias", "head.head.bias"),
+    ):
+        if source_name not in normalized_state_dict:
+            continue
+        if target_name in normalized_state_dict:
+            raise ValueError(
+                f"FlashVSR transformer checkpoint contains both {source_name} and {target_name}"
+            )
+        normalized_state_dict[target_name] = normalized_state_dict.pop(source_name)
+    normalized_state_dict, _ = converter.from_civitai(normalized_state_dict)
+    return normalized_state_dict
 
 
 def _sinusoidal_embedding_1d(dim: int, position: torch.Tensor) -> torch.Tensor:

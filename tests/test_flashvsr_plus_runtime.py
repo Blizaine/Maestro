@@ -197,6 +197,97 @@ class FlashVSRRuntimeContractTests(unittest.TestCase):
             1.25,
         )
 
+    def test_v11_auto_topk_ratio_covers_tiny_variants_and_preserves_full_floor(self):
+        for variant in (
+            runtime.FLASHVSR_VARIANT_TINY,
+            runtime.FLASHVSR_VARIANT_TINY_LONG,
+            runtime.FLASHVSR_VARIANT_FULL,
+        ):
+            with self.subTest(variant=variant):
+                self.assertEqual(
+                    runtime._select_topk_ratio(runtime.FLASHVSR_MODEL_V11, 0.0, variant, 512, 512),
+                    2.0,
+                )
+                self.assertEqual(
+                    runtime._select_topk_ratio(runtime.FLASHVSR_MODEL_V11, 0.0, variant, 1536, 2560),
+                    runtime.FLASHVSR_FULL_MIN_AUTO_TOPK_RATIO,
+                )
+
+    def test_tiny_long_default_ratio_produces_nonempty_draft_attention_masks(self):
+        ratio = runtime._select_topk_ratio(
+            runtime.FLASHVSR_MODEL_V11, 0.0, runtime.FLASHVSR_VARIANT_TINY_LONG, 512, 512
+        )
+        window_size = 16
+        topk = int(window_size * window_size * ratio) - 1
+        self.assertGreater(topk, 0)
+
+        torch.manual_seed(11)
+        local = torch.ones((2, 2), dtype=torch.bool)
+        q = torch.randn(4, 128, 8)
+        k = torch.randn(8, 128, 8)
+        dense_mask = generate_draft_block_mask(
+            1, 2, 2, [q.clone(), k.clone()], topk=topk, local_attn_mask=local, groups=1
+        )
+        sage_mask = generate_draft_block_mask_sage(
+            1, 2, 2, [q.clone(), k.clone()], topk=topk, local_attn_mask=local, groups=1
+        )
+        self.assertTrue(torch.count_nonzero(dense_mask).item() > 0)
+        self.assertTrue(torch.count_nonzero(sage_mask).item() > 0)
+
+    def test_v11_auto_topk_ratio_still_honors_explicit_value(self):
+        self.assertEqual(
+            runtime._select_topk_ratio(
+                runtime.FLASHVSR_MODEL_V11, 1.25, runtime.FLASHVSR_VARIANT_TINY_LONG, 1536, 2560
+            ),
+            1.25,
+        )
+
+    def test_plus_official_head_projection_aliases_are_normalized_without_copying(self):
+        weight = torch.randn(64, 1536)
+        bias = torch.randn(64)
+        normalized = runtime._preprocess_transformer_state_dict(
+            {"head.proj.weight": weight, "head.proj.bias": bias}
+        )
+        self.assertEqual(tuple(normalized["head.head.weight"].shape), (64, 1536))
+        self.assertEqual(tuple(normalized["head.head.bias"].shape), (64,))
+        self.assertIs(normalized["head.head.weight"], weight)
+        self.assertIs(normalized["head.head.bias"], bias)
+        self.assertTrue(torch.equal(normalized["head.head.weight"], weight))
+        self.assertTrue(torch.equal(normalized["head.head.bias"], bias))
+        self.assertNotIn("head.proj.weight", normalized)
+        self.assertNotIn("head.proj.bias", normalized)
+
+    def test_transformer_head_aliases_are_noop_for_legacy_names_and_ignore_modulation(self):
+        head = torch.randn(64, 1536)
+        bias = torch.randn(64)
+        modulation = torch.randn(1, 2, 1536)
+        unrelated = torch.randn(64, 1536)
+        normalized = runtime._preprocess_transformer_state_dict(
+            {
+                "head.head.weight": head,
+                "head.head.bias": bias,
+                "head.modulation": modulation,
+                "model.head.proj.weight": unrelated,
+            }
+        )
+        self.assertIs(normalized["head.head.weight"], head)
+        self.assertIs(normalized["head.head.bias"], bias)
+        self.assertIs(normalized["head.modulation"], modulation)
+        self.assertIs(normalized["model.head.proj.weight"], unrelated)
+
+    def test_transformer_head_alias_conflicts_are_rejected(self):
+        aliases = (
+            ("head.proj.weight", "head.head.weight", torch.randn(64, 1536)),
+            ("head.proj.bias", "head.head.bias", torch.randn(64)),
+        )
+        for source_name, target_name, value in aliases:
+            with self.subTest(source=source_name), self.assertRaisesRegex(
+                ValueError, f"both {source_name} and {target_name}"
+            ):
+                runtime._preprocess_transformer_state_dict(
+                    {source_name: value, target_name: torch.randn_like(value)}
+                )
+
     def test_structural_mask_has_two_half_windows_per_key_window(self):
         candidates, count, entries = structural_block_candidates(2, 2, 2, 1, 3)
         self.assertEqual(tuple(candidates.shape), (8, 12))
