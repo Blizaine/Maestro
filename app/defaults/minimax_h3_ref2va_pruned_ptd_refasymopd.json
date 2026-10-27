@@ -1,6 +1,6 @@
 {
   "model": {
-    "name": "H3 Omni — Pruned PTD RefAsymOPD 8-Step",
+    "name": "H3 Omni \u00e2\u20ac\u201d Pruned PTD RefAsymOPD 8-Step",
     "architecture": "minimax_h3_ref2va",
     "description": "Pruned MiniMax H3 Ref2VA with the dedicated eight-hop PTD RefAsymOPD adapters and pinned PDD heads. Uses eight Euler evaluations, CFG 1, shifts 12/3, one phase, and the fixed 768px-short-edge reference recipe.",
     "minimax_h3_ptd_refasymopd": true,
@@ -24,14 +24,14 @@
       "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/0543966fbdce5ba05709a8f2031c94bdba629b4a/diffusion_models/minimax_h3_ref2va_pruned_fp8_scaled.safetensors"
     ],
     "loras": [
-      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/de1028e84b0fd5e7f15b2684b704d8c7289b02be/loras/ptd_refasymopd/minimax_h3_ref2va_ptd_refasymopd_8step_hop01_bf16.safetensors|ptd_refasymopd",
-      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/de1028e84b0fd5e7f15b2684b704d8c7289b02be/loras/ptd_refasymopd/minimax_h3_ref2va_ptd_refasymopd_8step_hop02_bf16.safetensors|ptd_refasymopd",
-      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/de1028e84b0fd5e7f15b2684b704d8c7289b02be/loras/ptd_refasymopd/minimax_h3_ref2va_ptd_refasymopd_8step_hop03_bf16.safetensors|ptd_refasymopd",
-      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/de1028e84b0fd5e7f15b2684b704d8c7289b02be/loras/ptd_refasymopd/minimax_h3_ref2va_ptd_refasymopd_8step_hop04_bf16.safetensors|ptd_refasymopd",
-      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/de1028e84b0fd5e7f15b2684b704d8c7289b02be/loras/ptd_refasymopd/minimax_h3_ref2va_ptd_refasymopd_8step_hop05_bf16.safetensors|ptd_refasymopd",
-      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/de1028e84b0fd5e7f15b2684b704d8c7289b02be/loras/ptd_refasymopd/minimax_h3_ref2va_ptd_refasymopd_8step_hop06_bf16.safetensors|ptd_refasymopd",
-      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/de1028e84b0fd5e7f15b2684b704d8c7289b02be/loras/ptd_refasymopd/minimax_h3_ref2va_ptd_refasymopd_8step_hop07_bf16.safetensors|ptd_refasymopd",
-      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/de1028e84b0fd5e7f15b2684b704d8c7289b02be/loras/ptd_refasymopd/minimax_h3_ref2va_ptd_refasymopd_8step_hop08_bf16.safetensors|ptd_refasymopd"
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/de1028e84b0fd5e7f15b2684b704d8c7289b02be/loras/ptd_refasymopd/minimax_h3_ref2va_ptd_refasymopd_8step_hop01_bf16.safetensors",
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/de1028e84b0fd5e7f15b2684b704d8c7289b02be/loras/ptd_refasymopd/minimax_h3_ref2va_ptd_refasymopd_8step_hop02_bf16.safetensors",
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/de1028e84b0fd5e7f15b2684b704d8c7289b02be/loras/ptd_refasymopd/minimax_h3_ref2va_ptd_refasymopd_8step_hop03_bf16.safetensors",
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/de1028e84b0fd5e7f15b2684b704d8c7289b02be/loras/ptd_refasymopd/minimax_h3_ref2va_ptd_refasymopd_8step_hop04_bf16.safetensors",
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/de1028e84b0fd5e7f15b2684b704d8c7289b02be/loras/ptd_refasymopd/minimax_h3_ref2va_ptd_refasymopd_8step_hop05_bf16.safetensors",
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/de1028e84b0fd5e7f15b2684b704d8c7289b02be/loras/ptd_refasymopd/minimax_h3_ref2va_ptd_refasymopd_8step_hop06_bf16.safetensors",
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/de1028e84b0fd5e7f15b2684b704d8c7289b02be/loras/ptd_refasymopd/minimax_h3_ref2va_ptd_refasymopd_8step_hop07_bf16.safetensors",
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/de1028e84b0fd5e7f15b2684b704d8c7289b02be/loras/ptd_refasymopd/minimax_h3_ref2va_ptd_refasymopd_8step_hop08_bf16.safetensors"
     ],
     "loras_multipliers": [
       "1,0,0,0,0,0,0,0",
