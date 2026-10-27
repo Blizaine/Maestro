@@ -155,6 +155,13 @@ def test_turbo_masked_control_image_path_does_not_require_reference_images():
     assert model_def["image_reference_required_for_generate"] is True
     assert family_handler.validate_generative_settings("fibo2_edit_turbo", model_def, inputs) is None
 
+    migrated = {"image_mode": 2, "video_prompt_type": "VAIK", "image_refs": [],
+                "image_guide": "source.png", "image_mask": "mask.png", "guidance_scale": 1.0}
+    family_handler.fix_settings("fibo2_edit_turbo", 2.58, model_def, migrated)
+    assert migrated["video_prompt_type"] == "VA"
+    assert migrated["image_guide"] == "source.png" and migrated["image_mask"] == "mask.png"
+    assert family_handler.validate_generative_settings("fibo2_edit_turbo", model_def, migrated) is None
+
     # WGP supplies its inpaint Control Image as input_frames shaped CxTxHxW.
     source = torch.zeros(3, 1, 16, 16)
     source[0] = 1

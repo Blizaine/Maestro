@@ -117,6 +117,15 @@ class family_handler:
             ui_defaults.update(num_inference_steps=4, guidance_scale=1.0, video_prompt_type="KI")
 
     @staticmethod
+    def fix_settings(base_model_type, settings_version, model_def, ui_defaults):
+        # WGP's legacy reference-choice migration appends I when an editor's
+        # first reference choice is KI, even to a live masked VA request.
+        # Fibo masks have exactly one Control Image, not a second image_refs
+        # attachment; restore that native contract after the generic migration.
+        if ui_defaults.get("image_mode") in (2, "2"):
+            ui_defaults["video_prompt_type"] = "VA"
+
+    @staticmethod
     def validate_generative_settings(base_model_type, model_def, inputs):
         references = inputs.get("image_refs") or []
         if len(references) > 4:

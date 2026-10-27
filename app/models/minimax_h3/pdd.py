@@ -324,6 +324,39 @@ def _fixed_pdd_plans(
     )
 
 
+def _validate_pdd_head_header(handle, transformer: nn.Module) -> None:
+    """Check PDD head bank shapes and fp32 dtypes before reading payloads."""
+
+    final_layer = getattr(transformer, "final_layer", None)
+    if final_layer is None:
+        raise ValueError("MiniMax H3 PDD requires a transformer final layer.")
+    expected = {
+        "proj_out.weight": tuple(final_layer.video_out.weight.shape),
+        "proj_out.bias": tuple(final_layer.video_out.bias.shape),
+        "audio_proj_out.weight": tuple(final_layer.audio_out.weight.shape),
+        "audio_proj_out.bias": tuple(final_layer.audio_out.bias.shape),
+    }
+    available = set(handle.keys())
+    for key, base_shape in expected.items():
+        if key not in available:
+            raise ValueError(
+                f"MiniMax H3 PDD checkpoint is missing required head '{key}'."
+            )
+        tensor_slice = handle.get_slice(key)
+        shape = tuple(int(item) for item in tensor_slice.get_shape())
+        expected_shape = (PDD_NUM_INTERVALS, *base_shape)
+        if shape != expected_shape:
+            raise ValueError(
+                f"MiniMax H3 PDD head '{key}' shape mismatch: expected "
+                f"{expected_shape}, got {shape}."
+            )
+        dtype = tensor_slice.get_dtype()
+        if dtype != "F32":
+            raise ValueError(
+                f"MiniMax H3 PDD head '{key}' must be FP32, got {dtype}."
+            )
+
+
 class MiniMaxH3PDDParallelHead(nn.Module):
     """One MMGP-managed base head plus eight CPU-resident fused PDD heads."""
 
@@ -479,6 +512,7 @@ def install_pdd_parallel_heads(
                 "Maestro currently supports the published MiniMax H3 PDD "
                 f"32x4 schedule, got {num_steps}x{block_size}."
             )
+        _validate_pdd_head_header(handle, transformer)
         # Detach the interval heads from safetensors' file mapping.  The
         # controller keeps these small banks for scheduler-aware re-fusion;
         # owning the storage lets Windows release/update the checkpoint as

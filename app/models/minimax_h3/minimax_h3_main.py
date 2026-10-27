@@ -66,6 +66,7 @@ from .packing import (
     unpatchify_video_tokens,
     video_latent_num_frames,
 )
+from .runtime import runtime
 from .prompt_cache import H3PromptEncodingAborted, MiniMaxH3PromptCache
 from .ref2va import (
     MiniMaxH3PreparedReference,
@@ -1514,6 +1515,11 @@ class MiniMaxH3Model:
         self._fused_turbo = bool(
             model_def.get("minimax_h3_fused_turbo", False)
         )
+        self.ptd_refasymopd = bool(
+            model_def.get("minimax_h3_ptd_refasymopd", False)
+        )
+        if self.ptd_refasymopd and not model_def.get("omni_reference", False):
+            raise ValueError("PTD RefAsymOPD requires a MiniMax H3 Ref2VA model.")
         self.singularity = bool(model_def.get("minimax_h3_singularity", False))
         self.dasiwa = bool(model_def.get("minimax_h3_dasiwa", False))
         self._baked_turbo = bool(model_def.get("minimax_h3_baked_turbo", False))
@@ -1618,7 +1624,36 @@ class MiniMaxH3Model:
         self._pdd_lora_path: str | None = None
         self._pdd_lora_strength = 1.0
         self._pdd_controller = None
+        self._ptd_lora_paths: tuple[str, ...] = ()
+        self._ptd_head_path = model_def.get("minimax_h3_ptd_head_path")
+        self.latent_upscaler = None
+        # This immutable pipeline identity lets WanGP reload on Off/On changes.
+        # Every H3 pipeline starts false; the handler opts in before loading the
+        # separate latent-upscaler asset.
+        self.two_pass_enabled = (
+            model_def.get("minimax_h3_two_pass_enabled") is True
+        )
         self.__interrupt = False
+
+        if model_def.get("minimax_h3_latent_upscaler_enabled") is True:
+            if model_def.get("minimax_h3_two_pass_compatible") is not True:
+                raise ValueError(
+                    "The latent upscaler was requested for an incompatible MiniMax H3 model."
+                )
+            from .latent_upscaler import (
+                LATENT_UPSCALER_FILE,
+                load_h3_latent_upscaler,
+            )
+
+            upscaler_filename = str(
+                model_def.get("minimax_h3_latent_upscaler_filename")
+                or LATENT_UPSCALER_FILE
+            )
+            upscaler_path = fl.locate_file(
+                os.path.join(self.assets_root, upscaler_filename)
+            )
+            self.latent_upscaler = load_h3_latent_upscaler(upscaler_path)
+            self.two_pass_enabled = True
 
     def validate_loras(self, loras_selected) -> None:
         """Validate special H3 adapter requirements before MMGP loads them."""
@@ -1628,6 +1663,20 @@ class MiniMaxH3Model:
         self.release_special_loras()
         if getattr(self, "fasth3", False) and loras_selected:
             raise ValueError("FastH3 V2 does not support additional LoRAs.")
+        from .ptd import is_ptd_refasymopd_adapter, ordered_ptd_adapters
+
+        ptd_selected = tuple(
+            str(path)
+            for path in (loras_selected or [])
+            if is_ptd_refasymopd_adapter(path)
+        )
+        ptd_enabled = bool(getattr(self, "ptd_refasymopd", False))
+        if ptd_enabled:
+            self._ptd_lora_paths = ordered_ptd_adapters(ptd_selected)
+        elif ptd_selected:
+            raise ValueError(
+                "PTD RefAsymOPD hop adapters require the dedicated PTD RefAsymOPD model."
+            )
         if getattr(self, "_fused_turbo", False):
             validate_fused_h3_loras(loras_selected)
         if getattr(self, "_baked_turbo", False):
@@ -1640,6 +1689,10 @@ class MiniMaxH3Model:
         accelerator_paths = tuple(
             find_minimax_h3_accelerators(loras_selected)
         )
+        if ptd_enabled and accelerator_paths:
+            raise ValueError(
+                "PTD RefAsymOPD cannot be combined with another Turbo or PDD accelerator."
+            )
         if len(accelerator_paths) > 1:
             raise ValueError(
                 "MiniMax H3 supports one accelerator at a time; select only "
@@ -1728,7 +1781,27 @@ class MiniMaxH3Model:
                 "[MiniMax H3 LoRA] Preserved native ConvRot activation math for "
                 f"{installed} adapter-targeted layer(s)."
             )
-        if self._pdd_lora_active:
+        if self.ptd_refasymopd:
+            if not self._ptd_head_path or not os.path.isfile(str(self._ptd_head_path)):
+                raise FileNotFoundError(
+                    "PTD RefAsymOPD's pinned PDD head-bank asset is missing. "
+                    "Re-run model asset discovery for this PTD model."
+                )
+            try:
+                self._pdd_controller = install_pdd_parallel_heads(
+                    self.transformer,
+                    self._ptd_head_path,
+                    strength=1.0,
+                )
+                if self._pdd_controller.num_steps != PDD_NUM_EVALUATIONS:
+                    raise ValueError(
+                        "PTD RefAsymOPD output heads must expose exactly "
+                        f"{PDD_NUM_EVALUATIONS} evaluations."
+                    )
+            except Exception:
+                self.release_special_loras()
+                raise
+        elif self._pdd_lora_active:
             try:
                 self._pdd_controller = install_pdd_parallel_heads(
                     self.transformer,
@@ -1766,6 +1839,8 @@ class MiniMaxH3Model:
             self.conditioner._interrupt = self.__interrupt
         if getattr(self, "dialogue_whisper", None) is not None:
             self.dialogue_whisper._interrupt = self.__interrupt
+        if getattr(self, "latent_upscaler", None) is not None:
+            self.latent_upscaler._interrupt = self.__interrupt
 
     @property
     def patch_size(self) -> tuple[int, int, int]:
@@ -2101,6 +2176,186 @@ class MiniMaxH3Model:
         return visual_conditions, audio_conditions
 
     @torch.inference_mode()
+    def _generate_h3_two_pass(self, request: dict, settings: dict):
+        """Run two passes and restore the pipeline's per-job state always."""
+
+        import copy
+
+        original_schedules = request.get("loras_slists")
+        scheduler_states = [
+            (scheduler, copy.deepcopy(scheduler.__dict__))
+            for scheduler in (self.scheduler, self.audio_scheduler)
+        ]
+        try:
+            return self._run_h3_two_pass(request, settings)
+        finally:
+            try:
+                if isinstance(original_schedules, dict):
+                    from shared.utils.loras_mutipliers import update_loras_slists
+
+                    update_loras_slists(
+                        self.transformer,
+                        original_schedules,
+                        int(request.get("sampling_steps", 20)),
+                    )
+            finally:
+                try:
+                    offload.set_step_no_for_lora(self.transformer, 0)
+                finally:
+                    for scheduler, state in scheduler_states:
+                        scheduler.__dict__.clear()
+                        scheduler.__dict__.update(state)
+
+    @torch.inference_mode()
+    def _run_h3_two_pass(self, request: dict, settings: dict):
+        """Run standard H3 at half resolution, upscale its latent, then refine."""
+
+        from .two_pass import (
+            H3_TWO_PASS_ENABLED,
+            phase1_dimensions,
+            phase2_lora_schedule,
+            two_pass_unavailable_reason,
+        )
+
+        if self.latent_upscaler is None:
+            raise ValueError(
+                "H3 Two-Pass is enabled but its opt-in latent upscaler was not loaded. "
+                "Reload the model with H3 Two-Pass enabled."
+            )
+        if self.sample_solver != "euler":
+            raise ValueError("H3 Two-Pass currently requires the Euler sampler.")
+        reason = two_pass_unavailable_reason(
+            self.model_def,
+            pdd_active=bool(self._pdd_lora_active or self.ptd_refasymopd),
+            has_control_video=(
+                "G" in str(request.get("video_prompt_type") or "")
+                and "V" in str(request.get("video_prompt_type") or "")
+            ),
+            has_source_video=request.get("input_video") is not None,
+            has_edit_mask=(
+                request.get("input_masks") is not None
+                or request.get("outpainting_dims") is not None
+            ),
+            denoising_strength=request.get("denoising_strength", 1.0),
+            audio_refinement=(
+                (request.get("custom_settings") or {}).get("audio_refinement")
+                == "enabled"
+            ),
+            face_refinement=request.get("_face_refinement") is not None,
+            audio_only=self.audio_only,
+        )
+        if reason:
+            raise ValueError(reason)
+        if request.get("_audio_segment"):
+            raise ValueError("H3 Two-Pass is unavailable for segmented audio generation.")
+        if self.viggle or self._fused_turbo or self.fasth3 or self.vdn or self._baked_turbo or self.dasiwa or self.singularity:
+            raise ValueError("H3 Two-Pass is available for compatible standard H3 recipes only.")
+
+        target_height = int(request["height"])
+        target_width = int(request["width"])
+        height1, width1 = phase1_dimensions(target_height, target_width)
+        request_seed = request.get("seed")
+        if request_seed is None:
+            request_seed = int(torch.seed())
+
+        original_settings = dict(request.get("custom_settings") or {})
+        single_pass_settings = dict(original_settings)
+        single_pass_settings[H3_TWO_PASS_ENABLED] = "off"
+        phase1_request = dict(request)
+        phase1_request.update(
+            {
+                "height": height1,
+                "width": width1,
+                "seed": request_seed,
+                "custom_settings": single_pass_settings,
+                "_h3_two_pass_internal": True,
+                "_h3_capture_latents": True,
+                "_h3_initial_video_latents": None,
+                "_h3_initial_audio_latents": None,
+                "_h3_phase2_noise": None,
+                "_h3_freeze_audio": False,
+                "_h3_phase2_accelerator_strength": None,
+            }
+        )
+        phase1_result = self.generate(**phase1_request)
+        if phase1_result is None or self._interrupt:
+            return None
+        if not isinstance(phase1_result, dict) or not phase1_result.get("_h3_latents"):
+            raise RuntimeError("H3 first pass did not return its denoised latent handoff.")
+
+        if request.get("set_progress_status") is not None:
+            request["set_progress_status"]("Upscaling H3 latent between passes")
+        phase1_video = phase1_result["video_latents"]
+        phase2_target_size = (
+            int(phase1_video.shape[2]),
+            int(target_height // self.vae.spatial_compression_ratio),
+            int(target_width // self.vae.spatial_compression_ratio),
+        )
+        scale = (
+            phase2_target_size[1] / int(phase1_video.shape[-2])
+            + phase2_target_size[2] / int(phase1_video.shape[-1])
+        ) / 2.0
+        upscaler_device = runtime.execution_device(self.latent_upscaler)
+        latent_mean = torch.tensor(
+            VIDEO_LATENTS_MEAN, device=upscaler_device, dtype=torch.bfloat16
+        ).view(1, -1, 1, 1, 1)
+        latent_std = torch.tensor(
+            VIDEO_LATENTS_STD, device=upscaler_device, dtype=torch.bfloat16
+        ).view(1, -1, 1, 1, 1)
+        normalized_video = (
+            phase1_video.to(device=upscaler_device, dtype=torch.bfloat16)
+            - latent_mean
+        ) / latent_std
+        upscaled_video = self.latent_upscaler(
+            normalized_video,
+            scale,
+            target_size=phase2_target_size,
+        )
+        if self._interrupt:
+            return None
+        upscaled_video = (upscaled_video * latent_std + latent_mean).detach().to(
+            device="cpu", dtype=torch.float32, copy=True
+        )
+        del normalized_video, latent_mean, latent_std
+        phase2_audio = phase1_result["audio_latents"].detach().to(
+            device="cpu", dtype=torch.float32, copy=True
+        )
+        del phase1_video, phase1_result
+
+        phase2_request = dict(request)
+        phase2_request.update(
+            {
+                "height": target_height,
+                "width": target_width,
+                "sampling_steps": settings["h3_phase2_steps"],
+                "seed": request_seed,
+                "custom_settings": single_pass_settings,
+                "_h3_two_pass_internal": True,
+                "_h3_capture_latents": False,
+                "_h3_initial_video_latents": upscaled_video,
+                "_h3_initial_audio_latents": phase2_audio,
+                "_h3_phase2_noise": settings["h3_phase2_noise"],
+                "_h3_freeze_audio": True,
+                "_h3_phase2_accelerator_strength": settings[
+                    "h3_phase2_accelerator_strength"
+                ],
+            }
+        )
+        selected_loras = request.get("loras_selected") or ()
+        original_schedules = request.get("loras_slists")
+        phase2_schedules = phase2_lora_schedule(
+            original_schedules,
+            selected_loras,
+            self._turbo_lora_paths,
+            settings["h3_phase2_accelerator_strength"],
+        )
+        if phase2_schedules is not None:
+            phase2_request["loras_slists"] = phase2_schedules
+        if self._interrupt:
+            return None
+        return self.generate(**phase2_request)
+
+    @torch.inference_mode()
     def generate(
         self,
         input_prompt: str,
@@ -2140,12 +2395,65 @@ class MiniMaxH3Model:
         _audio_speaker=None,
         _face_refinement=None,
         minimax_h3_extended_duration=False,
+        _h3_two_pass_internal=False,
+        _h3_capture_latents=False,
+        _h3_initial_video_latents=None,
+        _h3_initial_audio_latents=None,
+        _h3_phase2_noise=None,
+        _h3_freeze_audio=False,
+        _h3_phase2_accelerator_strength=None,
         **_kwargs,
     ):
         if not _audio_segment:
             self._interrupt = False
         if not isinstance(input_prompt, str):
             raise ValueError("MiniMax H3 accepts one text prompt per generation.")
+        from .two_pass import (
+            H3_TWO_PASS_ENABLED,
+            build_two_pass_generate_request,
+            normalize_two_pass_settings,
+            phase2_clean_audio_timesteps,
+        )
+
+        two_pass_settings = normalize_two_pass_settings(custom_settings)
+        if two_pass_settings[H3_TWO_PASS_ENABLED] == "on" and not _h3_two_pass_internal:
+            from inspect import signature
+
+            request = build_two_pass_generate_request(
+                locals(), signature(self.generate)
+            )
+            return self._generate_h3_two_pass(request, two_pass_settings)
+        if self.ptd_refasymopd:
+            from .ptd import PTD_NUM_STEPS
+
+            if int(sampling_steps) != PTD_NUM_STEPS:
+                raise ValueError(
+                    f"PTD RefAsymOPD requires exactly {PTD_NUM_STEPS} Euler evaluations."
+                )
+            if self.sample_solver != "euler":
+                raise ValueError("PTD RefAsymOPD requires the Euler sampler.")
+            if two_pass_settings[H3_TWO_PASS_ENABLED] == "on":
+                raise ValueError("PTD RefAsymOPD cannot use H3 Two-Pass.")
+            if int(_kwargs.get("guide_phases", 1) or 1) != 1:
+                raise ValueError("PTD RefAsymOPD uses exactly one guidance phase.")
+            from .ptd import validate_ptd_cfg_settings
+
+            validate_ptd_cfg_settings(_kwargs)
+            if (
+                (custom_settings or {}).get("audio_refinement") == "enabled"
+                or _face_refinement is not None
+            ):
+                raise ValueError(
+                    "PTD RefAsymOPD cannot use Audio Refinement or face refinement."
+                )
+            try:
+                requested_denoising = float(denoising_strength)
+            except (TypeError, ValueError) as error:
+                raise ValueError("PTD RefAsymOPD requires full denoising strength 1.0.") from error
+            if requested_denoising != 1.0:
+                raise ValueError("PTD RefAsymOPD does not support partial-schedule denoising.")
+            if getattr(self.transformer, "cache", None) is not None:
+                raise ValueError("PTD RefAsymOPD does not support skip-step caches.")
         if getattr(self, "fasth3", False):
             if getattr(self, "fasth3_omniref", False):
                 from .fasth3_omniref import validate_request as validate_fasth3_request
@@ -2257,6 +2565,13 @@ class MiniMaxH3Model:
                 "Alibaba PAI MiniMax H3 Acc-LoRAs require exactly "
                 f"{PDD_NUM_EVALUATIONS} model evaluations; received "
                 f"{int(sampling_steps)}."
+            )
+        if self.ptd_refasymopd:
+            from .ptd import validate_ptd_schedules
+
+            validate_ptd_schedules(
+                _kwargs.get("loras_selected") or self._ptd_lora_paths,
+                _kwargs.get("loras_slists"),
             )
 
         audio_prompt_type = str(audio_prompt_type or "")
@@ -2674,11 +2989,20 @@ class MiniMaxH3Model:
                 minimax_h3_reference_detail = str(
                     minimax_h3_reference_detail or "match"
                 ).strip().lower()
-                if minimax_h3_reference_detail not in {"match", "max"}:
+                if self.ptd_refasymopd:
+                    from .ptd import PTD_REFERENCE_DETAIL
+
+                    minimax_h3_reference_detail = PTD_REFERENCE_DETAIL
+                if minimax_h3_reference_detail not in {"match", "max", "ptd768"}:
                     raise ValueError(
-                        "MiniMax H3 reference detail must be 'match' or 'max'."
+                        "MiniMax H3 reference detail must be 'match', 'max', or 'ptd768'."
                     )
-                if self._pdd_lora_active:
+                if self.ptd_refasymopd:
+                    print(
+                        "[MiniMax H3 PTD RefAsymOPD] Reference encoding uses "
+                        "the fixed 768px short-edge recipe."
+                    )
+                elif self._pdd_lora_active:
                     reference_preparation = (
                         "official high detail (2048px short edge)"
                         if minimax_h3_reference_detail == "max"
@@ -2930,7 +3254,29 @@ class MiniMaxH3Model:
         if self._interrupt:
             return None
 
-        if target_video_condition_rows is None:
+        if _h3_initial_video_latents is not None:
+            initial_video_latents = torch.as_tensor(_h3_initial_video_latents)
+            expected_shape = (
+                1,
+                24,
+                num_latent_frames,
+                latent_height,
+                latent_width,
+            )
+            if tuple(initial_video_latents.shape) != expected_shape:
+                raise ValueError(
+                    "H3 phase 2 latent handoff does not match the requested "
+                    f"video grid ({tuple(initial_video_latents.shape)} versus {expected_shape})."
+                )
+            if target_video_condition_rows is not None:
+                raise ValueError("H3 two-pass cannot refine a frozen Control Video.")
+            initial_video_latents = initial_video_latents.to(
+                device=self.device, dtype=torch.float32
+            )
+            video_rows = patchify_video_latents(
+                initial_video_latents, self.patch_size
+            )
+        elif target_video_condition_rows is None:
             video_noise = randn_tensor(
                 (1, 24, num_latent_frames, latent_height, latent_width),
                 generator=generator,
@@ -2957,6 +3303,18 @@ class MiniMaxH3Model:
             device=self.device,
             dtype=torch.float32,
         )
+        if _h3_initial_audio_latents is not None:
+            initial_audio_latents = torch.as_tensor(_h3_initial_audio_latents)
+            expected_audio_shape = (MINIMAX_H3_AUDIO_CHANNELS, 32, num_audio_latents)
+            if tuple(initial_audio_latents.shape) != expected_audio_shape:
+                raise ValueError(
+                    "H3 phase 2 audio handoff does not match the requested "
+                    f"audio grid ({tuple(initial_audio_latents.shape)} versus {expected_audio_shape})."
+                )
+            packed_audio = initial_audio_latents.to(
+                device=self.device, dtype=audio_rows.dtype
+            ).permute(0, 2, 1).reshape(-1, audio_rows.shape[-1])
+            audio_rows.copy_(packed_audio)
         if target_audio_condition_latents:
             conditioned = target_audio_condition[
                 :, :target_audio_condition_latents
@@ -2991,6 +3349,7 @@ class MiniMaxH3Model:
             or self.dasiwa
             or self.audio_only
             or self._pdd_lora_active
+            or self.ptd_refasymopd
         )
         _set_h3_generation_shifts(
             self.scheduler,
@@ -3005,6 +3364,34 @@ class MiniMaxH3Model:
         self.scheduler.set_solver(self.sample_solver)
         self.scheduler.set_timesteps(scheduler_points, device=self.device)
         self.audio_scheduler.set_timesteps(scheduler_points, device=self.device)
+        if _h3_initial_video_latents is not None:
+            from .two_pass import phase2_sigmas
+
+            phase2_values = phase2_sigmas(
+                int(sampling_steps), float(_h3_phase2_noise)
+            )
+            self.scheduler.set_solver("euler")
+            self.scheduler.set_timesteps(sigmas=phase2_values, device=self.device)
+            phase2_generator = torch.Generator(device="cpu").manual_seed(
+                int(request_seed)
+            )
+            phase2_noise = torch.randn(
+                tuple(int(item) for item in _h3_initial_video_latents.shape),
+                generator=phase2_generator,
+                device="cpu",
+                dtype=torch.float32,
+            ).to(self.device)
+            phase2_base = torch.as_tensor(_h3_initial_video_latents).to(
+                device=self.device, dtype=torch.float32
+            )
+            phase2_start = torch.lerp(
+                phase2_base,
+                phase2_noise,
+                float(_h3_phase2_noise),
+            )
+            video_rows[layout.num_condition_video_rows :].copy_(
+                patchify_video_latents(phase2_start, self.patch_size)
+            )
         if getattr(self, "fasth3", False):
             self.scheduler.set_solver("euler")
             if getattr(self, "fasth3_omniref", False):
@@ -3034,8 +3421,22 @@ class MiniMaxH3Model:
             video_rows[start_row:].copy_(torch.lerp(source_video_rows, source_noise_rows,
                 self.scheduler.sigmas[0].to(source_video_rows)))
         timesteps = self.scheduler.timesteps
-        audio_timesteps = self.audio_scheduler.timesteps
+        audio_timesteps = (
+            phase2_clean_audio_timesteps(timesteps)
+            if _h3_freeze_audio
+            else self.audio_scheduler.timesteps
+        )
         model_steps = len(timesteps)
+        lora_schedules = _kwargs.get("loras_slists")
+        if isinstance(lora_schedules, dict):
+            from shared.utils.loras_mutipliers import update_loras_slists
+
+            update_loras_slists(
+                self.transformer,
+                lora_schedules,
+                model_steps,
+            )
+            offload.set_step_no_for_lora(self.transformer, 0)
         if self._pdd_controller is not None:
             self._pdd_controller.configure_sigmas(
                 self.scheduler.sigmas,
@@ -3233,6 +3634,9 @@ class MiniMaxH3Model:
                 for index, (video_timestep, audio_timestep) in enumerate(zip(timesteps, audio_timesteps)):
                     if self._interrupt:
                         return None
+                    # PTD RefAsymOPD requires a separate adapter at each hop.
+                    # Ordinary H3 LoRA schedules use the same step index.
+                    offload.set_step_no_for_lora(self.transformer, index)
                     if self._pdd_controller is not None:
                         self._pdd_controller.set_step(index)
                     if getattr(self, "fasth3_omniref", False):
@@ -3244,7 +3648,11 @@ class MiniMaxH3Model:
                         index,
                         model_steps,
                     )
-                    if res_multistep and generated_audio_local_indices.numel():
+                    if (
+                        not _h3_freeze_audio
+                        and res_multistep
+                        and generated_audio_local_indices.numel()
+                    ):
                         audio_target = audio_rows[
                             layout.num_condition_audio_rows :
                         ]
@@ -3324,7 +3732,10 @@ class MiniMaxH3Model:
                                 preserved_sigma=(1.0 - MINIMAX_H3_KEYFRAME_NOISE_AUG
                                     if grouped_active and index + 1 < mask_end_step else None),
                             )
-                    if generated_audio_local_indices.numel():
+                    if (
+                        not _h3_freeze_audio
+                        and generated_audio_local_indices.numel()
+                    ):
                         audio_target = audio_rows[layout.num_condition_audio_rows :]
                         audio_velocity_target = audio_velocity[
                             0, layout.num_condition_audio_rows :
@@ -3406,7 +3817,11 @@ class MiniMaxH3Model:
         # so both modalities use the same second-order coefficients. Restore
         # H3's native audio latent scale before decoding. Reference/guide rows
         # are deliberately excluded, matching WanGP's ``audio_tail`` recipe.
-        if res_multistep and generated_audio_local_indices.numel():
+        if (
+            not _h3_freeze_audio
+            and res_multistep
+            and generated_audio_local_indices.numel()
+        ):
             audio_target = audio_rows[layout.num_condition_audio_rows :]
             # Advanced indexing returns a copy, so ``.div_`` on that result
             # never updated the packed audio rows. Assign the restored scale
@@ -3424,6 +3839,32 @@ class MiniMaxH3Model:
                 callback=callback, set_progress_status=set_progress_status)
             if audio_rows is None or self._interrupt:
                 return None
+        if _h3_capture_latents:
+            if self.audio_only or frozen_target_video is not None:
+                raise ValueError(
+                    "H3 Two-Pass latent capture requires generated video and audio."
+                )
+            video_latents = unpatchify_video_tokens(
+                video_rows[layout.num_condition_video_rows :],
+                num_latent_frames,
+                latent_height,
+                latent_width,
+                24,
+                self.patch_size,
+            )
+            audio_latents = unpack_audio_tokens(
+                audio_rows[layout.num_condition_audio_rows :],
+                num_audio_latents,
+            )
+            return {
+                "_h3_latents": True,
+                "video_latents": video_latents.detach().to(
+                    device="cpu", dtype=torch.float32, copy=True
+                ),
+                "audio_latents": audio_latents.detach().to(
+                    device="cpu", dtype=torch.float32, copy=True
+                ),
+            }
         if not self.audio_only and frozen_target_video is None:
             video_latents = unpatchify_video_tokens(
                 video_rows[layout.num_condition_video_rows :],

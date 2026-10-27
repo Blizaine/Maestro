@@ -8127,9 +8127,17 @@ def generate_video(
             send_cmd("exit")
             return True
     if str(model_def.get("architecture") or "").startswith("minimax_h3"):
+        from services.h3_runtime_configuration import two_pass_load_context
+        two_pass_options, two_pass_reload = two_pass_load_context(
+            model_def, custom_settings, wan_model,
+        )
+        model_kwargs.update(two_pass_options)
+        if two_pass_reload:
+            print("[MiniMax H3] Two-Pass selection changed; reloading the model profile.")
+            reload_needed = True
         requested_h3_video_vae = str(minimax_h3_video_vae or "auto")
         model_kwargs["minimax_h3_video_vae"] = requested_h3_video_vae
-        expected_h3_video_vae = get_runtime_model_def(model_type, {"minimax_h3_video_vae": requested_h3_video_vae}).get("minimax_h3_video_vae_variant", "auto")
+        expected_h3_video_vae = get_runtime_model_def(model_type, model_kwargs).get("minimax_h3_video_vae_variant", "auto")
         if wan_model is not None and getattr(wan_model, "video_vae_variant", "auto") != expected_h3_video_vae:
             print(f"[MiniMax H3] Video VAE changed to {requested_h3_video_vae}; reloading the model profile.")
             reload_needed = True

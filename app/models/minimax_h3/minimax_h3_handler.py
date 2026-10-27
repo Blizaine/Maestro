@@ -1899,6 +1899,13 @@ class family_handler:
             (model_def or {}).get("minimax_h3_fused_turbo", False)
         )
         vdn = bool((model_def or {}).get("vdn", False))
+        ptd_refasymopd = bool(
+            (model_def or {}).get(
+                "minimax_h3_ptd_refasymopd",
+                (model_def or {}).get("ptd", False),
+            )
+        )
+        fasth3 = bool((model_def or {}).get("minimax_h3_fasth3", False))
         explicit_video_vae = (
             "minimax_h3_video_vae_filename" in (model_def or {})
         )
@@ -1975,6 +1982,41 @@ class family_handler:
             raise ValueError(
                 "MiniMax H3 Singularity v1.3 requires a Pruned Frames or References workflow."
             )
+        if ptd_refasymopd and not omni_reference:
+            raise ValueError(
+                "PTD RefAsymOPD requires a MiniMax H3 Ref2VA architecture."
+            )
+        if ptd_refasymopd and any(
+            (
+                fused_turbo,
+                fasth3,
+                vdn,
+                singularity,
+                dasiwa,
+                baked_turbo,
+                audio_only,
+            )
+        ):
+            raise ValueError(
+                "PTD RefAsymOPD is a separate Ref2VA recipe and cannot be combined "
+                "with another fixed-step, fused, audio-only, or attention variant."
+            )
+        if ptd_refasymopd and not bool((model_def or {}).get("pdd", True)):
+            raise ValueError("PTD RefAsymOPD requires its PDD output heads.")
+        two_pass_compatible = not any(
+            (
+                ptd_refasymopd,
+                fused_turbo,
+                fasth3,
+                vdn,
+                singularity,
+                dasiwa,
+                baked_turbo,
+                audio_only,
+                bool(import_profile),
+                locked_inference_steps,
+            )
+        )
         window_memory_policy = (
             (
                 _H3_FUSED_REFERENCE_WINDOW_MEMORY_POLICY
@@ -2133,7 +2175,9 @@ class family_handler:
             # explicit so the UI still distinguishes Audio In from Audio Out.
             "supports_reference_audio": omni_reference,
             "no_negative_prompt": True,
-            "guidance_max_phases": 0,
+            "guidance_max_phases": 1 if ptd_refasymopd else 0,
+            "lock_guidance_phases": ptd_refasymopd,
+            "lock_guidance_scale": ptd_refasymopd,
             "visible_phases": 0,
             "compile": False,
             # H3's packed BF16 head-dimension-128 attention can use the
@@ -2151,7 +2195,7 @@ class family_handler:
                 "dense_last_steps": 0,
                 "protect_audio": True,
             },
-            "first_block_cache": not fused_turbo,
+            "first_block_cache": not fused_turbo and not ptd_refasymopd,
             "first_block_cache_thresholds": _FIRST_BLOCK_CACHE_THRESHOLDS,
             "skip_steps_multiplier_choices": _FIRST_BLOCK_CACHE_STRENGTHS,
             "skip_steps_multiplier_label": "First Block Cache Threshold",
@@ -2250,6 +2294,8 @@ class family_handler:
             },
             "minimax_h3_full_checkpoint": full_checkpoint,
             "minimax_h3_fused_turbo": fused_turbo,
+            "minimax_h3_ptd_refasymopd": ptd_refasymopd,
+            "minimax_h3_two_pass_compatible": two_pass_compatible,
             "minimax_h3_singularity": singularity,
             "minimax_h3_model_id": (
                 (_SINGULARITY_MODEL_ID if omni_reference else _SINGULARITY_FRAMES_MODEL_ID)
@@ -2293,12 +2339,16 @@ class family_handler:
             "source_sha256": str((model_def or {}).get("source_sha256") or ""),
             "source_size_bytes": (model_def or {}).get("source_size_bytes"),
             "model_size_gb": (model_def or {}).get("model_size_gb"),
-            "lock_inference_steps": False if fused_turbo else locked_inference_steps,
+            "lock_inference_steps": (
+                True
+                if ptd_refasymopd
+                else (False if fused_turbo else locked_inference_steps)
+            ),
             "inference_steps_min": (
-                _H3_FUSED_MIN_EVALUATIONS if fused_turbo else 1
+                8 if ptd_refasymopd else (_H3_FUSED_MIN_EVALUATIONS if fused_turbo else 1)
             ),
             "inference_steps_max": (
-                _H3_FUSED_MAX_EVALUATIONS if fused_turbo else 50
+                8 if ptd_refasymopd else (_H3_FUSED_MAX_EVALUATIONS if fused_turbo else 50)
             ),
             "inference_steps_label": (
                 "Total Steps" if fused_turbo else "Inference Steps"
@@ -2316,6 +2366,8 @@ class family_handler:
             "minimax_h3_sampler": (
                 "res_multistep" if fused_turbo else "euler"
             ),
+            "minimax_h3_video_shift": 12.0,
+            "minimax_h3_audio_shift": 3.0,
             "minimax_h3_video_vae_filename": (
                 video_vae_filename
             ),
@@ -2347,6 +2399,9 @@ class family_handler:
             ),
             "selector_help": f"{workflow_help}\n\n{checkpoint_help}",
             "lora_compatibility_note": (
+                "PTD RefAsymOPD uses eight independent hop adapters and its pinned PDD output heads. Do not add another Turbo/PDD accelerator."
+                if ptd_refasymopd
+                else
                 "The LightX2V Ref2VA Turbo4 adapter is the default "
                 "four-step accelerator at strength 1. Select only one H3 Turbo "
                 "or PDD adapter; other H3 LoRAs remain experimental."
@@ -2400,6 +2455,13 @@ class family_handler:
                     "sliding_window_defaults": sliding_window_defaults,
                 }
             )
+            if ptd_refasymopd:
+                from models.minimax_h3.ptd import PTD_REFERENCE_DETAIL
+
+                result["omni_reference_detail_choices"] = [
+                    ("PTD Recipe (768px short edge)", PTD_REFERENCE_DETAIL)
+                ]
+                result["omni_reference_detail_default"] = PTD_REFERENCE_DETAIL
         else:
             result["sliding_window_defaults"] = sliding_window_defaults
             result["sliding_window_memory_policy"] = window_memory_policy
@@ -2461,8 +2523,95 @@ class family_handler:
              "type": "dropdown", "default": "none",
              "choices": [("Off", "none"), ("Enabled — 6 extra steps", "enabled")]},
         ]
+        if two_pass_compatible:
+            from models.minimax_h3.two_pass import (
+                H3_PHASE2_ACCELERATOR_STRENGTH,
+                H3_PHASE2_NOISE,
+                H3_PHASE2_STEPS,
+                H3_TWO_PASS_ENABLED,
+                H3_TWO_PASS_DEFAULTS,
+            )
+
+            result["custom_settings"].extend(
+                [
+                    {
+                        "id": H3_TWO_PASS_ENABLED,
+                        "name": "H3 Two-Pass Latent Upscaling",
+                        "label": "H3 Two-Pass Latent Upscaling",
+                        "type": "dropdown",
+                        "default": "off",
+                        "choices": [("Off", "off"), ("On", "on")],
+                        "description": "Off by default. Phase 2 settings below are inactive until this is On.",
+                    },
+                    {
+                        "id": H3_PHASE2_STEPS,
+                        "name": "H3 Phase 2 Steps",
+                        "label": "H3 Phase 2 Steps",
+                        "type": "int",
+                        "default": H3_TWO_PASS_DEFAULTS[H3_PHASE2_STEPS],
+                        "min": 2,
+                        "max": 12,
+                        "step": 1,
+                        "description": "Used only when H3 Two-Pass Latent Upscaling is On.",
+                    },
+                    {
+                        "id": H3_PHASE2_NOISE,
+                        "name": "H3 Phase 2 Noise",
+                        "label": "H3 Phase 2 Noise",
+                        "type": "float",
+                        "default": H3_TWO_PASS_DEFAULTS[H3_PHASE2_NOISE],
+                        "min": 0.05,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "description": "Starting noise for phase 2; used only when H3 Two-Pass is On.",
+                    },
+                    {
+                        "id": H3_PHASE2_ACCELERATOR_STRENGTH,
+                        "name": "H3 Phase 2 Accelerator Strength",
+                        "label": "H3 Phase 2 Accelerator Strength",
+                        "type": "float",
+                        "default": H3_TWO_PASS_DEFAULTS[H3_PHASE2_ACCELERATOR_STRENGTH],
+                        "min": 0.0,
+                        "max": 2.0,
+                        "step": 0.05,
+                        "description": "Phase 2 strength for selected Turbo adapters; used only when H3 Two-Pass is On.",
+                    },
+                ]
+            )
         if fused_turbo or (model_def or {}).get("lock_inference_steps", False):
             result["custom_settings"] = result["custom_settings"][:1]
+        if ptd_refasymopd:
+            from models.minimax_h3.ptd import PTD_INFOS
+
+            result.update(
+                {
+                    "minimax_h3_ptd_refasymopd": True,
+                    "ptd": True,
+                    "pdd": True,
+                    "lock_inference_steps": True,
+                    "inference_steps_min": 8,
+                    "inference_steps_max": 8,
+                    "inference_steps_label": "Denoising Steps",
+                    "inference_steps_help": "PTD RefAsymOPD uses exactly eight Euler evaluations.",
+                    "guidance_max_phases": 1,
+                    "lock_guidance_phases": True,
+                    "lock_guidance_scale": True,
+                    "minimax_h3_transformer_working_vram_gb": 10,
+                    "minimax_h3_video_shift": 12.0,
+                    "minimax_h3_audio_shift": 3.0,
+                    "minimax_h3_sampler": "euler",
+                    "first_block_cache": False,
+                    "flow_shift": False,
+                    "omni_reference_detail_default": "ptd768",
+                    "omni_reference_detail_choices": [
+                        ("PTD Recipe (768px short edge)", "ptd768")
+                    ],
+                    "selector_help": (
+                        PTD_INFOS + "\n\n" + result["selector_help"]
+                    ),
+                    "custom_settings": [],
+                }
+            )
         if not omni_reference:
             result.update({"video_guide_outpainting": [0], "outpainting_quantize_margins": 32,
                            "video_guide_outpainting_label": "Extend the H3 Control Video canvas"})
@@ -2593,6 +2742,8 @@ class family_handler:
         if not isinstance(model_def, dict):
             return model_def
         context = runtime_context if isinstance(runtime_context, dict) else {}
+        resolved = model_def
+
         selection = context.get("minimax_h3_video_vae")
         if selection is not None:
             selection = str(selection).strip().lower()
@@ -2604,37 +2755,75 @@ class family_handler:
                 )
             if selection != "auto":
                 filename = VIDEO_VAE_VARIANT_FILENAMES[selection]
-                if (
+                if not (
                     model_def.get("minimax_h3_video_vae_filename") == filename
                     and model_def.get("minimax_h3_video_vae_auto") is False
                     and model_def.get("minimax_h3_video_vae_variant") == selection
                 ):
-                    return model_def
-                resolved = dict(model_def)
-                resolved["minimax_h3_video_vae_filename"] = filename
-                resolved["minimax_h3_video_vae_auto"] = False
-                resolved["minimax_h3_video_vae_variant"] = selection
-                return resolved
+                    resolved = dict(model_def)
+                    resolved["minimax_h3_video_vae_filename"] = filename
+                    resolved["minimax_h3_video_vae_auto"] = False
+                    resolved["minimax_h3_video_vae_variant"] = selection
 
-        if model_def.get("minimax_h3_video_vae_auto") is not True:
-            return model_def
-        quantization = str(
-            context.get("transformer_quantization") or ""
-        ).strip().lower()
-        filename = (
-            _VIDEO_VAE_INT8_CONVROT
-            if quantization == "int8"
-            else _VIDEO_VAE
-        )
-        variant = "full_int8" if quantization == "int8" else "full"
         if (
-            model_def.get("minimax_h3_video_vae_filename") == filename
-            and model_def.get("minimax_h3_video_vae_variant") == variant
+            selection is None or selection == "auto"
+        ) and resolved.get("minimax_h3_video_vae_auto") is True:
+            quantization = str(
+                context.get("transformer_quantization") or ""
+            ).strip().lower()
+            filename = (
+                _VIDEO_VAE_INT8_CONVROT
+                if quantization == "int8"
+                else _VIDEO_VAE
+            )
+            variant = "full_int8" if quantization == "int8" else "full"
+            if not (
+                resolved.get("minimax_h3_video_vae_filename") == filename
+                and resolved.get("minimax_h3_video_vae_variant") == variant
+            ):
+                resolved = dict(resolved)
+                resolved["minimax_h3_video_vae_filename"] = filename
+                resolved["minimax_h3_video_vae_variant"] = variant
+
+        from models.minimax_h3.two_pass import parse_two_pass_toggle
+
+        enabled = parse_two_pass_toggle(context.get("minimax_h3_two_pass"))
+        if not enabled:
+            if (
+                "minimax_h3_latent_upscaler_enabled" in resolved
+                or "minimax_h3_latent_upscaler_filename" in resolved
+                or "minimax_h3_two_pass_enabled" in resolved
+            ):
+                resolved = dict(resolved)
+                resolved.pop("minimax_h3_latent_upscaler_enabled", None)
+                resolved.pop("minimax_h3_latent_upscaler_filename", None)
+                resolved.pop("minimax_h3_two_pass_enabled", None)
+            return resolved
+
+        forbidden = (
+            "minimax_h3_ptd_refasymopd",
+            "minimax_h3_fused_turbo",
+            "minimax_h3_fasth3",
+            "minimax_h3_vdn",
+            "vdn",
+            "minimax_h3_dasiwa",
+            "minimax_h3_baked_turbo",
+            "minimax_h3_singularity",
+            "minimax_h3_audio_only",
+        )
+        if resolved.get("minimax_h3_two_pass_compatible") is not True or any(
+            resolved.get(key) for key in forbidden
         ):
-            return model_def
-        resolved = dict(model_def)
-        resolved["minimax_h3_video_vae_filename"] = filename
-        resolved["minimax_h3_video_vae_variant"] = variant
+            raise ValueError(
+                "MiniMax H3 two-pass latent upscaling is available only for "
+                "compatible standard H3 models."
+            )
+        from models.minimax_h3.latent_upscaler import LATENT_UPSCALER_FILE
+
+        resolved = dict(resolved)
+        resolved["minimax_h3_two_pass_enabled"] = True
+        resolved["minimax_h3_latent_upscaler_enabled"] = True
+        resolved["minimax_h3_latent_upscaler_filename"] = LATENT_UPSCALER_FILE
         return resolved
 
     @staticmethod
@@ -2722,6 +2911,41 @@ class family_handler:
             if fused_turbo
             else []
         )
+        ptd_asset_downloads = []
+        if (model_def or {}).get("minimax_h3_ptd_refasymopd") is True:
+            from models.minimax_h3.ptd import (
+                PTD_FOLDER,
+                PTD_HEAD_FILE,
+                PTD_REPO,
+                PTD_REVISION,
+            )
+
+            ptd_asset_downloads.append(
+                {
+                    "repoId": PTD_REPO,
+                    "revision": PTD_REVISION,
+                    "sourceFolderList": ["loras/ptd_refasymopd"],
+                    "targetFolderList": [os.path.join(_ASSETS_ROOT, "ptd_refasymopd")],
+                    "fileList": [[PTD_HEAD_FILE]],
+                }
+            )
+        latent_upscaler_downloads = []
+        if (model_def or {}).get("minimax_h3_latent_upscaler_enabled") is True:
+            from models.minimax_h3.latent_upscaler import (
+                LATENT_UPSCALER_FILE,
+                LATENT_UPSCALER_REPO,
+                LATENT_UPSCALER_REVISION,
+            )
+
+            latent_upscaler_downloads.append(
+                {
+                    "repoId": LATENT_UPSCALER_REPO,
+                    "revision": LATENT_UPSCALER_REVISION,
+                    "sourceFolderList": [""],
+                    "targetFolderList": [_ASSETS_ROOT],
+                    "fileList": [[LATENT_UPSCALER_FILE]],
+                }
+            )
         dialogue_downloads = ([{"repoId": "DeepBeepMeep/Wan2.1", "sourceFolderList": ["whisper_medium"],
                                "fileList": [["config.json", "model.safetensors"]]}]
                               if base_model_type == _TTS_MODEL_TYPE else [])
@@ -2762,7 +2986,7 @@ class family_handler:
             from models.minimax_h3.viggle import REPO, REVISION, PROMPT_FILE
             return vae_downloads + [{"repoId": REPO, "revision": REVISION,
                 "sourceFolderList": ["viggle_animate"], "fileList": [[PROMPT_FILE]]}]
-        return vae_downloads + x2_vae_downloads + attribution_downloads + dialogue_downloads + [
+        return vae_downloads + x2_vae_downloads + attribution_downloads + ptd_asset_downloads + latent_upscaler_downloads + dialogue_downloads + [
             {
                 "repoId": _OFFICIAL_REPO,
                 "revision": _OFFICIAL_REVISION,
@@ -2789,13 +3013,21 @@ class family_handler:
         from .minimax_h3_main import MiniMaxH3Model
         from .video_vae import video_vae_offload_models
 
-        if (model_def or {}).get("minimax_h3_viggle"):
+        resolved_model_def = dict(model_def or {})
+        if resolved_model_def.get("minimax_h3_ptd_refasymopd") is True:
+            from models.minimax_h3.ptd import PTD_FOLDER, PTD_HEAD_FILE
+
+            resolved_model_def["minimax_h3_ptd_head_path"] = fl.locate_file(
+                os.path.join(PTD_FOLDER, PTD_HEAD_FILE)
+            )
+
+        if resolved_model_def.get("minimax_h3_viggle"):
             from services.managed_preprocessors import ensure_minimax_h3_lora_affine_maps
             ensure_minimax_h3_lora_affine_maps("viggle", widths=(8,))
 
         model = MiniMaxH3Model(
             model_filename=model_filename,
-            model_def=model_def or {},
+            model_def=resolved_model_def,
             text_encoder_filename=text_encoder_filename,
             dtype=dtype,
             minimax_h3_text_encoder=kwargs.get(
@@ -2810,6 +3042,8 @@ class family_handler:
             **video_vae_offload_models(model.vae),
             "audio_vae": model.audio_vae,
         }
+        if model.latent_upscaler is not None:
+            pipe["latent_upscaler"] = model.latent_upscaler
         if not model.viggle:
             # Profile the two Qwen towers independently. Text-only FL2VA
             # never needs the vision tower, while Ref2VA can release it
@@ -2826,6 +3060,11 @@ class family_handler:
             "pipe": pipe,
             "workingVRAM": {
                 "transformer": int((model_def or {}).get("minimax_h3_transformer_working_vram_gb", 10) * 1024),
+                **(
+                    {"latent_upscaler": 2048}
+                    if model.latent_upscaler is not None
+                    else {}
+                ),
             },
         }
 
@@ -2899,6 +3138,28 @@ class family_handler:
                                 "minimax_h3_turbo_mode": False, "minimax_h3_turbo_preset": ""})
             if (model_def or {}).get("minimax_h3_baked_turbo"):
                 ui_defaults.update({"override_attention": "", "skip_steps_cache_type": ""})
+        if (model_def or {}).get("minimax_h3_ptd_refasymopd") is True:
+            from models.minimax_h3.ptd import PTD_REFERENCE_DETAIL
+
+            ui_defaults.update(
+                {
+                    "num_inference_steps": 8,
+                    "video_length": _H3_MIN_FRAMES,
+                    "sliding_window_size": _H3_MIN_FRAMES,
+                    "resolution": "864x480",
+                    "guidance_scale": 1.0,
+                    "guidance_phases": 1,
+                    "flow_shift": 12.0,
+                    "audio_flow_shift": 3.0,
+                    "sample_solver": "euler",
+                    "minimax_h3_reference_detail": PTD_REFERENCE_DETAIL,
+                    "skip_steps_cache_type": "",
+                    "denoising_strength": 1.0,
+                    "masking_strength": 1.0,
+                    "minimax_h3_multi_window": False,
+                    "minimax_h3_reference_sequence": False,
+                }
+            )
 
     @staticmethod
     def fix_settings(base_model_type, settings_version, model_def, ui_defaults):
@@ -3136,6 +3397,110 @@ class family_handler:
             except ValueError as error:
                 return str(error)
         custom = inputs.get("custom_settings") or {}
+        try:
+            from models.minimax_h3.two_pass import (
+                H3_TWO_PASS_ENABLED,
+                normalize_two_pass_settings,
+                two_pass_unavailable_reason,
+            )
+
+            two_pass_settings = normalize_two_pass_settings(custom)
+        except (ValueError, TypeError) as error:
+            return str(error)
+
+        ptd_refasymopd = (
+            model_def.get(
+                "minimax_h3_ptd_refasymopd",
+                model_def.get("ptd", False),
+            )
+            is True
+        )
+        if ptd_refasymopd:
+            if two_pass_settings[H3_TWO_PASS_ENABLED] == "on":
+                return "PTD RefAsymOPD cannot use H3 Two-Pass."
+            try:
+                steps = int(inputs.get("num_inference_steps", 8))
+                guide_phases = int(inputs.get("guidance_phases", 1))
+                guidance_scale = float(inputs.get("guidance_scale", 1.0))
+                flow_shift = float(inputs.get("flow_shift", 12.0))
+                audio_flow_shift = float(inputs.get("audio_flow_shift", 3.0))
+                denoising_strength = float(
+                    inputs.get("denoising_strength", 1.0)
+                )
+            except (TypeError, ValueError):
+                return "PTD RefAsymOPD settings must use its fixed eight-step recipe."
+            if steps != 8:
+                return "PTD RefAsymOPD requires exactly eight denoising evaluations."
+            if str(inputs.get("sample_solver", "euler")).strip().lower() != "euler":
+                return "PTD RefAsymOPD requires the Euler sampler."
+            if guide_phases != 1:
+                return "PTD RefAsymOPD uses exactly one guidance phase."
+            if guidance_scale != 1.0:
+                return "PTD RefAsymOPD requires guidance scale 1.0 (CFG 1)."
+            if flow_shift != 12.0 or audio_flow_shift != 3.0:
+                return "PTD RefAsymOPD requires video/audio flow shifts 12/3."
+            if denoising_strength != 1.0:
+                return "PTD RefAsymOPD requires full denoising strength 1.0."
+            if inputs.get("skip_steps_cache_type") not in (None, ""):
+                return "PTD RefAsymOPD does not support skip-step caches."
+            if custom.get("audio_refinement", "none") == "enabled":
+                return "PTD RefAsymOPD does not support Audio Refinement."
+            if inputs.get("_face_refinement") or inputs.get("face_refinement"):
+                return "PTD RefAsymOPD does not support face refinement."
+            from models.minimax_h3.ptd import PTD_REFERENCE_DETAIL
+
+            inputs["minimax_h3_reference_detail"] = PTD_REFERENCE_DETAIL
+
+        if two_pass_settings[H3_TWO_PASS_ENABLED] == "on":
+            if model_def.get("minimax_h3_two_pass_compatible") is not True:
+                return "H3 Two-Pass is available only for compatible standard H3 recipes."
+            from .turbo import find_minimax_h3_pdd_loras
+
+            selected_loras = (
+                inputs.get("activated_loras")
+                or inputs.get("loras_selected")
+                or ()
+            )
+            pdd_active = bool(find_minimax_h3_pdd_loras(selected_loras))
+            video_prompt = str(inputs.get("video_prompt_type") or "")
+            control_video = "G" in video_prompt and "V" in video_prompt
+            reason = two_pass_unavailable_reason(
+                model_def,
+                pdd_active=pdd_active,
+                has_control_video=control_video,
+                has_source_video=(
+                    inputs.get("input_video") is not None
+                    or inputs.get("video_guide") is not None
+                ),
+                has_edit_mask=(
+                    inputs.get("video_mask") is not None
+                    or inputs.get("image_mask") is not None
+                    or inputs.get("input_masks") is not None
+                    or inputs.get("outpainting_dims") is not None
+                    or bool(
+                        str(inputs.get("video_guide_outpainting") or "").strip()
+                    )
+                ),
+                denoising_strength=float(
+                    inputs.get("denoising_strength", 1.0)
+                ),
+                audio_refinement=custom.get("audio_refinement") == "enabled",
+                face_refinement=bool(
+                    inputs.get("_face_refinement")
+                    or inputs.get("face_refinement")
+                ),
+                audio_only=bool(model_def.get("minimax_h3_audio_only")),
+            )
+            if reason:
+                return reason
+            sample_solver = str(
+                inputs.get(
+                    "sample_solver",
+                    model_def.get("minimax_h3_sampler", "euler"),
+                )
+            ).strip().lower()
+            if sample_solver != "euler":
+                return "H3 Two-Pass currently requires the Euler sampler."
         if custom.get("audio_refinement") == "enabled":
             if (model_def or {}).get("lock_inference_steps") or (model_def or {}).get("minimax_h3_fused_turbo"):
                 return "Audio refinement is unavailable for fixed-step PDD and fused Turbo variants"

@@ -11,9 +11,27 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'app'))
 from services.enhance_guides import get_enhance_guide
 from services.studio_enhancement import enhancement_request
+from services.h3_runtime_configuration import two_pass_load_context
 
 
 class PortIntegrationTests(unittest.TestCase):
+    def test_two_pass_assets_and_reload_follow_explicit_opt_in(self):
+        md = {'architecture': 'minimax_h3_ref2va', 'minimax_h3_two_pass_compatible': True}
+        self.assertEqual(two_pass_load_context(md, None), ({'minimax_h3_two_pass': False}, False))
+        loaded = SimpleNamespace(two_pass_enabled=False)
+        self.assertEqual(two_pass_load_context(md, {'h3_two_pass_enabled': 'on'}, loaded),
+                         ({'minimax_h3_two_pass': True}, True))
+        loaded.two_pass_enabled = True
+        self.assertEqual(two_pass_load_context(md, {'h3_two_pass_enabled': 'on'}, loaded),
+                         ({'minimax_h3_two_pass': True}, False))
+        self.assertEqual(two_pass_load_context(md, {}, loaded), ({'minimax_h3_two_pass': False}, True))
+        for invalid in ('false', '', 'enabled', 1, 0, [], {}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                two_pass_load_context(md, {'h3_two_pass_enabled': invalid}, loaded)
+        with self.assertRaises(ValueError):
+            two_pass_load_context({'architecture': 'minimax_h3', 'minimax_h3_two_pass_compatible': False},
+                                  {'h3_two_pass_enabled': 'on'})
+        self.assertEqual(two_pass_load_context({'architecture': 'moss_image'}, {'h3_two_pass_enabled': 'on'}), ({}, False))
 
     def test_fibo_prose_and_reference_guides_preserve_different_contracts(self):
         with patch.dict(sys.modules, {'wgp': SimpleNamespace(get_model_def=lambda _: {})}):
