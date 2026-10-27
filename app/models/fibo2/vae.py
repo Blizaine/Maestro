@@ -214,7 +214,9 @@ class FiboVAE(AutoencoderKLFlux2):
                 start_y = row * 16
                 stop_y = rows[row_index + 1] * 16 if row_index + 1 < len(rows) else output_height
                 count = stop_y - start_y
-                ready = result[..., :count].div_(weights[..., :count].clamp_min(torch.finfo(torch.float32).tiny))
+                ready = result[..., :count, :].div_(
+                    weights[..., :count, :].clamp_min(torch.finfo(torch.float32).tiny)
+                )
                 pixels[..., start_y:stop_y, :].copy_(ready.add_(1).mul_(127.5).clamp_(0, 255))
                 remaining = buffer_height - count
                 if remaining:
