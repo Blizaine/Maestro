@@ -132,7 +132,7 @@ def validate_generation_inputs(inputs, model_def=None, editing=None):
     inputs = dict(inputs or {})
     model_def = model_def or {}
     editing = bool(model_def.get("moss_edit", False) if editing is None else editing)
-    mode = inputs.get("image_mode", inputs.get("model_mode"))
+    mode = inputs.get("image_mode")
     if mode is not None and str(mode).strip() not in ("1", "1.0"):
         return "MOSS Image Edit supports image generation mode 1 only." if editing else (
             "MOSS Image supports text-to-image only; select the standard image generation mode."
@@ -425,7 +425,12 @@ class MOSSImagePipeline:
             "flow_shift": flow_shift,
             "guidance_scale": guide_scale,
             "video_prompt_type": video_prompt_type,
-            "image_mode": image_mode if model_mode is None else model_mode,
+            # WGP passes both values to every model family. `image_mode` is
+            # Studio's output mode; `model_mode` is a separate family-specific
+            # selector (for example, music instrumental mode). MOSS has no
+            # model_modes contract, so a stale generic value must not replace
+            # the strict image-mode validation below.
+            "image_mode": image_mode,
             "sample_solver": sample_solver,
             "input_ref_images": input_ref_images,
             "custom_settings": custom_settings if custom_settings is not None else kwargs.get("custom_settings"),

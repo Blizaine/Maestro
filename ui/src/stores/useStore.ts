@@ -8590,6 +8590,17 @@ export const useStore = create<AppState>((set, get) => ({
       && selectedModelDefinition?.architecture === 'moss_image'
       && selectedModelDefinition.supports_instruction_image_edit === true
     )
+    // model_mode belongs to families that explicitly declare model_modes.
+    // The generic params snapshot can retain it after a model switch (for
+    // example from a music workflow); MOSS's `image_mode` is a distinct
+    // output-mode selector, so omit that unrelated field from this submit.
+    if (
+      isMossImageEditGenerate
+      && state.modelOptions?.model_type === params.model_type
+      && !state.modelOptions.model_modes
+    ) {
+      delete params.model_mode
+    }
     const nativeOrderedImageReferences = isFlux3KleinImageGenerate || isMossImageEditGenerate
     const nativeImageModelLabel = isMossImageEditGenerate ? 'MOSS Image Edit' : 'FLUX 3 Klein'
     if (nativeOrderedImageReferences && state.modelOptions?.model_type !== params.model_type) {

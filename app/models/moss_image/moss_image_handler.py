@@ -226,7 +226,7 @@ class family_handler:
                 inputs.get("video_prompt_type"),
                 _reference_images_from_inputs(inputs),
                 editing=True,
-                image_mode=inputs.get("image_mode", inputs.get("model_mode")),
+                image_mode=inputs.get("image_mode"),
             )
 
         return validate_generation_inputs(inputs, model_def=model_def)

@@ -206,6 +206,65 @@ class MossEditRuntimeTests(unittest.TestCase):
             ),
         )
 
+    def test_generate_keeps_studio_image_mode_authoritative_over_stale_model_mode(self):
+        reference = Image.new("RGB", (16, 16), "white")
+        for stale_mode in (0, 2):
+            self.assertIsNone(validate_generation_inputs({
+                "model_mode": stale_mode, "image_refs": [reference], "video_prompt_type": "I",
+            }, editing=True), "An unrelated selector must not replace the default image mode")
+
+        # WGP's production generate_video call passes both generic selectors.
+        # MOSS must ignore model_mode, which may be left by a different family,
+        # while still requiring the actual Studio image_mode to be 1.
+        for stale_mode in (0, 2):
+            with self.subTest(stale_model_mode=stale_mode):
+                pipeline = _pipeline(
+                    editing=True,
+                    variant="sft",
+                    model_def={"moss_edit_reference_size": 16},
+                )
+
+                def stop_after_mode_validation(*_args, **_kwargs):
+                    raise RuntimeError("valid image mode reached generation callback")
+
+                with self.assertRaisesRegex(RuntimeError, "valid image mode reached"):
+                    pipeline.generate(
+                        input_prompt="replace the hands",
+                        n_prompt="",
+                        sampling_steps=2,
+                        width=16,
+                        height=16,
+                        guide_scale=1,
+                        input_ref_images=[reference],
+                        image_mode=1,
+                        model_mode=stale_mode,
+                        video_prompt_type="I",
+                        VAE_tile_size=False,
+                        callback=stop_after_mode_validation,
+                    )
+
+        for invalid_image_mode in (0, 2):
+            with self.subTest(invalid_image_mode=invalid_image_mode):
+                pipeline = _pipeline(
+                    editing=True,
+                    variant="sft",
+                    model_def={"moss_edit_reference_size": 16},
+                )
+                with self.assertRaisesRegex(ValueError, "supports image generation mode 1 only"):
+                    pipeline.generate(
+                        input_prompt="replace the hands",
+                        n_prompt="",
+                        sampling_steps=2,
+                        width=16,
+                        height=16,
+                        guide_scale=1,
+                        input_ref_images=[reference],
+                        image_mode=invalid_image_mode,
+                        model_mode=1,
+                        video_prompt_type="I",
+                        VAE_tile_size=False,
+                    )
+
     def test_managed_adapter_is_required_once_and_cannot_cross_variants(self):
         sft = _pipeline(editing=True, variant="sft")
         hq = _pipeline(editing=True, variant="hq_v5")

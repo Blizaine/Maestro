@@ -41,8 +41,8 @@ const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
       });
       await page.goto('http://moss-reference.test');
       await page.addScriptTag({content: bundle.outputFiles[0].text});
-      async function configure(modelType, missingChoices = false) {
-        await page.evaluate(({modelType, missingChoices}) => {
+      async function configure(modelType, missingChoices = false, staleModelMode = 2) {
+        await page.evaluate(({modelType, missingChoices, staleModelMode}) => {
           const moss = modelType.startsWith('moss_');
           const models = ['fibo2_edit_turbo', 'moss_image_edit', 'moss_image_edit_hq'].map(id => ({
             model_type: id, architecture: id.startsWith('moss_') ? 'moss_image' : id,
@@ -59,40 +59,47 @@ const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
             modelOptions: {model_type: modelType, architecture: moss ? 'moss_image' : modelType,
               image_outputs: true, max_image_refs: 4, no_background_removal: true,
               image_ref_choices: {choices: missingChoices ? [] : [['Ordered references', moss ? 'I' : 'KI']], default: moss ? 'I' : 'KI'}},
-            params: {...state.params, model_type: modelType, image_mode: 1, prompt: 'Replace the hands using reference 2.',
+            params: {...state.params, model_type: modelType, image_mode: 1, model_mode: staleModelMode, prompt: 'Replace the hands using reference 2.',
               resolution: '720x1280', num_inference_steps: moss ? 50 : 4,
               video_prompt_type: 'KI', image_refs: undefined, image_start: undefined, image_end: undefined,
               activated_loras: [], loras_multipliers: '', spatial_upsampling: '', temporal_upsampling: ''},
           }));
-        }, {modelType, missingChoices});
+        }, {modelType, missingChoices, staleModelMode});
       }
       await configure('fibo2_edit_turbo');
       await page.evaluate(() => window.store.getState().startGeneration());
       assert.equal(submissions.length, 1, 'Fibo control submits');
       assert.equal(submissions[0].video_prompt_type, 'KI', 'Keep native Fibo selector');
+      assert.equal(submissions[0].model_mode, 2, 'Do not change unrelated Fibo submit fields');
       for (const modelType of ['moss_image_edit', 'moss_image_edit_hq']) {
-        await configure(modelType);
-        const before = uploads.length;
-        await page.evaluate(() => window.store.getState().startGeneration());
-        const submitted = submissions.at(-1);
-        assert.equal(submitted.model_type, modelType);
-        assert.equal(submitted.video_prompt_type, 'I', 'Drop the previous model’s stale K flag');
-        assert.deepEqual(submitted.image_refs, uploads.slice(before), 'Preserve all references in upload order');
-        assert.equal(submitted.image_refs.length, 2);
-        assert.equal(submitted.image_mode, 1);
-        assert.equal(submitted.resolution, '720x1280');
+        for (const staleModelMode of [0, 2]) {
+          await configure(modelType, false, staleModelMode);
+          const before = uploads.length;
+          await page.evaluate(() => window.store.getState().startGeneration());
+          const submitted = submissions.at(-1);
+          assert.equal(submitted.model_type, modelType);
+          assert.equal(submitted.video_prompt_type, 'I', 'Drop the previous model’s stale K flag');
+          assert.deepEqual(submitted.image_refs, uploads.slice(before), 'Preserve all references in upload order');
+          assert.equal(submitted.image_refs.length, 2);
+          assert.equal(submitted.image_mode, 1);
+          assert.equal(submitted.resolution, '720x1280');
+          assert.equal(Object.hasOwn(submitted, 'model_mode'), false, 'Do not submit another family\'s model selector');
+          assert.equal(await page.evaluate(() => window.store.getState().params.model_mode), staleModelMode,
+            'Request cleanup must not overwrite the persisted model preferences');
+        }
       }
-      assert.equal(submissions.length, 3);
+      assert.equal(submissions.length, 5);
       await configure('moss_image_edit', true);
       await page.evaluate(() => window.store.getState().startGeneration());
-      assert.equal(submissions.length, 3, 'Do not submit with missing native reference capabilities');
+      assert.equal(submissions.length, 5, 'Do not submit with missing native reference capabilities');
       assert.match(await page.evaluate(() => window.store.getState().promptEnhanceError), /MOSS Image Edit reference settings/);
       await configure('fibo2_edit_turbo');
       await page.evaluate(() => window.store.getState().startGeneration());
       assert.equal(submissions.at(-1).video_prompt_type, 'KI', 'Switching back preserves Fibo behavior');
+      assert.equal(submissions.at(-1).model_mode, 2, 'Switching back preserves Fibo selector fields');
       assert.equal(errors.length, 0, errors.join('\n'));
       await context.close();
     }
-    console.log('Desktop/phone Fibo→MOSS SFT/HQ→Fibo submissions, ordered refs and capability guard passed.');
+    console.log('Desktop/phone Fibo→MOSS SFT/HQ→Fibo submissions, stale model modes, ordered refs and capability guard passed.');
   } finally {await browser.close();}
 })().catch(error => {console.error(error); process.exitCode = 1;});
