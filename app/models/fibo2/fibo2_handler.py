@@ -83,6 +83,7 @@ class family_handler:
         if turbo:
             result.update({
                 "accelerated": "native",
+                "image_reference_required_for_generate": True,
                 "capability_overrides": {"text_to_image": False},
                 "profiles_dir": ["fibo2_edit_turbo"], "guidance_max_phases": 0, "no_negative_prompt": True,
                 "infos": TURBO_INFOS, "prompt_infos": TURBO_PROMPT_INFOS,

@@ -737,6 +737,7 @@ def _requires_image_reference(model_def: dict) -> bool:
     return bool(
         model_def.get("one_image_ref_needed", False)
         or model_def.get("at_least_one_image_ref_needed", False)
+        or model_def.get("image_reference_required_for_generate", False)
     )
 
 

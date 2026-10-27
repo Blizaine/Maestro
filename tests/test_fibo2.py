@@ -152,6 +152,7 @@ def test_turbo_masked_control_image_path_does_not_require_reference_images():
     model_def = family_handler.query_model_def("fibo2_edit_turbo", {})
     inputs = {"image_mode": 2, "image_refs": [], "video_prompt_type": "VA", "guidance_scale": 1.0}
     assert model_def["at_least_one_image_ref_needed"] is False
+    assert model_def["image_reference_required_for_generate"] is True
     assert family_handler.validate_generative_settings("fibo2_edit_turbo", model_def, inputs) is None
 
     # WGP supplies its inpaint Control Image as input_frames shaped CxTxHxW.
