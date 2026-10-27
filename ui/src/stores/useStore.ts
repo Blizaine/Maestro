@@ -8596,7 +8596,8 @@ export const useStore = create<AppState>((set, get) => ({
     // output-mode selector, so omit that unrelated field from this submit.
     if (
       isMossImageEditGenerate
-      && state.modelOptions?.model_type === params.model_type
+      && state.modelOptions != null
+      && state.modelOptions.model_type === params.model_type
       && !state.modelOptions.model_modes
     ) {
       delete params.model_mode
