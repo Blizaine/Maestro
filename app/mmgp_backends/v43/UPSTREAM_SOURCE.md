@@ -38,6 +38,10 @@ contracts have explicit parity coverage.
 Maestro additionally stages its own Windows x64 VMM build from the pinned C++
 source. `mmgp/allocator/VMM_BUILD.json` records the source, compiler, linker,
 flags, artifact hash and static export check. It is isolated from the legacy
-allocator; it is never activated by default. Linux and the optional RAM/OOM
-companion binaries are not supplied by this build. GPU validation is separate
-from this static build provenance.
+allocator; it is never activated by default. A subsequent local build supplies
+the optional Windows x64 OOM companion from the exact pinned `oom_error.cpp`.
+`mmgp/allocator/OOM_BUILD.json` records its source, binary and compiler hashes
+and CPU cross-DLL exception checks on installed PyTorch 2.7.1 and 2.10.0.
+Those checks do not allocate CUDA memory or certify GPU OOM recovery. Linux
+and optional RAM companion binaries remain unbundled. GPU validation is
+separate from this build provenance.

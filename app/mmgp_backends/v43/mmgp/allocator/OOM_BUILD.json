@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "upstream_commit": "9905f0df941e5ec7b0c80e32555d3a61fe415726",
+  "source_file": "oom_error.cpp",
+  "source_sha256": "01f7393f1a3621c9e4a332cf0bc1b02abf465eee1cc2ccca4b882d367fbd2653",
+  "artifact": "oom_error_win_amd64.dll",
+  "artifact_bytes": 13824,
+  "artifact_sha256": "2cd1d0e6ac9573f2ff177cfc12969fec1605cd1f7d6263791bf52da634cb3027",
+  "platform": "Windows x64",
+  "torch_headers": "2.10.0+cu130",
+  "exception_header_sha256": "70539ba9b7186ed00748dd85ceeeec8801c888d466a2493b66ed689d0ac157e5",
+  "compiler_sha256": "9be78a6fd4b862d3cf202ee3d8fe30869045c2f650fbe53af5f0678f56750451",
+  "compiler": "MSVC 19.39.33521.0",
+  "compile_flags": [
+    "/O2",
+    "/EHs",
+    "/LD",
+    "/MD",
+    "/std:c++17"
+  ],
+  "link_flags": [
+    "c10.lib",
+    "/NODEFAULTLIB:LIBCMT"
+  ],
+  "export": "mmgp_throw_out_of_memory",
+  "upstream_declared_exception_abi_range": "PyTorch 2.6 through 2.15",
+  "validation_note": "Native library loading and cross-DLL c10::OutOfMemoryError type/message passed on installed PyTorch 2.7.1 and 2.10.0 with CUDA uninitialized. This is not a real GPU OOM/recovery certification.",
+  "cpu_exception_checks": [
+    {
+      "torch": "2.7.1+cu128",
+      "python": "3.10.20",
+      "companion_load": true,
+      "cross_dll_c10_out_of_memory_type_and_message": true,
+      "cuda_initialized": false,
+      "scope": "No GPU allocation; this checks the native exception ABI, not a real GPU OOM recovery."
+    },
+    {
+      "torch": "2.10.0+cu130",
+      "python": "3.11.13",
+      "companion_load": true,
+      "cross_dll_c10_out_of_memory_type_and_message": true,
+      "cuda_initialized": false,
+      "scope": "No GPU allocation; this checks the native exception ABI, not a real GPU OOM recovery."
+    }
+  ]
+}

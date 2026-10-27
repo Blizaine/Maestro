@@ -93,7 +93,13 @@ on the legacy backend.
 The package omits upstream prebuilt allocator binaries. Its Windows x64
 candidate includes a local VMM build from the exact pinned C++ source;
 `app/mmgp_backends/v43/mmgp/allocator/VMM_BUILD.json` records the build and
-artifact hashes. Other platforms need their matching build before this option
+artifact hashes. It also includes the optional Windows x64 OOM companion,
+built from the same pinned upstream source with PyTorch 2.10 headers.
+`OOM_BUILD.json` records its source and binary hashes, compiler, dependencies,
+and CPU exception checks with installed PyTorch 2.7.1 and 2.10.0. This restores
+the upstream native OOM exception type and avoids a missing-companion warning
+that Pinokio otherwise mistakes for a startup error. Those CPU checks do not
+certify recovery from an actual GPU OOM. Other platforms need their matching build before this option
 becomes available. File presence alone does not establish ABI or GPU behavior;
 no allocator is loaded by the settings API.
 `require_profile_runtime()` fails closed until the matching VMM allocator is
