@@ -38,5 +38,18 @@ the VAE file. See the [Fibo Dev model card](https://huggingface.co/briaai/Fibo-2
 the [Fibo Edit Turbo model card](https://huggingface.co/briaai/Fibo-2.0-edit-turbo),
 and [model licensing](https://platform.bria.ai/licensing/pricing?model=fibo-2).
 
-This port has not been run on a GPU in this integration task. No quality or
-speed claims are made here.
+## Functional GPU checks — 27 October 2026
+
+Bounded checks ran on an RTX 4090 (24GB), RTX 3080 Ti (12GB), and RTX 5070
+Laptop (8GB). Structured text-to-image, two-reference composition, and Turbo
+single-image editing completed on all three machines. The original three
+masked-edit attempts failed input validation; after correcting image-mode
+routing, one affected masked edit per machine completed as well. All twelve
+successful images passed CPU decoding and visual review.
+
+The requested HELLO lettering was readable, the two-reference composition
+retained the robot antenna and cup handle, and corrected masked edits added
+the ball in the selected area. These are small functional fixtures, not proof
+of general editing quality, unchanged unmasked pixels, or matched performance
+against another model or GPU. Existing host memory policies differed and
+original preferences were preserved. Failed attempts remain in the evidence.

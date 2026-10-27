@@ -59,17 +59,22 @@ request-local reference K/V caching. Base/SFT text-to-image and their layout
 helper stay separate. The adapters and companion VAE have been checked against
 the actual released file headers. See [MOSS editing and cache controls](MOSS-Image.md#reference-editing).
 
-This follow-up has passed 248 targeted CPU regressions and the UI build, and has
-not been published with the FlashVSR repairs. GPU editing quality, cache activation, memory use and speed on
-the three workstation configurations remain to be measured. An available cache
-option must not be reported as a demonstrated speedup.
+This follow-up passed 248 targeted CPU regressions and the UI build. Its later
+18-case GPU pilot completed on 24GB, 12GB and 8GB machines. Caches activated
+on the two larger GPUs; the 8GB machine safely completed uncached. Composition
+artifacts remain, and no matched speedup is claimed. See the dated GPU findings
+in the MOSS guide. The editing follow-up remains separate from the already
+published FlashVSR repairs.
 
 ## Next batches
 
-The saved review still covers Fibo 2.0, H3 PTD,
-two-pass refinement, Profile 0, Worlds and a media assistant. Those are separate
-runtime/product integrations. MOSS caching depends on its editing integration;
-the Qwen cache controls do not add references to text-only MOSS models.
+Local candidates now also contain Fibo 2.0, H3 PTD, two-pass refinement,
+experimental Profile 0 and a dedicated Worlds workflow. Fibo's text, ordered
+references and corrected masked-edit fixtures have passed on all three GPUs;
+see [Fibo 2.0](Fibo-2.md). Runtime availability and CPU checks for the other
+candidates are distinct from their pending GPU acceptance checks. A media
+assistant remains a separate product integration rather than a model preset.
+The Qwen cache controls do not add references to text-only MOSS models.
 
 Before enabling new defaults or claiming a speedup, use matched GPU tests with
 the same inputs, settings, cache state and verified output. In particular,

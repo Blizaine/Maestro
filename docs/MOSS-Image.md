@@ -272,3 +272,19 @@ were run in this implementation pass. Visual editing, full-precision/INT8 cache
 comparisons, memory use and actual speed on 24GB, 12GB and 8GB machines remain
 pending. The earlier text-to-image GPU results above do not validate the new
 reference editors.
+
+## Reference-editing GPU follow-up — 27 October 2026
+
+Eighteen bounded SFT/HQ editing and cache cases completed on RTX 4090 24GB,
+RTX 3080 Ti 12GB, and RTX 5070 Laptop 8GB systems. The actual 512×512 outputs
+were fully decoded on CPU and every contact sheet was reviewed. Original
+preferences were preserved.
+
+HQ's 16-bit, INT8-VRAM, and INT8-RAM caches activated on the 24GB and 12GB
+machines. On 8GB all three requested cache modes safely declined the memory
+budget and completed uncached. That is a functioning fallback, not an 8GB
+cache acceleration result. Single-reference edits retained the robot while
+changing the wall color. Two-reference composition added the cup but changed
+its handle and the robot's antenna, with some cup shapes leaking into the
+face. These fixtures do not establish general quality or a matched speedup;
+the machines retained their different saved memory policies.

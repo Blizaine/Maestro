@@ -193,13 +193,16 @@ class HYNomasTransformer(nn.Module):
     # base: streamed as blocks of their own, each one interrupted the transfers ahead of the double blocks (profiles that stream)
     _offload_base_modules = ("action_modules", "extrinsics_embedding_camctrl", "c2ws_hidden_states_layer1", "c2ws_hidden_states_layer2")
 
-    def __init__(self):
+    def __init__(self, camera_attention_config=None):
         super().__init__()
         self.img_in = NomasPatchEmbed()
         self.txt_in = SingleTokenRefiner(TEXT_DIM, HIDDEN, HEADS, depth=2)
         self.time_in = TimestepEmbedder(HIDDEN, get_activation_layer("silu"))
         self.double_blocks = nn.ModuleList(NomasDoubleBlock() for _ in range(DEPTH))
-        self.final_layer = NomasFinalLayer()
+        # The release preset is intentionally limited to singleton per-frame
+        # camera attention. NomasFinalLayer validates that pinned grouping;
+        # forward the model definition here instead of silently defaulting.
+        self.final_layer = NomasFinalLayer(camera_attention_config=camera_attention_config)
         self.action_modules = nn.ModuleList(NomasCameraModule() for _ in range(DEPTH))
         self.extrinsics_embedding_camctrl = nn.Linear(CAMERA_DIM, CAMERA_DIM)
         self.c2ws_hidden_states_layer1 = nn.Linear(CAMERA_DIM, CAMERA_DIM)

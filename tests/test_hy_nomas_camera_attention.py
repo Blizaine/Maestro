@@ -13,6 +13,7 @@ if _APP not in sys.path:
 
 from models.hy_nomas.attention import attend_projected, broadcast_singleton_values
 from models.hy_nomas.camera import PINNED_CAMERA_ATTENTION, validate_camera_attention_config
+from models.hy_nomas import transformer as transformer_module
 from models.hy_nomas.transformer import NomasCameraModule
 
 
@@ -80,6 +81,36 @@ def test_only_pinned_singleton_camera_attention_configuration_is_accepted():
     ):
         with pytest.raises(ValueError, match="multi-key camera attention is not implemented"):
             validate_camera_attention_config(unsupported)
+
+
+def test_transformer_accepts_and_forwards_camera_config_to_real_validator(monkeypatch):
+    """Exercise the real transformer constructor without allocating DiT weights."""
+    forwarded = []
+    real_final_layer = transformer_module.NomasFinalLayer
+
+    def final_layer_spy(camera_attention_config=None):
+        forwarded.append(camera_attention_config)
+        return real_final_layer(camera_attention_config=camera_attention_config)
+
+    monkeypatch.setattr(transformer_module, "NomasPatchEmbed", lambda: nn.Identity())
+    monkeypatch.setattr(transformer_module, "SingleTokenRefiner", lambda *args, **kwargs: nn.Identity())
+    monkeypatch.setattr(transformer_module, "TimestepEmbedder", lambda *args, **kwargs: nn.Identity())
+    monkeypatch.setattr(transformer_module, "NomasDoubleBlock", lambda: nn.Identity())
+    monkeypatch.setattr(transformer_module, "NomasCameraModule", lambda: nn.Identity())
+    monkeypatch.setattr(transformer_module, "NomasFinalLayer", final_layer_spy)
+    monkeypatch.setattr(transformer_module, "DEPTH", 1)
+
+    config = dict(PINNED_CAMERA_ATTENTION)
+    # Every remaining nn.Parameter, including the real final layer's, is a
+    # meta tensor: constructor wiring is exercised without a multi-gigabyte
+    # model allocation or a CUDA dependency.
+    with torch.device("meta"):
+        model = transformer_module.HYNomasTransformer(camera_attention_config=config)
+
+    assert forwarded == [config]
+    assert validate_camera_attention_config(forwarded[0]) == PINNED_CAMERA_ATTENTION
+    assert list(model.parameters())
+    assert all(parameter.device.type == "meta" for parameter in model.parameters())
 
 
 def test_camera_checkpoint_audit_expands_all_162_conditional_extras():
