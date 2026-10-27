@@ -1,6 +1,6 @@
 {
   "model": {
-    "name": "H3 Omni \u00e2\u20ac\u201d Pruned PTD RefAsymOPD 8-Step",
+    "name": "H3 Omni - Pruned PTD RefAsymOPD 8-Step",
     "architecture": "minimax_h3_ref2va",
     "description": "Pruned MiniMax H3 Ref2VA with the dedicated eight-hop PTD RefAsymOPD adapters and pinned PDD heads. Uses eight Euler evaluations, CFG 1, shifts 12/3, one phase, and the fixed 768px-short-edge reference recipe.",
     "minimax_h3_ptd_refasymopd": true,

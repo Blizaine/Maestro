@@ -19,3 +19,10 @@ def test_ptd_bundled_urls_have_no_unsupported_upstream_folder_suffix():
             filename = url.split('/')[-1]
             assert '|' not in filename and not parsed.query
             assert filename == f'minimax_h3_ref2va_ptd_refasymopd_8step_hop{hop:02d}_bf16.safetensors'
+
+
+def test_ptd_catalog_names_are_readable():
+    for name in ("minimax_h3_ref2va_pruned_ptd_refasymopd", "minimax_h3_ref2va_ptd_refasymopd"):
+        data = json.loads((ROOT / "app/defaults" / (name + ".json")).read_text())
+        assert data["model"]["name"].isascii()
+        assert "PTD RefAsymOPD 8-Step" in data["model"]["name"]
