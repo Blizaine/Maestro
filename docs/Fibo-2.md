@@ -6,8 +6,10 @@ editing. Dev defaults to 50 steps and CFG 5. Edit Turbo defaults to four steps
 and CFG 1; it requires a source image and does not offer text-only generation.
 
 Both variants accept up to four ordered reference images. A mask selects one
-control image; white mask pixels preserve the source and black pixels are
-replaced with the model's neutral gray conditioning value. Output dimensions
+control image. White mask pixels mark the area to replace and become the
+model's neutral gray conditioning value; black pixels preserve the source in
+the conditioning image. The model generates the whole output, so pixels
+outside the mask are not guaranteed to remain identical. Output dimensions
 must be multiples of 16. References are passed to the Qwen3-VL encoder in the
 same order used to construct the edit prompt. Structured captions support
 scene fields and `text_render` entries; each requested string is rendered as a
@@ -21,7 +23,7 @@ adapters for tensor operations, attention masks, runtime placement, and VAE
 packing/tiling. The runtime requires the transformer, Qwen3-VL-4B encoder,
 tokenizer and processor metadata, FLUX.2 VAE, and text-rendering fonts. The
 asset definitions pin the compatible DeepBeepMeep/Fibo2 mirror to revision
-`72bf0a8`; original Bria checkpoint revisions are recorded in
+`72bf0a84dd97688a4e9427a8c872114b1162c4b8`; original Bria checkpoint revisions are recorded in
 [`NOTICE.txt`](../app/models/fibo2/NOTICE.txt).
 
 ## Model terms

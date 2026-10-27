@@ -5,13 +5,14 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn.functional as F
+from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app"))
 
 from models.fibo2.attention import attend_projected
-from models.fibo2.pipeline import _pil_image, pack, unpack, validate_generation_inputs
+from models.fibo2.pipeline import _pil_image, apply_edit_mask, pack, unpack, validate_generation_inputs
 from models.fibo2.transformer import BriaFibo2Attention
 
 
@@ -159,6 +160,19 @@ def test_turbo_masked_control_image_path_does_not_require_reference_images():
     converted = _pil_image(source)
     assert converted.size == (16, 16)
     assert converted.getpixel((0, 0)) == (255, 127, 127)
+
+
+def test_fibo_edit_mask_white_replaces_black_preserves_and_resize_is_nearest():
+    source = Image.new("RGB", (4, 1))
+    source.putdata([(10, 20, 30), (40, 50, 60), (70, 80, 90), (100, 110, 120)])
+    mask = Image.new("L", (2, 1))
+    mask.putdata([0, 255])
+
+    result = apply_edit_mask(source, mask)
+
+    assert list(result.getdata()) == [
+        (10, 20, 30), (40, 50, 60), (128, 128, 128), (128, 128, 128),
+    ]
 
 
 def test_fibo_accepts_wgp_raw_and_structured_prompt_forms():

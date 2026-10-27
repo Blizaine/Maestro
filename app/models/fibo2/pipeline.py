@@ -147,6 +147,17 @@ def _pil_image(image):
     return Image.fromarray(np.asarray(image))
 
 
+def apply_edit_mask(source, mask):
+    """Neutralize white-marked edit pixels and preserve black-marked source pixels."""
+    source = _pil_image(source).convert("RGB")
+    mask = _pil_image(mask).convert("L")
+    if mask.size != source.size:
+        mask = mask.resize(source.size, Image.Resampling.NEAREST)
+    binary = mask.point(lambda value: 255 if value >= 128 else 0)
+    neutral = Image.new("RGB", source.size, (128, 128, 128))
+    return Image.composite(neutral, source, binary)
+
+
 def _positive_integer(label, value):
     if isinstance(value, bool):
         raise ValueError(f"Fibo 2.0 {label} must be a positive integer.")
@@ -261,10 +272,7 @@ class FiboPipeline:
         if self.edit_only:
             guide_scale = 1.0
         if input_masks is not None:
-            if input_masks.size != references[0].size:
-                input_masks = input_masks.resize(references[0].size, Image.Resampling.NEAREST)
-            binary = input_masks.point(lambda value: 255 if value >= 128 else 0)
-            references[0] = Image.composite(Image.new("RGB", references[0].size, (128, 128, 128)), references[0], binary)
+            references[0] = apply_edit_mask(references[0], input_masks)
         caption, _ = Caption._parse_prompt(text)
         text_images = []
         if isinstance(caption, dict):
