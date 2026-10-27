@@ -60,6 +60,23 @@ def validate_reference_images(images, *, editing):
     return None
 
 
+def canonicalize_edit_reference_selector(video_prompt_type, images, *, editing, image_mode):
+    """Map the legacy Fibo ``KI`` selector only for a valid MOSS edit request.
+
+    ``K`` selects canvas fitting in some other image editors. MOSS uses the
+    selected canvas directly, so only its reference-mode ``I`` remains
+    meaningful. Requiring valid ordered PIL references here keeps malformed,
+    incomplete, and non-edit requests on the ordinary validation path.
+    """
+    if not editing or str(image_mode).strip() not in ("1", "1.0"):
+        return video_prompt_type
+    if str(video_prompt_type or "").strip() != "KI":
+        return video_prompt_type
+    if validate_reference_images(images, editing=True) is not None:
+        return video_prompt_type
+    return "I"
+
+
 def fit_reference_image(image, max_side=DEFAULT_REFERENCE_SIZE):
     """Resize an RGB PIL image proportionally to a multiple-of-16 canvas.
 

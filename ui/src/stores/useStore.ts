@@ -8584,17 +8584,25 @@ export const useStore = create<AppState>((set, get) => ({
       && state.generationMode === 'image'
       && state.studioImageWorkflow === 'generate'
     )
-    if (isFlux3KleinImageGenerate && state.modelOptions?.model_type !== params.model_type) {
-      set({ promptEnhanceError: 'FLUX 3 Klein settings are still loading. Try Generate again.' })
+    const isMossImageEditGenerate = (
+      state.generationMode === 'image'
+      && state.studioImageWorkflow === 'generate'
+      && selectedModelDefinition?.architecture === 'moss_image'
+      && selectedModelDefinition.supports_instruction_image_edit === true
+    )
+    const nativeOrderedImageReferences = isFlux3KleinImageGenerate || isMossImageEditGenerate
+    const nativeImageModelLabel = isMossImageEditGenerate ? 'MOSS Image Edit' : 'FLUX 3 Klein'
+    if (nativeOrderedImageReferences && state.modelOptions?.model_type !== params.model_type) {
+      set({ promptEnhanceError: `${nativeImageModelLabel} settings are still loading. Try Generate again.` })
       return
     }
-    const flux3SupportsImageReferences = imageReferenceChoices.some(([, value]) => value === 'I')
-    if (isFlux3KleinImageGenerate && state.imageRefs.length > 0 && !flux3SupportsImageReferences) {
-      set({ promptEnhanceError: 'FLUX 3 Klein reference settings are still loading. Try Generate again.' })
+    const supportsNativeImageReferences = imageReferenceChoices.some(([, value]) => value === 'I')
+    if (nativeOrderedImageReferences && state.imageRefs.length > 0 && !supportsNativeImageReferences) {
+      set({ promptEnhanceError: `${nativeImageModelLabel} reference settings are still loading. Try Generate again.` })
       return
     }
-    const effectiveImageRefType = isFlux3KleinImageGenerate
-      ? (flux3SupportsImageReferences ? (state.imageRefType === 'KI' ? 'KI' : 'I') : '')
+    const effectiveImageRefType = nativeOrderedImageReferences
+      ? (supportsNativeImageReferences ? (state.imageRefType === 'KI' ? 'KI' : 'I') : '')
       : state.imageRefType || (
           imageReferenceChoices.some(([, value]) => value.includes('K'))
             ? 'KI'
@@ -8661,14 +8669,14 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
 
-    if (isFlux3KleinImageGenerate) {
+    if (nativeOrderedImageReferences) {
       const referencePaths = Array.isArray(params.image_refs)
         ? (params.image_refs as unknown[]).filter(
             (path): path is string => typeof path === 'string' && path.trim().length > 0,
           )
         : []
-      if (referencePaths.length > 0 && !flux3SupportsImageReferences) {
-        set({ promptEnhanceError: 'FLUX 3 Klein reference settings are still loading. Try Generate again.' })
+      if (referencePaths.length > 0 && !supportsNativeImageReferences) {
+        set({ promptEnhanceError: `${nativeImageModelLabel} reference settings are still loading. Try Generate again.` })
         return
       }
       if (referencePaths.length > 0) {

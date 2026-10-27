@@ -190,7 +190,17 @@ class family_handler:
 
     @staticmethod
     def validate_generative_settings(base_model_type, model_def, inputs):
-        from .pipeline import validate_generation_inputs
+        from .edit_runtime import canonicalize_edit_reference_selector
+        from .pipeline import _reference_images_from_inputs, validate_generation_inputs
+
+        model_def = model_def or {}
+        if isinstance(inputs, dict) and model_def.get("moss_edit", False):
+            inputs["video_prompt_type"] = canonicalize_edit_reference_selector(
+                inputs.get("video_prompt_type"),
+                _reference_images_from_inputs(inputs),
+                editing=True,
+                image_mode=inputs.get("image_mode", inputs.get("model_mode")),
+            )
 
         return validate_generation_inputs(inputs, model_def=model_def)
 
