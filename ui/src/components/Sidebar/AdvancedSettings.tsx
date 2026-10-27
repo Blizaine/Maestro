@@ -656,11 +656,15 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
               {showReferenceDetail && modelOptions && <label className="block space-y-1.5 text-xs text-text-secondary">
                 <span>Reference detail</span>
                 <select aria-label="Reference detail" value={params.minimax_h3_reference_detail ?? modelOptions.omni_reference_detail_default ?? 'match'}
-                  onChange={event => setParam('minimax_h3_reference_detail', event.target.value as 'match' | 'max')}
+                  onChange={event => setParam('minimax_h3_reference_detail', event.target.value as 'match' | 'max' | 'ptd768')}
                   className="w-full rounded-lg border border-border bg-bg-tertiary px-2 py-2 text-xs">
                   {(modelOptions.omni_reference_detail_choices ?? [['Match output (faster)', 'match'], ['High detail (official PDD recipe)', 'max']]).map(([label, value]) => <option key={value} value={value}>{label}</option>)}
                 </select>
-                <span className="block text-[10px] text-text-muted">Match output avoids reference upscaling. High detail uses the official 2048px short-edge preparation and can require more memory and time.</span>
+                <span className="block text-[10px] text-text-muted">
+                  {(params.minimax_h3_reference_detail ?? modelOptions.omni_reference_detail_default) === 'ptd768'
+                    ? 'PTD RefAsymOPD fixes reference preparation to a 768px short edge as part of its eight-hop recipe.'
+                    : 'Match output avoids reference upscaling. High detail uses the official 2048px short-edge preparation and can require more memory and time.'}
+                </span>
               </label>}
 
               {/* The Qwen conditioner is shared by every H3 transformer.

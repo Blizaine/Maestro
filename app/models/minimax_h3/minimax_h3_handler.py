@@ -3075,10 +3075,6 @@ class family_handler:
             normalize_settings(ui_defaults, validate_media=False)
             ui_defaults.setdefault("resolution", "auto480p")
             return
-        omni_reference = base_model_type in {
-            _REF2VA_MODEL_TYPE,
-            _REF2VA_FULL_MODEL_TYPE,
-        }
         fused_turbo = bool(
             (model_def or {}).get("minimax_h3_fused_turbo", False)
         )
@@ -3400,7 +3396,9 @@ class family_handler:
         try:
             from models.minimax_h3.two_pass import (
                 H3_TWO_PASS_ENABLED,
+                has_h3_edit_mask_or_outpainting,
                 normalize_two_pass_settings,
+                resolve_h3_sample_solver,
                 two_pass_unavailable_reason,
             )
 
@@ -3431,8 +3429,14 @@ class family_handler:
                 return "PTD RefAsymOPD settings must use its fixed eight-step recipe."
             if steps != 8:
                 return "PTD RefAsymOPD requires exactly eight denoising evaluations."
-            if str(inputs.get("sample_solver", "euler")).strip().lower() != "euler":
-                return "PTD RefAsymOPD requires the Euler sampler."
+            sample_solver = resolve_h3_sample_solver(
+                inputs.get("sample_solver"), model_def
+            )
+            if sample_solver != "euler":
+                return (
+                    "PTD RefAsymOPD requires the Euler sampler; the effective "
+                    f"sampler is '{sample_solver}'. Choose Euler."
+                )
             if guide_phases != 1:
                 return "PTD RefAsymOPD uses exactly one guidance phase."
             if guidance_scale != 1.0:
@@ -3472,15 +3476,7 @@ class family_handler:
                     inputs.get("input_video") is not None
                     or inputs.get("video_guide") is not None
                 ),
-                has_edit_mask=(
-                    inputs.get("video_mask") is not None
-                    or inputs.get("image_mask") is not None
-                    or inputs.get("input_masks") is not None
-                    or inputs.get("outpainting_dims") is not None
-                    or bool(
-                        str(inputs.get("video_guide_outpainting") or "").strip()
-                    )
-                ),
+                has_edit_mask=has_h3_edit_mask_or_outpainting(inputs),
                 denoising_strength=float(
                     inputs.get("denoising_strength", 1.0)
                 ),
@@ -3493,14 +3489,14 @@ class family_handler:
             )
             if reason:
                 return reason
-            sample_solver = str(
-                inputs.get(
-                    "sample_solver",
-                    model_def.get("minimax_h3_sampler", "euler"),
-                )
-            ).strip().lower()
+            sample_solver = resolve_h3_sample_solver(
+                inputs.get("sample_solver"), model_def
+            )
             if sample_solver != "euler":
-                return "H3 Two-Pass currently requires the Euler sampler."
+                return (
+                    "H3 Two-Pass requires the Euler sampler; the effective "
+                    f"sampler is '{sample_solver}'. Choose an Euler H3 recipe."
+                )
         if custom.get("audio_refinement") == "enabled":
             if (model_def or {}).get("lock_inference_steps") or (model_def or {}).get("minimax_h3_fused_turbo"):
                 return "Audio refinement is unavailable for fixed-step PDD and fused Turbo variants"

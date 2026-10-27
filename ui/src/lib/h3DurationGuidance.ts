@@ -21,6 +21,7 @@ const H3_CANVAS_MULTIPLE = 32
 const H3_OUTPUT_MAX_PIXELS = 768 * 1344
 const H3_MAX_REFERENCE_IMAGE_SHORT_EDGE = 2048
 const H3_MAX_REFERENCE_ASPECT_RATIO = 4
+const H3_PTD_REFERENCE_MAX_PIXELS = 768 * 768 * H3_MAX_REFERENCE_ASPECT_RATIO
 const H3_MAX_NATIVE_FRAMES = 345
 const H3_MAX_EXTENDED_FRAMES = 719
 const H3_DEFAULT_ACTIVATION_CHUNK_TOKENS = 8192
@@ -57,7 +58,7 @@ export type H3DurationGuidanceInput = {
   totalVramGb: number
   totalRamGb?: number
   references?: MiniMaxH3Reference[]
-  referenceDetail?: 'match' | 'max'
+  referenceDetail?: 'match' | 'max' | 'ptd768'
   /** Already-conditioned history frames, excluding the regenerated boundary frame. */
   continuationFrames?: number
   /** Explicit first/last or timed keyframe images. Continuation boundary is counted separately. */
@@ -171,7 +172,9 @@ function addRows(total: RowRange, addition: RowRange): RowRange {
   }
 }
 
-function maxReferenceRowsPerFrame(detail: 'match' | 'max', geometry: Geometry): number {
+type ReferenceDetail = 'match' | 'max' | 'ptd768'
+
+function maxReferenceRowsPerFrame(detail: ReferenceDetail, geometry: Geometry): number {
   if (detail === 'max') {
     // Ref2VA image references keep a 2048px short edge and accept up to 4:1.
     // Video references use resolve_canvas_size's 768px/area-capped canvas.
@@ -180,6 +183,14 @@ function maxReferenceRowsPerFrame(detail: 'match' | 'max', geometry: Geometry): 
     return Math.max(
       maxImageRows,
       Math.ceil(roundedPixelAreaUpper(H3_OUTPUT_MAX_PIXELS) / (H3_CANVAS_MULTIPLE ** 2)),
+    )
+  }
+  if (detail === 'ptd768') {
+    // PTD fixes image and video references to a 768px short edge without the
+    // ordinary PDD video area cap.
+    return Math.max(
+      1,
+      Math.ceil(roundedPixelAreaUpper(H3_PTD_REFERENCE_MAX_PIXELS) / (H3_CANVAS_MULTIPLE ** 2)),
     )
   }
   // Match detail scales the source to the target area, then rounds each axis
@@ -196,27 +207,31 @@ function roundedPixelAreaUpper(area: number): number {
   return area + 16 * 2.5 * Math.sqrt(area) + 256
 }
 
-function maxVideoReferenceRowsPerFrame(detail: 'match' | 'max', geometry: Geometry): number {
+function maxVideoReferenceRowsPerFrame(detail: ReferenceDetail, geometry: Geometry): number {
   if (detail === 'max') {
     return Math.max(1, Math.ceil(roundedPixelAreaUpper(H3_OUTPUT_MAX_PIXELS) / (H3_CANVAS_MULTIPLE ** 2)))
   }
-  return maxReferenceRowsPerFrame('match', geometry)
+  return maxReferenceRowsPerFrame(detail, geometry)
 }
 
-function maxImageVisionTokens(detail: 'match' | 'max', geometry: Geometry): number {
+function maxImageVisionTokens(detail: ReferenceDetail, geometry: Geometry): number {
   const pixelBound = detail === 'max'
     ? Math.min(
       H3_MAX_REFERENCE_IMAGE_SHORT_EDGE ** 2 * H3_MAX_REFERENCE_ASPECT_RATIO,
       QWEN_MAX_IMAGE_PIXELS,
     )
-    : Math.min(QWEN_MAX_IMAGE_PIXELS, roundedPixelAreaUpper(geometry.pixels))
+    : detail === 'ptd768'
+      ? Math.min(QWEN_MAX_IMAGE_PIXELS, roundedPixelAreaUpper(H3_PTD_REFERENCE_MAX_PIXELS))
+      : Math.min(QWEN_MAX_IMAGE_PIXELS, roundedPixelAreaUpper(geometry.pixels))
   return Math.ceil(Math.max(QWEN_MIN_IMAGE_PIXELS, pixelBound) / QWEN_MERGED_IMAGE_TOKEN_AREA) + 2
 }
 
-function maxVideoVisionTokens(detail: 'match' | 'max', geometry: Geometry): number {
+function maxVideoVisionTokens(detail: ReferenceDetail, geometry: Geometry): number {
   const pixelBound = detail === 'max'
     ? roundedPixelAreaUpper(H3_OUTPUT_MAX_PIXELS)
-    : roundedPixelAreaUpper(geometry.pixels)
+    : detail === 'ptd768'
+      ? roundedPixelAreaUpper(H3_PTD_REFERENCE_MAX_PIXELS)
+      : roundedPixelAreaUpper(geometry.pixels)
   return Math.ceil(
     Math.max(QWEN_MIN_VIDEO_PIXELS, Math.min(QWEN_MAX_VIDEO_PIXELS, pixelBound))
       / QWEN_MERGED_IMAGE_TOKEN_AREA,
@@ -299,7 +314,7 @@ function getDurationBounds(references: MiniMaxH3Reference[]): ReferenceDurations
 function estimateReferenceRows(
   references: MiniMaxH3Reference[],
   passFrames: number,
-  detail: 'match' | 'max',
+  detail: ReferenceDetail,
   geometry: Geometry | null,
 ): { rows: RowRange; visionTokens: RowRange; unknownRefmod: boolean; notes: string[] } {
   let rows: RowRange = { low: 0, high: 0 }
@@ -317,7 +332,7 @@ function estimateReferenceRows(
   const audioSecondsHigh = applyPassBudget(audioDurations.high, passFrames, 'audio')
   const maxDetailGeometry: Geometry = { rowsPerFrame: 1, pixels: 0 }
   const referenceGeometry = geometry ?? maxDetailGeometry
-  const detailHasKnownCap = geometry != null || detail === 'max'
+  const detailHasKnownCap = geometry != null || detail !== 'match'
   const maxVideoRows = detailHasKnownCap ? maxVideoReferenceRowsPerFrame(detail, referenceGeometry) : null
   const maxImageRows = detailHasKnownCap ? maxReferenceRowsPerFrame(detail, referenceGeometry) : null
   const maxImageTokens = detailHasKnownCap ? maxImageVisionTokens(detail, referenceGeometry) : null
@@ -439,7 +454,7 @@ function estimateRows(
   frames: number,
   geometry: Geometry | null,
   prompt: RowRange,
-  detail: 'match' | 'max',
+  detail: ReferenceDetail,
 ): { range: RowRange; unknownRefmod: boolean; hasUnknownGuide: boolean; notes: string[] } {
   const passFrames = normalizeH3Frames(frames)
   const rawHistoryFrames = finitePositive(input.continuationFrames) ?? 0
@@ -542,7 +557,7 @@ function estimateFastMaxFrames(
   input: H3DurationGuidanceInput,
   geometry: Geometry | null,
   prompt: RowRange,
-  detail: 'match' | 'max',
+  detail: ReferenceDetail,
   minFrames: number,
 ): number | null {
   if (!geometry || prompt.high == null || input.videoGuide || input.audioGuide) return null
@@ -588,7 +603,9 @@ export function estimateH3DurationGuidance(
   }
 
   const options = input.options!
-  const detail: 'match' | 'max' = input.referenceDetail === 'max' ? 'max' : 'match'
+  const detail: ReferenceDetail = input.referenceDetail === 'ptd768'
+    ? 'ptd768'
+    : (input.referenceDetail === 'max' ? 'max' : 'match')
   const configuredMinimum = Math.max(124, Number(options.frames_minimum) || 124)
   const minimumFrames = normalizeH3Frames(configuredMinimum, 124, H3_MAX_NATIVE_FRAMES)
   const requestedFrames = normalizeH3Frames(input.frames, minimumFrames, H3_MAX_EXTENDED_FRAMES)

@@ -91,6 +91,70 @@ class TestH3TwoPassHelpers(unittest.TestCase):
         self.assertAlmostEqual(sigmas[-1], 0.0)
         self.assertTrue(all(left > right for left, right in zip(sigmas, sigmas[1:])))
 
+    def test_effective_sampler_resolves_implicit_values_but_preserves_explicit_choice(self):
+        resolve = self.two_pass.resolve_h3_sample_solver
+        recipe = {"minimax_h3_sampler": "euler"}
+        for requested in (None, "", "   ", "default", " DEFAULT "):
+            with self.subTest(requested=requested):
+                self.assertEqual(resolve(requested, recipe), "euler")
+        self.assertEqual(resolve("default", {}), "euler")
+        self.assertEqual(resolve("unipc", recipe), "unipc")
+        self.assertEqual(
+            resolve("default", {"minimax_h3_sampler": "default"}),
+            "default",
+        )
+        self.assertEqual(
+            resolve("default", {"minimax_h3_sampler": "res_multistep"}),
+            "res_multistep",
+        )
+
+    def test_default_mask_and_outpaint_controls_are_not_treated_as_active(self):
+        detect = self.two_pass.has_h3_edit_mask_or_outpainting
+        for inputs in (
+            {
+                "video_mask": None,
+                "image_mask": "",
+                "input_masks": [],
+                "outpainting_dims": None,
+                "video_guide_outpainting": "# disabled: 0 0 0 0",
+            },
+            {
+                "video_mask": None,
+                "image_mask": None,
+                "input_masks": [None, ""],
+                "outpainting_dims": [0, 0, 0, 0],
+                "video_guide_outpainting": "0 0 0 0",
+            },
+            {
+                "video_mask": None,
+                "image_mask": None,
+                "input_masks": [],
+                "outpainting_dims": [],
+                "video_guide_outpainting": "",
+            },
+            {
+                "video_mask": "",
+                "image_mask": "",
+                "input_masks": "",
+                "outpainting_dims": [0, 0, 0, 0],
+                "video_guide_outpainting": "# disabled",
+            },
+        ):
+            with self.subTest(inputs=inputs):
+                self.assertFalse(detect(inputs))
+
+    def test_real_masks_and_outpaint_margins_are_still_detected(self):
+        detect = self.two_pass.has_h3_edit_mask_or_outpainting
+        for inputs in (
+            {"video_mask": "mask.mp4"},
+            {"image_mask": "mask.png"},
+            {"input_masks": ["mask.png"]},
+            {"outpainting_dims": [0, 12, 0, 0]},
+            {"video_guide_outpainting": "0 12 0 0"},
+        ):
+            with self.subTest(inputs=inputs):
+                self.assertTrue(detect(inputs))
+
     def test_half_size_rounding_and_phase_two_loras_do_not_mutate_settings(self):
         self.assertEqual(self.two_pass.phase1_dimensions(512, 864), (256, 448))
         schedules = {
@@ -540,6 +604,128 @@ class TestH3TwoPassHelpers(unittest.TestCase):
                     "minimax_h3_ref2va", definition, inputs
                 )
                 self.assertIn(expected.lower(), result.lower())
+
+    def test_full_wgp_defaults_allow_two_pass_for_lightx2v_turbo4_native_euler(self):
+        from models.minimax_h3.minimax_h3_handler import family_handler
+
+        definition = family_handler.query_model_def("minimax_h3_ref2va", {})
+        self.assertEqual(definition.get("minimax_h3_sampler"), "euler")
+        self.assertTrue(definition.get("minimax_h3_two_pass_compatible"))
+        for implicit_solver in ("default", ""):
+            inputs = {
+                "custom_settings": {
+                    "h3_two_pass_enabled": "on",
+                    "h3_phase2_steps": 3,
+                    "h3_phase2_noise": 0.9035,
+                    "h3_phase2_accelerator_strength": 1.0,
+                    "audio_refinement": "none",
+                },
+                "sample_solver": implicit_solver,
+                "video_prompt_type": "",
+                "image_prompt_type": "",
+                "video_guide": None,
+                "input_video": None,
+                "video_mask": None,
+                "image_mask": None,
+                "input_masks": [],
+                "outpainting_dims": [0, 0, 0, 0],
+                "video_guide_outpainting": "# disabled: 0 0 0 0",
+                "denoising_strength": 1.0,
+                "num_inference_steps": 4,
+                "video_length": 124,
+                "sliding_window_size": 124,
+                "sliding_window_overlap": 18,
+                "minimax_h3_turbo_mode": True,
+                "minimax_h3_turbo_preset": "lightx2v-ref2va-4step-v1.0-768p",
+                "activated_loras": [
+                    "minimax_h3_lightx2v_ref2v_turbo_4step_alpha8_v1.0_768p_bf16.safetensors"
+                ],
+                "loras_selected": [
+                    "minimax_h3_lightx2v_ref2v_turbo_4step_alpha8_v1.0_768p_bf16.safetensors"
+                ],
+                "loras_multipliers": "1.0",
+                "_face_refinement": False,
+                "face_refinement": False,
+            }
+            current_definition = copy.deepcopy(definition)
+            family_handler.fix_settings(
+                "minimax_h3_ref2va", 2.58, current_definition, inputs
+            )
+            with self.subTest(sample_solver=implicit_solver):
+                self.assertIsNone(
+                    family_handler.validate_generative_settings(
+                        "minimax_h3_ref2va", current_definition, inputs
+                    )
+                )
+                self.assertEqual(inputs["sample_solver"], implicit_solver)
+
+    def test_two_pass_rejects_actual_mask_and_positive_outpaint_dimensions(self):
+        from models.minimax_h3.minimax_h3_handler import family_handler
+
+        definition = {
+            "architecture": "minimax_h3_ref2va",
+            "omni_reference": True,
+            "frames_maximum": 719,
+            "minimax_h3_sampler": "euler",
+            "minimax_h3_two_pass_compatible": True,
+        }
+        base_inputs = {
+            "custom_settings": {"h3_two_pass_enabled": "on"},
+            "sample_solver": "default",
+            "video_prompt_type": "",
+            "video_mask": None,
+            "image_mask": None,
+            "input_masks": [],
+            "outpainting_dims": [],
+            "video_guide_outpainting": "# disabled",
+            "denoising_strength": 1.0,
+            "num_inference_steps": 20,
+            "video_length": 124,
+            "sliding_window_size": 124,
+        }
+        for extra in (
+            {"video_mask": "mask.mp4"},
+            {"outpainting_dims": [0, 10, 0, 0]},
+            {"video_guide_outpainting": "0 10 0 0"},
+        ):
+            inputs = {**base_inputs, **extra}
+            with self.subTest(extra=extra):
+                result = family_handler.validate_generative_settings(
+                    "minimax_h3_ref2va", definition, inputs
+                )
+                self.assertIn("masks or outpainting", result.lower())
+
+    def test_two_pass_rejects_explicit_non_euler_without_rewriting_it(self):
+        from models.minimax_h3.minimax_h3_handler import family_handler
+
+        definition = {
+            "architecture": "minimax_h3_ref2va",
+            "omni_reference": True,
+            "frames_maximum": 719,
+            "minimax_h3_sampler": "euler",
+            "minimax_h3_two_pass_compatible": True,
+        }
+        inputs = {
+            "custom_settings": {"h3_two_pass_enabled": "on"},
+            "sample_solver": "unipc",
+            "video_prompt_type": "",
+            "video_mask": None,
+            "image_mask": None,
+            "input_masks": [],
+            "outpainting_dims": [],
+            "video_guide_outpainting": "# disabled",
+            "denoising_strength": 1.0,
+            "num_inference_steps": 20,
+            "video_length": 124,
+            "sliding_window_size": 124,
+        }
+
+        result = family_handler.validate_generative_settings(
+            "minimax_h3_ref2va", definition, inputs
+        )
+
+        self.assertIn("effective sampler is 'unipc'", result.lower())
+        self.assertEqual(inputs["sample_solver"], "unipc")
 
     def test_legacy_defaults_have_no_two_pass_opt_in(self):
         for filename in (

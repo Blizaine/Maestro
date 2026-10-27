@@ -249,7 +249,7 @@ export interface GenerateParams {
   face_refiner?: FaceRefinerOptions
   // MiniMax H3 Ref2VA ordered Omni-reference manifest.
   minimax_h3_references?: MiniMaxH3Reference[]
-  minimax_h3_reference_detail?: 'match' | 'max'
+  minimax_h3_reference_detail?: 'match' | 'max' | 'ptd768'
   /** Experimental long-form Omni orchestration using native continuation or hard-cut clips. */
   minimax_h3_reference_sequence?: boolean
   /** Enable native multi-window continuation for H3 First / Last. Defaults on. */
@@ -1052,8 +1052,8 @@ export interface ModelOptions {
     audio: number
     total: number
   } | null
-  omni_reference_detail_choices?: [string, 'match' | 'max'][] | null
-  omni_reference_detail_default?: 'match' | 'max'
+  omni_reference_detail_choices?: [string, 'match' | 'max' | 'ptd768'][] | null
+  omni_reference_detail_default?: 'match' | 'max' | 'ptd768'
   minimax_h3_text_encoder_choices?: {
     value: string
     label: string

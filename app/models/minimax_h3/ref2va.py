@@ -34,6 +34,7 @@ from .packing import (
     MINIMAX_H3_FPS,
     MINIMAX_H3_FRAMES_PER_CHUNK,
     MINIMAX_H3_LATENTS_PER_CHUNK,
+    MINIMAX_H3_SHORT_EDGE,
     MINIMAX_H3_TEXT_TAG,
     MINIMAX_H3_VIDEO_TAG,
     MiniMaxH3PackedSequence,
@@ -47,10 +48,10 @@ from .packing import (
     resolve_canvas_size,
 )
 from .reference_manifest import (
-    MINIMAX_H3_MAX_REFERENCE_AUDIOS,
-    MINIMAX_H3_MAX_REFERENCE_IMAGES,
-    MINIMAX_H3_MAX_REFERENCE_VIDEOS,
-    MINIMAX_H3_MAX_REFERENCES,
+    MINIMAX_H3_MAX_REFERENCE_AUDIOS as MINIMAX_H3_MAX_REFERENCE_AUDIOS,
+    MINIMAX_H3_MAX_REFERENCE_IMAGES as MINIMAX_H3_MAX_REFERENCE_IMAGES,
+    MINIMAX_H3_MAX_REFERENCE_VIDEOS as MINIMAX_H3_MAX_REFERENCE_VIDEOS,
+    MINIMAX_H3_MAX_REFERENCES as MINIMAX_H3_MAX_REFERENCES,
     object_reference_prompt_contract,
     validate_reference_manifest,
 )
@@ -63,6 +64,7 @@ from .reference_media import (
 
 
 MINIMAX_H3_REFERENCE_IMAGE_SHORT_EDGE = 2048
+MINIMAX_H3_PTD_REFERENCE_SHORT_EDGE = MINIMAX_H3_SHORT_EDGE
 MINIMAX_H3_QWEN_VIDEO_SAMPLE_FPS = 2.0
 MINIMAX_H3_QWEN_TEMPORAL_PATCH = 2
 _REFERENCE_TAG_RE = re.compile(r"<(?:Picture|Video|Audio)\s+\d+>", re.IGNORECASE)
@@ -90,6 +92,37 @@ _REF2VA_IDENTITY_ISOLATION_CONTRACT = (
 _REFERENCE_BACKGROUND_SESSION = None
 _REFERENCE_BACKGROUND_SESSION_LOCK = threading.Lock()
 _REFERENCE_BACKGROUND_RUN_LOCK = threading.Lock()
+
+
+def normalize_reference_detail(
+    detail: Any,
+    *,
+    ptd_refasymopd: bool = False,
+) -> str:
+    """Validate Ref2VA detail while keeping the PTD canvas model-gated.
+
+    WanGP supplies ``match`` as its legacy default for every model. PTD has a
+    fixed 768px recipe, so accept that legacy default and normalize it to the
+    pinned PTD value. Other explicit PTD values are rejected instead of
+    silently changing the adapter recipe.
+    """
+    from .ptd import PTD_REFERENCE_DETAIL
+
+    default = PTD_REFERENCE_DETAIL if ptd_refasymopd else "match"
+    value = str(detail or default).strip().lower()
+    if ptd_refasymopd:
+        if value in {"match", PTD_REFERENCE_DETAIL}:
+            return PTD_REFERENCE_DETAIL
+        raise ValueError(
+            f"PTD RefAsymOPD uses its fixed '{PTD_REFERENCE_DETAIL}' reference recipe."
+        )
+    if value == PTD_REFERENCE_DETAIL:
+        raise ValueError(
+            "Reference detail 'ptd768' is only available for PTD RefAsymOPD models."
+        )
+    if value not in {"match", "max"}:
+        raise ValueError("Reference detail must be 'match' or 'max'.")
+    return value
 
 _REF2VA_CONTEXT_IR_HEADERS = (
     "subject_definitions",
@@ -889,14 +922,14 @@ def _ensure_ref2va_object_contract(text: str, items: list[dict]) -> str:
         definition, retention = object_reference_prompt_contract(
             f"<Picture {picture}>", item.get("role", ""),
         )
-        for clause, field, next_field in (
+        for clause, section_name, next_field in (
             (definition, "subject_definitions", "summary"),
             (retention, "retention_analysis", "detailed_description"),
         ):
             if clause.casefold() in compiled.casefold():
                 continue
             pattern = re.compile(
-                rf"(?ms)(^\s*{field}\s*:.*?)(?=^\s*{next_field}\s*:)",
+                rf"(?ms)(^\s*{section_name}\s*:.*?)(?=^\s*{next_field}\s*:)",
             )
             if pattern.search(compiled):
                 compiled = pattern.sub(
@@ -1443,7 +1476,7 @@ def resolve_reference_image_size(
     target_height: int | None = None,
     target_width: int | None = None,
 ) -> tuple[int, int]:
-    """Resolve official maximum detail or Maestro's consumer-friendly match size."""
+    """Resolve Ref2VA image geometry for match, PDD max, or the fixed PTD recipe."""
 
     if width <= 0 or height <= 0:
         raise ValueError(f"A reference image must have a positive size, got {width}x{height}.")
@@ -1452,12 +1485,14 @@ def resolve_reference_image_size(
     multiple = MINIMAX_H3_CANVAS_MULTIPLE
     if detail == "max":
         scale = MINIMAX_H3_REFERENCE_IMAGE_SHORT_EDGE / min(width, height)
+    elif detail == "ptd768":
+        scale = MINIMAX_H3_PTD_REFERENCE_SHORT_EDGE / min(width, height)
     elif detail == "match":
         if not target_height or not target_width:
             raise ValueError("Matched reference detail needs the target height and width.")
         scale = min(1.0, math.sqrt((target_height * target_width) / float(height * width)))
     else:
-        raise ValueError("Reference detail must be 'match' or 'max'.")
+        raise ValueError("Reference detail must be 'match', 'max', or the PTD-only 'ptd768'.")
     return (
         max(multiple, round(height * scale / multiple) * multiple),
         max(multiple, round(width * scale / multiple) * multiple),
@@ -1584,7 +1619,7 @@ def resolve_reference_video_size(
     target_height: int | None = None,
     target_width: int | None = None,
 ) -> tuple[int, int]:
-    """Resolve Ref2VA video detail without silently exceeding the output area.
+    """Resolve Ref2VA video detail, including PTD's exact 768px short edge.
 
     The official high-detail path keeps MiniMax's 768px-short-edge canvas.
     Maestro's default ``match`` path instead preserves the reference aspect
@@ -1600,8 +1635,15 @@ def resolve_reference_video_size(
         raise ValueError(f"A reference video must be within 1:4 and 4:1, got {width}x{height}.")
     if detail == "max":
         return resolve_canvas_size(width, height)
+    if detail == "ptd768":
+        scale = MINIMAX_H3_PTD_REFERENCE_SHORT_EDGE / min(width, height)
+        multiple = MINIMAX_H3_CANVAS_MULTIPLE
+        return (
+            max(multiple, round(height * scale / multiple) * multiple),
+            max(multiple, round(width * scale / multiple) * multiple),
+        )
     if detail != "match":
-        raise ValueError("Reference detail must be 'match' or 'max'.")
+        raise ValueError("Reference detail must be 'match', 'max', or the PTD-only 'ptd768'.")
     if not target_height or not target_width:
         raise ValueError("Matched reference detail needs the target height and width.")
 

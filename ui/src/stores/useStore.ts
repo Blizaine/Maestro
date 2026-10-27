@@ -2290,9 +2290,9 @@ interface AppState {
   directorReferenceImagePath: string | null
   /** Ordered mixed-media references used by H3 Omni Director projects. */
   directorH3References: MiniMaxH3Reference[]
-  directorH3ReferenceDetail: 'match' | 'max'
+  directorH3ReferenceDetail: 'match' | 'max' | 'ptd768'
   setDirectorH3References: (references: MiniMaxH3Reference[]) => void
-  setDirectorH3ReferenceDetail: (detail: 'match' | 'max') => void
+  setDirectorH3ReferenceDetail: (detail: 'match' | 'max' | 'ptd768') => void
   directorCharacterRefs: File[]
   directorCharacterRefPaths: string[]
   directorCharacterRefLabels: string[]
@@ -2720,7 +2720,9 @@ async function _buildDirectorRestorePatch(
     directorReferenceImagePath: referencePath,
     directorH3References,
     directorH3ReferenceDetail: (
-      params.minimax_h3_reference_detail === 'max' ? 'max' : 'match'
+      params.minimax_h3_reference_detail === 'ptd768'
+        ? 'ptd768'
+        : (params.minimax_h3_reference_detail === 'max' ? 'max' : 'match')
     ),
     directorCharacterRefs: characterFiles,
     directorCharacterRefPaths: characterPaths,
@@ -13392,9 +13394,11 @@ export const useStore = create<AppState>((set, get) => ({
           })
         : undefined,
       minimax_h3_reference_detail: (
-        p.minimax_h3_reference_detail === 'max'
-          ? 'max'
-          : (p.minimax_h3_reference_detail === 'match' ? 'match' : undefined)
+        p.minimax_h3_reference_detail === 'ptd768'
+          ? 'ptd768'
+          : (p.minimax_h3_reference_detail === 'max'
+            ? 'max'
+            : (p.minimax_h3_reference_detail === 'match' ? 'match' : undefined))
       ),
       settings_version: p.settings_version as number,
     }

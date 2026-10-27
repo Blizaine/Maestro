@@ -194,6 +194,25 @@ export function OmniReferenceSection({
   const references = scope === 'director'
     ? directorReferences
     : (params.minimax_h3_references ?? EMPTY_REFERENCES)
+  useEffect(() => {
+    const choices = modelOptions?.omni_reference_detail_choices
+    const defaultDetail = modelOptions?.omni_reference_detail_default
+    if (!choices?.length || !defaultDetail) return
+    const currentDetail = scope === 'director'
+      ? directorDetail
+      : params.minimax_h3_reference_detail
+    const supported = choices.some(([, value]) => value === currentDetail)
+    if (supported || (currentDetail == null && defaultDetail !== 'ptd768')) return
+    if (scope === 'director') setDirectorDetail(defaultDetail)
+    else setParam('minimax_h3_reference_detail', defaultDetail)
+  }, [
+    scope,
+    modelOptions,
+    directorDetail,
+    params.minimax_h3_reference_detail,
+    setDirectorDetail,
+    setParam,
+  ])
   const limits = modelOptions?.omni_reference_limits ?? {
     image: 9, video: 3, audio: 3, total: 12,
   }
@@ -498,8 +517,11 @@ export function OmniReferenceSection({
     : (params.minimax_h3_reference_detail
       ?? modelOptions?.omni_reference_detail_default
       ?? 'match')
+  const detailHelp = detail === 'ptd768'
+    ? 'PTD RefAsymOPD fixes reference preparation to a 768px short edge as part of its eight-hop recipe.'
+    : 'Match output preserves the selected output-sized preparation and avoids reference upscaling. High detail follows the official Ref2VA PDD 2048px-short-edge recipe, but can use substantially more memory and time.'
 
-  const setDetail = (next: 'match' | 'max') => {
+  const setDetail = (next: 'match' | 'max' | 'ptd768') => {
     if (scope === 'director') setDirectorDetail(next)
     else setParam('minimax_h3_reference_detail', next)
   }
@@ -861,8 +883,8 @@ export function OmniReferenceSection({
           <select
             value={detail}
             disabled={disabled}
-            onChange={event => setDetail(event.target.value as 'match' | 'max')}
-            title="Match output preserves the selected output-sized preparation and avoids reference upscaling. High detail follows the official Ref2VA PDD 2048px-short-edge recipe, but can use substantially more memory and time."
+            onChange={event => setDetail(event.target.value as 'match' | 'max' | 'ptd768')}
+            title={detailHelp}
             className="bg-bg-tertiary border border-border rounded px-2 py-1 text-[9px] text-text-secondary focus:outline-none focus:border-accent-blue"
           >
             {(modelOptions?.omni_reference_detail_choices ?? [

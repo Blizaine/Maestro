@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import math
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -192,6 +193,89 @@ def two_pass_unavailable_reason(
     return None
 
 
+def resolve_h3_sample_solver(requested: Any, model_def: Any) -> str:
+    """Resolve implicit WGP sampler values through the selected H3 recipe.
+
+    WGP commonly submits ``"default"`` or an empty hidden dropdown value.
+    Those are not sampler names: H3's model definition owns the native solver.
+    Explicit non-default values are returned unchanged so validation can reject
+    unsupported requests rather than silently replacing them.
+    """
+
+    requested_solver = "" if requested is None else str(requested).strip().lower()
+    if requested_solver in ("", "default"):
+        definition = model_def if isinstance(model_def, Mapping) else {}
+        native_solver = str(
+            definition.get("minimax_h3_sampler") or "euler"
+        ).strip().lower()
+        return native_solver
+    return requested_solver
+
+
+def _has_payload(value: Any) -> bool:
+    """Treat empty WGP controls/containers as absent while failing closed."""
+
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, Mapping):
+        return any(_has_payload(item) for item in value.values())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_has_payload(item) for item in value)
+    if isinstance(value, (bytes, bytearray)):
+        return bool(value)
+    if hasattr(value, "numel"):
+        try:
+            return int(value.numel()) > 0
+        except (TypeError, ValueError, OverflowError):
+            return True
+    try:
+        return bool(value)
+    except (TypeError, ValueError):
+        return True
+
+
+def _has_positive_outpainting(value: Any) -> bool:
+    """Recognize actual WGP outpaint margins, not disabled/zero defaults."""
+
+    if value is None:
+        return False
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.startswith("#"):
+            return False
+        try:
+            values = [float(part) for part in text.split()]
+        except (TypeError, ValueError, OverflowError):
+            # Unknown non-empty text is not safe to treat as disabled.
+            return True
+        return any(not math.isfinite(item) or item > 0 for item in values)
+    if isinstance(value, Mapping):
+        return any(_has_positive_outpainting(item) for item in value.values())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_has_positive_outpainting(item) for item in value)
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return _has_payload(value)
+    return not math.isfinite(numeric) or numeric > 0
+
+
+def has_h3_edit_mask_or_outpainting(inputs: Any) -> bool:
+    """Detect active masks/outpaint margins in normalized WGP/API inputs."""
+
+    values = inputs if isinstance(inputs, Mapping) else {}
+    if any(
+        _has_payload(values.get(name))
+        for name in ("video_mask", "image_mask", "input_masks")
+    ):
+        return True
+    return _has_positive_outpainting(values.get("outpainting_dims")) or (
+        _has_positive_outpainting(values.get("video_guide_outpainting"))
+    )
+
+
 def phase1_dimensions(height: int, width: int, *, block_size: int = 32) -> tuple[int, int]:
     """Return the aligned half-resolution canvas used by WanGP's H3 recipe."""
 
@@ -281,6 +365,7 @@ __all__ = [
     "H3_PHASE2_STEPS_MIN",
     "H3_TWO_PASS_DEFAULTS",
     "build_two_pass_generate_request",
+    "has_h3_edit_mask_or_outpainting",
     "H3_TWO_PASS_ENABLED",
     "normalize_two_pass_settings",
     "parse_two_pass_toggle",
@@ -288,5 +373,6 @@ __all__ = [
     "phase2_lora_schedule",
     "phase2_clean_audio_timesteps",
     "phase2_sigmas",
+    "resolve_h3_sample_solver",
     "two_pass_unavailable_reason",
 ]

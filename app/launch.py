@@ -11540,9 +11540,18 @@ async def _prepare_generation_submission(
                 f"Audio-to-Video mode for {body['model_type']}."
             )
     if _generation_model_def.get("omni_reference"):
-        from models.minimax_h3.ref2va import validate_reference_manifest
+        from models.minimax_h3.ref2va import (
+            normalize_reference_detail,
+            validate_reference_manifest,
+        )
 
         try:
+            body["minimax_h3_reference_detail"] = normalize_reference_detail(
+                body.get("minimax_h3_reference_detail"),
+                ptd_refasymopd=bool(
+                    _generation_model_def.get("minimax_h3_ptd_refasymopd")
+                ),
+            )
             per_clip_references = body.get("per_clip_minimax_h3_references")
             if per_clip_references is not None:
                 if not isinstance(per_clip_references, list) or not per_clip_references:
@@ -11568,10 +11577,6 @@ async def _prepare_generation_submission(
                 body["minimax_h3_references"] = await asyncio.to_thread(
                     measure_video_audio_metadata, body["minimax_h3_references"]
                 )
-            detail = str(body.get("minimax_h3_reference_detail") or "match").strip().lower()
-            if detail not in {"match", "max"}:
-                raise ValueError("Reference detail must be 'match' or 'max'.")
-            body["minimax_h3_reference_detail"] = detail
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
     if str(_generation_model_def.get("architecture") or "").startswith("minimax_h3"):
