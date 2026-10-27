@@ -97,6 +97,12 @@ See the [port scope](WanGP-October-2026-Ports.md) for remaining work.
 
 ## Update and test
 
+**Graphite Studio** is a new appearance option with matte charcoal surfaces,
+neutral borders, flat peach-orange actions and readable dark action labels.
+It includes a matching light palette and follows the system in Auto mode.
+Fresh browser profiles start with Graphite Studio; existing saved themes
+remain selected. Choose it under **Settings → Performance → Appearance → Theme**.
+
 The image-prompt follow-up adds [Krea 2 caption and edit guides](Krea-2-Prompting.md)
 for Raw, Turbo and their Identity Edit variants. Studio's guided and dedicated
 raw image writers now carry an explicit medium/style contract: anime,

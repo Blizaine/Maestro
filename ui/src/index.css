@@ -135,6 +135,106 @@
   color-scheme: dark;
 }
 
+/* Graphite Studio: matte neutral surfaces, quiet borders and flat orange
+ * actions. Bright fills use their own dark label color; media overlay text
+ * and the existing theme families retain their original foregrounds. */
+[data-theme="graphite-studio"] {
+  color-scheme: dark;
+  --color-bg-primary: #111316;
+  --color-bg-secondary: #191c20;
+  --color-bg-tertiary: #24282e;
+  --color-bg-hover: #2c3138;
+  --color-bg-active: #323942;
+  --color-border: #353b43;
+  --color-border-light: #4a535e;
+  --color-text-primary: #f0f1f3;
+  --color-text-secondary: #c0c6cf;
+  --color-text-muted: #abb3bf;
+  --color-accent-blue: #ff985f;
+  --color-accent-blue-hover: #ffac7d;
+  --color-accent-green: #7dccb1;
+  --color-accent-green-hover: #9be0c5;
+  --color-accent-warm: #ff985f;
+  --color-accent-warm-hover: #ffac7d;
+  --color-accent-cool-from: #7565b3;
+  --color-accent-cool-to: #7565b3;
+  --color-gradient-cta-from: #ff985f;
+  --color-gradient-cta-to: #ff985f;
+  --color-gradient-toggle-from: #ff985f;
+  --color-gradient-toggle-to: #ff985f;
+  --color-gradient-active-frame-from: #ff985f;
+  --color-gradient-active-frame-to: #ff985f;
+  --color-media-canvas: #111316;
+  --shadow-accent-glow: 0 0 0 transparent;
+  --shadow-active-ring: 0 0 0 transparent;
+  --graphite-on-accent: #251208;
+  --graphite-on-success: #0c211b;
+}
+
+/* Graphite's daylight companion retains its orange identity. Deeper accents
+ * carry white labels, and the media canvas stays dark for neutral letterbox
+ * bars. Functional indicators and category chips keep their learned hues. */
+[data-theme="graphite-daylight"] {
+  color-scheme: light;
+  --color-bg-primary: #f3f4f6;
+  --color-bg-secondary: #fafbfc;
+  --color-bg-tertiary: #ffffff;
+  --color-bg-hover: #e8ebef;
+  --color-bg-active: #dde2e8;
+  --color-border: #d1d6dd;
+  --color-border-light: #b9c1cc;
+  --color-text-primary: #20252b;
+  --color-text-secondary: #4d5866;
+  --color-text-muted: #596472;
+  --color-accent-blue: #b34312;
+  --color-accent-blue-hover: #92350d;
+  --color-accent-green: #12664f;
+  --color-accent-green-hover: #0c513e;
+  --color-accent-warm: #b34312;
+  --color-accent-warm-hover: #92350d;
+  --color-accent-cool-from: #66509f;
+  --color-accent-cool-to: #66509f;
+  --color-gradient-cta-from: #b34312;
+  --color-gradient-cta-to: #b34312;
+  --color-gradient-toggle-from: #b34312;
+  --color-gradient-toggle-to: #b34312;
+  --color-gradient-active-frame-from: #b34312;
+  --color-gradient-active-frame-to: #b34312;
+  --color-indicator-success: #15803d;
+  --color-indicator-warning: #b45309;
+  --color-chip-yellow: #a16207;
+  --color-chip-green: #15803d;
+  --color-chip-cyan: #0e7490;
+  --color-chip-blue: #1d4ed8;
+  --color-chip-purple: #7e22ce;
+  --color-chip-pink: #be185d;
+  --color-chip-teal: #0f766e;
+  --color-chip-orange: #c2410c;
+  --color-chip-gray: #4b5563;
+  --color-chip-red: #b91c1c;
+  --color-media-canvas: #111316;
+  --shadow-accent-glow: 0 0 0 transparent;
+  --shadow-active-ring: 0 0 0 transparent;
+  --graphite-on-accent: #ffffff;
+  --graphite-on-success: #ffffff;
+}
+
+/* Pair text with actual filled accents, including retained white-label
+ * controls and badges. Do not recolor translucent selection surfaces or
+ * white playback controls over media. Scoped to the new family only. */
+:is([data-theme="graphite-studio"], [data-theme="graphite-daylight"])
+  :is(.bg-cta, .bg-cta-vertical, .bg-toggle-active, .bg-accent-blue,
+      [class~="bg-accent-blue/70"], [class~="bg-accent-blue/85"]) {
+  color: var(--graphite-on-accent);
+}
+:is([data-theme="graphite-studio"], [data-theme="graphite-daylight"]) .bg-accent-green {
+  color: var(--graphite-on-success);
+}
+:is([data-theme="graphite-studio"], [data-theme="graphite-daylight"])
+  .bg-cta [class~="border-white/20"] {
+  border-color: color-mix(in srgb, var(--graphite-on-accent) 20%, transparent);
+}
+
 /* ─── Golden Hour theme ─────────────────────────────────────────────────
  * Warm cinematic palette. Inspired by late-afternoon sunlight: deep
  * coffee-toned charcoals for surfaces, warm cream text, amber/gold for

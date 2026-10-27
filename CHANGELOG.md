@@ -5,6 +5,11 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [3.3.0] - 2026-10-26
 
+**Appearance:** add Graphite Studio, a matte charcoal theme with flat orange
+actions, quieter neutral borders and a matching light variant. It is the
+default for fresh browser profiles; saved theme choices remain unchanged.
+Dark, Light and Auto modes apply the same palette before the UI mounts.
+
 **27 October image and terminal fixes:** add Krea 2 generation/edit prompt guides;
 preserve requested image media and styles across Studio, raw image writers and
 Director image rules; distinguish FLUX 3 Base from the distilled variant. Remove

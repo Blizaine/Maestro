@@ -4,13 +4,13 @@
  * Themes are CSS-variable overrides applied via `[data-theme="..."]` on
  * the <html> element. The actual variable values live in src/index.css.
  *
- * The user-facing model is THREE theme families (Golden Hour, Classic,
- * Onyx), each with a dark and a light variant, plus an appearance mode:
+ * The user-facing model is four theme families (Graphite Studio, Golden
+ * Hour, Classic, Onyx), each with dark and light variants and an appearance mode:
  *   - mode: 'dark' | 'light' | 'auto' — auto follows the OS scheme
  *     (prefers-color-scheme) and live-switches when the OS changes.
  * The effective CSS theme = the chosen family's variant for whichever
- * scheme the mode resolves to. The light variants (ivory / daylight /
- * pearl) are internal CSS ids, not user-facing names.
+ * scheme the mode resolves to. Light variants use internal CSS ids rather
+ * than separate user-facing theme names.
  *
  * Persistence: localStorage under "maestro-theme-mode" and
  * "maestro-theme-family". Legacy keys are migrated on first load so
@@ -25,8 +25,8 @@
  * the index.html pre-mount script.
  */
 
-export type ThemeId = 'default' | 'golden-hour' | 'onyx' | 'ivory' | 'daylight' | 'pearl'
-export type FamilyId = 'default' | 'golden-hour' | 'onyx'
+export type ThemeId = 'graphite-studio' | 'graphite-daylight' | 'default' | 'golden-hour' | 'onyx' | 'ivory' | 'daylight' | 'pearl'
+export type FamilyId = 'graphite-studio' | 'default' | 'golden-hour' | 'onyx'
 export type ThemeMode = 'dark' | 'light' | 'auto'
 
 export interface ThemeVariant {
@@ -50,10 +50,18 @@ export interface ThemeFamily {
  * break — only the LABEL says 'Classic'. */
 export const FAMILIES: ThemeFamily[] = [
   {
+    id: 'graphite-studio',
+    label: 'Graphite Studio',
+    description:
+      'Default. Matte graphite surfaces and flat orange highlights; cool paper and burnt orange in daylight.',
+    dark: { id: 'graphite-studio', swatch: { bg: '#111316', surface: '#191c20', accent: '#ff985f' } },
+    light: { id: 'graphite-daylight', swatch: { bg: '#f3f4f6', surface: '#fafbfc', accent: '#b34312' } },
+  },
+  {
     id: 'golden-hour',
     label: 'Golden Hour',
     description:
-      'Default. Warm cinematic palette — near-black surfaces and amber highlights at night; warm paper and burnt orange in daylight.',
+      'Warm cinematic palette — near-black surfaces and amber highlights at night; warm paper and burnt orange in daylight.',
     dark: { id: 'golden-hour', swatch: { bg: '#0a0a0a', surface: '#181818', accent: '#f97316' } },
     light: { id: 'ivory', swatch: { bg: '#f2ede2', surface: '#f9f6ee', accent: '#c2410c' } },
   },
@@ -77,6 +85,8 @@ export const FAMILIES: ThemeFamily[] = [
 
 /** Any theme id (either variant) -> its family. */
 const FAMILY_OF: Record<ThemeId, FamilyId> = {
+  'graphite-studio': 'graphite-studio',
+  'graphite-daylight': 'graphite-studio',
   'golden-hour': 'golden-hour',
   ivory: 'golden-hour',
   default: 'default',
@@ -85,7 +95,7 @@ const FAMILY_OF: Record<ThemeId, FamilyId> = {
   pearl: 'onyx',
 }
 
-const LIGHT_IDS: ReadonlySet<string> = new Set(['ivory', 'daylight', 'pearl'])
+const LIGHT_IDS: ReadonlySet<string> = new Set(['graphite-daylight', 'ivory', 'daylight', 'pearl'])
 
 export interface ThemePrefs {
   mode: ThemeMode
@@ -100,7 +110,7 @@ const INTERIM_DARK_KEY = 'maestro-theme-dark'
  * with the resolved theme so downgrades show something sensible. */
 const LEGACY_KEY = 'maestro-theme'
 
-const DEFAULT_PREFS: ThemePrefs = { mode: 'dark', family: 'golden-hour' }
+const DEFAULT_PREFS: ThemePrefs = { mode: 'dark', family: 'graphite-studio' }
 
 function isFamily(id: string | null): id is FamilyId {
   return !!id && FAMILIES.some(f => f.id === id)
