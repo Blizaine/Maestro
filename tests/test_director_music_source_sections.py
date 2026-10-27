@@ -27,7 +27,7 @@ class MusicSourceSectionTests(unittest.TestCase):
     def test_real_story_actions_survive_without_metadata_milestones(self):
         contract = build_music_narrative_contract(BRIEF)
         self.assertEqual(contract['source'], BRIEF)
-        self.assertEqual(contract['revision'], 5)
+        self.assertEqual(contract['revision'], 6)
         self.assertEqual([event['event_id'] for event in contract['events']],
                          ['M1', 'M2', 'M3', 'M4', 'M5'])
         self.assertEqual([event['text'] for event in contract['events']],

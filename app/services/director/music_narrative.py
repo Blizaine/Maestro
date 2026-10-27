@@ -12,7 +12,7 @@ import re
 from typing import Any
 
 
-_REVISION = 5
+_REVISION = 6
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _SENTENCE_RE = re.compile(r"[^.!?;\n]+(?:[.!?;]+|$)")
 _SUBJECT_TAG_RE = re.compile(r"<\s*subject\s+\d+\s*>", re.IGNORECASE)
@@ -61,9 +61,12 @@ _STRUCTURAL_HEADING_RE = re.compile(
     re.IGNORECASE,
 )
 _BRIEF_SECTION_RE = re.compile(
-    r"(?im)^\s*(?:#{1,6}\s*)?(?P<name>story\s+arc|story|narrative(?:\s+arc)?|"
+    r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?P<name>story\s+arc|story|narrative(?:\s+arc)?|"
     r"character(?:s)?(?:\s*\([^\n]*?\))?|setting|location|performance|"
-    r"audio\s+direction|style|camera|negative\s+prompt)\s*:\s*"
+    r"audio\s+direction|style|camera|negative\s+prompt)[ \t]*:[ \t]*"
+)
+_MARKDOWN_HEADING_RE = re.compile(
+    r"(?m)^[ \t]*(?P<level>#{1,6})[ \t]+(?P<name>[^\n]+?)[ \t]*$"
 )
 _NATIVE_SECTION_RE = re.compile(
     r"(?im)^\s*(subject_definitions|summary|retention_analysis|"
@@ -675,22 +678,41 @@ def _native_music_source_fields(value: str) -> list[tuple[str, str]] | None:
     return fields
 
 
+def _brief_sections(value: str) -> list[tuple[str, int, int, int]]:
+    """Recognize both colon labels and Markdown section hierarchy."""
+    markdown = list(_MARKDOWN_HEADING_RE.finditer(value))
+    sections = [(_normal_text(match.group('name').rstrip(' #:')), match.start(),
+                 match.end(), len(match.group('level'))) for match in markdown]
+    sections.extend((_normal_text(match.group('name')), match.start(), match.end(), 0)
+                    for match in _BRIEF_SECTION_RE.finditer(value)
+                    if not any(heading.start() <= match.start() < heading.end()
+                               for heading in markdown))
+    return sorted(sections, key=lambda section: section[1])
+
+
+def _brief_section_body(value: str, sections: list, index: int) -> str:
+    _name, _start, end, level = sections[index]
+    stop = next((start for _name, start, _end, other_level in sections[index + 1:]
+                 if other_level <= (level or 2)), len(value))
+    # Nested act/chapter headings organize the story; they are not actions.
+    return _MARKDOWN_HEADING_RE.sub('', value[end:stop])
+
+
 def _music_narrative_source(value: str) -> str:
     """Select narrative-bearing native fields and extract actual beat text."""
 
     fields = _native_music_source_fields(value)
     if fields is None:
         narrative = value
-        sections = list(_BRIEF_SECTION_RE.finditer(value))
+        sections = _brief_sections(value)
         story_sections = [index for index, section in enumerate(sections)
-                          if " ".join(section.group("name").casefold().split())
+                          if section[0]
                           in {"story arc", "story", "narrative", "narrative arc"}]
         if story_sections:
             # Explicit chronological story beats own the milestones. Identity,
             # setting, style and ongoing performance remain in contract.source
             # and in the creative prompt, not as one-time ordered actions.
-            narrative = "\n".join(value[sections[index].end():
-                sections[index + 1].start() if index + 1 < len(sections) else len(value)]
+            narrative = "\n".join(_brief_section_body(value, sections, index)
                 for index in story_sections)
     else:
         narrative = "\n".join(
@@ -705,11 +727,10 @@ def _music_participant_context(value: str) -> str:
 
     fields = _native_music_source_fields(value)
     if fields is None:
-        sections = list(_BRIEF_SECTION_RE.finditer(value))
-        return "\n".join(value[section.end():
-            sections[index + 1].start() if index + 1 < len(sections) else len(value)]
+        sections = _brief_sections(value)
+        return "\n".join(_brief_section_body(value, sections, index)
             for index, section in enumerate(sections)
-            if section.group("name").casefold().startswith("character"))
+            if section[0].startswith(('character', 'main character')))
     return "\n".join(
         text for name, text in fields if name == "subject_definitions"
     )
@@ -977,6 +998,12 @@ def _actor_aliases(
     bare_subject = re.search(r"\b(nose|crowd|audience)\s*$", prefix, re.I)
     if bare_subject:
         return [bare_subject.group(1).casefold()]
+    if action_number == 0 and re.match(r'\s*end\s+with\b', prefix, re.I):
+        # "End with an image of the Rebel walking" names a subject inside
+        # framing direction; the imperative End is not an actor's name.
+        directed = _entity_candidates(prefix[re.match(r'\s*end\s+with\b', prefix, re.I).end():])
+        if directed:
+            return _select_entity(directed)
     pronoun = re.search(r"\b(?:as|while|when|after|before|and\s+then|then)?\s*(it|he|she|they|them)\s*$", prefix, re.I)
     if pronoun:
         antecedents = _entity_candidates(prefix[:pronoun.start()])
@@ -1425,6 +1452,10 @@ def build_music_narrative_contract(
 def reconcile_music_narrative_checkpoint(checkpoint: dict, contract: dict) -> dict:
     """Do not replay cached event IDs when their source meanings have changed."""
     prior = checkpoint.get("music_narrative_contract")
+    if not isinstance(prior, dict):
+        pending = checkpoint.get('music_arc_allocation_repair')
+        if isinstance(pending, dict):
+            prior = pending.get('contract')
     if not isinstance(prior, dict) or prior.get("events") == contract.get("events"):
         return checkpoint
     updated = copy.deepcopy(checkpoint)

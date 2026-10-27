@@ -944,16 +944,18 @@ def normalize_music_arc(rows: Any, clips: Any, contract: Any) -> list[dict[str, 
     normalized.sort(key=lambda row: row["clip_index"])
     if seen_indexes != set(range(clip_count)):
         raise ValueError("music arc must cover each timeline group exactly once")
-    if clip_count <= MAX_MUSIC_ARC_ROWS:
-        issues = music_arc_quality_issues(normalized, contract)
-        hard_issues = [issue for issue in issues if not issue.startswith("Repairable planning issue:")]
-        if hard_issues:
-            raise ValueError(hard_issues[0])
+    # Check ownership before creative quality, which also reports allocation
+    # errors but would otherwise hide the actionable event diagnostics.
     if [event_id for row in normalized for event_id in row["source_event_ids"]] != expected_ids:
         from .music_arc_repair import allocation_report, allocation_error
         report = allocation_report(arc_allocation(normalized), contract, clip_count)
         raise ValueError("music arc must assign every contract source_event_id exactly once and in source order; "
                          + allocation_error(report))
+    if clip_count <= MAX_MUSIC_ARC_ROWS:
+        issues = music_arc_quality_issues(normalized, contract)
+        hard_issues = [issue for issue in issues if not issue.startswith("Repairable planning issue:")]
+        if hard_issues:
+            raise ValueError(hard_issues[0])
     return normalized
 
 
