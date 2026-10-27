@@ -338,7 +338,7 @@ class TestH3FusedQKVLayout(unittest.TestCase):
                     hidden,
                 )
 
-    def test_local_ptd_qkv_loras_fuse_for_legacy_grouped_token_refiner(self):
+    def test_wrapped_local_ptd_qkv_loras_preserve_rank_alpha_and_fused_delta(self):
         torch = self.torch
         torch.manual_seed(57)
         transformer = self._tiny_transformer("grouped")
@@ -349,39 +349,15 @@ class TestH3FusedQKVLayout(unittest.TestCase):
         }
         source = {}
         for kind, (down, up, alpha) in factors.items():
-            prefix = f"token_refiner.blocks.0.attn.{kind}_proj"
+            prefix = f"diffusion_model.token_refiner.blocks.0.attn.{kind}_proj"
             source[f"{prefix}.lora_A.weight"] = down
             source[f"{prefix}.lora_B.weight"] = up
             source[f"{prefix}.alpha"] = torch.tensor(alpha)
 
         from models.minimax_h3.lora_vdn import normalize_diffusers_lora
 
-        converted = normalize_diffusers_lora(source, transformer)
         fused_prefix = "token_refiner.blocks.0.attn.qkv_proj"
-        self.assertEqual(
-            set(converted),
-            {
-                f"{fused_prefix}.lora_A.weight",
-                f"{fused_prefix}.lora_B.weight",
-            },
-        )
-        self.assertEqual(tuple(converted[f"{fused_prefix}.lora_A.weight"].shape), (6, 8))
-        self.assertEqual(tuple(converted[f"{fused_prefix}.lora_B.weight"].shape), (24, 6))
-
         hidden = torch.randn(1, 5, 8)
-        fused_delta = torch.nn.functional.linear(
-            torch.nn.functional.linear(
-                hidden,
-                converted[f"{fused_prefix}.lora_A.weight"],
-            ),
-            converted[f"{fused_prefix}.lora_B.weight"],
-        )
-        actual = self.transformer._split_fused_qkv(
-            fused_delta,
-            attention.heads,
-            attention.head_dim,
-            attention.qkv_layout,
-        )
         expected = tuple(
             torch.nn.functional.linear(
                 torch.nn.functional.linear(hidden, factors[kind][0]),
@@ -389,8 +365,34 @@ class TestH3FusedQKVLayout(unittest.TestCase):
             ).reshape(hidden.shape[0], hidden.shape[1], attention.heads, attention.head_dim)
             for kind in ("q", "k", "v")
         )
-        for actual_projection, expected_projection in zip(actual, expected):
-            torch.testing.assert_close(actual_projection, expected_projection, atol=1e-6, rtol=1e-6)
+        for layout in ("grouped", "interleaved"):
+            with self.subTest(layout=layout):
+                transformer.set_qkv_layout(layout)
+                converted = normalize_diffusers_lora(source, transformer)
+                self.assertEqual(
+                    set(converted),
+                    {
+                        f"{fused_prefix}.lora_A.weight",
+                        f"{fused_prefix}.lora_B.weight",
+                    },
+                )
+                down = converted[f"{fused_prefix}.lora_A.weight"]
+                up = converted[f"{fused_prefix}.lora_B.weight"]
+                self.assertEqual(tuple(down.shape), (6, 8))
+                self.assertEqual(tuple(up.shape), (24, 6))
+                fused_delta = torch.nn.functional.linear(
+                    torch.nn.functional.linear(hidden, down), up
+                )
+                actual = self.transformer._split_fused_qkv(
+                    fused_delta,
+                    attention.heads,
+                    attention.head_dim,
+                    attention.qkv_layout,
+                )
+                for actual_projection, expected_projection in zip(actual, expected):
+                    torch.testing.assert_close(
+                        actual_projection, expected_projection, atol=1e-6, rtol=1e-6
+                    )
 
     def test_local_ptd_qkv_loras_stay_split_for_int8_token_refiner(self):
         torch = self.torch
@@ -400,7 +402,7 @@ class TestH3FusedQKVLayout(unittest.TestCase):
         for projection in ("q_proj", "k_proj", "v_proj"):
             setattr(attention, projection, torch.nn.Linear(8, 8, bias=False))
         source = {
-            f"token_refiner.blocks.0.attn.{projection}.lora_{factor}.weight": torch.randn(
+            f"diffusion_model.token_refiner.blocks.0.attn.{projection}.lora_{factor}.weight": torch.randn(
                 2 if factor == "A" else 8,
                 8 if factor == "A" else 2,
             )
@@ -411,9 +413,13 @@ class TestH3FusedQKVLayout(unittest.TestCase):
         from models.minimax_h3.lora_vdn import normalize_diffusers_lora
 
         converted = normalize_diffusers_lora(source, transformer)
-        self.assertEqual(set(converted), set(source))
+        expected = {
+            key.removeprefix("diffusion_model."): value
+            for key, value in source.items()
+        }
+        self.assertEqual(set(converted), set(expected))
         for key, value in source.items():
-            self.assertIs(converted[key], value)
+            self.assertIs(converted[key.removeprefix("diffusion_model.")], value)
 
     def test_incomplete_local_qkv_group_is_not_guessed_into_a_fused_adapter(self):
         torch = self.torch
@@ -429,6 +435,137 @@ class TestH3FusedQKVLayout(unittest.TestCase):
         self.assertEqual(set(converted), set(source))
         for key, value in source.items():
             self.assertIs(converted[key], value)
+
+    def test_wrapped_and_mixed_local_ptd_header_keys_fuse_for_grouped_attention(self):
+        torch = self.torch
+        transformer = self._tiny_transformer("grouped")
+        factors = {
+            kind: (torch.randn(2, 8), torch.randn(8, 2), 2.0)
+            for kind in ("q", "k", "v")
+        }
+        source = {}
+        for kind, (down, up, alpha) in factors.items():
+            # The root wrapper must be removed before Diffusers names are
+            # detected and mapped; token-refiner entries below remain mixed
+            # local Maestro names, as in the PTD header.
+            source_key_prefix = f"diffusion_model.transformer_blocks.0.attn.to_{kind}"
+            source[f"{source_key_prefix}.lora_A.weight"] = down
+            source[f"{source_key_prefix}.lora_B.weight"] = up
+            source[f"{source_key_prefix}.alpha"] = torch.tensor(alpha)
+
+            refiner_prefix = f"token_refiner.blocks.0.attn.{kind}_proj"
+            if kind == "k":
+                source[f"{refiner_prefix}.lora_A.weight"] = down
+                source[f"{refiner_prefix}.lora_B.weight"] = up
+                source[f"{refiner_prefix}.alpha"] = torch.tensor(alpha)
+            else:
+                wrapped_refiner_prefix = f"diffusion_model.{refiner_prefix}"
+                source[f"{wrapped_refiner_prefix}.lora_A.weight"] = down
+                source[f"{wrapped_refiner_prefix}.lora_B.weight"] = up
+                source[f"{wrapped_refiner_prefix}.alpha"] = torch.tensor(alpha)
+        unknown = torch.randn(1, 8)
+        source["diffusion_model.unknown_module.lora_A.weight"] = unknown
+
+        from models.minimax_h3.lora_vdn import normalize_diffusers_lora
+
+        converted = normalize_diffusers_lora(source, transformer)
+        self.assertIs(converted["unknown_module.lora_A.weight"], unknown)
+        for module_path in ("blocks.0.attn", "token_refiner.blocks.0.attn"):
+            self.assertIn(f"{module_path}.qkv_proj.lora_A.weight", converted)
+            self.assertIn(f"{module_path}.qkv_proj.lora_B.weight", converted)
+            self.assertFalse(any(
+                key.startswith(module_path + ".") and ".q_proj." in key
+                for key in converted
+            ))
+
+    def test_mmgp_wrapper_and_local_alias_collisions_fail_without_overwrite(self):
+        torch = self.torch
+        from models.minimax_h3.lora_vdn import normalize_diffusers_lora
+
+        wrapper_collision = {
+            "diffusion_model.blocks.0.attn.out_proj.lora_A.weight": torch.ones(2, 8),
+            "blocks.0.attn.out_proj.lora_A.weight": torch.zeros(2, 8),
+        }
+        with self.assertRaisesRegex(ValueError, "collision after removing MMGP root prefixes"):
+            normalize_diffusers_lora(wrapper_collision, self._tiny_transformer("grouped"))
+
+        suffix_collision = {
+            "transformer_blocks.0.attn.to_out.0.lora_A.turbo.weight": torch.ones(2, 8),
+            "blocks.0.attn.out_proj.lora_A.weight": torch.zeros(2, 8),
+        }
+        with self.assertRaisesRegex(ValueError, "collision after name normalization"):
+            normalize_diffusers_lora(suffix_collision, self._tiny_transformer("grouped"))
+
+    def test_qkv_target_lookup_reports_missing_attribute_and_keyerror(self):
+        torch = self.torch
+        from models.minimax_h3.lora_vdn import normalize_diffusers_lora
+
+        source = {}
+        for projection in ("q_proj", "k_proj", "v_proj"):
+            source[f"blocks.0.attn.{projection}.lora_A.weight"] = torch.ones(2, 8)
+            source[f"blocks.0.attn.{projection}.lora_B.weight"] = torch.ones(8, 2)
+
+        class MissingTarget:
+            use_adaln_curves = False
+
+            def __init__(self, error):
+                self.error = error
+
+            def get_submodule(self, _name):
+                raise self.error
+
+        for error in (AttributeError("missing"), KeyError("missing")):
+            with self.subTest(error=type(error).__name__), self.assertRaisesRegex(
+                ValueError, "Cannot resolve MiniMax H3 QKV LoRA attention target"
+            ):
+                normalize_diffusers_lora(source, MissingTarget(error))
+
+    def test_complete_wrapped_hop01_header_inventory_maps_on_meta_model(self):
+        torch = self.torch
+        with torch.device("meta"):
+            transformer = self.transformer.MiniMaxH3Transformer(dtype=torch.bfloat16)
+        transformer.set_qkv_layout("contiguous")
+
+        state_dict = {}
+        for block_path in (
+            *(f"blocks.{index}" for index in range(50)),
+            *(f"token_refiner.blocks.{index}" for index in range(2)),
+        ):
+            targets = (
+                ("attn.q_proj", (128, 5376), (7168, 128)),
+                ("attn.k_proj", (128, 5376), (7168, 128)),
+                ("attn.v_proj", (128, 5376), (7168, 128)),
+                ("attn.out_proj", (128, 7168), (5376, 128)),
+                ("mlp.fc1", (128, 5376), (28672, 128)),
+                ("mlp.fc2", (128, 14336), (5376, 128)),
+            )
+            for target, down_shape, up_shape in targets:
+                prefix = f"diffusion_model.{block_path}.{target}"
+                state_dict[f"{prefix}.lora_A.weight"] = torch.empty(down_shape, device="meta")
+                state_dict[f"{prefix}.lora_B.weight"] = torch.empty(up_shape, device="meta")
+                # Scalars are the only non-meta values, matching the actual
+                # header's 128.0 alpha tensors without materializing LoRA weights.
+                state_dict[f"{prefix}.alpha"] = torch.tensor(128.0)
+
+        self.assertEqual(len(state_dict), 936)
+        self.assertTrue(all(
+            value.is_meta
+            for key, value in state_dict.items()
+            if not key.endswith(".alpha")
+        ))
+        from models.minimax_h3.lora_vdn import normalize_diffusers_lora
+
+        converted = normalize_diffusers_lora(state_dict, transformer)
+        self.assertEqual(len(converted), 572)
+        for block_path in (
+            *(f"blocks.{index}" for index in range(50)),
+            *(f"token_refiner.blocks.{index}" for index in range(2)),
+        ):
+            qkv = f"{block_path}.attn.qkv_proj"
+            self.assertEqual(tuple(converted[f"{qkv}.lora_A.weight"].shape), (384, 5376))
+            self.assertEqual(tuple(converted[f"{qkv}.lora_B.weight"].shape), (21504, 384))
+            self.assertTrue(converted[f"{qkv}.lora_A.weight"].is_meta)
+            self.assertTrue(converted[f"{qkv}.lora_B.weight"].is_meta)
 
     def test_pdd_independent_qkv_loras_match_both_fused_layouts(self):
         torch = self.torch

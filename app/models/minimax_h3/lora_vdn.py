@@ -6,6 +6,30 @@ Namespace, SwiGLU ordering and fused-QKV conversion adapted from Wan2GP
 import torch
 
 
+_MMGP_LORA_ROOT_PREFIXES = ("diffusion_model.", "transformer.")
+
+
+def _strip_mmgp_lora_root_prefixes(state_dict):
+    """Canonicalize MMGP's optional per-key root wrappers without data loss."""
+
+    normalized = {}
+    source_keys = {}
+    for source_key, value in state_dict.items():
+        key = source_key
+        for prefix in _MMGP_LORA_ROOT_PREFIXES:
+            if key.startswith(prefix):
+                key = key[len(prefix):]
+                break
+        if key in normalized:
+            raise ValueError(
+                "MiniMax H3 LoRA key collision after removing MMGP root prefixes: "
+                f"{source_keys[key]!r} and {source_key!r} both map to {key!r}."
+            )
+        normalized[key] = value
+        source_keys[key] = source_key
+    return normalized, source_keys
+
+
 def interleave_qkv_lora_b_rows(
     weight: torch.Tensor,
     heads: int,
@@ -41,6 +65,7 @@ def normalize_diffusers_lora(state_dict, transformer):
         ("context_embedder.", "condition_proj."), ("norm_out.norm.", "final_layer.norm."),
         ("norm_out.linear.", "final_layer.adaln_proj.linear."),
         ("audio_proj_out.", "final_layer.audio_out."), ("proj_out.", "final_layer.video_out."))
+    state_dict, source_keys = _strip_mmgp_lora_root_prefixes(state_dict)
     has_diffusers_prefix = any(
         key.startswith(tuple(source for source, _ in prefixes))
         for key in state_dict
@@ -48,7 +73,9 @@ def normalize_diffusers_lora(state_dict, transformer):
     # Already-local split Q/K/V keys still need fusing when the base checkpoint
     # keeps its QKV projection fused (for example, scaled-FP8 legacy H3).
     converted = {}
+    converted_sources = {}
     for key, value in state_dict.items():
+        source_key = source_keys[key]
         if has_diffusers_prefix:
             key = key.replace(".lora_A.turbo.weight", ".lora_A.weight").replace(".lora_B.turbo.weight", ".lora_B.weight")
             fc1 = ".ff.net.0.proj." in key
@@ -69,7 +96,13 @@ def normalize_diffusers_lora(state_dict, transformer):
                 value = torch.cat(value.chunk(2, dim=0)[::-1], dim=0).contiguous()
         if has_diffusers_prefix and transformer.use_adaln_curves and key.startswith("time_embedder."):
             continue
+        if key in converted:
+            raise ValueError(
+                "MiniMax H3 LoRA key collision after name normalization: "
+                f"{converted_sources[key]!r} and {source_key!r} both map to {key!r}."
+            )
         converted[key] = value
+        converted_sources[key] = source_key
     for down_suffix, up_suffix in (("lora_A.weight", "lora_B.weight"),
         ("lora_A.default.weight", "lora_B.default.weight"), ("lora_down.weight", "lora_up.weight"),
         ("lora_down.default.weight", "lora_up.default.weight"), ("lora.A.weight", "lora.B.weight"),
@@ -78,9 +111,6 @@ def normalize_diffusers_lora(state_dict, transformer):
         marker = "q_proj." + down_suffix
         for key in [key for key in converted if key.endswith(marker)]:
             prefix = key[:-len(marker)]
-            attention = transformer.get_submodule(prefix.rstrip("."))
-            if hasattr(attention, "q_proj"):
-                continue
             required = [
                 prefix + projection + suffix
                 for projection in ("q_proj.", "k_proj.", "v_proj.")
@@ -91,13 +121,35 @@ def normalize_diffusers_lora(state_dict, transformer):
                 # by this exact rank-3R fused conversion. Leave it intact for
                 # MMGP's normal compatibility error instead of guessing.
                 continue
+            attention_path = prefix.rstrip(".")
+            try:
+                attention = transformer.get_submodule(attention_path)
+            except (AttributeError, KeyError) as error:
+                raise ValueError(
+                    "Cannot resolve MiniMax H3 QKV LoRA attention target "
+                    f"{attention_path!r} after removing MMGP root prefixes."
+                ) from error
+            if hasattr(attention, "q_proj"):
+                continue
+            if not hasattr(attention, "qkv_proj"):
+                raise ValueError(
+                    "MiniMax H3 QKV LoRA target has neither split projections nor "
+                    f"a fused qkv_proj: {attention_path!r}."
+                )
             down, up = [], []
             for projection in ("q_proj", "k_proj", "v_proj"):
                 down.append(converted.pop(prefix + projection + "." + down_suffix))
                 weight = converted.pop(prefix + projection + "." + up_suffix)
                 alpha = converted.pop(prefix + projection + ".alpha", None)
                 up.append(weight if alpha is None else weight * (float(alpha) / down[-1].shape[0]))
-            converted[prefix + "qkv_proj." + down_suffix] = torch.cat(down)
+            fused_down_key = prefix + "qkv_proj." + down_suffix
+            fused_up_key = prefix + "qkv_proj." + up_suffix
+            if fused_down_key in converted or fused_up_key in converted:
+                raise ValueError(
+                    "MiniMax H3 LoRA key collision while fusing independent Q/K/V "
+                    f"adapters at {attention_path!r}."
+                )
+            converted[fused_down_key] = torch.cat(down)
             fused_up = torch.block_diag(*up)
             layout = str(getattr(attention, "qkv_layout", "grouped"))
             layout = layout.strip().lower().replace("-", "_")
@@ -111,7 +163,7 @@ def normalize_diffusers_lora(state_dict, transformer):
                 raise ValueError(
                     f"Unsupported MiniMax H3 QKV LoRA target layout {layout!r}"
                 )
-            converted[prefix + "qkv_proj." + up_suffix] = fused_up
+            converted[fused_up_key] = fused_up
     return converted
 
 
