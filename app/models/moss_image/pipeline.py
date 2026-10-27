@@ -34,6 +34,14 @@ from .edit_runtime import (
 )
 from .text_encoder import TextEncoder, Qwen3_5TextConfig, encode_prompt
 from .transformer import MOSSImageTransformer, rope_embed
+from .hq_vision import (
+    DEFAULT_HQ_VISION_PIXELS,
+    Qwen3_5VisionPositionIndexer,
+    encode_prompt_with_vision,
+    encode_vision_references,
+    load_hq_vision_components,
+    vision_prompt_cache_key,
+)
 from .vae import MOSSImageVAE
 
 
@@ -231,7 +239,20 @@ def _unpack_vae_tile_size(setting):
 
 
 class MOSSImagePipeline:
-    def __init__(self, transformer, text_encoder, tokenizer, vae, editing=False, edit_variant=None, model_def=None):
+    def __init__(
+        self,
+        transformer,
+        text_encoder,
+        tokenizer,
+        vae,
+        editing=False,
+        edit_variant=None,
+        model_def=None,
+        vision_encoder=None,
+        image_processor=None,
+        vision_config=None,
+        vision_token_ids=None,
+    ):
         self.transformer = transformer
         self.text_encoder = text_encoder
         self.tokenizer = tokenizer
@@ -241,6 +262,20 @@ class MOSSImagePipeline:
         self.edit_variant = edit_variant
         self.hq_edit = self.editing and is_hq_edit_variant(edit_variant)
         self.model_def = dict(model_def or {})
+        self.vision_encoder = vision_encoder
+        self.image_processor = image_processor
+        self.vision_config = vision_config
+        self.vision_token_ids = dict(vision_token_ids or {})
+        self.vision_position_indexer = (
+            Qwen3_5VisionPositionIndexer(vision_config) if self.hq_edit and vision_config is not None else None
+        )
+        self.vision_max_pixels = int(
+            self.model_def.get("moss_edit_vision_pixels", DEFAULT_HQ_VISION_PIXELS)
+        )
+        if self.hq_edit and any(
+            value is None for value in (self.vision_encoder, self.image_processor, self.vision_config, self.vision_position_indexer)
+        ):
+            raise RuntimeError("MOSS Image Edit HQ v5 is missing its required Qwen3.5 vision conditioning components.")
         self.preview_mean = vae.bn.running_mean.detach().float().cpu().reshape(1, 128, 1, 1)
         self.preview_std = (vae.bn.running_var.detach().float().cpu() + vae.bn_eps).sqrt().reshape(1, 128, 1, 1)
 
@@ -250,6 +285,7 @@ class MOSSImagePipeline:
             getattr(self.transformer, "_interrupt", False)
             or getattr(self.text_encoder, "_interrupt", False)
             or getattr(self.vae, "_interrupt", False)
+            or getattr(self.vision_encoder, "_interrupt", False)
         )
 
     @_interrupt.setter
@@ -258,9 +294,63 @@ class MOSSImagePipeline:
         self.transformer._interrupt = value
         self.text_encoder._interrupt = value
         self.vae._interrupt = value
+        if self.vision_encoder is not None:
+            self.vision_encoder._interrupt = value
 
     def abort(self):
         self._interrupt = True
+
+    def _encode_text_contexts(self, prompts, image_refs, device):
+        if not self.hq_edit:
+            return self.text_encoder_cache.encode(
+                lambda items: [encode_prompt(self.text_encoder, self.tokenizer, prompt) for prompt in items],
+                prompts,
+                device=device,
+            )
+        if not image_refs:
+            raise ValueError("MOSS Image Edit HQ v5 requires one to four reference images.")
+        if self.vision_encoder is None or self.image_processor is None or self.vision_config is None:
+            raise RuntimeError("MOSS Image Edit HQ v5 is missing its required Qwen3.5 vision conditioning components.")
+
+        image_features, image_grid_thw = encode_vision_references(
+            self.vision_encoder,
+            self.image_processor,
+            image_refs,
+            max_pixels=self.vision_max_pixels,
+        )
+        merge_size = int(self.vision_config.vision_config.spatial_merge_size)
+        token_counts = [
+            int(count)
+            for count in (image_grid_thw.prod(-1) // (merge_size * merge_size)).tolist()
+        ]
+        grid_summary = ",".join("x".join(str(int(axis)) for axis in grid) for grid in image_grid_thw.tolist())
+        print(
+            "[MOSS Image Edit HQ] Qwen vision conditioning: "
+            f"refs={len(image_refs)} grid_thw={grid_summary} visual_tokens={token_counts} "
+            f"pixel_budget={self.vision_max_pixels} cfg_contexts={len(prompts)}"
+        )
+        cache_keys = [
+            vision_prompt_cache_key(prompt, image_refs, self.vision_max_pixels)
+            for prompt in prompts
+        ]
+        return self.text_encoder_cache.encode(
+            lambda items: [
+                encode_prompt_with_vision(
+                    self.text_encoder,
+                    self.tokenizer,
+                    prompt,
+                    image_features,
+                    image_grid_thw,
+                    self.vision_config,
+                    self.vision_token_ids,
+                    self.vision_position_indexer,
+                )
+                for prompt in items
+            ],
+            prompts,
+            device=device,
+            cache_keys=cache_keys,
+        )
 
     def validate_loras(self, loras_selected):
         """Require the catalog editor adapter exactly once and reject it on T2I."""
@@ -377,11 +467,7 @@ class MOSSImagePipeline:
         prompts = [_prompt_without_comment_lines(prompt) for prompt in prompts]
 
         set_phase_status("Preparing Text Conditioning")
-        texts = self.text_encoder_cache.encode(
-            lambda items: [encode_prompt(self.text_encoder, self.tokenizer, prompt) for prompt in items],
-            prompts,
-            device=device,
-        )
+        texts = self._encode_text_contexts(prompts, input_ref_images, device)
         set_phase_status("Preparing Timesteps")
         schedule = sampling_schedule(sampling_steps, flow_shift, device)
         if loras_slists is None:
@@ -632,6 +718,7 @@ def load_pipeline(model_filename, text_encoder_filename, model_def, model_type, 
     text_encoder_paths = _resolve_checkpoint_paths(text_encoder_filename, "MOSS Image text encoder")
     vae_path = assets[os.path.join("moss_image", "flux2_small_decoder_bf16.safetensors")]
     editing = bool(model_def.get("moss_edit", False))
+    hq_edit = editing and is_hq_edit_variant(model_def.get("moss_edit_variant"))
     encoder_path = None
     if editing:
         encoder_file = model_def.get("moss_vae_encoder_file", "flux2_vae.safetensors")
@@ -646,6 +733,10 @@ def load_pipeline(model_filename, text_encoder_filename, model_def, model_type, 
         transformer = MOSSImageTransformer(**config)
         encoder = TextEncoder(text_config)
         vae = MOSSImageVAE(encode=editing)
+
+    vision_encoder = image_processor = vision_config = vision_token_ids = None
+    if hq_edit:
+        vision_encoder, image_processor, vision_config, vision_token_ids = load_hq_vision_components(model_def)
 
     with torch.device("cpu"):
         encoder.rotary_emb.inv_freq, encoder.rotary_emb.attention_scaling = (
@@ -698,4 +789,8 @@ def load_pipeline(model_filename, text_encoder_filename, model_def, model_type, 
         editing=editing,
         edit_variant=model_def.get("moss_edit_variant"),
         model_def=model_def,
+        vision_encoder=vision_encoder,
+        image_processor=image_processor,
+        vision_config=vision_config,
+        vision_token_ids=vision_token_ids,
     )

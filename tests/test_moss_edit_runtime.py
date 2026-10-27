@@ -31,6 +31,10 @@ from models.moss_image.pipeline import MOSSImagePipeline, validate_generation_in
 from models.moss_image.progress import GenerationAborted  # noqa: E402
 from models.moss_image.transformer import MOSSImageTransformer, rope_embed  # noqa: E402
 from models.moss_image.vae import MOSSImageVAE  # noqa: E402
+from shared.prompt_enhancer.qwen3_5.configuration_qwen3_5 import (  # noqa: E402
+    Qwen3_5Config,
+    Qwen3_5VisionConfig,
+)
 from shared.reference_cache import ReferenceKVLayerCache  # noqa: E402
 
 
@@ -130,6 +134,14 @@ class _TinyEditingVAE(nn.Module):
 def _pipeline(editing=False, variant=None, model_def=None):
     transformer = _tiny_transformer(layers=2)
     vae = _TinyEditingVAE()
+    vision_kwargs = {}
+    if editing and is_hq_edit_variant(variant):
+        vision_kwargs = {
+            "vision_encoder": nn.Identity(),
+            "image_processor": object(),
+            "vision_config": Qwen3_5Config(vision_config=Qwen3_5VisionConfig()),
+            "vision_token_ids": {"image": 248056, "vision_start": 248053, "vision_end": 248054},
+        }
     pipeline = MOSSImagePipeline(
         transformer,
         SimpleNamespace(_interrupt=False),
@@ -138,6 +150,7 @@ def _pipeline(editing=False, variant=None, model_def=None):
         editing=editing,
         edit_variant=variant,
         model_def=model_def or {},
+        **vision_kwargs,
     )
     pipeline.text_encoder_cache = _FixedTextCache([
         torch.randn(1, 3, 16),

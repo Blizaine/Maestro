@@ -24,6 +24,14 @@ EDIT_ASSET_REVISION = "66a563156a744feba3806b3528b560bdf6f59fb6"
 VAE_ENCODER_REPO = "DeepBeepMeep/Flux2"
 VAE_ENCODER_REVISION = "c976cb238dbf2bee48f0bd65eeb14c039cf45e03"
 VAE_ENCODER_FILE = "flux2_vae.safetensors"
+HQ_VISION_FOLDER = "moss_image_hq_vision"
+HQ_VISION_FILE = "Qwen3.5-9B-vision_bf16.safetensors"
+HQ_VISION_REPO = "DeepBeepMeep/Wan2.1"
+HQ_VISION_REVISION = "a4c0cc35033229072cb6d5a92952c3d51716837f"
+HQ_VISION_SOURCE_FOLDER = "Qwen3_5_9B_Abliterated"
+HQ_CONFIG_REPO = "Qwen/Qwen3.5-9B"
+HQ_CONFIG_REVISION = "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+HQ_CONFIG_FILES = ("config.json", "preprocessor_config.json")
 
 
 def _hf_url(folder, filename):
@@ -132,6 +140,22 @@ class family_handler:
                 "sourceFolderList": [""],
                 "fileList": [[VAE_ENCODER_FILE]],
             })
+            from .edit_runtime import is_hq_edit_variant
+
+            if is_hq_edit_variant((model_def or {}).get("moss_edit_variant")):
+                files.extend([{
+                    "repoId": HQ_VISION_REPO,
+                    "revision": HQ_VISION_REVISION,
+                    "sourceFolderList": [HQ_VISION_SOURCE_FOLDER],
+                    "targetFolderList": [HQ_VISION_FOLDER],
+                    "fileList": [[HQ_VISION_FILE]],
+                }, {
+                    "repoId": HQ_CONFIG_REPO,
+                    "revision": HQ_CONFIG_REVISION,
+                    "sourceFolderList": [""],
+                    "targetFolderList": [HQ_VISION_FOLDER],
+                    "fileList": [list(HQ_CONFIG_FILES)],
+                }])
         return files
 
     @staticmethod
@@ -160,11 +184,14 @@ class family_handler:
             save_quantized,
             dtype,
         )
-        return pipeline, {
+        components = {
             "transformer": pipeline.transformer,
             "text_encoder": pipeline.text_encoder,
             "vae": pipeline.vae,
         }
+        if getattr(pipeline, "vision_encoder", None) is not None:
+            components["vision_encoder"] = pipeline.vision_encoder
+        return pipeline, components
 
     @staticmethod
     def update_default_settings(base_model_type, model_def, ui_defaults):
@@ -215,8 +242,10 @@ def _editing_definition(model_def):
     """Native ordered-reference edits are separate from layout generation."""
     from .prompts import EDITING
 
-    hq = str(model_def.get("moss_edit_variant", "")).startswith("hq_")
-    return {
+    from .edit_runtime import is_hq_edit_variant
+
+    hq = is_hq_edit_variant(model_def.get("moss_edit_variant"))
+    definition = {
         "moss_edit": True,
         "moss_image_prompt_helper": False,
         "max_image_refs": 4,
@@ -228,7 +257,7 @@ def _editing_definition(model_def):
             os.path.join("moss_image", VAE_FILE), VAE_ENCODER_FILE,
         ],
         "moss_vae_encoder_file": VAE_ENCODER_FILE,
-        "moss_edit_reference_size": 384 if hq else 1024,
+        "moss_edit_reference_size": 1024,
         "custom_settings": [{
             "id": "moss_image_kv_cache", "name": "Reference KV cache", "label": "Reference KV cache",
             "type": "dropdown", "default": "Disabled",
@@ -252,10 +281,23 @@ def _editing_definition(model_def):
             "default": "",
         },
         "infos": (
-            ("MOSS Edit HQ v5 is an unofficial community editor on MOSS SFT. Start with one source and a bounded edit, 50 steps, CFG 3, shift 5. References are fitted within 384 pixels per side. " if hq else
+            ("MOSS Edit HQ v5 is an unofficial community editor on MOSS SFT. Start with one source and a bounded edit, 50 steps, CFG 3, shift 5. It uses a separate Qwen vision encoder with a 512-by-512 pixel budget, plus VAE reference features fitted within 1024 pixels per side. " if hq else
              "MOSS Edit SFT uses the original community editing adapter on MOSS SFT. Start at 50 steps, CFG 4, shift 5. References are fitted within 1024 pixels per side. ")
             + "Provide 1–4 images in order, describe what to change and what to preserve, and explain each image's role. The selected canvas sets output dimensions. Surrounding details may change; there is no mask or exact pixel-preservation workflow. Optional reference caching uses extra memory and is disabled by default. Reduce canvas size and batch size for limited VRAM."
         ),
         "prompt_infos": "Use concise edit instructions, for example: Change only the jacket to dark blue; preserve the person's face, pose, background and lighting. For multiple images, say image 1, image 2, etc. in upload order and specify each role. Quote exact lettering. These are natural-language instructions, not special image tokens or layout boxes.",
         "deepy_infos": "Native image-reference editing: image_mode=1, video_prompt_type=I, 1–4 ordered image_refs; output dimensions follow the selected canvas. No masks, inpainting, outpainting, audio or video. 50 Euler steps and shift 5; CFG 3 for HQ v5 or 4 for Edit SFT. Optional custom_settings.moss_image_kv_cache: Disabled, Enabled, INT8, INT8_RAM. Caches last only this request; HQ guidance branches remain independent. Cache fallback is logged. Unchanged pixels are not guaranteed.",
     }
+    if hq:
+        definition.update({
+            "moss_edit_vision_folder": HQ_VISION_FOLDER,
+            "moss_edit_vision_file": os.path.join(HQ_VISION_SOURCE_FOLDER, HQ_VISION_FILE),
+            "moss_edit_vision_pixels": 512 * 512,
+        })
+        definition["required_model_assets"].extend(
+            os.path.join(HQ_VISION_FOLDER, name) for name in HQ_CONFIG_FILES
+        )
+        definition["required_model_assets"].append(
+            os.path.join(HQ_VISION_FOLDER, HQ_VISION_SOURCE_FOLDER, HQ_VISION_FILE)
+        )
+    return definition

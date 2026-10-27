@@ -6,8 +6,9 @@ SFT revision: daf706d2e1c7a6369c17b6d1658671aee6db1ebe
 The released weights and inference code are licensed under Apache-2.0.
 
 The frozen text encoder is Qwen3.5-9B, using WanGP's existing Qwen
-implementation and its preserved upstream license notices. The unused
-vision tower is omitted. Q/gate projection rows are stored in separate
+implementation and its preserved upstream license notices. Text-to-image
+and the original SFT editor use text-only conditioning. HQ v5 additionally
+loads the matching Qwen3.5 vision tower. Q/gate rows are stored in separate
 contiguous groups in the WanGP encoder checkpoint.
 
 The FLUX.2 small VAE decoder reuses WanGP's FLUX autoencoder implementation.
@@ -49,6 +50,22 @@ SHA256: 1fbfae4eaaafc62c66a298e63e16fc5211566e1e3de1c58f83c35c6bc226c9f9
 The repository declares Apache-2.0. The recommended v5 is selected instead
 of experimental v6. Native adapter tensors retain alpha/rank=1: rank 192 for
 q/k/v projections and rank 64 for output/FFN projections.
+
+HQ v5 uses two reference paths: normalized VAE latents and image features
+inside the chat-templated text input. The latter follows the published
+ai-toolkit training contract (Picture N markers, image placeholders and
+multimodal rotary positions), not the latent-only chinoll edit contract:
+https://github.com/ostris/ai-toolkit/tree/main/extensions_built_in/diffusion_models/moss_image
+The existing bundled Apache-2.0 Qwen3.5 model implementation is reused.
+HQ vision-only checkpoint (no abliterated text weights are loaded):
+https://huggingface.co/DeepBeepMeep/Wan2.1/tree/a4c0cc35033229072cb6d5a92952c3d51716837f/Qwen3_5_9B_Abliterated
+File: Qwen3.5-9B-vision_bf16.safetensors (912070464 bytes)
+SHA256: 51cdf3972087941da8185d54b4bc903885eb1fef64550f04b83a0042b297ba13
+Its vision configuration matches the official Qwen3.5-9B configuration:
+https://huggingface.co/Qwen/Qwen3.5-9B/tree/c202236235762e1c871ad0ccb60c8ee5ba337b9a
+Only config.json and preprocessor_config.json come from the official repo.
+HQ vision references use a 512x512 pixel budget; VAE references retain a
+separate, bounded 1024-pixel maximum side with the existing tiled encoder.
 
 Reference editing additionally loads only the encoder from the full Flux2 VAE:
 https://huggingface.co/DeepBeepMeep/Flux2/tree/c976cb238dbf2bee48f0bd65eeb14c039cf45e03

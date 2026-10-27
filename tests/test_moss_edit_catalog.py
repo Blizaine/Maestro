@@ -3,6 +3,7 @@ import ast
 import json
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -66,6 +67,55 @@ class MossEditCatalogTests(unittest.TestCase):
         self.assertRegex(edit[1]["revision"], r"^[0-9a-f]{40}$")
         self.assertEqual(edit[1]["fileList"], [["flux2_vae.safetensors"]])
 
+    def test_hq_requires_vision_assets_without_replacing_sft_text_weights(self):
+        definition = family_handler.query_model_def("moss_image", catalog("moss_image_edit_hq")["model"])
+        plain = family_handler.query_model_def("moss_image", catalog("moss_image_edit")["model"])
+        self.assertEqual(definition["text_encoder_URLs"], plain["text_encoder_URLs"])
+        self.assertEqual(definition["moss_edit_vision_pixels"], 512 * 512)
+        self.assertEqual(definition["moss_edit_reference_size"], 1024)
+        required = {os.path.join("moss_image_hq_vision", name) for name in (
+            "config.json", "preprocessor_config.json")}
+        required.add(os.path.join("moss_image_hq_vision", "Qwen3_5_9B_Abliterated", "Qwen3.5-9B-vision_bf16.safetensors"))
+        self.assertTrue(required.issubset(definition["required_model_assets"]))
+        self.assertFalse(required.intersection(plain["required_model_assets"]))
+        files = family_handler.query_model_files([], "moss_image", catalog("moss_image_edit_hq")["model"])
+        self.assertEqual(files[2]["fileList"], [["Qwen3.5-9B-vision_bf16.safetensors"]])
+        self.assertEqual(files[2]["targetFolderList"], ["moss_image_hq_vision"])
+        self.assertEqual(files[3]["fileList"], [["config.json", "preprocessor_config.json"]])
+        self.assertEqual(files[3]["repoId"], "Qwen/Qwen3.5-9B")
+        for entry in files:
+            self.assertRegex(entry["revision"], r"^[0-9a-f]{40}$")
+        self.assertNotIn("Abliterated-text", str(files))
+
+    def test_hq_download_targets_match_required_asset_paths(self):
+        tree = ast.parse((ROOT / "app/wgp.py").read_text(encoding="utf-8"))
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                        and node.name == "process_files_def")
+        with tempfile.TemporaryDirectory() as folder:
+            downloaded = []
+
+            def download(**kwargs):
+                destination = Path(kwargs["local_dir"]) / kwargs.get("subfolder", "") / kwargs["filename"]
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"download fixture")
+                downloaded.append(destination)
+                return str(destination)
+
+            namespace = {"os": os, "hf_download_with_public_fallback": download,
+                         "fl": SimpleNamespace(get_smart_download_root=lambda _: folder,
+                                               get_checkpoints_paths=lambda: [folder])}
+            exec(compile(ast.Module(body=[function], type_ignores=[]), "<download-dispatch>", "exec"), namespace)
+            md = catalog("moss_image_edit_hq")["model"]
+            files = family_handler.query_model_files([], "moss_image", md)
+            for entry in files[2:]:
+                namespace["process_files_def"](**entry)
+            required = family_handler.query_model_def("moss_image", md)["required_model_assets"]
+            expected = {Path(folder) / name for name in required if name.startswith("moss_image_hq_vision")}
+            self.assertEqual(set(downloaded), expected)
+            for entry in files[2:]:
+                namespace["process_files_def"](**entry)
+            self.assertEqual(len(downloaded), 3, "Complete assets should be reused without another download")
+
     def test_partial_install_is_not_reported_ready(self):
         tree = ast.parse((ROOT / "app/launch.py").read_text(encoding="utf-8"))
         node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_check_model_downloaded")
@@ -91,6 +141,25 @@ class MossEditCatalogTests(unittest.TestCase):
             inputs = {"image_refs": ["first.png", "second.png"]}
             self.assertEqual(family_handler.validate_generative_settings("moss_image", md, inputs), "checked")
             validate.assert_called_once_with(inputs, model_def=md)
+
+    def test_hq_without_any_vision_companion_is_not_reported_downloaded(self):
+        tree = ast.parse((ROOT / "app/launch.py").read_text(encoding="utf-8"))
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_check_model_downloaded")
+        namespace = {"wgp": None, "os": os, "_model_weight_groups": lambda _: [["transformer"]],
+                     "_variant_group_downloaded": lambda *a, **k: True}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "<readiness>", "exec"), namespace)
+        md = family_handler.query_model_def("moss_image", catalog("moss_image_edit_hq")["model"])
+        paths = set(md["required_model_assets"])
+        paths.add(md["required_model_asset_groups"][0][0])
+        namespace["wgp"] = SimpleNamespace(
+            get_model_def=lambda _: md, get_model_recursive_prop=lambda *a, **k: [],
+            fl=SimpleNamespace(locate_file=lambda name, **k: name if name in paths else None))
+        self.assertTrue(namespace["_check_model_downloaded"]("moss_image_edit_hq"))
+        for missing in [name for name in paths if name.startswith("moss_image_hq_vision")]:
+            with self.subTest(missing=missing):
+                paths.remove(missing)
+                self.assertFalse(namespace["_check_model_downloaded"]("moss_image_edit_hq"))
+                paths.add(missing)
 
 
 if __name__ == "__main__":

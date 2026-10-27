@@ -288,3 +288,21 @@ changing the wall color. Two-reference composition added the cup but changed
 its handle and the robot's antenna, with some cup shapes leaking into the
 face. These fixtures do not establish general quality or a matched speedup;
 the machines retained their different saved memory policies.
+
+### HQ v5 conditioning correction
+
+Further user testing exposed two gaps: a stale reference selector after switching
+from Fibo could reject both editors, and the HQ port omitted image features in
+the text encoder. The small robot outputs above exercised the old latent-only
+HQ path; they do not establish faithful HQ v5 conditioning.
+
+HQ v5 requires both VAE reference latents and Qwen3.5 vision features inside its
+text input. Its separate vision component adds a roughly 912 MB download; the
+existing MOSS text weights remain in use. Vision references use a 512×512 pixel
+budget, while VAE references preserve more detail within a 1024-pixel maximum
+side. These are separate from the selected output canvas and the VAE tile size.
+SFT continues to use its original latent-only reference contract.
+
+For HQ, start with one source and a localized edit. Multi-image compositing and
+precise hand or text replacement remain quality-sensitive. A job completing
+without an exception does not establish that its edit is visually successful.
