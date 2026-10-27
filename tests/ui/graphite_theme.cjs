@@ -35,7 +35,7 @@ const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
     const theme = expectedTheme(family, variant);
     const htmlTheme = theme === 'default' ? null : theme;
     const familyInfo = {
-      'graphite-studio': {dark: '#111316', light: '#f3f4f6'},
+      'graphite-studio': {dark: '#111316', light: '#d9dfe6'},
       'golden-hour': {dark: '#0a0a0a', light: '#f2ede2'},
       default: {dark: '#0a0a0f', light: '#f4f5f7'},
       onyx: {dark: '#000000', light: '#f2f2f2'},
@@ -222,7 +222,7 @@ const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
     assert.deepEqual(graphite, {
       id: 'graphite-studio', dark: 'graphite-studio', light: 'graphite-daylight',
       darkSwatch: {bg: '#111316', surface: '#191c20', accent: '#ff985f'},
-      lightSwatch: {bg: '#f3f4f6', surface: '#fafbfc', accent: '#b34312'},
+      lightSwatch: {bg: '#d9dfe6', surface: '#e6ebf0', accent: '#b34312'},
       goldenHourDescription: 'Warm cinematic palette — near-black surfaces and amber highlights at night; warm paper and burnt orange in daylight.',
     });
     console.log('Graphite Studio preference defaults, legacy migrations, prepaint/runtime parity, modes, OS changes, persistence and browser tint passed.');

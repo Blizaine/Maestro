@@ -53,9 +53,9 @@ export const FAMILIES: ThemeFamily[] = [
     id: 'graphite-studio',
     label: 'Graphite Studio',
     description:
-      'Default. Matte graphite surfaces and flat orange highlights; cool paper and burnt orange in daylight.',
+      'Default. Matte graphite surfaces and flat orange highlights; silver-grey surfaces and burnt orange in daylight.',
     dark: { id: 'graphite-studio', swatch: { bg: '#111316', surface: '#191c20', accent: '#ff985f' } },
-    light: { id: 'graphite-daylight', swatch: { bg: '#f3f4f6', surface: '#fafbfc', accent: '#b34312' } },
+    light: { id: 'graphite-daylight', swatch: { bg: '#d9dfe6', surface: '#e6ebf0', accent: '#b34312' } },
   },
   {
     id: 'golden-hour',

@@ -176,16 +176,16 @@
  * bars. Functional indicators and category chips keep their learned hues. */
 [data-theme="graphite-daylight"] {
   color-scheme: light;
-  --color-bg-primary: #f3f4f6;
-  --color-bg-secondary: #fafbfc;
-  --color-bg-tertiary: #ffffff;
-  --color-bg-hover: #e8ebef;
-  --color-bg-active: #dde2e8;
-  --color-border: #d1d6dd;
-  --color-border-light: #b9c1cc;
+  --color-bg-primary: #d9dfe6;
+  --color-bg-secondary: #e6ebf0;
+  --color-bg-tertiary: #f1f4f7;
+  --color-bg-hover: #d6dee7;
+  --color-bg-active: #cbd5e0;
+  --color-border: #b0bcc9;
+  --color-border-light: #92a1b2;
   --color-text-primary: #20252b;
-  --color-text-secondary: #4d5866;
-  --color-text-muted: #596472;
+  --color-text-secondary: #455263;
+  --color-text-muted: #4b596b;
   --color-accent-blue: #b34312;
   --color-accent-blue-hover: #92350d;
   --color-accent-green: #12664f;
