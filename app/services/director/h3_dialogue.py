@@ -324,6 +324,13 @@ def _is_generated_speech_instruction(text: str, cue: re.Match[str]) -> bool:
 
     verb = cue.group(0).casefold().replace(" ", "-")
     if verb in {"call", "calls", "calling"}:
+        # Preparing a phone call is a visible action, not an instruction to
+        # generate a voice. Keep explicit quoted words classified as speech.
+        if (
+            re.search(r"\b(?:smartphone|phone|handset)\b[^.!?;\n]*\bto\s+$", prefix, re.IGNORECASE)
+            and not re.match(r"\s*(?:out\s*)?(?:[:,—-]\s*)?[\"'“]", suffix)
+        ):
+            return False
         # Bare calls commonly describe birdsong, a call button, or a person
         # summoning a lift. Treat it as speech only when words are explicit.
         return bool(re.match(

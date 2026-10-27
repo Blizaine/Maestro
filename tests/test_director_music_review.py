@@ -393,7 +393,9 @@ class MusicReviewTests(unittest.TestCase):
         self.assertEqual(schema["type"], "object")
         self.assertEqual(schema["properties"]["source_event_clips"]["required"], ["M1"])
         self.assertFalse(schema["properties"]["source_event_clips"]["additionalProperties"])
-        self.assertNotIn("source_event_ids", schema["properties"]["beats"]["items"]["properties"])
+        initial_schema = writer.call_args_list[0].kwargs["json_schema"]
+        self.assertNotIn("source_event_ids", initial_schema["properties"]["beats"]["items"]["properties"])
+        self.assertNotIn("beats", schema["properties"])  # Allocation repair cannot rewrite the outline.
 
     def test_malformed_keyed_outline_is_repaired_without_crashing(self):
         from services.director.music_narrative import build_music_narrative_contract

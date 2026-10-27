@@ -49,6 +49,7 @@ from ..music_narrative import (
     format_music_narrative_context,
     music_narrative_row_issue,
     validate_music_narrative_allocation,
+    reconcile_music_narrative_checkpoint,
 )
 from ..lyrics_context import lyrics_context_enabled, lyric_visual_policy
 
@@ -2307,6 +2308,9 @@ class MusicVideoPlanner(BasePlanner):
             )
             if video_model.lower().startswith("minimax_h3") else {"events": [], "source": scene_description}
         )
+        self._planning_resume_checkpoint = reconcile_music_narrative_checkpoint(
+            self._planning_resume_checkpoint, self._music_narrative_contract,
+        )
         self._music_arc = self._plan_music_arc(
             clips, scene_description, lyrics=lyrics,
         ) if len(clips) >= 4 else []
@@ -2498,6 +2502,9 @@ class MusicVideoPlanner(BasePlanner):
             music_arc_action_issues, music_arc_repetition_findings,
             music_arc_reprise_reason_findings,
             ground_music_combat_arc, coerce_music_arc_rows,
+        )
+        from ..music_arc_repair import (
+            build_allocation_repair_request, apply_allocation_patch,
         )
         cached = self._planning_resume_checkpoint.get("music_creative_arc")
         contract = self._music_narrative_contract
@@ -2856,6 +2863,7 @@ class MusicVideoPlanner(BasePlanner):
                         item["source_event_ids"] = []
                     expanded.append(item)
             checkpoint = copy.deepcopy(self._planning_resume_checkpoint)
+            checkpoint.pop("music_arc_allocation_repair", None)
             checkpoint["music_creative_arc"] = expanded
             checkpoint["music_arc_assignment_notes"] = copy.deepcopy(self._music_arc_assignment_notes)
             checkpoint["music_arc_quality_notes"] = copy.deepcopy(self._music_arc_quality_notes)
@@ -2903,6 +2911,15 @@ class MusicVideoPlanner(BasePlanner):
         baseline = None
         baseline_findings = []
         best_outline = None
+        allocation_draft = None
+        pending = self._planning_resume_checkpoint.get("music_arc_allocation_repair")
+        if (isinstance(pending, dict) and pending.get("contract") == contract
+                and pending.get("groups") == groups):
+            try:
+                build_allocation_repair_request(pending.get("response"), groups, contract)
+                allocation_draft = copy.deepcopy(pending["response"])
+            except ValueError:
+                pass
         for attempt in range(2):
             self._raise_if_planning_cancelled()
             self._emit_planning_progress(message="Planning progression across the whole song...",
@@ -2940,15 +2957,26 @@ class MusicVideoPlanner(BasePlanner):
                     repair_context += "\nBest previously accepted outline:\n" + json.dumps(
                         outline_response_payload(best_outline), ensure_ascii=False,
                     )
+            request_prompt = prompt + repair_context
+            request_schema = response_schema
+            if allocation_draft is not None:
+                request_prompt, request_schema, diagnostics = build_allocation_repair_request(
+                    allocation_draft, groups, contract,
+                )
+                if issue:
+                    request_prompt += "\nRejected correction: " + issue
             response = self._call_llm_json(
-                user_prompt=prompt + repair_context,
-                system_prompt=outline_system_prompt,
+                user_prompt=request_prompt,
+                system_prompt=("Repair only the source_event_clips mapping. Preserve the fixed outline."
+                               if allocation_draft is not None else outline_system_prompt),
                 max_tokens=max(2048, 160 * len(groups) + 1024),
                 temperature=0.55, thinking_budget=0,
-                json_schema=response_schema,
+                json_schema=request_schema,
                 remote_json_schema=True,
             )
             try:
+                if allocation_draft is not None:
+                    response = apply_allocation_patch(allocation_draft, response, groups, contract)
                 candidate = parse_candidate(response, baseline=baseline)
                 if baseline is None:
                     baseline = candidate
@@ -2974,6 +3002,19 @@ class MusicVideoPlanner(BasePlanner):
                 if baseline is not None:
                     # Optional repetition repair errors are advisory after a valid baseline.
                     return expand_and_checkpoint(baseline, quality_notes_for(baseline))
+                if allocation_draft is None and event_ids:
+                    try:
+                        _prompt, _schema, diagnostics = build_allocation_repair_request(response, groups, contract)
+                    except ValueError:
+                        pass  # Malformed creative rows still need the bounded full-outline repair.
+                    else:
+                        allocation_draft = copy.deepcopy(response)
+                        checkpoint = copy.deepcopy(self._planning_resume_checkpoint)
+                        checkpoint["music_arc_allocation_repair"] = {
+                            "response": copy.deepcopy(response), "contract": copy.deepcopy(contract),
+                            "groups": copy.deepcopy(groups), "diagnostics": diagnostics, "error": issue,
+                        }
+                        self._publish_planning_checkpoint(checkpoint)
         if baseline is not None:
             return expand_and_checkpoint(baseline, quality_notes_for(baseline))
         raise RuntimeError("Music-video whole-song planning needs revision: " + issue)

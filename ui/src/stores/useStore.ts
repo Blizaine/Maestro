@@ -11183,13 +11183,12 @@ export const useStore = create<AppState>((set, get) => ({
 
   setSidebarMode: (mode) => {
     if (mode === 'director') {
-      const { sidebarMode, directorAudioFile } = get()
+      const { sidebarMode } = get()
       if (sidebarMode !== 'director') {
-        if (!directorAudioFile) {
-          set({ sidebarMode: 'director', directorStep: 'upload', directorError: null })
-        } else {
-          set({ sidebarMode: 'director' })
-        }
+        // Text-only short films have no audio file. Navigation must not
+        // reset their prompts, stage, or failure diagnostics. Only the
+        // explicit directorReset action starts a fresh production.
+        set({ sidebarMode: 'director' })
       }
       void get().loadDirectorQueue()
     } else if (mode === 'studio') {
