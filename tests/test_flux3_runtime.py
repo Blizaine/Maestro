@@ -400,6 +400,34 @@ class Flux3RuntimeTests(unittest.TestCase):
         self.assertEqual(callback_calls[0][1]["override_num_inference_steps"], 6)
         self.assertEqual([call[0][0] for call in callback_calls[1:]], list(range(6)))
 
+    def test_image_generate_ignores_stale_music_model_mode_values(self):
+        for model_mode in (0, 2):
+            with self.subTest(model_mode=model_mode):
+                runtime = _runtime_for_cpu_test()
+                with patch.object(runtime_module, "encode_prompt",
+                                  return_value=(torch.zeros((1, 20480)), torch.zeros((1, 4)))) as encode:
+                    output = runtime_module.model_factory.generate(
+                        runtime, input_prompt="A red kite", sampling_steps=1,
+                        width=64, height=64, image_mode=1, model_mode=model_mode,
+                    )
+
+                self.assertEqual(tuple(output.shape), (3, 1, 64, 64))
+                self.assertEqual(len(runtime.vae.decoded_ids), 1)
+                encode.assert_called_once()
+
+    def test_video_and_masked_image_modes_are_rejected_before_runtime_work(self):
+        for image_mode in (0, 2, "0", "2"):
+            with self.subTest(image_mode=image_mode):
+                runtime = _runtime_for_cpu_test()
+                with patch.object(runtime_module, "encode_prompt") as encode:
+                    with self.assertRaisesRegex(ValueError, "Image Generate only"):
+                        runtime_module.model_factory.generate(
+                            runtime, input_prompt="A red kite", image_mode=image_mode,
+                        )
+
+                encode.assert_not_called()
+                self.assertEqual(runtime.vae.decoded_ids, [])
+
     def test_nonpositive_steps_are_rejected_before_runtime_work(self):
         runtime = _runtime_for_cpu_test()
         with self.assertRaisesRegex(ValueError, "positive integer"):

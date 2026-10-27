@@ -427,11 +427,13 @@ class model_factory:
                  input_ref_images=None, original_input_ref_images=None, video_prompt_type="",
                  input_frames=None, input_masks=None, image_start=None, callback=None,
                  set_progress_status=None, sample_solver="default", loras_slists=None,
-                 outpainting_dims=None, model_mode=None, **kwargs):
+                 outpainting_dims=None, image_mode=1, model_mode=None, **kwargs):
         if input_masks is not None or _active_outpainting(outpainting_dims):
             raise ValueError("FLUX 3 Image Klein supports instruction-based reference editing, not masked inpainting or outpainting.")
-        if model_mode not in (None, 0, "0", 1, "1"):
-            raise ValueError("FLUX 3 Image Klein supports standard image generation and reference editing only.")
+        if str(image_mode).strip() not in ("1", "1.0"):
+            raise ValueError("FLUX 3 Image Klein supports Image Generate only (image_mode=1).")
+        # model_mode is shared with music-family selectors. The image workflow is
+        # selected by image_mode, so stale model_mode values must not block it.
         if str(sample_solver or "default").strip().lower() not in ("", "default", "euler"):
             raise ValueError("FLUX 3 Image Klein uses its native flow-map Euler sampler.")
         try:

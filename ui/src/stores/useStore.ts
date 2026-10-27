@@ -8592,10 +8592,10 @@ export const useStore = create<AppState>((set, get) => ({
     )
     // model_mode belongs to families that explicitly declare model_modes.
     // The generic params snapshot can retain it after a model switch (for
-    // example from a music workflow); MOSS's `image_mode` is a distinct
-    // output-mode selector, so omit that unrelated field from this submit.
+    // example from a music workflow); these native image pipelines use the
+    // distinct `image_mode` selector, so omit the unrelated field on submit.
     if (
-      isMossImageEditGenerate
+      (isMossImageEditGenerate || isFlux3KleinImageGenerate)
       && state.modelOptions != null
       && state.modelOptions.model_type === params.model_type
       && !state.modelOptions.model_modes
