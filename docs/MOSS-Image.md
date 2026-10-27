@@ -302,6 +302,9 @@ existing MOSS text weights remain in use. Vision references use a 512×512 pixel
 budget, while VAE references preserve more detail within a 1024-pixel maximum
 side. These are separate from the selected output canvas and the VAE tile size.
 SFT continues to use its original latent-only reference contract.
+Both editors preserve each source image's native proportions through shared
+preprocessing. A fixed output canvas does not letterbox the references; the
+model's own bounded reference encoders perform their later resizing.
 
 For HQ, start with one source and a localized edit. Multi-image compositing and
 precise hand or text replacement remain quality-sensitive. A job completing

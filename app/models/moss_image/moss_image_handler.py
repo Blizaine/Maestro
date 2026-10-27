@@ -249,6 +249,7 @@ def _editing_definition(model_def):
         "moss_edit": True,
         "moss_image_prompt_helper": False,
         "max_image_refs": 4,
+        "preserve_image_ref_native_size": True,
         "at_least_one_image_ref_needed": True,
         "inpaint_support": False,
         "image_ref_choices": {"choices": [("Ordered reference images (1–4)", "I")], "letters_filter": "I", "default": "I"},
