@@ -1,4 +1,3 @@
-import { Settings, X } from 'lucide-react'
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
 import { useStore } from '../../stores/useStore'
 import { AvatarControls } from './AvatarControls'
@@ -31,7 +30,7 @@ import { VideoWorkflowSelector } from './VideoWorkflowSelector'
 import { ImageWorkflowSelector } from './ImageWorkflowSelector'
 import { ImageWorkflowControls } from './ImageWorkflowControls'
 import { ControlVideoSection } from './ControlVideoSection'
-import { AppModeToggle, MaestroBrand, WorldsButton } from '../AppModeNavigation'
+import { SidebarHeader } from './SidebarHeader'
 import { CharacterToolbarContext, PromptDock, SidebarLayoutContext } from './SidebarPanels'
 import { StartupStatus } from '../StartupStatus'
 
@@ -363,20 +362,8 @@ export function Sidebar({ onOpenWorlds, worldsOpen = false }: { onOpenWorlds?: (
           data-keyboard-open={visibleViewport?.keyboardOpen ?? false}
           className={`maestro-sidebar fixed top-0 h-dvh w-[380px] max-w-[94vw] bg-bg-secondary border-r border-border z-50 flex flex-col transition-[left] duration-300 ease-in-out ${sidebarOpen ? 'left-0' : '-left-full'}`}>
           {/* Header */}
-          <div className="shrink-0 px-4 py-3 border-b border-border flex items-center justify-between">
-            <MaestroBrand compact />
-            <div className="flex items-center gap-1.5">
-              <AppModeToggle size="sm" />
-              {onOpenWorlds && <WorldsButton size="sm" open={worldsOpen} onClick={onOpenWorlds} />}
-              <button
-                onClick={() => setSidebarOpen(false)}
-                aria-label="Close sidecar"
-                className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
-              >
-                <X size={16} />
-              </button>
-            </div>
-          </div>
+          <SidebarHeader mobile onOpenWorlds={onOpenWorlds} worldsOpen={worldsOpen}
+            onSettings={toggleSettings} onClose={() => setSidebarOpen(false)} />
           <StartupStatus />
           {isDirector ? <Suspense fallback={<p role="status" className="m-3 text-xs text-text-muted">Loading Director…</p>}><DirectorChat /></Suspense> : studioControls}
           <div className="studio-hardware shrink-0"><HardwareStatusBar /></div>
@@ -389,20 +376,8 @@ export function Sidebar({ onOpenWorlds, worldsOpen = false }: { onOpenWorlds?: (
   return (
     <aside ref={setSidebarElement} className="maestro-sidebar w-[420px] h-full bg-bg-secondary border-r border-border flex flex-col shrink-0">
       {/* Header */}
-      <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
-        <MaestroBrand />
-        <div className="flex items-center gap-2">
-          <AppModeToggle />
-          {onOpenWorlds && <WorldsButton size="sm" open={worldsOpen} onClick={onOpenWorlds} />}
-          <button
-            onClick={toggleSettings}
-            className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
-            title="Settings"
-          >
-            <Settings size={16} />
-          </button>
-        </div>
-      </div>
+      <SidebarHeader onOpenWorlds={onOpenWorlds} worldsOpen={worldsOpen}
+        onSettings={toggleSettings} onClose={() => setSidebarOpen(false)} />
       <StartupStatus />
       {isDirector ? <Suspense fallback={<p role="status" className="m-3 text-xs text-text-muted">Loading Director…</p>}><DirectorChat /></Suspense> : studioControls}
       <div className="studio-hardware shrink-0"><HardwareStatusBar /></div>
