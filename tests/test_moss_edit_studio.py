@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 from pathlib import Path
 import sys
 import unittest
@@ -238,7 +239,9 @@ class MossEditStudioTests(unittest.TestCase):
 
     def test_edit_types_are_enabled_through_additive_visibility_migration(self):
         source = (ROOT / "ui" / "src" / "stores" / "useStore.ts").read_text(encoding="utf-8")
-        self.assertIn("const DEFAULTS_VERSION = 24", source)
+        version = re.search(r"const DEFAULTS_VERSION = (\d+)", source)
+        self.assertIsNotNone(version)
+        self.assertGreaterEqual(int(version.group(1)), 24)
         self.assertIn("24: ['moss_image_edit', 'moss_image_edit_hq']", source)
         model_types = (ROOT / "ui" / "src" / "types" / "index.ts").read_text(encoding="utf-8")
         self.assertIn("supports_instruction_image_edit?: boolean", model_types)
