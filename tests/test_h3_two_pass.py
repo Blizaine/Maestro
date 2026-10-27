@@ -246,6 +246,7 @@ class TestH3TwoPassHelpers(unittest.TestCase):
         model = object.__new__(MiniMaxH3Model)
         model.sample_solver = "euler"
         model.model_def = {}
+        model._turbo_lora_active = True
         model._pdd_lora_active = False
         model.ptd_refasymopd = False
         model.audio_only = False
@@ -256,10 +257,17 @@ class TestH3TwoPassHelpers(unittest.TestCase):
         model._baked_turbo = False
         model.dasiwa = False
         model.singularity = False
+        model.omni_reference = False
+        model.VAE_upsampling = None
         model._interrupt = False
         model._turbo_lora_paths = []
         model.vae = types.SimpleNamespace(spatial_compression_ratio=8)
         model.latent_upscaler = object()
+        real_generate = MiniMaxH3Model.generate.__get__(model, MiniMaxH3Model)
+        phase2_validation_reached = []
+
+        class _AfterTurboValidation(Exception):
+            pass
 
         def fake_generate(**kwargs):
             calls.append(kwargs)
@@ -269,6 +277,15 @@ class TestH3TwoPassHelpers(unittest.TestCase):
                     "video_latents": phase1_video,
                     "audio_latents": phase1_audio,
                 }
+            # Exercise the production second-pass generate path through Turbo's
+            # step-count validation, then stop before model input construction.
+            with mock.patch(
+                "models.minimax_h3.minimax_h3_main._split_continuation_video",
+                side_effect=_AfterTurboValidation,
+            ):
+                with self.assertRaises(_AfterTurboValidation):
+                    real_generate(**kwargs)
+            phase2_validation_reached.append(True)
             return "phase2-result"
 
         model.generate = fake_generate
@@ -308,12 +325,68 @@ class TestH3TwoPassHelpers(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual((calls[0]["height"], calls[0]["width"]), (32, 32))
         self.assertEqual((calls[1]["height"], calls[1]["width"]), (64, 64))
+        self.assertNotIn("_h3_phase2_validation_token", calls[0])
+        from models.minimax_h3 import minimax_h3_main
+
+        self.assertIs(
+            calls[1]["_h3_phase2_validation_token"],
+            minimax_h3_main._H3_TWO_PASS_PHASE2_VALIDATION_TOKEN,
+        )
+        self.assertEqual(phase2_validation_reached, [True])
         self.assertTrue(calls[0]["_h3_capture_latents"])
         self.assertTrue(calls[1]["_h3_freeze_audio"])
         self.assertFalse(calls[1]["_h3_capture_latents"])
         self.assertTrue(
             torch.equal(calls[1]["_h3_initial_audio_latents"], phase1_audio)
         )
+
+    def test_turbo_minimum_cannot_be_bypassed_by_phase_one_or_caller_markers(self):
+        from models.minimax_h3.minimax_h3_main import MiniMaxH3Model
+
+        model = object.__new__(MiniMaxH3Model)
+        model._turbo_lora_active = True
+        model._turbo_lora_paths = []
+        model._pdd_lora_active = False
+        model.ptd_refasymopd = False
+        model.sample_solver = "euler"
+        model.fasth3 = False
+        model.audio_only = False
+        model.viggle = False
+        model._interrupt = False
+        model._baked_turbo = False
+        model.model_def = {}
+        model._fused_turbo = False
+
+        request = {
+            "input_prompt": "a short clip",
+            "frame_num": 124,
+            "height": 64,
+            "width": 64,
+            "sampling_steps": 3,
+            "custom_settings": {"h3_two_pass_enabled": "off"},
+        }
+        internal_phase1 = {**request, "_h3_two_pass_internal": True}
+        incomplete_phase2 = {
+            **internal_phase1,
+            "_h3_initial_video_latents": object(),
+            "_h3_initial_audio_latents": object(),
+            "_h3_freeze_audio": True,
+        }
+        forged_phase2 = {
+            **incomplete_phase2,
+            "_h3_phase2_validation_token": object(),
+        }
+        for label, candidate in (
+            ("ordinary request", request),
+            ("internal phase one", internal_phase1),
+            ("phase two without token", incomplete_phase2),
+            ("phase two with untrusted token", forged_phase2),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    ValueError, "Turbo LoRA needs at least 4 denoising steps"
+                ):
+                    model.generate(**candidate)
 
     def test_unsupported_recipes_and_workflows_are_explicit(self):
         incompatible_models = (

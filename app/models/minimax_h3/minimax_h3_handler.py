@@ -2925,7 +2925,11 @@ class family_handler:
                     "repoId": PTD_REPO,
                     "revision": PTD_REVISION,
                     "sourceFolderList": [PTD_FOLDER],
-                    "targetFolderList": [os.path.join(_ASSETS_ROOT, "ptd_refasymopd")],
+                    # PTD_FOLDER already includes the full local path beneath
+                    # the checkpoint root. A second target folder here makes
+                    # WGP download to `minimax_h3/ptd_refasymopd/<PTD_FOLDER>`
+                    # while load_model resolves `<PTD_FOLDER>/<file>`.
+                    "targetFolderList": [None],
                     "fileList": [[PTD_HEAD_FILE]],
                 }
             )

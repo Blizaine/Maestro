@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
 import types
 import unittest
 from urllib.parse import urlsplit
@@ -124,7 +126,26 @@ class TestH3PTDDownloads(unittest.TestCase):
         self.assertEqual(head_download["repoId"], self.ptd.PTD_REPO)
         self.assertEqual(head_download["revision"], self.ptd.PTD_REVISION)
         self.assertEqual(head_download["sourceFolderList"], [self.ptd.PTD_FOLDER])
+        # WGP appends sourceFolder to local_dir. PTD_FOLDER is already the
+        # complete checkpoint-relative path, so a target folder here would
+        # duplicate it and make load_model's locator miss the downloaded file.
+        self.assertEqual(head_download["targetFolderList"], [None])
         self.assertEqual(head_download["fileList"], [[self.ptd.PTD_HEAD_FILE]])
+
+        from shared.utils import files_locator as fl
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoints = Path(directory)
+            downloaded = checkpoints / self.ptd.PTD_FOLDER / self.ptd.PTD_HEAD_FILE
+            downloaded.parent.mkdir(parents=True)
+            downloaded.write_bytes(b"header-only path fixture")
+            with mock.patch.object(fl, "_checkpoints_paths", [str(checkpoints)]):
+                self.assertEqual(
+                    Path(fl.locate_file(
+                        os.path.join(self.ptd.PTD_FOLDER, self.ptd.PTD_HEAD_FILE)
+                    )),
+                    downloaded,
+                )
 
         for step, url in enumerate(self.ptd.PTD_LORA_URLS, start=1):
             self.assertIn(

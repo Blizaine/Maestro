@@ -114,6 +114,12 @@ from .video_vae import AutoencoderKLMiniMaxH3
 from .video_vae_assets import is_light_video_vae_checkpoint
 
 
+# Only `_run_h3_two_pass` can place this identity token in a phase-two request.
+# It distinguishes the configured second-pass schedule (which may be 2–3 steps)
+# from a normal Turbo LoRA request, whose published minimum remains enforced.
+_H3_TWO_PASS_PHASE2_VALIDATION_TOKEN = object()
+
+
 def _set_h3_generation_shifts(
     video_scheduler,
     audio_scheduler,
@@ -2340,6 +2346,9 @@ class MiniMaxH3Model:
                 "_h3_phase2_accelerator_strength": settings[
                     "h3_phase2_accelerator_strength"
                 ],
+                "_h3_phase2_validation_token": (
+                    _H3_TWO_PASS_PHASE2_VALIDATION_TOKEN
+                ),
             }
         )
         selected_loras = request.get("loras_selected") or ()
@@ -2555,7 +2564,19 @@ class MiniMaxH3Model:
                 "minimum_steps", MINIMAX_H3_TURBO_MIN_STEPS
             )) for path in self._turbo_lora_paths
         ), default=MINIMAX_H3_TURBO_MIN_STEPS)
-        if self._turbo_lora_active and int(sampling_steps) < turbo_minimum_steps:
+        trusted_phase2_schedule = (
+            _kwargs.get("_h3_phase2_validation_token")
+            is _H3_TWO_PASS_PHASE2_VALIDATION_TOKEN
+            and _h3_two_pass_internal is True
+            and _h3_initial_video_latents is not None
+            and _h3_initial_audio_latents is not None
+            and _h3_freeze_audio is True
+        )
+        if (
+            self._turbo_lora_active
+            and int(sampling_steps) < turbo_minimum_steps
+            and not trusted_phase2_schedule
+        ):
             raise ValueError(
                 "MiniMax H3 Turbo LoRA needs at least "
                 f"{turbo_minimum_steps} denoising steps; "
