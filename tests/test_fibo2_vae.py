@@ -9,7 +9,7 @@ import torch.nn as nn
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app"))
 
-from models.fibo2.vae import FiboVAE
+from models.fibo2.vae import FiboVAE  # noqa: E402 - test target is under app/
 
 
 class _PointwiseDecoder(nn.Module):
