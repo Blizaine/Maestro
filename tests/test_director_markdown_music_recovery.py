@@ -1,4 +1,4 @@
-"""Regression for project 50f698d3: Markdown story and camera metadata."""
+"""Regression for Markdown story headings mixed with camera metadata."""
 import copy
 from pathlib import Path
 import sys
@@ -17,10 +17,10 @@ BRIEF = '''# MUSIC VIDEO
 ### THE TRAVELER
 A traveler wears a black coat.
 ### THE SPEAKER
-He gives theatrical speeches from enormous podiums while surrounded by devoted officials.
+He gives welcoming speeches from a wooden platform.
 ## STORY
 ### ACT I — OPENING
-Rows of government officials applaud in perfect synchronization.
+Rows of festival staff applaud in perfect synchronization.
 ### ACT II — DEVELOPMENT
 The traveler watches the ceremony.
 ### ACT III — FINALE
@@ -46,7 +46,7 @@ class MarkdownMusicRecoveryTests(unittest.TestCase):
         contract = build_music_narrative_contract(BRIEF)
         self.assertEqual(contract['source'], BRIEF)
         self.assertEqual([e['text'] for e in contract['events']], [
-            'Rows of government officials applaud in perfect synchronization',
+            'Rows of festival staff applaud in perfect synchronization',
             'walking away from the spectacle'])
         self.assertEqual(contract['events'][1]['actor_aliases'], ['traveler'])
         self.assertIn('striking close-ups', contract['source'])
@@ -72,8 +72,8 @@ class MarkdownMusicRecoveryTests(unittest.TestCase):
 
     def test_exact_failed_checkpoint_is_migrated_without_modifying_original(self):
         old = {'revision': 5, 'events': [
-            {'event_id': 'M1', 'text': 'gives theatrical speeches'},
-            {'event_id': 'M2', 'text': 'Rows of government officials applaud'},
+            {'event_id': 'M1', 'text': 'gives welcoming speeches'},
+            {'event_id': 'M2', 'text': 'Rows of festival staff applaud'},
             {'event_id': 'M3', 'text': 'walking away from the spectacle'},
             {'event_id': 'M4', 'text': 'striking close-ups'}]}
         checkpoint = {'music_narrative_contract': old,
