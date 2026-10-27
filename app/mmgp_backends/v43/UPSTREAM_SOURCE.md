@@ -45,3 +45,8 @@ and CPU cross-DLL exception checks on installed PyTorch 2.7.1 and 2.10.0.
 Those checks do not allocate CUDA memory or certify GPU OOM recovery. Linux
 and optional RAM companion binaries remain unbundled. GPU validation is
 separate from this build provenance.
+
+Maestro's publication checks additionally remove an unreachable return from
+`offload.cudacontext` and explicitly initialize the tower-sequence tracker in
+`offload._detect_main_towers`. These small Python source adaptations retain
+the upstream license and do not change the native build sources or hashes.

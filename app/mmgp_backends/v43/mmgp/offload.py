@@ -131,8 +131,6 @@ def cudacontext(device):
         return wrapper
     return decorator
 
-    return _orig_get_parameter_device(parameter)
-
 try:
     import transformers.modeling_utils as mu # Transfomers v4
     _orig_get_parameter_device = mu.get_parameter_device
@@ -252,6 +250,7 @@ def _get_max_reservable_memory(perc_reserved_mem_max = 0):
 
 def _detect_main_towers(model, min_floors = 5, extra_towers = ()):
     cur_blocks_prefix = None
+    cur_blocks_seq = -1
     towers_modules= []
     towers_names= []
 

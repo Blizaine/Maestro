@@ -90,7 +90,7 @@ The drawer presents the [NVIDIA PixelUMM non-commercial license](https://develop
 
 ### Source provenance
 
-The copied WanGP model source snapshot is revision `9905f0df941e5ec7b0c80e32555d3a61fe415726`, recorded in the read-only source manifest. Each source byte count matched its manifest entry. The following SHA-256 values were computed from the exact saved raw-source files:
+The copied WanGP model source snapshot is revision `9905f0df941e5ec7b0c80e32555d3a61fe415726`. The following SHA-256 values were computed from the exact raw-source files retained during the port review; the table records their public provenance:
 
 | Raw source file | Source SHA-256 | Maestro file matches raw source |
 | --- | --- | --- |
