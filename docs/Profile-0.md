@@ -131,11 +131,14 @@ profile arguments, missing allocator behavior, graph rejection, MMGP manager
 teardown, API preflight purity, saved-choice preservation, and UI capability
 gates. Both application entry points select the saved runtime before allocator
 imports, and generation checks the active allocator before loading a model.
-No GPU allocation safety, memory or speed improvement,
-automatic-preload quality, CUDA graph parity, or compatibility with every
-Maestro pipeline has been established. Do not generate with this backend until
-the pinned native allocator and restart/generation gates have been separately
-reviewed and tested.
+The 27 October functional follow-up exercised the native Profile 0 path in
+six bounded image/video conditions across the 24GB, 12GB and 8GB test systems,
+including restart/generation gates and CPU decoding of the resulting media.
+The bundled Windows OOM companion also passed typed-exception checks with
+PyTorch 2.7.1 and 2.10.0. Actual GPU OOM recovery, general allocation safety,
+memory or speed improvement, automatic-preload quality, CUDA graph parity and
+compatibility with every Maestro pipeline remain unverified. Keep this backend
+experimental and opt-in; these pilots do not qualify Fish or graph capture.
 
 The immutable source is recorded in
 `app/mmgp_backends/v43/UPSTREAM_SOURCE.md`. Its `pyproject.toml` says 4.3.0,

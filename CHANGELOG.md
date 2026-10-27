@@ -5,6 +5,14 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [3.3.0] - 2026-10-26
 
+**27 October Dev follow-up:** MOSS SFT/HQ reference editors and caching, HQ v5
+vision conditioning, model-switch validation and native reference geometry;
+Fibo 2.0 and rectangular VAE decoding; H3 PTD and optional two-pass refinement;
+experimental queued Worlds and opt-in VMM/Profile 0. Includes the integration
+fixes found during bounded three-workstation pilots and subsequent workstation
+01 user tests. These are functional checks, not matched speedup or general
+editing-quality claims. See the release notes for compatibility and limits.
+
 Public Dev testing release of the first October WanGP porting batch. Main
 remains v3.2.5. See the [v3.3.0 Dev release notes](docs/RELEASE_NOTES_V3.3.0.md).
 

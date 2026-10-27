@@ -1,4 +1,4 @@
-# WanGP October 2026 ports — first batch
+# WanGP October 2026 ports
 
 This batch adapts selected features from [WanGP revision
 9905f0d](https://github.com/deepbeepmeep/WanGP/tree/9905f0df941e5ec7b0c80e32555d3a61fe415726),
@@ -51,29 +51,37 @@ official Plus transformer and projection names; all 12 latest image/video
 checks passed after 27 CPU regressions. The earlier failed attempts remain
 part of the private evidence.
 
-## MOSS editing follow-up
+## Additional ports and integration fixes — 27 October
 
-The next implementation adds separate MOSS Edit SFT and HQ armV5 presets,
+This follow-up adds separate MOSS Edit SFT and HQ armV5 presets,
 ordered image references, the full VAE encoder, edit-specific enhancement and
 request-local reference K/V caching. Base/SFT text-to-image and their layout
 helper stay separate. The adapters and companion VAE have been checked against
 the actual released file headers. See [MOSS editing and cache controls](MOSS-Image.md#reference-editing).
 
-This follow-up passed 248 targeted CPU regressions and the UI build. Its later
-18-case GPU pilot completed on 24GB, 12GB and 8GB machines. Caches activated
-on the two larger GPUs; the 8GB machine safely completed uncached. Composition
-artifacts remain, and no matched speedup is claimed. See the dated GPU findings
-in the MOSS guide. The editing follow-up remains separate from the already
-published FlashVSR repairs.
+The original implementation passed 248 targeted CPU regressions and the UI
+build. Its 18-case GPU pilot completed on 24GB, 12GB and 8GB machines; the 8GB
+cache requests completed uncached. Later user tests exposed missing HQ vision
+conditioning and stale selectors after switching models. Those fixes, native
+reference geometry and separation of image mode from generic model selectors
+were tested on workstation 01. Earlier latent-only HQ outputs do not qualify
+the corrected HQ path on smaller GPUs. Composition artifacts remain, and no
+matched speedup is claimed. See the dated findings in the MOSS guide.
 
-## Next batches
+This Dev follow-up also includes Fibo 2.0, H3 PTD, two-pass refinement,
+experimental Profile 0 and a dedicated Worlds workflow. Bounded functional
+pilots covered all three GPUs, with native execution checks and CPU-decoded
+media. Fibo's rectangular VAE correction received an additional workstation 01
+image test. Profile 0 remains opt-in, excludes Fish and graph capture, and has
+no certified GPU OOM-recovery result. Worlds camera moves are queued clips,
+not real-time interaction. See [Fibo 2.0](Fibo-2.md), [H3 PTD](H3-PTD-RefAsymOPD.md),
+[H3 two-pass](H3-Two-Pass.md), [Profile 0](Profile-0.md), and
+[Worlds](Worlds-Hy-Nomas.md).
 
-Local candidates now also contain Fibo 2.0, H3 PTD, two-pass refinement,
-experimental Profile 0 and a dedicated Worlds workflow. Fibo's text, ordered
-references and corrected masked-edit fixtures have passed on all three GPUs;
-see [Fibo 2.0](Fibo-2.md). Runtime availability and CPU checks for the other
-candidates are distinct from their pending GPU acceptance checks. A media
-assistant remains a separate product integration rather than a model preset.
+## Remaining scope
+
+EVOKE, Deepy Prime and native FP8/W8A16 dispatch remain separate, unported
+work. A media assistant is a product integration rather than a model preset.
 The Qwen cache controls do not add references to text-only MOSS models.
 
 Before enabling new defaults or claiming a speedup, use matched GPU tests with

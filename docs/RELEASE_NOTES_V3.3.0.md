@@ -1,7 +1,7 @@
 # Maestro v3.3.0 — Dev testing
 
-26 October 2026. Available on public Dev for testing the first October WanGP
-porting batch. Public Main remains v3.2.5. Existing sampling defaults and
+26–27 October 2026. Public Dev testing release of the October WanGP ports
+and their integration fixes. Public Main remains v3.2.5. Existing sampling defaults and
 saved v1.1 FlashVSR selections retain their behavior.
 
 ## What changed
@@ -59,8 +59,41 @@ retry allocation failures. This portable path materializes one prefix layer
 for the existing attention backend. It does not include native staged Sage
 cache kernels or the separate new WGPKernels FP8/W8A16 dispatch.
 
-MOSS editing, Fibo, PTD, flexible two-pass H3, Profile 0 and Worlds are later
-batches. See the [port scope](WanGP-October-2026-Ports.md).
+## 27 October follow-up
+
+- **MOSS reference editing:** separate SFT and HQ v5 editors, ordered image
+  references, edit-specific prompt enhancement and request-local reference
+  caching. HQ includes its required Qwen3.5 vision conditioning. Switching
+  from other image models no longer leaks their reference selector or generic
+  model-mode value into MOSS validation. References preserve their native
+  proportions independently of the output canvas. See [MOSS Image](MOSS-Image.md).
+- **Fibo 2.0:** Dev text-to-image and four-step reference/masked editing.
+  The tiled VAE flush now handles rectangular canvases correctly. See
+  [Fibo 2.0](Fibo-2.md).
+- **H3:** dedicated Full/Pruned eight-hop PTD RefAsymOPD recipes and opt-in
+  two-pass latent upscaling for compatible standard recipes. Fixes cover PTD
+  output heads, wrapped/fused adapter layouts and second-pass admission. See
+  [PTD](H3-PTD-RefAsymOPD.md) and [two-pass generation](H3-Two-Pass.md).
+- **Worlds:** an experimental Hy-Nomas workspace with saved worlds, queued
+  camera moves, continuation, capture and recording of saved clips. This is
+  queued generation; it does not provide real-time navigation. PixelUMM's
+  non-commercial license requires acknowledgement. See [Worlds](Worlds-Hy-Nomas.md).
+- **Optional memory runtime:** experimental MMGP VMM/Profile 0 selection with
+  restart and compatibility gates. Legacy remains the default; Fish and CUDA
+  graph capture remain unavailable on the experimental runtime. See
+  [Profile 0](Profile-0.md).
+
+Bounded functional pilots exercised these ports on the 24GB, 12GB and 8GB
+test systems, including verified native two-pass execution and decoded media.
+They are not matched speed or general quality benchmarks. The later Fibo
+rectangular-canvas correction and corrected MOSS HQ vision/mode-switch path
+were additionally exercised on workstation 01. The corrected HQ path has not
+been requalified on the smaller GPUs; the earlier latent-only HQ pilot is
+documented separately in the MOSS guide. Precise compositing, hand replacement
+and text preservation can still fail visually even when generation completes.
+The experimental allocator's actual GPU OOM recovery is not certified.
+
+See the [port scope](WanGP-October-2026-Ports.md) for remaining work.
 
 ## Update and test
 
