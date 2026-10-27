@@ -9,8 +9,11 @@ const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
 
 async function main() {
   const appSource = fs.readFileSync(path.join(root, 'ui/src/App.tsx'), 'utf8');
-  assert.match(appSource, /<Sidebar onOpenWorlds=\{openWorlds\} worldsOpen=\{worldsOpen\} \/>/,
-    'The app root connects the dedicated sidebar entry to local Worlds visibility');
+  assert.match(appSource, /<Sidebar onOpenWorlds=\{openWorlds\} \/>/,
+    'The app root provides the Worlds opener to Studio');
+  const sidebarSource = fs.readFileSync(path.join(root, 'ui/src/components/Sidebar/Sidebar.tsx'), 'utf8');
+  assert.match(sidebarSource, /<VideoWorkflowSelector onOpenWorlds=\{onOpenWorlds\} \/>/,
+    'The Video workflow menu receives the dedicated Worlds opener');
   assert.match(appSource, /<WorldExplorer open=\{worldsOpen\} onClose=\{\(\) => setWorldsOpen\(false\)\} \/>/,
     'The app root wires the panel close callback');
   assert.match(appSource, /aria-label="Close World Explorer"/,
@@ -24,15 +27,14 @@ async function main() {
     "import {useStore, getModelsForFamily} from './src/stores/useStore';",
     "import {ModelSelector} from './src/components/Sidebar/ModelSelector';",
     "import {GenerateButton} from './src/components/Sidebar/GenerateButton';",
-    "import {WorldsButton} from './src/components/AppModeNavigation';",
+    "import {VideoWorkflowSelector} from './src/components/Sidebar/VideoWorkflowSelector';",
     'window.store = useStore;',
     'window.getModelsForFamily = getModelsForFamily;',
     'window.mount = () => {',
     '  const root = createRoot(document.getElementById("root"));',
     '  const Harness = () => {',
-    '    const [open, setOpen] = React.useState(false);',
     '    return React.createElement("div", null,',
-    '      React.createElement(WorldsButton, {open, onClick: () => setOpen(true)}),',
+    '      React.createElement(VideoWorkflowSelector, {onOpenWorlds: () => window.store.getState().setWorldsOpen(true)}),',
     '      React.createElement(ModelSelector, {placement: "below"}),',
     '      React.createElement(GenerateButton, {stretch: true}),',
     '    );',
@@ -70,7 +72,7 @@ async function main() {
       };
       window.worldCatalog = [world, studio];
       window.store.setState({
-        servicesConfig: {worlds_enabled: true},
+        servicesConfig: {worlds_enabled: false},
         modelsLoaded: true,
         modelsLoading: false,
         modelsLoadError: null,
@@ -89,13 +91,53 @@ async function main() {
       window.mount();
     });
 
-    const worlds = page.getByRole('button', {name: 'Open Worlds'});
+    const workflowSelector = page.locator('button[title^="Text, first / last"]');
+    await workflowSelector.click();
+    const dialog = page.getByRole('dialog', {name: 'Choose a workflow'});
+    const worlds = dialog.getByRole('button', {name: /^Worlds/});
+    assert.equal(await worlds.count(), 0, 'Worlds stays out of Create while the experimental setting is disabled');
+    await workflowSelector.click();
+    await page.evaluate(() => window.store.setState({servicesConfig: {worlds_enabled: true}}));
+    await workflowSelector.click();
+    await worlds.waitFor();
+    const placement = await dialog.evaluate(element => {
+      const titles = [...element.querySelectorAll('div')].filter(item =>
+        item.childElementCount === 0 && ['Create', 'Transform'].includes(item.textContent.trim()));
+      const createTitle = titles.find(item => item.textContent.trim() === 'Create');
+      const transformTitle = titles.find(item => item.textContent.trim() === 'Transform');
+      const createGroup = createTitle.parentElement;
+      const labels = [...createGroup.querySelectorAll(':scope > button')]
+        .map(button => button.querySelector('span.min-w-0 > span')?.textContent.trim());
+      const worldsOption = [...createGroup.querySelectorAll(':scope > button')]
+        .find(button => button.innerText.includes('Create and explore saved worlds'));
+      return {
+        labels,
+        inCreate: createGroup.contains(worldsOption),
+        beforeTransform: Boolean(worldsOption.compareDocumentPosition(transformTitle) & Node.DOCUMENT_POSITION_FOLLOWING),
+      };
+    });
+    assert.deepEqual(placement.labels.slice(-2), ['Blend', 'Worlds'], 'Worlds is immediately after Blend in Create');
+    assert.equal(placement.inCreate, true);
+    assert.equal(placement.beforeTransform, true, 'Create appears before Transform');
+    const beforeOpen = await page.evaluate(() => {
+      const state = window.store.getState();
+      return {sidebarMode: state.sidebarMode, generationMode: state.generationMode,
+        workflow: state.studioVideoWorkflow, modelType: state.params.model_type,
+        imageMode: state.params.image_mode};
+    });
     await worlds.click();
-    assert.equal(await worlds.getAttribute('aria-expanded'), 'true', 'Worlds button exposes its open state');
+    assert.equal(await page.evaluate(() => window.store.getState().worldsOpen), true,
+      'Selecting the menu item opens the dedicated Worlds panel');
     assert.equal(await page.evaluate(() => window.store.getState().sidebarMode), 'studio',
       'Opening Worlds preserves the current Studio/Director mode');
     assert.equal(await page.evaluate(() => window.store.getState().studioVideoWorkflow), 'frames',
       'Opening Worlds preserves the selected Studio workflow');
+    assert.deepEqual(await page.evaluate(() => {
+      const state = window.store.getState();
+      return {sidebarMode: state.sidebarMode, generationMode: state.generationMode,
+        workflow: state.studioVideoWorkflow, modelType: state.params.model_type,
+        imageMode: state.params.image_mode};
+    }), beforeOpen, 'Opening Worlds preserves the generation mode, selected model, and parameters');
     const selector = page.getByRole('button', {name: 'Choose model'});
     assert.equal((await selector.innerText()).trim(), 'No compatible model',
       'A saved world runtime is not presented as the current Studio choice');

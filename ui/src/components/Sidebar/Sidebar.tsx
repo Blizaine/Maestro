@@ -61,7 +61,7 @@ function inputRevealBounds(input: HTMLElement) {
   return input.getBoundingClientRect()
 }
 
-export function Sidebar({ onOpenWorlds, worldsOpen = false }: { onOpenWorlds?: () => void; worldsOpen?: boolean } = {}) {
+export function Sidebar({ onOpenWorlds }: { onOpenWorlds?: () => void } = {}) {
   const toggleSettings = useStore(s => s.toggleSettings)
   const generationMode = useStore(s => s.generationMode)
   const imageMode = useStore(s => s.params.image_mode)
@@ -270,7 +270,7 @@ export function Sidebar({ onOpenWorlds, worldsOpen = false }: { onOpenWorlds?: (
         {/* Studio's user-facing hierarchy is media first, workflow second.
             The workflow selectors route into the legacy video/avatar/tools
             engines so saved jobs and API behavior remain compatible. */}
-        {isVideoWorkspace && <VideoWorkflowSelector />}
+        {isVideoWorkspace && <VideoWorkflowSelector onOpenWorlds={onOpenWorlds} />}
         {isImageWorkspace && <ImageWorkflowSelector />}
         {isAudioWorkspace && <AudioSubModeToggle />}
       </div>
@@ -362,8 +362,7 @@ export function Sidebar({ onOpenWorlds, worldsOpen = false }: { onOpenWorlds?: (
           data-keyboard-open={visibleViewport?.keyboardOpen ?? false}
           className={`maestro-sidebar fixed top-0 h-dvh w-[380px] max-w-[94vw] bg-bg-secondary border-r border-border z-50 flex flex-col transition-[left] duration-300 ease-in-out ${sidebarOpen ? 'left-0' : '-left-full'}`}>
           {/* Header */}
-          <SidebarHeader mobile onOpenWorlds={onOpenWorlds} worldsOpen={worldsOpen}
-            onSettings={toggleSettings} onClose={() => setSidebarOpen(false)} />
+          <SidebarHeader mobile onSettings={toggleSettings} onClose={() => setSidebarOpen(false)} />
           <StartupStatus />
           {isDirector ? <Suspense fallback={<p role="status" className="m-3 text-xs text-text-muted">Loading Director…</p>}><DirectorChat /></Suspense> : studioControls}
           <div className="studio-hardware shrink-0"><HardwareStatusBar /></div>
@@ -376,8 +375,7 @@ export function Sidebar({ onOpenWorlds, worldsOpen = false }: { onOpenWorlds?: (
   return (
     <aside ref={setSidebarElement} className="maestro-sidebar w-[420px] h-full bg-bg-secondary border-r border-border flex flex-col shrink-0">
       {/* Header */}
-      <SidebarHeader onOpenWorlds={onOpenWorlds} worldsOpen={worldsOpen}
-        onSettings={toggleSettings} onClose={() => setSidebarOpen(false)} />
+      <SidebarHeader onSettings={toggleSettings} onClose={() => setSidebarOpen(false)} />
       <StartupStatus />
       {isDirector ? <Suspense fallback={<p role="status" className="m-3 text-xs text-text-muted">Loading Director…</p>}><DirectorChat /></Suspense> : studioControls}
       <div className="studio-hardware shrink-0"><HardwareStatusBar /></div>

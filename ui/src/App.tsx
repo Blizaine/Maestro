@@ -143,7 +143,7 @@ function App() {
         <Suspense fallback={<p role="status" className="m-auto text-sm text-text-muted">Loading editor…</p>}><EditorWorkspace /></Suspense>
       ) : (
         <>
-          <Sidebar onOpenWorlds={openWorlds} worldsOpen={worldsOpen} />
+          <Sidebar onOpenWorlds={openWorlds} />
           <MainContent />
         </>
       )}

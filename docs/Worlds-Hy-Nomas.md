@@ -2,7 +2,7 @@
 
 ## Scope
 
-Worlds is experimental and hidden by default. Enable **Settings → Integrations → Beta Features → Worlds mode (Experimental)** to show it in the top navigation. This preference is saved per installation. Disabling it closes the drawer without cancelling queued work or removing saved worlds.
+Worlds is experimental and hidden by default. Enable **Settings → Integrations → Beta Features → Worlds mode (Experimental)** to show **Worlds** below **Blend** in Studio's **Video → Create** workflow menu. This preference is saved per installation. Disabling it closes the drawer without cancelling queued work or removing saved worlds.
 
 This port adds Hy-Nomas, a bounded `.wgpworld` v1 reader/writer, and a dedicated Worlds drawer connected to Maestro's durable generation queue. Create a world, continue its events, or request discrete camera moves; save its state, capture its last frame, and record the saved clip chain. Each move is a queued job. Interactive latency and model quality still require GPU validation; this integration does not promise real-time navigation.
 
@@ -80,7 +80,7 @@ Companion readiness must include the selected Qwen text-encoder weight file, all
 
 ## Standalone Worlds workflow foundation
 
-`app/services/worlds_workflow.py` supplies the mounted API and pure request helpers. `app/services/worlds_storage.py` verifies completed media and saves immutable state under the separate Worlds workspace. The navigation button opens `ui/src/components/Worlds/WorldExplorer.tsx`; it does not change the current Director, Studio or Editor mode. Hy-Nomas is registered for this dedicated workflow and filtered from ordinary Studio model choices.
+`app/services/worlds_workflow.py` supplies the mounted API and pure request helpers. `app/services/worlds_storage.py` verifies completed media and saves immutable state under the separate Worlds workspace. The **Video → Create → Worlds** menu item opens `ui/src/components/Worlds/WorldExplorer.tsx`; it does not change the current Director, Studio or Editor mode. Hy-Nomas is registered for this dedicated workflow and filtered from ordinary Studio model choices.
 
 The router accepts only an operation, its prompt/action fields, a canonical client UUID, a SHA-256 digest, and the explicit PixelUMM non-commercial acknowledgement. It constructs every generation request with `model_type=hy_nomas`, 832x480, 97 frames, 8 steps, guidance 1.0, and the allowlisted nested `custom_settings` values `world_output=world_video` and `acknowledge_pixelumm_noncommercial=true`; `_client_submission_id` equals the client UUID. A continuation or move resolves the world ID through the injected world store and passes only the app-resolved `.wgpworld` path as `custom_guide`. The client cannot choose paths, model IDs, geometry, steps, or backend settings. Moves use bounded integer milliseconds (100 ms through 10 s), default to 800 ms, and map to Hy-Nomas bracket instructions. Event actions map to `[Event] text`.
 

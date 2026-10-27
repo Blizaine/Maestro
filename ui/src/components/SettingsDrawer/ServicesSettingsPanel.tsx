@@ -760,7 +760,7 @@ export function ServicesSettingsPanel() {
             <div className="flex-1">
               <div id="worlds-mode-label" className="text-sm text-text-primary">Worlds mode (Experimental)</div>
               <p id="worlds-mode-description" className="text-[10px] text-text-muted mt-0.5 leading-relaxed">
-                Show Worlds in the top navigation for world generation and exploration. Off by default.
+                Show Worlds under Video → Create for world generation and exploration. Off by default.
               </p>
             </div>
             <button

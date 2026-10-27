@@ -11,14 +11,13 @@ const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
     stdin: {contents: `
       import React from 'react'; import {createRoot} from 'react-dom/client';
       import {useStore} from './src/stores/useStore';
-      import {WorldsButton} from './src/components/AppModeNavigation';
+      import {VideoWorkflowSelector} from './src/components/Sidebar/VideoWorkflowSelector';
       import {ServicesSettingsPanel} from './src/components/SettingsDrawer/ServicesSettingsPanel';
       window.store = useStore;
       function Harness() {
-        const open = useStore(s => s.worldsOpen);
-        const setOpen = useStore(s => s.setWorldsOpen);
-        return <><WorldsButton open={open} onClick={() => setOpen(true)}/><ServicesSettingsPanel/></>;
+        return <><VideoWorkflowSelector onOpenWorlds={() => useStore.getState().setWorldsOpen(true)}/><ServicesSettingsPanel/></>;
       }
+      useStore.setState({generationMode: 'video', studioVideoWorkflow: 'frames', sidebarMode: 'studio'});
       createRoot(document.getElementById('root')).render(<Harness/>);
     `, resolveDir: path.join(root, 'ui'), loader: 'tsx'},
     bundle: true, write: false, jsx: 'automatic', logLevel: 'silent',
@@ -63,42 +62,58 @@ const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
       }
       await page.goto('http://worlds-setting.test');
       await page.addScriptTag({content: bundle.outputFiles[0].text});
-      const worlds = page.getByRole('button', {name: 'Open Worlds'});
-      assert.equal(await worlds.count(), 0, 'No navigation flash before settings load');
+      const workflow = page.locator('button[title^="Text, first / last"]');
+      const openWorkflow = () => workflow.click();
+      const workflowDialog = page.getByRole('dialog', {name: 'Choose a workflow'});
+      const worlds = workflowDialog.getByRole('button', {name: /^Worlds/});
       await page.evaluate(() => window.store.getState().setWorldsOpen(true));
       assert.equal(await page.evaluate(() => window.store.getState().worldsOpen), false);
       await page.evaluate(() => window.store.getState().loadServicesConfig());
       const toggle = page.getByRole('switch', {name: 'Worlds mode (Experimental)'});
+      const waitForToggle = value => page.waitForFunction(expected =>
+        document.querySelector('button[aria-labelledby="worlds-mode-label"]')?.getAttribute('aria-checked') === String(expected), value);
       await toggle.waitFor();
       assert.equal(await toggle.getAttribute('aria-checked'), 'false', 'Missing preference defaults off');
-      assert.equal(await worlds.count(), 0, 'Other beta features do not enable Worlds');
+      await openWorkflow();
+      assert.equal(await worlds.count(), 0, 'Other beta features do not enable Worlds in the Create menu');
+      await openWorkflow();
 
       await toggle.click();
-      await worlds.waitFor();
+      await waitForToggle(true);
       assert.equal(await toggle.getAttribute('aria-checked'), 'true');
-      assert.match(await worlds.getAttribute('title'), /Experimental/);
       assert.deepEqual(writes.at(-1), {path: '/api/v1/services-config', body: {worlds_enabled: true}});
+      await openWorkflow();
+      await worlds.waitFor();
+      assert.match(await worlds.innerText(), /Experimental · Create and explore saved worlds/);
       await worlds.click();
-      assert.equal(await page.evaluate(() => window.store.getState().worldsOpen), true);
+      assert.equal(await page.evaluate(() => window.store.getState().worldsOpen), true, 'The menu item opens the dedicated Worlds panel');
+      assert.equal(await page.evaluate(() => window.store.getState().studioVideoWorkflow), 'frames', 'Opening Worlds leaves the selected workflow intact');
 
       await boot();
-      await worlds.waitFor();
       assert.equal(await toggle.getAttribute('aria-checked'), 'true', 'Enabled choice survives reload');
       assert.equal(await page.evaluate(() => window.store.getState().worldsOpen), false, 'The panel itself is transient');
+      await openWorkflow();
+      await worlds.waitFor();
       await worlds.click();
       await toggle.click();
-      await worlds.waitFor({state: 'detached'});
+      await waitForToggle(false);
       assert.equal(await page.evaluate(() => window.store.getState().worldsOpen), false, 'Disabling closes the panel');
       assert.deepEqual(writes.at(-1).body, {worlds_enabled: false});
+      await openWorkflow();
+      assert.equal(await worlds.count(), 0, 'Disabling removes Worlds from the Create menu');
+      await openWorkflow();
       await boot();
       await toggle.waitFor();
       assert.equal(await toggle.getAttribute('aria-checked'), 'false', 'Disabled choice survives reload');
+      await openWorkflow();
       assert.equal(await worlds.count(), 0);
+      await openWorkflow();
 
       failSave = true;
       await toggle.click();
       await page.getByRole('alert').waitFor();
       assert.equal(await toggle.getAttribute('aria-checked'), 'false', 'Failed saves do not enable the feature');
+      await openWorkflow();
       assert.equal(await worlds.count(), 0);
       assert.equal(saved.auto_performance, true);
       assert.equal(saved.nsfw_mode, false);

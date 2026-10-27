@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import {
   Blend,
   FlaskConical,
+  Globe,
   Images,
   Paintbrush,
   PanelsTopLeft,
@@ -20,7 +21,8 @@ import {
   type StudioWorkflowOption,
 } from './StudioWorkflowSelect'
 
-type DisplayVideoWorkflow = StudioVideoWorkflow | 'legacy_multishot' | 'legacy_inpaint'
+type ActiveVideoWorkflow = StudioVideoWorkflow | 'legacy_multishot' | 'legacy_inpaint'
+type DisplayVideoWorkflow = ActiveVideoWorkflow | 'worlds'
 
 const VIDEO_WORKFLOW_GROUPS: StudioWorkflowGroup<DisplayVideoWorkflow>[] = [
   {
@@ -77,7 +79,7 @@ function deriveActiveWorkflow(
   editSubMode: string,
   toolsTool: string,
   rememberedWorkflow: StudioVideoWorkflow,
-): DisplayVideoWorkflow {
+): ActiveVideoWorkflow {
   if (generationMode === 'tools' && toolsTool === 'upscale') return 'upscale'
   if (generationMode === 'tools' && toolsTool === 'film_grain') return 'film_grain'
   if (generationMode === 'avatar') {
@@ -109,7 +111,8 @@ function deriveActiveWorkflow(
   return 'frames'
 }
 
-export function VideoWorkflowSelector() {
+export function VideoWorkflowSelector({ onOpenWorlds }: { onOpenWorlds?: () => void } = {}) {
+  const worldsEnabled = useStore(state => state.servicesConfig?.worlds_enabled === true)
   const generationMode = useStore(state => state.generationMode)
   const imageMode = Number(useStore(state => state.params.image_mode) || 0)
   const editSubMode = useStore(state => state.editSubMode)
@@ -118,6 +121,16 @@ export function VideoWorkflowSelector() {
   const setWorkflow = useStore(state => state.setStudioVideoWorkflow)
   const modelType = useStore(state => state.params.model_type)
   const viggleAvailable = useStore(state => state.models.some(model => model.model_type === 'viggle_animate'))
+  const groups = worldsEnabled && onOpenWorlds
+    ? VIDEO_WORKFLOW_GROUPS.map(group => group.label === 'Create'
+      ? { ...group, options: [...group.options, {
+        value: 'worlds' as const,
+        label: 'Worlds',
+        description: 'Experimental · Create and explore saved worlds',
+        icon: Globe,
+      }] }
+      : group)
+    : VIDEO_WORKFLOW_GROUPS
 
   const activeWorkflow = deriveActiveWorkflow(
     generationMode,
@@ -150,9 +163,13 @@ export function VideoWorkflowSelector() {
     <StudioWorkflowSelect<DisplayVideoWorkflow>
       value={activeWorkflow}
       activeOption={activeOption}
-      groups={VIDEO_WORKFLOW_GROUPS}
+      groups={groups}
       hint="Frames · References · Transform · Finish"
       onChange={workflow => {
+        if (workflow === 'worlds') {
+          onOpenWorlds?.()
+          return
+        }
         if (workflow === 'legacy_multishot' || workflow === 'legacy_inpaint') return
         setWorkflow(workflow)
       }}
