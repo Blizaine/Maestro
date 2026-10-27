@@ -213,6 +213,8 @@ export function ServicesSettingsPanel() {
   const llmModels = useStore(s => s.llmModels)
   const loadLlmModels = useStore(s => s.loadLlmModels)
   const [refreshing, setRefreshing] = useState(false)
+  const [worldsSaving, setWorldsSaving] = useState(false)
+  const [worldsSaveError, setWorldsSaveError] = useState<string | null>(null)
 
   if (servicesConfigLoading && !servicesConfig) {
     return <div className="text-xs text-text-muted py-4 text-center">Loading...</div>
@@ -234,6 +236,18 @@ export function ServicesSettingsPanel() {
     setRefreshing(true)
     await loadLlmModels()
     setRefreshing(false)
+  }
+
+  const toggleWorlds = async () => {
+    setWorldsSaving(true)
+    setWorldsSaveError(null)
+    try {
+      await updateConfig({ worlds_enabled: servicesConfig.worlds_enabled !== true }, { throwOnError: true })
+    } catch (error) {
+      setWorldsSaveError(error instanceof Error ? error.message : 'Could not save the Worlds setting.')
+    } finally {
+      setWorldsSaving(false)
+    }
   }
 
   // Filter models by current provider (show local + remote of current provider)
@@ -741,6 +755,33 @@ export function ServicesSettingsPanel() {
         <h3 className="text-[11px] text-text-secondary uppercase tracking-wider font-medium mb-3">
           Beta Features
         </h3>
+        <div className="mb-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex-1">
+              <div id="worlds-mode-label" className="text-sm text-text-primary">Worlds mode (Experimental)</div>
+              <p id="worlds-mode-description" className="text-[10px] text-text-muted mt-0.5 leading-relaxed">
+                Show Worlds in the top navigation for world generation and exploration. Off by default.
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-labelledby="worlds-mode-label"
+              aria-describedby="worlds-mode-description"
+              aria-checked={servicesConfig.worlds_enabled === true}
+              disabled={worldsSaving}
+              onClick={() => void toggleWorlds()}
+              className={`w-9 h-5 rounded-full transition-colors relative shrink-0 disabled:opacity-50 ${
+                servicesConfig.worlds_enabled === true ? 'bg-accent-blue' : 'bg-bg-tertiary border border-border'
+              }`}
+            >
+              <span className={`absolute top-0.5 left-0 w-4 h-4 rounded-full bg-white border border-border shadow transition-transform ${
+                servicesConfig.worlds_enabled === true ? 'translate-x-4' : 'translate-x-0.5'
+              }`} />
+            </button>
+          </div>
+          {worldsSaveError && <p role="alert" className="text-xs text-red-400 mt-2">{worldsSaveError}</p>}
+        </div>
         <label className="flex items-center justify-between cursor-pointer group">
           <div className="flex-1 mr-3">
             <div className="text-sm text-text-primary">

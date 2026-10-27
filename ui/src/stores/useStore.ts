@@ -2195,6 +2195,10 @@ interface AppState {
   storageDashboardOpen: boolean
   setStorageDashboardOpen: (open: boolean) => void
 
+  // Worlds panel visibility is transient; the feature opt-in is server-backed.
+  worldsOpen: boolean
+  setWorldsOpen: (open: boolean) => void
+
   // LoRA picker sort order — store-backed (not per-component state) so
   // simultaneously mounted pickers (e.g. Director's Image + Video
   // accordions) stay in sync; persisted to localStorage.
@@ -10175,7 +10179,8 @@ export const useStore = create<AppState>((set, get) => ({
     set({ servicesConfigLoading: true })
     try {
       const config = await api.fetchServicesConfig()
-      set({ servicesConfig: config, servicesConfigLoading: false })
+      set({ servicesConfig: config, servicesConfigLoading: false,
+        ...(config.worlds_enabled !== true ? {worldsOpen: false} : {}) })
       if (
         config.nsfw_mode
         && _modelVisibilityHydrated
@@ -10201,7 +10206,8 @@ export const useStore = create<AppState>((set, get) => ({
       await api.updateServicesConfig(partial)
       // A field awaiting save must see the new masked value before closing.
       const config = await api.fetchServicesConfig()
-      set({ servicesConfig: config })
+      set({ servicesConfig: config,
+        ...(config.worlds_enabled !== true ? {worldsOpen: false} : {}) })
       // Newly-discovered Mature models appear once when Mature Mode is
       // enabled. Previously initialized models retain the user's whitelist.
       if (partial.nsfw_mode === true && _modelVisibilityHydrated) {
@@ -12574,6 +12580,8 @@ export const useStore = create<AppState>((set, get) => ({
 
   storageDashboardOpen: false,
   setStorageDashboardOpen: (open) => set({ storageDashboardOpen: open }),
+  worldsOpen: false,
+  setWorldsOpen: (open) => set({ worldsOpen: open && get().servicesConfig?.worlds_enabled === true }),
 
   loraPickerSort: (() => {
     try { return localStorage.getItem('maestro_lora_picker_sort') === 'newest' ? 'newest' as const : 'name' as const } catch { return 'name' as const }

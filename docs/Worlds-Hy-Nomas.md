@@ -2,6 +2,8 @@
 
 ## Scope
 
+Worlds is experimental and hidden by default. Enable **Settings → Integrations → Beta Features → Worlds mode (Experimental)** to show it in the top navigation. This preference is saved per installation. Disabling it closes the drawer without cancelling queued work or removing saved worlds.
+
 This port adds Hy-Nomas, a bounded `.wgpworld` v1 reader/writer, and a dedicated Worlds drawer connected to Maestro's durable generation queue. Create a world, continue its events, or request discrete camera moves; save its state, capture its last frame, and record the saved clip chain. Each move is a queued job. Interactive latency and model quality still require GPU validation; this integration does not promise real-time navigation.
 
 The model runtime returns a `.wgpworld` payload from generation and retains the complete session state in `model_factory.session`. It preserves the latents, segment text embeddings, camera poses, manifest timeline, and the rebuilt/active history archive. The `.wgpworld` file intentionally does not contain KV history; loading it replays each stored segment's history write.

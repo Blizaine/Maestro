@@ -7908,6 +7908,9 @@ def get_services_config():
         # config; the Edit mode picker hides Inpaint. Voice Reference is
         # intentionally independent of this gate.
         "show_experimental": services.get("show_experimental", False),
+        # Controls whether the Worlds entry is shown in the UI. This is a
+        # persisted visibility preference only; it does not gate routes/jobs.
+        "worlds_enabled": services.get("worlds_enabled", False) is True,
         # Storage Manager: opt-in gate for removing duplicate files FROM
         # linked installs (the inverse of Reclaim). Default off — deleting
         # from another install is informed-consent territory.
@@ -7957,6 +7960,10 @@ async def update_services_config(request: Request):
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Settings must be an object.")
+    # Validate this preference before preparing any updates so values such as
+    # the string "false" can never be treated as truthy or partially applied.
+    if "worlds_enabled" in body and type(body["worlds_enabled"]) is not bool:
+        raise HTTPException(status_code=400, detail="Worlds visibility must be true or false.")
 
     ALLOWED_KEYS = {
         "llm_model_id", "llm_device", "llm_provider", "llm_remote_url",
@@ -7967,6 +7974,7 @@ async def update_services_config(request: Request):
         "use_director_v2", "nsfw_mode", "nsfw_accepted_at", "director_prompt_polish",
         "civitai_api_key", "voice_reference_enabled", "ltx_progressive_pipeline",
         "show_experimental", "auto_performance", "storage_allow_linked_removal",
+        "worlds_enabled",
         "director_multishot_lora_mode",
         "flashvsr_model", "flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend",
     }

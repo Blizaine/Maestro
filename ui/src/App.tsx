@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect } from 'react'
 import { Menu, Settings } from 'lucide-react'
 import { Sidebar } from './components/Sidebar/Sidebar'
 import { MainContent } from './components/MainContent/MainContent'
@@ -26,7 +26,8 @@ const EditorWorkspace = lazy(() => import('./editor/EditorWorkspace').then(modul
 const WorldExplorer = lazy(() => import('./components/Worlds/WorldExplorer').then(module => ({default: module.WorldExplorer})))
 
 function App() {
-  const [worldsOpen, setWorldsOpen] = useState(false)
+  const worldsOpen = useStore(s => s.servicesConfig?.worlds_enabled === true && s.worldsOpen)
+  const setWorldsOpen = useStore(s => s.setWorldsOpen)
   const loadModels = useStore(s => s.loadModels)
   const loadOutputs = useStore(s => s.loadOutputs)
   const loadWorkspaces = useStore(s => s.loadWorkspaces)

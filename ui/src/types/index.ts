@@ -1448,6 +1448,8 @@ export interface ServicesConfig {
    *  enhancer config; the Edit mode picker hides Inpaint. LTX Voice
    *  Reference is a separate opt-in under Video Frames → Advanced. */
   show_experimental: boolean
+  /** Separate opt-in for the experimental Worlds workspace. Default off. */
+  worlds_enabled?: boolean
   /** Storage Manager opt-in: allow removing duplicate files FROM linked
    *  installs (Recycle Bin only). Default off — informed consent. */
   storage_allow_linked_removal?: boolean

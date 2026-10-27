@@ -73,6 +73,9 @@ export function WorldsButton({
   open?: boolean
   onClick: () => void
 }) {
+  const enabled = useStore(state => state.servicesConfig?.worlds_enabled === true)
+  if (!enabled) return null
+
   return (
     <button
       type="button"
@@ -80,7 +83,7 @@ export function WorldsButton({
       aria-label="Open Worlds"
       aria-haspopup="dialog"
       aria-expanded={open}
-      title="Open Worlds explorer"
+      title="Worlds explorer (Experimental)"
       className={`${size === 'sm' ? 'px-2 py-1 text-[11px]' : 'px-2.5 py-1.5 text-xs'} flex shrink-0 items-center gap-1.5 rounded-lg border border-border text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary`}
     >
       <Globe size={size === 'sm' ? 13 : 14} />

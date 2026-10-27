@@ -70,6 +70,7 @@ async function main() {
       };
       window.worldCatalog = [world, studio];
       window.store.setState({
+        servicesConfig: {worlds_enabled: true},
         modelsLoaded: true,
         modelsLoading: false,
         modelsLoadError: null,
