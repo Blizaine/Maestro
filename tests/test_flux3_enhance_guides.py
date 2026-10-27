@@ -4,7 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = ROOT / "app"
@@ -44,13 +44,14 @@ class Flux3EnhanceGuideTests(unittest.TestCase):
 
     def test_full_model_override_still_replaces_the_architecture_guide(self):
         override = "Standalone fine-tune guide."
+        load_guide = Mock(return_value=override)
         with patch.dict(
             sys.modules,
             {"wgp": SimpleNamespace(get_model_def=lambda _model_type: {
                 "enhance_guide": "custom_guide",
                 "enhance_guide_text": "inline delta should not replace the override",
-            })},
-        ), patch("services.guide_loader.load_guide", return_value=override) as load_guide:
+            }), "services.guide_loader": SimpleNamespace(load_guide=load_guide)},
+        ):
             guide = get_enhance_guide("flux3_klein", "image", has_images=True)
 
         self.assertEqual(guide, override)

@@ -5,6 +5,13 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [3.3.0] - 2026-10-26
 
+**27 October image and terminal fixes:** add Krea 2 generation/edit prompt guides;
+preserve requested image media and styles across Studio, raw image writers and
+Director image rules; distinguish FLUX 3 Base from the distilled variant. Remove
+forced photograph/static-pose wording and unconditional source-lighting rules.
+Fix FLUX 3 image generation rejecting unrelated model-mode settings. Quiet
+successful HTTP access logs while retaining failures, warnings and startup logs.
+
 **27 October Dev follow-up:** MOSS SFT/HQ reference editors and caching, HQ v5
 vision conditioning, model-switch validation and native reference geometry;
 Fibo 2.0 and rectangular VAE decoding; H3 PTD and optional two-pass refinement;

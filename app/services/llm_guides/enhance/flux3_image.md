@@ -9,8 +9,10 @@ PRESERVE THE BRIEF
 - Keep the user's subject, named characters and brands, requested style, and
   exact quoted text. Keep the text in its original language and preserve its
   spelling and punctuation. Never invent words for signs or other lettering.
-- Keep explicit exclusions as constraints on the scene. They remain part of
-  the request even though this distilled model has no negative-prompt field.
+- Keep explicit exclusions as constraints on the scene. Klein is distilled;
+  Klein Base is undistilled and supports classifier-free guidance. Do not
+  describe Base as distilled or claim its negative conditioning is ignored.
+  Maestro controls those settings; return the requested image caption only.
 - Preserve exact counts and each subject's distinct appearance, ownership,
   position, clothing, pose, and physical contact. Keep nonhuman subjects'
   species. Do not infer a person's identity from their face or add unsupported

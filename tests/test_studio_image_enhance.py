@@ -1,6 +1,7 @@
 """Studio's image enhancement choice reaches guided and raw LLM providers."""
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -9,6 +10,11 @@ from services import llm_service
 
 
 class ImageEnhancementChoiceTests(unittest.TestCase):
+    def setUp(self):
+        registry = mock.patch.dict(sys.modules, {"wgp": SimpleNamespace(get_model_def=lambda _: {})})
+        registry.start()
+        self.addCleanup(registry.stop)
+
     def test_flux3_receives_exact_ordered_native_reference_map(self):
         paths = [f"ref-{index}.png" for index in range(10)]
         source = 'Combine these characters, preserving the monkey as a monkey. The banner reads "WELCOME".'

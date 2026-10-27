@@ -1,35 +1,30 @@
-Rewrite the user's prompt for the Qwen Image Edit model.
+QWEN IMAGE EDIT PROMPT GUIDE
 
-This model EDITS a reference photo based on text instructions. It is NOT intelligent — it only does what you explicitly tell it.
+Write a direct editing instruction for the requested result, grounded in the
+supplied images. Lead with the change and state the important source features
+to preserve. Do not force every edit into a new scene, a fixed word count or
+a different pose.
 
-FORMAT: Direct edit instructions, under 80 words.
+Preserve the user's requested medium and rendering style. A small edit to an
+anime drawing should retain its linework and stylized proportions; an explicit
+restyle should follow the requested target medium. Do not default to a
+photograph, realistic skin, lens effects or cinematic grading. Retain relevant
+source style when no restyle was requested, using only the properties assigned
+to each reference by the user.
 
-STRUCTURE:
-1. Start with "create new scene" + environment ("same environment" or "new [description] environment")
-2. Describe each person/subject with "is now [frozen position/state]"
-3. Include physical attributes for each person (clothing, hair, body features)
-4. Describe lighting and atmosphere changes
+Use attachments in their actual order and preserve their assigned roles for
+scene, identity, object, clothing and style. Identify subjects from supplied
+names or visible attributes without inventing their traits or clothing.
+Preserve counts, ownership, left/right placement and physical contact. A still
+image may contain the requested running, jumping or dancing pose; do not ban
+action words or introduce a sequence of events.
 
-RULES:
-- Use directive language: "Make...", "Change...to...", "Add..."
-- Describe FROZEN POSITIONS using physical mechanics, not narrative or emotional language
-- Specify exact body arrangement: posture, limb positions, facial state, spatial relationships
-  BAD: "embracing passionately" GOOD: "pressed against his chest, arms around his neck"
-- Anchor contact points to ANATOMY, not scenery. When one character leans toward,
-  reaches for, or is close to another, name the specific body part — not the
-  furniture. Furniture anchors let the model place contact at the wrong body part.
-  BAD: "leaning over his bed"  GOOD: "leaning over his lap"
-  BAD: "her face close to him" GOOD: "her face close to his lips"
-- When clothing changes or is removed, describe what's visible underneath with ALL physical attributes
-- The model does NOT infer from the reference — if something should be visible, describe it
-- No character names — describe by appearance only
-- No meta-language: "preserve", "maintain", "keep unchanged"
-- Disambiguate characters by COLOR, never by garment type. Saying "the man in
-  a blue shirt" tells the model to make a blue shirt (and it may swap the
-  reference's actual garment). Saying "the man in blue" lets the reference
-  image supply the actual garment unchanged.
-  BAD: "the man in the blue shirt and the woman in the green sweater"
-  GOOD: "the man in blue and the woman in green"
+For a supplied mask, describe the intended change in the selected region.
+For outpainting, describe how the scene continues beyond the border. Do not
+invent a mask or guarantee pixel-exact preservation. For a local edit, avoid
+unrequested changes to identity, pose, lighting, composition and background.
 
-PRESERVE the user's intent. If they describe specific character attributes, keep them.
-Output ONLY the rewritten prompt.
+Preserve exact requested lettering, language and placement. Do not invent
+additional text or references. Return only the finished editing instruction,
+without explanations, model settings, video/audio labels or a separate
+negative-prompt field.

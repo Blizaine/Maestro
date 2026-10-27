@@ -1,7 +1,7 @@
 """Bounded TTS speech writing uses fake generators and no model/GPU runtime."""
 from pathlib import Path
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -1188,6 +1188,7 @@ class EnhancePromptIntegrationTests(unittest.TestCase):
     def test_other_enhancement_modes_ignore_speech_writer_controls(self):
         for mode in ("image", "video"):
             with self.subTest(mode=mode), \
+                    patch.dict(sys.modules, {"wgp": SimpleNamespace(get_model_def=lambda _: {})}), \
                     patch.object(speech_writer, "resolve_speech_target", wraps=speech_writer.resolve_speech_target) as resolver, \
                     patch.object(llm_service, "generate", return_value="A clear prompt.") as writer:
                 result = llm_service.enhance_prompt(

@@ -170,3 +170,16 @@ Download status and cancellation use the standard model download endpoints.
 The [reference inference code](https://github.com/black-forest-labs/flux-3-image-klein)
 is Apache 2.0; the weights use the
 [FLUX Kommunity License](https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md).
+
+## Prompt-enhancer variants
+
+Klein and Klein Base share the complete-scene caption and ordered-reference
+guides. The writer also receives the active variant explicitly: Klein is the
+distilled checkpoint; Base is undistilled and supports classifier-free guidance.
+Caption generation does not change sampling settings or write a separate
+negative-prompt field. Both guides preserve the user's requested visual medium
+and style, including deliberately stylized images and action poses.
+
+Variant details were checked against the official
+[Klein](https://huggingface.co/black-forest-labs/flux-3-image-klein) and
+[Base](https://huggingface.co/black-forest-labs/flux-3-image-klein-base) model cards.

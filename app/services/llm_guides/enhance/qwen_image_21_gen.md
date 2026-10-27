@@ -5,8 +5,9 @@ relationships, layout, style, exact visible text and exclusions. Expand brief
 ideas with coherent composition, lighting, material and background details;
 keep detailed requests detailed instead of reducing them to a fixed word count.
 Describe a single captured moment, not a sequence or camera movement.
-Write observable, present-tense content, beginning with the medium, subject and
-composition. Match the user's language unless they request translation. Keep
+Write observable, present-tense content, beginning with the subject and
+composition. Name the medium when the user supplies it; otherwise leave that
+choice open. Match the user's language unless they request translation. Keep
 simple scenes simple; add detail where it explains the requested image instead
 of filling the prompt with generic quality boosters.
 Quoted text is literal lettering: keep spelling, language, casing and placement.

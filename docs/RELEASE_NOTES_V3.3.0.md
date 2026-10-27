@@ -97,6 +97,28 @@ See the [port scope](WanGP-October-2026-Ports.md) for remaining work.
 
 ## Update and test
 
+The image-prompt follow-up adds [Krea 2 caption and edit guides](Krea-2-Prompting.md)
+for Raw, Turbo and their Identity Edit variants. Studio's guided and dedicated
+raw image writers now carry an explicit medium/style contract: anime,
+illustration, painting, photography and 3D are followed when requested. Source
+images used only for identity do not prescribe a target style. Director's image
+guides and dialect rules retain opening-frame continuity without forcing a
+photographic medium, static neutral poses or the source image's lighting.
+The older Flux/Qwen/generic guides no longer impose those constraints.
+
+FLUX 3 prompt enhancement now identifies the active variant: Klein is distilled,
+while Base is undistilled and uses classifier-free guidance, consistent with
+the [official Base model card](https://huggingface.co/black-forest-labs/flux-3-image-klein-base).
+Both still return a caption rather than changing the selected sampler settings.
+The runtime also stops treating a stale generic model selector as the image
+workflow, fixing valid Image Generate requests rejected after model switching.
+
+Routine successful HTTP access lines are hidden in the terminal. HTTP failures,
+warnings, exceptions and startup messages remain visible. These backend changes
+take effect after a normal restart. The style checks cover routing, prompt
+assembly and mocked-writer contracts; they do not guarantee that every LLM draft
+or rendered image will follow the requested style.
+
 When idle, stop Maestro, select **Update** for the **Dev** installation in
 Pinokio, restart it and refresh the browser. The UI should show **v3.3.0**.
 

@@ -1,6 +1,14 @@
 QWEN IMAGE EDIT PROMPTING GUIDE
 Concise version for an LLM that writes prompts for Qwen-Image-Edit
 
+MEDIUM AND STYLE
+Follow the user's requested medium and visual style. Anime, illustration,
+painting, graphic design, photography and 3D are choices to preserve, not
+defaults to impose. A requested restyle overrides the base scene's medium;
+otherwise retain its style for a bounded edit. An identity-only reference
+does not determine the target style. Use realism, lens, lighting and material
+details only when they fit the user's chosen medium and requested change.
+
 PURPOSE
 Write clear, high-performing prompts for Qwen-Image-Edit that handle:
 - local appearance edits
@@ -38,7 +46,7 @@ Then decide what matters most:
 - identity preservation
 - text accuracy
 - layout preservation
-- realism and scene integration
+- requested style and scene integration
 
 ==================================================
 2. CORE RULES
@@ -106,19 +114,19 @@ IMPORTANT:
 ==================================================
 
 A) ADD OBJECT
-Edit the provided image. Add [object] at [location]. Keep [scene/subject/composition] unchanged. Match the existing lighting, perspective, and scale. Do not alter unrelated areas.
+Edit the provided image. Add [object] at [location]. Keep [scene/subject/composition] unchanged. Follow the requested medium and lighting, preserving source lighting when the user wants it retained. Keep the requested perspective and relative scale. Do not alter unrelated areas.
 
 B) REMOVE OBJECT
 Edit the provided image. Remove [object/detail]. Cleanly fill the area using the surrounding background or texture. Keep everything else unchanged.
 
 C) REPLACE OBJECT
-Edit the provided image. Replace [old object] with [new object] in the same position and approximate size. Match lighting and perspective. Keep all other areas unchanged.
+Edit the provided image. Replace [old object] with [new object] in the same position and approximate size. Use perspective and lighting appropriate to the requested scene and style. Keep all other areas unchanged.
 
 D) MODIFY ATTRIBUTE
 Edit the provided image. Change only [target attribute] to [new value]. Preserve [shape/pose/identity/background]. Keep all other elements unchanged.
 
 E) BACKGROUND CHANGE
-Edit the provided image. Replace the background with [new background]. Preserve the subject’s identity, pose, scale, and framing. Keep the result natural and well integrated.
+Edit the provided image. Replace the background with [new background]. Preserve the subject’s identity, pose, scale, and framing. Keep the result coherent with the requested medium and style.
 
 F) CLOTHING CHANGE
 Edit the provided image. Change the subject’s outfit to [description]. Preserve identity, pose, expression, body proportions, and framing. Keep the background unchanged.
@@ -127,7 +135,7 @@ G) STYLE TRANSFER
 Edit the provided image. Transform it into [style]. Preserve identity, pose, expression, and composition. Keep the image semantically consistent while allowing full stylistic reinterpretation.
 
 H) VIEW ROTATION
-Edit the provided image. Rotate [object] to show [side/back/front] view. Preserve the object’s design, proportions, materials, and color. Keep lighting realistic.
+Edit the provided image. Rotate [object] to show [side/back/front] view. Preserve the object’s design, proportions, materials, and color. Follow the requested lighting within the selected visual medium.
 
 I) TEXT EDIT
 Edit the provided image. Replace the [target text/region] with exactly: "[new text]". Preserve the original font style, size, spacing, alignment, color, and layout. Keep all other content unchanged.
@@ -163,7 +171,7 @@ Useful phrases:
 - preserve the existing camera angle
 - preserve lighting and shadows
 - preserve font style and layout
-- preserve material texture and realism
+- preserve material treatment within the requested style
 
 For semantic edits, use softer wording:
 - preserve semantic identity
@@ -172,17 +180,15 @@ For semantic edits, use softer wording:
 - allow stylistic reinterpretation while preserving identity
 
 ==================================================
-7. REALISM / INTEGRATION LANGUAGE
+7. STYLE-CONSISTENT INTEGRATION LANGUAGE
 ==================================================
 
-When adding or changing physical elements, include:
-- match the existing lighting
-- match perspective
-- keep scale realistic
-- include natural shadows
-- include reflections if appropriate
-- maintain material realism
-- blend naturally into the scene
+When adding or changing elements, use only integration cues appropriate to
+the requested medium and edit. Preserve requested perspective and relative
+scale. Match source lighting only when the user wants it retained; an explicit
+lighting change takes priority. Shadows, reflections and material realism are
+optional techniques for a requested photographic treatment, not requirements
+for anime, flat illustration or deliberately stylized work.
 
 ==================================================
 8. WHAT TO AVOID
@@ -246,7 +252,7 @@ Pass 2:
 Step 1: Identify what changes
 Step 2: Classify the edit type
 Step 3: Identify what must be preserved
-Step 4: Add realism or layout constraints
+Step 4: Preserve the requested medium and relevant layout constraints
 Step 5: If text is involved, specify exact text
 Step 6: If difficult, split into multiple passes
 Step 7: Write a direct, focused prompt
@@ -255,4 +261,4 @@ Step 7: Write a direct, focused prompt
 12. COMPACT SYSTEM PROMPT FOR AN LLM
 ==================================================
 
-You are an expert prompt writer for Qwen-Image-Edit. First classify the request as appearance editing, semantic editing, text editing, view synthesis, or multi-pass repair. Then write a focused prompt that clearly states what to change, what to preserve, and any realism, typography, or layout constraints needed. For text edits, always render replacement text exactly as written. For difficult edits, prefer step-by-step prompts over one overloaded instruction.
+You are an expert prompt writer for Qwen-Image-Edit. First classify the request as appearance editing, semantic editing, text editing, view synthesis, or multi-pass repair. Write a focused prompt stating what to change, what to preserve, and the user's requested medium, style, typography and layout constraints. Do not impose realism or a photographic treatment. For text edits, retain replacement text exactly as written. For difficult edits, keep each requested change clear without inventing additional changes.

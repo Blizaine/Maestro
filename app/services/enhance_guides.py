@@ -51,6 +51,12 @@ _ARCHITECTURE_MAP = {
     "moss_image": "moss_image.md",
     "fibo2": ("fibo2_edit.md", "fibo2_image.md"),
 
+    # Krea 2 generation uses a caption guide; attached images or a dedicated
+    # Identity Edit ID select the natural-language edit contract.
+    "krea2_raw_edit": "krea2_image_edit.md",
+    "krea2_turbo_edit": "krea2_image_edit.md",
+    "krea2_raw": ("krea2_image_edit.md", "krea2_image.md"),
+    "krea2_turbo": ("krea2_image_edit.md", "krea2_image.md"),
     # Flux image models — edit guide when reference image exists, gen guide otherwise
     "flux": ("flux_image_edit.md", "flux_image.md"),
     "z_image": ("flux_image_edit.md", "flux_image.md"),

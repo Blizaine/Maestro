@@ -11,6 +11,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
 
 class TestEnhancementProviderRouting(unittest.TestCase):
+    def setUp(self):
+        # Functions extracted from launch.py supply their own app namespace;
+        # lazy guide imports also need an isolated model metadata registry.
+        registry = patch.dict(sys.modules, {"wgp": SimpleNamespace(get_model_def=lambda _: {})})
+        registry.start()
+        self.addCleanup(registry.stop)
+
     @classmethod
     def setUpClass(cls):
         path = Path(__file__).resolve().parents[1] / "app/launch.py"
