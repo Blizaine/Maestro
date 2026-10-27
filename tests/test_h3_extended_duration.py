@@ -86,7 +86,8 @@ class H3ExtendedDurationTests(unittest.TestCase):
                      "MINIMAX_H3_MIN_DURATION": 5, "MINIMAX_H3_MAX_DURATION": 15,
                      "math": math, "align_num_frames": align_num_frames}
         exec(compile(ast.Module(body=[generate], type_ignores=[]), "h3-generate.py", "exec"), namespace)
-        model = SimpleNamespace(audio_only=False, viggle=False, _pdd_lora_active=False)
+        model = SimpleNamespace(audio_only=False, viggle=False, ptd_refasymopd=False,
+                                sample_solver="euler", _pdd_lora_active=False)
         for flag, frames, message in ((False, 719, "duration limit"), (True, 719, "scheduler grid"),
                                      (True, 736, "duration limit"), (False, 345, "scheduler grid")):
             with self.subTest(flag=flag, frames=frames), self.assertRaisesRegex(ValueError, message):

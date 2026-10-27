@@ -5,6 +5,7 @@ from contextlib import nullcontext
 from functools import partial
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,7 +40,8 @@ def production_function(path, name, namespace=None, class_name=None):
         nodes = next(node for node in nodes if isinstance(node, ast.ClassDef)
                      and node.name == class_name).body
     function = next(node for node in nodes if isinstance(node, ast.FunctionDef) and node.name == name)
-    namespace = dict(namespace or {})
+    namespace = {"__name__": "models.minimax_h3.minimax_h3_main",
+                 "__package__": "models.minimax_h3", **dict(namespace or {})}
     module = ast.Module(body=[ast.ImportFrom(module="__future__",
                                            names=[ast.alias(name="annotations")], level=0),
                              function], type_ignores=[])
@@ -137,7 +139,7 @@ class SingularityIntegrationTests(unittest.TestCase):
         )
         for model in MODELS:
             definition = model_definition(model)
-            stub = SimpleNamespace(model_def=definition,
+            stub = SimpleNamespace(model_def=definition, fasth3=False,
                                    omni_reference=bool(definition.get("omni_reference")),
                                    release_special_loras=lambda: None)
             validate(stub, [FILENAME])
@@ -148,6 +150,52 @@ class SingularityIntegrationTests(unittest.TestCase):
                                        release_special_loras=lambda: None)
         with self.assertRaisesRegex(ValueError, "REF2VA"):
             validate(stock_frames, [FILENAME])
+
+    def test_ptd_hop_files_are_not_reclassified_as_turbo_or_foreign_pdd(self):
+        import struct
+        from models.minimax_h3 import ptd, turbo
+
+        def write_header(path, metadata):
+            header = json.dumps({"__metadata__": metadata}, separators=(",", ":")).encode("utf-8")
+            path.write_bytes(struct.pack("<Q", len(header)) + header)
+            return str(path)
+
+        metadata = {
+            "base_model": "minimax-h3",
+            "sampler_steps": "8",
+            "application": "lora_a,lora_b",
+            "pdd_num_steps": "32",
+            "pdd_block_size": "4",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            hop_paths = [write_header(root / name, metadata) for name in ptd.PTD_LORA_FILES]
+            # Reproduce the metadata signature that caused the real PTD files
+            # to enter the generic Turbo/PDD accelerator classifier.
+            self.assertEqual(turbo.find_minimax_h3_accelerators(hop_paths), hop_paths)
+            validate = production_function(
+                ROOT / "app/models/minimax_h3/minimax_h3_main.py", "validate_loras",
+                {"os": __import__("os"), **{name: getattr(turbo, name) for name in (
+                    "find_minimax_h3_accelerators", "find_minimax_h3_turbo_loras",
+                    "find_minimax_h3_pdd_loras", "minimax_h3_turbo_preset_for_path",
+                    "minimax_h3_adapter_workflow")}}, class_name="MiniMaxH3Model",
+            )
+            model = SimpleNamespace(
+                model_def={"omni_reference": True}, omni_reference=True,
+                ptd_refasymopd=True, fasth3=False, _fused_turbo=False,
+                _baked_turbo=False, release_special_loras=lambda: None,
+            )
+            validate(model, hop_paths)
+            self.assertEqual(model._ptd_lora_paths, tuple(hop_paths))
+            self.assertFalse(model._turbo_lora_active)
+            self.assertFalse(model._pdd_lora_active)
+
+            foreign_pdd = write_header(
+                root / "MiniMax-H3-Ref2VA-Acc-8Step.safetensors",
+                {"pdd_num_steps": "32", "pdd_block_size": "4"},
+            )
+            with self.assertRaisesRegex(ValueError, "cannot be combined with another Turbo or PDD"):
+                validate(model, [*hop_paths, foreign_pdd])
 
     def test_loader_preserves_ref2va_lora_basis_for_shared_singularity_checkpoint(self):
         from models.minimax_h3 import turbo

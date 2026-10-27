@@ -1684,6 +1684,16 @@ class MiniMaxH3Model:
             raise ValueError(
                 "PTD RefAsymOPD hop adapters require the dedicated PTD RefAsymOPD model."
             )
+        # PTD's eight hop LoRAs are distinct from generic Turbo/PDD
+        # accelerators. Their metadata can satisfy those broad classifiers,
+        # but the dedicated PTD recipe owns and schedules them separately.
+        # Continue validating all non-PTD selections so a foreign accelerator
+        # cannot be stacked onto the fixed PTD head bank.
+        accelerator_loras = tuple(
+            str(path)
+            for path in (loras_selected or [])
+            if not is_ptd_refasymopd_adapter(path)
+        )
         if getattr(self, "_fused_turbo", False):
             validate_fused_h3_loras(loras_selected)
         if getattr(self, "_baked_turbo", False):
@@ -1694,7 +1704,7 @@ class MiniMaxH3Model:
                 from .dasiwa import validate_dasiwa_turbo_loras
                 validate_dasiwa_turbo_loras(loras_selected)
         accelerator_paths = tuple(
-            find_minimax_h3_accelerators(loras_selected)
+            find_minimax_h3_accelerators(accelerator_loras)
         )
         if ptd_enabled and accelerator_paths:
             raise ValueError(
@@ -1705,8 +1715,8 @@ class MiniMaxH3Model:
                 "MiniMax H3 supports one accelerator at a time; select only "
                 "one Turbo or PDD adapter."
             )
-        turbo_paths = tuple(find_minimax_h3_turbo_loras(loras_selected))
-        pdd_paths = tuple(find_minimax_h3_pdd_loras(loras_selected))
+        turbo_paths = tuple(find_minimax_h3_turbo_loras(accelerator_loras))
+        pdd_paths = tuple(find_minimax_h3_pdd_loras(accelerator_loras))
         for path in turbo_paths:
             preset = minimax_h3_turbo_preset_for_path(path)
             if preset is None:

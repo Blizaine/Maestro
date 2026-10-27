@@ -136,7 +136,8 @@ class H3VaeResidencyTests(unittest.TestCase):
     def test_h3_handler_exposes_both_codec_phases_to_mmgp(self):
         from models.minimax_h3.minimax_h3_handler import family_handler
         model = SimpleNamespace(vae=self.codec(), transformer=torch.nn.Linear(2, 2),
-                                audio_vae=torch.nn.Linear(2, 2), viggle=True, audio_only=False)
+                                audio_vae=torch.nn.Linear(2, 2), latent_upscaler=None,
+                                viggle=True, audio_only=False)
         with mock.patch("models.minimax_h3.minimax_h3_main.MiniMaxH3Model", return_value=model), mock.patch.object(
                 torch.cuda, "is_available", return_value=False):
             result, options = family_handler.load_model("unused.safetensors", dtype=torch.float16)

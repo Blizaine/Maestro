@@ -159,19 +159,24 @@ class TestVedaIntegration(unittest.TestCase):
         generation = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "generate_video")
         start = next(i for i, node in enumerate(generation.body) if isinstance(node, ast.Assign)
                      and any(isinstance(target, ast.Name) and target.id == "model_kwargs" for target in node.targets))
+        h3_context = next(i for i, node in enumerate(generation.body)
+                          if isinstance(node, ast.If) and "two_pass_load_context" in ast.unparse(node))
+        stop = h3_context + 1
         function = ast.parse("def select():\n    reload_needed = False\n").body[0]
-        function.body += generation.body[start:start + 5]
+        function.body += generation.body[start:stop]
         function.body += ast.parse("return model_kwargs, reload_needed").body
         scope = {"model_def": {"architecture": "minimax_h3", "veda_attention": True},
                  "model_type": "minimax_h3", "override_attention": "veda", "attention_mode": "sage2",
                  "get_overridden_attention": lambda _: None, "minimax_h3_text_encoder": "nvfp4_awq",
-                 "minimax_h3_video_vae": "auto",
+                 "minimax_h3_video_vae": "auto", "custom_settings": {},
                  "get_runtime_model_def": lambda *a: {"minimax_h3_video_vae_variant": "auto"},
-                 "wan_model": SimpleNamespace(veda=False, text_encoder_variant="nvfp4_awq"),
+                 "wan_model": SimpleNamespace(veda=False, two_pass_enabled=False,
+                                               video_vae_variant="auto", text_encoder_variant="nvfp4_awq"),
                  "send_cmd": mock.Mock()}
         exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "veda_job_gate", "exec"), scope)
         with mock.patch.object(attention, "get_veda_attention_status", return_value={"supported": True}):
-            self.assertEqual(scope["select"](), ({"minimax_h3_veda": True, "minimax_h3_text_encoder": "nvfp4_awq", "minimax_h3_video_vae": "auto"}, True))
+            self.assertEqual(scope["select"](), ({"minimax_h3_two_pass": False, "minimax_h3_video_vae": "auto",
+                                                  "minimax_h3_veda": True, "minimax_h3_text_encoder": "nvfp4_awq"}, True))
             scope["wan_model"].veda = True
             self.assertFalse(scope["select"]()[1])
             scope["override_attention"] = "sla"
