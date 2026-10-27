@@ -1368,15 +1368,15 @@ export function getFamiliesForMode(mode: GenerationMode, allFamilies: ModelFamil
 /** Get models for a family ID, optionally filtered by generation mode */
 export function getModelsForFamily(familyId: string, allModels: ModelDef[], mode?: GenerationMode, editSubMode?: string): ModelDef[] {
   if (familyId === 'tts_speech') {
-    return allModels.filter(m => m.family === 'tts' && !isMusicModelType(m.model_type) && !sfxModelTypes.has(m.model_type))
+    return allModels.filter(m => !m.world_model && m.family === 'tts' && !isMusicModelType(m.model_type) && !sfxModelTypes.has(m.model_type))
   }
   if (familyId === 'tts_music') {
-    return allModels.filter(m => m.family === 'tts' && isMusicModelType(m.model_type))
+    return allModels.filter(m => !m.world_model && m.family === 'tts' && isMusicModelType(m.model_type))
   }
   if (familyId === 'tts_sfx') {
-    return allModels.filter(m => m.family === 'tts' && sfxModelTypes.has(m.model_type))
+    return allModels.filter(m => !m.world_model && m.family === 'tts' && sfxModelTypes.has(m.model_type))
   }
-  const familyModels = allModels.filter(m => m.family === familyId)
+  const familyModels = allModels.filter(m => !m.world_model && m.family === familyId)
   if (mode === 'avatar' && editSubMode === 'outpaint' && familyId === 'minimax_h3') {
     return familyModels.filter(m => ['minimax_h3', 'minimax_h3_full'].includes(m.model_type))
   }
@@ -1490,7 +1490,7 @@ function getDefaultModelForMode(
   const isEnabled = (modelType: string) => !enabledModels || enabledModels.has(modelType)
   // Try the preferred default first
   const preferred = modeDefaultModel[mode]
-  if (preferred && isEnabled(preferred) && models.some(m => m.model_type === preferred)) {
+  if (preferred && isEnabled(preferred) && models.some(m => m.model_type === preferred && !m.world_model)) {
     return preferred
   }
   // Fallback: first enabled model in the first family of this mode. Selecting

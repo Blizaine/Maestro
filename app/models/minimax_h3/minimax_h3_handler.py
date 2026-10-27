@@ -2924,7 +2924,7 @@ class family_handler:
                 {
                     "repoId": PTD_REPO,
                     "revision": PTD_REVISION,
-                    "sourceFolderList": ["loras/ptd_refasymopd"],
+                    "sourceFolderList": [PTD_FOLDER],
                     "targetFolderList": [os.path.join(_ASSETS_ROOT, "ptd_refasymopd")],
                     "fileList": [[PTD_HEAD_FILE]],
                 }

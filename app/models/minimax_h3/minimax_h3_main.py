@@ -109,6 +109,7 @@ from .pdd import (
     install_pdd_parallel_heads,
     release_pdd_parallel_heads,
 )
+from .ptd import install_ptd_relative_heads
 from .video_vae import AutoencoderKLMiniMaxH3
 from .video_vae_assets import is_light_video_vae_checkpoint
 
@@ -1788,7 +1789,7 @@ class MiniMaxH3Model:
                     "Re-run model asset discovery for this PTD model."
                 )
             try:
-                self._pdd_controller = install_pdd_parallel_heads(
+                self._pdd_controller = install_ptd_relative_heads(
                     self.transformer,
                     self._ptd_head_path,
                     strength=1.0,

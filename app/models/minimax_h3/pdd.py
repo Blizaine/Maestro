@@ -522,24 +522,83 @@ def install_pdd_parallel_heads(
         audio_weights = handle.get_tensor("audio_proj_out.weight").clone()
         audio_biases = handle.get_tensor("audio_proj_out.bias").clone()
 
+    return _install_pdd_interval_heads(
+        transformer,
+        checkpoint,
+        video_weights,
+        video_biases,
+        audio_weights,
+        audio_biases,
+        strength=strength,
+        video_shift=video_shift,
+        audio_shift=audio_shift,
+        block_size=block_size,
+        adapter_name="Alibaba PAI",
+    )
+
+
+def _install_pdd_interval_heads(
+    transformer: nn.Module,
+    checkpoint: str,
+    video_weights: torch.Tensor,
+    video_biases: torch.Tensor,
+    audio_weights: torch.Tensor,
+    audio_biases: torch.Tensor,
+    *,
+    strength: float,
+    video_shift: float,
+    audio_shift: float,
+    block_size: int = PDD_BLOCK_SIZE,
+    adapter_name: str = "Alibaba PAI",
+) -> MiniMaxH3PDDController:
+    """Install validated absolute PDD interval banks.
+
+    PTD stores its banks as one base projection plus relative heads. Its
+    model-local adapter reconstructs those absolute banks and delegates here;
+    the ordinary PDD checkpoint loader keeps its existing on-disk contract.
+    """
+
+    final_layer = getattr(transformer, "final_layer", None)
+    if final_layer is None:
+        raise ValueError("MiniMax H3 PDD requires a transformer final layer.")
+    expected = {
+        "video weights": (PDD_NUM_INTERVALS, *tuple(final_layer.video_out.weight.shape)),
+        "video biases": (PDD_NUM_INTERVALS, *tuple(final_layer.video_out.bias.shape)),
+        "audio weights": (PDD_NUM_INTERVALS, *tuple(final_layer.audio_out.weight.shape)),
+        "audio biases": (PDD_NUM_INTERVALS, *tuple(final_layer.audio_out.bias.shape)),
+    }
+    actual = {
+        "video weights": tuple(video_weights.shape),
+        "video biases": tuple(video_biases.shape),
+        "audio weights": tuple(audio_weights.shape),
+        "audio biases": tuple(audio_biases.shape),
+    }
+    for name, shape in expected.items():
+        if actual[name] != shape:
+            raise ValueError(
+                f"MiniMax H3 PDD {name} shape mismatch: expected {shape}, "
+                f"got {actual[name]}."
+            )
+    for name, tensor in (
+        ("video weights", video_weights),
+        ("video biases", video_biases),
+        ("audio weights", audio_weights),
+        ("audio biases", audio_biases),
+    ):
+        if tensor.dtype != torch.float32:
+            raise ValueError(f"MiniMax H3 PDD {name} must be FP32.")
+
     video_fused = _fuse_interval_heads_for_plans(
         video_weights,
         video_biases,
-        _fixed_pdd_plans(
-            float(video_shift),
-            int(video_weights.shape[0]),
-            block_size,
-        ),
+        _fixed_pdd_plans(float(video_shift), int(video_weights.shape[0]), int(block_size)),
     )
     audio_fused = _fuse_interval_heads_for_plans(
         audio_weights,
         audio_biases,
-        _fixed_pdd_plans(
-            float(audio_shift),
-            int(audio_weights.shape[0]),
-            block_size,
-        ),
+        _fixed_pdd_plans(float(audio_shift), int(audio_weights.shape[0]), int(block_size)),
     )
+    release_pdd_parallel_heads(transformer)
     video_head = MiniMaxH3PDDParallelHead(
         transformer.final_layer.video_out,
         video_fused[0],
@@ -565,7 +624,7 @@ def install_pdd_parallel_heads(
     )
     transformer._pdd_controller = controller
     print(
-        "[MiniMax H3 PDD] Loaded Alibaba PAI acceleration adapter: "
+        f"[MiniMax H3 PDD] Loaded {adapter_name} acceleration adapter: "
         f"{os.path.basename(str(checkpoint))}, {controller.num_steps} "
         f"evaluations, strength {float(strength):.2f}."
     )

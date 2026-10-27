@@ -1,0 +1,1237 @@
+{
+  "schema_version": 1,
+  "checkpoint": {
+    "repo_id": "DeepBeepMeep/Worlds",
+    "revision": "545ad7b2393ad5e606c821fb04e07f8fec151046",
+    "path": "hy_nomas_distilled_int8.safetensors",
+    "lfs_sha256": "973fa409f3b009232db3c83feddc89c5326fc3a5672feb791f0989ea8bf83252",
+    "size_bytes": 9059126120,
+    "safetensors_source_sha256": "73819bcf3b82b090116dd1a1748795de95eef703c304e7443963d00ea8aa4d70"
+  },
+  "tencent_source": {
+    "repo": "Tencent-Hunyuan/Hy-Nomas",
+    "revision": "18974d41ada7af4aa3a026480197ab0ac0702682",
+    "config": {
+      "path": "configs/experiment/inference.yaml",
+      "git_blob_sha": "f82d037667fc26a2c41e0a963295fc550361ea83",
+      "url": "https://github.com/Tencent-Hunyuan/Hy-Nomas/blob/18974d41ada7af4aa3a026480197ab0ac0702682/configs/experiment/inference.yaml",
+      "settings": {
+        "per_segment_camera_attn": false,
+        "per_chunk_camera_attn": true,
+        "camera_chunk_size": 1
+      }
+    },
+    "action_module": {
+      "path": "hymm/models/camera/action_module.py",
+      "git_blob_sha": "fb20d0a89e29492ed3cc12a198f2e0f73d914e60",
+      "url": "https://github.com/Tencent-Hunyuan/Hy-Nomas/blob/18974d41ada7af4aa3a026480197ab0ac0702682/hymm/models/camera/action_module.py",
+      "constructor": {
+        "img_hidden_size": 2048,
+        "keyboard_hidden_dim": 1024,
+        "heads_num": 16,
+        "head_dim": 64,
+        "qkv_bias": false
+      },
+      "behavior": "Per-chunk boundaries are converted to image query ranges [frame*spatial_tokens,(frame+1)*spatial_tokens) and keyboard key ranges [frame,frame+1). With camera_chunk_size=1 each group has one K/V token."
+    }
+  },
+  "header_parity": {
+    "header_tensor_entries": 3043,
+    "quantized_layer_count": 775,
+    "local_meta_state_entries_after_canonicalizing_quantized_weights": 2106,
+    "local_entries_missing_or_shape_mismatched": 0,
+    "additional_source_camera_entries": 162,
+    "ignored_entry_count": 162,
+    "ignored_entries": [
+      {
+        "key": "action_modules.0.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.0.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.0.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.1.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.1.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.1.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.2.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.2.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.2.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.3.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.3.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.3.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.4.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.4.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.4.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.5.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.5.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.5.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.6.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.6.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.6.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.7.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.7.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.7.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.8.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.8.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.8.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.9.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.9.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.9.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.10.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.10.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.10.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.11.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.11.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.11.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.12.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.12.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.12.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.13.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.13.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.13.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.14.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.14.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.14.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.15.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.15.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.15.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.16.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.16.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.16.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.17.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.17.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.17.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.18.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.18.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.18.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.19.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.19.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.19.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.20.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.20.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.20.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.21.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.21.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.21.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.22.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.22.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.22.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.23.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.23.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.23.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.24.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.24.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.24.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.25.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.25.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.25.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.26.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.26.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.26.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.27.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.27.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.27.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.28.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.28.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.28.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.29.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.29.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.29.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.30.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.30.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.30.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.31.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.31.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.31.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.32.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.32.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.32.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.33.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.33.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.33.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.34.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.34.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.34.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.35.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.35.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.35.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.36.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.36.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.36.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.37.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.37.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.37.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.38.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.38.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.38.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.39.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.39.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.39.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.40.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.40.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.40.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.41.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.41.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.41.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.42.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.42.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.42.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.43.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.43.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.43.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.44.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.44.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.44.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.45.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.45.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.45.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.46.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.46.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.46.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.47.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.47.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.47.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.48.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.48.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.48.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.49.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.49.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.49.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.50.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.50.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.50.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.51.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.51.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.51.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.52.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.52.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.52.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.53.img_attn_q.weight",
+        "shape": [
+          1024,
+          2048
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so the image query cannot affect output."
+      },
+      {
+        "key": "action_modules.53.key_attn_q_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so query normalization cannot affect output."
+      },
+      {
+        "key": "action_modules.53.key_attn_k_norm.weight",
+        "shape": [
+          64
+        ],
+        "reason": "The pinned one-key-per-latent-frame attention group has softmax 1, so key normalization cannot affect output."
+      }
+    ]
+  },
+  "interpretation": "The adapter has no query or Q/K norm modules because those values cannot change singleton-key softmax output. It still loads each camera keyboard_embed, keyboard_attn_kv, proj_keyboard, and pose-embedding tensor. No multi-key camera mode is supported."
+}

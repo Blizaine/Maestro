@@ -53,9 +53,11 @@ export function ImageWorkflowSelector() {
   useEffect(() => {
     if (workflow === 'upscale' || models.length === 0) return
     const current = models.find(model => model.model_type === currentModelType)
-    if (modelSupportsImageWorkflow(current, workflow, hasReferenceImages)
+    if (!current?.world_model && modelSupportsImageWorkflow(current, workflow, hasReferenceImages)
       && isModelEnabledInScope(currentModelType, enabledModels, overrides, visibilityScope)) return
     const fallback = models.find(model => (
+      !model.world_model
+      &&
       isModelEnabledInScope(model.model_type, enabledModels, overrides, visibilityScope)
       && (!model.nsfw_only || nsfwMode)
       && modelSupportsImageWorkflow(model, workflow, hasReferenceImages)

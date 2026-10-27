@@ -1,0 +1,24 @@
+Hy-Nomas world model adapted from Tencent Hy-Nomas:
+https://github.com/Tencent-Hunyuan/Hy-Nomas (read at revision 18974d41ada7af4aa3a026480197ab0ac0702682)
+https://huggingface.co/tencent/Hy-Nomas
+Copyright (C) 2026 Tencent. All rights reserved.
+The Hy-Nomas inference code, DiT weights and LoRAs are licensed under Apache-2.0. The exact Tencent license file and bundled dependency
+license text are retained in LICENSE-Tencent-Apache-2.0.txt, fetched from revision 18974d41ada7af4aa3a026480197ab0ac0702682.
+The prompt rewriter instructions in prompts.py are condensed from
+the release's online prompt rewriter (Apache-2.0).
+
+The default video decoder is PixelUMM, as fine-tuned for Hy-Nomas (tencent/Hy-Nomas VAE/PixelUMM_FT):
+https://github.com/nv-tlabs/PixelUMM (code Apache-2.0; file-specific notices retained upstream; license copy in LICENSE-PixelUMM-Apache-2.0.txt)
+https://huggingface.co/nvidia/PixelUMM (weights)
+THE PIXELUMM WEIGHTS AND THEIR DERIVATIVES ARE LICENSED UNDER THE NVIDIA ONE-WAY NONCOMMERCIAL LICENSE:
+they may be used for non-commercial research or evaluation purposes only. The exact official NVIDIA license PDF is retained in
+LICENSE-PixelUMM-One-Way-Noncommercial.pdf. Hy-Nomas worlds are decoded with these derivatives, so generating or exploring a Hy-Nomas
+world is subject to this restriction; users are responsible for meeting it. The pinned WanGP file
+(hy_nomas/pixelumm_decoder_fp8.safetensors) holds the decoder tensors of the release's FP8 file (VAE/PixelUMM_FT_FP8) unchanged, without
+its encoder.
+
+The Qwen2.5-VL-7B-Instruct text encoder is WanGP's existing Qwen-Image component; the upstream Qwen model is Apache-2.0.
+
+The local block_scaled.py compatibility adapter is from WanGP revision 9905f0df941e5ec7b0c80e32555d3a61fe415726 and is licensed under
+the repository's WanGP Community License 2.0 (see app/LICENSE.txt). Its original source SHA-256 is
+76f5d5f9bf1144fc5feaa6f48813b53bd93f466faa29e794aac50bf574be28e2; it was modified for Maestro's MMGP 4.0 runtime.

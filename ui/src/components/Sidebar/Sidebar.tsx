@@ -31,7 +31,7 @@ import { VideoWorkflowSelector } from './VideoWorkflowSelector'
 import { ImageWorkflowSelector } from './ImageWorkflowSelector'
 import { ImageWorkflowControls } from './ImageWorkflowControls'
 import { ControlVideoSection } from './ControlVideoSection'
-import { AppModeToggle, MaestroBrand } from '../AppModeNavigation'
+import { AppModeToggle, MaestroBrand, WorldsButton } from '../AppModeNavigation'
 import { CharacterToolbarContext, PromptDock, SidebarLayoutContext } from './SidebarPanels'
 import { StartupStatus } from '../StartupStatus'
 
@@ -62,7 +62,7 @@ function inputRevealBounds(input: HTMLElement) {
   return input.getBoundingClientRect()
 }
 
-export function Sidebar() {
+export function Sidebar({ onOpenWorlds, worldsOpen = false }: { onOpenWorlds?: () => void; worldsOpen?: boolean } = {}) {
   const toggleSettings = useStore(s => s.toggleSettings)
   const generationMode = useStore(s => s.generationMode)
   const imageMode = useStore(s => s.params.image_mode)
@@ -367,6 +367,7 @@ export function Sidebar() {
             <MaestroBrand compact />
             <div className="flex items-center gap-1.5">
               <AppModeToggle size="sm" />
+              {onOpenWorlds && <WorldsButton size="sm" open={worldsOpen} onClick={onOpenWorlds} />}
               <button
                 onClick={() => setSidebarOpen(false)}
                 aria-label="Close sidecar"
@@ -392,6 +393,7 @@ export function Sidebar() {
         <MaestroBrand />
         <div className="flex items-center gap-2">
           <AppModeToggle />
+          {onOpenWorlds && <WorldsButton size="sm" open={worldsOpen} onClick={onOpenWorlds} />}
           <button
             onClick={toggleSettings}
             className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"

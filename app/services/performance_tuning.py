@@ -11,6 +11,7 @@ import math
 import re
 import sqlite3
 import statistics
+import sys
 import threading
 import time
 from pathlib import Path
@@ -35,12 +36,41 @@ def _digest(value):
 
 
 def _auto_preload_runtime_identity():
-    """Hash MMGP's adaptive VRAM planner, which is outside launch's runtime list."""
-    path = Path(__file__).resolve().parents[1] / "mmgp" / "auto_preload.py"
+    """Fingerprint the selected MMGP planner source without importing it.
+
+    Legacy keeps the previous raw-source hash, so its hardware-history key is
+    unchanged. Experimental/unknown imports also include package identity and
+    version to prevent sharing adaptive-preload evidence across runtimes.
+    """
+    app_dir = Path(__file__).resolve().parents[1]
+    package = sys.modules.get("mmgp")
+    if package is None:
+        # Keep the historical path and digest when called before MMGP startup.
+        path = app_dir / "mmgp" / "auto_preload.py"
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return "unavailable"
+
+    planner = sys.modules.get("mmgp.auto_preload")
+    origin = getattr(planner, "__file__", None) if planner is not None else None
+    package_origin = getattr(package, "__file__", None)
+    package_dir = Path(package_origin).resolve().parent if package_origin else None
+    path = Path(origin).resolve() if origin else (
+        package_dir / "auto_preload.py" if package_dir is not None else None
+    )
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        source_hash = hashlib.sha256(path.read_bytes()).hexdigest() if path is not None else "unavailable"
     except OSError:
-        return "unavailable"
+        source_hash = "unavailable"
+
+    from services.memory_runtime import active_runtime_selection
+    selection = active_runtime_selection(app_dir, getattr(sys.modules.get("wgp"), "memory_runtime_selection", None))
+    backend = selection.backend if selection is not None else "unknown"
+    if backend == "legacy":
+        return source_hash
+    version = str(getattr(package, "__version__", "unknown"))
+    return _digest({"backend": backend, "version": version, "source": source_hash})
 
 
 def auto_owns(config, key):

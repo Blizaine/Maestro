@@ -26,7 +26,8 @@ export function GenerateButton({ stretch = false }: { stretch?: boolean }) {
   const controlsPending = useStore(s => s.modelsLoading || !!s.modelsLoadError)
   const needsEnabledModel = useStore(s => s.generationMode !== 'tools'
     && !(s.generationMode === 'audio' && ['mixer', 'revoice'].includes(s.audioSubMode))
-    && ((!s.servicesConfig?.nsfw_mode && s.models.find(model => model.model_type === s.params.model_type)?.nsfw_only === true)
+    && (s.models.find(model => model.model_type === s.params.model_type)?.world_model === true
+      || (!s.servicesConfig?.nsfw_mode && s.models.find(model => model.model_type === s.params.model_type)?.nsfw_only === true)
       || !isModelEnabledInScope(s.params.model_type, s.enabledModels, s.modelVisibilityOverrides, getModelVisibilityScope(s))))
   const imageMode = useStore(s => Number(s.params.image_mode || 0))
   const isPrimaryCreate = generationMode === 'video'

@@ -122,6 +122,7 @@ function WorkflowModelSelector({ placement = 'above' }: { placement?: Placement 
     hasAudioDrive: createWorkflow === 'references' ? hasReferenceAudioDrive : hasFrameAudioDrive,
   } as const
   const currentModelCompatible = Boolean(currentModel)
+    && !currentModel?.world_model
     && (!currentModel?.nsfw_only || nsfwMode)
     && isModelEnabledInScope(currentModelType, enabledModels, modelVisibilityOverrides, visibilityScope)
     && (
@@ -156,7 +157,8 @@ function WorkflowModelSelector({ placement = 'above' }: { placement?: Placement 
   //   1. the effective model choice for this workflow,
   //   2. nsfw_only gate (Mature Mode must be on for those to appear).
   const workflowFilter = (model: typeof models[number]) => (
-    (generationMode !== 'video' || (studioVideoWorkflow === 'animate'
+    !model.world_model
+    && (generationMode !== 'video' || (studioVideoWorkflow === 'animate'
       ? model.model_type === 'viggle_animate' : model.model_type !== 'viggle_animate'))
     && (generationMode !== 'video' || studioVideoWorkflow === 'avatar' || !isLongCatAvatarModel(model))
     &&

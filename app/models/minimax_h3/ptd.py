@@ -14,6 +14,23 @@ PTD_FOLDER = "minimax_h3/ptd_refasymopd"
 PTD_HEAD_FILE = "minimax_h3_ref2va_ptd_refasymopd_8step_heads_fp32.safetensors"
 PTD_NUM_STEPS = 8
 PTD_REFERENCE_DETAIL = "ptd768"
+PTD_PDD_INTERVALS = 32
+PTD_PDD_BLOCK_SIZE = 4
+PTD_PDD_RELATIVE_FORMAT = "wangp_pdd_relative_heads_v1"
+PTD_SOURCE_REPOSITORY = "taobao-content-ai/MiniMax-H3-PTD-RefAsymOPD-LoRAs"
+PTD_SOURCE_REVISION = "5501eb8918ef8bcb858ff045b885bf47a2c4502b"
+PTD_SOURCE_SHA256 = "6796802b9150110a3cd7f66891c9e6190502a432c30b0fa1aa299724cfc15cc3"
+
+_PTD_HEAD_KEYS = (
+    "pdd_heads.video_out.linear.weight",
+    "pdd_heads.video_out.heads",
+    "pdd_heads.video_out.linear.bias",
+    "pdd_heads.video_out.head_biases",
+    "pdd_heads.audio_out.linear.weight",
+    "pdd_heads.audio_out.heads",
+    "pdd_heads.audio_out.linear.bias",
+    "pdd_heads.audio_out.head_biases",
+)
 
 PTD_LORA_FILES = tuple(
     f"minimax_h3_ref2va_ptd_refasymopd_8step_hop{step:02d}_bf16.safetensors"
@@ -130,6 +147,141 @@ def validate_ptd_cfg_settings(kwargs: Any) -> None:
             raise ValueError("PTD RefAsymOPD requires guidance scale 1.0 (CFG 1).")
 
 
+def _validate_ptd_head_header(handle: Any, transformer: Any) -> None:
+    """Validate the pinned base-plus-relative PDD head format without loading it."""
+
+    metadata = handle.metadata() or {}
+    expected_metadata = {
+        "pdd_num_steps": str(PTD_PDD_INTERVALS),
+        "pdd_block_size": str(PTD_PDD_BLOCK_SIZE),
+        "ptd_format": PTD_PDD_RELATIVE_FORMAT,
+        "ptd_num_hops": str(PTD_NUM_STEPS),
+        "ptd_num_curv": str(PTD_NUM_STEPS),
+        "source_repository": PTD_SOURCE_REPOSITORY,
+        "source_revision": PTD_SOURCE_REVISION,
+        "source_sha256": PTD_SOURCE_SHA256,
+    }
+    for key, expected_value in expected_metadata.items():
+        if metadata.get(key) != expected_value:
+            raise ValueError(
+                "PTD RefAsymOPD head bank metadata mismatch for "
+                f"'{key}': expected {expected_value!r}, got {metadata.get(key)!r}."
+            )
+
+    final_layer = getattr(transformer, "final_layer", None)
+    if final_layer is None:
+        raise ValueError("PTD RefAsymOPD requires a transformer final layer.")
+    expected_shapes = {
+        "pdd_heads.video_out.linear.weight": tuple(final_layer.video_out.weight.shape),
+        "pdd_heads.video_out.heads": (
+            PTD_PDD_INTERVALS - 1,
+            *tuple(final_layer.video_out.weight.shape),
+        ),
+        "pdd_heads.video_out.linear.bias": tuple(final_layer.video_out.bias.shape),
+        "pdd_heads.video_out.head_biases": (
+            PTD_PDD_INTERVALS - 1,
+            *tuple(final_layer.video_out.bias.shape),
+        ),
+        "pdd_heads.audio_out.linear.weight": tuple(final_layer.audio_out.weight.shape),
+        "pdd_heads.audio_out.heads": (
+            PTD_PDD_INTERVALS - 1,
+            *tuple(final_layer.audio_out.weight.shape),
+        ),
+        "pdd_heads.audio_out.linear.bias": tuple(final_layer.audio_out.bias.shape),
+        "pdd_heads.audio_out.head_biases": (
+            PTD_PDD_INTERVALS - 1,
+            *tuple(final_layer.audio_out.bias.shape),
+        ),
+    }
+    available = set(handle.keys())
+    missing = set(expected_shapes) - available
+    unexpected = available - set(expected_shapes)
+    if missing or unexpected:
+        raise ValueError(
+            "PTD RefAsymOPD head bank tensor keys do not match the pinned "
+            f"format (missing={sorted(missing)}, unexpected={sorted(unexpected)})."
+        )
+    for key, expected_shape in expected_shapes.items():
+        tensor_slice = handle.get_slice(key)
+        shape = tuple(int(value) for value in tensor_slice.get_shape())
+        if shape != expected_shape:
+            raise ValueError(
+                f"PTD RefAsymOPD head '{key}' shape mismatch: expected "
+                f"{expected_shape}, got {shape}."
+            )
+        dtype = tensor_slice.get_dtype()
+        if dtype != "F32":
+            raise ValueError(
+                f"PTD RefAsymOPD head '{key}' must be FP32, got {dtype}."
+            )
+
+
+def install_ptd_relative_heads(
+    transformer: Any,
+    checkpoint: str,
+    *,
+    strength: float = 1.0,
+    video_shift: float = 12.0,
+    audio_shift: float = 3.0,
+):
+    """Install PTD's pinned base-plus-relative 32-interval PDD heads.
+
+    The first linear projection is interval zero. The remaining tensors are
+    deltas from that base, as established by WanGP's PTD checkpoint
+    conversion: stack(head 0, heads 1..31), then store heads 1..31 minus head
+    zero. Reconstruct absolute intervals here and share Maestro's ordinary
+    scheduler-aware 32x4 fusion/controller without changing its PDD file
+    format.
+    """
+
+    import torch
+    from safetensors import safe_open
+
+    from . import pdd
+
+    pdd.release_pdd_parallel_heads(transformer)
+    with safe_open(str(checkpoint), framework="pt", device="cpu") as handle:
+        _validate_ptd_head_header(handle, transformer)
+        tensors = {
+            key: handle.get_tensor(key).clone()
+            for key in _PTD_HEAD_KEYS
+        }
+
+    video_weight_base = tensors["pdd_heads.video_out.linear.weight"]
+    video_bias_base = tensors["pdd_heads.video_out.linear.bias"]
+    audio_weight_base = tensors["pdd_heads.audio_out.linear.weight"]
+    audio_bias_base = tensors["pdd_heads.audio_out.linear.bias"]
+    video_weights = torch.cat(
+        (video_weight_base.unsqueeze(0), video_weight_base.unsqueeze(0) + tensors["pdd_heads.video_out.heads"]),
+        dim=0,
+    )
+    video_biases = torch.cat(
+        (video_bias_base.unsqueeze(0), video_bias_base.unsqueeze(0) + tensors["pdd_heads.video_out.head_biases"]),
+        dim=0,
+    )
+    audio_weights = torch.cat(
+        (audio_weight_base.unsqueeze(0), audio_weight_base.unsqueeze(0) + tensors["pdd_heads.audio_out.heads"]),
+        dim=0,
+    )
+    audio_biases = torch.cat(
+        (audio_bias_base.unsqueeze(0), audio_bias_base.unsqueeze(0) + tensors["pdd_heads.audio_out.head_biases"]),
+        dim=0,
+    )
+    return pdd._install_pdd_interval_heads(
+        transformer,
+        checkpoint,
+        video_weights,
+        video_biases,
+        audio_weights,
+        audio_biases,
+        strength=strength,
+        video_shift=video_shift,
+        audio_shift=audio_shift,
+        block_size=PTD_PDD_BLOCK_SIZE,
+        adapter_name="PTD RefAsymOPD",
+    )
+
+
 PTD_INFOS = """## PTD RefAsymOPD Eight-Step Recipe
 
 - The eight independent RefAsymOPD hop adapters and PDD output heads are loaded with this model. Each 8-step window activates exactly one hop adapter per step.
@@ -157,9 +309,16 @@ __all__ = [
     "PTD_LORA_MULTIPLIERS",
     "PTD_LORA_URLS",
     "PTD_NUM_STEPS",
+    "PTD_PDD_BLOCK_SIZE",
+    "PTD_PDD_INTERVALS",
+    "PTD_PDD_RELATIVE_FORMAT",
     "PTD_REFERENCE_DETAIL",
     "PTD_REPO",
     "PTD_REVISION",
+    "PTD_SOURCE_REPOSITORY",
+    "PTD_SOURCE_REVISION",
+    "PTD_SOURCE_SHA256",
+    "install_ptd_relative_heads",
     "is_ptd_refasymopd_adapter",
     "ordered_ptd_adapters",
     "ptd_hop_number",

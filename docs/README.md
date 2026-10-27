@@ -30,6 +30,7 @@ Start with the [README](../README.md) for installation and the feature overview.
 ## Image models
 
 - [MOSS Image](MOSS-Image.md) — Base/SFT generation, layouts and prompt enhancement.
+- [Fibo 2.0](Fibo-2.md) — structured text rendering, ordered references and masked Turbo editing.
 - [Qwen Image 2.1](Qwen-Image-2.1.md) — generation, reference editing, Turbo, transparency and VAE memory.
 - [Flux 3 Klein](Flux-3-Klein.md) — model variants, references and LoRAs.
 
@@ -44,6 +45,8 @@ Start with the [README](../README.md) for installation and the feature overview.
 
 - [Optional CUDA kernels](optional-kernel-pins.md) — supported stacks, pinned downloads and fallbacks.
 - [Performance Auto-Tune](Performance-auto-tune.md) — hardware recommendations and manual controls.
+- [Experimental Profile 0](Profile-0.md) — separate memory runtime, restart requirements and compatibility limits.
+- [Experimental Worlds](Worlds-Hy-Nomas.md) — Hy-Nomas world creation, saved state and queued camera moves.
 - [Duration recommendations](Duration-recommendations.md) — tested and estimated starting points by hardware and workload.
 - [H3 on 16GB GPUs](H3-16GB-placement.md) — memory placement and the reported regression.
 - [Model downloads](Download-controls.md) — progress, cancellation and retries.

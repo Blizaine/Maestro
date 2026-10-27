@@ -748,7 +748,7 @@ function LinkedModelFoldersSection() {
 function SelectField({ label, value, options, onChange }: {
   label: string
   value: string | number
-  options: { value: string | number; label: string }[]
+  options: { value: string | number; label: string; disabled?: boolean }[]
   onChange: (val: string) => void
 }) {
   return (
@@ -762,7 +762,7 @@ function SelectField({ label, value, options, onChange }: {
         className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
       >
         {options.map(opt => (
-          <option key={opt.value} value={opt.value}>{opt.label}</option>
+          <option key={opt.value} value={opt.value} disabled={opt.disabled}>{opt.label}</option>
         ))}
       </select>
     </div>
@@ -1126,10 +1126,20 @@ export function SystemSettingsPanel() {
     label: m === 'auto' ? 'Auto' : m === 'sdpa' ? 'SDPA' : m.charAt(0).toUpperCase() + m.slice(1),
   }))
 
-  const profileOptions = Object.entries(profileLabels).map(([k, label]) => ({
-    value: k,
-    label,
-  }))
+  const profile0Allowed = systemConfig.saved_runtime === 'wangp9905'
+    && systemConfig.vram_allocator === 'vmm'
+    && systemConfig.profile0_native_available === true
+  const profile0CurrentlySelected = [
+    systemConfig.video_profile, systemConfig.image_profile, systemConfig.audio_profile,
+  ].some(profile => profile === 0)
+  const profileOptions = [
+    ...(profile0Allowed || profile0CurrentlySelected ? [{
+      value: '0',
+      label: 'Profile 0: Shared pin pool, automatic CPU compute',
+      disabled: !profile0Allowed,
+    }] : []),
+    ...Object.entries(profileLabels).map(([k, label]) => ({ value: k, label })),
+  ]
 
   const autoOn = !!servicesConfig?.auto_performance
 
@@ -1207,6 +1217,12 @@ export function SystemSettingsPanel() {
       {/* Profiles */}
       <div className="space-y-4">
         <h3 className="text-[11px] text-text-secondary uppercase tracking-wider font-medium">Profiles</h3>
+        {systemConfig.saved_runtime === 'wangp9905' && <p className="text-[10px] text-indicator-warning">
+          Experimental Profile0 (WanGP9905) changes model placement for Profiles 1 and 3 too; profile numbers and saved settings are preserved. Fish Audio is unsupported on this runtime.
+        </p>}
+        {systemConfig.saved_runtime === 'wangp9905' && !profile0Allowed && <p className="text-[10px] text-text-muted">
+          Profile 0 is unavailable: {systemConfig.profile0_capability_reason ?? 'select VMM and provide the pinned native allocator first'}.
+        </p>}
 
         <SelectField
           label="Video Profile"

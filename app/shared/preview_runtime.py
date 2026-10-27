@@ -27,7 +27,7 @@ def begin_preview_window(send_cmd, gen, mode):
 
 
 def decoder_key(mode, architecture, model_def):
-    if preview_mode(mode) in ("off", "rgb") or model_def.get("external_runtime") or model_def.get("audio_only"):
+    if preview_mode(mode) in ("off", "rgb") or model_def.get("external_runtime") or model_def.get("audio_only") or model_def.get("supports_latent_preview") is False:
         return None
     from shared.tinyvae.decoder import decoder_for
     # Maestro's H3 names predate WanGP's FL2VA/pruned naming. They expose the
@@ -55,7 +55,7 @@ def model_preview_support(architecture, model_def, model_handler):
     Image jobs use the Tiny VAE video preference as still previews. This reports
     registered model support; optional decoder setup can still fail at runtime.
     """
-    if model_def.get("audio_only") or model_def.get("external_runtime"):
+    if model_def.get("audio_only") or model_def.get("external_runtime") or model_def.get("supports_latent_preview") is False:
         return {"rgb": False, "tiny_vae_frames": False, "tiny_vae_video": False}
     tiny_supported = decoder_key("tiny_vae_frames", architecture, model_def) is not None
     return {
@@ -67,7 +67,7 @@ def model_preview_support(architecture, model_def, model_handler):
 
 def prepare_preview_decoder(mode, architecture, model_def, gen=None):
     """Return (decoder, requested key, notice); optional failures stay local."""
-    if preview_mode(mode) in ("off", "rgb") or model_def.get("audio_only"):
+    if preview_mode(mode) in ("off", "rgb") or model_def.get("audio_only") or model_def.get("supports_latent_preview") is False:
         return None, None, None
     key = None
     try:

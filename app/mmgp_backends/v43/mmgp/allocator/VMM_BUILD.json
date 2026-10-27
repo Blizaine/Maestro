@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "upstream_commit": "9905f0df941e5ec7b0c80e32555d3a61fe415726",
+  "source_file": "vmm_alloc.cpp",
+  "source_sha256": "7b0f242a9debddddaa67e0ccdaf1ca38f1d32d10d07d2857bcf7dc7c61c5579b",
+  "artifact": "vmm_alloc_win_amd64.dll",
+  "artifact_bytes": 143872,
+  "artifact_sha256": "d0d5eff674c4ef262944bedd92f0b11df5379085978dfa2a1ac22742cc3ee6fa",
+  "platform": "Windows x64",
+  "compiler": "MSVC 19.39.33521.0",
+  "compiler_sha256": "9be78a6fd4b862d3cf202ee3d8fe30869045c2f650fbe53af5f0678f56750451",
+  "linker_version": "14.39.33521.0",
+  "linker_sha256": "a3f73dadaeb51dbad6eed5380af362116c662fc58d4881454077c53846fe0b38",
+  "windows_sdk": "10.0.22621.0",
+  "compile_flags": [
+    "/O2",
+    "/EHs",
+    "/LD",
+    "/MD",
+    "/std:c++17"
+  ],
+  "link_flags": [
+    "/NODEFAULTLIB:LIBCMT"
+  ],
+  "exported_vmm_symbols": 47,
+  "missing_python_referenced_vmm_symbols": 0,
+  "static_build_only": true,
+  "validation_note": "Build and export proof only. Native behavior requires explicit opt-in restart and GPU validation; default backend stays unchanged."
+}

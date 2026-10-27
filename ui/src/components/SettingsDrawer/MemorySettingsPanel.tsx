@@ -1,6 +1,7 @@
-import { useId } from 'react'
+import { useId, useState } from 'react'
 import { useStore } from '../../stores/useStore'
 import type { SystemConfig } from '../../types'
+import * as api from '../../api/client'
 
 const selectClass = 'w-full bg-bg-primary border border-border rounded-md px-2 py-1.5 text-xs text-text-primary'
 const labelClass = 'block text-[11px] text-text-muted mb-1'
@@ -10,14 +11,53 @@ const allocatorNames = { default: 'PyTorch default', vmm: 'MMGP optimized', vmm_
 export function MemorySettingsPanel() {
   const config = useStore(s => s.systemConfig)
   const update = useStore(s => s.updateSystemConfig)
+  const loadSystemConfig = useStore(s => s.loadSystemConfig)
   const id = useId()
+  const [runtimeSaving, setRuntimeSaving] = useState(false)
+  const [runtimeError, setRuntimeError] = useState<string | null>(null)
   if (!config || config.vram_allocator === undefined) return null
   const allocator = config.vram_allocator
   const active = config.vram_allocator_active ?? 'default'
+  const savedRuntime = config.saved_runtime ?? config.memory_runtime ?? 'legacy'
+  const runtimeExperimental = savedRuntime === 'wangp9905'
+    || config.active_runtime === 'wangp9905'
+  const saveRuntime = async (next: 'legacy' | 'wangp9905') => {
+    setRuntimeSaving(true)
+    setRuntimeError(null)
+    try {
+      await api.updateSystemConfig({ memory_runtime: next })
+      await loadSystemConfig()
+    } catch (error) {
+      setRuntimeError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setRuntimeSaving(false)
+    }
+  }
   return (
     <section className="space-y-4 border-t border-border pt-4" aria-labelledby={`${id}-title`}>
       <h3 id={`${id}-title`} className="text-[11px] text-text-secondary uppercase tracking-wider font-medium">RAM / VRAM Management</h3>
       <p className={helpClass}>Auto-tune can size H3 transformer residency for each generation while preload is at Profile default. Changing a managed control here switches to manual mode.</p>
+      <div>
+        <label className={labelClass} htmlFor={`${id}-runtime`}>Memory Runtime</label>
+        <select id={`${id}-runtime`} data-testid="memory-runtime-select" className={selectClass}
+          value={savedRuntime} disabled={runtimeSaving}
+          onChange={event => void saveRuntime(event.target.value as 'legacy' | 'wangp9905')}>
+          <option value="legacy">Maestro MMGP 4.0 (default)</option>
+          <option value="wangp9905" disabled={!config.experimental_runtime_selectable}>
+            {config.experimental_runtime_selectable
+              ? 'Experimental Profile0 (WanGP9905)'
+              : 'Experimental Profile0 (WanGP9905) — VMM asset unavailable'}
+          </option>
+        </select>
+        <p className={helpClass}>Changing the memory runtime requires a full Maestro restart. Your profiles and manual settings are preserved.</p>
+        <p className={helpClass}>Active: {config.active_label ?? 'MMGP source not verified'}.</p>
+        {!config.experimental_runtime_selectable && <p className={helpClass}>Experimental runtime unavailable: {config.experimental_runtime_capability_reason ?? config.profile0_capability_reason ?? 'allocator support is unavailable on this installation'}.</p>}
+        {config.restart_required && <p role="status" className="text-[11px] text-indicator-warning mt-1">Restart Maestro to apply the saved memory runtime.</p>}
+        {runtimeExperimental && <p className="text-[10px] text-indicator-warning mt-1">Fish Audio is unsupported on this runtime. Profiles 1 and 3 also place model weights differently than the Maestro default.</p>}
+        {runtimeExperimental && !config.profile0_native_available && <p className={helpClass}>Profile 0 is unavailable: {config.profile0_capability_reason ?? 'the pinned VMM binary has not passed availability checks'}.</p>}
+        {runtimeExperimental && config.ram_allocator === 'mmgp' && !config.profile0_ram_native_available && <p className="text-[10px] text-indicator-warning mt-1">The saved MMGP RAM allocator has no companion binary in this runtime. Change RAM Allocator to PyTorch default explicitly before selecting this runtime.</p>}
+        {runtimeError && <p role="alert" className="text-[10px] text-indicator-warning mt-1">Could not save runtime: {runtimeError}</p>}
+      </div>
       <div>
         <label className={labelClass} htmlFor={`${id}-allocator`}>VRAM Allocator</label>
         <select id={`${id}-allocator`} className={selectClass} value={allocator}
@@ -37,7 +77,7 @@ export function MemorySettingsPanel() {
         <select id={`${id}-ram-allocator`} className={selectClass} value={config.ram_allocator ?? 'default'}
           onChange={event => void update({ ram_allocator: event.target.value as SystemConfig['ram_allocator'] })}>
           <option value="default">PyTorch default</option>
-          <option value="mmgp">MMGP optimized</option>
+          <option value="mmgp" disabled={runtimeExperimental && !config.profile0_ram_native_available && config.ram_allocator !== 'mmgp'}>MMGP optimized</option>
         </select>
         <p className={helpClass}>MMGP reuses freed CPU tensor buffers and returns its cache when RAM is under pressure. This can reduce allocation overhead; live model weights still need RAM.</p>
         <p className={helpClass}>Active: {config.ram_allocator_active === 'mmgp' ? 'MMGP optimized' : 'PyTorch default'}.</p>
@@ -48,12 +88,13 @@ export function MemorySettingsPanel() {
       <label className="flex gap-2 items-start text-xs text-text-secondary">
         <input type="checkbox" className="mt-0.5" checked={config.smart_memory_pinning ?? true}
           onChange={event => void update({ smart_memory_pinning: event.target.checked })} />
-        <span>Smart Memory Pinning<span className={`block ${helpClass}`}>Uses a small staging buffer in reserved RAM to speed up weight transfers, especially with Profile 5 and image models.</span></span>
+        <span>Smart Memory Pinning<span className={`block ${helpClass}`}>{runtimeExperimental ? 'Profile 0 uses a shared pin pool to stage weights; this preference does not override that pool. Its saved value is preserved.' : 'Uses a small staging buffer in reserved RAM to speed up weight transfers, especially with Profile 5 and image models.'}</span></span>
       </label>
       <label className="flex gap-2 items-start text-xs text-text-secondary">
         <input type="checkbox" className="mt-0.5" checked={config.read_ahead ?? false}
+          disabled={runtimeExperimental && !(config.read_ahead ?? false)}
           onChange={event => void update({ read_ahead: event.target.checked })} />
-        <span>Read Ahead (Windows)<span className={`block ${helpClass}`}>Reads checkpoint files ahead of use for faster loading. Windows may retain more file data in its RAM cache.</span></span>
+        <span>Read Ahead (Windows)<span className={`block ${helpClass}`}>{runtimeExperimental ? 'Unavailable with the Experimental Profile0 runtime. Turn it off explicitly before switching runtimes; this saved setting is never reset automatically.' : 'Reads checkpoint files ahead of use for faster loading. Windows may retain more file data in its RAM cache.'}</span></span>
       </label>
       {(['video', 'image', 'audio'] as const).map(kind => {
         const profile = config[`${kind}_profile`]

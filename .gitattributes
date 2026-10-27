@@ -1,0 +1,2 @@
+# Preserve the pinned vendor snapshot and its recorded source/build hashes.
+app/mmgp_backends/v43/** -text -whitespace

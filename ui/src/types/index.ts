@@ -68,6 +68,8 @@ export interface ModelDef {
   requires_image_reference?: boolean
   supports_image_inpaint?: boolean
   supports_image_outpaint?: boolean
+  /** Dedicated persistent-world runtime; never offered as a Studio model. */
+  world_model?: boolean
   /** Native preview decoders supported by this model, when reported by the backend. */
   preview_support?: GenerationPreviewSupport
   director?: DirectorModelCompatibility
@@ -1204,6 +1206,26 @@ export interface SystemConfig {
   // Maestro release version (repo-root VERSION file), shown next to the
   // app title. Optional: older backends don't send it.
   app_version?: string
+  /** Saved process-wide MMGP package choice; switching it requires restart. */
+  memory_runtime?: 'legacy' | 'wangp9905'
+  saved_runtime?: 'legacy' | 'wangp9905'
+  active_runtime?: 'legacy' | 'wangp9905' | null
+  selected_label?: string
+  active_label?: string
+  restart_required?: boolean
+  experimental_runtime_selectable?: boolean
+  experimental_runtime_capability_reason?: string | null
+  profile0_native_available?: boolean
+  profile0_native_abi_verified?: boolean
+  profile0_native_validation_reason?: string | null
+  profile0_ram_native_available?: boolean
+  profile0_capability_reason?: string | null
+  profile0_ram_capability_reason?: string | null
+  profile0_saved_configuration_eligible?: boolean
+  fish_supported?: boolean
+  fish_limitation?: string | null
+  active_fish_supported?: boolean | null
+  active_fish_limitation?: string | null
   attention_mode: string
   transformer_quantization: string
   vae_config: number

@@ -15,7 +15,6 @@ Environment variables:
 
 import gc
 import sys
-import torch
 import os
 import glob
 import json
@@ -35,10 +34,23 @@ from urllib.parse import quote
 # --- Bootstrap: CWD must be app/ and sys.argv must be patched before importing wgp ---
 _app_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(_app_dir)
+if _app_dir not in sys.path:
+    sys.path.insert(0, _app_dir)
+from services.memory_runtime import read_saved_runtime, select_runtime, startup_config_path
+
+# Resolve the exact config WGP's argparse store action will use and select its
+# MMGP package before Torch or allocator modules can import either backend.
+_memory_runtime_config_path = startup_config_path(sys.argv, cwd=_app_dir)
+_memory_runtime_selection = select_runtime(
+    _app_dir,
+    read_saved_runtime(_memory_runtime_config_path),
+)
+
 from shared.cuda_memory import apply_startup_settings
 # The allocator must precede hardware detection, model imports and profiling.
 # wgp also calls this for the classic entry point; the helper is idempotent.
 apply_startup_settings(sys.argv, os.path.join(_app_dir, "wgp_config.json"))
+import torch
 
 # Preserve original argv, patch for wgp's argparse
 _original_argv = sys.argv[:]
@@ -791,6 +803,7 @@ def list_models():
             "lora_compatibility_note": md.get("lora_compatibility_note", ""),
             "family": family,
             "architecture": architecture,
+            "world_model": bool(md.get("world_model", False)),
             "preview_support": model_preview_support(
                 architecture, md, wgp.model_types_handlers.get(architecture),
             ),
@@ -6904,10 +6917,15 @@ def get_system_config():
     """Return system-level settings for the UI System tab."""
     cfg = wgp.server_config
     from services.memory_settings import memory_settings_snapshot
+    from services.memory_runtime import active_runtime_selection, runtime_snapshot
     from shared.cuda_memory import allocator_status
+    runtime_selection = active_runtime_selection(
+        _app_dir, getattr(wgp, "memory_runtime_selection", None)
+    )
     return {
         **memory_settings_snapshot(cfg),
         **allocator_status(cfg),
+        **runtime_snapshot(runtime_selection, cfg),
         "app_version": _APP_VERSION,
         "attention_mode": cfg.get("attention_mode", "auto"),
         "transformer_quantization": cfg.get("transformer_quantization", "int8"),
@@ -6951,14 +6969,8 @@ def _get_linked_model_folders():
     return [p for p in paths[1:] if isinstance(p, str) and is_external_root(p)]
 
 
-def _apply_linked_model_folders(folders):
-    """Validate and apply a list of linked model folders.
-
-    Rebuilds checkpoints_paths as [primary] + [linked] + ["."], preserving
-    whatever primary download root the config already had (default
-    "ckpts"). Applies live via the files locator — no restart needed for
-    lookups. Raises (400) BEFORE any state is mutated.
-    """
+def _validate_linked_model_folders(folders):
+    """Validate linked folders without changing server or locator state."""
     from shared.utils.files_locator import is_external_root
     if not isinstance(folders, list):
         raise HTTPException(status_code=400, detail="model_folders must be a list of folder paths")
@@ -6970,7 +6982,6 @@ def _apply_linked_model_folders(folders):
     for p in folders:
         if not isinstance(p, str) or not p.strip():
             raise HTTPException(status_code=400, detail=f"Invalid folder entry: {p!r}")
-        # Tolerate Windows Explorer "Copy as path" quoting.
         cleaned = p.strip().strip('"').strip("'").strip()
         ap = os.path.normpath(os.path.abspath(cleaned))
         if not os.path.isdir(ap):
@@ -6983,7 +6994,18 @@ def _apply_linked_model_folders(folders):
         if ap_n not in seen:
             seen.add(ap_n)
             normalized.append(ap)
-    new_paths = [primary] + normalized + ["."]
+    return normalized, [primary] + normalized + ["."]
+
+
+def _apply_linked_model_folders(folders, prepared=None):
+    """Apply a previously validated linked-folder update.
+
+    Rebuilds checkpoints_paths as [primary] + [linked] + ["."], preserving
+    whatever primary download root the config already had (default
+    "ckpts"). Applies live via the files locator — no restart needed for
+    lookups. Validation is performed before other settings are changed.
+    """
+    normalized, new_paths = prepared or _validate_linked_model_folders(folders)
     wgp.server_config["checkpoints_paths"] = new_paths
     wgp.fl.set_checkpoints_paths(new_paths)
     return normalized
@@ -6995,16 +7017,70 @@ async def update_system_config(request: Request):
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Settings must be a JSON object")
-    from services.memory_settings import MEMORY_KEYS, MODEL_LOAD_KEYS, validate_memory_updates
-    try:
-        memory_updates = validate_memory_updates(body)
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
+    from services.memory_runtime import (
+        active_runtime_selection,
+        runtime_snapshot,
+        validate_system_memory_updates,
+    )
+    cfg = wgp.server_config
+    runtime_selection = active_runtime_selection(
+        _app_dir, getattr(wgp, "memory_runtime_selection", None)
+    )
+    from services.memory_settings import MEMORY_KEYS, MODEL_LOAD_KEYS
+    runtime_bound_keys = MEMORY_KEYS | {
+        "memory_runtime", "video_profile", "image_profile", "audio_profile",
+    }
+    if runtime_selection is None and runtime_bound_keys.intersection(body):
+        raise HTTPException(
+            status_code=503,
+            detail="The active MMGP source is not verified; restart Maestro before changing memory runtime settings.",
+        )
+    if runtime_selection is None:
+        memory_updates = {}
+    else:
+        try:
+            memory_updates, _runtime_updates = validate_system_memory_updates(
+                body, cfg, runtime_selection
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error))
     if "generation_preview" in body and (
         not isinstance(body["generation_preview"], str)
         or body["generation_preview"] not in PREVIEW_MODES
     ):
         raise HTTPException(status_code=400, detail="Invalid generation preview mode")
+
+    if "attention_mode" in body and body["attention_mode"] not in wgp.attention_modes_supported:
+        raise HTTPException(status_code=400, detail="Invalid attention mode")
+    if "transformer_quantization" in body and body["transformer_quantization"] not in ("int8", "fp8", "bf16"):
+        raise HTTPException(status_code=400, detail="Invalid transformer quantization")
+    if "vae_config" in body and (
+        type(body["vae_config"]) is not int or body["vae_config"] not in (0, 1, 2, 3)
+    ):
+        raise HTTPException(status_code=400, detail="Invalid VAE tiling setting")
+    if "compile" in body and body["compile"] not in ("", "transformer"):
+        raise HTTPException(status_code=400, detail="Invalid compile setting")
+    if "video_output_codec" in body and body["video_output_codec"] not in (
+        "libx264_8", "libx264_10", "libx264_lossless", "libx265_8", "libx265_28",
+    ):
+        raise HTTPException(status_code=400, detail="Invalid video output codec")
+    if "image_output_codec" in body and body["image_output_codec"] not in (
+        "jpeg_95", "jpeg_85", "jpeg_70", "png", "webp_95", "webp_85", "webp_lossless",
+    ):
+        raise HTTPException(status_code=400, detail="Invalid image output codec")
+    if "enhancer_enabled" in body and (
+        type(body["enhancer_enabled"]) is not int or body["enhancer_enabled"] not in range(5)
+    ):
+        raise HTTPException(status_code=400, detail="Invalid prompt enhancer setting")
+    if "prompt_enhancer_quantization" in body and not isinstance(body["prompt_enhancer_quantization"], str):
+        raise HTTPException(status_code=400, detail="Invalid prompt enhancer quantization")
+    if "vram_safety_coefficient" in body:
+        try:
+            coefficient = float(body["vram_safety_coefficient"])
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(status_code=400, detail="Invalid VRAM safety coefficient")
+        if not math.isfinite(coefficient) or not 0.5 <= coefficient <= 0.95:
+            raise HTTPException(status_code=400, detail="VRAM safety coefficient must be from 0.50 to 0.95")
 
     ALLOWED_KEYS = {
         "attention_mode", "transformer_quantization", "vae_config",
@@ -7012,55 +7088,72 @@ async def update_system_config(request: Request):
         "video_output_codec", "image_output_codec",
         "enhancer_enabled", "prompt_enhancer_quantization",
         "vram_safety_coefficient", "generation_preview",
-    } | MEMORY_KEYS
+    } | MEMORY_KEYS | {"memory_runtime"}
 
-    updated = {}
-    # Linked model folders map onto checkpoints_paths (validated + applied
-    # live); the raw key is deliberately NOT in ALLOWED_KEYS so clients
-    # can't bypass the validation and write-pinning invariants. Processed
-    # FIRST because its validation raises 400 before mutating anything —
-    # a mixed body must not leave other keys half-applied.
+    # Preflight every field that can reject this request before changing
+    # server_config or the live model-folder locator. In particular this
+    # keeps mixed memory/runtime requests atomic when any later field is bad.
+    prepared_folders = None
     if "model_folders" in body:
-        updated["model_folders"] = _apply_linked_model_folders(body["model_folders"])
-
-    # These public API names intentionally do not reuse WanGP's legacy
-    # notification keys. WanGP rings those keys at every low-level clip and
-    # sliding-window boundary; Maestro rings once at the top-level Studio or
-    # Director lifecycle boundary instead.
+        try:
+            prepared_folders = _validate_linked_model_folders(body["model_folders"])
+        except HTTPException:
+            raise
+    host_enabled = None
     if "host_notification_sound_enabled" in body:
-        raw_enabled = body["host_notification_sound_enabled"]
-        if not isinstance(raw_enabled, bool):
+        host_enabled = body["host_notification_sound_enabled"]
+        if not isinstance(host_enabled, bool):
             raise HTTPException(
                 status_code=400,
                 detail="host_notification_sound_enabled must be true or false",
             )
-        enabled = raw_enabled
-        wgp.server_config["maestro_host_notification_sound_enabled"] = enabled
-        updated["host_notification_sound_enabled"] = enabled
+    host_volume = None
     if "host_notification_sound_volume" in body:
         try:
-            volume = max(0, min(100, int(body["host_notification_sound_volume"])))
+            host_volume = max(0, min(100, int(body["host_notification_sound_volume"])))
         except (TypeError, ValueError):
             raise HTTPException(
                 status_code=400,
                 detail="host_notification_sound_volume must be between 0 and 100",
             )
-        wgp.server_config["maestro_host_notification_sound_volume"] = volume
-        updated["host_notification_sound_volume"] = volume
+
+    config_updates = {key: body[key] for key in body if key in ALLOWED_KEYS}
+    if "vram_safety_coefficient" in config_updates:
+        config_updates["vram_safety_coefficient"] = coefficient
+    if not (prepared_folders is not None or host_enabled is not None or host_volume is not None or config_updates):
+        raise HTTPException(status_code=400, detail="No valid fields to update")
 
     from services.perf_recommend import applied_keys
+    auto_managed_keys = applied_keys()
 
-    for key, value in body.items():
-        if key in ALLOWED_KEYS:
-            if key in applied_keys() and wgp.server_config.get(key) != value:
-                # Protect manual API clients too; the settings UI also turns
-                # Auto off, but a separate frontend request is not sufficient.
-                wgp.server_config.setdefault("services", {})["auto_performance"] = False
-            wgp.server_config[key] = value
-            updated[key] = value
+    updated = {}
+    # Linked model folders map onto checkpoints_paths and apply live; the raw
+    # key is deliberately NOT in ALLOWED_KEYS so clients can't bypass the
+    # validation and write-pinning invariants. Every validation has completed
+    # before any setting or locator state is changed.
+    if "model_folders" in body:
+        updated["model_folders"] = _apply_linked_model_folders(
+            body["model_folders"], prepared=prepared_folders
+        )
 
-    if not updated:
-        raise HTTPException(status_code=400, detail="No valid fields to update")
+    # These public API names intentionally do not reuse WanGP's legacy
+    # notification keys. WanGP rings those keys at every low-level clip and
+    # sliding-window boundary; Maestro rings once at the top-level Studio or
+    # Director lifecycle boundary instead.
+    if host_enabled is not None:
+        wgp.server_config["maestro_host_notification_sound_enabled"] = host_enabled
+        updated["host_notification_sound_enabled"] = host_enabled
+    if host_volume is not None:
+        wgp.server_config["maestro_host_notification_sound_volume"] = host_volume
+        updated["host_notification_sound_volume"] = host_volume
+
+    for key, value in config_updates.items():
+        if key in auto_managed_keys and wgp.server_config.get(key) != value:
+            # Protect manual API clients too; the settings UI also turns
+            # Auto off, but a separate frontend request is not sufficient.
+            wgp.server_config.setdefault("services", {})["auto_performance"] = False
+        wgp.server_config[key] = value
+        updated[key] = value
 
     # Persist to disk
     with open(wgp.server_config_filename, "w", encoding="utf-8") as f:
@@ -7079,7 +7172,12 @@ async def update_system_config(request: Request):
         wgp.reload_needed = True
 
     from shared.cuda_memory import allocator_status
-    return {"status": "ok", "updated": updated, **allocator_status(wgp.server_config)}
+    return {
+        "status": "ok",
+        "updated": updated,
+        **allocator_status(wgp.server_config),
+        **runtime_snapshot(runtime_selection, wgp.server_config),
+    }
 
 
 @api.post("/api/v1/notification-sound/test")
@@ -11376,6 +11474,12 @@ async def _prepare_generation_submission(
     except Exception:
         _base_model_type = body.get("model_type")
     _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
+    if _generation_model_def.get("world_model"):
+        from services.worlds_runtime import world_runtime_context
+        try:
+            world_runtime_context(_generation_model_def, body.get("custom_settings"))
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
     if _generation_model_def.get("minimax_h3_fasth3"):
         if _generation_model_def.get("minimax_h3_fasth3_omniref"):
             from models.minimax_h3.fasth3_omniref import validate_request as validate_fasth3_request
@@ -29904,6 +30008,80 @@ def cancel_job(job_id: str):
     if result.abort_signalled:
         print(f"[Cancel] Signalling abort for job {job_id}")
     return {"status": job["status"], "was_running": result.was_running}
+
+
+def _worlds_storage():
+    """Create the small Worlds library lazily, away from UI startup scans."""
+    from services.worlds_storage import WorldsStorage
+    with _worlds_storage_lock:
+        global _worlds_storage_instance
+        if _worlds_storage_instance is None:
+            _worlds_storage_instance = WorldsStorage(_worlds_output_root)
+        return _worlds_storage_instance
+
+
+async def _worlds_submit_generation(body):
+    request = dict(body)
+    request.update(
+        workspace="Worlds",
+        generation_mode="video",
+        image_mode=0,
+        multi_prompts_gen_type=2,
+        _enhance_on_generation=False,
+        spatial_upsampling="",
+        temporal_upsampling="",
+        activated_loras=[],
+        loras_multipliers="",
+    )
+    try:
+        return await _prepare_generation_submission(request)
+    except HTTPException as error:
+        if not 400 <= error.status_code < 500:
+            raise
+        # A known preflight rejection cannot become an endlessly pending
+        # receipt. Reconcile any job already carrying this UUID first.
+        client_id = request.get("_client_submission_id")
+        matches = [snapshot_job(job) for job in _jobs.values()
+                   if job.get("client_submission_id") == client_id]
+        if len(matches) == 1:
+            return {"job_id": matches[0]["id"], "status": matches[0]["status"], "client_submission_id": client_id}
+        if matches:
+            raise
+        return {"rejected": True, "client_submission_id": client_id, "detail": str(error.detail)[:1000]}
+
+
+def _worlds_job_status(job_id):
+    status = get_status(job_id)
+    # These fields remain server-owned; no path is accepted from the Worlds
+    # client. Publication verifies outputs against this captured directory.
+    captured = snapshot_job(_jobs[job_id])
+    return {**status, "out_dir": captured.get("out_dir"), "params": captured.get("params")}
+
+
+async def _worlds_storage_call(method, *args):
+    return await asyncio.to_thread(lambda: getattr(_worlds_storage(), method)(*args))
+
+
+_worlds_storage_instance = None
+_worlds_storage_lock = threading.Lock()
+_worlds_output_root = Path(wgp.server_config.get("save_path", "outputs")).resolve()
+from services.worlds_workflow import create_worlds_router
+api.include_router(create_worlds_router(
+    workspace_root=_worlds_output_root / "Worlds",
+    submit_generation=_worlds_submit_generation,
+    lookup_jobs=lambda: {"jobs": [snapshot_job(job) for job in _jobs.values()]},
+    get_job_status=_worlds_job_status,
+    cancel_generation=cancel_job,
+    list_worlds=lambda: _worlds_storage_call("list_worlds"),
+    get_world=lambda world_id: _worlds_storage_call("get_world", world_id),
+    resolve_world_file=lambda world_id: _worlds_storage_call("resolve_world_file", world_id),
+    publish_completed_generation=lambda job, receipt: _worlds_storage_call("publish_completed_generation", job, receipt),
+    save_world=lambda world_id: _worlds_storage_call("save_world", world_id),
+    record_world=lambda world_id: _worlds_storage().record_world(world_id),
+    capture_world=lambda world_id: _worlds_storage_call("capture_world", world_id),
+    read_receipt=lambda request_id: _worlds_storage_call("read_receipt", request_id),
+    write_receipt=lambda request_id, receipt: _worlds_storage_call("write_receipt", request_id, receipt),
+))
 
 
 @api.delete("/api/v1/jobs/{job_id}")

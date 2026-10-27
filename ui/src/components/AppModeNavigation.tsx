@@ -1,3 +1,4 @@
+import { Globe } from 'lucide-react'
 import { useStore } from '../stores/useStore'
 import type { AppMode } from '../types'
 
@@ -60,5 +61,30 @@ export function AppModeToggle({ size = 'md' }: { size?: 'sm' | 'md' }) {
         </button>
       ))}
     </div>
+  )
+}
+
+export function WorldsButton({
+  size = 'md',
+  open = false,
+  onClick,
+}: {
+  size?: 'sm' | 'md'
+  open?: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label="Open Worlds"
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      title="Open Worlds explorer"
+      className={`${size === 'sm' ? 'px-2 py-1 text-[11px]' : 'px-2.5 py-1.5 text-xs'} flex shrink-0 items-center gap-1.5 rounded-lg border border-border text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary`}
+    >
+      <Globe size={size === 'sm' ? 13 : 14} />
+      <span>Worlds</span>
+    </button>
   )
 }
