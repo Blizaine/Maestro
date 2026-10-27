@@ -41,28 +41,33 @@ def normalize_diffusers_lora(state_dict, transformer):
         ("context_embedder.", "condition_proj."), ("norm_out.norm.", "final_layer.norm."),
         ("norm_out.linear.", "final_layer.adaln_proj.linear."),
         ("audio_proj_out.", "final_layer.audio_out."), ("proj_out.", "final_layer.video_out."))
-    if not any(key.startswith(tuple(source for source, _ in prefixes)) for key in state_dict):
-        return dict(state_dict)
+    has_diffusers_prefix = any(
+        key.startswith(tuple(source for source, _ in prefixes))
+        for key in state_dict
+    )
+    # Already-local split Q/K/V keys still need fusing when the base checkpoint
+    # keeps its QKV projection fused (for example, scaled-FP8 legacy H3).
     converted = {}
     for key, value in state_dict.items():
-        key = key.replace(".lora_A.turbo.weight", ".lora_A.weight").replace(".lora_B.turbo.weight", ".lora_B.weight")
-        fc1 = ".ff.net.0.proj." in key
-        for source, target in prefixes:
-            if key.startswith(source):
-                key = target + key[len(source):]
-                break
-        for source, target in ((".attn.norm_q.", ".attn.q_norm."), (".attn.norm_k.", ".attn.k_norm."),
-            (".attn.orig.to_out.0.", ".attn.out_proj."), (".attn.orig.to_q.", ".attn.q_proj."),
-            (".attn.orig.to_k.", ".attn.k_proj."), (".attn.orig.to_v.", ".attn.v_proj."),
-            (".attn.to_out.0.", ".attn.out_proj."), (".attn.to_q.", ".attn.q_proj."),
-            (".attn.to_k.", ".attn.k_proj."), (".attn.to_v.", ".attn.v_proj."),
-            (".ff.net.0.proj.", ".mlp.fc1."), (".ff.net.2.", ".mlp.fc2.")):
-            key = key.replace(source, target)
-        for branch in ("linear_attention", "softmax_gate", "to_out_linear"):
-            key = key.replace(f".attn.{branch}.", f".attn.vdn.{branch}.")
-        if fc1 and any(suffix in key for suffix in (".lora_B.", ".lora_up.", ".lora.B.", ".lora.up.")):
-            value = torch.cat(value.chunk(2, dim=0)[::-1], dim=0).contiguous()
-        if transformer.use_adaln_curves and key.startswith("time_embedder."):
+        if has_diffusers_prefix:
+            key = key.replace(".lora_A.turbo.weight", ".lora_A.weight").replace(".lora_B.turbo.weight", ".lora_B.weight")
+            fc1 = ".ff.net.0.proj." in key
+            for source, target in prefixes:
+                if key.startswith(source):
+                    key = target + key[len(source):]
+                    break
+            for source, target in ((".attn.norm_q.", ".attn.q_norm."), (".attn.norm_k.", ".attn.k_norm."),
+                (".attn.orig.to_out.0.", ".attn.out_proj."), (".attn.orig.to_q.", ".attn.q_proj."),
+                (".attn.orig.to_k.", ".attn.k_proj."), (".attn.orig.to_v.", ".attn.v_proj."),
+                (".attn.to_out.0.", ".attn.out_proj."), (".attn.to_q.", ".attn.q_proj."),
+                (".attn.to_k.", ".attn.k_proj."), (".attn.to_v.", ".attn.v_proj."),
+                (".ff.net.0.proj.", ".mlp.fc1."), (".ff.net.2.", ".mlp.fc2.")):
+                key = key.replace(source, target)
+            for branch in ("linear_attention", "softmax_gate", "to_out_linear"):
+                key = key.replace(f".attn.{branch}.", f".attn.vdn.{branch}.")
+            if fc1 and any(suffix in key for suffix in (".lora_B.", ".lora_up.", ".lora.B.", ".lora.up.")):
+                value = torch.cat(value.chunk(2, dim=0)[::-1], dim=0).contiguous()
+        if has_diffusers_prefix and transformer.use_adaln_curves and key.startswith("time_embedder."):
             continue
         converted[key] = value
     for down_suffix, up_suffix in (("lora_A.weight", "lora_B.weight"),
@@ -75,6 +80,16 @@ def normalize_diffusers_lora(state_dict, transformer):
             prefix = key[:-len(marker)]
             attention = transformer.get_submodule(prefix.rstrip("."))
             if hasattr(attention, "q_proj"):
+                continue
+            required = [
+                prefix + projection + suffix
+                for projection in ("q_proj.", "k_proj.", "v_proj.")
+                for suffix in (down_suffix, up_suffix)
+            ]
+            if any(required_key not in converted for required_key in required):
+                # A partial independent-Q/K/V adapter cannot be represented
+                # by this exact rank-3R fused conversion. Leave it intact for
+                # MMGP's normal compatibility error instead of guessing.
                 continue
             down, up = [], []
             for projection in ("q_proj", "k_proj", "v_proj"):
