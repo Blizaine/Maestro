@@ -240,6 +240,11 @@ def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
                 "The MOSS Image Edit reference attachments follow image_refs order. "
                 "The brief assigns their roles; the order map itself does not assign roles."
             )
+        elif model.get("instruction_image_edit") and image_refs:
+            context.append(
+                "Reference image numbers follow image_refs attachment order, beginning at image 1. "
+                "Preserve the roles assigned by the user; do not exchange source identities."
+            )
     else:
         for field, time in (("image_start", "0.00"), ("image_end", f"{total / fps:.2f}")):
             if params.get(field):

@@ -49,6 +49,7 @@ _ARCHITECTURE_MAP = {
     # and SFT text-to-image models keep their native caption/layout guide.
     "moss_image_edit": "moss_image_edit.md",
     "moss_image": "moss_image.md",
+    "fibo2": ("fibo2_edit.md", "fibo2_image.md"),
 
     # Flux image models — edit guide when reference image exists, gen guide otherwise
     "flux": ("flux_image_edit.md", "flux_image.md"),

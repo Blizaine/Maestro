@@ -810,7 +810,7 @@ def list_models():
             # Studio's Image workflow selector uses the model definition's
             # native capabilities instead of name/architecture heuristics.
             "supports_image_edit": bool(md.get("image_ref_choices")),
-            "supports_instruction_image_edit": bool(md.get("moss_edit")),
+            "supports_instruction_image_edit": bool(md.get("instruction_image_edit") or md.get("moss_edit")),
             "requires_image_reference": _requires_image_reference(md),
             "supports_image_inpaint": bool(md.get("inpaint_support", False)),
             "supports_image_outpaint": bool(

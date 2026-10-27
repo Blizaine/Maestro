@@ -3863,6 +3863,16 @@ def enhance_prompt(
                 "map identifies order only and does not assign extra roles.\n\n"
                 f"{ordered_map}\n\n{user_prompt}"
             )
+        elif mode == "image" and str(model_type or "").startswith("fibo2"):
+            ordered_map = reference_context.strip() if reference_context else "\n".join(
+                f"Image {index + 1} is the attached image in position {index + 1}."
+                for index in range(len(image_paths))
+            )
+            user_prompt = (
+                "Use the attached Fibo images in this exact order. Preserve the edit and "
+                "source roles requested by the user.\n\n"
+                f"{ordered_map}\n\n{user_prompt}"
+            )
         elif mode == "image":
             user_prompt = f"I have attached a reference image. Enhance this prompt based on what you see in the image:\n\n{user_prompt}"
         else:

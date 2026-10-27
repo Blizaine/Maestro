@@ -1025,6 +1025,7 @@ const familyModeMap: Record<string, GenerationMode> = {
   flux2: 'image',
   flux3: 'image',
   moss_image: 'image',
+  fibo2: 'image',
   qwen: 'image',
   z_image: 'image',
   krea2: 'image',
@@ -1114,6 +1115,8 @@ const DEFAULT_ENABLED_MODELS = new Set([
   'moss_image_sft',
   'moss_image_edit',
   'moss_image_edit_hq',
+  'fibo2_dev',
+  'fibo2_edit_turbo',
   'qwen_image_21_7B',
   'qwen_image_21_7B_turbo',
   'krea2_raw',
@@ -1171,7 +1174,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 24
+const DEFAULTS_VERSION = 25
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -1215,6 +1218,8 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   23: ['moss_image_sft'],
   // MOSS Image's dedicated ordered-reference editing checkpoints.
   24: ['moss_image_edit', 'moss_image_edit_hq'],
+  // Fibo Dev and its separate four-step reference/masked editor.
+  25: ['fibo2_dev', 'fibo2_edit_turbo'],
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 

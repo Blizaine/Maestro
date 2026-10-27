@@ -2193,7 +2193,7 @@ def update_generation_status(html_content):
     if(html_content):
         return gr.update(value=html_content)
 
-family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx25.ltx25_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.minimax_h3.minimax_h3_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.flux3.flux3_handler", "models.moss_image.moss_image_handler", "models.qwen.qwen_handler", "models.qwen21.qwen21_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.yue2.yue2_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.minimax_music3_handler", "models.TTS.index_tts2_handler", "models.TTS.fish_audio.fish_audio_handler"]
+family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx25.ltx25_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.minimax_h3.minimax_h3_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.flux3.flux3_handler", "models.moss_image.moss_image_handler", "models.fibo2.fibo2_handler", "models.qwen.qwen_handler", "models.qwen21.qwen21_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.yue2.yue2_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.minimax_music3_handler", "models.TTS.index_tts2_handler", "models.TTS.fish_audio.fish_audio_handler"]
 family_handlers.append("models.TTS.fish_audio_small.fish_audio_small_handler")
 DEFAULT_LORA_ROOT = "loras"
 
@@ -6780,6 +6780,16 @@ def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image
         prompt_max_tokens_key = "text_prompt_enhancer_max_tokens" if prompt_profile_id == "0" else f"text_prompt_enhancer_max_tokens{prompt_profile_id}"
         prompt_enhancer_instructions = model_def.get(prompt_instructions_key, model_def.get("text_prompt_enhancer_instructions", prompt_enhancer_instructions))
         text_encoder_max_tokens = model_def.get(prompt_max_tokens_key, model_def.get("text_prompt_enhancer_max_tokens", text_encoder_max_tokens))
+    elif is_image:
+        prompt_profile_match = re.search(r"\d", prompt_enhancer_mode)
+        if prompt_profile_match is not None and prompt_profile_match.group(0) != "0":
+            profile_id = prompt_profile_match.group(0)
+            prompt_enhancer_instructions = model_def.get(
+                f"image_prompt_enhancer_instructions{profile_id}", prompt_enhancer_instructions,
+            )
+            text_encoder_max_tokens = model_def.get(
+                f"image_prompt_enhancer_max_tokens{profile_id}", text_encoder_max_tokens,
+            )
 
     moss_image_layout = (
         model_def.get("architecture") == "moss_image"
@@ -6802,7 +6812,7 @@ def process_prompt_enhancer(model_def, prompt_enhancer, original_prompts,  image
             # the existing WGP_TI vision transport.
             ref_limit = (
                 max(1, int(model_def.get("max_image_refs", 4)))
-                if model_def.get("moss_edit") is True else 1
+                if model_def.get("moss_edit") is True or model_def.get("instruction_image_edit") is True else 1
             )
             prompt_images += original_image_refs[:ref_limit]
     prompt_images = [Image.open(img) if isinstance(img,str) else img for img in prompt_images]

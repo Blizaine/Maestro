@@ -1,0 +1,51 @@
+Fibo 2.0 integration
+
+The Fibo-local handler, adapters, progress bridge, pipeline and VAE wrapper
+contain WanGP-derived code under the WanGP Community License 2.0, preserved in
+app/LICENSES/WanGP-Community-2.0.txt.
+
+Transformer, caption processing and text-image rendering are adapted from
+Bria AI's contribution to Hugging Face Diffusers, revision
+ab96e2b58c89adb9df418af74d81cc8b1e1be074, under Apache License 2.0.
+See LICENSE-APACHE.txt and the source file notices.
+
+Model source: https://huggingface.co/briaai/Fibo-2.0-dev
+Weights revision: 530604492bf2bd1364ae43ca6b2bf2285ef0f2ba
+Edit Turbo source: https://huggingface.co/briaai/Fibo-2.0-edit-turbo
+Edit Turbo revision: 63316ff6d5c4c4ba37729a8a6510bced7e8f585b
+
+The compatible, rewrapped checkpoints used by Maestro are from
+the [DeepBeepMeep/Fibo2](https://huggingface.co/DeepBeepMeep/Fibo2/tree/72bf0a84dd97688a4e9427a8c872114b1162c4b8)
+revision 72bf0a84dd97688a4e9427a8c872114b1162c4b8. The publisher identifies the Dev and
+Edit Turbo files as derivatives of the exact Bria source revisions above;
+their terms are inherited from Bria. The current Bria Hugging Face model
+cards identify the Fibo weights as CC BY-NC 4.0. Commercial use requires a
+separate agreement with Bria. See https://huggingface.co/briaai/Fibo-2.0-dev
+and https://huggingface.co/briaai/Fibo-2.0-edit-turbo.
+
+At that immutable checkpoint revision, Hugging Face reports these LFS SHA-256
+digests and sizes (the files are not included here):
+
+| File | Bytes | SHA-256 |
+|---|---:|---|
+| Fibo_2.0_Dev_bf16.safetensors | 16254776914 | e610f8afdac71449f2ae42011ef0cf7f093505e019181e551c22646da9057a7a |
+| Fibo_2.0_Dev_int8_convrot.safetensors | 8143299206 | b9102d0314ea4b687b7c323ebbd2f3f1f17a27ae65ae95db92b09bc7abfc705c |
+| Fibo_2.0_Edit_Turbo_bf16.safetensors | 16254776922 | 7281a4704a5716e40eea6d247ef4e1df5dfae7a5d266f4589738d484104d2331 |
+| Fibo_2.0_Edit_Turbo_int8_convrot.safetensors | 8143299213 | 5a8768565a658552926e2f040247bff12048e21d15e910e5bc691ae60528cb72 |
+| Qwen3-VL-4B-Instruct/Qwen3-VL-4B-Instruct_bf16.safetensors | 8875721296 | 77e1d9bf9aaaa12fd5be7697fc3249e123941ef900e218b8f44c6c9d900ee9e1 |
+| Qwen3-VL-4B-Instruct/Qwen3-VL-4B-Instruct_int8_convrot.safetensors | 4836895727 | 2ffd11a4d69d5af374592904a0ee2adbb279c03dd0806f9f95a86d9299d3e038 |
+| fibo2/flux2_vae_fp16.safetensors | 168121302 | 59e1a803780082d15e4d9358f794996ec18719db6b6821f605545ce19d04bb37 |
+
+The pinned Dev and Edit Turbo transformer headers both contain 783 tensors
+in BF16 or 1,603 entries in INT8 ConvRot format. The Qwen headers contain 713
+BF16 or 1,425 INT8 ConvRot entries; the VAE header contains 251 tensors.
+These were checked using bounded HTTP Range reads of safetensors headers only;
+no weight payload was downloaded.
+
+Qwen3-VL conditioning reuses the Apache-2.0 implementation in
+app/models/ideogram4/qwen3_vl_transformers.py and
+app/models/ideogram4/qwen3_vl_configuration.py. The FLUX.2 autoencoder code is
+reused from app/models/flux/modules/autoencoder_flux2.py. The Qwen3-VL-4B
+model weights are Apache-2.0. The FLUX.2 VAE file is published under Apache-2.0
+independently of the FLUX.2-dev transformer license. The downloaded Aileron
+and DejaVu fonts retain their accompanying license files.
