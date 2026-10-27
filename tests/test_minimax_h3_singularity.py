@@ -414,7 +414,7 @@ class TestSingularityCheckpointAndLoraContracts(unittest.TestCase):
 
             @staticmethod
             def get_submodule(_name):
-                return object()
+                return SimpleNamespace(qkv_proj=object(), qkv_layout="grouped")
 
         down = torch.ones((128, 4), dtype=torch.float32)
         up = torch.ones((2, 128), dtype=torch.float32)

@@ -508,6 +508,8 @@ class TestFusedH3LoraRuntime(unittest.TestCase):
         )
         pipeline = MiniMaxH3Model.__new__(MiniMaxH3Model)
         pipeline.transformer = model
+        # Real __init__ always initializes the opt-in PTD capability flag.
+        pipeline.ptd_refasymopd = False
         pipeline._fused_turbo = True
         pipeline._turbo_lora_active = False
         pipeline._pdd_lora_active = False

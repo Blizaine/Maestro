@@ -504,7 +504,23 @@ class MiniMaxH3VideoVAEPipelineBindingTests(unittest.TestCase):
         self.assertIsInstance(resolver_call, ast.Call)
         self.assertIsInstance(resolver_call.func, ast.Name)
         self.assertEqual(resolver_call.func.id, "get_runtime_model_def")
-        self.assertEqual(resolver_call.args[1].keys[0].value, "minimax_h3_video_vae")
+        self.assertIsInstance(resolver_call.args[1], ast.Name)
+        self.assertEqual(resolver_call.args[1].id, "model_kwargs")
+        vae_setting = next(
+            node
+            for node in ast.walk(generate_video)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "model_kwargs"
+                and isinstance(target.slice, ast.Constant)
+                and target.slice.value == "minimax_h3_video_vae"
+                for target in node.targets
+            )
+        )
+        self.assertEqual(ast.unparse(vae_setting.value), "requested_h3_video_vae")
+        self.assertLess(vae_setting.lineno, expected_assignment.lineno)
 
         reload_guard = next(
             node
@@ -527,6 +543,7 @@ class MiniMaxH3VideoVAEPipelineBindingTests(unittest.TestCase):
             namespace = {
                 "model_type": "minimax_h3",
                 "requested_h3_video_vae": "auto",
+                "model_kwargs": {},
                 "get_runtime_model_def": lambda *_args: {
                     "minimax_h3_video_vae_variant": "full"
                 },
@@ -536,7 +553,7 @@ class MiniMaxH3VideoVAEPipelineBindingTests(unittest.TestCase):
             exec(
                 compile(
                     ast.Module(
-                        body=[expected_assignment, reload_guard],
+                        body=[vae_setting, expected_assignment, reload_guard],
                         type_ignores=[],
                     ),
                     str(WGP_PATH),
