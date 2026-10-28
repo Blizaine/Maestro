@@ -25,6 +25,7 @@ import { DEFAULT_EDITOR_FONT, EDITOR_FONT_OPTIONS, editorFontStack } from './edi
 import { EditorAnimationControls } from './EditorAnimationControls'
 import { EditorColorControls } from './EditorColorControls'
 import { EditorKeyingControls } from './EditorKeyingControls'
+import { EditorExportDialog } from './EditorExportDialog'
 import { EditorTakeComparison } from './EditorTakeComparison'
 import { getApplicableEditorProperties } from './editorAnimation'
 import { useEditorStore } from './useEditorStore'
@@ -183,6 +184,7 @@ function EditorInspectorContent({
   setAiReturnMode: (mode: EditorAIReturnMode) => void
 }) {
   const [aiExpanded, setAiExpanded] = useState(false)
+  const [overlayExportOpen, setOverlayExportOpen] = useState(false)
   const [activeClipTab, setActiveClipTab] = useState<'basic' | 'audio' | 'motion' | 'ai'>('basic')
   const relinkInputRef = useRef<HTMLInputElement>(null)
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
@@ -329,6 +331,8 @@ function EditorInspectorContent({
                     className={`w-full rounded-lg border px-3 py-2 text-xs disabled:opacity-40 ${item.pinned ? 'border-accent-blue/50 bg-accent-blue/10 text-accent-blue' : 'border-border text-text-secondary hover:bg-bg-hover'}`}>
                     {item.pinned ? 'Pinned · protected from auto-edit' : 'Pin this clip for auto-edit'}
                   </button>
+                  {track.type !== 'audio' && <button type="button" onClick={() => setOverlayExportOpen(true)}
+                    className="w-full rounded-lg border border-accent-blue/30 bg-accent-blue/5 px-3 py-2 text-xs text-accent-blue">Export transparent MOV</button>}
                   <FieldLabel>Timing</FieldLabel>
                   <div className="grid grid-cols-2 gap-2">
                     <NumberField label="Start" value={item.start} min={0} step={1 / project.canvas.fps} onChange={value => updateItem(item.id, { start: value })} />
@@ -746,6 +750,7 @@ function EditorInspectorContent({
           <p className="text-[9px] leading-relaxed text-text-muted">Select a clip to edit timing, framing, speed, volume, opacity, and text. All edits remain non-destructive until export.</p>
         </div>
       )}
+      {overlayExportOpen && item && <EditorExportDialog open onClose={() => setOverlayExportOpen(false)} overlayItemIds={[item.id]} />}
     </aside>
   )
 }

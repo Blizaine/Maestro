@@ -199,7 +199,7 @@ def prepare_window_references(input_frames, edited_images, history_count, frame_
     image = _tensor_to_pil(edited_images[0])
     if image is None:
         raise ValueError("The Viggle edited frame is not a readable image.")
-    image = prepare_keyframe_image(image, height, width, stretch=True)
+    image = prepare_keyframe_image(image, height, width)
     pixels = _window_pixels(video, history_count, frame_num, height, width)
     return [MiniMaxH3PreparedReference(kind="video", frames=pixels),
             MiniMaxH3PreparedReference(kind="image", image=image)]

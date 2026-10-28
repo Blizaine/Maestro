@@ -220,27 +220,27 @@ def audio_latent_num_frames(num_frames: int) -> int:
     return int(round(num_frames / MINIMAX_H3_FPS * MINIMAX_H3_AUDIO_LATENTS_PER_SECOND))
 
 
-def prepare_keyframe_image(image, height: int, width: int, stretch: bool):
-    r"""
-    Put a keyframe onto the target canvas.
+def h3_keyframe_fit_crop(*, fit_crop: bool, auto_aspect: bool) -> bool:
+    """Use cover-cropping for explicit H3 canvases while keeping Auto fit behavior."""
+    return bool(fit_crop or not auto_aspect)
 
-    The first keyframe of a request is the geometry anchor and is *stretched* onto the canvas, while a second
-    keyframe follows that canvas and is cover-cropped (aspect-preserving max-scale LANCZOS resize plus a centre
-    crop). An image that already is the canvas is returned untouched, without a resampling pass.
+
+def prepare_keyframe_image(image, height: int, width: int):
+    r"""
+    Put a keyframe onto the target canvas without changing its aspect ratio.
+
+    A keyframe with a different aspect ratio is cover-cropped (aspect-preserving max-scale LANCZOS resize plus a
+    centre crop). An image that already is the canvas is returned untouched, without a resampling pass.
 
     Args:
         image (`PIL.Image.Image`): The keyframe, in RGB and already EXIF-transposed.
         height (`int`): Canvas height.
         width (`int`): Canvas width.
-        stretch (`bool`): Whether to stretch (geometry anchor) instead of cover-cropping (follower).
-
     Returns:
         `PIL.Image.Image`: The prepared keyframe.
     """
     if image.size == (width, height):
         return image
-    if stretch:
-        return image.resize((width, height), Image.Resampling.LANCZOS)
 
     scale = max(width / image.size[0], height / image.size[1])
     resized_size = (max(width, round(image.size[0] * scale)), max(height, round(image.size[1] * scale)))

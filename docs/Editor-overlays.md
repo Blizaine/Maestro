@@ -4,6 +4,38 @@ Chroma key removes a chosen solid background from an image or video clip. Put th
 keyed clip on a higher video track to reveal another scene underneath. This is a
 non-destructive clip setting: the original media file stays unchanged.
 
+## Create an animated title
+
+Choose **Create animated title** in the Editor media panel. Enter the exact text,
+describe its lettering/style, choose an animation, duration, aspect and resolution,
+then press **Generate title**. H3 Fused 4-Step — Frames must already be installed.
+Maestro prepares perfectly uniform green start/end images at the requested output
+dimensions and writes the title prompt. It does not reuse Studio reference images,
+LoRAs, enhancement drafts or other creative settings. Global runtime/performance
+preferences still apply as they do to other generation jobs.
+
+The result is inserted at the captured playhead position on a new **Title FX**
+video track above existing visual tracks. Green keying and starting edge/spill
+settings are enabled automatically. Generated clip audio is muted unless **Keep
+generated clip audio** was selected. Review spelling, timing and fine-particle
+edges: the instructions discourage people and scenery but cannot guarantee what
+the generative model draws. Changing baked-in lettering requires another render.
+
+You can keep editing while generation runs. The title is tracked by its exact
+submission/job identity. A lost receipt is checked read-only, never automatically
+resubmitted. If you switch projects, the result waits for the original project;
+it is not inserted into the new one. **Stop tracking** does not cancel the GPU job.
+The original generation remains in its workspace if you dismiss tracking.
+
+Frame counts are snapped to H3's native 24 fps lattice, so the displayed effective
+duration can differ slightly from the requested seconds. The wizard creates both
+boundary images with the selected shape. In ordinary Studio Frames workflows,
+an explicit aspect ratio uses a centered cover crop when a start/end image has a
+different shape; proportions are preserved and outer edges can be trimmed.
+**Auto** follows the source image's aspect instead.
+
+## Key an existing clip
+
 1. Add the main scene to the timeline.
 2. Add the title/effect clip to a higher video track and select it.
 3. Open **Basic → Chroma key** in the Inspector and enable it.
@@ -47,9 +79,35 @@ native resolution before scaling. Browser decoding, preview scaling and encoded
 output can differ slightly at edges; inspect a short export for critical work.
 
 The normal MP4 export is a finished composition over the lower tracks/background.
-This feature does **not** add an alpha-channel video export preset. Real alpha
-assets avoid color separation when supplied, but video alpha also depends on the
-codec and browser decoder. Portable transparent overlay exports are separate work.
+
+## Export a transparent MOV
+
+Select a visual clip or text title and choose **Export transparent MOV** in its
+Basic Inspector. This exports only that overlay, moved to time zero, at the chosen
+delivery resolution. Background footage and unrelated audio tracks are excluded.
+Selected keying, framing, color, opacity, fades and automation are retained. The
+saved project and original media are not removed or replaced. Its source clip's
+mute setting and the export's audio toggle determine whether embedded audio is
+included.
+
+For a whole-project transparent render, open **Export** and choose **MOV · ProRes
+4444 with alpha**. All visible tracks are composited over transparency; an opaque
+video still covers the background under it. Use the clip-specific action when
+you want to isolate a title from footage underneath.
+
+ProRes 4444 MOV preserves partial transparency for dust and soft edges. It is a
+large, software-encoded editing master, not a small web-delivery file. Optional
+audio is PCM. The export requires a local FFmpeg build with `prores_ks`; its
+availability is shown in the export dialog. AI upscaling/finishing passes are
+unavailable because they do not preserve alpha. An alpha-capable editing program
+can composite the MOV over its own footage. Browser/phone players may be unable
+to play the MOV or show black where alpha is transparent; that alone does not
+mean transparency was lost.
+
+H3 itself produces RGB video. This workflow calculates an alpha matte after
+generation and saves it; changing the file format cannot repair contamination
+or missing particles in that matte. Genuine source alpha is preserved when
+supported by the source codec and decoder.
 
 The CPU export uses FFmpeg's [RGB color key](https://github.com/FFmpeg/FFmpeg/blob/master/libavfilter/vf_colorkey.c)
 and [despill](https://github.com/FFmpeg/FFmpeg/blob/master/libavfilter/vf_despill.c)

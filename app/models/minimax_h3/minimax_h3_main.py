@@ -2755,7 +2755,6 @@ class MiniMaxH3Model:
                     continuation_picture,
                     height,
                     width,
-                    stretch=True,
                 )
                 keyframes.append(continuation_picture)
                 visual_conditions.append(
@@ -2778,7 +2777,6 @@ class MiniMaxH3Model:
                     image,
                     height,
                     width,
-                    stretch=len(keyframes) == 0,
                 )
                 keyframes.append(image)
                 visual_conditions.append(
@@ -2818,7 +2816,6 @@ class MiniMaxH3Model:
                 image,
                 height,
                 width,
-                stretch=True,
             )
             keyframes.append(image)
             visual_conditions.append(

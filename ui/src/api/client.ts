@@ -381,6 +381,16 @@ export async function fetchJobStatus(jobId: string): Promise<ApiJobStatus> {
   return res.json()
 }
 
+export async function fetchJobBySubmission(clientId: string): Promise<ApiJobStatus | null> {
+  const response = await fetch(`${BASE}/api/v1/jobs/by-submission/${encodeURIComponent(clientId)}`)
+  if (response.status === 404) return null
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Could not recover the submission receipt.' }))
+    throw new Error(error.detail || 'Could not recover the submission receipt.')
+  }
+  return response.json()
+}
+
 // --- Music: LLM song writer (Music mode Simple) ---
 
 export async function writeSong(params: {
@@ -740,6 +750,7 @@ export async function fetchEditorExportCapabilities(): Promise<import('../types'
 export async function exportEditorProject(
   project: import('../types').EditorProject,
   mode: 'now' | 'queue' = 'now',
+  options?: { itemIds: string[]; format: 'prores4444' },
 ): Promise<{ job_id: string; status: ApiJobStatus['status']; revision?: number }> {
   const res = await fetch(`${BASE}/api/v1/editor/export`, {
     method: 'POST',
@@ -748,6 +759,7 @@ export async function exportEditorProject(
       workspace: project.workspace,
       project,
       queue_mode: mode === 'queue' ? 'held' : 'now',
+      ...(options ? { item_ids: options.itemIds, format: options.format } : {}),
     }),
   })
   if (!res.ok) {

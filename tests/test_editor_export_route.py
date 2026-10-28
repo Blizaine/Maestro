@@ -98,6 +98,7 @@ class EditorExportRouteTests(unittest.IsolatedAsyncioTestCase):
             return saved
 
         namespace = {
+            "deepcopy": copy.deepcopy,
             "HTTPException": RouteError,
             "EditorProjectError": ProjectError,
             "EditorProjectRevisionConflict": RevisionConflict,
@@ -115,6 +116,14 @@ class EditorExportRouteTests(unittest.IsolatedAsyncioTestCase):
         module = ast.fix_missing_locations(ast.Module(body=[route], type_ignores=[]))
         exec(compile(module, str(LAUNCH), "exec"), namespace)
         self.routes = namespace
+
+        def overlay_project(project, item_ids):
+            if not isinstance(item_ids, list) or item_ids != ["title-fx"]:
+                raise ProjectError("Selected overlay item was not found")
+            project["tracks"] = [{"id": "title-layer", "items": [{"id": "title-fx", "start": 0}]}]
+            return project
+
+        self.routes["prepare_editor_overlay_project"] = overlay_project
 
     async def _submit(self, body):
         class Request:
@@ -178,6 +187,35 @@ class EditorExportRouteTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(self.save_calls, [])
+        self.assertEqual(self.jobs, {})
+
+    async def test_selected_alpha_export_uses_copy_and_preserves_saved_settings(self):
+        self.project["export"].update({"encoder": "nvidia", "spatial_upsampling": "flashvsr2", "film_grain_intensity": .2})
+        self.saved_project = copy.deepcopy(self.project)
+        before = copy.deepcopy(self.project)
+        result = await self._submit({"project": copy.deepcopy(self.project), "item_ids": ["title-fx"], "format": "prores4444", "queue_mode": "held"})
+        render = self.jobs[result["job_id"]]["params"]
+        self.assertEqual(render["source_item_ids"], ["title-fx"])
+        self.assertEqual(render["project"]["export"]["format"], "prores4444")
+        self.assertEqual(render["project"]["export"]["encoder"], "software")
+        self.assertEqual(render["project"]["export"]["spatial_upsampling"], "")
+        self.assertEqual(render["project"]["export"]["film_grain_intensity"], 0)
+        self.assertEqual(render["project"]["tracks"][0]["items"][0]["start"], 0)
+        self.assertEqual(self.saved_project, before)
+        self.assertEqual(self.save_calls, [])
+        self.assertEqual(result["revision"], before["revision"])
+
+    async def test_bad_overlay_selection_does_not_queue(self):
+        with self.assertRaises(RouteError) as raised:
+            await self._submit({"project": copy.deepcopy(self.project), "item_ids": ["missing"], "format": "prores4444"})
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(self.jobs, {})
+        self.assertEqual(self.save_calls, [])
+
+    async def test_scoped_export_requires_explicit_alpha_format(self):
+        with self.assertRaises(RouteError) as raised:
+            await self._submit({"project": copy.deepcopy(self.project), "item_ids": ["title-fx"], "format": "mp4"})
+        self.assertEqual(raised.exception.status_code, 400)
         self.assertEqual(self.jobs, {})
 
 

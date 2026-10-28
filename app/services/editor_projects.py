@@ -467,6 +467,7 @@ def create_editor_project(
             },
         ],
         "export": {
+            "format": "mp4",
             "quality": "high",
             "codec": "h264",
             "encoder": "auto",
@@ -928,7 +929,14 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
         numeric_frame_rate = int(raw_frame_rate)
     except (TypeError, ValueError):
         numeric_frame_rate = 0
+    raw_format = export.get("format", "mp4")
+    if not isinstance(raw_format, str) or raw_format.strip().lower() not in {
+        "mp4", "prores4444",
+    }:
+        raise EditorProjectError("Editor export format must be 'mp4' or 'prores4444'")
+    export_format = raw_format.strip().lower()
     normalized["export"] = {
+        "format": export_format,
         "quality": quality if quality in {"draft", "balanced", "high"} else "high",
         "codec": codec if codec in {"h264", "h265"} else "h264",
         "encoder": encoder
@@ -954,6 +962,13 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
             min(1.0, _finite_number(export.get("film_grain_saturation"), 0.5)),
         ),
     }
+    if export_format == "prores4444" and (
+        normalized["export"]["spatial_upsampling"]
+        or normalized["export"]["film_grain_intensity"] > 1e-6
+    ):
+        raise EditorProjectError(
+            "ProRes 4444 alpha export does not support spatial upscaling or film grain"
+        )
     raw_exports = normalized.get("exports")
     export_history: list[dict[str, Any]] = []
     if isinstance(raw_exports, list):
@@ -964,12 +979,20 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
             if not filename:
                 continue
             record_codec = str(raw_record.get("codec") or "h264").lower()
+            raw_record_format = raw_record.get("format")
+            record_format = (
+                str(raw_record_format).strip().lower()
+                if isinstance(raw_record_format, str)
+                else "prores4444" if record_codec == "prores4444" else "mp4"
+            )
+            if record_format not in {"mp4", "prores4444"}:
+                record_format = "prores4444" if record_codec == "prores4444" else "mp4"
             record_quality = str(raw_record.get("quality") or "high").lower()
             record_encoder = str(raw_record.get("encoder") or "auto").lower()
             record_upscale = str(
                 raw_record.get("spatial_upsampling") or ""
             ).lower()
-            export_history.append({
+            record: dict[str, Any] = {
                 "id": _safe_identifier(
                     raw_record.get("id"), fallback=uuid.uuid4().hex[:16]
                 ),
@@ -982,7 +1005,10 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
                 "width": max(0, int(_finite_number(raw_record.get("width"), 0))),
                 "height": max(0, int(_finite_number(raw_record.get("height"), 0))),
                 "fps": max(0.0, _finite_number(raw_record.get("fps"), 0.0)),
-                "codec": record_codec if record_codec in {"h264", "h265"} else "h264",
+                "codec": record_codec
+                if record_codec in {"h264", "h265", "prores4444"}
+                else "h264",
+                "format": record_format,
                 "quality": record_quality
                 if record_quality in {"draft", "balanced", "high"}
                 else "high",
@@ -1006,7 +1032,16 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
                         _finite_number(raw_record.get("film_grain_saturation"), 0.5),
                     ),
                 ),
-            })
+            }
+            if isinstance(raw_record.get("source_item_ids"), list):
+                source_item_ids: list[str] = []
+                for raw_item_id in raw_record["source_item_ids"][:MAX_EDITOR_ITEMS_PER_TRACK]:
+                    if not isinstance(raw_item_id, str) or not _PROJECT_ID_RE.fullmatch(raw_item_id):
+                        continue
+                    if raw_item_id not in source_item_ids:
+                        source_item_ids.append(raw_item_id)
+                record["source_item_ids"] = source_item_ids
+            export_history.append(record)
     export_history.sort(key=lambda record: record["created_at"], reverse=True)
     normalized["exports"] = export_history[:50]
     for track_index, track in enumerate(tracks):
@@ -1024,6 +1059,94 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
                     "ends beyond the 24-hour project limit"
                 )
     return normalized
+
+
+def prepare_editor_overlay_project(
+    project: Mapping[str, Any],
+    item_ids: list[str] | tuple[str, ...],
+) -> dict[str, Any]:
+    """Build an unsaved transparent-overlay project from an exact visual selection.
+
+    The source project is normalized into a deep copy first and is never
+    modified. Only selected video/image and text items remain; their timeline
+    starts are shifted so the earliest selected item begins at zero.
+    """
+    if not isinstance(item_ids, (list, tuple)) or not item_ids:
+        raise EditorProjectError("Select at least one visual Editor item")
+    if any(not isinstance(item_id, str) or not item_id.strip() for item_id in item_ids):
+        raise EditorProjectError("Overlay selection contains an invalid item id")
+    selected_ids = list(item_ids)
+    if len(set(selected_ids)) != len(selected_ids):
+        raise EditorProjectError("Overlay selection contains duplicate item ids")
+
+    normalized = normalize_editor_project(project)
+    found: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {
+        item_id: [] for item_id in selected_ids
+    }
+    for track in normalized["tracks"]:
+        for item in track["items"]:
+            if item["id"] in found:
+                found[item["id"]].append((track, item))
+    for item_id, matches in found.items():
+        if not matches:
+            raise EditorProjectError(f"Overlay selection item was not found: {item_id}")
+        if len(matches) != 1:
+            raise EditorProjectError(f"Overlay selection item id is ambiguous: {item_id}")
+        track, item = matches[0]
+        track_type = track.get("type")
+        if track_type == "video":
+            asset = normalized["assets"].get(str(item.get("asset_id") or ""))
+            if not asset or asset.get("type") not in {"video", "image"}:
+                raise EditorProjectError(
+                    f"Overlay selection item is not visual: {item_id}"
+                )
+        elif track_type != "text":
+            raise EditorProjectError(
+                f"Overlay selection item is not visual: {item_id}"
+            )
+
+    selected = [found[item_id][0] for item_id in selected_ids]
+    earliest = min(float(item["start"]) for _track, item in selected)
+    latest = max(
+        float(item["start"]) + float(item["duration"])
+        for _track, item in selected
+    )
+    selected_by_track: dict[int, list[dict[str, Any]]] = {}
+    used_asset_ids: set[str] = set()
+    for track, item in selected:
+        selected_by_track.setdefault(id(track), []).append(item)
+        asset_id = str(item.get("asset_id") or "")
+        if asset_id:
+            used_asset_ids.add(asset_id)
+        for take_id in item.get("take_asset_ids") or []:
+            take_asset = normalized["assets"].get(str(take_id))
+            if take_asset and take_asset.get("type") in {"video", "image"}:
+                used_asset_ids.add(str(take_id))
+
+    overlay_tracks: list[dict[str, Any]] = []
+    for track in normalized["tracks"]:
+        selected_items = selected_by_track.get(id(track))
+        if not selected_items:
+            continue
+        overlay_track = copy.deepcopy(track)
+        overlay_track["items"] = copy.deepcopy(selected_items)
+        for item in overlay_track["items"]:
+            item["start"] = max(0.0, float(item["start"]) - earliest)
+        overlay_tracks.append(overlay_track)
+
+    normalized["tracks"] = overlay_tracks
+    normalized["assets"] = {
+        asset_id: asset
+        for asset_id, asset in normalized["assets"].items()
+        if asset_id in used_asset_ids
+    }
+    normalized["markers"] = [
+        {**marker, "time": float(marker["time"]) - earliest}
+        for marker in normalized["markers"]
+        if earliest <= float(marker["time"]) <= latest
+    ]
+    normalized["export"]["format"] = "prores4444"
+    return normalize_editor_project(normalized)
 
 
 def save_editor_project(
@@ -2137,7 +2260,14 @@ def editor_export_capabilities(ffmpeg: str = "ffmpeg") -> dict[str, Any]:
         (name for name in ("nvidia", "apple", "intel") if encoders[name]),
         "software",
     )
-    return {"encoders": encoders, "recommended": recommended}
+    return {
+        "encoders": encoders,
+        "recommended": recommended,
+        # `prores_ks` is a software encoder and does not depend on the
+        # hardware backend probes above. Its listing is the additive feature
+        # capability used by the transparent-overlay workflow.
+        "prores4444": "prores_ks" in listing,
+    }
 
 
 def _atempo_chain(speed: float) -> list[str]:
@@ -2253,6 +2383,11 @@ def resolve_editor_export_encoder(
     capabilities: Mapping[str, Any] | None = None,
 ) -> tuple[str, str, list[str]]:
     """Return the selected backend, FFmpeg codec, and quality arguments."""
+    if str(export_settings.get("format") or "mp4").lower() == "prores4444":
+        # ProRes 4444's alpha plane is only supported by the software encoder.
+        # Keep this explicit so render retry logic never attempts a hardware
+        # H.264/H.265 encoder for a transparent MOV.
+        return "software", "prores_ks", ["-profile:v", "4"]
     codec = str(export_settings.get("codec") or "h264")
     quality = str(export_settings.get("quality") or "high")
     requested = str(export_settings.get("encoder") or "auto")
@@ -2398,6 +2533,7 @@ def compile_editor_render(
     fps = float(canvas["fps"])
     export_width, export_height, export_fps = editor_export_dimensions(project)
     background = str(canvas["background"]).lstrip("#")
+    alpha_export = str((project.get("export") or {}).get("format") or "mp4") == "prores4444"
     assets = project["assets"]
 
     inputs: list[str] = []
@@ -2428,9 +2564,12 @@ def compile_editor_render(
                 inputs.extend(["-i", path])
             source_entries.append((track, item, asset, input_index))
 
-    filters: list[str] = [
-        f"color=c=0x{background}:s={width}x{height}:r={fps:.8f}:d={duration:.8f}[editor_base_0]"
-    ]
+    base_source = (
+        f"color=c=black@0.0:s={width}x{height}:r={fps:.8f}:d={duration:.8f},format=rgba"
+        if alpha_export
+        else f"color=c=0x{background}:s={width}x{height}:r={fps:.8f}:d={duration:.8f}"
+    )
+    filters: list[str] = [f"{base_source}[editor_base_0]"]
     base_label = "editor_base_0"
     visual_entries = sorted(
         (entry for entry in source_entries if entry[0].get("type") == "video"),
@@ -2668,6 +2807,7 @@ def compile_editor_render(
             f"[{base_label}][{clip_label}]overlay="
             f"x='(main_w-overlay_w)/2+({x_expression})':"
             f"y='(main_h-overlay_h)/2+({y_expression})'"
+            f"{':format=auto' if alpha_export else ''}"
             f"{overlay_eval}:eof_action=pass:shortest=0:"
             f"enable='between(t,{start:.8f},{start + clip_duration:.8f})'"
             f"[{output_label}]"
@@ -2742,15 +2882,75 @@ def compile_editor_render(
         alpha_expression = "*".join(alpha_parts) if alpha_parts else "1"
         output_label = f"editor_text_{text_index}"
         font_option = _drawtext_font_option(style.get("font_family"))
-        filters.append(
-            f"[{base_label}]drawtext=text='{text}'{font_option}:fontcolor={color}:fontsize={font_size_expression}:"
-            f"x='{x_expression}':y='(h-text_h)/2+({y_expression_value})':alpha='{alpha_expression}':"
-            f"box={1 if background_opacity > 1e-6 else 0}:"
-            f"boxcolor={background_color}@{background_opacity:.8f}:boxborderw=12:"
-            f"enable='between(t,{start:.8f},{end:.8f})'"
-            f"[{output_label}]"
-        )
-        base_label = output_label
+        if alpha_export:
+            color_layer = f"editor_text_color_{text_index}"
+            color_layer_drawn = f"editor_text_color_drawn_{text_index}"
+            mask_layer = f"editor_text_mask_source_{text_index}"
+            mask_layer_drawn = f"editor_text_mask_drawn_{text_index}"
+            mask_merge_label = f"editor_text_mask_merge_{text_index}"
+            mask_unpremultiply_label = f"editor_text_mask_unpremultiply_{text_index}"
+            mask_restore_label = f"editor_text_mask_restore_{text_index}"
+            premultiplied_label = f"editor_text_premultiplied_{text_index}"
+            unpremultiplied_label = f"editor_text_unpremultiplied_{text_index}"
+            straight_label = f"editor_text_straight_{text_index}"
+            filters.append(
+                f"color=c=black:s={width}x{height}:r={fps:.8f}:d={duration:.8f},"
+                f"format=rgba[{color_layer}]"
+            )
+            filters.append(
+                f"color=c=black:s={width}x{height}:r={fps:.8f}:d={duration:.8f},"
+                f"format=rgba[{mask_layer}]"
+            )
+            drawtext_geometry = (
+                f"fontsize={font_size_expression}:x='{x_expression}':"
+                f"y='(h-text_h)/2+({y_expression_value})':alpha='{alpha_expression}':"
+                f"box={1 if background_opacity > 1e-6 else 0}:"
+                f"boxcolor=BOX_COLOR:boxborderw=12:"
+                f"enable='between(t,{start:.8f},{end:.8f})'"
+            )
+            filters.append(
+                f"[{color_layer}]drawtext=text='{text}'{font_option}:fontcolor={color}:"
+                f"{drawtext_geometry.replace('BOX_COLOR', f'{background_color}@{background_opacity:.8f}')},"
+                f"format=rgba[{color_layer_drawn}]"
+            )
+            filters.append(
+                f"[{mask_layer}]drawtext=text='{text}'{font_option}:fontcolor=white:"
+                f"{drawtext_geometry.replace('BOX_COLOR', f'white@{background_opacity:.8f}')},"
+                f"format=rgba[{mask_layer_drawn}]"
+            )
+            filters.append(
+                f"[{mask_layer_drawn}]format=gray,split=3"
+                f"[{mask_merge_label}][{mask_unpremultiply_label}]"
+                f"[{mask_restore_label}]"
+            )
+            filters.append(
+                f"[{color_layer_drawn}][{mask_merge_label}]"
+                f"alphamerge[{premultiplied_label}]"
+            )
+            filters.append(
+                f"[{premultiplied_label}][{mask_unpremultiply_label}]"
+                f"unpremultiply=planes=7[{unpremultiplied_label}]"
+            )
+            filters.append(
+                f"[{unpremultiplied_label}][{mask_restore_label}]"
+                f"alphamerge[{straight_label}]"
+            )
+            filters.append(
+                f"[{base_label}][{straight_label}]overlay=x=0:y=0:format=auto:"
+                f"eof_action=pass:shortest=0"
+                f"[{output_label}_composited]"
+            )
+            base_label = f"{output_label}_composited"
+        else:
+            filters.append(
+                f"[{base_label}]drawtext=text='{text}'{font_option}:fontcolor={color}:fontsize={font_size_expression}:"
+                f"x='{x_expression}':y='(h-text_h)/2+({y_expression_value})':alpha='{alpha_expression}':"
+                f"box={1 if background_opacity > 1e-6 else 0}:"
+                f"boxcolor={background_color}@{background_opacity:.8f}:boxborderw=12:"
+                f"enable='between(t,{start:.8f},{end:.8f})'"
+                f"[{output_label}]"
+            )
+            base_label = output_label
     frame_rate_filter = (
         f"fps={export_fps:.8f},"
         if abs(export_fps - fps) > 1e-9
@@ -2759,11 +2959,13 @@ def compile_editor_render(
     if export_width != width or export_height != height:
         filters.append(
             f"[{base_label}]scale={export_width}:{export_height}:flags=lanczos,"
-            f"{frame_rate_filter}format=yuv420p[editor_video]"
+            f"{frame_rate_filter}"
+            f"{'format=yuva444p10le' if alpha_export else 'format=yuv420p'}[editor_video]"
         )
     else:
         filters.append(
-            f"[{base_label}]{frame_rate_filter}format=yuv420p[editor_video]"
+            f"[{base_label}]{frame_rate_filter}"
+            f"{'format=yuva444p10le' if alpha_export else 'format=yuv420p'}[editor_video]"
         )
 
     audio_labels: list[str] = []
@@ -2849,9 +3051,9 @@ def compile_editor_render(
         "-t", f"{duration:.8f}",
         "-c:v", video_codec,
         *encoder_args,
-        "-pix_fmt", "yuv420p",
-        *(["-tag:v", "hvc1"] if codec == "h265" else []),
-        *(["-c:a", "aac", "-b:a", "192k"] if include_audio else ["-an"]),
+        "-pix_fmt", "yuva444p10le" if alpha_export else "yuv420p",
+        *(["-tag:v", "hvc1"] if codec == "h265" and not alpha_export else []),
+        *(["-c:a", "pcm_s16le"] if include_audio and alpha_export else ["-c:a", "aac", "-b:a", "192k"] if include_audio else ["-an"]),
         "-movflags", "+faststart",
         "-progress", "pipe:1",
         "-nostats",
@@ -2907,10 +3109,17 @@ def render_editor_project(
         if custom_name
         else f"{timestamp}_{_safe_output_stem(project['name'])}_edit"
     )
-    output_path = os.path.join(output_dir, f"{stem}.mp4")
+    output_extension = (
+        ".mov"
+        if (project.get("export") or {}).get("format") == "prores4444"
+        else ".mp4"
+    )
+    output_path = os.path.join(output_dir, f"{stem}{output_extension}")
     suffix = 2
     while os.path.exists(output_path):
-        output_path = os.path.join(output_dir, f"{stem}({suffix}).mp4")
+        output_path = os.path.join(
+            output_dir, f"{stem}({suffix}){output_extension}"
+        )
         suffix += 1
     temporary_dir = tempfile.mkdtemp(prefix="maestro-editor-render-", dir=output_dir)
     # Render the unpublished part file directly inside the workspace. On
@@ -2918,7 +3127,10 @@ def render_editor_project(
     # retain that directory's restrictive ACL and become unreadable to the
     # gallery/ffprobe process. A hidden sibling part inherits the workspace ACL
     # and is still atomically renamed only after FFmpeg finishes successfully.
-    temporary_output = os.path.join(output_dir, f".{stem}.{uuid.uuid4().hex[:8]}.part.mp4")
+    temporary_output = os.path.join(
+        output_dir,
+        f".{stem}.{uuid.uuid4().hex[:8]}.part{output_extension}",
+    )
     filter_script = os.path.join(temporary_dir, "timeline_filter.txt")
     process: subprocess.Popen[str] | None = None
     try:

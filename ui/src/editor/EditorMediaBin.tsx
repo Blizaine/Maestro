@@ -13,6 +13,7 @@ import {
   Eye,
   RefreshCw,
   Search,
+  Sparkles,
   Type,
   Upload,
 } from 'lucide-react'
@@ -20,6 +21,7 @@ import type { EditorAsset, EditorMediaType, PipelineListItem } from '../types'
 import { useEditorMediaPreview } from './editorMediaPreview'
 import { useEditorStore } from './useEditorStore'
 import { EditorSourceViewer } from './EditorSourceViewer'
+import { EditorAnimatedTitleDialog } from './EditorAnimatedTitleDialog'
 
 type Filter = 'all' | 'favorites' | 'director' | EditorMediaType
 const MEDIA_BATCH_SIZE = 80
@@ -123,6 +125,7 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
   const [thumbnailSize, setThumbnailSize] = useState(120)
   const [usedOnly, setUsedOnly] = useState(false)
   const [sourceAsset, setSourceAsset] = useState<EditorAsset | null>(null)
+  const [titleOpen, setTitleOpen] = useState(false)
   const project = useEditorStore(state => state.project)
   const cards = compact && view === 'grid'
   const library = useEditorStore(state => state.library)
@@ -265,7 +268,11 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
             onClick={() => addTitle(undefined, selectedTrackId || undefined)}
             className="flex items-center justify-center gap-1 rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-[11px] text-text-secondary hover:border-accent-blue/40 hover:text-accent-blue"
           >
-            <Type size={11} /> Title
+            <Type size={11} /> Text title
+          </button>
+          <button type="button" disabled={!project} onClick={() => setTitleOpen(true)}
+            className="col-span-2 flex items-center justify-center gap-1 rounded-lg border border-accent-blue/30 bg-accent-blue/5 px-2 py-2 text-[11px] text-accent-blue disabled:opacity-40">
+            <Sparkles size={12} /> Create animated title
           </button>
           <input
             ref={inputRef}
@@ -381,6 +388,7 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
         )}
       </div>
       {sourceAsset && <EditorSourceViewer key={sourceAsset.id} asset={sourceAsset} onClose={() => setSourceAsset(null)} />}
+      <EditorAnimatedTitleDialog open={titleOpen} onClose={() => setTitleOpen(false)} />
     </section>
   )
 }

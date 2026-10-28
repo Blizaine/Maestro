@@ -8488,6 +8488,7 @@ def generate_video(
     
     # Track whether user selected auto aspect (resolution was "auto*") vs fixed (e.g. "1280x720")
     _auto_aspect = not resolution or "x" not in resolution or resolution.startswith("auto")
+    _h3_model = str(model_def.get("architecture") or "").startswith("minimax_h3")
 
     # Auto resolution: compute from reference image aspect ratio
     if _auto_aspect:
@@ -8986,6 +8987,14 @@ def generate_video(
     if fit_crop and outpainting_dims is not None:
         fit_crop = False
         fit_canvas = 1
+    _h3_anchor_fit_crop = fit_crop
+    if _h3_model:
+        from models.minimax_h3.packing import h3_keyframe_fit_crop
+
+        _h3_anchor_fit_crop = h3_keyframe_fit_crop(
+            fit_crop=fit_crop,
+            auto_aspect=_auto_aspect,
+        )
     # Progressive pipeline with start image: disable fit_canvas since we handle
     # image fitting + 128-padding ourselves. Otherwise let fit_canvas=1 work normally.
     if progressive_pipeline and (image_start is not None or _progressive_pad_info is not None):
@@ -9416,8 +9425,8 @@ def generate_video(
             image_start_tensor = image_end_tensor = None
             if window_no == 1 and (video_source is not None or image_start is not None):
                 if image_start is not None:
-                    image_start_tensor, new_height, new_width = calculate_dimensions_and_resize_image(image_start, height, width, sample_fit_canvas, fit_crop, block_size = block_size)
-                    if fit_crop: refresh_preview["image_start"] = image_start_tensor
+                    image_start_tensor, new_height, new_width = calculate_dimensions_and_resize_image(image_start, height, width, sample_fit_canvas, _h3_anchor_fit_crop, block_size = block_size)
+                    if _h3_anchor_fit_crop: refresh_preview["image_start"] = image_start_tensor
                     image_start_tensor = convert_image_to_tensor(image_start_tensor)
                     pre_video_guide =  prefix_video = image_start_tensor.unsqueeze(1)
                 else:
@@ -9482,7 +9491,7 @@ def generate_video(
                     image_end_for_window = image_end_list[window_no - 1]
                 if image_end_for_window is not None:
                     new_height, new_width = image_size                    
-                    image_end_tensor, _, _ = calculate_dimensions_and_resize_image(image_end_for_window, new_height, new_width, sample_fit_canvas, fit_crop, block_size = block_size)
+                    image_end_tensor, _, _ = calculate_dimensions_and_resize_image(image_end_for_window, new_height, new_width, sample_fit_canvas, _h3_anchor_fit_crop, block_size = block_size)
                     # image_end_tensor =image_end_list[window_no-1].resize((new_width, new_height), resample=Image.Resampling.LANCZOS) 
                     refresh_preview["image_end"] = image_end_tensor 
                     image_end_tensor = convert_image_to_tensor(image_end_tensor)

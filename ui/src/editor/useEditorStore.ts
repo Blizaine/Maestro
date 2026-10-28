@@ -34,6 +34,7 @@ import { flashvsrScale } from '../lib/flashvsr'
 import { invalidateEditorMediaPreview } from './editorMediaPreview'
 import { applyEditorEditOperation, type EditorEditOperation } from './editorEditOperations'
 import { previewEditorAutoEdit, type EditorAutoProposal } from './editorAutoEdit'
+import { insertAnimatedTitle } from './editorAnimatedTitles'
 
 const HISTORY_LIMIT = 60
 const MIN_ITEM_DURATION = 1 / 30
@@ -128,6 +129,7 @@ interface EditorState {
   clearDirectorRerunError: (itemId: string) => void
   rerunDirectorClip: (itemId: string, prompt?: string) => Promise<void>
   addTitle: (at?: number, trackId?: string) => void
+  addAnimatedTitle: (asset: EditorAsset, options: { id: string; projectId: string; workspace: string; at: number; text: string; keepAudio: boolean }) => boolean
   addTrack: (type: EditorTrackType) => void
   renameTrack: (trackId: string, name: string) => void
   setTrackVolume: (trackId: string, volume: number) => void
@@ -169,7 +171,7 @@ interface EditorState {
   jumpToEdit: (direction: -1 | 1) => void
   undo: () => void
   redo: () => void
-  exportProject: (mode?: 'now' | 'queue') => Promise<void>
+  exportProject: (mode?: 'now' | 'queue', options?: { itemIds: string[]; format: 'prores4444' }) => Promise<void>
 }
 
 function cloneProject(project: EditorProject): EditorProject {
@@ -1744,6 +1746,21 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     })
   },
 
+  addAnimatedTitle: (asset, options) => {
+    const current = get().project
+    if (!current || current.id !== options.projectId || current.workspace !== options.workspace) return false
+    const existing = current.tracks.some(track => track.items.some(item => item.animated_title_id === options.id))
+    if (existing) return true
+    let placed: { itemId: string; trackId: string; start: number } | undefined
+    commitProject(set, get, project => {
+      placed = insertAnimatedTitle(project, asset, { ...options, itemId: newId('title-fx'), trackId: newId('title-fx-track') })
+    })
+    if (!placed) return false
+    set({ selectedItemId: placed.itemId, selectedItemIds: [placed.itemId], selectedTrackId: placed.trackId,
+      playhead: placed.start, playing: false, mobilePanel: 'inspector' })
+    return true
+  },
+
   addTrack: type => {
     const trackId = newId(type)
     commitProject(set, get, project => {
@@ -2826,7 +2843,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       playing: false,
     })
   },
-  exportProject: async (mode = 'now') => {
+  exportProject: async (mode = 'now', options) => {
     if (get().exportJobId) return
     const currentProject = get().project
     if (!currentProject || projectDuration(currentProject) <= 0) {
@@ -2838,7 +2855,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return
     }
     const usedAssetIds = new Set(currentProject.tracks.flatMap(track => (
-      track.items.flatMap(item => item.asset_id ? [item.asset_id] : [])
+      track.items.filter(item => !options || options.itemIds.includes(item.id)).flatMap(item => item.asset_id ? [item.asset_id] : [])
     )))
     const missing = Object.values(currentProject.assets).filter(asset => (
       asset.missing && usedAssetIds.has(asset.id)
@@ -2855,7 +2872,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const project = get().dirty ? await get().saveProject() : get().project
     if (!project) return
     try {
-      const result = await api.exportEditorProject(project, mode)
+      const result = await api.exportEditorProject(project, mode, options)
       if (Number.isInteger(result.revision)) {
         rememberSavedEditorProject({ ...project, revision: result.revision })
         set(state => (
@@ -2899,7 +2916,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
                 width: fallbackDimensions.width * fallbackUpscaleScale,
                 height: fallbackDimensions.height * fallbackUpscaleScale,
                 fps: editorExportFps(project),
-                codec: project.export.codec,
+                codec: options || project.export.format === 'prores4444' ? 'prores4444' : project.export.codec,
+                format: options?.format || project.export.format || 'mp4',
+                ...(options ? { source_item_ids: options.itemIds } : {}),
                 quality: project.export.quality,
                 encoder: project.export.encoder,
                 spatial_upsampling: project.export.spatial_upsampling,

@@ -3,6 +3,7 @@ import { useIsMobileSidecar } from '../lib/useIsMobile'
 import { useStore } from '../stores/useStore'
 import { EditorLayout } from './EditorLayout'
 import { EditorAIWorkspace } from './EditorAIWorkspace'
+import { EditorAnimatedTitleStatus } from './EditorAnimatedTitleDialog'
 import { EditorTopBar } from './EditorTopBar'
 import { editorProjectDuration } from './editorUtils'
 import { useEditorStore } from './useEditorStore'
@@ -129,6 +130,7 @@ export function EditorWorkspace() {
   return (
     <main className="relative flex h-full w-full min-w-0 flex-col overflow-hidden bg-bg-primary text-text-primary">
       <EditorTopBar />
+      <EditorAnimatedTitleStatus />
       {Boolean(project?.compatibility_warnings?.length) && <details className="shrink-0 border-b border-amber-500/20 bg-amber-500/5 px-4 py-1.5 text-xs text-text-secondary">
         <summary className="cursor-pointer">Project compatibility notes</summary>
         <ul className="list-disc space-y-1 py-2 pl-4">{project?.compatibility_warnings?.map(note => <li key={note}>{note}</li>)}</ul>

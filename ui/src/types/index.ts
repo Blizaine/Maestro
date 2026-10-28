@@ -786,6 +786,8 @@ export interface EditorKeyingSettings {
 }
 
 export interface EditorTimelineItem {
+  /** Correlates an automatically returned title; retained for duplicate protection. */
+  animated_title_id?: string
   id: string
   asset_id?: string
   name: string
@@ -859,6 +861,7 @@ export type EditorUpscaleMethod =
   | 'flashvsrplus2pass4'
 
 export interface EditorExportSettings {
+  format?: 'mp4' | 'prores4444'
   quality: 'draft' | 'balanced' | 'high'
   codec: 'h264' | 'h265'
   encoder: 'auto' | 'software' | 'nvidia' | 'intel' | 'apple'
@@ -872,6 +875,8 @@ export interface EditorExportSettings {
 }
 
 export interface EditorExportRecord {
+  format?: 'mp4' | 'prores4444'
+  source_item_ids?: string[]
   id: string
   filename: string
   workspace: string
@@ -880,7 +885,7 @@ export interface EditorExportRecord {
   width: number
   height: number
   fps: number
-  codec: EditorExportSettings['codec']
+  codec: EditorExportSettings['codec'] | 'prores4444'
   quality: EditorExportSettings['quality']
   encoder?: EditorExportSettings['encoder']
   spatial_upsampling?: EditorUpscaleMethod
@@ -953,6 +958,7 @@ export interface EditorMediaPreview {
 }
 
 export interface EditorExportCapabilities {
+  prores4444?: boolean
   encoders: {
     software: boolean
     nvidia: boolean

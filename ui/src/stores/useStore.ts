@@ -6038,10 +6038,14 @@ export const useStore = create<AppState>((set, get) => ({
 
   resolutionPreset: '720p',
   setResolutionPreset: (preset) => {
-    const ratio = get().aspectRatio
-    const resolution = resolveResolution(get().modelOptions, preset, ratio)
+    const state = get()
+    // Auto is source-aspect-driven; keep the displayed ratio truthful.
+    const ratio = preset === 'auto' && state.modelOptions?.supports_auto_aspect
+      ? 'auto' : state.aspectRatio
+    const resolution = resolveResolution(state.modelOptions, preset, ratio)
     set(s => ({
       resolutionPreset: preset,
+      aspectRatio: ratio,
       params: { ...s.params, resolution },
       ...(resolution !== s.params.resolution ? { restoredWindowSelectionKey: null } : {}),
       h3WindowPlan: null,
@@ -6051,9 +6055,10 @@ export const useStore = create<AppState>((set, get) => ({
   aspectRatio: '16:9',
   setAspectRatio: (ratio) => {
     const state = get()
-    // Auto resolution follows the reference aspect. A fixed image aspect
-    // needs concrete dimensions so the backend can honor the selection.
-    const preset = state.generationMode === 'image'
+    // Auto resolution follows the source aspect. Choosing an explicit ratio
+    // needs concrete dimensions for images and source-aware video models.
+    const preset = (state.generationMode === 'image'
+      || (state.generationMode === 'video' && state.modelOptions?.supports_auto_aspect === true))
       && state.resolutionPreset === 'auto' && ratio !== 'auto'
       ? '720p' : state.resolutionPreset
     const resolution = resolveResolution(state.modelOptions, preset, ratio)

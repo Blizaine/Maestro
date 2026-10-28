@@ -113,6 +113,7 @@ from services.editor_projects import (
     list_editor_project_revisions,
     load_editor_project,
     normalize_editor_project,
+    prepare_editor_overlay_project,
     probe_media,
     render_editor_project,
     resolve_editor_asset,
@@ -30491,6 +30492,19 @@ def start_studio_queue():
     }
 
 
+@api.get("/api/v1/jobs/by-submission/{client_submission_id}")
+def job_by_submission(client_submission_id: str):
+    """Recover an exact receipt even after a job left the active queue."""
+    if not client_submission_id or len(client_submission_id) > 160:
+        raise HTTPException(400, "Invalid client submission identity")
+    matches = [job for job in list(_jobs.values()) if job.get("client_submission_id") == client_submission_id]
+    if not matches:
+        raise HTTPException(404, "Submission receipt not found")
+    if len(matches) != 1:
+        raise HTTPException(409, "Multiple jobs share this submission identity; review the queue")
+    return get_status(matches[0]["id"])
+
+
 @api.get("/api/v1/jobs")
 def list_jobs():
     """List all active/recent jobs for reconnection after browser refresh."""
@@ -31755,7 +31769,9 @@ def _run_editor_export(job_id: str) -> bool:
                 "width": int(round(export_width * upscale_factor)),
                 "height": int(round(export_height * upscale_factor)),
                 "fps": export_fps,
-                "codec": export_settings.get("codec") or "h264",
+                "codec": "prores4444" if export_settings.get("format") == "prores4444" else export_settings.get("codec") or "h264",
+                "format": export_settings.get("format") or "mp4",
+                **({"source_item_ids": job["params"]["source_item_ids"]} if job["params"].get("source_item_ids") else {}),
                 "quality": export_settings.get("quality") or "high",
                 "encoder": export_settings.get("encoder") or "auto",
                 "spatial_upsampling": spatial_upsampling,
@@ -32361,6 +32377,25 @@ async def editor_export(request: Request):
     except EditorProjectError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
+    source_item_ids = body.get("item_ids")
+    if source_item_ids is not None:
+        if body.get("format") != "prores4444":
+            raise HTTPException(400, "Selected overlay export requires format prores4444")
+        # Export an unsaved copy. Background footage and unrelated audio must
+        # never be baked into the standalone overlay or removed from the edit.
+        try:
+            overlay_source = deepcopy(project)
+            overlay_source["export"] = {
+                **overlay_source["export"], "format": "prores4444",
+                "encoder": "software", "spatial_upsampling": "",
+                "film_grain_intensity": 0,
+            }
+            project = prepare_editor_overlay_project(overlay_source, source_item_ids)
+        except EditorProjectError as error:
+            raise HTTPException(400, str(error)) from error
+    elif "format" in body:
+        raise HTTPException(400, "Set the full-project format in its export settings")
+
     job_id = uuid.uuid4().hex[:8]
     _jobs[job_id] = {
         "id": job_id,
@@ -32372,7 +32407,7 @@ async def editor_export(request: Request):
         "phase": "",
         "message": "Editor export held" if hold_for_queue else "Editor export queued",
         "created_at": time.time(),
-        "params": {"project": project},
+        "params": {"project": project, **({"source_item_ids": list(source_item_ids)} if source_item_ids is not None else {})},
         "workspace": workspace,
         "out_dir": _workspace_dir(workspace),
         "output_files": [],
