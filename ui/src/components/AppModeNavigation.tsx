@@ -18,11 +18,13 @@ export function MaestroBrand({
 
   return (
     <div className={`flex shrink-0 items-center gap-2 ${className}`}>
-      <img
-        src="/maestro-home-icon-orange.png"
-        alt=""
-        className={`${compact ? 'h-7 w-7 rounded-[7px]' : 'h-8 w-8 rounded-lg'} shrink-0`}
-      />
+      <span
+        aria-hidden="true"
+        className={`${compact ? 'h-7 w-7 rounded-[7px] text-lg' : 'h-8 w-8 rounded-lg text-xl'} flex shrink-0 select-none items-center justify-center font-bold leading-none`}
+        style={{ backgroundColor: 'var(--color-accent-blue)', color: '#ffffff' }}
+      >
+        M
+      </span>
       <>
         {!compact && (
           <span className="text-sm font-semibold tracking-tight text-text-primary">Maestro</span>

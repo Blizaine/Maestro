@@ -13,6 +13,8 @@ opener; panel width and desktop visibility are remembered per browser.
 **Appearance:** add Graphite Studio, a matte charcoal theme with flat orange
 actions, quieter neutral borders and a matching light variant. It is the
 default for fresh browser profiles; saved theme choices remain unchanged.
+The header uses a flat rounded-square M mark that follows the selected theme's
+accent color.
 Dark, Light and Auto modes apply the same palette before the UI mounts.
 
 **27 October image and terminal fixes:** add Krea 2 generation/edit prompt guides;
