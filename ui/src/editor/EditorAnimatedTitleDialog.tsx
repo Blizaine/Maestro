@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react'
 import { CheckCircle2, ExternalLink, Loader2, Sparkles, X } from 'lucide-react'
-import { animatedTitlePrompt, titleDimensions, titleFrames } from './editorAnimatedTitles'
+import { animatedTitlePrompt, titleDimensions, titleFrames, TITLE_EFFECTS, TITLE_EFFECT_LABELS } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 import { useEditorDialog } from './useEditorDialog'
 import { useEditorStore } from './useEditorStore'
 import { useEditorTitleStore } from './useEditorTitleStore'
 
 const DEFAULTS: AnimatedTitleSettings = {
-  text: '', look: 'Bold metallic 3D lettering', effect: 'dust', direction: '',
+  text: '', look: 'Bold metallic 3D lettering', effect: 'custom', direction: '',
   seconds: 5.2, aspect: 'project', resolution: '720p', keepAudio: false,
 }
 const FIELD = 'w-full rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-xs text-text-primary outline-none focus:border-accent-blue/60'
@@ -44,12 +44,26 @@ export function EditorAnimatedTitleDialog({ open, onClose }: { open: boolean; on
           <input aria-label="Title visual style" value={settings.look} maxLength={1200} disabled={busy}
             onChange={event => patch({ look: event.target.value })} placeholder="Describe any style: anime, hand-drawn, metallic, minimal…" className={FIELD} />
         </label>
-        <div className="grid grid-cols-2 gap-3">
-          <label className="space-y-1.5 text-xs text-text-secondary">Animation
-            <select aria-label="Title animation" value={settings.effect} disabled={busy} onChange={event => patch({ effect: event.target.value as AnimatedTitleSettings['effect'] })} className={FIELD}>
-              <option value="dust">Dust dissolve</option><option value="dissolve">Soft reveal and dissolve</option><option value="neon">Neon trace</option><option value="impact">Impact and shatter</option>
+        <label className="block space-y-1.5 text-xs text-text-secondary">Describe the animation
+          <textarea aria-label="Title animation description" value={settings.direction} maxLength={1200} rows={3} disabled={busy}
+            onChange={event => patch({ direction: event.target.value, effect: 'custom' })}
+            placeholder="Describe how the title appears, moves and disappears, including any timing you want." className={FIELD} />
+        </label>
+        <details className="rounded-lg border border-border bg-bg-tertiary p-3 text-xs text-text-secondary">
+          <summary className="cursor-pointer">Use an animation preset (optional)</summary>
+          <label className="mt-3 block space-y-1.5">Animation preset
+            <select aria-label="Title animation preset" value={settings.effect} disabled={busy}
+              onChange={event => {
+                const effect = event.target.value as AnimatedTitleSettings['effect']
+                patch({ effect, ...(effect !== 'custom' ? { direction: TITLE_EFFECTS[effect] } : {}) })
+              }} className={FIELD}>
+              <option value="custom">None — use my description</option>
+              {Object.entries(TITLE_EFFECT_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
           </label>
+          <p className="mt-2 text-[11px] leading-relaxed text-text-muted">A preset fills the description as a starting point. Edit it freely; only the description is sent as the animation direction.</p>
+        </details>
+        <div className="grid grid-cols-2 gap-3">
           <label className="space-y-1.5 text-xs text-text-secondary">Duration (seconds)
             <input aria-label="Title duration" type="number" min={5} max={14.5} step={.1} value={settings.seconds} disabled={busy}
               onChange={event => patch({ seconds: Number(event.target.value) })} className={FIELD} />
@@ -65,10 +79,6 @@ export function EditorAnimatedTitleDialog({ open, onClose }: { open: boolean; on
             </select>
           </label>
         </div>
-        <label className="block space-y-1.5 text-xs text-text-secondary">Additional direction (optional)
-          <textarea aria-label="Title additional direction" value={settings.direction} maxLength={1200} rows={2} disabled={busy}
-            onChange={event => patch({ direction: event.target.value })} placeholder="Hold the complete title for two seconds before it blows away." className={FIELD} />
-        </label>
         <label className="flex items-center gap-2 text-xs text-text-secondary"><input type="checkbox" checked={settings.keepAudio} disabled={busy}
           onChange={event => patch({ keepAudio: event.target.checked })} className="accent-[var(--color-accent-blue)]" />Keep generated clip audio</label>
         <div className="rounded-lg border border-border bg-bg-tertiary p-3 text-[11px] leading-relaxed text-text-muted">

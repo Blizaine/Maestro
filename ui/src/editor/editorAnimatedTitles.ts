@@ -18,12 +18,30 @@ export const TITLE_EFFECTS = {
   dissolve: 'The complete title fades into view, holds clearly long enough to read, then gently dissolves away.',
   neon: 'The title traces on with luminous neon strokes, holds clearly long enough to read, then switches off and disappears.',
   impact: 'The complete title assembles with a bold energetic impact, holds clearly long enough to read, then shatters and clears the frame.',
+  smoke: 'Soft smoke reveals the complete title. Hold it clearly long enough to read, then let the lettering dissolve into smoke and clear the frame.',
+  typewriter: 'Type the title on one character at a time. Hold the complete wording clearly, then erase the characters until the frame is clear.',
+  brush: 'Draw the lettering with expressive brush strokes. Hold the complete title clearly, then let the strokes fade away.',
+  glitch: 'Assemble the title through brief digital glitch fragments. Settle into crisp readable lettering, hold, then glitch out and clear the frame.',
+  liquid: 'Liquid metal flows together into the exact title. Hold the solid readable lettering, then let it flow apart and disappear.',
+  fire: 'Sparks trace and reveal the title with fiery edges. Hold the complete lettering clearly, then let the embers fade and clear the frame.',
+  frost: 'Frost crystals form the title. Hold the complete readable lettering, then let it melt into a faint mist and disappear.',
+  paper: 'Folded paper shapes unfold into the exact title. Hold it clearly long enough to read, then fold the lettering away and clear the frame.',
+  sand: 'Fine sand gathers into the exact title. Hold the complete lettering clearly, then let it scatter away until the frame is clear.',
+  electric: 'Electric arcs trace the exact title. Hold the completed readable lettering, then let the arcs flicker out and disappear.',
+  hologram: 'A holographic scan reveals the exact title. Stabilize the complete wording for readability, then scan it away and clear the frame.',
+  paint: 'Paint splashes assemble into the exact title. Hold the complete readable lettering, then let it break into droplets and disappear.',
 } as const
+export const TITLE_EFFECT_LABELS: Record<keyof typeof TITLE_EFFECTS, string> = {
+  dust: 'Dust dissolve', dissolve: 'Soft reveal and dissolve', neon: 'Neon trace', impact: 'Impact and shatter',
+  smoke: 'Smoke reveal', typewriter: 'Typewriter', brush: 'Brush lettering', glitch: 'Digital glitch',
+  liquid: 'Liquid metal', fire: 'Fire and sparks', frost: 'Frost and melt', paper: 'Paper unfolding',
+  sand: 'Sand assembly', electric: 'Electric trace', hologram: 'Hologram scan', paint: 'Paint splash',
+}
 
 export interface AnimatedTitleSettings {
   text: string
   look: string
-  effect: keyof typeof TITLE_EFFECTS
+  effect: 'custom' | keyof typeof TITLE_EFFECTS
   direction: string
   seconds: number
   aspect: 'project' | '16:9' | '9:16' | '1:1'
@@ -50,13 +68,14 @@ export function titleFrames(seconds: number): number {
 export function animatedTitlePrompt(settings: AnimatedTitleSettings): string {
   const text = settings.text.trim()
   if (!text || text.length > 160) throw new Error('Enter a title of 1–160 characters.')
-  if (!Object.hasOwn(TITLE_EFFECTS, settings.effect)) throw new Error('Choose an animation effect.')
+  if (settings.effect !== 'custom' && !Object.hasOwn(TITLE_EFFECTS, settings.effect)) throw new Error('Choose an animation effect.')
   if (settings.look.length > 1200 || settings.direction.length > 1200) throw new Error('Keep each direction under 1,200 characters.')
+  const animation = settings.direction.trim() || (settings.effect === 'custom' ? '' : TITLE_EFFECTS[settings.effect])
+  if (!animation) throw new Error('Describe the animation or choose an optional preset.')
   return [
     `Animated title VFX. The ONLY visible lettering is exactly ${JSON.stringify(text)}. Preserve every word, spelling and punctuation; no extra text.`,
     settings.look.trim() ? `Lettering and visual style: ${settings.look.trim()}` : 'Bold, clear, readable lettering.',
-    TITLE_EFFECTS[settings.effect],
-    settings.direction.trim(),
+    animation,
     'Start and end on the supplied perfectly uniform bright green background (#00FF00). Keep that same flat green backdrop throughout, with no texture, horizon, floor, shadows or lighting changes.',
     'Only title lettering and its animation effect are visible. No people, faces, characters, bodies, scenery, logos or additional objects. Do not visualize people or objects mentioned by the title words.',
     'Keep all lettering and particles within a generous safe margin, centered in the frame. Locked camera. No green lettering, green particles or green reflections. No speech or music.',

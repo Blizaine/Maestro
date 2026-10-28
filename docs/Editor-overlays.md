@@ -7,8 +7,13 @@ non-destructive clip setting: the original media file stays unchanged.
 ## Create an animated title
 
 Choose **Create animated title** in the Editor media panel. Enter the exact text,
-describe its lettering/style, choose an animation, duration, aspect and resolution,
+describe its lettering/style and animation, then choose duration, aspect and resolution,
 then press **Generate title**. H3 Fused 4-Step — Frames must already be installed.
+The animation description is blank by default. Write your own timing and motion,
+or expand **Use an animation preset (optional)** for 16 starting ideas, including
+dust, smoke, neon, typewriter, glitch, liquid metal, fire, frost and paper effects.
+Picking a preset fills the description; editing it replaces that preset's direction
+rather than adding a second, conflicting animation instruction.
 Maestro prepares perfectly uniform green start/end images at the requested output
 dimensions and writes the title prompt. It does not reuse Studio reference images,
 LoRAs, enhancement drafts or other creative settings. Global runtime/performance

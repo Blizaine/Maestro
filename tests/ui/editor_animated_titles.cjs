@@ -136,13 +136,13 @@ async function bundleUi() {
         import {useEditorStore} from './src/editor/useEditorStore';
         import {useStore} from './src/stores/useStore';
         import {useEditorTitleStore} from './src/editor/useEditorTitleStore';
-        import {animatedTitlePrompt, titleDimensions, titleFrames} from './src/editor/editorAnimatedTitles';
+        import {animatedTitlePrompt, titleDimensions, titleFrames, TITLE_EFFECTS} from './src/editor/editorAnimatedTitles';
         import {EditorAnimatedTitleDialog, EditorAnimatedTitleStatus} from './src/editor/EditorAnimatedTitleDialog';
         import {EditorInspector} from './src/editor/EditorInspector';
         window.editorStore = useEditorStore;
         window.studioStore = useStore;
         window.titleStore = useEditorTitleStore;
-        window.titleHelpers = {animatedTitlePrompt, titleDimensions, titleFrames};
+        window.titleHelpers = {animatedTitlePrompt, titleDimensions, titleFrames, TITLE_EFFECTS};
         function App() {
           const [titleOpen, setTitleOpen] = useState(false);
           const selectedItemId = useEditorStore(state => state.selectedItemId);
@@ -415,7 +415,7 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
     await page.addStyleTag({content: appCss()});
     await page.addScriptTag({content: await bundleUi()});
     const expectedTitleSettings = {
-      text: 'Orion / Q4!', look: 'Chromed serif lettering with a blue edge light', effect: 'neon',
+      text: 'Orion / Q4!', look: 'Chromed serif lettering with a blue edge light', effect: 'custom',
       direction: 'Reveal the exact spelling first; hold it clearly before it disappears.',
       seconds: 6.8, aspect: 'project', resolution: '480p', keepAudio: false,
     };
@@ -450,11 +450,20 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
     await dialog.waitFor();
     await dialog.getByRole('textbox', {name: 'Animated title text'}).fill('  Orion / Q4!  ');
     await dialog.getByRole('textbox', {name: 'Title visual style'}).fill('Chromed serif lettering with a blue edge light');
-    await dialog.getByLabel('Title animation').selectOption('neon');
+    const animation = dialog.getByRole('textbox', {name: 'Title animation description'});
+    assert.equal(await animation.inputValue(), '', 'Custom animation is blank and visible by default.');
+    assert.equal(await dialog.getByLabel('Title animation preset').isVisible(), false, 'Preset dropdown is optional and collapsed initially.');
+    await dialog.getByText('Use an animation preset (optional)', {exact: true}).click();
+    const presets = dialog.getByLabel('Title animation preset');
+    assert.equal(await presets.locator('option').count(), 17, 'Sixteen presets plus the custom option are offered.');
+    await presets.selectOption('neon');
+    assert.equal(await animation.inputValue(), await page.evaluate(() => window.titleHelpers.TITLE_EFFECTS.neon), 'A preset fills the editable description.');
+    await animation.fill('Reveal the exact spelling first; hold it clearly before it disappears.');
+    assert.equal(await presets.inputValue(), 'custom', 'Editing a starter description returns to custom animation.');
+    await dialog.getByText('Use an animation preset (optional)', {exact: true}).click();
     await dialog.getByLabel('Title duration').fill('6.8');
     await dialog.getByLabel('Title aspect ratio').selectOption('project');
     await dialog.getByLabel('Title resolution').selectOption('480p');
-    await dialog.getByRole('textbox', {name: 'Title additional direction'}).fill('Reveal the exact spelling first; hold it clearly before it disappears.');
     const expectedPrompt = await page.evaluate(settings => window.titleHelpers.animatedTitlePrompt(settings), expectedTitleSettings);
     await dialog.getByText('View prepared prompt').click();
     assert.equal(await dialog.locator('pre').innerText(), expectedPrompt,
@@ -462,8 +471,20 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
     assert.match(expectedPrompt, /ONLY visible lettering is exactly "Orion \/ Q4!"/);
     assert.match(expectedPrompt, /Start and end on the supplied perfectly uniform bright green background \(#00FF00\)/);
     assert.match(expectedPrompt, /No people, faces, characters, bodies, scenery, logos or additional objects/);
+    assert.equal(expectedPrompt.includes('luminous neon strokes'), false, 'The preset is not silently appended to custom direction.');
+    assert.equal(expectedPrompt.includes('breaks into fine dust'), false, 'No default dust animation is imposed.');
+    const presetChecks = await page.evaluate(settings => Object.entries(window.titleHelpers.TITLE_EFFECTS).map(([effect, direction]) => {
+      const prompt = window.titleHelpers.animatedTitlePrompt({...settings, effect, direction: ''});
+      return {effect, presentOnce: prompt.indexOf(direction) >= 0 && prompt.indexOf(direction) === prompt.lastIndexOf(direction)};
+    }), expectedTitleSettings);
+    assert.equal(presetChecks.length, 16);
+    assert.ok(presetChecks.every(result => result.presentOnce), 'All presets remain valid, with one animation direction each.');
+    assert.equal(await page.evaluate(settings => {
+      try { window.titleHelpers.animatedTitlePrompt({...settings, effect: 'custom', direction: ' '}); return false; }
+      catch (error) { return error.message.includes('Describe the animation'); }
+    }, expectedTitleSettings), true, 'Blank custom animation asks for direction instead of falling back to dust.');
 
-    const screenshotDirectory = path.join(root, '.codex-tmp', 'editor-animated-titles-20261028');
+    const screenshotDirectory = path.join(root, '.codex-tmp', 'editor-title-custom-20261028');
     fs.mkdirSync(screenshotDirectory, {recursive: true});
     await page.screenshot({path: path.join(screenshotDirectory, 'title-dialog-desktop.png'), fullPage: true});
     await page.setViewportSize({width: 390, height: 844});
@@ -705,7 +726,7 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
     assert.ok(!requests.some(request => /download|restart|llm|plan-h3|preview/i.test(request.pathname)),
       'The workflow makes no model downloads, restarts, LLM planning, or GPU preview requests.');
     console.log('Animated title workflow passed: green PNG upload, exact lost-receipt recovery, prompt and geometry, safe insertion, ownership, undo/idempotence, failed/cancelled jobs, and scoped transparent MOV export.');
-    console.log(`Dialog screenshots: ${path.join(screenshotDirectory, 'title-dialog-desktop.png')} and ${path.join(screenshotDirectory, 'title-dialog-mobile.png')}`);
+    console.log(`Custom-animation dialog screenshots: ${path.join(screenshotDirectory, 'title-dialog-desktop.png')} and ${path.join(screenshotDirectory, 'title-dialog-mobile.png')}`);
   } finally {
     await browser.close();
   }
