@@ -13,6 +13,7 @@ type EditorProxyProfile = 'auto' | 'mobile'
 const previewCache = new Map<string, EditorMediaPreview>()
 const previewPromises = new Map<string, Promise<EditorMediaPreview>>()
 const previewFailures = new Set<string>()
+const MAX_CACHED_PREVIEWS = 128
 
 function previewKey(
   asset: EditorAsset,
@@ -44,6 +45,7 @@ function requestPreview(
   const request = api.fetchEditorMediaPreview(asset, workspace, includeProxy, proxyProfile)
     .then(result => {
       previewCache.set(key, result)
+      while (previewCache.size > MAX_CACHED_PREVIEWS) previewCache.delete(previewCache.keys().next().value!)
       previewFailures.delete(key)
       return result
     })
@@ -90,6 +92,7 @@ export function useEditorMediaPreview(
       if (active) setResult({ key, data: result, failed: false })
     }).catch(() => {
       previewFailures.add(key)
+      while (previewFailures.size > MAX_CACHED_PREVIEWS) previewFailures.delete(previewFailures.values().next().value!)
       if (active) setResult({ key, data: null, failed: true })
     })
     return () => { active = false }

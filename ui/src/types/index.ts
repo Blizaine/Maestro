@@ -161,6 +161,10 @@ export interface GenerateParams {
   _studio_video_workflow?: StudioVideoWorkflow
   /** UI-only Audio workflow marker retained in output sidecars. */
   _audio_sub_mode?: AudioSubMode
+  /** Ephemeral request identity used to bind Editor AI round trips to one job. */
+  _editor_operation_id?: string
+  /** Stable client-generated identity used to recover the exact accepted submit. */
+  _client_submission_id?: string
   /** Restorable ffmpeg Mixer recipe. Volumes use the backend's 0-1 scale. */
   audio_mixer_tracks?: Array<{
     path: string
@@ -620,6 +624,76 @@ export type EditorAIRoundTripTool =
   | 'revoice'
 export type EditorAIReturnMode = 'replace' | 'alternate'
 
+export type EditorOperationStatus =
+  | 'armed'
+  | 'queued'
+  | 'running'
+  | 'result_ready'
+  | 'completed'
+  | 'failed'
+  | 'needs_review'
+  | 'cancelled'
+
+export interface EditorOperationSourceSnapshot {
+  item_id: string
+  track_id: string
+  track_type: EditorTrackType
+  asset_id: string
+  asset_name: string
+  asset_path: string
+  start: number
+  duration: number
+  source_in: number
+  speed: number
+}
+
+export interface EditorOperationRecord {
+  schema_version: 1
+  operation_id: string
+  client_submission_id: string
+  workspace: string
+  project_id: string
+  project_revision?: number
+  item_id: string
+  item_name: string
+  tool: EditorAIRoundTripTool
+  return_mode: EditorAIReturnMode
+  source_snapshot: EditorOperationSourceSnapshot
+  source_range: { start: number; end: number }
+  status: EditorOperationStatus
+  job_id: string | null
+  job_kind: string | null
+  job_status: string | null
+  output_file: string | null
+  error: string | null
+  review_reason: string | null
+  created_at: number
+  updated_at: number
+}
+
+export interface EditorOperationCreateRequest {
+  operation_id: string
+  client_submission_id: string
+  workspace: string
+  project_id: string
+  project_revision?: number
+  item_id: string
+  item_name: string
+  tool: EditorAIRoundTripTool
+  return_mode: EditorAIReturnMode
+  source_snapshot: EditorOperationSourceSnapshot
+  source_range: { start: number; end: number }
+}
+
+export interface EditorOperationTransitionRequest {
+  client_submission_id: string
+  job_id?: string
+  status: 'completed' | 'failed' | 'needs_review' | 'cancelled'
+  output_file?: string
+  error?: string
+  review_reason?: string
+}
+
 export interface EditorAsset {
   id: string
   name: string
@@ -646,6 +720,19 @@ export interface EditorTransform {
   y: number
   scale: number
   rotation: number
+}
+
+export type EditorAnimatedProperty = 'x' | 'y' | 'scale' | 'rotation' | 'opacity' | 'volume'
+export interface EditorKeyframe {
+  time: number
+  value: number
+  easing: 'linear' | 'hold' | 'ease-in' | 'ease-out' | 'ease-in-out'
+}
+export interface EditorColorSettings {
+  exposure: number
+  contrast: number
+  saturation: number
+  temperature: number
 }
 
 export interface EditorTextStyle {
@@ -708,6 +795,14 @@ export interface EditorTimelineItem {
   fade_out?: number
   transition_in?: EditorTransitionType
   transition_out?: EditorTransitionType
+  /** Authored overlap with the preceding clip, used by a true crossfade. */
+  transition_overlap?: number
+  keyframes?: Partial<Record<EditorAnimatedProperty, EditorKeyframe[]>>
+  color?: EditorColorSettings
+  /** Optional generated/readable caption attached to this clip. */
+  caption?: boolean
+  /** Legacy project text transform/rotation preserved for compatibility review. */
+  legacy_text_rotation?: { transform?: number; style?: number }
   /** Items with the same link id move, trim, split, and delete together. */
   link_group_id?: string
   /** Non-destructive source alternatives created manually or by Maestro AI. */
@@ -784,6 +879,10 @@ export interface EditorExportRecord {
 
 export interface EditorProject {
   schema_version: number
+  /** Saved-project compatibility notes, such as legacy text transforms. */
+  compatibility_warnings?: string[]
+  /** Server revision used to preserve edits made from another device. */
+  revision?: number
   id: string
   name: string
   workspace: string

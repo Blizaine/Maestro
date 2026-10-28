@@ -21,7 +21,7 @@ import {
   sanitizeH3VaeUpsampling,
 } from '../lib/h3VaeUpsampling'
 import { isKreaIdentityEdit, normalizeKreaIdentitySettings, type KreaIdentitySettings } from '../lib/kreaIdentityControls'
-import type { MiniMaxH3VideoAudioRole, SavedOmniCharacter, TtsVoice } from '../types'
+import type { EditorAIRoundTripTool, MiniMaxH3VideoAudioRole, SavedOmniCharacter, TtsVoice } from '../types'
 import { applyTtsVoices, ttsAudioModeForCount, ttsCharacterEnhancePrompt, ttsSpeakingVoiceCount, ttsVoiceLimit, ttsVoicePaths } from '../lib/ttsVoices'
 import { vigglePreparationKey, viggleSourceReady, viggleTimeline } from '../lib/viggle'
 import { DEFAULT_AVATAR_SPEAKER_LOCATIONS, isLongCatAvatarModel, isMultiSpeakerAvatarModel, parseAvatarSpeakerRegions } from '../lib/avatarWorkflow'
@@ -64,6 +64,47 @@ const _civitRefreshedCheckpointDownloads = new Set<string>()
 const DIRECTOR_REPAIR_POLL_MS = 2000
 const DIRECTOR_REPAIR_ACTIVE = new Set(['queued', 'running', 'cancelling'])
 const DIRECTOR_PIPELINE_ACTIVE = new Set(['running', 'paused'])
+const EDITOR_AI_ROUND_TRIP_STORAGE_KEY = 'maestro-editor-ai-round-trip-v1'
+type EditorOperationSubmission = {
+  _editor_operation_id: string
+  _client_submission_id: string
+  workspace: string
+}
+
+function _editorOperationSubmission(
+  tool: EditorAIRoundTripTool,
+): EditorOperationSubmission | undefined {
+  if (typeof window === 'undefined') return undefined
+  try {
+    const operation = JSON.parse(window.sessionStorage.getItem(EDITOR_AI_ROUND_TRIP_STORAGE_KEY) || 'null')
+    if (
+      !operation
+      || !['armed', 'queued', 'running'].includes(operation.status)
+      || operation.tool !== tool
+      || !operation.id
+      || !operation.clientSubmissionId
+      || !operation.workspace
+    ) return undefined
+    return {
+      _editor_operation_id: String(operation.id),
+      _client_submission_id: String(operation.clientSubmissionId),
+      workspace: String(operation.workspace),
+    }
+  } catch {
+    return undefined
+  }
+}
+
+function _failEditorOperationSubmission(tool: EditorAIRoundTripTool, error: string): void {
+  const submission = _editorOperationSubmission(tool)
+  if (!submission) return
+  void api.transitionEditorOperation(submission._editor_operation_id, {
+    client_submission_id: submission._client_submission_id,
+    status: 'failed',
+    error,
+  }).catch(() => undefined)
+}
+
 type DirectorRepairPoll = {
   operationId: string
   timer: number | null
@@ -6534,6 +6575,7 @@ export const useStore = create<AppState>((set, get) => ({
             dlss_depth: String(s.params.custom_settings?.dlss_depth ?? 'half'),
             dlss_motion: String(s.params.custom_settings?.dlss_motion ?? 'original'),
             workspace: s.activeWorkspace,
+            ..._editorOperationSubmission('upscale'),
           })
         : tool === 'film_grain'
           ? await api.submitToolFilmGrain({
@@ -6541,8 +6583,10 @@ export const useStore = create<AppState>((set, get) => ({
               intensity: s.filmGrainIntensity,
               saturation: s.filmGrainSaturation,
               workspace: s.activeWorkspace,
+              ..._editorOperationSubmission('film_grain'),
             })
-          : await api.submitToolRevoice({ video_path: source, voice_ref_paths: refPaths, mode: s.toolsRevoiceMode, workspace: s.activeWorkspace })
+          : await api.submitToolRevoice({ video_path: source, voice_ref_paths: refPaths, mode: s.toolsRevoiceMode, workspace: s.activeWorkspace,
+              ..._editorOperationSubmission('revoice') })
 
       set(st => ({
         jobs: st.jobs.map(j => j === newJob ? { ...j, id: result.job_id, status: 'running', message: runningMessage } : j),
@@ -6582,6 +6626,7 @@ export const useStore = create<AppState>((set, get) => ({
           : tool === 'film_grain'
             ? 'Film grain failed'
             : 'Revoice failed'
+      _failEditorOperationSubmission(tool, msg)
       set(st => ({
         jobs: st.jobs.map(j => j === newJob ? { ...j, id: j.id || `tool-fail-${Date.now()}`, status: 'failed', message: msg, error: msg } : j),
         isGenerating: st.jobs.some(j => j !== newJob && (j.status === 'running' || j.status === 'queued')),
@@ -7236,6 +7281,7 @@ export const useStore = create<AppState>((set, get) => ({
           activated_loras: (state.params.activated_loras as string[]) || [],
           loras_multipliers: (state.params.loras_multipliers as string) || '',
           workspace: state.activeWorkspace,
+          ..._editorOperationSubmission('outpaint'),
         })
 
         set(s => ({
@@ -7277,6 +7323,7 @@ export const useStore = create<AppState>((set, get) => ({
         }, 2000)
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'Outpaint failed'
+        _failEditorOperationSubmission('outpaint', msg)
         // Submit itself failed (pre-queue). Convert the placeholder to a
         // failed state in place so the user sees what went wrong instead of
         // the tile silently disappearing.
@@ -7334,6 +7381,7 @@ export const useStore = create<AppState>((set, get) => ({
           activated_loras: (state.params.activated_loras as string[]) || [],
           loras_multipliers: (state.params.loras_multipliers as string) || '',
           workspace: state.activeWorkspace,
+          ..._editorOperationSubmission('repaint'),
         })
 
         set(s => ({
@@ -7384,6 +7432,7 @@ export const useStore = create<AppState>((set, get) => ({
         }, 2000)
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'Repaint failed'
+        _failEditorOperationSubmission('repaint', msg)
         set(s => ({
           jobs: s.jobs.map(j => j === newJob
             ? { ...j, id: j.id || `submit-fail-${Date.now()}`, status: 'failed', message: msg, error: msg }
@@ -7460,6 +7509,7 @@ export const useStore = create<AppState>((set, get) => ({
           activated_loras: (state.params.activated_loras as string[]) || [],
           loras_multipliers: (state.params.loras_multipliers as string) || '',
           workspace: state.activeWorkspace,
+          ..._editorOperationSubmission('recast'),
         })
 
         set(s => ({
@@ -7499,6 +7549,7 @@ export const useStore = create<AppState>((set, get) => ({
         }, 2000)
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'Recast failed'
+        _failEditorOperationSubmission('recast', msg)
         set(s => ({
           jobs: s.jobs.map(j => j === newJob ? { ...j, id: j.id || `submit-fail-${Date.now()}`, status: 'failed', message: msg, error: msg } : j),
           isGenerating: s.jobs.some(j => j !== newJob && (j.status === 'running' || j.status === 'queued')),
@@ -7546,6 +7597,7 @@ export const useStore = create<AppState>((set, get) => ({
             // missing/null/empty path as "fall back to source".
             ...(state.editAnythingStartAnchor ? { start_anchor_path: state.editAnythingStartAnchor } : {}),
             ...(state.editAnythingEndAnchor ? { end_anchor_path: state.editAnythingEndAnchor } : {}),
+            ..._editorOperationSubmission('edit_anything'),
           })
         } else if (state.editSubMode === 'inpaint') {
           result = await api.submitInpaint({
@@ -7594,6 +7646,7 @@ export const useStore = create<AppState>((set, get) => ({
             activated_loras: (state.params.activated_loras as string[]) || [],
             loras_multipliers: (state.params.loras_multipliers as string) || '',
             workspace: state.activeWorkspace,
+            ..._editorOperationSubmission('retake'),
           })
         }
 
@@ -7637,6 +7690,9 @@ export const useStore = create<AppState>((set, get) => ({
         }, 2000)
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'Generation failed'
+        if (state.editSubMode === 'edit_anything' || state.editSubMode === 'retake') {
+          _failEditorOperationSubmission(state.editSubMode, msg)
+        }
         // Submit itself failed (pre-queue). Convert the placeholder to a
         // failed state in place so the user sees what went wrong instead of
         // the tile silently disappearing.
@@ -8854,6 +8910,10 @@ export const useStore = create<AppState>((set, get) => ({
       delete params.h3_window_plan
     }
 
+    // Editor operations belong only to their explicit edit/tool submission
+    // handlers above. Generic generation can be used to create helper images
+    // while configuring Recast/Edit Anything, so it must never inherit the
+    // pending operation merely from stale workflow state.
     const clientSubmissionId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
     delete params._viggle_prepare_only
     if (state.params.model_type === 'viggle_animate') {
@@ -8889,6 +8949,7 @@ export const useStore = create<AppState>((set, get) => ({
       delete params._viggle_prepared
     }
     const pendingJobId = `pending-${clientSubmissionId}`
+    delete params._editor_operation_id
     params._client_submission_id = clientSubmissionId
     const newJob: GenerationJob = {
       id: pendingJobId,
@@ -9068,6 +9129,7 @@ export const useStore = create<AppState>((set, get) => ({
           const active = await api.fetchActiveJobs()
           const accepted = active.jobs.find(job => (
             job.client_submission_id === clientSubmissionId
+
           ))
           if (accepted) {
             clearCapturedEnhancement()

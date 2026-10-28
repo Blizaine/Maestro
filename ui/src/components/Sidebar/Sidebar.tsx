@@ -61,7 +61,7 @@ function inputRevealBounds(input: HTMLElement) {
   return input.getBoundingClientRect()
 }
 
-export function Sidebar({ onOpenWorlds }: { onOpenWorlds?: () => void } = {}) {
+export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () => void; embedded?: boolean } = {}) {
   const toggleSettings = useStore(s => s.toggleSettings)
   const generationMode = useStore(s => s.generationMode)
   const imageMode = useStore(s => s.params.image_mode)
@@ -264,7 +264,7 @@ export function Sidebar({ onOpenWorlds }: { onOpenWorlds?: () => void } = {}) {
           a boundary anchor or Recast reference is being edited; null otherwise. */}
       <AnchorReturnBanner />
 
-      <div data-testid="studio-workflow-header" className="studio-workflow-header flex shrink-0 flex-col gap-2 px-3 pb-2 pt-3">
+      {!embedded && <div data-testid="studio-workflow-header" className="studio-workflow-header flex shrink-0 flex-col gap-2 px-3 pb-2 pt-3">
         <GenerationModeSelector />
 
         {/* Studio's user-facing hierarchy is media first, workflow second.
@@ -273,7 +273,7 @@ export function Sidebar({ onOpenWorlds }: { onOpenWorlds?: () => void } = {}) {
         {isVideoWorkspace && <VideoWorkflowSelector onOpenWorlds={onOpenWorlds} />}
         {isImageWorkspace && <ImageWorkflowSelector />}
         {isAudioWorkspace && <AudioSubModeToggle />}
-      </div>
+      </div>}
       <div className="studio-composition mx-3 flex grow shrink-0 basis-auto flex-col rounded-2xl border border-border bg-bg-primary/30" data-has-prompt={hasPrompt}>
       <div data-testid="studio-controls-scroll" className={`${hasPrompt ? 'studio-inputs shrink-0' : 'grow shrink-0'} flex min-w-0 flex-col gap-3 p-2.5 [&>*]:shrink-0`}>
         {isUpscale ? (
@@ -346,6 +346,13 @@ export function Sidebar({ onOpenWorlds }: { onOpenWorlds?: () => void } = {}) {
       {!isStandaloneTool && <StudioFooter onCharacterSlot={setCharacterSlot} onAnchor={setSettingsElement} />}
     </CharacterToolbarContext.Provider>
     </SidebarLayoutContext.Provider>
+  )
+
+  if (embedded) return (
+    <div ref={setSidebarElement} className="maestro-sidebar flex h-full min-h-0 w-full min-w-0 flex-col bg-bg-secondary" data-testid="editor-ai-controls">
+      <StartupStatus />
+      {studioControls}
+    </div>
   )
 
   // Mobile: overlay drawer

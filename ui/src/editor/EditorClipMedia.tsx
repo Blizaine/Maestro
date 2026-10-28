@@ -66,6 +66,7 @@ async function generateVideoStrip(
     video.removeAttribute('src')
     video.load()
     videoStripCache.set(key, frames)
+    while (videoStripCache.size > 96) videoStripCache.delete(videoStripCache.keys().next().value!)
     return frames
   })().catch(() => []).finally(() => videoStripPromises.delete(key))
   videoStripPromises.set(key, promise)
@@ -101,6 +102,7 @@ async function generateWaveform(url: string): Promise<number[]> {
       const maximum = Math.max(0.001, ...values)
       const normalized = values.map(value => Math.max(0.06, Math.min(1, value / maximum)))
       waveformCache.set(url, normalized)
+      while (waveformCache.size > 128) waveformCache.delete(waveformCache.keys().next().value!)
       return normalized
     } finally {
       void context.close()

@@ -190,6 +190,7 @@ function makeProject() {
       window.mount();
     }, makeProject());
 
+    await page.getByRole('tab', {name: 'AI', exact: true}).click();
     const prompt = '  Revised prompt with exact spacing.\nKeep both lines.  ';
     const promptDraft = page.getByLabel('Video prompt draft');
     await promptDraft.fill(prompt);
@@ -208,6 +209,7 @@ function makeProject() {
 
     await page.evaluate(() => window.store.setState({selectedItemId: null, selectedItemIds: []}));
     await page.evaluate(() => window.store.setState({selectedItemId: 'director-shot', selectedItemIds: ['director-shot']}));
+    await page.getByRole('tab', {name: 'AI', exact: true}).click();
     assert.equal(await page.getByLabel('Video prompt draft').inputValue(), prompt,
       'Deselecting and reselecting restores the stored draft');
 
@@ -241,12 +243,14 @@ function makeProject() {
 
     await page.evaluate(() => window.store.setState({selectedItemId: null, selectedItemIds: []}));
     await page.evaluate(() => window.store.setState({selectedItemId: 'director-shot', selectedItemIds: ['director-shot']}));
+    await page.getByRole('tab', {name: 'AI', exact: true}).click();
     assert.equal(await page.getByRole('alert').count(), 1, 'The shot-local failure survives reselection');
     assert.equal(await page.getByLabel('Video prompt draft').inputValue(), prompt,
       'A failed rerun leaves the draft intact');
 
     await page.evaluate(async () => window.store.getState().loadProject('project-director-drafts'));
     await page.evaluate(() => window.store.setState({selectedItemId: 'director-shot', selectedItemIds: ['director-shot']}));
+    await page.getByRole('tab', {name: 'AI', exact: true}).click();
     assert.equal(await page.getByLabel('Video prompt draft').inputValue(), prompt,
       'The saved draft survives reloading the project');
     assert.equal(await page.getByRole('alert').count(), 1,
@@ -295,6 +299,7 @@ function makeProject() {
     await page.evaluate(() => window.store.setState({
       selectedItemId: 'director-shot-2', selectedItemIds: ['director-shot-2'],
     }));
+    await page.getByRole('tab', {name: 'AI', exact: true}).click();
     await page.getByLabel('Video prompt draft').fill(newerSecondDraft);
     releaseFinalSave();
     await page.waitForFunction(() => window.store.getState().directorRerunItemId === null

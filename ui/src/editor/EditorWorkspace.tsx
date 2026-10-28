@@ -1,15 +1,14 @@
 import { useEffect } from 'react'
-import { useIsMobile } from '../lib/useIsMobile'
+import { useIsMobileSidecar } from '../lib/useIsMobile'
 import { useStore } from '../stores/useStore'
-import { EditorLeftPanel } from './EditorLeftPanel'
-import { EditorPreview } from './EditorPreview'
-import { EditorTimeline } from './EditorTimeline'
+import { EditorLayout } from './EditorLayout'
+import { EditorAIWorkspace } from './EditorAIWorkspace'
 import { EditorTopBar } from './EditorTopBar'
 import { editorProjectDuration } from './editorUtils'
 import { useEditorStore } from './useEditorStore'
 
 export function EditorWorkspace() {
-  const isMobile = useIsMobile()
+  const isMobile = useIsMobileSidecar()
   const activeWorkspace = useStore(state => state.activeWorkspace)
   const initialize = useEditorStore(state => state.initialize)
   const loading = useEditorStore(state => state.loading)
@@ -45,17 +44,19 @@ export function EditorWorkspace() {
 
   useEffect(() => {
     const keyboard = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return
       const target = event.target as HTMLElement | null
       const editingText = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.tagName === 'SELECT' || target?.isContentEditable
+      const nativeControl = target?.closest('button, a, [role="button"], [role="tab"], [role="slider"]')
       const command = event.ctrlKey || event.metaKey
       if (command && event.key.toLowerCase() === 's') {
         event.preventDefault()
         void saveProject()
-      } else if (command && event.key.toLowerCase() === 'z') {
+      } else if (command && !editingText && event.key.toLowerCase() === 'z') {
         event.preventDefault()
         if (event.shiftKey) redo()
         else undo()
-      } else if (command && event.key.toLowerCase() === 'y') {
+      } else if (command && !editingText && event.key.toLowerCase() === 'y') {
         event.preventDefault()
         redo()
       } else if (command && !editingText && event.key.toLowerCase() === 'c') {
@@ -70,7 +71,7 @@ export function EditorWorkspace() {
       } else if (command && !editingText && event.key.toLowerCase() === 'd') {
         event.preventDefault()
         duplicateSelected()
-      } else if (!editingText && event.code === 'Space') {
+      } else if (!editingText && !nativeControl && event.code === 'Space') {
         event.preventDefault()
         setPlaying(!playing)
       } else if (!editingText && event.key.toLowerCase() === 's') {
@@ -128,28 +129,12 @@ export function EditorWorkspace() {
   return (
     <main className="relative flex h-full w-full min-w-0 flex-col overflow-hidden bg-bg-primary text-text-primary">
       <EditorTopBar />
-
-      {isMobile ? (
-        <>
-          <EditorLeftPanel mobile />
-          <div className="flex min-h-0 flex-1 flex-col">
-            <div className="min-h-[220px] flex-[0.9]">
-              <EditorPreview />
-            </div>
-            <div className="min-h-0 flex-[1.1] border-t border-border">
-              <EditorTimeline compact />
-            </div>
-          </div>
-        </>
-      ) : (
-        <div className="flex min-h-0 flex-1">
-          <EditorLeftPanel />
-          <div className="flex min-w-0 flex-1 flex-col">
-            <EditorPreview />
-            <EditorTimeline />
-          </div>
-        </div>
-      )}
+      {Boolean(project?.compatibility_warnings?.length) && <details className="shrink-0 border-b border-amber-500/20 bg-amber-500/5 px-4 py-1.5 text-xs text-text-secondary">
+        <summary className="cursor-pointer">Project compatibility notes</summary>
+        <ul className="list-disc space-y-1 py-2 pl-4">{project?.compatibility_warnings?.map(note => <li key={note}>{note}</li>)}</ul>
+      </details>}
+      <EditorLayout isMobile={isMobile} />
+      <EditorAIWorkspace />
 
       {loading && (
         <div className="absolute inset-0 z-[100] flex items-center justify-center bg-bg-primary/75 backdrop-blur-sm">
@@ -160,8 +145,8 @@ export function EditorWorkspace() {
         </div>
       )}
       {error && (
-        <div className="pointer-events-none absolute bottom-4 left-1/2 z-[110] max-w-[min(520px,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-red-500/30 bg-red-950/90 px-3 py-2 text-[10px] text-red-200 shadow-xl">
-          {error}
+        <div role="alert" className="absolute bottom-16 left-1/2 z-[160] flex max-w-[min(620px,calc(100vw-2rem))] -translate-x-1/2 items-start gap-3 rounded-lg border border-red-500/30 bg-bg-secondary px-4 py-3 text-xs text-red-400 shadow-xl">
+          <span>{error}</span><button type="button" onClick={() => useEditorStore.setState({ error: null })} className="shrink-0 underline">Dismiss</button>
         </div>
       )}
     </main>

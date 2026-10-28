@@ -10,6 +10,7 @@ import type {
   EditorExportSettings,
   EditorMarker,
   EditorMediaProbe,
+  EditorOperationSourceSnapshot,
   EditorProject,
   EditorProjectSummary,
   EditorTimelineItem,
@@ -31,6 +32,7 @@ import {
 import { DEFAULT_EDITOR_FONT } from './editorFonts'
 import { flashvsrScale } from '../lib/flashvsr'
 import { invalidateEditorMediaPreview } from './editorMediaPreview'
+import { applyEditorEditOperation, type EditorEditOperation } from './editorEditOperations'
 
 const HISTORY_LIMIT = 60
 const MIN_ITEM_DURATION = 1 / 30
@@ -54,16 +56,21 @@ export type EditorAIRoundTripStatus = 'armed' | 'queued' | 'running' | 'complete
 
 export interface EditorAIRoundTrip {
   id: string
+  clientSubmissionId: string
   projectId: string
+  projectRevision?: number
+  projectSignature: string
   workspace: string
   itemId: string
   itemName: string
+  sourceSnapshot: EditorOperationSourceSnapshot
+  sourceRange: { start: number; end: number }
   tool: EditorAIRoundTripTool
   returnMode: EditorAIReturnMode
   status: EditorAIRoundTripStatus
-  baselineJobIds: string[]
   claimedJobId?: string
   outputFile?: string
+  reviewRequired?: boolean
   error?: string
   createdAt: number
 }
@@ -94,6 +101,7 @@ interface EditorState {
   future: EditorProject[]
   clipboard: EditorClipboard | null
   roundTrip: EditorAIRoundTrip | null
+  aiWorkspaceOpen: boolean
   mobilePanel: EditorMobilePanel
   exportJobId: string | null
   exportProgress: number
@@ -103,7 +111,7 @@ interface EditorState {
   refreshLibrary: () => Promise<void>
   createProject: (name?: string, canvas?: Partial<EditorCanvas>) => Promise<void>
   duplicateProject: () => Promise<void>
-  loadProject: (projectId: string) => Promise<void>
+  loadProject: (projectId: string, options?: { discardUnsaved?: boolean }) => Promise<void>
   auditProjectMedia: () => Promise<void>
   saveProject: () => Promise<EditorProject | null>
   deleteProject: (projectId: string) => Promise<void>
@@ -113,7 +121,7 @@ interface EditorState {
 
   uploadMedia: (file: File, trackId?: string) => Promise<void>
   relinkMedia: (assetId: string, file: File) => Promise<void>
-  addMedia: (asset: EditorAsset, at?: number, trackId?: string) => Promise<void>
+  addMedia: (asset: EditorAsset, at?: number, trackId?: string, range?: { sourceIn: number; sourceOut: number }) => Promise<void>
   importDirectorRun: (pipelineId: string, at?: number) => Promise<void>
   setDirectorDraftPrompt: (itemId: string, prompt: string) => void
   clearDirectorRerunError: (itemId: string) => void
@@ -135,7 +143,9 @@ interface EditorState {
   setSnapping: (enabled: boolean) => void
   setRipple: (enabled: boolean) => void
   setMobilePanel: (panel: EditorMobilePanel) => void
+  setAIWorkspaceOpen: (open: boolean) => void
   updateItem: (itemId: string, patch: Partial<EditorTimelineItem>) => void
+  executeEditOperations: (operations: EditorEditOperation[]) => boolean
   moveItem: (itemId: string, start: number, trackId?: string) => void
   trimItem: (itemId: string, edge: 'start' | 'end', time: number) => void
   splitSelected: () => void
@@ -240,6 +250,117 @@ function itemLocation(project: EditorProject, itemId: string): {
   return null
 }
 
+function editorOperationSourceSnapshot(
+  project: EditorProject,
+  itemId: string,
+): EditorOperationSourceSnapshot | null {
+  const located = itemLocation(project, itemId)
+  const asset = located?.item.asset_id ? project.assets[located.item.asset_id] : null
+  if (!located || !asset || located.track.type !== 'video' || asset.type !== 'video') return null
+  return {
+    item_id: located.item.id,
+    track_id: located.track.id,
+    track_type: located.track.type,
+    asset_id: asset.id,
+    asset_name: asset.name,
+    asset_path: asset.path || asset.name,
+    start: located.item.start,
+    duration: located.item.duration,
+    source_in: located.item.source_in,
+    speed: located.item.speed,
+  }
+}
+
+function editorOperationSourceMatches(
+  expected: EditorOperationSourceSnapshot,
+  current: EditorOperationSourceSnapshot | null,
+): boolean {
+  if (!current) return false
+  const stringKeys: Array<keyof EditorOperationSourceSnapshot> = [
+    'item_id', 'asset_id', 'asset_name', 'asset_path',
+  ]
+  if (stringKeys.some(key => expected[key] !== current[key])) return false
+  const numberKeys: Array<keyof EditorOperationSourceSnapshot> = [
+    'duration', 'source_in', 'speed',
+  ]
+  return numberKeys.every(key => (
+    typeof expected[key] === 'number'
+    && typeof current[key] === 'number'
+    && Math.abs(expected[key] as number - (current[key] as number)) <= 1e-6
+  ))
+}
+
+function editorProjectSignature(project: EditorProject): string {
+  const content = JSON.stringify({
+    id: project.id,
+    workspace: project.workspace,
+    canvas: project.canvas,
+    assets: project.assets,
+    tracks: project.tracks,
+    markers: project.markers,
+    export: project.export,
+  })
+  let hash = 2166136261
+  for (let index = 0; index < content.length; index += 1) {
+    hash = Math.imul(hash ^ content.charCodeAt(index), 16777619)
+  }
+  return `${content.length}-${(hash >>> 0).toString(36)}`
+}
+
+const SAVED_EDITOR_PROJECT_LIMIT = 100
+const savedEditorProjectSnapshots = new Map<string, { revision: number; signature: string }>()
+
+function editorSavedProjectSignature(project: EditorProject): string {
+  // `missing` is an audited availability flag, not an edit. Revision,
+  // updated_at, and exports are deliberately excluded because export history
+  // writes those fields without changing the timeline document.
+  const assets = Object.fromEntries(Object.entries(project.assets).map(([id, asset]) => {
+    const { missing: _missing, ...content } = asset
+    return [id, content]
+  }))
+  const content = JSON.stringify({
+    id: project.id,
+    workspace: project.workspace,
+    name: project.name,
+    created_at: project.created_at,
+    canvas: project.canvas,
+    assets,
+    tracks: project.tracks,
+    markers: project.markers,
+    export: project.export,
+  })
+  let hash = 2166136261
+  for (let index = 0; index < content.length; index += 1) {
+    hash = Math.imul(hash ^ content.charCodeAt(index), 16777619)
+  }
+  return `${content.length}-${(hash >>> 0).toString(36)}`
+}
+
+function savedEditorProjectKey(project: Pick<EditorProject, 'id' | 'workspace'>): string {
+  return `${project.workspace}\u0000${project.id}`
+}
+
+function rememberSavedEditorProject(project: EditorProject): void {
+  const key = savedEditorProjectKey(project)
+  const revision = project.revision || 0
+  const existing = savedEditorProjectSnapshots.get(key)
+  if (existing && existing.revision > revision) return
+  savedEditorProjectSnapshots.delete(key)
+  savedEditorProjectSnapshots.set(key, {
+    revision,
+    signature: editorSavedProjectSignature(project),
+  })
+  while (savedEditorProjectSnapshots.size > SAVED_EDITOR_PROJECT_LIMIT) {
+    const oldest = savedEditorProjectSnapshots.keys().next().value
+    if (oldest === undefined) break
+    savedEditorProjectSnapshots.delete(oldest)
+  }
+}
+
+function getSavedEditorProjectSnapshot(project: Pick<EditorProject, 'id' | 'workspace'>) {
+  return savedEditorProjectSnapshots.get(savedEditorProjectKey(project))
+}
+
 function uniqueItemIds(values: Iterable<string>): string[] {
   return Array.from(new Set(Array.from(values).filter(Boolean)))
 }
@@ -282,7 +403,19 @@ function restoreRoundTrip(): EditorAIRoundTrip | null {
     const raw = window.sessionStorage.getItem(ROUND_TRIP_STORAGE_KEY)
     if (!raw) return null
     const value = JSON.parse(raw) as EditorAIRoundTrip
-    if (!value?.id || !value.projectId || !value.itemId || !value.tool) return null
+    if (
+      !value?.id
+      || !value.clientSubmissionId
+      || !value.projectId
+      || !value.itemId
+      || !value.tool
+      || !value.sourceSnapshot
+      || !value.sourceRange
+      || !value.projectSignature
+    ) {
+      window.sessionStorage.removeItem(ROUND_TRIP_STORAGE_KEY)
+      return null
+    }
     return value
   } catch {
     return null
@@ -306,7 +439,9 @@ function commitProject(
 ): void {
   const current = get().project
   if (!current) return
-  const before = cloneProject(current)
+  // Projects are immutable snapshots; sharing the prior snapshot avoids a
+  // second full-project clone for every edit while keeping undo independent.
+  const before = current
   const next = cloneProject(current)
   updater(next)
   next.updated_at = Date.now() / 1000
@@ -563,6 +698,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   future: [],
   clipboard: null,
   roundTrip: restoreRoundTrip(),
+  aiWorkspaceOpen: false,
   mobilePanel: 'timeline',
   exportJobId: null,
   exportProgress: 0,
@@ -571,7 +707,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const requestSequence = ++initializeSequence
     const existing = get().project
     if (existing && existing.workspace !== workspace && get().dirty) {
-      await get().saveProject()
+      if (get().saving) {
+        set({ error: 'A project save is still in progress. Wait for it to finish before switching workspaces.' })
+        return
+      }
+      const saved = await get().saveProject()
+      if (!saved || get().dirty || get().project?.id !== existing.id) {
+        const reason = get().error
+        set({ error: reason
+          ? `${reason} Your edits remain open; save them successfully before switching workspaces.`
+          : 'Your edits remain open; save them successfully before switching workspaces.' })
+        return
+      }
     }
     if (requestSequence !== initializeSequence) return
     set({ loading: true, workspace, error: null, playing: false })
@@ -588,6 +735,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         project = await api.createEditorProject({ workspace, name: 'Untitled edit' })
       }
       if (requestSequence !== initializeSequence) return
+      if (current?.workspace !== workspace || !get().dirty) {
+        rememberSavedEditorProject(project)
+      }
       set({
         project,
         projects: projects.some(summary => summary.id === project.id)
@@ -613,6 +763,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       })
       await get().auditProjectMedia()
       await get().refreshLibrary()
+      startRoundTripReconciliation()
     } catch (error) {
       if (requestSequence === initializeSequence) {
         set({ loading: false, error: error instanceof Error ? error.message : 'Editor failed to open' })
@@ -675,9 +826,25 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   createProject: async (name = 'Untitled edit', canvas) => {
+    const current = get()
+    if (current.saving) {
+      set({ error: 'A project save is still in progress. Wait for it to finish before creating a project.' })
+      return
+    }
+    if (current.dirty) {
+      const saved = await get().saveProject()
+      if (!saved || get().dirty || get().project?.id !== current.project?.id) {
+        const reason = get().error
+        set({ error: reason
+          ? `${reason} Your edits remain open; save them successfully before creating a project.`
+          : 'Your edits remain open; save them successfully before creating a project.' })
+        return
+      }
+    }
     set({ loading: true, error: null, playing: false })
     try {
       const project = await api.createEditorProject({ workspace: get().workspace, name, canvas })
+      rememberSavedEditorProject(project)
       set({
         project,
         loading: false,
@@ -698,8 +865,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   duplicateProject: async () => {
-    const source = await get().saveProject()
-    if (!source) return
+    const source = get().project
+    if (!source) {
+      set({ error: 'Open a project before creating a version.' })
+      return
+    }
     set({ loading: true, error: null, playing: false })
     try {
       const now = Date.now() / 1000
@@ -708,11 +878,21 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       copy.name = nextProjectVersionName(source.name, get().projects)
       copy.created_at = now
       copy.updated_at = now
+      copy.revision = 0
       copy.exports = []
       const project = await api.createEditorProject({
         workspace: source.workspace,
         project: copy,
       })
+      rememberSavedEditorProject(project)
+      if (get().project !== source) {
+        // The new version is based on the immutable snapshot captured at
+        // click time. Keep later edits on the original open if they changed
+        // while the copy was being written.
+        set({ loading: false, error: 'Created a version from the saved snapshot. Newer edits remain open in the original project.' })
+        await get().refreshProjects()
+        return
+      }
       set({
         project,
         loading: false,
@@ -732,11 +912,28 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
   },
 
-  loadProject: async (projectId) => {
-    if (get().dirty) await get().saveProject()
+  loadProject: async (projectId, options) => {
+    const current = get()
+    if (current.saving) {
+      set({ error: 'A project save is still in progress. Wait for it to finish before changing projects.' })
+      return
+    }
+    const discardSameProject = options?.discardUnsaved === true
+      && current.project?.id === projectId
+    if (current.dirty && !discardSameProject) {
+      const saved = await get().saveProject()
+      if (!saved || get().dirty || get().project?.id !== current.project?.id) {
+        const reason = get().error
+        set({ error: reason
+          ? `${reason} Your edits remain open. Save successfully or explicitly reload this same project and discard them.`
+          : 'Your edits remain open. Save successfully or explicitly reload this same project and discard them.' })
+        return
+      }
+    }
     set({ loading: true, error: null, playing: false })
     try {
       const project = await api.fetchEditorProject(projectId, get().workspace)
+      rememberSavedEditorProject(project)
       set({
         project,
         loading: false,
@@ -786,6 +983,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set({ saving: true, error: null })
     try {
       const saved = await api.saveEditorProject(project)
+      rememberSavedEditorProject(saved)
       let needsFollowUpSave = false
       set(state => {
         if (state.project?.id !== saved.id) return { saving: false }
@@ -804,7 +1002,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         // A newer immutable project snapshot was created while this request
         // was in flight. Keep it and immediately persist that newer state.
         needsFollowUpSave = true
-        return { saving: false, dirty: true }
+        return { project: { ...state.project, revision: saved.revision }, saving: false, dirty: true }
       })
       await get().refreshProjects()
       if (needsFollowUpSave) return await get().saveProject()
@@ -948,7 +1146,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
   },
 
-  addMedia: async (libraryAsset, at, preferredTrackId) => {
+  addMedia: async (libraryAsset, at, preferredTrackId, range) => {
     const project = get().project
     if (!project) return
     const destinationProjectId = project.id
@@ -976,13 +1174,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       let placedStart = requestedStart
       const itemId = newId('clip')
       const finalAsset = asset
+      const sourceIn = finalAsset.type === 'image' ? 0 : Math.max(0, range?.sourceIn || 0)
+      const sourceOut = range?.sourceOut ?? (finalAsset.type === 'image' ? 5 : finalAsset.duration || 5)
+      if (!Number.isFinite(sourceOut) || sourceOut <= sourceIn
+        || (finalAsset.type !== 'image' && finalAsset.duration > 0 && sourceOut > finalAsset.duration + 0.001)) {
+        throw new Error('The selected In/Out range is outside this source.')
+      }
       commitProject(set, get, next => {
         next.assets[assetId] = finalAsset
         const trackType: EditorTrackType = finalAsset.type === 'audio' ? 'audio' : 'video'
         const track = bestTrack(next, trackType, preferredTrackId)
-        const duration = finalAsset.type === 'image'
-          ? 5
-          : Math.max(MIN_ITEM_DURATION, finalAsset.duration || 5)
+        const duration = Math.max(MIN_ITEM_DURATION, sourceOut - sourceIn)
         placedStart = closestAvailableEditorStart(
           track,
           requestedStart,
@@ -996,7 +1198,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           name: finalAsset.display_name || finalAsset.name,
           start: placedStart,
           duration,
-          source_in: 0,
+          source_in: sourceIn,
           speed: 1,
           volume: 1,
           opacity: 1,
@@ -1642,6 +1844,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setSnapping: snapping => set({ snapping }),
   setRipple: ripple => set({ ripple }),
   setMobilePanel: mobilePanel => set({ mobilePanel }),
+  setAIWorkspaceOpen: aiWorkspaceOpen => set({ aiWorkspaceOpen }),
   addMarker: time => commitProject(set, get, project => {
     const marker: EditorMarker = {
       id: newId('marker'),
@@ -1664,36 +1867,116 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   removeMarker: markerId => commitProject(set, get, project => {
     project.markers = (project.markers || []).filter(marker => marker.id !== markerId)
   }),
-  updateItem: (itemId, patch) => commitProject(set, get, project => {
-    const located = itemLocation(project, itemId)
-    if (!located || located.track.locked) return
-    const originalEnd = located.item.start + located.item.duration
-    const changesStart = Object.prototype.hasOwnProperty.call(patch, 'start')
-    const changesDuration = Object.prototype.hasOwnProperty.call(patch, 'duration')
-    Object.assign(located.item, patch)
-    located.item.start = Math.max(0, located.item.start)
-    located.item.duration = Math.max(MIN_ITEM_DURATION, located.item.duration)
-    clampItemToSource(project, located.item)
-    if (changesStart) {
-      located.item.start = closestAvailableEditorStart(
-        located.track,
-        located.item.start,
-        located.item.duration,
-        located.item.id,
-      )
-    } else if (changesDuration) {
-      const nextStart = nextEditorItemStart(located.track, located.item.id, originalEnd)
-      if (nextStart !== null) {
+  executeEditOperations: operations => {
+    if (!get().project || operations.length === 0) return false
+    try {
+      commitProject(set, get, project => operations.forEach(operation => applyEditorEditOperation(project, operation)))
+      return true
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : 'This edit could not be applied.' })
+      return false
+    }
+  },
+  updateItem: (itemId, patch) => {
+    try {
+      commitProject(set, get, project => {
+        const located = itemLocation(project, itemId)
+        if (!located || located.track.locked) return
+        const originalEnd = located.item.start + located.item.duration
+        const changesStart = Object.prototype.hasOwnProperty.call(patch, 'start')
+        const changesDuration = Object.prototype.hasOwnProperty.call(patch, 'duration')
+        const changesStructure = changesStart || changesDuration
+        const changesIncomingTransition = (
+          Object.prototype.hasOwnProperty.call(patch, 'fade_in')
+          || Object.prototype.hasOwnProperty.call(patch, 'transition_in')
+        )
+        const changesOutgoingTransition = (
+          Object.prototype.hasOwnProperty.call(patch, 'fade_out')
+          || Object.prototype.hasOwnProperty.call(patch, 'transition_out')
+        )
+        const orderedBeforeEdit = [...located.track.items].sort((left, right) => left.start - right.start)
+        const originalIndex = orderedBeforeEdit.findIndex(item => item.id === itemId)
+        const outgoingOverlap = orderedBeforeEdit[originalIndex + 1]
+        const hasIncomingOverlap = (located.item.transition_overlap || 0) > 0
+        const hasOutgoingOverlap = (outgoingOverlap?.transition_overlap || 0) > 0
+
+        // Timeline moves and trims invalidate overlap geometry. Clear both
+        // sides through the canonical operation so following clips return to
+        // a butt cut before the manual edit is applied.
+        if (changesStructure) {
+          if (hasIncomingOverlap) {
+            applyEditorEditOperation(project, { type: 'crossfade', itemId, seconds: 0 })
+          }
+          if (hasOutgoingOverlap && outgoingOverlap) {
+            applyEditorEditOperation(project, { type: 'crossfade', itemId: outgoingOverlap.id, seconds: 0 })
+          }
+        } else {
+          if (hasIncomingOverlap && changesIncomingTransition) {
+            const requestedTransition = Object.prototype.hasOwnProperty.call(patch, 'transition_in')
+              ? patch.transition_in
+              : located.item.transition_in || 'dissolve'
+            const requestedFade = Object.prototype.hasOwnProperty.call(patch, 'fade_in')
+              ? Number(patch.fade_in)
+              : Number(located.item.fade_in || 0)
+            if (requestedTransition !== 'dissolve' || !Number.isFinite(requestedFade) || requestedFade <= 0) {
+              applyEditorEditOperation(project, { type: 'crossfade', itemId, seconds: 0 })
+              if (requestedTransition === 'dissolve') {
+                patch = { ...patch, transition_in: 'none', fade_in: 0 }
+              }
+            } else {
+              const previous = orderedBeforeEdit[originalIndex - 1]
+              if (!previous) {
+                located.item.transition_overlap = 0
+                located.item.transition_in = 'none'
+                located.item.fade_in = 0
+              } else {
+                const overlap = Math.max(0, Math.min(
+                  requestedFade,
+                  previous.duration,
+                  located.item.duration,
+                ))
+                applyEditorEditOperation(project, { type: 'crossfade', itemId, seconds: overlap })
+                patch = { ...patch, transition_in: 'dissolve', fade_in: overlap }
+              }
+            }
+          }
+          if (hasOutgoingOverlap && outgoingOverlap && changesOutgoingTransition) {
+            applyEditorEditOperation(project, { type: 'crossfade', itemId: outgoingOverlap.id, seconds: 0 })
+          }
+        }
+
+        const originalEndAfterTransitions = located.item.start + located.item.duration
+        Object.assign(located.item, patch)
+        located.item.start = Math.max(0, Number.isFinite(located.item.start) ? located.item.start : 0)
         located.item.duration = Math.max(
           MIN_ITEM_DURATION,
-          Math.min(located.item.duration, nextStart - located.item.start),
+          Number.isFinite(located.item.duration) ? located.item.duration : MIN_ITEM_DURATION,
         )
-      }
+        clampItemToSource(project, located.item)
+        if (changesStart) {
+          located.item.start = closestAvailableEditorStart(
+            located.track,
+            located.item.start,
+            located.item.duration,
+            located.item.id,
+          )
+        } else if (changesDuration) {
+          const nextStart = nextEditorItemStart(located.track, located.item.id, originalEndAfterTransitions || originalEnd)
+          if (nextStart !== null) {
+            located.item.duration = Math.max(
+              MIN_ITEM_DURATION,
+              Math.min(located.item.duration, nextStart - located.item.start),
+            )
+          }
+        }
+        located.item.fade_in = Math.max(0, Math.min(located.item.duration, located.item.fade_in || 0))
+        located.item.fade_out = Math.max(0, Math.min(located.item.duration, located.item.fade_out || 0))
+        if (changesStart) located.track.items.sort((left, right) => left.start - right.start)
+      })
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : 'This clip edit could not be applied.' })
     }
-    located.item.fade_in = Math.max(0, Math.min(located.item.duration, located.item.fade_in || 0))
-    located.item.fade_out = Math.max(0, Math.min(located.item.duration, located.item.fade_out || 0))
-    if (changesStart) located.track.items.sort((left, right) => left.start - right.start)
-  }),
+  },
   moveItem: (itemId, start, trackId) => {
     const current = get().project
     if (!current) return
@@ -2130,39 +2413,75 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
     const saved = await get().saveProject()
     if (!saved) return
+    const savedLocated = itemLocation(saved, itemId)
+    const savedAsset = savedLocated?.item.asset_id ? saved.assets[savedLocated.item.asset_id] : null
+    const sourceSnapshot = editorOperationSourceSnapshot(saved, itemId)
+    if (!savedLocated || !savedAsset || !sourceSnapshot) {
+      set({ error: 'The selected Editor clip changed while its project was being saved.' })
+      return
+    }
+    const sourceRange = {
+      start: sourceSnapshot.source_in,
+      end: sourceSnapshot.source_in + sourceSnapshot.duration * sourceSnapshot.speed,
+    }
+    const operationId = newId('editor-op')
+    const clientSubmissionId = newId('submission')
+    try {
+      await api.createEditorOperation({
+        operation_id: operationId,
+        client_submission_id: clientSubmissionId,
+        workspace: saved.workspace,
+        project_id: saved.id,
+        project_revision: saved.revision,
+        item_id: itemId,
+        item_name: savedLocated.item.name,
+        tool,
+        return_mode: returnMode,
+        source_snapshot: sourceSnapshot,
+        source_range: sourceRange,
+      })
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : 'Could not prepare the Editor AI operation.' })
+      return
+    }
     const roundTrip: EditorAIRoundTrip = {
-      id: newId('ai'),
+      id: operationId,
+      clientSubmissionId,
       projectId: saved.id,
+      projectRevision: saved.revision,
+      projectSignature: editorProjectSignature(saved),
       workspace: saved.workspace,
       itemId,
-      itemName: located.item.name,
+      itemName: savedLocated.item.name,
+      sourceSnapshot,
+      sourceRange,
       tool,
       returnMode,
       status: 'armed',
-      baselineJobIds: useStore.getState().jobs.map(job => job.id),
       createdAt: Date.now(),
     }
     persistRoundTrip(roundTrip)
-    set({ roundTrip, error: null, playing: false })
+    set({ roundTrip, error: null, playing: false, aiWorkspaceOpen: true })
+    startRoundTripReconciliation()
 
     const studio = useStore.getState()
-    const sourcePath = asset.path || asset.name
+    const sourcePath = savedAsset.path || savedAsset.name
     const clipEnd = Math.min(
-      asset.duration || Number.POSITIVE_INFINITY,
-      located.item.source_in + located.item.duration * located.item.speed,
+      savedAsset.duration || Number.POSITIVE_INFINITY,
+      sourceRange.end,
     )
     if (tool === 'upscale' || tool === 'film_grain' || tool === 'revoice') {
-      studio.sendClipToTools(sourcePath, asset.url, tool)
+      studio.sendClipToTools(sourcePath, savedAsset.url, tool)
     } else {
       studio.setEditVideo(
         null,
         sourcePath,
-        asset.url,
-        asset.duration,
-        `${asset.width || saved.canvas.width}x${asset.height || saved.canvas.height}`,
+        savedAsset.url,
+        savedAsset.duration,
+        `${savedAsset.width || saved.canvas.width}x${savedAsset.height || saved.canvas.height}`,
       )
       useStore.setState({
-        editStartTime: Math.max(0, located.item.source_in),
+        editStartTime: Math.max(0, savedLocated.item.source_in),
         editEndTime: clipEnd,
       })
       studio.setStudioVideoWorkflow(
@@ -2171,15 +2490,25 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           : tool,
       )
     }
-    useStore.getState().setSidebarMode('studio')
+    useStore.getState().setSidebarMode('editor')
+    set({ aiWorkspaceOpen: true })
   },
   cancelAIRoundTrip: () => {
+    const pending = get().roundTrip
+    if (pending && !['completed', 'failed'].includes(pending.status)) {
+      void api.transitionEditorOperation(pending.id, {
+        client_submission_id: pending.clientSubmissionId,
+        ...(pending.claimedJobId ? { job_id: pending.claimedJobId } : {}),
+        status: 'cancelled',
+      }).catch(() => undefined)
+    }
     persistRoundTrip(null)
-    set({ roundTrip: null })
+    set({ roundTrip: null, aiWorkspaceOpen: false })
   },
   completeAIRoundTrip: async outputFile => {
     const pending = get().roundTrip
     if (!pending || pending.status === 'completed') return
+    let recoverableAsset: EditorAsset | null = null
     try {
       const outputName = outputFile.replace(/\\/g, '/').split('/').filter(Boolean).at(-1) || outputFile
       const outputResponse = await api.fetchOutputs(0, 0, { workspace: pending.workspace })
@@ -2205,7 +2534,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const probe = await api.probeEditorMedia(libraryAsset, pending.workspace)
       const generatedAsset: EditorAsset = {
         ...libraryAsset,
-        id: newId('asset'),
+        id: `ai-${pending.id}`,
         type: mediaTypeFromProbe(probe),
         path: probe.path,
         duration: probe.duration,
@@ -2215,14 +2544,86 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         has_audio: probe.has_audio,
         size: probe.size,
       }
-      const current = get().project
-      const sourceProject = current?.id === pending.projectId
-        ? current
-        : await api.fetchEditorProject(pending.projectId, pending.workspace)
-      const before = cloneProject(sourceProject)
-      const next = cloneProject(sourceProject)
+      recoverableAsset = generatedAsset
+      set(state => ({
+        library: [generatedAsset, ...state.library.filter(asset => asset.id !== generatedAsset.id && asset.name !== generatedAsset.name)],
+      }))
+
+      const currentState = get()
+      const current = currentState.project
+      const preserveForReview = async (reason: string) => {
+        const failed: EditorAIRoundTrip = {
+          ...pending,
+          status: 'failed',
+          outputFile,
+          reviewRequired: true,
+          error: reason,
+        }
+        persistRoundTrip(failed)
+        set(state => ({
+          library: [generatedAsset, ...state.library.filter(asset => asset.id !== generatedAsset.id && asset.name !== generatedAsset.name)],
+          roundTrip: failed,
+          error: reason,
+        }))
+        void api.transitionEditorOperation(pending.id, {
+          client_submission_id: pending.clientSubmissionId,
+          ...(pending.claimedJobId ? { job_id: pending.claimedJobId } : {}),
+          status: 'needs_review',
+          output_file: outputFile,
+          error: reason,
+          review_reason: reason,
+        }).catch(() => undefined)
+        await get().refreshProjects()
+        void useStore.getState().loadOutputs()
+      }
+
+      if (!current || current.id !== pending.projectId || current.workspace !== pending.workspace) {
+        await preserveForReview('The Editor project changed while this result was processing. The result is saved in the workspace library for review.')
+        return
+      }
+      const alreadyApplied = itemLocation(current, pending.itemId)?.item.asset_id === generatedAsset.id
+      if (alreadyApplied) {
+        const completed: EditorAIRoundTrip = {
+          ...pending,
+          status: 'completed',
+          outputFile,
+          error: undefined,
+          reviewRequired: false,
+        }
+        persistRoundTrip(completed)
+        set(state => ({
+          library: [generatedAsset, ...state.library.filter(asset => asset.id !== generatedAsset.id && asset.name !== generatedAsset.name)],
+          roundTrip: completed,
+          error: null,
+        }))
+        void api.transitionEditorOperation(pending.id, {
+          client_submission_id: pending.clientSubmissionId,
+          ...(pending.claimedJobId ? { job_id: pending.claimedJobId } : {}),
+          status: 'completed',
+          output_file: outputFile,
+        }).catch(() => undefined)
+        await get().refreshProjects()
+        void useStore.getState().loadOutputs()
+        return
+      }
+      const currentSnapshot = editorOperationSourceSnapshot(current, pending.itemId)
+      if (!editorOperationSourceMatches(pending.sourceSnapshot, currentSnapshot)) {
+        await preserveForReview('The originating clip was replaced, removed, or retimed. The result is saved in the workspace library for review.')
+        return
+      }
+
+      const timelineChanged = (
+        editorProjectSignature(current) !== pending.projectSignature
+        || current.revision !== pending.projectRevision
+        || currentState.dirty
+      )
+      const before = cloneProject(current)
+      const next = cloneProject(current)
       const located = itemLocation(next, pending.itemId)
-      if (!located) throw new Error('The originating Editor clip no longer exists.')
+      if (!located) {
+        await preserveForReview('The originating Editor clip no longer exists. The result is saved in the workspace library for review.')
+        return
+      }
       next.assets[generatedAsset.id] = generatedAsset
       const originalAssetId = located.item.asset_id || ''
       located.item.take_asset_ids = uniqueItemIds([
@@ -2230,7 +2631,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         originalAssetId,
         generatedAsset.id,
       ]).filter(id => Boolean(next.assets[id]))
-      const generatedUsesWholeSource = pending.tool === 'upscale'
+      const generatedUsesSourceRange = pending.tool === 'upscale'
         || pending.tool === 'film_grain'
         || pending.tool === 'revoice'
       located.item.take_states = {
@@ -2242,20 +2643,25 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           },
         } : {}),
         [generatedAsset.id]: {
-          source_in: generatedUsesWholeSource ? located.item.source_in : 0,
-          speed: generatedUsesWholeSource ? located.item.speed : 1,
+          // Clip tools receive an FFmpeg-staged asset that begins at the
+          // selected source range, so preserve playback speed but restart at 0.
+          source_in: 0,
+          speed: generatedUsesSourceRange ? located.item.speed : 1,
         },
       }
       located.item.ai_history = [
-        ...(located.item.ai_history || []),
+        ...(located.item.ai_history || []).filter(entry => entry.id !== `ai-result-${pending.id}`),
         {
-          id: newId('ai-result'),
+          id: `ai-result-${pending.id}`,
           tool: pending.tool,
           asset_id: generatedAsset.id,
           created_at: Date.now() / 1000,
         },
       ].slice(-100)
-      if (pending.returnMode === 'replace') {
+      const appliedReturnMode = timelineChanged && pending.returnMode === 'replace'
+        ? 'alternate'
+        : pending.returnMode
+      if (appliedReturnMode === 'replace') {
         located.item.asset_id = generatedAsset.id
         located.item.name = generatedAsset.name
         located.item.source_in = located.item.take_states[generatedAsset.id].source_in
@@ -2267,7 +2673,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const completed: EditorAIRoundTrip = {
         ...pending,
         status: 'completed',
+        claimedJobId: pending.claimedJobId,
+        returnMode: appliedReturnMode,
         outputFile,
+        reviewRequired: false,
         error: undefined,
       }
       persistRoundTrip(completed)
@@ -2282,16 +2691,37 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         roundTrip: completed,
         error: null,
       }))
+      void api.transitionEditorOperation(pending.id, {
+        client_submission_id: pending.clientSubmissionId,
+        ...(pending.claimedJobId ? { job_id: pending.claimedJobId } : {}),
+        status: 'completed',
+        output_file: outputFile,
+      }).catch(() => undefined)
       await get().refreshProjects()
       void useStore.getState().loadOutputs()
     } catch (error) {
+      const message = error instanceof Error ? error.message : 'Maestro AI result could not return to Editor.'
       const failed: EditorAIRoundTrip = {
         ...pending,
         status: 'failed',
-        error: error instanceof Error ? error.message : 'Maestro AI result could not return to Editor.',
+        ...(recoverableAsset ? { outputFile, reviewRequired: true } : {}),
+        error: message,
       }
       persistRoundTrip(failed)
-      set({ roundTrip: failed, error: failed.error || null })
+      set(state => ({
+        ...(recoverableAsset ? {
+          library: [recoverableAsset, ...state.library.filter(asset => asset.id !== recoverableAsset?.id && asset.name !== recoverableAsset?.name)],
+        } : {}),
+        roundTrip: failed,
+        error: failed.error || null,
+      }))
+      void api.transitionEditorOperation(pending.id, {
+        client_submission_id: pending.clientSubmissionId,
+        ...(pending.claimedJobId ? { job_id: pending.claimedJobId } : {}),
+        status: recoverableAsset ? 'needs_review' : 'failed',
+        ...(recoverableAsset ? { output_file: outputFile, review_reason: message } : {}),
+        error: message,
+      }).catch(() => undefined)
     }
   },
   deleteSelected: () => {
@@ -2342,7 +2772,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const previous = history.at(-1)
     if (!current || !previous) return
     set({
-      project: cloneProject(previous),
+      project: { ...cloneProject(previous), revision: current.revision },
       history: history.slice(0, -1),
       future: [cloneProject(current), ...get().future].slice(0, HISTORY_LIMIT),
       dirty: true,
@@ -2358,7 +2788,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const next = future[0]
     if (!current || !next) return
     set({
-      project: cloneProject(next),
+      project: { ...cloneProject(next), revision: current.revision },
       history: [...get().history, cloneProject(current)].slice(-HISTORY_LIMIT),
       future: future.slice(1),
       dirty: true,
@@ -2371,27 +2801,46 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   exportProject: async (mode = 'now') => {
     if (get().exportJobId) return
     const currentProject = get().project
-    if (currentProject) {
-      const usedAssetIds = new Set(currentProject.tracks.flatMap(track => (
-        track.items.flatMap(item => item.asset_id ? [item.asset_id] : [])
-      )))
-      const missing = Object.values(currentProject.assets).filter(asset => (
-        asset.missing && usedAssetIds.has(asset.id)
-      ))
-      if (missing.length > 0) {
-        set({
-          error: `Relink ${missing.length === 1 ? 'the offline source' : `${missing.length} offline sources`} before exporting: ${missing.slice(0, 3).map(asset => asset.name).join(', ')}`,
-        })
-        return
-      }
-    }
-    const project = await get().saveProject()
-    if (!project || projectDuration(project) <= 0) {
+    if (!currentProject || projectDuration(currentProject) <= 0) {
       set({ error: 'Add media or a title to the timeline before exporting.' })
       return
     }
+    if (get().saving) {
+      set({ error: 'Wait for the current project save to finish before exporting.' })
+      return
+    }
+    const usedAssetIds = new Set(currentProject.tracks.flatMap(track => (
+      track.items.flatMap(item => item.asset_id ? [item.asset_id] : [])
+    )))
+    const missing = Object.values(currentProject.assets).filter(asset => (
+      asset.missing && usedAssetIds.has(asset.id)
+    ))
+    if (missing.length > 0) {
+      set({
+        error: `Relink ${missing.length === 1 ? 'the offline source' : `${missing.length} offline sources`} before exporting: ${missing.slice(0, 3).map(asset => asset.name).join(', ')}`,
+      })
+      return
+    }
+    // A clean Editor project already has an authoritative persisted revision.
+    // Only save when edits are pending; the API also verifies exact saved
+    // content for older clients that submit a project payload directly.
+    const project = get().dirty ? await get().saveProject() : get().project
+    if (!project) return
     try {
       const result = await api.exportEditorProject(project, mode)
+      if (Number.isInteger(result.revision)) {
+        rememberSavedEditorProject({ ...project, revision: result.revision })
+        set(state => (
+          state.project?.id === project.id && state.project.workspace === project.workspace
+            ? {
+                project: {
+                  ...state.project,
+                  revision: Math.max(state.project.revision || 0, result.revision as number),
+                },
+              }
+            : {}
+        ))
+      }
       set({ exportJobId: result.job_id, exportProgress: 0, error: null })
       trackEditorJob(
         result.job_id,
@@ -2430,22 +2879,49 @@ export const useEditorStore = create<EditorState>((set, get) => ({
                 film_grain_saturation: project.export.film_grain_saturation,
               } : null
               const record = serverRecord || fallbackRecord
-              if (record) {
-                set(state => {
-                  if (!state.project || state.project.id !== project.id) return {}
-                  const exports = [
-                    record,
-                    ...(state.project.exports || []).filter(entry => entry.filename !== record.filename),
-                  ].slice(0, 50)
-                  return {
-                    project: {
-                      ...state.project,
-                      exports,
-                      updated_at: Math.max(state.project.updated_at, serverProject.updated_at),
-                    },
-                  }
-                })
-              }
+              set(state => {
+                if (
+                  !state.project
+                  || state.project.id !== project.id
+                  || state.project.workspace !== project.workspace
+                ) return {}
+                const currentRevision = state.project.revision || 0
+                const lastSavedSnapshot = getSavedEditorProjectSnapshot(state.project)
+                const serverSignature = editorSavedProjectSignature(serverProject)
+                // We can carry forward an export-history revision while local
+                // edits are pending only when the fetched server content
+                // exactly matches the last snapshot we know was saved at the
+                // current local revision. Otherwise the project may have
+                // changed in another client, so keep the old revision and let
+                // the next save report that conflict.
+                const canAdoptServerRevision = (
+                  serverSignature === editorSavedProjectSignature(project)
+                  || serverSignature === editorSavedProjectSignature(state.project)
+                  || (
+                    lastSavedSnapshot?.revision === currentRevision
+                    && lastSavedSnapshot.signature === serverSignature
+                  )
+                )
+                if (canAdoptServerRevision) rememberSavedEditorProject(serverProject)
+                return {
+                  project: {
+                    ...state.project,
+                    ...(canAdoptServerRevision ? {
+                      revision: Math.max(
+                        state.project.revision || 0,
+                        serverProject.revision || 0,
+                      ),
+                    } : {}),
+                    ...(record ? {
+                      exports: [
+                        record,
+                        ...(state.project.exports || []).filter(entry => entry.filename !== record.filename),
+                      ].slice(0, 50),
+                    } : {}),
+                    updated_at: Math.max(state.project.updated_at, serverProject.updated_at),
+                  },
+                }
+              })
               await Promise.all([get().refreshProjects(), get().refreshLibrary()])
             } catch {
               // The universal queue already contains the successful output;
@@ -2461,55 +2937,130 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 }))
 
-// The Editor and Studio are separate app surfaces, but they share the same
-// universal generation queue. Arm a round trip before opening Studio, claim
-// the first subsequently-created generation job, then attach that job's
-// output to the original Editor clip when it completes. This works for held
-// queue entries as well as jobs started immediately.
+// Reconcile through the durable operation ID. Never infer ownership from a
+// newly-created global queue entry, since Studio jobs can be submitted in
+// parallel with the Editor round trip.
+let roundTripReconciliationTimer: number | null = null
+let roundTripReconciliationInFlight = false
 let completingRoundTripJobId: string | null = null
-useStore.subscribe(state => {
+
+async function reconcileRoundTrip(): Promise<void> {
+  if (roundTripReconciliationInFlight) return
   const editor = useEditorStore.getState()
   const pending = editor.roundTrip
-  if (!pending || pending.status === 'completed' || pending.status === 'failed') return
-  const candidate = pending.claimedJobId
-    ? state.jobs.find(job => job.id === pending.claimedJobId)
-    : state.jobs.find(job => (
-        job.kind !== 'editor_export'
-        && !pending.baselineJobIds.includes(job.id)
-        && ['held', 'queued', 'running', 'completed', 'failed', 'cancelled'].includes(job.status)
-      ))
-  if (!candidate) return
-  const nextStatus: EditorAIRoundTripStatus = candidate.status === 'held' || candidate.status === 'queued'
-    ? 'queued'
-    : candidate.status === 'running'
+  if (!pending || ['completed', 'failed'].includes(pending.status)) {
+    if (roundTripReconciliationTimer !== null && typeof window !== 'undefined') {
+      window.clearInterval(roundTripReconciliationTimer)
+      roundTripReconciliationTimer = null
+    }
+    return
+  }
+  roundTripReconciliationInFlight = true
+  try {
+    const operation = await api.fetchEditorOperation(pending.id)
+    if (operation.client_submission_id !== pending.clientSubmissionId) {
+      const failed: EditorAIRoundTrip = {
+        ...pending,
+        status: 'failed',
+        reviewRequired: true,
+        error: 'The recovered Editor operation did not match this browser submission. Its result was not applied.',
+      }
+      persistRoundTrip(failed)
+      useEditorStore.setState({ roundTrip: failed, error: failed.error || null })
+      return
+    }
+
+    if (operation.status === 'needs_review') {
+      const failed: EditorAIRoundTrip = {
+        ...pending,
+        ...(operation.job_id ? { claimedJobId: operation.job_id } : {}),
+        status: 'failed',
+        outputFile: operation.output_file || undefined,
+        reviewRequired: true,
+        error: operation.error || operation.review_reason || 'The result needs review before it can be returned to this clip.',
+      }
+      persistRoundTrip(failed)
+      useEditorStore.setState({ roundTrip: failed, error: failed.error || null })
+      return
+    }
+    if (operation.status === 'failed' || operation.status === 'cancelled') {
+      const failed: EditorAIRoundTrip = {
+        ...pending,
+        ...(operation.job_id ? { claimedJobId: operation.job_id } : {}),
+        status: 'failed',
+        error: operation.error || (operation.status === 'cancelled'
+          ? 'The linked job was cancelled.'
+          : 'The linked Maestro AI job failed.'),
+      }
+      persistRoundTrip(failed)
+      useEditorStore.setState({ roundTrip: failed, error: failed.error || null })
+      return
+    }
+    if (operation.status === 'completed') {
+      const completed: EditorAIRoundTrip = {
+        ...pending,
+        ...(operation.job_id ? { claimedJobId: operation.job_id } : {}),
+        status: 'completed',
+        outputFile: operation.output_file || pending.outputFile,
+        error: undefined,
+      }
+      persistRoundTrip(completed)
+      useEditorStore.setState({ roundTrip: completed, error: null })
+      return
+    }
+
+    const nextStatus: EditorAIRoundTripStatus = operation.status === 'running'
       ? 'running'
-      : candidate.status === 'completed'
-        ? 'completed'
-        : 'failed'
-  if (pending.claimedJobId !== candidate.id || pending.status !== nextStatus) {
-    const updated: EditorAIRoundTrip = {
-      ...pending,
-      claimedJobId: candidate.id,
-      status: nextStatus === 'completed' ? 'running' : nextStatus,
-      ...(nextStatus === 'failed' ? { error: candidate.error || candidate.message || 'Maestro AI generation failed.' } : {}),
+      : operation.status === 'queued'
+        ? 'queued'
+        : pending.status
+    if (pending.claimedJobId !== operation.job_id || pending.status !== nextStatus) {
+      const updated: EditorAIRoundTrip = {
+        ...pending,
+        ...(operation.job_id ? { claimedJobId: operation.job_id } : {}),
+        status: nextStatus,
+      }
+      persistRoundTrip(updated)
+      useEditorStore.setState({ roundTrip: updated })
     }
-    persistRoundTrip(updated)
-    useEditorStore.setState({ roundTrip: updated })
-  }
-  if (candidate.status === 'completed' && candidate.outputFiles.length > 0 && completingRoundTripJobId !== candidate.id) {
-    completingRoundTripJobId = candidate.id
-    void useEditorStore.getState().completeAIRoundTrip(candidate.outputFiles.at(-1) || candidate.outputFiles[0])
-      .finally(() => { completingRoundTripJobId = null })
-  } else if (candidate.status === 'completed' && candidate.outputFiles.length === 0) {
-    const failed: EditorAIRoundTrip = {
-      ...pending,
-      claimedJobId: candidate.id,
-      status: 'failed',
-      error: 'The linked generation completed without returning a media file.',
+    if (operation.status === 'result_ready') {
+      if (!operation.output_file) {
+        const error = operation.error || 'The linked job completed without returning a media file.'
+        const failed: EditorAIRoundTrip = { ...pending, status: 'failed', error }
+        persistRoundTrip(failed)
+        useEditorStore.setState({ roundTrip: failed, error })
+        if (operation.job_id) {
+          void api.transitionEditorOperation(pending.id, {
+            client_submission_id: pending.clientSubmissionId,
+            job_id: operation.job_id,
+            status: 'failed',
+            error,
+          }).catch(() => undefined)
+        }
+      } else if (operation.job_id && completingRoundTripJobId !== operation.job_id) {
+        completingRoundTripJobId = operation.job_id
+        const current = useEditorStore.getState().roundTrip
+        if (current && current.id === pending.id && current.claimedJobId !== operation.job_id) {
+          const updated = { ...current, claimedJobId: operation.job_id, status: 'running' as const }
+          persistRoundTrip(updated)
+          useEditorStore.setState({ roundTrip: updated })
+        }
+        void useEditorStore.getState().completeAIRoundTrip(operation.output_file)
+          .finally(() => { completingRoundTripJobId = null })
+      }
     }
-    persistRoundTrip(failed)
-    useEditorStore.setState({ roundTrip: failed, error: failed.error || null })
+  } catch {
+    // Reload recovery is best-effort while the app server reconnects. Keep the
+    // durable operation and retry on the next poll.
+  } finally {
+    roundTripReconciliationInFlight = false
   }
-})
+}
+
+function startRoundTripReconciliation(): void {
+  if (typeof window === 'undefined' || roundTripReconciliationTimer !== null) return
+  void reconcileRoundTrip()
+  roundTripReconciliationTimer = window.setInterval(() => { void reconcileRoundTrip() }, 1800)
+}
 
 export { projectDuration }

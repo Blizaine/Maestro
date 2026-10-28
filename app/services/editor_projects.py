@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import copy
 from array import array
+from collections import OrderedDict
 import functools
 import hashlib
 import json
 import math
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -24,11 +26,38 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
+from services.editor_animation import (
+    EditorAnimationError,
+    KEYFRAME_VALUE_RANGES,
+    editor_color_filters,
+    editor_keyframe_expression,
+    normalize_editor_color,
+    normalize_editor_keyframes,
+)
 
-EDITOR_SCHEMA_VERSION = 5
+
+EDITOR_SCHEMA_VERSION = 6
 EDITOR_PROJECT_DIR = ".maestro_editor"
+EDITOR_RECOVERY_DIR = "history"
+EDITOR_RECOVERY_REVISIONS = 20
 EDITOR_MEDIA_CACHE_DIR = "media_cache"
 EDITOR_MEDIA_PREVIEW_VERSION = 3
+EDITOR_MEDIA_PREVIEW_WORKERS = 2
+EDITOR_MEDIA_PREVIEW_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024
+EDITOR_MEDIA_PREVIEW_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
+EDITOR_MEDIA_PREVIEW_ACTIVE_SECONDS = 60 * 60
+EDITOR_MEDIA_PREVIEW_CLEANUP_INTERVAL_SECONDS = 60 * 60
+EDITOR_PROJECT_SUMMARY_CACHE_MAX_ENTRIES = 256
+MAX_EDITOR_PROJECT_DURATION_SECONDS = 24 * 60 * 60
+MAX_EDITOR_ASSETS = 2000
+MAX_EDITOR_TRACKS = 100
+MAX_EDITOR_ITEMS_PER_TRACK = 5000
+MAX_EDITOR_TAKE_IDS_PER_ITEM = 100
+MAX_EDITOR_TAKE_STATES_PER_ITEM = 100
+MAX_EDITOR_AI_HISTORY_PER_ITEM = 100
+MAX_EDITOR_WINDOW_PROMPTS_PER_ITEM = 100
+MAX_EDITOR_MARKERS = 1000
+MAX_EDITOR_EXPORTS = 50
 _PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _PREVIEW_ID_RE = re.compile(r"^[a-f0-9]{24}$")
 _HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -61,11 +90,38 @@ _EDITOR_FONT_FAMILIES = {
     "Impact",
 }
 _project_lock = threading.RLock()
-_media_cache_lock = threading.RLock()
+_project_summary_cache_lock = threading.RLock()
+_project_summary_cache: OrderedDict[str, tuple[int, int, dict[str, Any]]] = OrderedDict()
+_preview_builds_lock = threading.RLock()
+_preview_build_slots = threading.BoundedSemaphore(EDITOR_MEDIA_PREVIEW_WORKERS)
+_preview_builds: dict[str, "_PreviewBuildFlight"] = {}
+_preview_cache_cleanup_lock = threading.Lock()
+_preview_cache_cleanup_times: OrderedDict[str, float] = OrderedDict()
+
+
+class _PreviewBuildFlight:
+    def __init__(self, *, needs_proxy: bool, proxy_profile: str) -> None:
+        self.needs_proxy = needs_proxy
+        self.proxy_profile = proxy_profile
+        self.event = threading.Event()
+        self.result: dict[str, Any] | None = None
+        self.error: BaseException | None = None
 
 
 class EditorProjectError(ValueError):
     """A project or asset was invalid or unsafe."""
+
+
+class EditorProjectRevisionConflict(EditorProjectError):
+    """A project save was based on a revision that is no longer current."""
+
+    def __init__(self, expected_revision: int, current_revision: int) -> None:
+        self.expected_revision = expected_revision
+        self.current_revision = current_revision
+        super().__init__(
+            "Editor project changed since it was loaded "
+            f"(expected revision {expected_revision}, current revision {current_revision})"
+        )
 
 
 class EditorRenderCancelled(RuntimeError):
@@ -82,6 +138,178 @@ def _finite_number(value: Any, default: float) -> float:
 
 def _bounded_number(value: Any, default: float, low: float, high: float) -> float:
     return min(high, max(low, _finite_number(value, default)))
+
+
+def _editor_revision(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise EditorProjectError("Invalid Editor project revision")
+    return value
+
+
+def _finite_project_time(value: Any, *, label: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise EditorProjectError(f"Editor {label} must be a finite number") from error
+    if not math.isfinite(parsed):
+        raise EditorProjectError(f"Editor {label} must be a finite number")
+    return parsed
+
+
+def _validate_editor_project_input(project: Mapping[str, Any]) -> None:
+    """Reject oversized or non-finite timeline input before normalization.
+
+    Normalization historically sliced collection limits and replaced invalid
+    numbers with defaults. That is useful for old optional fields, but silently
+    dropping authored clips/assets is not safe when saving a project.
+    """
+    if not isinstance(project, Mapping):
+        raise EditorProjectError("Editor project must be an object")
+
+    assets = project.get("assets")
+    if isinstance(assets, Mapping) and len(assets) > MAX_EDITOR_ASSETS:
+        raise EditorProjectError(
+            f"Editor project has more than {MAX_EDITOR_ASSETS} assets"
+        )
+
+    tracks = project.get("tracks")
+    if not isinstance(tracks, list):
+        tracks = []
+    if len(tracks) > MAX_EDITOR_TRACKS:
+        raise EditorProjectError(
+            f"Editor project has more than {MAX_EDITOR_TRACKS} tracks"
+        )
+    for track_index, track in enumerate(tracks):
+        if not isinstance(track, Mapping):
+            continue
+        items = track.get("items")
+        if not isinstance(items, list):
+            continue
+        if len(items) > MAX_EDITOR_ITEMS_PER_TRACK:
+            raise EditorProjectError(
+                f"Editor track {track_index + 1} has more than "
+                f"{MAX_EDITOR_ITEMS_PER_TRACK} items"
+            )
+        for item_index, item in enumerate(items):
+            if not isinstance(item, Mapping):
+                continue
+            location = f"track {track_index + 1} item {item_index + 1}"
+            # Keep the existing defaults for omitted fields, but reject explicit
+            # NaN/Infinity or unparsable values instead of converting them to 0/1.
+            start = _finite_project_time(item.get("start", 0.0), label=f"{location} start")
+            _finite_project_time(
+                item.get("duration", 1.0), label=f"{location} duration"
+            )
+            if start > MAX_EDITOR_PROJECT_DURATION_SECONDS:
+                raise EditorProjectError(
+                    f"Editor {location} starts beyond the 24-hour project limit"
+                )
+
+            raw_duration = _finite_project_time(
+                item.get("duration", 1.0), label=f"{location} duration"
+            )
+            bounded_duration = min(
+                MAX_EDITOR_PROJECT_DURATION_SECONDS,
+                max(1 / 240, raw_duration),
+            )
+            try:
+                keyframes = normalize_editor_keyframes(
+                    item.get("keyframes"), duration=bounded_duration
+                )
+                normalize_editor_color(item.get("color"))
+            except EditorAnimationError as error:
+                raise EditorProjectError(f"Editor {location}: {error}") from error
+            track_type = str(track.get("type") or "video").lower()
+            supported_by_track = {
+                "video": set(KEYFRAME_VALUE_RANGES),
+                "audio": {"volume"},
+                # drawtext supports a per-frame fontsize expression, so text
+                # scale can be rendered while keeping alignment tied to the
+                # current glyph bounds. Rotation is intentionally rejected:
+                # drawtext has no rotation option and a separate raster layer
+                # would change text alignment/font-metric behavior.
+                "text": {"x", "y", "scale", "opacity"},
+            }
+            allowed_properties = supported_by_track.get(track_type)
+            if allowed_properties is not None:
+                unsupported = set(keyframes) - allowed_properties
+                if unsupported:
+                    property_name = sorted(unsupported)[0]
+                    raise EditorProjectError(
+                        f"Editor {location}: keyframes.{property_name} is not supported "
+                        f"on a {track_type} track"
+                    )
+            if "color" in item and track_type != "video":
+                raise EditorProjectError(
+                    f"Editor {location}: color adjustments require a video track"
+                )
+            if "transition_overlap" in item:
+                overlap = _finite_project_time(
+                    item.get("transition_overlap"),
+                    label=f"{location} transition overlap",
+                )
+                if overlap <= 0 or overlap > MAX_EDITOR_PROJECT_DURATION_SECONDS:
+                    raise EditorProjectError(
+                        f"Editor {location}: transition overlap must be between 0 and 24 hours"
+                    )
+
+            take_ids = item.get("take_asset_ids")
+            if isinstance(take_ids, list) and len(take_ids) > MAX_EDITOR_TAKE_IDS_PER_ITEM:
+                raise EditorProjectError(
+                    f"Editor {location} has more than {MAX_EDITOR_TAKE_IDS_PER_ITEM} takes"
+                )
+            take_states = item.get("take_states")
+            if (
+                isinstance(take_states, Mapping)
+                and len(take_states) > MAX_EDITOR_TAKE_STATES_PER_ITEM
+            ):
+                raise EditorProjectError(
+                    f"Editor {location} has more than "
+                    f"{MAX_EDITOR_TAKE_STATES_PER_ITEM} take states"
+                )
+            history = item.get("ai_history")
+            if isinstance(history, list) and len(history) > MAX_EDITOR_AI_HISTORY_PER_ITEM:
+                raise EditorProjectError(
+                    f"Editor {location} has more than "
+                    f"{MAX_EDITOR_AI_HISTORY_PER_ITEM} AI history entries"
+                )
+            director = item.get("director")
+            window_prompts = (
+                director.get("window_prompts")
+                if isinstance(director, Mapping)
+                else None
+            )
+            if (
+                isinstance(window_prompts, list)
+                and len(window_prompts) > MAX_EDITOR_WINDOW_PROMPTS_PER_ITEM
+            ):
+                raise EditorProjectError(
+                    f"Editor {location} has more than "
+                    f"{MAX_EDITOR_WINDOW_PROMPTS_PER_ITEM} Director window prompts"
+                )
+
+    markers = project.get("markers")
+    if isinstance(markers, list):
+        if len(markers) > MAX_EDITOR_MARKERS:
+            raise EditorProjectError(
+                f"Editor project has more than {MAX_EDITOR_MARKERS} markers"
+            )
+        for marker_index, marker in enumerate(markers):
+            if not isinstance(marker, Mapping):
+                continue
+            marker_time = _finite_project_time(
+                marker.get("time", 0.0), label=f"marker {marker_index + 1} time"
+            )
+            if marker_time > MAX_EDITOR_PROJECT_DURATION_SECONDS:
+                raise EditorProjectError(
+                    f"Editor marker {marker_index + 1} is beyond the 24-hour project limit"
+                )
+
+    exports = project.get("exports")
+    if isinstance(exports, list) and len(exports) > MAX_EDITOR_EXPORTS:
+        raise EditorProjectError(
+            f"Editor project has more than {MAX_EDITOR_EXPORTS} export records"
+        )
 
 
 def _editor_font_family(value: Any) -> str:
@@ -169,6 +397,7 @@ def create_editor_project(
     project_id = uuid.uuid4().hex[:16]
     return {
         "schema_version": EDITOR_SCHEMA_VERSION,
+        "revision": 0,
         "id": project_id,
         "name": (str(name or "Untitled project").strip() or "Untitled project")[:120],
         "workspace": _safe_workspace_name(workspace),
@@ -228,10 +457,16 @@ def create_editor_project(
 
 
 def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | None = None) -> dict[str, Any]:
-    if not isinstance(project, Mapping):
-        raise EditorProjectError("Editor project must be an object")
+    _validate_editor_project_input(project)
     normalized = copy.deepcopy(dict(project))
+    try:
+        source_schema_version = int(project.get("schema_version", 0))
+    except (TypeError, ValueError, OverflowError):
+        source_schema_version = 0
+    if isinstance(project.get("schema_version"), bool):
+        source_schema_version = 0
     normalized["schema_version"] = EDITOR_SCHEMA_VERSION
+    normalized["revision"] = _editor_revision(normalized.get("revision", 0))
     normalized["id"] = _safe_identifier(normalized.get("id"), fallback=uuid.uuid4().hex[:16])
     normalized["name"] = (
         str(normalized.get("name") or "Untitled project").strip() or "Untitled project"
@@ -305,7 +540,12 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
                     item = dict(raw_item)
                     item["id"] = _safe_identifier(item.get("id"), fallback=uuid.uuid4().hex[:16])
                     item["start"] = max(0.0, _finite_number(item.get("start"), 0.0))
-                    item["duration"] = _bounded_number(item.get("duration"), 1.0, 1 / 240, 86400.0)
+                    item["duration"] = _bounded_number(
+                        item.get("duration"),
+                        1.0,
+                        1 / 240,
+                        MAX_EDITOR_PROJECT_DURATION_SECONDS,
+                    )
                     item["source_in"] = max(0.0, _finite_number(item.get("source_in"), 0.0))
                     item["speed"] = _bounded_number(item.get("speed"), 1.0, 0.1, 8.0)
                     item["volume"] = _bounded_number(item.get("volume"), 1.0, 0.0, 4.0)
@@ -342,6 +582,11 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
                     item["transition_out"] = (
                         transition_out if transition_out in _EDITOR_TRANSITIONS else "none"
                     )
+                    if "transition_overlap" in item:
+                        item["transition_overlap"] = _finite_project_time(
+                            item["transition_overlap"],
+                            label="transition overlap",
+                        )
                     link_group_id = str(item.get("link_group_id") or "").strip()
                     if link_group_id and _PROJECT_ID_RE.fullmatch(link_group_id):
                         item["link_group_id"] = link_group_id
@@ -458,17 +703,49 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
                     else:
                         item.pop("director", None)
                     transform = item.get("transform") if isinstance(item.get("transform"), Mapping) else {}
+                    text_style_source = item.get("style") if isinstance(item.get("style"), Mapping) else {}
+                    if track_type == "text":
+                        legacy_transform_rotation = _finite_number(
+                            transform.get("rotation"), 0.0
+                        )
+                        legacy_style_rotation = _finite_number(
+                            text_style_source.get("rotation"), 0.0
+                        )
+                        if source_schema_version >= 6:
+                            if abs(legacy_transform_rotation) > 1e-6 or abs(legacy_style_rotation) > 1e-6:
+                                raise EditorProjectError(
+                                    "Editor text rotation is not supported; use visual clips for rotation"
+                                )
+                        elif abs(legacy_transform_rotation) > 1e-6 or abs(legacy_style_rotation) > 1e-6:
+                            legacy_rotation: dict[str, float] = {}
+                            if abs(legacy_transform_rotation) > 1e-6:
+                                legacy_rotation["transform"] = legacy_transform_rotation
+                            if abs(legacy_style_rotation) > 1e-6:
+                                legacy_rotation["style"] = legacy_style_rotation
+                            item["legacy_text_rotation"] = legacy_rotation
+                            warnings = normalized.get("compatibility_warnings")
+                            if not isinstance(warnings, list):
+                                warnings = []
+                            warning = (
+                                "Legacy text rotation was reset to 0 because Editor text rotation is unsupported."
+                            )
+                            if warning not in warnings:
+                                warnings.append(warning)
+                            normalized["compatibility_warnings"] = warnings[:20]
                     item["transform"] = {
                         "x": _finite_number(transform.get("x"), 0.0),
                         "y": _finite_number(transform.get("y"), 0.0),
                         "scale": _bounded_number(transform.get("scale"), 1.0, 0.05, 4.0),
-                        "rotation": _bounded_number(transform.get("rotation"), 0.0, -360.0, 360.0),
+                        "rotation": (
+                            0.0 if track_type == "text" and source_schema_version < 6
+                            else _bounded_number(transform.get("rotation"), 0.0, -360.0, 360.0)
+                        ),
                     }
                     item["fit"] = "cover" if str(item.get("fit")) == "cover" else "contain"
                     item["muted"] = bool(item.get("muted", False))
                     item["disabled"] = bool(item.get("disabled", False))
                     if track_type == "text":
-                        style = item.get("style") if isinstance(item.get("style"), Mapping) else {}
+                        style = text_style_source
                         color = str(style.get("color") or "#ffffff")
                         background_color = str(style.get("background_color") or "#000000")
                         text_align = str(style.get("text_align") or "center")
@@ -486,17 +763,86 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
                             "text_align": text_align
                             if text_align in {"left", "center", "right"} else "center",
                         }
+                    try:
+                        keyframes = normalize_editor_keyframes(
+                            item.get("keyframes"), duration=item["duration"]
+                        )
+                        color_adjustments = normalize_editor_color(item.get("color"))
+                    except EditorAnimationError as error:
+                        raise EditorProjectError(
+                            f"Editor track {len(tracks) + 1} item {len(items) + 1}: {error}"
+                        ) from error
+                    if keyframes:
+                        item["keyframes"] = keyframes
+                    else:
+                        item.pop("keyframes", None)
+                    if color_adjustments is not None:
+                        item["color"] = color_adjustments
+                    else:
+                        item.pop("color", None)
                     items.append(item)
-            # A timeline track is a single editing lane: clips may meet at an
-            # edit point but cannot occupy the same time range. Normalize old
-            # or externally edited projects by retaining their order and
-            # moving any overlap to the preceding clip's end.
+            # Legacy overlaps still normalize to a butt edit. The only
+            # preserved overlap is an explicit incoming dissolve whose marker
+            # agrees with the authored clip geometry.
             items.sort(key=lambda item: (item["start"], item["id"]))
             previous_end = 0.0
-            for item in items:
-                if item["start"] < previous_end - 1e-9:
+            previous_item: dict[str, Any] | None = None
+            frame_tolerance = 1.0 / float(normalized["canvas"]["fps"])
+            for item_index, item in enumerate(items):
+                overlap = max(0.0, previous_end - item["start"])
+                explicit_overlap = "transition_overlap" in item
+                if explicit_overlap:
+                    declared_overlap = float(item["transition_overlap"])
+                    if track_type != "video" or previous_item is None:
+                        raise EditorProjectError(
+                            "Editor transition overlap requires a preceding video clip"
+                        )
+                    if overlap <= 1e-9:
+                        raise EditorProjectError(
+                            "Editor transition overlap is declared but clips do not overlap"
+                        )
+                    if item.get("transition_in") != "dissolve":
+                        raise EditorProjectError(
+                            "Editor transition overlap requires transition_in='dissolve'"
+                        )
+                    if abs(declared_overlap - overlap) > frame_tolerance:
+                        raise EditorProjectError(
+                            "Editor transition_overlap does not match the clip overlap "
+                            "within one frame"
+                        )
+                    if (
+                        overlap > float(previous_item["duration"]) + 1e-9
+                        or overlap > float(item["duration"]) + 1e-9
+                    ):
+                        raise EditorProjectError(
+                            "Editor transition overlap cannot exceed either clip duration"
+                        )
+                    if float(item.get("fade_in") or 0.0) + 1e-9 < overlap:
+                        raise EditorProjectError(
+                            "Editor transition overlap requires fade_in to cover the overlap"
+                        )
+                    if float(previous_item.get("fade_out") or 0.0) > 1e-9:
+                        raise EditorProjectError(
+                            "Editor transition overlap requires an opaque preceding clip "
+                            "with no fade_out"
+                        )
+                    if previous_item.get("disabled"):
+                        raise EditorProjectError(
+                            "Editor transition overlap requires an enabled preceding clip"
+                        )
+                    if any(
+                        float(older["start"]) + float(older["duration"])
+                        > float(item["start"]) + 1e-9
+                        for older in items[:item_index - 1]
+                    ):
+                        raise EditorProjectError(
+                            "Editor transition overlap cannot overlap more than two clips"
+                        )
+                    item["transition_overlap"] = round(overlap, 8)
+                elif overlap > 1e-9:
                     item["start"] = previous_end
                 previous_end = item["start"] + item["duration"]
+                previous_item = item
             tracks.append({
                 **dict(raw_track),
                 "id": track_id,
@@ -620,16 +966,240 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
             })
     export_history.sort(key=lambda record: record["created_at"], reverse=True)
     normalized["exports"] = export_history[:50]
+    for track_index, track in enumerate(tracks):
+        for item_index, item in enumerate(track["items"]):
+            start = float(item["start"])
+            end = start + float(item["duration"])
+            if (
+                not math.isfinite(start)
+                or not math.isfinite(end)
+                or start > MAX_EDITOR_PROJECT_DURATION_SECONDS
+                or end > MAX_EDITOR_PROJECT_DURATION_SECONDS
+            ):
+                raise EditorProjectError(
+                    f"Editor track {track_index + 1} item {item_index + 1} "
+                    "ends beyond the 24-hour project limit"
+                )
     return normalized
 
 
-def save_editor_project(save_root: str, workspace: str, project: Mapping[str, Any]) -> dict[str, Any]:
+def save_editor_project(
+    save_root: str,
+    workspace: str,
+    project: Mapping[str, Any],
+    *,
+    expected_revision: int | None = None,
+) -> dict[str, Any]:
+    """Persist one project snapshot and advance its optimistic revision.
+
+    A revision in the payload (or ``expected_revision``) enables stale-write
+    rejection. Callers that omit a revision retain the older last-write-wins
+    behavior while saved results still receive an incremented revision.
+    """
     normalized = normalize_editor_project(project, workspace=workspace)
-    normalized["updated_at"] = time.time()
     path = _project_path(save_root, normalized["workspace"], normalized["id"])
+    revision_was_explicit = expected_revision is not None or "revision" in project
+    expected = (
+        _editor_revision(expected_revision)
+        if expected_revision is not None
+        else _editor_revision(project["revision"])
+        if "revision" in project
+        else None
+    )
     with _project_lock:
+        current_revision = 0
+        stored: Mapping[str, Any] | None = None
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as handle:
+                stored = json.load(handle)
+            if not isinstance(stored, Mapping):
+                raise EditorProjectError("Stored Editor project must be an object")
+            current_revision = _editor_revision(stored.get("revision", 0))
+            if revision_was_explicit and expected != current_revision:
+                raise EditorProjectRevisionConflict(expected, current_revision)
+            _archive_editor_project_revision(
+                save_root,
+                normalized["workspace"],
+                normalized["id"],
+                current_revision,
+                stored,
+            )
+        normalized["revision"] = current_revision + 1
+        normalized["updated_at"] = time.time()
         _atomic_write_json(path, normalized)
+        _store_project_summary_cache(path, os.stat(path), _editor_project_summary(normalized))
     return normalized
+
+
+def _editor_project_recovery_directory(
+    save_root: str,
+    workspace: str,
+    project_id: str,
+    *,
+    create: bool,
+) -> str:
+    safe_id = _safe_identifier(project_id)
+    project_dir_path = os.path.abspath(editor_project_directory(save_root, workspace))
+    save_root_real = os.path.realpath(os.path.abspath(save_root))
+    if os.path.islink(project_dir_path):
+        raise EditorProjectError("Invalid Editor project directory")
+    project_dir = os.path.realpath(project_dir_path)
+    if not _is_under(project_dir, save_root_real):
+        raise EditorProjectError("Editor project directory escaped its output root")
+
+    root_path = os.path.join(project_dir, EDITOR_RECOVERY_DIR)
+    if os.path.islink(root_path):
+        raise EditorProjectError("Invalid Editor recovery directory")
+    if create:
+        os.makedirs(root_path, exist_ok=True)
+    if not os.path.isdir(root_path):
+        return root_path
+    root = os.path.realpath(root_path)
+    if os.path.dirname(root) != project_dir:
+        raise EditorProjectError("Editor recovery directory escaped its project root")
+
+    project_history_path = os.path.join(root, safe_id)
+    if os.path.islink(project_history_path):
+        raise EditorProjectError("Invalid Editor recovery history")
+    if create:
+        os.makedirs(project_history_path, exist_ok=True)
+    if not os.path.isdir(project_history_path):
+        return project_history_path
+    project_history = os.path.realpath(project_history_path)
+    if os.path.dirname(project_history) != root:
+        raise EditorProjectError("Editor recovery history escaped its recovery root")
+    return project_history
+
+
+def _archive_editor_project_revision(
+    save_root: str,
+    workspace: str,
+    project_id: str,
+    revision: int,
+    stored_project: Mapping[str, Any],
+) -> None:
+    history_dir = _editor_project_recovery_directory(
+        save_root, workspace, project_id, create=True
+    )
+    snapshot = os.path.join(history_dir, f"r{revision}.json")
+    if os.path.islink(snapshot):
+        raise EditorProjectError("Invalid Editor recovery snapshot")
+    if not os.path.lexists(snapshot):
+        _atomic_write_json(snapshot, stored_project)
+
+    revisions: list[tuple[int, str]] = []
+    try:
+        with os.scandir(history_dir) as entries:
+            for entry in entries:
+                match = re.fullmatch(r"r(\d+)\.json", entry.name)
+                if not match or entry.is_symlink():
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                revisions.append((int(match.group(1)), entry.path))
+    except OSError:
+        return
+    revisions.sort(reverse=True)
+    for _revision, old_path in revisions[EDITOR_RECOVERY_REVISIONS:]:
+        # Recovery pruning deletes only a direct regular file under the exact
+        # per-project history directory; it never follows symlinks or recurses.
+        if os.path.islink(old_path) or os.path.dirname(os.path.realpath(old_path)) != history_dir:
+            continue
+        try:
+            os.remove(old_path)
+        except OSError:
+            pass
+
+
+def list_editor_project_revisions(
+    save_root: str,
+    workspace: str,
+    project_id: str,
+) -> list[dict[str, Any]]:
+    """List bounded prior snapshots available for safe project recovery."""
+    history_dir = _editor_project_recovery_directory(
+        save_root, workspace, project_id, create=False
+    )
+    if not os.path.isdir(history_dir):
+        return []
+    revisions: list[dict[str, Any]] = []
+    with _project_lock, os.scandir(history_dir) as entries:
+        for entry in entries:
+            match = re.fullmatch(r"r(\d+)\.json", entry.name)
+            if not match or entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                continue
+            if os.path.dirname(os.path.realpath(entry.path)) != history_dir:
+                continue
+            try:
+                filename_revision = int(match.group(1))
+                with open(entry.path, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                if not isinstance(payload, Mapping):
+                    continue
+                if _editor_revision(payload.get("revision", 0)) != filename_revision:
+                    continue
+                project = normalize_editor_project(payload, workspace=workspace)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+            revisions.append({
+                "revision": filename_revision,
+                "name": project["name"],
+                "updated_at": project["updated_at"],
+                "duration": editor_project_duration(project),
+                "asset_count": len(project.get("assets") or {}),
+            })
+    revisions.sort(key=lambda item: item["revision"], reverse=True)
+    return revisions[:EDITOR_RECOVERY_REVISIONS]
+
+
+def restore_editor_project_revision(
+    save_root: str,
+    workspace: str,
+    project_id: str,
+    revision: int,
+    *,
+    expected_revision: int,
+) -> dict[str, Any]:
+    """Restore a snapshot while advancing the live revision monotonically."""
+    safe_id = _safe_identifier(project_id)
+    revision = _editor_revision(revision)
+    if revision < 0:
+        raise EditorProjectError("Invalid Editor recovery revision")
+    expected = _editor_revision(expected_revision)
+    path = _project_path(save_root, workspace, safe_id)
+    history_dir = _editor_project_recovery_directory(
+        save_root, workspace, safe_id, create=False
+    )
+    snapshot = os.path.join(history_dir, f"r{revision}.json")
+    if os.path.islink(snapshot) or os.path.dirname(os.path.realpath(snapshot)) != history_dir:
+        raise FileNotFoundError(revision)
+    with _project_lock:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(safe_id)
+        with open(path, "r", encoding="utf-8") as handle:
+            current = json.load(handle)
+        current_revision = _editor_revision(current.get("revision", 0))
+        if current_revision != expected:
+            raise EditorProjectRevisionConflict(expected, current_revision)
+        if not os.path.isfile(snapshot):
+            raise FileNotFoundError(revision)
+        with open(snapshot, "r", encoding="utf-8") as handle:
+            previous = json.load(handle)
+        if not isinstance(previous, Mapping):
+            raise EditorProjectError("Stored Editor recovery snapshot must be an object")
+        if _editor_revision(previous.get("revision", 0)) != revision:
+            raise EditorProjectError(
+                "Stored Editor recovery snapshot revision does not match its filename"
+            )
+        restored = normalize_editor_project(previous, workspace=workspace)
+        restored["id"] = safe_id
+        restored["revision"] = current_revision
+        return save_editor_project(
+            save_root,
+            workspace,
+            restored,
+            expected_revision=current_revision,
+        )
 
 
 def load_editor_project(save_root: str, workspace: str, project_id: str) -> dict[str, Any]:
@@ -648,22 +1218,28 @@ def list_editor_projects(save_root: str, workspace: str) -> list[dict[str, Any]]
     summaries: list[dict[str, Any]] = []
     with _project_lock:
         for entry in os.scandir(directory):
-            if not entry.is_file() or not entry.name.endswith(".json"):
+            if not entry.is_file(follow_symlinks=False) or not entry.name.endswith(".json"):
                 continue
             try:
+                before = entry.stat(follow_symlinks=False)
+                cached = _get_project_summary_cache(
+                    entry.path,
+                    mtime_ns=before.st_mtime_ns,
+                    size=before.st_size,
+                )
+                if cached is not None:
+                    summaries.append(cached)
+                    continue
                 with open(entry.path, "r", encoding="utf-8") as handle:
                     payload = json.load(handle)
                 project = normalize_editor_project(payload, workspace=workspace)
-                summaries.append({
-                    "id": project["id"],
-                    "name": project["name"],
-                    "workspace": project["workspace"],
-                    "created_at": project["created_at"],
-                    "updated_at": project["updated_at"],
-                    "duration": editor_project_duration(project),
-                    "asset_count": len(project.get("assets") or {}),
-                })
+                summary = _editor_project_summary(project)
+                after = os.stat(entry.path, follow_symlinks=False)
+                if (before.st_mtime_ns, before.st_size) == (after.st_mtime_ns, after.st_size):
+                    _store_project_summary_cache(entry.path, after, summary)
+                summaries.append(summary)
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                _invalidate_project_summary_cache(entry.path)
                 continue
     summaries.sort(key=lambda item: item["updated_at"], reverse=True)
     return summaries
@@ -675,6 +1251,7 @@ def delete_editor_project(save_root: str, workspace: str, project_id: str) -> bo
         if not os.path.isfile(path):
             return False
         os.remove(path)
+        _invalidate_project_summary_cache(path)
     return True
 
 
@@ -692,6 +1269,64 @@ def editor_project_duration(project: Mapping[str, Any]) -> float:
                 + max(0.0, _finite_number(item.get("duration"), 0.0)),
             )
     return duration
+
+
+def _editor_project_summary(project: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "id": project["id"],
+        "name": project["name"],
+        "workspace": project["workspace"],
+        "created_at": project["created_at"],
+        "updated_at": project["updated_at"],
+        "duration": editor_project_duration(project),
+        "asset_count": len(project.get("assets") or {}),
+    }
+
+
+def _project_summary_cache_key(path: str) -> str:
+    return os.path.realpath(os.path.abspath(path))
+
+
+def _get_project_summary_cache(
+    path: str,
+    *,
+    mtime_ns: int,
+    size: int,
+) -> dict[str, Any] | None:
+    key = _project_summary_cache_key(path)
+    with _project_summary_cache_lock:
+        cached = _project_summary_cache.get(key)
+        if cached is None:
+            return None
+        cached_mtime_ns, cached_size, summary = cached
+        if (cached_mtime_ns, cached_size) != (mtime_ns, size):
+            del _project_summary_cache[key]
+            return None
+        _project_summary_cache.move_to_end(key)
+        return dict(summary)
+
+
+def _store_project_summary_cache(
+    path: str,
+    stat_result: os.stat_result,
+    summary: Mapping[str, Any],
+) -> None:
+    key = _project_summary_cache_key(path)
+    with _project_summary_cache_lock:
+        _project_summary_cache[key] = (
+            stat_result.st_mtime_ns,
+            stat_result.st_size,
+            dict(summary),
+        )
+        _project_summary_cache.move_to_end(key)
+        while len(_project_summary_cache) > EDITOR_PROJECT_SUMMARY_CACHE_MAX_ENTRIES:
+            _project_summary_cache.popitem(last=False)
+
+
+def _invalidate_project_summary_cache(path: str) -> None:
+    key = _project_summary_cache_key(path)
+    with _project_summary_cache_lock:
+        _project_summary_cache.pop(key, None)
 
 
 def resolve_editor_asset(
@@ -823,6 +1458,149 @@ def _editor_preview_id(path: str) -> str:
     return hashlib.sha256(identity.encode("utf-8", errors="surrogatepass")).hexdigest()[:24]
 
 
+def _editor_media_cache_root(save_root: str, workspace: str) -> str:
+    requested_root = os.path.abspath(editor_media_cache_directory(save_root, workspace))
+    project_root = os.path.realpath(editor_project_directory(save_root, workspace))
+    if os.path.islink(requested_root):
+        raise EditorProjectError("Invalid Editor preview cache root")
+    resolved_root = os.path.realpath(requested_root)
+    if os.path.dirname(resolved_root) != project_root:
+        raise EditorProjectError("Editor preview cache must stay inside its project cache root")
+    return resolved_root
+
+
+def _editor_media_cache_entry_path(root: str, preview_id: str) -> str:
+    if not _PREVIEW_ID_RE.fullmatch(str(preview_id or "")):
+        raise EditorProjectError("Invalid Editor preview identifier")
+    candidate = os.path.join(root, preview_id)
+    if os.path.islink(candidate):
+        raise EditorProjectError("Invalid Editor preview cache entry")
+    resolved = os.path.realpath(candidate)
+    if os.path.dirname(resolved) != root:
+        raise EditorProjectError("Editor preview cache entry escaped its cache root")
+    return resolved
+
+
+def _editor_media_cache_file_path(cache_dir: str, filename: str) -> str:
+    candidate = os.path.join(cache_dir, filename)
+    if os.path.islink(candidate):
+        raise EditorProjectError("Invalid Editor preview cache file")
+    resolved = os.path.realpath(candidate)
+    if os.path.dirname(resolved) != cache_dir:
+        raise EditorProjectError("Editor preview cache file escaped its cache entry")
+    return candidate
+
+
+def _safe_preview_cache_entry(root: str, entry_name: str) -> str | None:
+    if not _PREVIEW_ID_RE.fullmatch(entry_name):
+        return None
+    candidate = os.path.join(root, entry_name)
+    if os.path.islink(candidate) or not os.path.isdir(candidate):
+        return None
+    resolved = os.path.realpath(candidate)
+    if os.path.dirname(resolved) != root or resolved == root:
+        return None
+    return resolved
+
+
+def _preview_cache_entry_size(cache_dir: str) -> int:
+    total = 0
+    for current, directories, filenames in os.walk(cache_dir, followlinks=False):
+        directories[:] = [
+            name for name in directories
+            if not os.path.islink(os.path.join(current, name))
+        ]
+        for filename in filenames:
+            path = os.path.join(current, filename)
+            try:
+                if not os.path.islink(path):
+                    total += os.lstat(path).st_size
+            except OSError:
+                continue
+    return total
+
+
+def _prune_editor_media_cache(
+    root: str,
+    *,
+    now: float | None = None,
+    max_bytes: int = EDITOR_MEDIA_PREVIEW_CACHE_MAX_BYTES,
+    ttl_seconds: float = EDITOR_MEDIA_PREVIEW_CACHE_TTL_SECONDS,
+    active_seconds: float = EDITOR_MEDIA_PREVIEW_ACTIVE_SECONDS,
+) -> None:
+    """Prune only direct, non-symlink preview entries in this exact cache root."""
+    root = os.path.realpath(os.path.abspath(root))
+    if not os.path.isdir(root):
+        return
+    now = time.time() if now is None else now
+    with _preview_builds_lock:
+        active_entries = set(_preview_builds)
+        entries: list[tuple[str, str, float, int]] = []
+        total_bytes = 0
+        try:
+            with os.scandir(root) as scan:
+                for entry in scan:
+                    try:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        cache_dir = _safe_preview_cache_entry(root, entry.name)
+                        if cache_dir is None:
+                            continue
+                        stat_result = os.stat(cache_dir, follow_symlinks=False)
+                        size = _preview_cache_entry_size(cache_dir)
+                    except OSError:
+                        continue
+                    entries.append((entry.name, cache_dir, stat_result.st_mtime, size))
+                    total_bytes += size
+        except OSError:
+            return
+
+        def remove_entry(entry_name: str, cache_dir: str) -> bool:
+            # Re-resolve immediately before deletion. Never pass an unchecked or
+            # nested target to rmtree, even when the directory has been replaced.
+            resolved = _safe_preview_cache_entry(root, entry_name)
+            if resolved is None or resolved != cache_dir or resolved in active_entries:
+                return False
+            try:
+                shutil.rmtree(resolved)
+                return True
+            except OSError:
+                return False
+
+        candidates: list[tuple[str, str, float, int]] = []
+        for entry_name, cache_dir, last_used, size in entries:
+            if cache_dir in active_entries or now - last_used < active_seconds:
+                continue
+            if now - last_used > ttl_seconds:
+                if remove_entry(entry_name, cache_dir):
+                    total_bytes -= size
+                continue
+            candidates.append((entry_name, cache_dir, last_used, size))
+
+        if total_bytes > max_bytes:
+            for entry_name, cache_dir, _last_used, size in sorted(
+                candidates, key=lambda value: value[2]
+            ):
+                if total_bytes <= max_bytes:
+                    break
+                if remove_entry(entry_name, cache_dir):
+                    total_bytes -= size
+
+
+def _cleanup_editor_media_cache_if_due(root: str) -> None:
+    root = os.path.realpath(os.path.abspath(root))
+    now = time.time()
+    with _preview_cache_cleanup_lock:
+        last_cleanup = _preview_cache_cleanup_times.get(root, 0.0)
+        if now - last_cleanup < EDITOR_MEDIA_PREVIEW_CLEANUP_INTERVAL_SECONDS:
+            return
+        _prune_editor_media_cache(root, now=now)
+        _preview_cache_cleanup_times[root] = now
+        _preview_cache_cleanup_times.move_to_end(root)
+        while len(_preview_cache_cleanup_times) > 64:
+            _preview_cache_cleanup_times.popitem(last=False)
+
+
 def resolve_editor_media_cache_file(
     save_root: str,
     workspace: str,
@@ -838,10 +1616,21 @@ def resolve_editor_media_cache_file(
     }.get(str(kind or ""))
     if not filename:
         raise EditorProjectError("Invalid Editor preview type")
-    root = editor_media_cache_directory(save_root, workspace)
-    path = _safe_join(root, preview_id, filename)
-    if not path or not os.path.isfile(path):
+    root = _editor_media_cache_root(save_root, workspace)
+    cache_dir = _editor_media_cache_entry_path(root, preview_id)
+    path = _editor_media_cache_file_path(cache_dir, filename)
+    if not os.path.isfile(path):
         raise FileNotFoundError(filename)
+    # Touch the entry directory so TTL/LRU cleanup treats recently served files
+    # as active for a conservative window. Keep cleanup and URL resolution from
+    # racing over the same cache entry.
+    with _preview_builds_lock:
+        if _safe_preview_cache_entry(root, preview_id) != cache_dir:
+            raise FileNotFoundError(filename)
+        try:
+            os.utime(cache_dir, None)
+        except OSError:
+            pass
     return path
 
 
@@ -862,31 +1651,162 @@ def _run_preview_command(command: list[str], *, timeout: int = 180) -> bool:
         return False
 
 
-def _build_editor_waveform(path: str, *, ffmpeg: str, bins: int = 512) -> list[float]:
+def _build_editor_waveform(
+    path: str,
+    *,
+    ffmpeg: str,
+    duration: float,
+    bins: int = 512,
+) -> list[float]:
+    """Stream mono PCM into coarse peak buckets with bounded memory."""
+    duration = max(
+        0.0,
+        min(
+            MAX_EDITOR_PROJECT_DURATION_SECONDS,
+            _finite_number(duration, 0.0),
+        ),
+    )
+    if duration <= 0 or bins <= 0:
+        return []
+
+    sample_rate = 2000
+    expected_samples = max(1, int(math.ceil(duration * sample_rate)))
+    target_peak_count = min(max(1, bins * 16), max(1, int(math.ceil(duration * 10))))
+    samples_per_peak = max(1, int(math.ceil(expected_samples / target_peak_count)))
+    peaks = array("f")
+    current_peak = 0.0
+    current_count = 0
+    sample_count = 0
+    output_queue: queue.Queue[bytes | None] = queue.Queue(maxsize=4)
+    stop_reader = threading.Event()
+    reader_errors: list[BaseException] = []
+    process: subprocess.Popen[bytes] | None = None
+    reader: threading.Thread | None = None
+    sentinel: bytes | None = None
+
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             [
-                ffmpeg, "-hide_banner", "-loglevel", "error", "-i", path,
-                "-vn", "-ac", "1", "-ar", "2000", "-f", "f32le", "pipe:1",
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                path,
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                str(sample_rate),
+                "-t",
+                f"{duration:.8f}",
+                "-f",
+                "f32le",
+                "pipe:1",
             ],
-            capture_output=True,
-            timeout=180,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            startupinfo=(
+                subprocess.STARTUPINFO()
+                if os.name == "nt"
+                else None
+            ),
         )
-    except (OSError, subprocess.SubprocessError):
+        assert process.stdout is not None
+
+        def read_chunks() -> None:
+            try:
+                while not stop_reader.is_set():
+                    chunk = process.stdout.read(64 * 1024)
+                    if not chunk:
+                        break
+                    while not stop_reader.is_set():
+                        try:
+                            output_queue.put(chunk, timeout=0.2)
+                            break
+                        except queue.Full:
+                            continue
+            except BaseException as error:
+                reader_errors.append(error)
+            finally:
+                while not stop_reader.is_set():
+                    try:
+                        output_queue.put(sentinel, timeout=0.2)
+                        break
+                    except queue.Full:
+                        continue
+
+        reader = threading.Thread(target=read_chunks, daemon=True)
+        reader.start()
+        deadline = time.monotonic() + 180
+        remainder = bytearray()
+        reached_eof = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(ffmpeg, 180)
+            try:
+                chunk = output_queue.get(timeout=min(0.2, remaining))
+            except queue.Empty:
+                if process.poll() is not None and not reader.is_alive():
+                    reached_eof = True
+                    break
+                continue
+            if chunk is sentinel:
+                reached_eof = True
+                break
+            remainder.extend(chunk)
+            usable_length = len(remainder) - (len(remainder) % 4)
+            if usable_length == 0:
+                continue
+            sample_bytes = remainder[:usable_length]
+            del remainder[:usable_length]
+            samples = array("f")
+            samples.frombytes(sample_bytes)
+            for value in samples:
+                if sample_count >= expected_samples:
+                    break
+                if math.isfinite(value):
+                    current_peak = max(current_peak, abs(value))
+                current_count += 1
+                sample_count += 1
+                if current_count >= samples_per_peak:
+                    peaks.append(current_peak)
+                    current_peak = 0.0
+                    current_count = 0
+
+        if not reached_eof:
+            return []
+        process.wait(timeout=max(0.1, deadline - time.monotonic()))
+        if process.returncode != 0 or reader_errors:
+            return []
+        if current_count:
+            peaks.append(current_peak)
+        if not peaks:
+            return []
+
+        block = max(1, math.ceil(len(peaks) / bins))
+        downsampled = [
+            max(peaks[start:start + block], default=0.0)
+            for start in range(0, len(peaks), block)
+        ][:bins]
+        maximum = max(0.001, *downsampled)
+        return [round(max(0.02, min(1.0, value / maximum)), 4) for value in downsampled]
+    except (OSError, subprocess.SubprocessError, queue.Empty):
         return []
-    if result.returncode != 0 or not result.stdout:
-        return []
-    samples = array("f")
-    samples.frombytes(result.stdout[:len(result.stdout) - (len(result.stdout) % 4)])
-    if not samples:
-        return []
-    block = max(1, math.ceil(len(samples) / bins))
-    peaks = [
-        max((abs(value) for value in samples[start:start + block]), default=0.0)
-        for start in range(0, len(samples), block)
-    ][:bins]
-    maximum = max(0.001, *peaks)
-    return [round(max(0.02, min(1.0, value / maximum)), 4) for value in peaks]
+    finally:
+        stop_reader.set()
+        if process is not None and process.poll() is None:
+            process.kill()
+        if process is not None:
+            try:
+                process.wait(timeout=5)
+            except subprocess.SubprocessError:
+                pass
+            if process.stdout is not None:
+                process.stdout.close()
+        if reader is not None:
+            reader.join(timeout=1)
 
 
 def build_editor_media_preview(
@@ -912,98 +1832,210 @@ def build_editor_media_preview(
         uploads_root=uploads_root,
     )
     preview_id = _editor_preview_id(path)
-    cache_dir = os.path.join(editor_media_cache_directory(save_root, workspace), preview_id)
-    metadata_path = os.path.join(cache_dir, "preview.json")
     media_type = str(asset.get("type") or "video")
     duration = max(0.0, _finite_number(asset.get("duration"), 0.0))
-    has_audio = bool(asset.get("has_audio", media_type == "audio"))
-    with _media_cache_lock:
-        os.makedirs(cache_dir, exist_ok=True)
-        metadata: dict[str, Any] = {}
-        if os.path.isfile(metadata_path):
+    profile = "mobile" if str(proxy_profile or "auto").strip().lower() == "mobile" else "auto"
+    needs_proxy = _editor_preview_needs_proxy(asset, include_proxy, profile)
+    root = _editor_media_cache_root(save_root, workspace)
+    cache_dir = _editor_media_cache_entry_path(root, preview_id)
+
+    while True:
+        with _preview_builds_lock:
+            flight = _preview_builds.get(cache_dir)
+            owner = flight is None
+            if owner:
+                flight = _PreviewBuildFlight(
+                    needs_proxy=needs_proxy,
+                    proxy_profile=profile,
+                )
+                _preview_builds[cache_dir] = flight
+        assert flight is not None
+        if owner:
             try:
-                with open(metadata_path, "r", encoding="utf-8") as handle:
-                    loaded = json.load(handle)
-                if (
-                    isinstance(loaded, dict)
-                    and loaded.get("version") == EDITOR_MEDIA_PREVIEW_VERSION
-                ):
-                    metadata = loaded
-            except (OSError, ValueError):
-                metadata = {}
+                with _preview_build_slots:
+                    _cleanup_editor_media_cache_if_due(root)
+                    result = _build_editor_media_preview(
+                        path,
+                        preview_id=preview_id,
+                        save_root=save_root,
+                        workspace=workspace,
+                        cache_root=root,
+                        cache_dir=cache_dir,
+                        media_type=media_type,
+                        duration=duration,
+                        has_audio=bool(asset.get("has_audio", media_type == "audio")),
+                        needs_proxy=needs_proxy,
+                        proxy_profile=profile,
+                        ffmpeg=ffmpeg,
+                    )
+                flight.result = result
+                return result
+            except BaseException as error:
+                flight.error = error
+                raise
+            finally:
+                with _preview_builds_lock:
+                    if _preview_builds.get(cache_dir) is flight:
+                        del _preview_builds[cache_dir]
+                    flight.event.set()
 
-        thumbnail_path = os.path.join(cache_dir, "thumbnail.jpg")
-        if media_type == "video" and not os.path.isfile(thumbnail_path):
-            interval = max(0.12, duration / 8.0) if duration > 0 else 1.0
-            filter_chain = (
-                f"fps=1/{interval:.8f},"
-                "scale=160:90:force_original_aspect_ratio=increase,"
-                "crop=160:90,tile=8x1"
-            )
-            _run_preview_command([
-                ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", path,
-                "-vf", filter_chain, "-frames:v", "1", "-q:v", "5", thumbnail_path,
-            ])
+        flight.event.wait()
+        if flight.error is not None:
+            raise flight.error
+        result = flight.result
+        if result is None:
+            continue
+        if _preview_result_satisfies(result, needs_proxy, profile):
+            return copy.deepcopy(result)
+        # Avoid immediately repeating an expensive failed build for callers
+        # that requested the same proxy profile. Different requests run one
+        # serialized follow-up flight after the existing build finishes.
+        same_attempt = needs_proxy and flight.needs_proxy and flight.proxy_profile == profile
+        if same_attempt:
+            return copy.deepcopy(result)
 
-        waveform = metadata.get("waveform") if isinstance(metadata.get("waveform"), list) else []
-        if has_audio and not waveform:
-            waveform = _build_editor_waveform(path, ffmpeg=ffmpeg)
 
-        mobile_proxy = str(proxy_profile or "auto").strip().lower() == "mobile"
-        standard_proxy_path = os.path.join(cache_dir, "proxy.mp4")
-        mobile_proxy_path = os.path.join(cache_dir, "proxy-mobile-v3.mp4")
-        proxy_path = mobile_proxy_path if mobile_proxy else standard_proxy_path
-        width = max(0, int(_finite_number(asset.get("width"), 0)))
-        height = max(0, int(_finite_number(asset.get("height"), 0)))
-        size = max(0, int(_finite_number(asset.get("size"), 0)))
-        needs_proxy = (
-            include_proxy
-            and media_type == "video"
-            and (
-                mobile_proxy
-                or width > 1280
-                or height > 720
-                or size > 256 * 1024 * 1024
-            )
+def _editor_preview_needs_proxy(
+    asset: Mapping[str, Any],
+    include_proxy: bool,
+    proxy_profile: str,
+) -> bool:
+    if not include_proxy or str(asset.get("type") or "video") != "video":
+        return False
+    if proxy_profile == "mobile":
+        return True
+    width = max(0, int(_finite_number(asset.get("width"), 0)))
+    height = max(0, int(_finite_number(asset.get("height"), 0)))
+    size = max(0, int(_finite_number(asset.get("size"), 0)))
+    return width > 1280 or height > 720 or size > 256 * 1024 * 1024
+
+
+def _preview_result_satisfies(
+    metadata: Mapping[str, Any],
+    needs_proxy: bool,
+    proxy_profile: str,
+) -> bool:
+    if not needs_proxy:
+        return True
+    return bool(
+        metadata.get("proxy_mobile")
+        if proxy_profile == "mobile"
+        else metadata.get("proxy")
+    )
+
+
+def _build_editor_media_preview(
+    path: str,
+    *,
+    preview_id: str,
+    save_root: str,
+    workspace: str,
+    cache_root: str,
+    cache_dir: str,
+    media_type: str,
+    duration: float,
+    has_audio: bool,
+    needs_proxy: bool,
+    proxy_profile: str,
+    ffmpeg: str,
+) -> dict[str, Any]:
+    if _editor_media_cache_root(save_root, workspace) != cache_root:
+        raise EditorProjectError("Editor preview cache root changed during build")
+    os.makedirs(cache_root, exist_ok=True)
+    if _editor_media_cache_root(save_root, workspace) != cache_root:
+        raise EditorProjectError("Editor preview cache root changed during build")
+    os.makedirs(cache_dir, exist_ok=True)
+    if _editor_media_cache_entry_path(cache_root, preview_id) != cache_dir:
+        raise EditorProjectError("Editor preview cache entry changed during build")
+
+    metadata_path = _editor_media_cache_file_path(cache_dir, "preview.json")
+    metadata: dict[str, Any] = {}
+    if os.path.isfile(metadata_path):
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if (
+                isinstance(loaded, dict)
+                and loaded.get("version") == EDITOR_MEDIA_PREVIEW_VERSION
+                and loaded.get("preview_id") == preview_id
+            ):
+                metadata = loaded
+        except (OSError, ValueError):
+            metadata = {}
+
+    thumbnail_path = _editor_media_cache_file_path(cache_dir, "thumbnail.jpg")
+    if media_type == "video" and not os.path.isfile(thumbnail_path):
+        interval = max(0.12, duration / 8.0) if duration > 0 else 1.0
+        filter_chain = (
+            f"fps=1/{interval:.8f},"
+            "scale=160:90:force_original_aspect_ratio=increase,"
+            "crop=160:90,tile=8x1"
         )
-        if needs_proxy and not os.path.isfile(proxy_path):
-            temporary_proxy = os.path.join(cache_dir, f"proxy.{uuid.uuid4().hex[:8]}.part.mp4")
-            video_filter = (
-                "scale=854:480:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-                "format=yuv420p"
-                if mobile_proxy else
-                "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p"
-            )
-            built = _run_preview_command([
-                ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", path,
-                "-map", "0:v:0", "-map", "0:a?", "-vf", video_filter,
-                "-c:v", "libx264", "-preset", "veryfast",
-                "-crf", "27" if mobile_proxy else "25",
-                *(["-profile:v", "main", "-level:v", "3.1"] if mobile_proxy else []),
-                "-c:a", "aac", "-b:a", "80k" if mobile_proxy else "96k",
-                "-movflags", "+faststart", temporary_proxy,
-            ], timeout=900)
-            if built and os.path.isfile(temporary_proxy):
-                os.replace(temporary_proxy, proxy_path)
-            elif os.path.isfile(temporary_proxy):
-                os.remove(temporary_proxy)
+        temporary_thumbnail = _editor_media_cache_file_path(
+            cache_dir, f"thumbnail.{uuid.uuid4().hex}.part.jpg"
+        )
+        built_thumbnail = _run_preview_command([
+            ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", path,
+            "-vf", filter_chain, "-frames:v", "1", "-q:v", "5", temporary_thumbnail,
+        ])
+        if built_thumbnail and os.path.isfile(temporary_thumbnail):
+            os.replace(temporary_thumbnail, thumbnail_path)
+        elif os.path.isfile(temporary_thumbnail):
+            os.remove(temporary_thumbnail)
 
-        metadata = {
-            "version": EDITOR_MEDIA_PREVIEW_VERSION,
-            "preview_id": preview_id,
-            "waveform": waveform,
-            "thumbnail": os.path.isfile(thumbnail_path),
-            "proxy": os.path.isfile(standard_proxy_path),
-            "proxy_mobile": os.path.isfile(mobile_proxy_path),
-            "updated_at": time.time(),
-        }
-        _atomic_write_json(metadata_path, metadata)
+    waveform = metadata.get("waveform") if isinstance(metadata.get("waveform"), list) else []
+    if has_audio and not waveform:
+        waveform = _build_editor_waveform(path, ffmpeg=ffmpeg, duration=duration)
+
+    mobile_proxy = proxy_profile == "mobile"
+    standard_proxy_path = _editor_media_cache_file_path(cache_dir, "proxy.mp4")
+    mobile_proxy_path = _editor_media_cache_file_path(cache_dir, "proxy-mobile-v3.mp4")
+    proxy_path = mobile_proxy_path if mobile_proxy else standard_proxy_path
+    if needs_proxy and not os.path.isfile(proxy_path):
+        temporary_proxy = _editor_media_cache_file_path(
+            cache_dir, f"proxy.{uuid.uuid4().hex}.part.mp4"
+        )
+        video_filter = (
+            "scale=854:480:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+            "format=yuv420p"
+            if mobile_proxy else
+            "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p"
+        )
+        built = _run_preview_command([
+            ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", path,
+            "-map", "0:v:0", "-map", "0:a?", "-vf", video_filter,
+            "-c:v", "libx264", "-preset", "veryfast",
+            "-crf", "27" if mobile_proxy else "25",
+            *(["-profile:v", "main", "-level:v", "3.1"] if mobile_proxy else []),
+            "-c:a", "aac", "-b:a", "80k" if mobile_proxy else "96k",
+            "-movflags", "+faststart", temporary_proxy,
+        ], timeout=900)
+        if built and os.path.isfile(temporary_proxy):
+            os.replace(temporary_proxy, proxy_path)
+        elif os.path.isfile(temporary_proxy):
+            os.remove(temporary_proxy)
+
+    metadata = {
+        "version": EDITOR_MEDIA_PREVIEW_VERSION,
+        "preview_id": preview_id,
+        "waveform": waveform,
+        "thumbnail": os.path.isfile(thumbnail_path),
+        "proxy": os.path.isfile(standard_proxy_path),
+        "proxy_mobile": os.path.isfile(mobile_proxy_path),
+        "updated_at": time.time(),
+    }
+    _atomic_write_json(metadata_path, metadata)
     return metadata
 
 
 @functools.lru_cache(maxsize=4)
 def editor_export_capabilities(ffmpeg: str = "ffmpeg") -> dict[str, Any]:
-    """Inspect the active FFmpeg build once for safe hardware encoders."""
+    """Probe FFmpeg's hardware encoders, including a minimal real encode.
+
+    ``ffmpeg -encoders`` only reports compiled-in wrappers. A one-frame null
+    encode also checks that the runtime can initialize each advertised codec
+    and its device, so auto-selection does not pick an unusable backend.
+    """
     try:
         result = subprocess.run(
             [ffmpeg, "-hide_banner", "-encoders"],
@@ -1014,12 +2046,50 @@ def editor_export_capabilities(ffmpeg: str = "ffmpeg") -> dict[str, Any]:
         listing = result.stdout if result.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         listing = ""
-    encoders = {
-        "software": True,
-        "nvidia": "h264_nvenc" in listing and "hevc_nvenc" in listing,
-        "intel": "h264_qsv" in listing and "hevc_qsv" in listing,
-        "apple": "h264_videotoolbox" in listing and "hevc_videotoolbox" in listing,
-    }
+    def runtime_available(name: str) -> bool:
+        if name not in listing:
+            return False
+        try:
+            probe = subprocess.run(
+                [
+                    ffmpeg,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:s=64x64:r=1",
+                    "-frames:v",
+                    "1",
+                    "-an",
+                    "-c:v",
+                    name,
+                    "-f",
+                    "null",
+                    "-",
+                ],
+                capture_output=True,
+                timeout=6,
+                startupinfo=(
+                    subprocess.STARTUPINFO()
+                    if os.name == "nt"
+                    else None
+                ),
+            )
+            return probe.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    encoders = {"software": True}
+    for backend, h264, h265 in (
+        ("nvidia", "h264_nvenc", "hevc_nvenc"),
+        ("intel", "h264_qsv", "hevc_qsv"),
+        ("apple", "h264_videotoolbox", "hevc_videotoolbox"),
+    ):
+        encoders[backend] = (
+            runtime_available(h264) and runtime_available(h265)
+        )
     recommended = next(
         (name for name in ("nvidia", "apple", "intel") if encoders[name]),
         "software",
@@ -1207,6 +2277,62 @@ def editor_export_dimensions(project: Mapping[str, Any]) -> tuple[int, int, floa
     return width, height, fps
 
 
+def _editor_item_keyframes(item: Mapping[str, Any]) -> Mapping[str, list[Mapping[str, Any]]]:
+    keyframes = item.get("keyframes")
+    return keyframes if isinstance(keyframes, Mapping) else {}
+
+
+def _editor_item_animation_expression(
+    item: Mapping[str, Any],
+    property_name: str,
+    fallback: float,
+    *,
+    time_variable: str,
+    clip_start: float | None = None,
+) -> str:
+    time_expression = (
+        time_variable
+        if clip_start is None
+        else f"({time_variable}-{clip_start:.8f})"
+    )
+    return editor_keyframe_expression(
+        _editor_item_keyframes(item),
+        property_name,
+        fallback=fallback,
+        time_expression=time_expression,
+    )
+
+
+def _editor_alpha_ramp_expression(
+    *,
+    time_variable: str,
+    clip_start: float,
+    clip_duration: float,
+    fade_in: float,
+    fade_out: float,
+) -> str:
+    local_time = f"({time_variable}-{clip_start:.8f})"
+    ramps: list[str] = []
+    if fade_in > 1e-9:
+        ramps.append(f"min(1,max(0,{local_time}/{fade_in:.8f}))")
+    if fade_out > 1e-9:
+        ramps.append(
+            f"min(1,max(0,({clip_duration:.8f}-{local_time})/{fade_out:.8f}))"
+        )
+    return "*".join(ramps) if ramps else "1"
+
+
+def _editor_animated_rotation_bounds(
+    width: int,
+    height: int,
+    *,
+    maximum_scale: float,
+) -> tuple[int, int]:
+    diagonal = math.hypot(width * maximum_scale, height * maximum_scale)
+    bound = max(2, int(math.ceil(diagonal / 2.0) * 2))
+    return bound, bound
+
+
 def compile_editor_render(
     project: Mapping[str, Any],
     *,
@@ -1273,19 +2399,28 @@ def compile_editor_render(
         source_in = float(item.get("source_in") or 0)
         speed = float(item.get("speed") or 1)
         source_span = clip_duration * speed
+        keyframes = _editor_item_keyframes(item)
         transform = item.get("transform") if isinstance(item.get("transform"), Mapping) else {}
         scale = _bounded_number(transform.get("scale"), 1.0, 0.05, 4.0)
         x = _finite_number(transform.get("x"), 0.0)
         y = _finite_number(transform.get("y"), 0.0)
         rotation = _finite_number(transform.get("rotation"), 0.0)
         opacity = _bounded_number(item.get("opacity"), 1.0, 0.0, 1.0)
+        animated_scale = bool(keyframes.get("scale"))
+        animated_rotation = bool(keyframes.get("rotation"))
+        animated_opacity = bool(keyframes.get("opacity"))
         fade_in = min(clip_duration, _bounded_number(item.get("fade_in"), 0.0, 0.0, clip_duration))
         fade_out = min(clip_duration, _bounded_number(item.get("fade_out"), 0.0, 0.0, clip_duration))
+        transition_overlap = _finite_number(item.get("transition_overlap"), 0.0)
+        render_fade_in = transition_overlap if transition_overlap > 0 else fade_in
         transition_in = str(item.get("transition_in") or "none")
         transition_out = str(item.get("transition_out") or "none")
         fit = str(item.get("fit") or "contain")
         clip_label = f"editor_clip_{visual_index}"
         output_label = f"editor_base_{visual_index}"
+        raw_clip_label = (
+            f"editor_clip_raw_{visual_index}" if animated_opacity else clip_label
+        )
         if asset.get("type") == "image":
             prefix = f"[{input_index}:v]trim=duration={clip_duration:.8f},setpts=PTS-STARTPTS+{start:.8f}/TB"
         else:
@@ -1293,8 +2428,9 @@ def compile_editor_render(
                 f"[{input_index}:v]trim=start={source_in:.8f}:duration={source_span:.8f},"
                 f"setpts=(PTS-STARTPTS)/{speed:.8f}+{start:.8f}/TB"
             )
-        target_w = max(2, int(round(width * scale / 2) * 2))
-        target_h = max(2, int(round(height * scale / 2) * 2))
+        resize_scale = 1.0 if animated_scale else scale
+        target_w = max(2, int(round(width * resize_scale / 2) * 2))
+        target_h = max(2, int(round(height * resize_scale / 2) * 2))
         if fit == "cover":
             resize = (
                 f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
@@ -1302,34 +2438,182 @@ def compile_editor_render(
             )
         else:
             resize = f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease"
+        scale_filter = ""
+        if animated_scale:
+            scale_expression = _editor_item_animation_expression(
+                item, "scale", scale, time_variable="t", clip_start=start
+            )
+            scale_filter = (
+                ",scale=w='max(2,trunc(iw*("
+                f"{scale_expression})/2)*2)':"
+                "h='max(2,trunc(ih*("
+                f"{scale_expression})/2)*2)':eval=frame"
+            )
         rotation_filter = ""
-        if abs(rotation) > 0.001:
+        if animated_rotation:
+            rotation_expression = _editor_item_animation_expression(
+                item, "rotation", rotation, time_variable="t", clip_start=start
+            )
+            max_scale = (
+                max(float(point["value"]) for point in keyframes["scale"])
+                if animated_scale else scale
+            )
+            rotation_width, rotation_height = _editor_animated_rotation_bounds(
+                width,
+                height,
+                maximum_scale=max_scale,
+            )
+            rotation_filter = (
+                f",rotate=angle='({rotation_expression})*PI/180':c=none:"
+                f"ow={rotation_width}:oh={rotation_height}"
+            )
+        elif animated_scale and abs(rotation) > 0.001:
+            rotation_width, rotation_height = _editor_animated_rotation_bounds(
+                width,
+                height,
+                maximum_scale=max(
+                    float(point["value"]) for point in keyframes["scale"]
+                ),
+            )
+            radians = rotation * math.pi / 180.0
+            rotation_filter = (
+                f",rotate={radians:.10f}:c=none:"
+                f"ow={rotation_width}:oh={rotation_height}"
+            )
+        elif abs(rotation) > 0.001:
             radians = rotation * math.pi / 180.0
             rotation_filter = (
                 f",rotate={radians:.10f}:c=none:ow=rotw({radians:.10f}):oh=roth({radians:.10f})"
             )
-        fade_filters: list[str] = []
-        if fade_in > 1e-6:
-            fade_filters.append(
-                f"fade=t=in:st={start:.8f}:d={fade_in:.8f}"
-                + (":color=black" if transition_in == "fade_black" else ":alpha=1")
-            )
-        if fade_out > 1e-6:
-            fade_filters.append(
-                f"fade=t=out:st={max(start, start + clip_duration - fade_out):.8f}:"
-                f"d={fade_out:.8f}"
-                + (":color=black" if transition_out == "fade_black" else ":alpha=1")
-            )
-        fade_chain = "".join(f",{value}" for value in fade_filters)
-        filters.append(
-            f"{prefix},fps={fps:.8f},{resize}{rotation_filter},format=rgba{fade_chain},"
-            f"colorchannelmixer=aa={opacity:.8f}[{clip_label}]"
+        color_filters = editor_color_filters(
+            item.get("color") if isinstance(item.get("color"), Mapping) else None
         )
-        x_expression = f"(main_w-overlay_w)/2+({x:.8f})"
-        y_expression = f"(main_h-overlay_h)/2+({y:.8f})"
+        fade_filters: list[str] = []
+        if render_fade_in > 1e-6:
+            if transition_in == "fade_black":
+                fade_filters.append(
+                    f"fade=t=in:st={start:.8f}:d={render_fade_in:.8f}:color=black"
+                )
+            elif not animated_opacity:
+                fade_filters.append(
+                    f"fade=t=in:st={start:.8f}:d={render_fade_in:.8f}:alpha=1"
+                )
+        if fade_out > 1e-6:
+            if transition_out == "fade_black":
+                fade_filters.append(
+                    f"fade=t=out:st={max(start, start + clip_duration - fade_out):.8f}:"
+                    f"d={fade_out:.8f}:color=black"
+                )
+            elif not animated_opacity:
+                fade_filters.append(
+                    f"fade=t=out:st={max(start, start + clip_duration - fade_out):.8f}:"
+                    f"d={fade_out:.8f}:alpha=1"
+                )
+        fade_chain = "".join(f",{value}" for value in fade_filters)
+        color_chain = "".join(f",{value}" for value in color_filters)
+        static_opacity_filter = (
+            "" if animated_opacity else f",colorchannelmixer=aa={opacity:.8f}"
+        )
+        if animated_opacity:
+            spatial_chain = f"{prefix},fps={fps:.8f},{resize},format=rgba"
+            if fit == "contain":
+                spatial_chain += (
+                    f",pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black@0"
+                )
+            spatial_chain += f"{scale_filter}{rotation_filter}"
+        else:
+            spatial_chain = (
+                f"{prefix},fps={fps:.8f},{resize}{scale_filter}{rotation_filter},format=rgba"
+            )
+        if color_filters:
+            pre_color_label = f"editor_pre_color_{visual_index}"
+            color_input_label = f"editor_color_input_{visual_index}"
+            alpha_input_label = f"editor_color_alpha_input_{visual_index}"
+            color_alpha_label = f"editor_color_alpha_{visual_index}"
+            colored_label = f"editor_colored_{visual_index}"
+            filters.append(
+                f"{spatial_chain},split=2"
+                f"[{color_input_label}][{alpha_input_label}]"
+            )
+            filters.append(
+                f"[{alpha_input_label}]format=yuva444p,alphaextract[{color_alpha_label}]"
+            )
+            filters.append(
+                f"[{color_input_label}]{color_chain[1:]},format=rgba[{colored_label}]"
+            )
+            filters.append(
+                f"[{colored_label}][{color_alpha_label}]alphamerge[{pre_color_label}]"
+            )
+            filters.append(
+                f"[{pre_color_label}]{fade_chain[1:] if fade_chain else 'null'}"
+                f"{static_opacity_filter}"
+                f"[{raw_clip_label}]"
+            )
+        else:
+            filters.append(
+                f"{spatial_chain}{fade_chain}{static_opacity_filter}"
+                f"[{raw_clip_label}]"
+            )
+        if animated_opacity:
+            opacity_expression = _editor_item_animation_expression(
+                item, "opacity", opacity, time_variable="T", clip_start=start
+            )
+            alpha_ramp = _editor_alpha_ramp_expression(
+                time_variable="T",
+                clip_start=start,
+                clip_duration=clip_duration,
+                fade_in=(
+                    render_fade_in
+                    if transition_in != "fade_black" else 0.0
+                ),
+                fade_out=fade_out if transition_out != "fade_black" else 0.0,
+            )
+            alpha_expression = f"({opacity_expression})*({alpha_ramp})"
+            mask_label = f"editor_opacity_mask_{visual_index}"
+            filters.append(
+                f"color=c=white:s=2x2:r={fps:.8f}:d={clip_duration:.8f},"
+                f"setpts=PTS+{start:.8f}/TB,format=gray,"
+                f"geq=lum='255*({alpha_expression})',"
+                f"scale={target_w}:{target_h}{scale_filter}{rotation_filter}"
+                f"[{mask_label}]"
+            )
+            filters.append(
+                f"[{raw_clip_label}]split=2"
+                f"[editor_opacity_color_{visual_index}]"
+                f"[editor_opacity_source_alpha_{visual_index}]"
+            )
+            filters.append(
+                f"[editor_opacity_source_alpha_{visual_index}]"
+                f"format=yuva444p,alphaextract,format=gray"
+                f"[editor_opacity_alpha_{visual_index}]"
+            )
+            filters.append(
+                f"[editor_opacity_alpha_{visual_index}][{mask_label}]"
+                f"blend=all_mode=multiply:shortest=1"
+                f"[editor_opacity_combined_alpha_{visual_index}]"
+            )
+            filters.append(
+                f"[editor_opacity_color_{visual_index}]"
+                f"[editor_opacity_combined_alpha_{visual_index}]"
+                f"alphamerge[{clip_label}]"
+            )
+        x_expression = _editor_item_animation_expression(
+            item, "x", x, time_variable="t", clip_start=start
+        )
+        y_expression = _editor_item_animation_expression(
+            item, "y", y, time_variable="t", clip_start=start
+        )
+        overlay_eval = (
+            ":eval=frame"
+            if keyframes.get("x") or keyframes.get("y") or animated_scale
+            else ""
+        )
         filters.append(
-            f"[{base_label}][{clip_label}]overlay=x='{x_expression}':y='{y_expression}':"
-            f"eof_action=pass:shortest=0:enable='between(t,{start:.8f},{start + clip_duration:.8f})'"
+            f"[{base_label}][{clip_label}]overlay="
+            f"x='(main_w-overlay_w)/2+({x_expression})':"
+            f"y='(main_h-overlay_h)/2+({y_expression})'"
+            f"{overlay_eval}:eof_action=pass:shortest=0:"
+            f"enable='between(t,{start:.8f},{start + clip_duration:.8f})'"
             f"[{output_label}]"
         )
         base_label = output_label
@@ -1353,21 +2637,48 @@ def compile_editor_render(
         end = start + float(item["duration"])
         x = _finite_number(style.get("x"), 0.0)
         y = _finite_number(style.get("y"), 0.0)
+        x_expression_value = _editor_item_animation_expression(
+            item, "x", x, time_variable="t", clip_start=start
+        )
+        y_expression_value = _editor_item_animation_expression(
+            item, "y", y, time_variable="t", clip_start=start
+        )
         background_color = str(style.get("background_color") or "#000000")
         if not _HEX_COLOR_RE.fullmatch(background_color):
             background_color = "#000000"
         background_opacity = _bounded_number(style.get("background_opacity"), 0.32, 0.0, 1.0)
         text_align = str(style.get("text_align") or "center")
         if text_align == "left":
-            x_expression = f"w/2+({x:.8f})"
+            x_expression = f"w/2+({x_expression_value})"
         elif text_align == "right":
-            x_expression = f"w/2-text_w+({x:.8f})"
+            x_expression = f"w/2-text_w+({x_expression_value})"
         else:
-            x_expression = f"(w-text_w)/2+({x:.8f})"
+            x_expression = f"(w-text_w)/2+({x_expression_value})"
         fade_in = min(float(item["duration"]), _bounded_number(item.get("fade_in"), 0.0, 0.0, float(item["duration"])))
         fade_out = min(float(item["duration"]), _bounded_number(item.get("fade_out"), 0.0, 0.0, float(item["duration"])))
         text_opacity = _bounded_number(item.get("opacity"), 1.0, 0.0, 1.0)
-        alpha_parts: list[str] = [f"{text_opacity:.8f}"]
+        text_scale_expression = _editor_item_animation_expression(
+            item,
+            "scale",
+            _bounded_number(
+                (item.get("transform") or {}).get("scale")
+                if isinstance(item.get("transform"), Mapping) else None,
+                1.0,
+                0.05,
+                4.0,
+            ),
+            time_variable="t",
+            clip_start=start,
+        )
+        font_size_expression = f"'{font_size}*({text_scale_expression})'"
+        opacity_expression = _editor_item_animation_expression(
+            item,
+            "opacity",
+            text_opacity,
+            time_variable="t",
+            clip_start=start,
+        )
+        alpha_parts: list[str] = [opacity_expression]
         if fade_in > 1e-6:
             alpha_parts.append(f"if(lt(t,{start + fade_in:.8f}),(t-{start:.8f})/{fade_in:.8f},1)")
         if fade_out > 1e-6:
@@ -1376,22 +2687,27 @@ def compile_editor_render(
         output_label = f"editor_text_{text_index}"
         font_option = _drawtext_font_option(style.get("font_family"))
         filters.append(
-            f"[{base_label}]drawtext=text='{text}'{font_option}:fontcolor={color}:fontsize={font_size}:"
-            f"x='{x_expression}':y='(h-text_h)/2+({y:.8f})':alpha='{alpha_expression}':"
+            f"[{base_label}]drawtext=text='{text}'{font_option}:fontcolor={color}:fontsize={font_size_expression}:"
+            f"x='{x_expression}':y='(h-text_h)/2+({y_expression_value})':alpha='{alpha_expression}':"
             f"box={1 if background_opacity > 1e-6 else 0}:"
             f"boxcolor={background_color}@{background_opacity:.8f}:boxborderw=12:"
             f"enable='between(t,{start:.8f},{end:.8f})'"
             f"[{output_label}]"
         )
         base_label = output_label
+    frame_rate_filter = (
+        f"fps={export_fps:.8f},"
+        if abs(export_fps - fps) > 1e-9
+        else ""
+    )
     if export_width != width or export_height != height:
         filters.append(
             f"[{base_label}]scale={export_width}:{export_height}:flags=lanczos,"
-            f"fps={export_fps:.8f},format=yuv420p[editor_video]"
+            f"{frame_rate_filter}format=yuv420p[editor_video]"
         )
     else:
         filters.append(
-            f"[{base_label}]fps={export_fps:.8f},format=yuv420p[editor_video]"
+            f"[{base_label}]{frame_rate_filter}format=yuv420p[editor_video]"
         )
 
     audio_labels: list[str] = []
@@ -1424,7 +2740,18 @@ def compile_editor_render(
                 chain.append(
                     f"afade=t=out:st={max(0.0, clip_duration - fade_out):.8f}:d={fade_out:.8f}"
                 )
-            chain.append(f"volume={volume * track_volume:.8f}")
+            if _editor_item_keyframes(item).get("volume"):
+                volume_expression = _editor_item_animation_expression(
+                    item,
+                    "volume",
+                    volume,
+                    time_variable="t",
+                )
+                chain.append(
+                    f"volume='{volume_expression}*{track_volume:.8f}':eval=frame"
+                )
+            else:
+                chain.append(f"volume={volume * track_volume:.8f}")
             delay_ms = max(0, int(round(start * 1000)))
             if delay_ms:
                 chain.append(f"adelay={delay_ms}:all=1")
@@ -1482,6 +2809,26 @@ def _safe_output_stem(name: str) -> str:
     stem = re.sub(r"[^A-Za-z0-9 _-]+", "", requested).strip()
     stem = re.sub(r"\s+", " ", stem)[:64]
     return stem or "Editor export"
+
+
+def _is_hardware_encoder_initialization_failure(stderr: str) -> bool:
+    """Identify device/encoder startup failures safe to retry in software."""
+    message = str(stderr or "").lower()
+    markers = (
+        "no nvenc capable devices found",
+        "cannot load libcuda",
+        "cannot initialize cuda",
+        "cannot init cuda",
+        "error initializing an mfx session",
+        "error initializing an internal mfx session",
+        "no device available",
+        "failed to create device",
+        "failed to initialize hardware device",
+        "device setup failed",
+        "cannot create compression session",
+        "failed to create compression session",
+    )
+    return any(marker in message for marker in markers)
 
 
 def render_editor_project(
@@ -1548,6 +2895,37 @@ def render_editor_project(
                 startupinfo=startupinfo,
             )
             assert process.stdout is not None
+            assert process.stderr is not None
+            progress_lines: queue.Queue[str | None] = queue.Queue()
+            reader_stop = threading.Event()
+            stderr_tail = bytearray()
+            stderr_tail_lock = threading.Lock()
+
+            def drain_progress() -> None:
+                try:
+                    for line in process.stdout:
+                        if reader_stop.is_set():
+                            break
+                        progress_lines.put(line)
+                finally:
+                    progress_lines.put(None)
+
+            def drain_stderr() -> None:
+                while not reader_stop.is_set():
+                    chunk = process.stderr.read(8192)
+                    if not chunk:
+                        return
+                    encoded = chunk.encode("utf-8", errors="replace")
+                    with stderr_tail_lock:
+                        stderr_tail.extend(encoded)
+                        if len(stderr_tail) > 64 * 1024:
+                            del stderr_tail[:-64 * 1024]
+
+            progress_reader = threading.Thread(target=drain_progress, daemon=True)
+            stderr_reader = threading.Thread(target=drain_stderr, daemon=True)
+            progress_reader.start()
+            stderr_reader.start()
+            saw_progress_eof = False
             while True:
                 if cancel_check and cancel_check():
                     process.terminate()
@@ -1555,8 +2933,17 @@ def render_editor_project(
                         process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         process.kill()
+                    reader_stop.set()
+                    progress_reader.join(timeout=1)
+                    stderr_reader.join(timeout=1)
                     raise EditorRenderCancelled("Editor export cancelled")
-                line = process.stdout.readline()
+                try:
+                    line = progress_lines.get(timeout=0.1)
+                except queue.Empty:
+                    line = ""
+                if line is None:
+                    saw_progress_eof = True
+                    line = ""
                 if line:
                     key, _, value = line.strip().partition("=")
                     if key in {"out_time_us", "out_time_ms"}:
@@ -1567,20 +2954,28 @@ def render_editor_project(
                                 progress_callback(percent, phase)
                         except (TypeError, ValueError, ZeroDivisionError):
                             pass
-                if process.poll() is not None:
+                if process.poll() is not None and saw_progress_eof and progress_lines.empty():
                     break
-                if not line:
-                    time.sleep(0.05)
-            return process.stderr.read() if process.stderr is not None else ""
+            process.wait()
+            reader_stop.set()
+            progress_reader.join(timeout=1)
+            stderr_reader.join(timeout=1)
+            with stderr_tail_lock:
+                return stderr_tail.decode("utf-8", errors="replace")
 
         stderr = _execute(command, "Rendering timeline")
         selected_encoder, _codec, _args = resolve_editor_export_encoder(
             project.get("export") or {}, capabilities
         )
         failed = process.returncode != 0 or not os.path.isfile(temporary_output)
-        if failed and selected_encoder != "software" and str(
+        if (
+            failed
+            and selected_encoder != "software"
+            and _is_hardware_encoder_initialization_failure(stderr)
+            and str(
             (project.get("export") or {}).get("encoder") or "auto"
-        ) == "auto":
+            ) == "auto"
+        ):
             if os.path.isfile(temporary_output):
                 os.remove(temporary_output)
             if progress_callback:

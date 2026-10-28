@@ -1,7 +1,7 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Maximize2, Pause, Play, RotateCcw, SkipBack, SkipForward } from 'lucide-react'
 import type { EditorAsset, EditorTimelineItem, EditorTrack, EditorTransform } from '../types'
-import { useIsMobile } from '../lib/useIsMobile'
+import { useIsMobileSidecar } from '../lib/useIsMobile'
 import {
   activeEditorItems,
   editorProjectDuration,
@@ -12,8 +12,13 @@ import {
 import { DEFAULT_EDITOR_FONT, editorFontStack } from './editorFonts'
 import { useEditorMediaPreview } from './editorMediaPreview'
 import { useEditorStore } from './useEditorStore'
+import { evaluateEditorItem, upsertEditorKeyframe } from './editorAnimation'
+import { editorColorFilter, editorColorMatrix } from './editorColor'
+import { releaseEditorMediaAudio, resumeEditorAudio, setEditorMediaGain } from './editorAudioGraph'
+import { EditorAudioMeter } from './EditorAudioMeter'
 
 type CanvasInteractionMode = 'move' | 'resize'
+type PreviewQuality = 'auto' | 'original' | 'proxy' | 'mobile'
 
 interface CanvasInteraction {
   itemId: string
@@ -124,7 +129,7 @@ function nearestGuideOffset(
 function clipEnvelope(item: EditorTimelineItem, playhead: number): number {
   const elapsed = Math.max(0, playhead - item.start)
   const remaining = Math.max(0, item.start + item.duration - playhead)
-  const fadeIn = Math.max(0, Math.min(item.duration, item.fade_in || 0))
+  const fadeIn = Math.max(0, Math.min(item.duration, item.transition_overlap || item.fade_in || 0))
   const fadeOut = Math.max(0, Math.min(item.duration, item.fade_out || 0))
   const fadeInLevel = fadeIn > 0 ? Math.min(1, elapsed / fadeIn) : 1
   const fadeOutLevel = fadeOut > 0 ? Math.min(1, remaining / fadeOut) : 1
@@ -171,7 +176,7 @@ function syncMediaElement(
     element.currentTime = wantedTime
   }
   element.playbackRate = Math.max(0.1, Math.min(8, item.speed))
-  element.volume = Math.max(0, Math.min(1, volume))
+  setEditorMediaGain(element, volume)
   if (playing) {
     if (element.paused) void element.play().catch(() => {})
   } else if (!element.paused) {
@@ -221,6 +226,7 @@ function PreviewVisual({
   locked,
   workspace,
   mobilePlayback,
+  previewQuality,
   masterClock,
   active,
   timelineTimeRef,
@@ -238,6 +244,7 @@ function PreviewVisual({
   locked: boolean
   workspace: string
   mobilePlayback: boolean
+  previewQuality: PreviewQuality
   masterClock: boolean
   active: boolean
   timelineTimeRef: { current: number }
@@ -250,14 +257,21 @@ function PreviewVisual({
   ) => void
 }) {
   const videoRef = useRef<HTMLVideoElement>(null)
+  useEffect(() => {
+    const element = videoRef.current
+    return () => { if (element) releaseEditorMediaAudio(element) }
+  }, [asset.type, asset.missing])
+  const colorFilterId = `editor-color-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`
+  const mediaFilter = item.color ? editorColorFilter(item.color, colorFilterId) : undefined
   const mediaPreview = useEditorMediaPreview(
     asset.type === 'video' ? asset : undefined,
     workspace,
-    true,
-    mobilePlayback ? 'mobile' : 'auto',
+    previewQuality !== 'original',
+    previewQuality === 'mobile' || (mobilePlayback && previewQuality === 'auto') ? 'mobile' : 'auto',
   )
   const waitingForMobileProxy = (
-    mobilePlayback
+    (mobilePlayback || previewQuality === 'proxy' || previewQuality === 'mobile')
+    && previewQuality !== 'original'
     && asset.type === 'video'
     && mediaPreview.loading
   )
@@ -265,7 +279,7 @@ function PreviewVisual({
   // the lightweight proxy locks Safari onto the large source for the rest of
   // that clip. Wait briefly for the proxy instead; fall back to the original
   // only when preview preparation actually fails or returns no proxy.
-  const resolvedSourceUrl = mediaPreview.data?.proxy_url
+  const resolvedSourceUrl = previewQuality === 'original' ? asset.url : mediaPreview.data?.proxy_url
     || (waitingForMobileProxy ? '' : asset.url)
   const [sourceState, setSourceState] = useState({ assetId: asset.id, url: resolvedSourceUrl })
   const sourceAssetChanged = sourceState.assetId !== asset.id
@@ -390,8 +404,11 @@ function PreviewVisual({
       }}
       onPointerDown={event => onTransformStart(event, item, track, 'move')}
     >
+      {item.color && <svg className="pointer-events-none absolute h-0 w-0" aria-hidden="true"><defs>
+        <filter id={colorFilterId} colorInterpolationFilters="sRGB"><feColorMatrix type="matrix" values={editorColorMatrix(item.color)} /></filter>
+      </defs></svg>}
       {asset.type === 'image' ? (
-        <img src={asset.url} alt="" draggable={false} className="pointer-events-none h-full w-full select-none" style={{ objectFit: item.fit }} />
+        <img src={asset.url} alt="" draggable={false} className="pointer-events-none h-full w-full select-none" style={{ objectFit: item.fit, filter: mediaFilter }} />
       ) : asset.missing ? (
         <div className="grid h-full w-full place-items-center bg-red-950/70 text-[10px] font-semibold uppercase tracking-wider text-red-100">Media offline</div>
       ) : (
@@ -400,7 +417,7 @@ function PreviewVisual({
             ref={videoRef}
             src={sourceUrl || undefined}
             className="pointer-events-none h-full w-full"
-            style={{ objectFit: item.fit }}
+            style={{ objectFit: item.fit, filter: mediaFilter }}
             playsInline
             preload="auto"
             data-editor-media-active={active ? 'true' : 'false'}
@@ -468,6 +485,10 @@ function PreviewAudio({
   timelineTimeRef: { current: number }
 }) {
   const ref = useRef<HTMLAudioElement>(null)
+  useEffect(() => {
+    const element = ref.current
+    return () => { if (element) releaseEditorMediaAudio(element) }
+  }, [])
   const wasActiveRef = useRef(active)
   const promotionSyncPendingRef = useRef(false)
   const syncActiveAudio = (forceSeek = false) => {
@@ -531,7 +552,13 @@ function PreviewAudio({
 }
 
 export function EditorPreview() {
-  const isMobile = useIsMobile()
+  const isMobile = useIsMobileSidecar()
+  const [previewQuality, setPreviewQuality] = useState<PreviewQuality>(() => {
+    try {
+      const value = localStorage.getItem('maestro-editor-preview-quality')
+      return ['auto', 'original', 'proxy', 'mobile'].includes(value || '') ? value as PreviewQuality : 'auto'
+    } catch { return 'auto' }
+  })
   const project = useEditorStore(state => state.project)
   const playhead = useEditorStore(state => state.playhead)
   const playing = useEditorStore(state => state.playing)
@@ -554,11 +581,11 @@ export function EditorPreview() {
   const projectCanvasHeight = project?.canvas.height || 1
   const duration = editorProjectDuration(project)
   const active = useMemo(
-    () => project ? activeEditorItems(project, playhead) : [],
+    () => project ? activeEditorItems(project, playhead).map(entry => ({ ...entry, item: evaluateEditorItem(entry.item, playhead) })) : [],
     [playhead, project],
   )
   const preparedMedia = useMemo(
-    () => project ? preparedEditorMediaItems(project, playhead) : [],
+    () => project ? preparedEditorMediaItems(project, playhead).map(entry => ({ ...entry, item: evaluateEditorItem(entry.item, playhead) })) : [],
     [playhead, project],
   )
   const activeAudio = active.filter(entry => entry.track.type === 'audio')
@@ -588,6 +615,17 @@ export function EditorPreview() {
       .filter(value => Number.isFinite(value) && value > 0)
       .map(value => Math.round(value * 1000) / 1000)
     return [...new Set(values)].sort((left, right) => left - right)
+  }, [project])
+  const animationWindows = useMemo(() => {
+    const ranges = (project?.tracks || []).filter(track => !track.muted)
+      .flatMap(track => track.items).filter(item => !item.disabled && Object.values(item.keyframes || {}).some(frames => frames && frames.length > 1))
+      .map(item => ({ start: item.start, end: item.start + item.duration })).sort((a, b) => a.start - b.start)
+    return ranges.reduce<Array<{ start: number; end: number }>>((merged, range) => {
+      const previous = merged.at(-1)
+      if (previous && range.start <= previous.end) previous.end = Math.max(previous.end, range.end)
+      else merged.push({ ...range })
+      return merged
+    }, [])
   }, [project])
 
   useEffect(() => {
@@ -633,9 +671,9 @@ export function EditorPreview() {
     // at 30 Hz made every Editor panel re-render 30 times per second on iOS.
     // Ten UI updates per second keeps controls responsive while Safari's media
     // decoder continues smooth native playback between updates.
-    const publishInterval = 1000 / (isMobile ? 10 : 30)
+    const ordinaryPublishInterval = 1000 / (isMobile ? 10 : 30)
     let latestPlayhead = originalPlayhead
-    let lastPublishedAt = startedAt - publishInterval
+    let lastPublishedAt = startedAt - ordinaryPublishInterval
     let lastTickAt = startedAt
     let nextBoundaryIndex = playbackBoundaries.findIndex(
       boundary => boundary > originalPlayhead + 0.001,
@@ -683,6 +721,14 @@ export function EditorPreview() {
       // clip boundaries are published on the audio-clock frame that crosses
       // them. This promotes the warmed deck immediately instead of up to
       // 100 ms later on mobile.
+      let low = 0, high = animationWindows.length - 1, animated = false
+      while (low <= high) {
+        const middle = Math.floor((low + high) / 2), range = animationWindows[middle]
+        if (next < range.start) high = middle - 1
+        else if (next >= range.end) low = middle + 1
+        else { animated = true; break }
+      }
+      const publishInterval = animated ? 1000 / 60 : ordinaryPublishInterval
       if (crossedBoundary || now - lastPublishedAt >= publishInterval) {
         setPlayhead(next)
         lastPublishedAt = now
@@ -694,7 +740,7 @@ export function EditorPreview() {
       cancelAnimationFrame(frame)
       if (latestPlayhead < duration) setPlayhead(latestPlayhead)
     }
-  }, [duration, isMobile, playbackBoundaries, playing, project, setPlayhead, setPlaying])
+  }, [animationWindows, duration, isMobile, playbackBoundaries, playing, project, setPlayhead, setPlaying])
 
   if (!project) return <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-text-muted">Opening Editor…</div>
 
@@ -706,6 +752,7 @@ export function EditorPreview() {
   }
   const frameDuration = 1 / project.canvas.fps
   const startPlaybackFromGesture = () => {
+    resumeEditorAudio(canvasRef.current?.querySelectorAll<HTMLMediaElement>('video, audio') || [])
     // iOS Safari requires unmuted media playback to begin inside the original
     // tap handler. Prime both alternating decks while that gesture is still
     // active. The standby deck is muted, decoded, paused, and rewound; when the
@@ -982,6 +1029,18 @@ export function EditorPreview() {
     })
   }
 
+  const commitCanvasTransform = (itemId: string, transform: EditorTransform) => {
+    const authored = project.tracks.flatMap(track => track.items).find(item => item.id === itemId)
+    if (!authored) return
+    let next = authored
+    const staticTransform = { ...transform }
+    for (const property of ['x', 'y', 'scale', 'rotation'] as const) {
+      if (!authored.keyframes?.[property]?.length) continue
+      next = upsertEditorKeyframe(next, property, playheadRef.current - authored.start, transform[property])
+      staticTransform[property] = authored.transform[property]
+    }
+    updateItem(itemId, { transform: staticTransform, keyframes: next.keyframes })
+  }
   const finishCanvasTransform = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.pointerType === 'touch') canvasTouchPointersRef.current.delete(event.pointerId)
     if (canvasPinch) {
@@ -990,7 +1049,7 @@ export function EditorPreview() {
         const changed = (Object.keys(startTransform) as Array<keyof EditorTransform>).some(key => (
           Math.abs(startTransform[key] - previewTransform[key]) > 1e-4
         ))
-        if (changed) updateItem(canvasPinch.itemId, { transform: previewTransform })
+        if (changed) commitCanvasTransform(canvasPinch.itemId, previewTransform)
         setCanvasPinch(null)
         setCanvasGuides({ x: [], y: [] })
       }
@@ -1001,7 +1060,7 @@ export function EditorPreview() {
     const changed = (Object.keys(startTransform) as Array<keyof EditorTransform>).some(key => (
       Math.abs(startTransform[key] - previewTransform[key]) > 1e-4
     ))
-    if (changed) updateItem(canvasInteraction.itemId, { transform: previewTransform })
+    if (changed) commitCanvasTransform(canvasInteraction.itemId, previewTransform)
     setCanvasInteraction(null)
     setCanvasGuides({ x: [], y: [] })
     canvasRef.current?.releasePointerCapture?.(event.pointerId)
@@ -1051,6 +1110,7 @@ export function EditorPreview() {
                 locked={track.locked}
                 workspace={project.workspace}
                 mobilePlayback={isMobile}
+                previewQuality={previewQuality}
                 masterClock={isMobile && item.id === videoMasterItemId}
                 active={itemActive}
                 timelineTimeRef={playheadRef}
@@ -1083,10 +1143,10 @@ export function EditorPreview() {
                 style={{
                   color: style.color,
                   fontFamily: editorFontStack(style.font_family),
-                  fontSize: `clamp(12px, ${Math.max(1.1, style.font_size / project.canvas.height * 75)}vw, 92px)`,
+                  fontSize: `${style.font_size / project.canvas.height * previewCanvasSize.height}px`,
                   left: `calc(50% + ${style.x / project.canvas.width * 100}%)`,
                   top: `calc(50% + ${style.y / project.canvas.height * 100}%)`,
-                  transform: `translate(${translateX}%, -50%)`,
+                  transform: `translate(${translateX}%, -50%) scale(${item.transform.scale}) rotate(${item.transform.rotation}deg)`,
                   textAlign,
                   background: hexToRgba(style.background_color || '#000000', style.background_opacity ?? 0.32),
                   opacity: item.opacity * clipEnvelope(item, playhead),
@@ -1139,6 +1199,17 @@ export function EditorPreview() {
       </div>
 
       <div className="flex h-11 shrink-0 items-center gap-2 border-t border-border bg-bg-secondary px-3 md:px-4">
+        <EditorAudioMeter playing={playing} />
+        <select aria-label="Preview quality" title="Preview quality; exports always use the original sources"
+          value={previewQuality} onChange={event => {
+            const quality = event.target.value as PreviewQuality
+            setPlaying(false)
+            setPreviewQuality(quality)
+            try { localStorage.setItem('maestro-editor-preview-quality', quality) } catch { /* Session-only setting. */ }
+          }} className="max-w-24 rounded-md border border-border bg-bg-tertiary p-1 text-[10px] text-text-secondary">
+          <option value="auto">Auto</option><option value="original">Original</option>
+          <option value="proxy">720p proxy</option><option value="mobile">480p proxy</option>
+        </select>
         <button type="button" onClick={() => seek(0)} className="rounded p-1.5 text-text-muted hover:bg-bg-hover hover:text-text-primary" title="Go to start">
           <SkipBack size={14} />
         </button>
