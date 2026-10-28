@@ -30,13 +30,20 @@ export const TITLE_EFFECTS = {
   electric: 'Electric arcs trace the exact title. Hold the completed readable lettering, then let the arcs flicker out and disappear.',
   hologram: 'A holographic scan reveals the exact title. Stabilize the complete wording for readability, then scan it away and clear the frame.',
   paint: 'Paint splashes assemble into the exact title. Hold the complete readable lettering, then let it break into droplets and disappear.',
+  kinetic: 'Animate the exact title with bold changes of scale, rotation, compression and word placement. Let the lettering itself carry the motion. Settle into a complete readable composition, hold, then clear the frame.',
+  collision: 'Bring the title words in from opposing sides so they collide and settle into the exact readable title. Hold the complete wording, then scatter the letters and clear the frame.',
+  rebuild: 'Break the exact title into letter fragments, then regroup them into a crisp, correctly spelled composition. Hold it clearly long enough to read, then let the lettering disappear.',
+  offset: 'Reveal the exact title, briefly offset and overlap copies of its lettering, then bring every copy back into one clean readable composition. Hold the complete title, then clear the frame.',
 } as const
 export const TITLE_EFFECT_LABELS: Record<keyof typeof TITLE_EFFECTS, string> = {
   dust: 'Dust dissolve', dissolve: 'Soft reveal and dissolve', neon: 'Neon trace', impact: 'Impact and shatter',
   smoke: 'Smoke reveal', typewriter: 'Typewriter', brush: 'Brush lettering', glitch: 'Digital glitch',
   liquid: 'Liquid metal', fire: 'Fire and sparks', frost: 'Frost and melt', paper: 'Paper unfolding',
   sand: 'Sand assembly', electric: 'Electric trace', hologram: 'Hologram scan', paint: 'Paint splash',
+  kinetic: 'Kinetic typography', collision: 'Word collision', rebuild: 'Deconstruct and rebuild', offset: 'Offset and overlap',
 }
+
+export type TitleBackground = 'chroma' | 'black'
 
 export interface AnimatedTitleSettings {
   text: string
@@ -47,6 +54,16 @@ export interface AnimatedTitleSettings {
   aspect: 'project' | '16:9' | '9:16' | '1:1'
   resolution: '480p' | '720p'
   keepAudio: boolean
+  /** Missing on older saved title intents, which always used green keying. */
+  background?: TitleBackground
+}
+
+/** One choice governs the boundary images, prompt and inserted clip's keying. */
+export function titleBackground(settings: { background?: TitleBackground }) {
+  const mode = settings.background === undefined ? 'chroma' : settings.background
+  if (mode === 'chroma') return { mode, color: '#00FF00', fileLabel: 'green', chromaKey: true } as const
+  if (mode === 'black') return { mode, color: '#000000', fileLabel: 'black', chromaKey: false } as const
+  throw new Error('Choose a supported title background.')
 }
 
 export function titleDimensions(settings: AnimatedTitleSettings, canvas: { width: number; height: number }) {
@@ -66,6 +83,7 @@ export function titleFrames(seconds: number): number {
 }
 
 export function animatedTitlePrompt(settings: AnimatedTitleSettings): string {
+  const background = titleBackground(settings)
   const text = settings.text.trim()
   if (!text || text.length > 160) throw new Error('Enter a title of 1–160 characters.')
   if (settings.effect !== 'custom' && !Object.hasOwn(TITLE_EFFECTS, settings.effect)) throw new Error('Choose an animation effect.')
@@ -74,11 +92,15 @@ export function animatedTitlePrompt(settings: AnimatedTitleSettings): string {
   if (!animation) throw new Error('Describe the animation or choose an optional preset.')
   return [
     `Animated title VFX. The ONLY visible lettering is exactly ${JSON.stringify(text)}. Preserve every word, spelling and punctuation; no extra text.`,
-    settings.look.trim() ? `Lettering and visual style: ${settings.look.trim()}` : 'Bold, clear, readable lettering.',
+    settings.look.trim() ? `Lettering and visual style: ${settings.look.trim()}` : 'Clear, readable lettering.',
     animation,
-    'Start and end on the supplied perfectly uniform bright green background (#00FF00). Keep that same flat green backdrop throughout, with no texture, horizon, floor, shadows or lighting changes.',
+    background.chromaKey
+      ? 'Start and end on the supplied perfectly uniform bright green background (#00FF00). Keep that same flat green backdrop throughout, with no texture, horizon, floor, shadows or lighting changes.'
+      : 'Start and end on the supplied perfectly uniform pure black background (#000000). Keep that same flat black backdrop throughout, with no texture, horizon, floor, shadows or lighting changes. The black background is part of the finished title card.',
     'Only title lettering and its animation effect are visible. No people, faces, characters, bodies, scenery, logos or additional objects. Do not visualize people or objects mentioned by the title words.',
-    'Keep all lettering and particles within a generous safe margin, centered in the frame. Locked camera. No green lettering, green particles or green reflections. No speech or music.',
+    'The typography itself is the visual subject, not captions over a scene. Animate the lettering according to the requested motion; give each word or requested text group a clear readable moment. Include a complete-title hold unless the animation description explicitly requests otherwise. Repeated or rearranged text uses only the supplied title words.',
+    'Keep important readable lettering inside the frame with safe margins; follow any explicit request for intentional edge cropping. Use a locked camera unless the animation description requests a camera move. Preserve the requested lettering style and language. No speech or music.',
+    background.chromaKey ? 'No green lettering, green particles or green reflections; reserve bright green for the removable backdrop.' : '',
   ].filter(Boolean).join('\n\n')
 }
 
@@ -104,13 +126,14 @@ export function animatedTitleParams(settings: AnimatedTitleSettings, canvas: { w
 
 /** One undoable, idempotent insertion above all existing visual layers. */
 export function insertAnimatedTitle(project: EditorProject, asset: EditorAsset, options: {
-  id: string; at: number; text: string; keepAudio: boolean; itemId: string; trackId: string
+  id: string; at: number; text: string; keepAudio: boolean; itemId: string; trackId: string; background?: TitleBackground
 }) {
   const existingTrack = project.tracks.find(track => track.items.some(item => item.animated_title_id === options.id))
   const existing = existingTrack?.items.find(item => item.animated_title_id === options.id)
   if (existingTrack && existing) return { itemId: existing.id, trackId: existingTrack.id, start: existing.start }
   if (asset.type !== 'video' || !Number.isFinite(asset.duration) || asset.duration <= 0) throw new Error('The generated title has no usable video duration.')
   if (!Number.isFinite(options.at) || options.at < 0 || options.at + asset.duration > 86400) throw new Error('The title placement is outside the supported timeline.')
+  const background = titleBackground(options)
   const start = options.at
   project.assets[asset.id] = asset
   project.tracks.push({
@@ -121,7 +144,7 @@ export function insertAnimatedTitle(project: EditorProject, asset: EditorAsset, 
       animated_title_id: options.id, start, duration: asset.duration, source_in: 0,
       speed: 1, opacity: 1, volume: 1, muted: !options.keepAudio, fit: 'contain',
       transform: { x: 0, y: 0, scale: 1, rotation: 0 }, fade_in: 0, fade_out: 0,
-      keying: { ...DEFAULT_EDITOR_KEYING, enabled: true, similarity: .23, softness: .12, spill: .65 },
+      keying: { ...DEFAULT_EDITOR_KEYING, enabled: background.chromaKey, similarity: .23, softness: .12, spill: .65 },
     }],
   })
   return { itemId: options.itemId, trackId: options.trackId, start }

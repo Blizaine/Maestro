@@ -7,24 +7,42 @@ non-destructive clip setting: the original media file stays unchanged.
 ## Create an animated title
 
 Choose **Create animated title** in the Editor media panel. Enter the exact text,
-describe its lettering/style and animation, then choose duration, aspect and resolution,
-then press **Generate title**. H3 Fused 4-Step — Frames must already be installed.
-The animation description is blank by default. Write your own timing and motion,
-or expand **Use an animation preset (optional)** for 16 starting ideas, including
-dust, smoke, neon, typewriter, glitch, liquid metal, fire, frost and paper effects.
-Picking a preset fills the description; editing it replaces that preset's direction
-rather than adding a second, conflicting animation instruction.
-Maestro prepares perfectly uniform green start/end images at the requested output
-dimensions and writes the title prompt. It does not reuse Studio reference images,
-LoRAs, enhancement drafts or other creative settings. Global runtime/performance
-preferences still apply as they do to other generation jobs.
+describe its lettering/style and animation, choose a title background, then choose
+duration, aspect and resolution before pressing **Generate title**. H3 Fused 4-Step —
+Frames must already be installed. The animation description is blank by default.
+Write your own timing and motion, or expand **Use an animation preset (optional)**
+for starting ideas such as dust, smoke, neon, typewriter, glitch, liquid metal, fire,
+frost and paper effects. Picking a preset fills the description; edit it freely to
+make it your own.
 
-The result is inserted at the captured playhead position on a new **Title FX**
-video track above existing visual tracks. Green keying and starting edge/spill
-settings are enabled automatically. Generated clip audio is muted unless **Keep
-generated clip audio** was selected. Review spelling, timing and fine-particle
-edges: the instructions discourage people and scenery but cannot guarantee what
-the generative model draws. Changing baked-in lettering requires another render.
+**Chroma key (green)** is selected by default. Maestro prepares matching, flat green
+start/end images at the requested dimensions and automatically keys the generated
+green background, so the title shows over lower footage. Choose **Black background**
+for an opaque black field instead. That clip stays opaque and covers footage below
+across its full frame. Maestro does not reuse Studio reference images, LoRAs,
+enhancement drafts or other creative settings. Global runtime/performance preferences
+still apply as they do to other generation jobs.
+
+The result is inserted at the captured playhead position on a new **Title FX** video
+track above existing visual tracks. Green keying and starting edge/spill settings are
+enabled automatically for the chroma option; the black option remains opaque without
+automatic keying. Generated clip audio is muted unless **Keep generated clip audio**
+was selected. Review the exact wording, timing and edge quality: generated results
+can vary, and changing baked-in lettering requires another render.
+
+### Writing a readable kinetic title
+
+Use the exact wording you want, including punctuation, and describe the lettering,
+materials, colors and visual style in your own terms and language. Give the animation
+a clear sequence with concrete motion verbs—for example, reveal, trace, assemble,
+sweep or dissolve. Say when the complete title should hold still long enough to read,
+and how it should leave the frame. A simple reveal → readable hold → exit gives the
+model a clear timing arc while leaving room for your chosen style and effects.
+
+The [WeShop guide to AI text animation with MiniMax H3](https://www.weshop.ai/solutions/models/ai-text-animation-with-mini-max-h3-create-a-black-and-white-kinetic-typography-video)
+is one source of inspiration for typography-focused motion, exact copy, specific
+movement and readable holds. It is not a guarantee of the same results in Maestro;
+generations can vary.
 
 You can keep editing while generation runs. The title is tracked by its exact
 submission/job identity. A lost receipt is checked read-only, never automatically

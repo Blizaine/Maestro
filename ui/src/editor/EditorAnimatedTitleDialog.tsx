@@ -7,8 +7,8 @@ import { useEditorStore } from './useEditorStore'
 import { useEditorTitleStore } from './useEditorTitleStore'
 
 const DEFAULTS: AnimatedTitleSettings = {
-  text: '', look: 'Bold metallic 3D lettering', effect: 'custom', direction: '',
-  seconds: 5.2, aspect: 'project', resolution: '720p', keepAudio: false,
+  text: '', look: '', effect: 'custom', direction: '',
+  seconds: 5.2, aspect: 'project', resolution: '720p', keepAudio: false, background: 'chroma',
 }
 const FIELD = 'w-full rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-xs text-text-primary outline-none focus:border-accent-blue/60'
 
@@ -22,6 +22,7 @@ export function EditorAnimatedTitleDialog({ open, onClose }: { open: boolean; on
   const submit = useEditorTitleStore(state => state.submit)
   const [settings, setSettings] = useState<AnimatedTitleSettings>({ ...DEFAULTS })
   if (!open || !project) return null
+  const background = settings.background ?? 'chroma'
   const patch = (value: Partial<AnimatedTitleSettings>) => setSettings(current => ({ ...current, ...value }))
   const blocked = busy || Boolean(intent && !['inserted', 'failed'].includes(intent.status))
   let geometry = { width: 0, height: 0 }, prompt = '', duration = 0, validation = ''
@@ -35,10 +36,19 @@ export function EditorAnimatedTitleDialog({ open, onClose }: { open: boolean; on
         <button type="button" onClick={onClose} aria-label="Close animated title" className="rounded-lg p-2 text-text-secondary hover:bg-bg-hover"><X size={17} /></button>
       </header>
       <div className="space-y-4 overflow-y-auto p-4">
-        <p className="text-xs leading-relaxed text-text-secondary">H3 Fused 4-Step · Frames. Matching green start/end frames are prepared automatically. The result returns above your footage with chroma key enabled.</p>
+        <p className="text-xs leading-relaxed text-text-secondary">H3 Fused 4-Step · Frames. Matching {background === 'chroma' ? 'green' : 'black'} start/end frames are prepared automatically. {background === 'chroma' ? 'The result is inserted with chroma key enabled so footage below shows through.' : 'The result stays opaque, so its black background covers footage below.'}</p>
         <label className="block space-y-1.5 text-xs text-text-secondary">Title text
           <textarea aria-label="Animated title text" value={settings.text} maxLength={160} rows={2} disabled={busy}
             onChange={event => patch({ text: event.target.value })} placeholder="Superman vs Thanos" className={FIELD} />
+        </label>
+        <label className="block space-y-1.5 text-xs text-text-secondary">Title background
+          <select aria-label="Title background" value={background} disabled={busy}
+            onChange={event => patch({ background: event.target.value as NonNullable<AnimatedTitleSettings['background']> })} className={FIELD}>
+            <option value="chroma">Chroma key (green)</option><option value="black">Black background</option>
+          </select>
+          <span className="block text-[11px] leading-relaxed text-text-muted">{background === 'chroma'
+            ? 'Green is keyed automatically so the title and effects show over footage below.'
+            : 'Black stays opaque. The title clip covers footage below for its full frame.'}</span>
         </label>
         <label className="block space-y-1.5 text-xs text-text-secondary">Lettering and visual style
           <input aria-label="Title visual style" value={settings.look} maxLength={1200} disabled={busy}
@@ -83,7 +93,8 @@ export function EditorAnimatedTitleDialog({ open, onClose }: { open: boolean; on
           onChange={event => patch({ keepAudio: event.target.checked })} className="accent-[var(--color-accent-blue)]" />Keep generated clip audio</label>
         <div className="rounded-lg border border-border bg-bg-tertiary p-3 text-[11px] leading-relaxed text-text-muted">
           {geometry.width}×{geometry.height} · {duration ? `${duration.toFixed(2)}s at 24 fps` : 'Check duration'} · inserts at {playhead.toFixed(2)}s.<br />
-          No reference characters or Studio settings are reused. Review generated spelling and fine-particle edges; generative results can vary.
+          Background: {background === 'chroma' ? 'Chroma key (green), removed automatically.' : 'Black, opaque and covering footage below.'}<br />
+          No reference characters or Studio settings are reused. Review the wording, timing and edge quality; generated results can vary.
         </div>
         {prompt && <details className="text-xs text-text-secondary"><summary className="cursor-pointer">View prepared prompt</summary><pre className="mt-2 whitespace-pre-wrap rounded-lg bg-bg-tertiary p-3 text-[11px] leading-relaxed">{prompt}</pre></details>}
         {error && <p role="alert" className="rounded-lg border border-red-500/25 bg-red-500/5 p-3 text-xs text-red-400">{error}</p>}

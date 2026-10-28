@@ -178,20 +178,24 @@ function extractUploadedPng(request) {
   assert.ok(boundary, 'The title background must be uploaded as multipart form data.');
   const body = request.postDataBuffer();
   assert.ok(body, 'The PNG upload request must include a body.');
-  const dispositionAt = body.indexOf(Buffer.from('filename="title-green-'));
-  assert.notEqual(dispositionAt, -1, 'The upload uses a generated green-background PNG filename.');
+  const dispositionAt = body.indexOf(Buffer.from('filename="title-'));
+  assert.notEqual(dispositionAt, -1, 'The upload uses a generated title-background PNG filename.');
   const headerEnd = body.indexOf(Buffer.from('\r\n\r\n'), dispositionAt);
   assert.notEqual(headerEnd, -1, 'The multipart file part has headers.');
   const fileEnd = body.indexOf(Buffer.from(`\r\n--${boundary}`), headerEnd + 4);
   assert.notEqual(fileEnd, -1, 'The multipart file part is terminated.');
   const headers = body.subarray(dispositionAt, headerEnd).toString('utf8');
   assert.match(headers, /Content-Type:\s*image\/png/i);
+  const filename = /^filename="(title-(?:green|black)-\d+x\d+\.png)"/i.exec(headers)?.[1];
+  assert.ok(filename, `The upload filename identifies the selected green or black title background: ${headers}`);
   const bytes = body.subarray(headerEnd + 4, fileEnd);
   assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], 'The uploaded payload is a PNG.');
-  return bytes;
+  return {bytes, filename};
 }
 
-function decodeSolidGreenPng(bytes) {
+function decodeSolidBackgroundPng(bytes, expectedColor) {
+  const expected = expectedColor === '#00FF00' ? [0, 255, 0] : expectedColor === '#000000' ? [0, 0, 0] : null;
+  assert.ok(expected, `The uploaded title background is a supported solid color (${expectedColor}).`);
   const chunks = [];
   let offset = 8;
   let width = 0, height = 0, bitDepth = 0, colorType = 0;
@@ -233,9 +237,9 @@ function decodeSolidGreenPng(bytes) {
     }
   }
   for (let index = 0; index < pixels.length; index += 4) {
-    assert.equal(pixels[index], 0, `Pixel ${index / 4} has no red component.`);
-    assert.equal(pixels[index + 1], 255, `Pixel ${index / 4} is bright green.`);
-    assert.equal(pixels[index + 2], 0, `Pixel ${index / 4} has no blue component.`);
+    assert.equal(pixels[index], expected[0], `Pixel ${index / 4} has the expected red component for ${expectedColor}.`);
+    assert.equal(pixels[index + 1], expected[1], `Pixel ${index / 4} has the expected green component for ${expectedColor}.`);
+    assert.equal(pixels[index + 2], expected[2], `Pixel ${index / 4} has the expected blue component for ${expectedColor}.`);
     assert.equal(pixels[index + 3], 255, `Pixel ${index / 4} is fully opaque.`);
   }
   return {width, height};
@@ -325,13 +329,18 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
         return route.fulfill({json: clone(serverProject)});
       }
       if (pathname === '/api/v1/upload' && request.method() === 'POST') {
-        const pngBytes = extractUploadedPng(request);
-        const dimensions = decodeSolidGreenPng(pngBytes);
-        uploads.push({dimensions, filename: /filename="([^"]+)/.exec(request.postDataBuffer().toString('latin1'))?.[1]});
+        const {bytes, filename} = extractUploadedPng(request);
+        const fileLabel = /^title-(green|black)-\d+x\d+\.png$/i.exec(filename)?.[1];
+        assert.ok(fileLabel, `The title PNG filename has a supported background label (${filename}).`);
+        const color = fileLabel === 'green' ? '#00FF00' : '#000000';
+        const dimensions = decodeSolidBackgroundPng(bytes, color);
+        assert.equal(filename, `title-${fileLabel}-${dimensions.width}x${dimensions.height}.png`,
+          'The dimensions in the upload filename match the fully opaque PNG.');
+        uploads.push({dimensions, filename, color});
         return route.fulfill({json: {
-          filename: `title-green-${dimensions.width}x${dimensions.height}.png`,
-          path: `/uploads/title-green-${dimensions.width}x${dimensions.height}.png`,
-          url: `/uploads/title-green-${dimensions.width}x${dimensions.height}.png`,
+          filename,
+          path: `/uploads/${filename}`,
+          url: `/uploads/${filename}`,
         }});
       }
       if (pathname === '/api/v1/generate' && request.method() === 'POST') {
@@ -411,31 +420,36 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
       return route.fulfill({status: 204, body: ''});
     });
 
-    await page.goto(ORIGIN);
-    await page.addStyleTag({content: appCss()});
-    await page.addScriptTag({content: await bundleUi()});
+    const isolatedBundle = await bundleUi();
     const expectedTitleSettings = {
       text: 'Orion / Q4!', look: 'Chromed serif lettering with a blue edge light', effect: 'custom',
       direction: 'Reveal the exact spelling first; hold it clearly before it disappears.',
-      seconds: 6.8, aspect: 'project', resolution: '480p', keepAudio: false,
+      seconds: 6.8, aspect: 'project', resolution: '480p', keepAudio: false, background: 'chroma',
     };
-    await page.evaluate(({fixture, tracks, assets, workspace, titleSettings}) => {
-      window.editorStore.setState({
-        workspace, project: fixture, projects: [], library: [], dirty: false,
-        history: [], future: [], selectedItemId: null, selectedItemIds: [], selectedTrackId: null,
-        playhead: 5.375, playing: false, saving: false, error: null,
-      });
-      window.originalProjectParts = {tracks, assets};
-      window.originalProjectFixture = fixture;
-      window.expectedTitleSettings = titleSettings;
-      window.studioStore.setState(state => ({
-        generationMode: 'video',
-        params: {...state.params, prompt: 'STUDIO_PROMPT_MUST_NOT_LEAK', image_refs: ['/private/studio-ref.png'],
-          activated_loras: ['studio-private.safetensors'], custom_settings: {private_setting: 'studio-secret'},
-          spatial_upsampling: 'studio-upscale', film_grain_intensity: 0.9, negative_prompt: 'private negative prompt'},
-      }));
-      window.mount();
-    }, {fixture: sourceProject, tracks: sourceTracks, assets: sourceAssets, workspace: WORKSPACE, titleSettings: expectedTitleSettings});
+    const injectAndMount = async titleSettings => {
+      await page.addStyleTag({content: appCss()});
+      await page.evaluate(() => { document.documentElement.dataset.theme = 'graphite-studio'; });
+      await page.addScriptTag({content: isolatedBundle});
+      await page.evaluate(({fixture, tracks, assets, workspace, titleSettings: settings}) => {
+        window.editorStore.setState({
+          workspace, project: fixture, projects: [], library: [], dirty: false,
+          history: [], future: [], selectedItemId: null, selectedItemIds: [], selectedTrackId: null,
+          playhead: 5.375, playing: false, saving: false, error: null,
+        });
+        window.originalProjectParts = {tracks, assets};
+        window.originalProjectFixture = fixture;
+        window.expectedTitleSettings = settings;
+        window.studioStore.setState(state => ({
+          generationMode: 'video',
+          params: {...state.params, prompt: 'STUDIO_PROMPT_MUST_NOT_LEAK', image_refs: ['/private/studio-ref.png'],
+            activated_loras: ['studio-private.safetensors'], custom_settings: {private_setting: 'studio-secret'},
+            spatial_upsampling: 'studio-upscale', film_grain_intensity: 0.9, negative_prompt: 'private negative prompt'},
+        }));
+        window.mount();
+      }, {fixture: sourceProject, tracks: sourceTracks, assets: sourceAssets, workspace: WORKSPACE, titleSettings});
+    };
+    await page.goto(ORIGIN);
+    await injectAndMount(expectedTitleSettings);
 
     assert.deepEqual(await page.evaluate(() => Object.fromEntries([5, 5.2, 6.8, 14.5].map(seconds => [seconds, window.titleHelpers.titleFrames(seconds)]))), {
       5: 124, 5.2: 124, 6.8: 158, 14.5: 345,
@@ -448,6 +462,9 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
     await page.getByRole('button', {name: 'Open title generator'}).click();
     const dialog = page.getByRole('dialog', {name: 'Create animated title'});
     await dialog.waitFor();
+    assert.equal(await dialog.getByLabel('Title background').inputValue(), 'chroma', 'Chroma key is the default title background.');
+    assert.match(await dialog.innerText(), /Green is keyed automatically/);
+    assert.equal(await dialog.getByLabel('Title visual style').inputValue(), '', 'A new title does not impose metallic, 3D or another visual style.');
     await dialog.getByRole('textbox', {name: 'Animated title text'}).fill('  Orion / Q4!  ');
     await dialog.getByRole('textbox', {name: 'Title visual style'}).fill('Chromed serif lettering with a blue edge light');
     const animation = dialog.getByRole('textbox', {name: 'Title animation description'});
@@ -455,7 +472,7 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
     assert.equal(await dialog.getByLabel('Title animation preset').isVisible(), false, 'Preset dropdown is optional and collapsed initially.');
     await dialog.getByText('Use an animation preset (optional)', {exact: true}).click();
     const presets = dialog.getByLabel('Title animation preset');
-    assert.equal(await presets.locator('option').count(), 17, 'Sixteen presets plus the custom option are offered.');
+    assert.equal(await presets.locator('option').count(), 21, 'Twenty presets plus the custom option are offered.');
     await presets.selectOption('neon');
     assert.equal(await animation.inputValue(), await page.evaluate(() => window.titleHelpers.TITLE_EFFECTS.neon), 'A preset fills the editable description.');
     await animation.fill('Reveal the exact spelling first; hold it clearly before it disappears.');
@@ -477,16 +494,19 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
       const prompt = window.titleHelpers.animatedTitlePrompt({...settings, effect, direction: ''});
       return {effect, presentOnce: prompt.indexOf(direction) >= 0 && prompt.indexOf(direction) === prompt.lastIndexOf(direction)};
     }), expectedTitleSettings);
-    assert.equal(presetChecks.length, 16);
+    assert.equal(presetChecks.length, 20);
     assert.ok(presetChecks.every(result => result.presentOnce), 'All presets remain valid, with one animation direction each.');
     assert.equal(await page.evaluate(settings => {
       try { window.titleHelpers.animatedTitlePrompt({...settings, effect: 'custom', direction: ' '}); return false; }
       catch (error) { return error.message.includes('Describe the animation'); }
     }, expectedTitleSettings), true, 'Blank custom animation asks for direction instead of falling back to dust.');
 
-    const screenshotDirectory = path.join(root, '.codex-tmp', 'editor-title-custom-20261028');
+    const screenshotDirectory = process.env.MAESTRO_EDITOR_TITLE_SCREENSHOTS
+      ? path.resolve(process.env.MAESTRO_EDITOR_TITLE_SCREENSHOTS)
+      : path.join(root, '.codex-tmp', 'editor-title-backgrounds-20261028');
     fs.mkdirSync(screenshotDirectory, {recursive: true});
-    await page.screenshot({path: path.join(screenshotDirectory, 'title-dialog-desktop.png'), fullPage: true});
+    await page.getByLabel('Title background').selectOption('chroma');
+    await page.screenshot({path: path.join(screenshotDirectory, 'chroma-title-dialog-desktop.png'), fullPage: true});
     await page.setViewportSize({width: 390, height: 844});
     const mobileDialog = await dialog.evaluate(element => ({
       maxHeight: getComputedStyle(element).maxHeight,
@@ -504,8 +524,13 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
     } else {
       console.warn('Mobile title viewport assertion deferred: the current ui/dist CSS bundle predates the title dialog utilities.');
     }
-    await page.screenshot({path: path.join(screenshotDirectory, 'title-dialog-mobile.png'), fullPage: true});
+    await page.screenshot({path: path.join(screenshotDirectory, 'chroma-title-dialog-mobile.png'), fullPage: true});
+    await page.getByLabel('Title background').selectOption('black');
+    assert.match(await dialog.innerText(), /Black stays opaque\. The title clip covers footage below for its full frame\./);
+    await page.screenshot({path: path.join(screenshotDirectory, 'black-title-dialog-mobile.png'), fullPage: true});
     await page.setViewportSize({width: 1440, height: 960});
+    await page.screenshot({path: path.join(screenshotDirectory, 'black-title-dialog-desktop.png'), fullPage: true});
+    await page.getByLabel('Title background').selectOption('chroma');
 
     const uploadCountBefore = uploads.length;
     await dialog.getByRole('button', {name: 'Generate title'}).dblclick();
@@ -524,6 +549,8 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
     const dimensions = firstBody.resolution.split('x').map(Number);
     assert.deepEqual(uploads[0].dimensions, {width: dimensions[0], height: dimensions[1]},
       'The solid green start/end PNG uses the requested output dimensions.');
+    assert.equal(uploads[0].filename, `title-green-${dimensions[0]}x${dimensions[1]}.png`);
+    assert.equal(uploads[0].color, '#00FF00');
     assert.ok(Math.abs(dimensions[0] / dimensions[1] - 16 / 9) < 0.05,
       'The generated green background follows the selected project aspect ratio within the frame lattice.');
     assert.equal(firstBody.model_type, 'minimax_h3_fused_turbo');
@@ -534,7 +561,7 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
     assert.equal(firstBody.video_length, 158);
     assert.equal(firstBody.num_inference_steps, 4);
     assert.equal(firstBody.guidance_scale, 1);
-    assert.equal(firstBody.image_start, `/uploads/title-green-${dimensions[0]}x${dimensions[1]}.png`);
+    assert.equal(firstBody.image_start, `/uploads/${uploads[0].filename}`);
     assert.equal(firstBody.image_end, firstBody.image_start, 'The same flat green frame is used at the start and end.');
     assert.equal(firstBody.image_prompt_type, 'SE');
     assert.deepEqual(firstBody.image_refs, [], 'No Studio reference image is inherited.');
@@ -591,6 +618,14 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
       assert.deepEqual(inserted.projectAssets[assetId], originalAsset, `Original asset ${assetId} remains unchanged.`);
     }
     assert.equal(inserted.historyLength, 1, 'The new overlay is one undoable project edit.');
+
+    const firstGreenIntent = await page.evaluate(() => JSON.parse(localStorage.getItem('maestro-editor-animated-title-v1')));
+    assert.equal(firstGreenIntent.settings.background, 'chroma', 'The first title intent durably records its green keying mode.');
+    const invalidBackgroundCounts = {uploads: uploads.length, saves: projectSaves.length, generations: generationBodies.length};
+    await page.evaluate(settings => window.titleStore.getState().submit({...settings, background: 'magenta'}), expectedTitleSettings);
+    await waitUntil(page, () => window.titleStore.getState().error === 'Choose a supported title background.', 'invalid title background rejection');
+    assert.deepEqual({uploads: uploads.length, saves: projectSaves.length, generations: generationBodies.length}, invalidBackgroundCounts,
+      'An unsupported background is rejected before upload, project save, or generation submission.');
 
     const idempotent = await page.evaluate(() => {
       const intent = window.titleStore.getState().intent;
@@ -720,13 +755,165 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
       await page.evaluate(() => window.titleStore.getState().dismiss());
     }
 
+    // A ready legacy green intent is restored after a real browser reload.
+    // Older persisted records have no background field and retain green keying.
+    const legacyReadyIntent = clone(firstGreenIntent);
+    legacyReadyIntent.status = 'ready';
+    delete legacyReadyIntent.settings.background;
+    delete legacyReadyIntent.error;
+    const generationsBeforeLegacyReload = generationBodies.length;
+    await page.evaluate(intent => localStorage.setItem('maestro-editor-animated-title-v1', JSON.stringify(intent)), legacyReadyIntent);
+    await page.reload();
+    await injectAndMount(expectedTitleSettings);
+    await waitUntil(page, () => window.titleStore.getState().intent?.status === 'inserted', 'legacy green ready intent restores after browser reload');
+    assert.equal(generationBodies.length, generationsBeforeLegacyReload,
+      'Restoring a saved legacy title does not submit another generation POST.');
+    const legacyRestore = await page.evaluate(() => {
+      const intent = window.titleStore.getState().intent;
+      const title = window.editorStore.getState().project.tracks.find(track => track.name === 'Title FX')?.items[0];
+      return {background: intent?.settings.background, keyingEnabled: title?.keying?.enabled, status: intent?.status};
+    });
+    assert.deepEqual(legacyRestore, {background: undefined, keyingEnabled: true, status: 'inserted'},
+      'A pre-background saved ready intent restores with green chroma key enabled.');
+
+    await page.evaluate(fixture => {
+      window.titleStore.getState().dismiss();
+      window.editorStore.setState({
+        workspace: fixture.workspace, project: fixture, projects: [], library: [], dirty: false,
+        history: [], future: [], selectedItemId: null, selectedItemIds: [], selectedTrackId: null,
+        playhead: 5.375, playing: false, saving: false, error: null, exportJobId: null,
+      });
+    }, sourceProject);
+
+    // A full black-background run preserves Unicode wording, Spanish motion
+    // directions and deliberately surreal green lettering through a reload.
+    await page.getByRole('button', {name: 'Open title generator'}).click();
+    const blackDialog = page.getByRole('dialog', {name: 'Create animated title'});
+    await blackDialog.waitFor();
+    const blackTitleSettings = {
+      text: 'Mañana — Ω-2049 · ½',
+      look: 'Letras de vidrio verde lima, surrealistas y con geometría imposible.',
+      effect: 'custom',
+      direction: 'Las letras flotan en una órbita imposible, se ordenan para que se puedan leer, quedan quietas un momento y luego se desvanecen.',
+      seconds: 6.8, aspect: 'project', resolution: '480p', keepAudio: false, background: 'black',
+    };
+    await blackDialog.getByLabel('Title text').fill(blackTitleSettings.text);
+    await blackDialog.getByLabel('Title visual style').fill(blackTitleSettings.look);
+    await blackDialog.getByLabel('Title animation description').fill(blackTitleSettings.direction);
+    await blackDialog.getByLabel('Title background').selectOption('black');
+    await blackDialog.getByLabel('Title duration').fill(String(blackTitleSettings.seconds));
+    await blackDialog.getByLabel('Title aspect ratio').selectOption(blackTitleSettings.aspect);
+    await blackDialog.getByLabel('Title resolution').selectOption(blackTitleSettings.resolution);
+    assert.match(await blackDialog.innerText(), /Black stays opaque\. The title clip covers footage below for its full frame\./);
+    const blackPrompt = await page.evaluate(settings => window.titleHelpers.animatedTitlePrompt(settings), blackTitleSettings);
+    await blackDialog.getByText('View prepared prompt').click();
+    assert.equal(await blackDialog.locator('pre').innerText(), blackPrompt,
+      'The black prepared prompt preserves the exact Unicode title, Spanish direction and requested lettering style.');
+    assert.match(blackPrompt, /ONLY visible lettering is exactly "Mañana — Ω-2049 · ½"/);
+    assert.match(blackPrompt, /Letras de vidrio verde lima, surrealistas y con geometría imposible\./);
+    assert.match(blackPrompt, /Las letras flotan en una órbita imposible/);
+    assert.match(blackPrompt, /uniform pure black background \(#000000\)/);
+    assert.doesNotMatch(blackPrompt, /#00FF00|bright green|green particles|green reflections|reserve .*green|no green/i,
+      'The black prompt has no green-key color or particle restrictions.');
+    assert.doesNotMatch(blackPrompt, /\b(?:2D|English|neon|particles?)\b/i,
+      'The black prompt does not force a 2D/English/neon look or ban particles.');
+
+    await page.screenshot({path: path.join(screenshotDirectory, 'black-title-dialog-desktop.png'), fullPage: true});
+    await page.setViewportSize({width: 390, height: 844});
+    const blackMobileDialog = await blackDialog.evaluate(element => ({
+      width: element.getBoundingClientRect().width,
+      viewportWidth: window.innerWidth,
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    }));
+    assert.ok(blackMobileDialog.width <= blackMobileDialog.viewportWidth,
+      `The black title dialog fits mobile width: ${JSON.stringify(blackMobileDialog)}`);
+    assert.ok(blackMobileDialog.scrollWidth <= blackMobileDialog.clientWidth + 1,
+      `The black title dialog has no horizontal overflow: ${JSON.stringify(blackMobileDialog)}`);
+    await page.screenshot({path: path.join(screenshotDirectory, 'black-title-dialog-mobile.png'), fullPage: true});
+    await page.setViewportSize({width: 1440, height: 960});
+
+    const blackUploadCountBefore = uploads.length;
+    const blackSaveCountBefore = projectSaves.length;
+    const blackGenerationCountBefore = generationBodies.length;
+    await blackDialog.getByRole('button', {name: 'Generate title'}).click();
+    await waitUntil(page, () => window.titleStore.getState().intent?.settings.background === 'black'
+      && window.titleStore.getState().intent?.status === 'running', 'black title generation starts');
+    assert.equal(uploads.length, blackUploadCountBefore + 1, 'Black mode uploads one boundary PNG.');
+    assert.equal(projectSaves.length, blackSaveCountBefore + 1, 'The project is saved before black title submission.');
+    assert.equal(generationBodies.length, blackGenerationCountBefore + 1, 'Black mode submits one generation POST.');
+    const blackBody = generationBodies.at(-1);
+    const blackUpload = uploads.at(-1);
+    const blackDimensions = blackBody.resolution.split('x').map(Number);
+    assert.equal(blackUpload.filename, `title-black-${blackDimensions[0]}x${blackDimensions[1]}.png`);
+    assert.equal(blackUpload.color, '#000000', 'The uploaded boundary frame is pure black.');
+    assert.deepEqual(blackUpload.dimensions, {width: blackDimensions[0], height: blackDimensions[1]});
+    assert.equal(blackBody.image_start, `/uploads/${blackUpload.filename}`);
+    assert.equal(blackBody.image_end, blackBody.image_start, 'Black mode uses one matching start/end frame.');
+    assert.equal(blackBody.prompt, blackPrompt);
+    assert.ok(blackBody._client_submission_id, 'The black job carries a durable submission identity.');
+    const blackJobId = generationByJob.size ? [...generationByJob.keys()].at(-1) : null;
+    assert.ok(blackJobId && jobs.get(blackJobId)?.client_submission_id === blackBody._client_submission_id,
+      'The running black job belongs to the frozen title intent.');
+    const frozenBlackIntent = await page.evaluate(() => ({
+      background: window.titleStore.getState().intent.settings.background,
+      text: window.titleStore.getState().intent.settings.text,
+      clientId: window.titleStore.getState().intent.clientId,
+      jobId: window.titleStore.getState().intent.jobId,
+      status: window.titleStore.getState().intent.status,
+    }));
+    assert.deepEqual(frozenBlackIntent, {
+      background: 'black', text: blackTitleSettings.text, clientId: blackBody._client_submission_id,
+      jobId: blackJobId, status: 'running',
+    }, 'The running intent freezes its selected black mode and exact title settings.');
+
+    await blackDialog.getByLabel('Title background').selectOption('chroma');
+    assert.equal(await blackDialog.getByLabel('Title background').inputValue(), 'chroma', 'The dialog draft can change while the job runs.');
+    assert.equal(await page.evaluate(() => window.titleStore.getState().intent.settings.background), 'black',
+      'Changing the live dialog draft does not change the submitted job mode.');
+    const blackGenerationCountBeforeReload = generationBodies.length;
+    await page.reload();
+    await injectAndMount(expectedTitleSettings);
+    await waitUntil(page, jobId => window.titleStore.getState().intent?.jobId === jobId
+      && window.titleStore.getState().intent?.status === 'running', 'black job recovers after browser reload', blackJobId);
+    assert.equal(generationBodies.length, blackGenerationCountBeforeReload,
+      'Reloading a running black title recovers its exact job without a new generation POST.');
+    assert.equal(await page.evaluate(() => window.titleStore.getState().intent.settings.background), 'black',
+      'Reload recovery retains the frozen black background selection.');
+
+    const blackJob = jobs.get(blackJobId);
+    assert.equal(blackJob.client_submission_id, frozenBlackIntent.clientId,
+      'Only the synthetic job with the exact client submission identity is completed.');
+    Object.assign(blackJob, {
+      status: 'completed', progress: 100, message: 'completed',
+      output_files: [`/outputs/${blackJobId}.mp4`],
+    });
+    await page.evaluate(() => window.titleStore.getState().reconcile());
+    await waitUntil(page, () => window.titleStore.getState().intent?.status === 'inserted', 'owned black job completes and inserts');
+    const blackInsertion = await page.evaluate(() => {
+      const intent = window.titleStore.getState().intent;
+      const title = window.editorStore.getState().project.tracks.find(track => track.name === 'Title FX')?.items[0];
+      return {
+        status: intent?.status,
+        background: intent?.settings.background,
+        message: intent?.message,
+        keyingEnabled: title?.keying?.enabled,
+        opacity: title?.opacity,
+      };
+    });
+    assert.deepEqual(blackInsertion, {
+      status: 'inserted', background: 'black',
+      message: 'Title added above your footage with its black background intact. Review spelling and timing.',
+      keyingEnabled: false, opacity: 1,
+    }, 'The black result is inserted opaque, with chroma key disabled and the matching status message.');
+
     assert.deepEqual(pageErrors, [], 'No browser runtime errors occur in the isolated workflow.');
     assert.ok(requests.every(request => new URL(request.url).hostname === '192.168.56.23'),
       'All application HTTP requests stay on the intercepted LAN-style test origin.');
     assert.ok(!requests.some(request => /download|restart|llm|plan-h3|preview/i.test(request.pathname)),
       'The workflow makes no model downloads, restarts, LLM planning, or GPU preview requests.');
-    console.log('Animated title workflow passed: green PNG upload, exact lost-receipt recovery, prompt and geometry, safe insertion, ownership, undo/idempotence, failed/cancelled jobs, and scoped transparent MOV export.');
-    console.log(`Custom-animation dialog screenshots: ${path.join(screenshotDirectory, 'title-dialog-desktop.png')} and ${path.join(screenshotDirectory, 'title-dialog-mobile.png')}`);
+    console.log('Animated title workflow passed: green/black PNG uploads, lost-receipt and reload recovery, prompt/preset behavior, safe insertion, ownership, undo/idempotence, failed/cancelled jobs, and scoped transparent MOV export.');
+    console.log(`Graphite dialog screenshots: ${['chroma-title-dialog-desktop.png', 'chroma-title-dialog-mobile.png', 'black-title-dialog-desktop.png', 'black-title-dialog-mobile.png'].map(name => path.join(screenshotDirectory, name)).join(' and ')}`);
   } finally {
     await browser.close();
   }

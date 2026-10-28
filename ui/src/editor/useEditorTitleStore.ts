@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import * as api from '../api/client'
 import type { EditorAsset } from '../types'
-import { animatedTitleParams, animatedTitlePrompt, titleDimensions, titleFrames, titleSubmissionId, TITLE_MODEL } from './editorAnimatedTitles'
+import { animatedTitleParams, animatedTitlePrompt, titleBackground, titleDimensions, titleFrames, titleSubmissionId, TITLE_MODEL } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 import { useEditorStore } from './useEditorStore'
 
@@ -28,15 +28,16 @@ function remember(intent: TitleIntent | null) {
   if (intent) localStorage.setItem(STORAGE, JSON.stringify(intent))
   else localStorage.removeItem(STORAGE)
 }
-async function greenFrame(width: number, height: number): Promise<File> {
+async function backgroundFrame(width: number, height: number, settings: AnimatedTitleSettings): Promise<File> {
+  const background = titleBackground(settings)
   const canvas = document.createElement('canvas')
   canvas.width = width; canvas.height = height
   const context = canvas.getContext('2d')
   if (!context) throw new Error('Could not prepare the title background.')
-  context.fillStyle = '#00ff00'; context.fillRect(0, 0, width, height)
+  context.fillStyle = background.color; context.fillRect(0, 0, width, height)
   const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(value => value
     ? resolve(value) : reject(new Error('Could not encode the title background.')), 'image/png'))
-  return new File([blob], `title-green-${width}x${height}.png`, { type: 'image/png' })
+  return new File([blob], `title-${background.fileLabel}-${width}x${height}.png`, { type: 'image/png' })
 }
 let submitting = false, reconciling = false
 
@@ -78,7 +79,7 @@ export const useEditorTitleStore = create<TitleState>((set, get) => {
         const saved = await useEditorStore.getState().saveProject()
         if (!saved || saved.id !== current.id || saved.workspace !== current.workspace
           || useEditorStore.getState().project?.id !== current.id) throw new Error('The Editor project changed while preparing the title.')
-        const background = await api.uploadImage(await greenFrame(width, height), { reuseIdentical: true })
+        const background = await api.uploadImage(await backgroundFrame(width, height, settingsCopy), { reuseIdentical: true })
         if (useEditorStore.getState().project?.id !== current.id || useEditorStore.getState().project?.workspace !== current.workspace) {
           throw new Error('The Editor project changed before submission. No title was generated.')
         }
@@ -157,8 +158,11 @@ export const useEditorTitleStore = create<TitleState>((set, get) => {
         const added = useEditorStore.getState().addAnimatedTitle(intent.asset, {
           id: intent.id, projectId: intent.projectId, workspace: intent.workspace,
           at: intent.at, text: intent.settings.text, keepAudio: intent.settings.keepAudio,
+          background: intent.settings.background,
         })
-        if (added) update({ ...intent, status: 'inserted', error: undefined, message: 'Title added above your footage. Review spelling and key edges.' })
+        if (added) update({ ...intent, status: 'inserted', error: undefined, message: titleBackground(intent.settings).chromaKey
+          ? 'Title added above your footage. Review spelling and key edges.'
+          : 'Title added above your footage with its black background intact. Review spelling and timing.' })
       } catch (error) { set({ error: error instanceof Error ? error.message : 'Could not add the title to this project.' }) }
     },
     dismiss: () => { remember(null); set({ intent: null, error: null }) },

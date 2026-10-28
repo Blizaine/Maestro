@@ -34,7 +34,7 @@ import { flashvsrScale } from '../lib/flashvsr'
 import { invalidateEditorMediaPreview } from './editorMediaPreview'
 import { applyEditorEditOperation, type EditorEditOperation } from './editorEditOperations'
 import { previewEditorAutoEdit, type EditorAutoProposal } from './editorAutoEdit'
-import { insertAnimatedTitle } from './editorAnimatedTitles'
+import { insertAnimatedTitle, type TitleBackground } from './editorAnimatedTitles'
 
 const HISTORY_LIMIT = 60
 const MIN_ITEM_DURATION = 1 / 30
@@ -129,7 +129,7 @@ interface EditorState {
   clearDirectorRerunError: (itemId: string) => void
   rerunDirectorClip: (itemId: string, prompt?: string) => Promise<void>
   addTitle: (at?: number, trackId?: string) => void
-  addAnimatedTitle: (asset: EditorAsset, options: { id: string; projectId: string; workspace: string; at: number; text: string; keepAudio: boolean }) => boolean
+  addAnimatedTitle: (asset: EditorAsset, options: { id: string; projectId: string; workspace: string; at: number; text: string; keepAudio: boolean; background?: TitleBackground }) => boolean
   addTrack: (type: EditorTrackType) => void
   renameTrack: (trackId: string, name: string) => void
   setTrackVolume: (trackId: string, volume: number) => void
