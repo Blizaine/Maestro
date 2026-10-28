@@ -53,6 +53,14 @@ class TestStudioPreferencePersistence(unittest.TestCase):
         self.assertEqual(legacy_edit["generation_mode"], "avatar")
         self.assertEqual(legacy_edit["studio_video_workflow"], "retake")
 
+    def test_titles_workflow_survives_sticky_preference_round_trip(self):
+        normalize = _load_normalizers()["_normalize_studio_preferences"]
+        saved = normalize({"generation_mode": "video", "studio_video_workflow": "titles"})
+        restored = normalize(json.loads(json.dumps(saved)))
+        updated = normalize({"audio_sub_mode": "music"}, current=restored)
+        self.assertEqual(restored["studio_video_workflow"], "titles")
+        self.assertEqual(updated["studio_video_workflow"], "titles")
+
     def test_krea_identity_settings_round_trip_per_model_and_legacy_save(self):
         normalize = _load_normalizers()["_normalize_studio_preferences"]
         settings = {

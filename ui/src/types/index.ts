@@ -159,6 +159,8 @@ export interface GenerateParams {
   _studio_image_workflow?: StudioImageWorkflow
   /** UI-only Video workflow marker retained in output sidecars. */
   _studio_video_workflow?: StudioVideoWorkflow
+  /** UI-only Studio Titles form settings restored from its output sidecar. */
+  _studio_title_settings?: Record<string, unknown>
   /** UI-only Audio workflow marker retained in output sidecars. */
   _audio_sub_mode?: AudioSubMode
   /** Ephemeral request identity used to bind Editor AI round trips to one job. */
@@ -987,6 +989,7 @@ export type StudioVideoWorkflow =
   | 'references'
   | 'extend'
   | 'blend'
+  | 'titles'
   | 'retake'
   | 'prompt_edit'
   | 'outpaint'

@@ -10,6 +10,7 @@ import {
   Scan,
   Sparkles,
   StepForward,
+  Type,
   UsersRound,
   WandSparkles,
 } from 'lucide-react'
@@ -33,6 +34,7 @@ const VIDEO_WORKFLOW_GROUPS: StudioWorkflowGroup<DisplayVideoWorkflow>[] = [
       { value: 'avatar', label: 'Avatar', description: 'Animate people from an anchor image and one or two voice tracks', icon: UsersRound },
       { value: 'extend', label: 'Extend', description: 'Continue an existing clip', icon: StepForward },
       { value: 'blend', label: 'Blend', description: 'Bridge two visual anchors', icon: Blend },
+      { value: 'titles', label: 'Titles', description: 'Create video titles and send them to the gallery', icon: Type },
     ],
   },
   {
@@ -90,6 +92,9 @@ function deriveActiveWorkflow(
     if (editSubMode === 'recast') return 'recast'
     return 'retake'
   }
+  // Titles has its own UI and always uses the regular video output path. Its
+  // durable workflow marker wins over a stale specialized image_mode value.
+  if (generationMode === 'video' && rememberedWorkflow === 'titles') return 'titles'
   if (imageMode === 2) return 'legacy_multishot'
   if (imageMode === 3) return 'extend'
   if (imageMode === 4) return 'blend'
@@ -153,11 +158,12 @@ export function VideoWorkflowSelector({ onOpenWorlds }: { onOpenWorlds?: () => v
       activeWorkflow !== 'legacy_multishot'
       && activeWorkflow !== 'legacy_inpaint'
       && (activeWorkflow !== rememberedWorkflow
-        || (activeWorkflow === 'animate' && viggleAvailable && modelType !== 'viggle_animate'))
+        || (activeWorkflow === 'animate' && viggleAvailable && modelType !== 'viggle_animate')
+        || (activeWorkflow === 'titles' && imageMode !== 0))
     ) {
       setWorkflow(activeWorkflow)
     }
-  }, [activeWorkflow, rememberedWorkflow, setWorkflow, viggleAvailable, modelType])
+  }, [activeWorkflow, imageMode, rememberedWorkflow, setWorkflow, viggleAvailable, modelType])
 
   return (
     <StudioWorkflowSelect<DisplayVideoWorkflow>

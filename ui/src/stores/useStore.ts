@@ -1476,6 +1476,9 @@ function _normalizeStudioVideoWorkflow(
   value: unknown,
   model?: ModelDef,
 ): StudioVideoWorkflow | null {
+  // Titles is a UI-only Studio workflow. Keep it stable even if the selected
+  // model is one of the specialized Avatar or Viggle engines.
+  if (value === 'titles') return 'titles'
   // Older LongCat output recipes used Frames before the dedicated inputs existed.
   if (isLongCatAvatarModel(model)) return 'avatar'
   if (value === 'generate') return 'frames'
@@ -3600,11 +3603,39 @@ export const useStore = create<AppState>((set, get) => ({
     const previousWorkflow = get().studioVideoWorkflow
     set(state => ({
       studioVideoWorkflow: workflow,
-      ...(previousWorkflow === 'avatar' && workflow !== 'avatar' ? {
+      ...(previousWorkflow === 'titles' && workflow !== 'titles' ? {
+        params: { ...state.params, _studio_title_settings: undefined },
+      } : workflow !== 'titles' && previousWorkflow === 'avatar' && workflow !== 'avatar' ? {
         params: { ...state.params, audio_prompt_type: String(state.params.audio_prompt_type || '').replace(/B/g, '') },
       } : {}),
     }))
     const persist = () => _persistStickyStudioPreferences(get())
+
+    if (workflow === 'titles') {
+      if (get().generationMode !== 'video') get().setGenerationMode('video')
+      // This form owns its inputs. Leave the selected model, prompt, references,
+      // and other video parameters intact while clearing any Blend/Extend mode
+      // residue from the engine-facing selector.
+      set(state => {
+        const previousImageMode = Number(state.params.image_mode) || 0
+        const nextSubModeStash = previousWorkflow === 'titles'
+          ? state.videoSubModeStash
+          : {
+              ...state.videoSubModeStash,
+              [previousImageMode]: captureVideoSubModeStash({
+                ...state,
+                params: { ...state.params, _studio_title_settings: undefined },
+              }),
+            }
+        return {
+          studioVideoWorkflow: workflow,
+          videoSubModeStash: nextSubModeStash,
+          params: { ...state.params, image_mode: 0, _studio_video_workflow: workflow },
+        }
+      })
+      persist()
+      return
+    }
 
     if (workflow === 'animate') {
       if (get().generationMode !== 'video') get().setGenerationMode('video')
@@ -3628,6 +3659,47 @@ export const useStore = create<AppState>((set, get) => ({
           hasOmniReferences: false, hasAudioDrive: false,
         })
         if (targetModel && !isLongCatAvatarModel({ model_type: targetModel })) get().selectModel(targetModel)
+      }
+      if (previousWorkflow === 'titles' && workflow === 'frames') {
+        const saved = get().videoSubModeStash[0]
+        if (saved) {
+          const restoredParams = {
+            ...saved.params,
+            image_mode: 0,
+            _studio_title_settings: undefined,
+            _studio_video_workflow: 'frames' as const,
+            ...(saved.params._studio_video_workflow === 'avatar' ? {
+              audio_prompt_type: String(saved.params.audio_prompt_type || '').replace(/B/g, ''),
+            } : {}),
+          }
+          set(state => ({
+            videoSubModeStash: {
+              ...state.videoSubModeStash,
+              0: { ...saved, params: restoredParams },
+            },
+            params: {
+              ...restoredParams,
+              model_type: state.params.model_type,
+              activated_loras: state.params.activated_loras,
+              loras_multipliers: state.params.loras_multipliers,
+            },
+            startImage: saved.startImage,
+            endImage: saved.endImage,
+            continueVideo: saved.continueVideo,
+            continueVideoPath: saved.continueVideoPath,
+            continueVideoUrl: saved.continueVideoUrl,
+            continueVideoDuration: saved.continueVideoDuration,
+            audioGuideFilename: saved.audioGuideFilename,
+            imageRefs: saved.imageRefs,
+            imageRefType: saved.imageRefType,
+            removeBackgroundRefs: saved.removeBackgroundRefs,
+            durationSeconds: saved.durationSeconds,
+            slidingWindowSeconds: saved.slidingWindowSeconds,
+            slidingWindowOverlap: saved.slidingWindowOverlap,
+            clips: saved.clips,
+            singlePromptMode: saved.singlePromptMode,
+          }))
+        }
       }
       if (get().params.model_type === 'viggle_animate') {
         const restore = [_preViggleVideoModel, get().studioVideoModelPerCreateRoute.omni,
@@ -4346,7 +4418,7 @@ export const useStore = create<AppState>((set, get) => ({
         prompt: restoredPrompt,
         image_mode: mode === 'image'
           ? (restoredImageWorkflow === 'inpaint' || restoredImageWorkflow === 'outpaint' ? 2 : 1)
-          : (restoredParams.image_mode ?? 0),
+          : restoredVideoWorkflow === 'titles' ? 0 : (restoredParams.image_mode ?? 0),
         ...(mode === 'image' ? { _studio_image_workflow: restoredImageWorkflow } : {}),
         ...(mode === 'video' ? { _studio_video_workflow: restoredVideoWorkflow } : {}),
         activated_loras: sameModel ? restoredLora.activated_loras : [],
@@ -12539,7 +12611,8 @@ export const useStore = create<AppState>((set, get) => ({
       (previousModelType === 'minimax_h3_singularity' && modelType === 'minimax_h3_ref2va_singularity')
       || (previousModelType === 'minimax_h3_ref2va_singularity' && modelType === 'minimax_h3_singularity')
     )
-    const avatarModel = currentMode === 'video' && isLongCatAvatarModel({ model_type: modelType })
+    const explicitTitlesWorkflow = currentMode === 'video' && get().studioVideoWorkflow === 'titles'
+    const avatarModel = currentMode === 'video' && !explicitTitlesWorkflow && isLongCatAvatarModel({ model_type: modelType })
     const leaveAvatar = currentMode === 'video' && get().studioVideoWorkflow === 'avatar' && !avatarModel
     set(s => ({
       ...((avatarModel || leaveAvatar) ? { studioVideoWorkflow: avatarModel ? 'avatar' as const : 'frames' as const } : {}),
@@ -13961,6 +14034,13 @@ export const useStore = create<AppState>((set, get) => ({
     }
     if (model && getModelMode(modelType, model.family) === 'video') {
       newParams._studio_video_workflow = restoredVideoWorkflow
+      const titleSettings = p._studio_title_settings
+      newParams._studio_title_settings = restoredVideoWorkflow === 'titles'
+        && titleSettings !== null
+        && typeof titleSettings === 'object'
+        && !Array.isArray(titleSettings)
+        ? titleSettings as Record<string, unknown>
+        : undefined
       // Specialized workflows normalize image_mode for the renderer before
       // the sidecar is written. Reconstruct the UI routing value from the
       // durable workflow marker so Extend/Blend do not reopen as Frames.

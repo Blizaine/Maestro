@@ -1,25 +1,29 @@
 import { create } from 'zustand'
 import * as api from '../api/client'
 import type { EditorAsset } from '../types'
+import { useStore } from '../stores/useStore'
 import { animatedTitleParams, animatedTitlePrompt, titleBackground, titleDimensions, titleFrames, titleSubmissionId, TITLE_MODEL } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 import { useEditorStore } from './useEditorStore'
 
 const STORAGE = 'maestro-editor-animated-title-v1'
 interface TitleIntent {
-  id: string; clientId: string; projectId: string; workspace: string; at: number
+  id: string; clientId: string; projectId?: string; workspace: string; at: number
+  /** Absent on legacy Editor-only intents. Studio never inserts into a project. */
+  destination?: 'editor' | 'studio'
   settings: AnimatedTitleSettings; width: number; height: number
-  status: 'submitting' | 'uncertain' | 'queued' | 'running' | 'ready' | 'inserted' | 'failed'
+  status: 'submitting' | 'uncertain' | 'queued' | 'running' | 'ready' | 'inserted' | 'completed' | 'failed'
   jobId?: string; asset?: EditorAsset; progress?: number; message?: string; error?: string
 }
 function restore(): TitleIntent | null {
   try {
     const value = JSON.parse(localStorage.getItem(STORAGE) || 'null') as TitleIntent | null
     if (!value || typeof value.id !== 'string' || typeof value.clientId !== 'string'
-      || typeof value.projectId !== 'string' || typeof value.workspace !== 'string'
+      || (value.destination !== undefined && !['editor', 'studio'].includes(value.destination))
+      || (value.destination !== 'studio' && typeof value.projectId !== 'string') || typeof value.workspace !== 'string'
       || !Number.isFinite(value.at) || value.at < 0 || !value.settings) return null
     animatedTitlePrompt(value.settings); titleFrames(value.settings.seconds)
-    if (!['submitting', 'uncertain', 'queued', 'running', 'ready', 'inserted', 'failed'].includes(value.status)) return null
+    if (!['submitting', 'uncertain', 'queued', 'running', 'ready', 'inserted', 'completed', 'failed'].includes(value.status)) return null
     return value.status === 'submitting' ? { ...value, status: 'uncertain' } : value
   } catch { return null }
 }
@@ -44,6 +48,7 @@ let submitting = false, reconciling = false
 interface TitleState {
   intent: TitleIntent | null; busy: boolean; error: string | null
   submit: (settings: AnimatedTitleSettings) => Promise<void>
+  submitStudio: (settings: AnimatedTitleSettings) => Promise<void>
   reconcile: () => Promise<void>
   insertReady: () => Promise<void>
   dismiss: () => void
@@ -53,40 +58,46 @@ export const useEditorTitleStore = create<TitleState>((set, get) => {
     try { remember(intent); set({ intent }) }
     catch { set({ intent, error: 'Browser storage is full. Keep this page open to track the existing title job.' }) }
   }
-  return {
-    intent: restore(), busy: false, error: null,
-    submit: async settings => {
+  const submitFor = async (settings: AnimatedTitleSettings, destination: 'editor' | 'studio') => {
       if (submitting || get().busy) return
       const prior = get().intent
-      if (prior && !['inserted', 'failed'].includes(prior.status)) {
+      if (prior && !['inserted', 'completed', 'failed'].includes(prior.status)) {
         set({ error: 'Finish or stop tracking the current title before generating another.' }); return
       }
       submitting = true; set({ busy: true, error: null })
       let intent: TitleIntent | null = null, posted = false
       try {
-        const current = useEditorStore.getState().project
-        if (!current) throw new Error('Open an Editor project first.')
-        const canvas = { ...current.canvas }
+        const current = destination === 'editor' ? useEditorStore.getState().project : null
+        if (destination === 'editor' && !current) throw new Error('Open an Editor project first.')
+        const workspace = current?.workspace ?? useStore.getState().activeWorkspace
+        if (!workspace || ['__all__', '__uploads__'].includes(workspace)) throw new Error('Choose a workspace for the title.')
+        const canvas = current ? { ...current.canvas } : { width: 1920, height: 1080 }
         const settingsCopy = { ...settings, text: settings.text.trim() }
         animatedTitlePrompt(settingsCopy); titleFrames(settingsCopy.seconds)
-        const { width, height } = titleDimensions(settingsCopy, current.canvas)
-        const at = useEditorStore.getState().playhead
+        const { width, height } = titleDimensions(settingsCopy, canvas)
+        const at = current ? useEditorStore.getState().playhead : 0
         if (at + titleFrames(settingsCopy.seconds) / 24 > 86400) throw new Error('The title would exceed the 24-hour timeline limit.')
         const { models } = await api.fetchModels()
         if (!models.some(model => model.model_type === TITLE_MODEL && model.is_downloaded === true)) {
           throw new Error('Install H3 Fused 4-Step — Frames in Settings before generating an animated title.')
         }
-        const saved = await useEditorStore.getState().saveProject()
-        if (!saved || saved.id !== current.id || saved.workspace !== current.workspace
-          || useEditorStore.getState().project?.id !== current.id) throw new Error('The Editor project changed while preparing the title.')
+        if (current) {
+          const saved = await useEditorStore.getState().saveProject()
+          if (!saved || saved.id !== current.id || saved.workspace !== current.workspace
+            || useEditorStore.getState().project?.id !== current.id) throw new Error('The Editor project changed while preparing the title.')
+        }
         const background = await api.uploadImage(await backgroundFrame(width, height, settingsCopy), { reuseIdentical: true })
-        if (useEditorStore.getState().project?.id !== current.id || useEditorStore.getState().project?.workspace !== current.workspace) {
+        if (current && (useEditorStore.getState().project?.id !== current.id || useEditorStore.getState().project?.workspace !== current.workspace)) {
           throw new Error('The Editor project changed before submission. No title was generated.')
         }
-        intent = { id: titleSubmissionId(), clientId: titleSubmissionId(), projectId: saved.id,
-          workspace: saved.workspace, at, settings: settingsCopy, width, height, status: 'submitting' }
+        if (destination === 'studio' && useStore.getState().activeWorkspace !== workspace) {
+          throw new Error('The workspace changed before submission. No title was generated.')
+        }
+        intent = { id: titleSubmissionId(), clientId: titleSubmissionId(), projectId: current?.id,
+          destination, workspace, at, settings: settingsCopy, width, height, status: 'submitting' }
         remember(intent); set({ intent }) // Durable before the one and only generation POST.
-        const params = animatedTitleParams(settingsCopy, canvas, background.path, saved.workspace, intent.clientId)
+        const params = { ...animatedTitleParams(settingsCopy, canvas, background.path, workspace, intent.clientId),
+          ...(destination === 'studio' ? { _studio_video_workflow: 'titles', _studio_title_settings: settingsCopy } : {}) }
         posted = true
         const receipt = await api.submitGeneration(params)
         if (!receipt.job_id) throw new Error('The title submission returned no job identity.')
@@ -100,13 +111,17 @@ export const useEditorTitleStore = create<TitleState>((set, get) => {
         submitting = false; set({ busy: false })
       }
       if (posted) void get().reconcile()
-    },
+  }
+  return {
+    intent: restore(), busy: false, error: null,
+    submit: settings => submitFor(settings, 'editor'),
+    submitStudio: settings => submitFor(settings, 'studio'),
     reconcile: async () => {
       const intent = get().intent
-      if (!intent || submitting || reconciling || ['inserted', 'failed'].includes(intent.status)) return
-      if (intent.status === 'ready') {
+      if (!intent || submitting || reconciling || ['inserted', 'completed', 'failed'].includes(intent.status)) return
+      if (intent.status === 'ready' && intent.destination !== 'studio') {
         const project = useEditorStore.getState().project
-        if (!intent.error && project?.id === intent.projectId && project.workspace === intent.workspace) await get().insertReady()
+        if (!intent.error && project && project.id === intent.projectId && project.workspace === intent.workspace) await get().insertReady()
         return
       }
       reconciling = true
@@ -123,6 +138,14 @@ export const useEditorTitleStore = create<TitleState>((set, get) => {
         const job = await api.fetchJobStatus(jobId)
         if (job.client_submission_id !== intent.clientId || job.job_id !== jobId) throw new Error('The job receipt does not match this title submission.')
         if (get().intent?.id !== intent.id) return
+        if (intent.destination === 'studio' && ['held', 'queued', 'running'].includes(job.status)) {
+          // Reuse the ordinary Studio queue/progress polling after an exact
+          // receipt check, including when this panel is subsequently closed.
+          await useStore.getState().reconnectJobs({ id: jobId, showInGallery: true, kind: 'generation',
+            status: job.status, progress: job.progress / 100, step: job.step, totalSteps: job.total_steps,
+            phase: job.phase, message: job.message, outputFiles: job.output_files, error: job.error })
+          if (get().intent?.id !== intent.id) return
+        }
         if (job.status === 'failed' || job.status === 'cancelled') {
           update({ ...intent, jobId, status: 'failed', error: job.error || job.message || 'Title generation did not complete.' }); return
         }
@@ -142,6 +165,13 @@ export const useEditorTitleStore = create<TitleState>((set, get) => {
         const asset = { ...library, path: probe.path, duration: probe.duration, width: probe.width, height: probe.height,
           fps: probe.fps, has_audio: probe.has_audio, size: probe.size }
         const sizeMatches = probe.width === intent.width && probe.height === intent.height
+        if (intent.destination === 'studio') {
+          update({ ...intent, jobId, asset, status: 'completed', progress: 100,
+            message: `Title saved to ${intent.workspace}. ${titleBackground(intent.settings).chromaKey ? 'The video keeps its green background for keying.' : 'The video keeps its black background.'}`,
+            error: sizeMatches ? undefined : `The video is ${probe.width}×${probe.height}; ${intent.width}×${intent.height} was requested.` })
+          await useStore.getState().refreshOutputs()
+          return
+        }
         update({ ...intent, jobId, asset, status: 'ready', progress: 100,
           error: sizeMatches ? undefined : `The video is ${probe.width}×${probe.height}; ${intent.width}×${intent.height} was requested. Review it before adding.`,
           message: 'Title ready' })
@@ -153,7 +183,7 @@ export const useEditorTitleStore = create<TitleState>((set, get) => {
     },
     insertReady: async () => {
       const intent = get().intent
-      if (!intent?.asset || !['ready', 'inserted'].includes(intent.status)) return
+      if (!intent?.asset || intent.destination === 'studio' || !intent.projectId || !['ready', 'inserted'].includes(intent.status)) return
       try {
         const added = useEditorStore.getState().addAnimatedTitle(intent.asset, {
           id: intent.id, projectId: intent.projectId, workspace: intent.workspace,

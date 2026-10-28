@@ -6,6 +6,26 @@ non-destructive clip setting: the original media file stays unchanged.
 
 ## Create an animated title
 
+### From Studio
+
+Choose **Video → Create → Titles**, below **Blend**, to generate a title without
+opening an Editor project. The same text, lettering, custom animation, optional
+presets, background, shape, duration and resolution controls are available here.
+The title has its own draft; unrelated Studio prompts, references and LoRAs are
+not reused. **Load Settings** on a title output restores its title controls.
+
+The output is saved in the workspace selected when you submit. Queue progress
+and completed media use the normal Studio gallery. Changing workspaces while it
+runs does not move the output or modify an open Editor project. Lost receipts
+and browser reloads recover the original submission rather than generating again.
+
+**Black background** produces an opaque title card. **Chroma key (green)** saves
+a video with a green background for keying in the Editor or another editing app;
+the Studio video itself has no alpha channel. Generated audio remains in the
+source clip and can be muted or removed during editing.
+
+### From the Editor
+
 Choose **Create animated title** in the Editor media panel. Enter the exact text,
 describe its lettering/style and animation, choose a title background, then choose
 duration, aspect and resolution before pressing **Generate title**. H3 Fused 4-Step —

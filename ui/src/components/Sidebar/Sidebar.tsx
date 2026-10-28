@@ -35,6 +35,9 @@ import { CharacterToolbarContext, PromptDock, SidebarLayoutContext } from './Sid
 import { StartupStatus } from '../StartupStatus'
 
 const DirectorChat = lazy(() => import('./DirectorChat').then(module => ({default: module.DirectorChat})))
+const StudioTitlesPanel = lazy(() => import('../../editor/StudioTitlesPanel').then(module => ({
+  default: module.StudioTitlesPanel,
+})))
 
 function isKeyboardInput(element: Element | null): boolean {
   if (element instanceof HTMLTextAreaElement) return !element.disabled && !element.readOnly
@@ -188,6 +191,7 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
   const toolsTool = useStore(s => s.toolsTool)
   const toolsUpscaleMedia = useStore(s => s.toolsUpscaleMedia)
   const videoWorkflow = useStore(s => s.studioVideoWorkflow)
+  const isTitles = isVideo && videoWorkflow === 'titles'
   const imageWorkflow = useStore(s => s.studioImageWorkflow)
   const isUpscale = isTools && toolsTool === 'upscale'
   const isImageUpscale = isUpscale && toolsUpscaleMedia === 'image'
@@ -218,7 +222,7 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
   const isBlend = isVideo && imageMode === 4
   const isDirector = sidebarMode === 'director'
   const isI2vOnly = modelOptions?.i2v_class && !modelOptions?.t2v_class
-  const hasPrompt = !isStandaloneTool && !isAnimate && !(isAudio && ['sfx', 'mixer', 'music'].includes(audioSubMode))
+  const hasPrompt = !isStandaloneTool && !isAnimate && !isTitles && !(isAudio && ['sfx', 'mixer', 'music'].includes(audioSubMode))
 
   // Video Transform controls backed by the legacy edit-mode engines.
   const editControls = (
@@ -262,7 +266,7 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
       <div data-testid="studio-body-scroll" className="studio-scroll-body flex min-h-0 flex-1 flex-col">
       {/* Prompt Edit/Recast → Image Mode round-trip banner. Visible while
           a boundary anchor or Recast reference is being edited; null otherwise. */}
-      <AnchorReturnBanner />
+      {!isTitles && <AnchorReturnBanner />}
 
       {!embedded && <div data-testid="studio-workflow-header" className="studio-workflow-header flex shrink-0 flex-col gap-2 px-3 pb-2 pt-3">
         <GenerationModeSelector />
@@ -274,6 +278,11 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
         {isImageWorkspace && <ImageWorkflowSelector />}
         {isAudioWorkspace && <AudioSubModeToggle />}
       </div>}
+      {isTitles ? (
+        <Suspense fallback={<p role="status" className="m-3 text-xs text-text-muted">Loading Titles…</p>}>
+          <StudioTitlesPanel />
+        </Suspense>
+      ) : (
       <div className="studio-composition mx-3 flex grow shrink-0 basis-auto flex-col rounded-2xl border border-border bg-bg-primary/30" data-has-prompt={hasPrompt}>
       <div data-testid="studio-controls-scroll" className={`${hasPrompt ? 'studio-inputs shrink-0' : 'grow shrink-0'} flex min-w-0 flex-col gap-3 p-2.5 [&>*]:shrink-0`}>
         {isUpscale ? (
@@ -342,8 +351,9 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
         <PromptDock>{isMultiClip ? <MultiClipEditor /> : <PromptInput />}</PromptDock>
       )}
       </div>
+      )}
+      {!isStandaloneTool && !isTitles && <StudioFooter onCharacterSlot={setCharacterSlot} onAnchor={setSettingsElement} />}
       </div>
-      {!isStandaloneTool && <StudioFooter onCharacterSlot={setCharacterSlot} onAnchor={setSettingsElement} />}
     </CharacterToolbarContext.Provider>
     </SidebarLayoutContext.Provider>
   )

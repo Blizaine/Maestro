@@ -58,6 +58,21 @@ export interface AnimatedTitleSettings {
   background?: TitleBackground
 }
 
+export const DEFAULT_TITLE_SETTINGS: AnimatedTitleSettings = {
+  text: '', look: '', effect: 'custom', direction: '', seconds: 5.2,
+  aspect: 'project', resolution: '720p', keepAudio: false, background: 'chroma',
+}
+
+export function titleFormState(settings: AnimatedTitleSettings, canvas: { width: number; height: number }) {
+  let geometry = { width: 0, height: 0 }, prompt = '', duration = 0, validation = ''
+  try {
+    geometry = titleDimensions(settings, canvas)
+    duration = titleFrames(settings.seconds) / 24
+    prompt = animatedTitlePrompt(settings)
+  } catch (reason) { validation = reason instanceof Error ? reason.message : 'Check the title settings.' }
+  return { geometry, prompt, duration, validation }
+}
+
 /** One choice governs the boundary images, prompt and inserted clip's keying. */
 export function titleBackground(settings: { background?: TitleBackground }) {
   const mode = settings.background === undefined ? 'chroma' : settings.background

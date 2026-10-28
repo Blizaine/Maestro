@@ -943,6 +943,7 @@ def _normalize_studio_preferences(values, current=None):
         "generation_mode": {"image", "video", "audio", "avatar"},
         "studio_video_workflow": {
             "frames", "references", "extend", "blend", "retake",
+            "titles",
             "prompt_edit", "outpaint", "repaint", "recast", "upscale",
             "film_grain", "animate", "avatar",
         },
