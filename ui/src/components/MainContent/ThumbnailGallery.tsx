@@ -1,18 +1,62 @@
 import { outputIdentity } from '../../lib/galleryIdentity'
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
-import { Film, Music, PanelRightClose, PanelRightOpen, X } from 'lucide-react'
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
+import { Film, Music, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { requestThumbnail } from '../../lib/thumbnailCache'
 import { useMediaDuration } from '../../lib/mediaDuration'
-import { useIsMobile } from '../../lib/useIsMobile'
+import { useIsMobileSidecar } from '../../lib/useIsMobile'
 import { getMediaTimestamp } from '../../lib/mediaTimestamp'
 import type { OutputFile } from '../../types'
 import { MediaDurationBadge } from './MediaDurationBadge'
 
-// Thumbnail dimensions: 80px wide, 16:9 aspect = 45px tall, 6px gap
-const THUMB_HEIGHT = 45
+const MIN_PANEL_WIDTH = 80
+const MIN_MOBILE_PANEL_WIDTH = 100
+const MAX_PANEL_WIDTH = 360
+const MIN_GALLERY_WIDTH = 240
 const THUMB_GAP = 6
 const THUMB_OVERSCAN = 10
+const PANEL_WIDTH_KEY = 'maestro-thumbnail-panel-width'
+
+interface Props {
+  activeIndex: number
+  onThumbnailClick: (id: string) => void
+  open: boolean
+  onClose: () => void
+}
+
+interface ResizeDrag {
+  pointerId: number
+  startX: number
+  startWidth: number
+  latestWidth: number
+  originalCursor: string
+  originalCursorPriority: string
+  originalUserSelect: string
+  originalUserSelectPriority: string
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value))
+}
+
+function readPreferredWidth(): number {
+  try {
+    const stored = Number(window.localStorage.getItem(PANEL_WIDTH_KEY))
+    if (Number.isFinite(stored) && stored > 0) return clamp(stored, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH)
+  } catch {
+    // Storage may be unavailable in a restricted browser context.
+  }
+  return MIN_PANEL_WIDTH
+}
+
+function persistPreferredWidth(width: number): void {
+  try {
+    window.localStorage.setItem(PANEL_WIDTH_KEY, String(Math.round(width)))
+  } catch {
+    // The panel remains usable when storage is unavailable.
+  }
+}
 
 function VideoThumbnail({ file }: { file: OutputFile }) {
   const [thumbUrl, setThumbUrl] = useState<string | null>(null)
@@ -43,25 +87,28 @@ function VideoThumbnail({ file }: { file: OutputFile }) {
   )
 }
 
-interface Props {
-  activeIndex: number
-  onThumbnailClick: (id: string) => void
-}
-
-function VirtualizedThumbnailList({ activeIndex, onThumbnailClick, onMobileClick }: Props & { onMobileClick?: () => void }) {
+function VirtualizedThumbnailList({
+  activeIndex,
+  onThumbnailClick,
+  onMobileClick,
+}: Pick<Props, 'activeIndex' | 'onThumbnailClick'> & { onMobileClick?: () => void }) {
   const outputs = useStore(s => s.filteredOutputs())
   const containerRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewHeight, setViewHeight] = useState(400)
+  const [thumbHeight, setThumbHeight] = useState(45)
 
-  // Measure container height
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
-    const ro = new ResizeObserver(entries => {
-      setViewHeight(entries[0].contentRect.height)
-    })
+    const measure = () => {
+      setViewHeight(el.clientHeight)
+      const nextHeight = el.clientWidth * 9 / 16
+      if (nextHeight > 0) setThumbHeight(nextHeight)
+    }
+    const ro = new ResizeObserver(measure)
     ro.observe(el)
+    measure()
     return () => ro.disconnect()
   }, [])
 
@@ -71,7 +118,6 @@ function VirtualizedThumbnailList({ activeIndex, onThumbnailClick, onMobileClick
     const el = containerRef.current
     if (!el) return
     setScrollTop(el.scrollTop)
-    // Infinite scroll: load more when near the bottom
     const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
     if (distanceToBottom < el.clientHeight && !loadingMore.current) {
       const store = useStore.getState()
@@ -82,37 +128,40 @@ function VirtualizedThumbnailList({ activeIndex, onThumbnailClick, onMobileClick
     }
   }, [])
 
-  // Auto-scroll to keep active thumbnail visible
+  // Width changes alter every row's height. Reposition only when the selected
+  // item would otherwise be outside the viewport, and use an instant scroll.
   useEffect(() => {
     const container = containerRef.current
-    if (!container) return
-    const itemTop = activeIndex * (THUMB_HEIGHT + THUMB_GAP)
-    const itemBottom = itemTop + THUMB_HEIGHT
+    if (!container || outputs.length === 0) return
+    const itemSize = thumbHeight + THUMB_GAP
+    const itemTop = activeIndex * itemSize
+    const itemBottom = itemTop + thumbHeight
     const viewTop = container.scrollTop
-    const viewBottom = viewTop + viewHeight
+    const viewBottom = viewTop + container.clientHeight
 
     if (itemTop < viewTop || itemBottom > viewBottom) {
-      // Each selection supersedes the previous one. A pending smooth scroll
-      // can otherwise carry the strip away from a newer, already-visible item.
-      container.scrollTo({ top: Math.max(0, itemTop - viewHeight / 2 + THUMB_HEIGHT / 2), behavior: 'auto' })
-      setScrollTop(container.scrollTop)
+      const maxScrollTop = Math.max(0, outputs.length * itemSize - THUMB_GAP - container.clientHeight)
+      const nextScrollTop = clamp(itemTop - (container.clientHeight - thumbHeight) / 2, 0, maxScrollTop)
+      container.scrollTop = nextScrollTop
+      setScrollTop(nextScrollTop)
     }
-  }, [activeIndex, viewHeight, outputs.length])
+  }, [activeIndex, outputs.length, thumbHeight, viewHeight])
 
-  const totalHeight = outputs.length * (THUMB_HEIGHT + THUMB_GAP) - (outputs.length > 0 ? THUMB_GAP : 0)
+  const itemSize = thumbHeight + THUMB_GAP
+  const totalHeight = outputs.length * itemSize - (outputs.length > 0 ? THUMB_GAP : 0)
 
   const { startIdx, endIdx } = useMemo(() => {
-    const itemSize = THUMB_HEIGHT + THUMB_GAP
     const start = Math.max(0, Math.floor(scrollTop / itemSize) - THUMB_OVERSCAN)
     const visibleCount = Math.ceil(viewHeight / itemSize)
     const end = Math.min(outputs.length, Math.floor(scrollTop / itemSize) + visibleCount + THUMB_OVERSCAN)
     return { startIdx: start, endIdx: end }
-  }, [scrollTop, viewHeight, outputs.length])
+  }, [scrollTop, viewHeight, outputs.length, itemSize])
 
   return (
     <div
       ref={containerRef}
-      className="flex-1 overflow-y-auto w-[80px]"
+      className="flex-1 min-h-0 w-full overflow-y-auto"
+      style={{ scrollbarGutter: 'stable' }}
       onScroll={handleScroll}
     >
       <div className="relative" style={{ height: totalHeight }}>
@@ -131,18 +180,14 @@ function VirtualizedThumbnailList({ activeIndex, onThumbnailClick, onMobileClick
                 onThumbnailClick(outputIdentity(file))
                 onMobileClick?.()
               }}
-              className={`absolute left-0 right-0 rounded-lg border overflow-hidden transition-all ${
+              className={`absolute left-0 right-0 rounded-lg border overflow-hidden transition-colors ${
                 activeIndex === idx
-                  // shadow-active-ring is empty in the default theme
-                  // (no bloom — the existing border+ring covers it).
-                  // In Golden Hour it adds an amber halo for the
-                  // "alive/dynamic" feel from the reference render.
                   ? 'border-accent-blue ring-1 ring-accent-blue shadow-active-ring'
                   : 'border-border hover:border-border-light'
               }`}
               style={{
-                top: idx * (THUMB_HEIGHT + THUMB_GAP),
-                height: THUMB_HEIGHT,
+                top: idx * itemSize,
+                height: thumbHeight,
               }}
             >
               {file.type === 'video' ? (
@@ -162,82 +207,193 @@ function VirtualizedThumbnailList({ activeIndex, onThumbnailClick, onMobileClick
   )
 }
 
-export function ThumbnailGallery({ activeIndex, onThumbnailClick }: Props) {
+export function ThumbnailGallery({ activeIndex, onThumbnailClick, open, onClose }: Props) {
   const outputs = useStore(s => s.filteredOutputs())
   const outputsLoading = useStore(s => s.outputsLoading)
-  const isMobile = useIsMobile()
-  const [collapsed, setCollapsed] = useState(false)
-  const [mobileOpen, setMobileOpen] = useState(false)
+  const isMobile = useIsMobileSidecar()
+  const hasContent = outputs.length > 0 || outputsLoading
+  const [preferredWidth, setPreferredWidth] = useState(readPreferredWidth)
+  const [parentWidth, setParentWidth] = useState(0)
+  const [viewportWidth, setViewportWidth] = useState(() => typeof window === 'undefined' ? 0 : window.innerWidth)
+  const panelRef = useRef<HTMLElement>(null)
+  const dragRef = useRef<ResizeDrag | null>(null)
 
-  if (outputs.length === 0 && !outputsLoading) return null
+  useLayoutEffect(() => {
+    if (!open || !hasContent) return
+    const panel = panelRef.current
+    const parent = panel?.parentElement
+    if (!panel || !parent) return
+    const measure = () => {
+      setParentWidth(parent.clientWidth)
+      setViewportWidth(window.innerWidth)
+    }
+    const ro = new ResizeObserver(measure)
+    ro.observe(parent)
+    window.addEventListener('resize', measure)
+    measure()
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', measure)
+    }
+  }, [open, isMobile, hasContent])
 
-  // Mobile: overlay from right
+  const maximumWidth = isMobile
+    ? Math.min(MAX_PANEL_WIDTH, Math.max(1, viewportWidth))
+    : Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, parentWidth - MIN_GALLERY_WIDTH))
+  const minimumWidth = Math.min(isMobile ? MIN_MOBILE_PANEL_WIDTH : MIN_PANEL_WIDTH, maximumWidth)
+  const effectiveWidth = clamp(preferredWidth, minimumWidth, maximumWidth)
+
+  const restoreDragStyles = useCallback(() => {
+    const drag = dragRef.current
+    if (!drag) return
+    const style = document.body.style
+    if (drag.originalCursor) style.setProperty('cursor', drag.originalCursor, drag.originalCursorPriority)
+    else style.removeProperty('cursor')
+    if (drag.originalUserSelect) style.setProperty('user-select', drag.originalUserSelect, drag.originalUserSelectPriority)
+    else style.removeProperty('user-select')
+  }, [])
+
+  const finishResize = useCallback((persist: boolean) => {
+    const drag = dragRef.current
+    if (!drag) return
+    restoreDragStyles()
+    dragRef.current = null
+    if (persist) {
+      const width = clamp(drag.latestWidth, minimumWidth, maximumWidth)
+      setPreferredWidth(width)
+      persistPreferredWidth(width)
+    }
+  }, [maximumWidth, minimumWidth, restoreDragStyles])
+
+  useEffect(() => () => {
+    const drag = dragRef.current
+    restoreDragStyles()
+    dragRef.current = null
+    if (drag) persistPreferredWidth(drag.latestWidth)
+  }, [restoreDragStyles])
+
+  useEffect(() => {
+    if (!open || !hasContent) finishResize(true)
+  }, [open, hasContent, finishResize])
+
+  const handleResizePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (dragRef.current) return
+    if (event.button !== 0 && event.pointerType !== 'touch') return
+    event.preventDefault()
+    const style = document.body.style
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: effectiveWidth,
+      latestWidth: effectiveWidth,
+      originalCursor: style.getPropertyValue('cursor'),
+      originalCursorPriority: style.getPropertyPriority('cursor'),
+      originalUserSelect: style.getPropertyValue('user-select'),
+      originalUserSelectPriority: style.getPropertyPriority('user-select'),
+    }
+    style.setProperty('cursor', 'col-resize')
+    style.setProperty('user-select', 'none')
+    try { event.currentTarget.setPointerCapture(event.pointerId) } catch { /* Capture may be unavailable in a synthetic event. */ }
+  }, [effectiveWidth])
+
+  const handleResizePointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    event.preventDefault()
+    const width = clamp(drag.startWidth + drag.startX - event.clientX, minimumWidth, maximumWidth)
+    drag.latestWidth = width
+    setPreferredWidth(width)
+  }, [maximumWidth, minimumWidth])
+
+  const handleResizePointerEnd = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (dragRef.current?.pointerId !== event.pointerId) return
+    finishResize(true)
+  }, [finishResize])
+
+  const handleResizeKeys = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    let nextWidth: number | undefined
+    if (event.key === 'ArrowLeft') nextWidth = effectiveWidth + 20
+    else if (event.key === 'ArrowRight') nextWidth = effectiveWidth - 20
+    else if (event.key === 'Home') nextWidth = minimumWidth
+    else if (event.key === 'End') nextWidth = maximumWidth
+    else return
+    event.preventDefault()
+    const width = clamp(nextWidth, minimumWidth, maximumWidth)
+    setPreferredWidth(width)
+    persistPreferredWidth(width)
+  }, [effectiveWidth, maximumWidth, minimumWidth])
+
+  if (!open || (outputs.length === 0 && !outputsLoading)) return null
+
+  const resizeHandle = (
+    <div
+      role="separator"
+      aria-label="Resize thumbnails"
+      aria-orientation="vertical"
+      aria-valuemin={minimumWidth}
+      aria-valuemax={maximumWidth}
+      aria-valuenow={Math.round(effectiveWidth)}
+      aria-valuetext={`${Math.round(effectiveWidth)} pixels`}
+      tabIndex={0}
+      onKeyDown={handleResizeKeys}
+      onPointerDown={handleResizePointerDown}
+      onPointerMove={handleResizePointerMove}
+      onPointerUp={handleResizePointerEnd}
+      onPointerCancel={handleResizePointerEnd}
+      onLostPointerCapture={() => finishResize(true)}
+      className="group absolute left-0 top-0 bottom-0 z-10 w-2 cursor-col-resize touch-none select-none hover:bg-bg-hover/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-blue"
+      style={{ touchAction: 'none', userSelect: 'none' }}
+    >
+      <span aria-hidden="true" className="absolute left-1/2 top-0 bottom-0 w-px -translate-x-1/2 bg-border group-hover:bg-accent-blue group-focus-visible:bg-accent-blue" />
+    </div>
+  )
+
   if (isMobile) {
     return (
       <>
-        {/* Toggle button - fixed in bottom-right */}
-        <button
-          onClick={() => setMobileOpen(true)}
-          className="fixed bottom-4 right-4 z-30 w-10 h-10 rounded-full bg-bg-secondary border border-border shadow-lg flex items-center justify-center text-text-secondary hover:text-text-primary transition-colors"
-          title="Show thumbnails"
+        <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} aria-hidden="true" />
+        <aside
+          ref={panelRef}
+          id="gallery-thumbnail-panel"
+          data-testid="thumbnail-panel"
+          aria-label="Gallery thumbnails"
+          className="fixed top-0 right-0 h-full bg-bg-secondary border-l border-border z-50 flex flex-col overflow-hidden"
+          style={{ width: effectiveWidth, maxWidth: '100vw' }}
         >
-          <PanelRightOpen size={18} />
-        </button>
-
-        {/* Overlay backdrop */}
-        {mobileOpen && (
-          <div
-            className="fixed inset-0 bg-black/40 z-40"
-            onClick={() => setMobileOpen(false)}
-          />
-        )}
-
-        {/* Slide-in panel from right */}
-        <aside className={`fixed top-0 right-0 h-full w-[100px] bg-bg-secondary border-l border-border z-50 flex flex-col transform transition-transform duration-300 ease-in-out ${
-          mobileOpen ? 'translate-x-0' : 'translate-x-full'
-        }`}>
-          <div className="px-2 py-2 border-b border-border flex items-center justify-between">
-            <span className="text-[10px] text-text-muted uppercase tracking-wider">History</span>
+          {resizeHandle}
+          <div className="px-2 py-2 border-b border-border flex items-center justify-between min-w-0">
+            <span className="min-w-0 truncate text-[10px] text-text-muted uppercase tracking-wider">History</span>
             <button
-              onClick={() => setMobileOpen(false)}
-              className="p-1 rounded hover:bg-bg-hover text-text-secondary"
+              type="button"
+              aria-label="Close thumbnails"
+              title="Close thumbnails"
+              onClick={onClose}
+              className="shrink-0 p-1 rounded hover:bg-bg-hover text-text-secondary"
             >
               <X size={14} />
             </button>
           </div>
-          {mobileOpen && (
-            <VirtualizedThumbnailList
-              activeIndex={activeIndex}
-              onThumbnailClick={onThumbnailClick}
-              onMobileClick={() => setMobileOpen(false)}
-            />
-          )}
+          <VirtualizedThumbnailList
+            activeIndex={activeIndex}
+            onThumbnailClick={onThumbnailClick}
+            onMobileClick={onClose}
+          />
         </aside>
       </>
     )
   }
 
-  // Desktop: collapsible sidebar
   return (
-    <div className={`shrink-0 border-l border-border flex flex-col transition-all duration-200 ${
-      collapsed ? 'w-0 overflow-hidden' : 'w-[80px]'
-    }`}>
-      {/* Collapse toggle */}
-      <button
-        onClick={() => setCollapsed(!collapsed)}
-        className="absolute right-0 top-2 z-10 w-5 h-10 bg-bg-secondary border border-border border-r-0 rounded-l-md flex items-center justify-center text-text-muted hover:text-text-primary transition-colors"
-        style={{ right: collapsed ? 0 : 80 }}
-        title={collapsed ? 'Show thumbnails' : 'Hide thumbnails'}
-      >
-        {collapsed ? <PanelRightOpen size={12} /> : <PanelRightClose size={12} />}
-      </button>
-
-      {!collapsed && (
-        <VirtualizedThumbnailList
-          activeIndex={activeIndex}
-          onThumbnailClick={onThumbnailClick}
-        />
-      )}
-    </div>
+    <aside
+      ref={panelRef}
+      id="gallery-thumbnail-panel"
+      data-testid="thumbnail-panel"
+      aria-label="Gallery thumbnails"
+      className="relative shrink-0 min-h-0 border-l border-border flex flex-col overflow-hidden"
+      style={{ width: effectiveWidth, flexBasis: effectiveWidth }}
+    >
+      {resizeHandle}
+      <VirtualizedThumbnailList activeIndex={activeIndex} onThumbnailClick={onThumbnailClick} />
+    </aside>
   )
 }

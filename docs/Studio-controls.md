@@ -48,6 +48,12 @@ Click a thumbnail on the right to bring that asset into the gallery and keep it
 selected while media details load or new results arrive. Scroll the main gallery
 to resume selecting the card being browsed.
 
+The gallery toolbar's **Show/Hide thumbnails** button opens or closes the right
+panel. Drag its left divider to enlarge the previews and narrow the main gallery;
+the width and desktop open/closed choice are remembered in this browser. The
+divider also supports Left/Right arrow keys and Home/End. On phones, thumbnails
+open as an overlay with a close button; selecting an item closes the overlay.
+
 Completed Director runs show **Show clips** beneath the latest joined video in
 **All**, **Video** and **Multi-clip**. The shots start collapsed; expand them to
 browse their individual cards and normal media actions, then **Hide clips** to

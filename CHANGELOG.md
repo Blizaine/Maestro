@@ -5,6 +5,11 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [3.3.0] - 2026-10-26
 
+**Gallery:** resize the thumbnail panel with a draggable, keyboard-accessible
+divider. Previews scale with its width, and the main gallery shares the available
+space. A gallery-toolbar button replaces the protruding tab and phone's floating
+opener; panel width and desktop visibility are remembered per browser.
+
 **Appearance:** add Graphite Studio, a matte charcoal theme with flat orange
 actions, quieter neutral borders and a matching light variant. It is the
 default for fresh browser profiles; saved theme choices remain unchanged.

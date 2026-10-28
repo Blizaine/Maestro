@@ -77,7 +77,11 @@ async function scrollThumbnailTo(page, index, mobile) {
     let pane = first;
     while (pane && !/(auto|scroll)/.test(getComputedStyle(pane).overflowY)) pane = pane.parentElement;
     if (!pane) throw new Error('Thumbnail scroll area was not found');
-    pane.scrollTop = Math.max(0, targetIndex * 51 - pane.clientHeight / 2);
+    const rendered = [...pane.querySelectorAll('[data-thumb-index]')];
+    const stride = rendered.length > 1
+      ? parseFloat(rendered[1].style.top) - parseFloat(rendered[0].style.top)
+      : (rendered[0]?.getBoundingClientRect().height ?? 45) + 6;
+    pane.scrollTop = Math.max(0, targetIndex * stride - pane.clientHeight / 2);
     pane.dispatchEvent(new Event('scroll', { bubbles: true }));
   }, index);
   await page.locator(`[data-thumb-index="${index}"]`).waitFor();
