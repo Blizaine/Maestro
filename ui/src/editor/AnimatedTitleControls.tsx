@@ -18,7 +18,8 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
         <p className="text-xs leading-relaxed text-text-secondary">H3 Fused 4-Step · Frames. Matching {background === 'chroma' ? 'green' : 'black'} start/end frames are prepared automatically. {destination === 'studio' ? 'The finished clip is saved to your gallery.' : background === 'chroma' ? 'The result is inserted with chroma key enabled so footage below shows through.' : 'The result stays opaque, so its black background covers footage below.'}</p>
         <label className="block space-y-1.5 text-xs text-text-secondary">Title text
           <textarea aria-label="Animated title text" value={settings.text} maxLength={160} rows={2} disabled={busy}
-            onChange={event => patch({ text: event.target.value })} placeholder="Superman vs Thanos" className={FIELD} />
+            onChange={event => patch({ text: event.target.value })} placeholder="Create something extraordinary" className={FIELD} />
+          <span className="block text-[11px] leading-relaxed text-text-muted">For a sequence, put each phrase on its own line, then describe their order and transitions below.</span>
         </label>
         <label className="block space-y-1.5 text-xs text-text-secondary">Title background
           <select aria-label="Title background" value={background} disabled={busy}
