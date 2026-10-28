@@ -6,6 +6,7 @@ Start with the [README](../README.md) for installation and the feature overview.
 
 - [Studio controls](Studio-controls.md) — video, image and audio workflows, queues, gallery search and saved settings.
 - [Director controls](Director-controls.md) — music videos, short films, soundtrack analysis and reviewable production stages.
+- [Editor overlays](Editor-overlays.md) — animated title overlays, green/blue screen keying and soft-edge controls.
 - [Prompt enhancement API](Studio-enhancement-api.md) — queued enhancement, saved drafts and programmatic control.
 - [Characters and RefMods](Maestro-Characters.md) — reusable appearance references, portable characters and voice sharing.
 - [Speech characters](TTS-Characters.md) — saved voices across speech workflows.

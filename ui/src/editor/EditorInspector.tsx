@@ -24,6 +24,7 @@ import { editorCanvasLabel } from './editorUtils'
 import { DEFAULT_EDITOR_FONT, EDITOR_FONT_OPTIONS, editorFontStack } from './editorFonts'
 import { EditorAnimationControls } from './EditorAnimationControls'
 import { EditorColorControls } from './EditorColorControls'
+import { EditorKeyingControls } from './EditorKeyingControls'
 import { EditorTakeComparison } from './EditorTakeComparison'
 import { getApplicableEditorProperties } from './editorAnimation'
 import { useEditorStore } from './useEditorStore'
@@ -377,6 +378,11 @@ function EditorInspectorContent({
                       </div>
                     )}
                   </section>
+                )}
+
+                {track.type === 'video' && (asset?.type === 'video' || asset?.type === 'image') && (
+                  <EditorKeyingControls value={item.keying} disabled={track.locked}
+                    onChange={keying => updateItem(item.id, { keying })} />
                 )}
 
                 {track.type === 'video' && (asset?.type === 'video' || asset?.type === 'image') && (

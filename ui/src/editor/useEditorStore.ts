@@ -2366,6 +2366,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         link_group_id: linkGroupId,
         opacity: 1,
         style: undefined,
+        keying: undefined,
+        color: undefined,
+        keyframes: source.item.keyframes?.volume
+          ? { volume: source.item.keyframes.volume.map(frame => ({ ...frame })) }
+          : undefined,
       }))
       audioTrack.items.sort((a, b) => a.start - b.start)
     })

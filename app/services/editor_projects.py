@@ -34,6 +34,11 @@ from services.editor_animation import (
     normalize_editor_color,
     normalize_editor_keyframes,
 )
+from services.editor_keying import (
+    EditorKeyingError,
+    editor_keying_filters,
+    normalize_editor_keying,
+)
 
 
 EDITOR_SCHEMA_VERSION = 6
@@ -243,6 +248,15 @@ def _validate_editor_project_input(project: Mapping[str, Any]) -> None:
                 raise EditorProjectError(
                     f"Editor {location}: color adjustments require a video track"
                 )
+            if "keying" in item and track_type != "video":
+                raise EditorProjectError(
+                    f"Editor {location}: keying requires a video track"
+                )
+            if "keying" in item:
+                try:
+                    normalize_editor_keying(item.get("keying"))
+                except EditorKeyingError as error:
+                    raise EditorProjectError(f"Editor {location}: {error}") from error
             if "transition_overlap" in item:
                 overlap = _finite_project_time(
                     item.get("transition_overlap"),
@@ -566,6 +580,22 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
                     if track_type != "text" and asset_id not in assets:
                         continue
                     asset = assets.get(asset_id)
+                    if "keying" in item:
+                        try:
+                            keying = normalize_editor_keying(item.get("keying"))
+                        except EditorKeyingError as error:
+                            raise EditorProjectError(
+                                f"Editor track {len(tracks) + 1} item {len(items) + 1}: {error}"
+                            ) from error
+                        if keying is not None:
+                            if asset and asset.get("type") not in {"video", "image"}:
+                                raise EditorProjectError(
+                                    f"Editor track {len(tracks) + 1} item {len(items) + 1}: "
+                                    "keying requires a video or image asset"
+                                )
+                            item["keying"] = keying
+                        else:
+                            item.pop("keying", None)
                     if asset and asset.get("type") != "image":
                         asset_duration = max(0.0, _finite_number(asset.get("duration"), 0.0))
                         if asset_duration > 0:
@@ -2441,6 +2471,19 @@ def compile_editor_render(
                 f"[{input_index}:v]trim=start={source_in:.8f}:duration={source_span:.8f},"
                 f"setpts=(PTS-STARTPTS)/{speed:.8f}+{start:.8f}/TB"
             )
+        spatial_prefix = prefix
+        keying = item.get("keying")
+        if isinstance(keying, Mapping) and keying.get("enabled"):
+            trimmed_label = f"editor_key_trimmed_{visual_index}"
+            keyed_native_label = f"editor_key_native_{visual_index}"
+            filters.append(f"{prefix},format=rgba[{trimmed_label}]")
+            filters.extend(editor_keying_filters(
+                keying,
+                input_label=trimmed_label,
+                output_label=keyed_native_label,
+                suffix=str(visual_index),
+            ))
+            spatial_prefix = f"[{keyed_native_label}]null"
         resize_scale = 1.0 if animated_scale else scale
         target_w = max(2, int(round(width * resize_scale / 2) * 2))
         target_h = max(2, int(round(height * resize_scale / 2) * 2))
@@ -2528,7 +2571,7 @@ def compile_editor_render(
             "" if animated_opacity else f",colorchannelmixer=aa={opacity:.8f}"
         )
         if animated_opacity:
-            spatial_chain = f"{prefix},fps={fps:.8f},{resize},format=rgba"
+            spatial_chain = f"{spatial_prefix},fps={fps:.8f},{resize},format=rgba"
             if fit == "contain":
                 spatial_chain += (
                     f",pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black@0"
@@ -2536,7 +2579,7 @@ def compile_editor_render(
             spatial_chain += f"{scale_filter}{rotation_filter}"
         else:
             spatial_chain = (
-                f"{prefix},fps={fps:.8f},{resize}{scale_filter}{rotation_filter},format=rgba"
+                f"{spatial_prefix},fps={fps:.8f},{resize}{scale_filter}{rotation_filter},format=rgba"
             )
         if color_filters:
             pre_color_label = f"editor_pre_color_{visual_index}"

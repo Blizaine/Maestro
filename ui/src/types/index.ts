@@ -777,6 +777,14 @@ export interface EditorDirectorClipSource {
   window_prompts?: string[]
 }
 
+export interface EditorKeyingSettings {
+  enabled: boolean
+  color: string
+  similarity: number
+  softness: number
+  spill: number
+}
+
 export interface EditorTimelineItem {
   id: string
   asset_id?: string
@@ -801,6 +809,7 @@ export interface EditorTimelineItem {
   transition_overlap?: number
   keyframes?: Partial<Record<EditorAnimatedProperty, EditorKeyframe[]>>
   color?: EditorColorSettings
+  keying?: EditorKeyingSettings
   /** Optional generated/readable caption attached to this clip. */
   caption?: boolean
   /** Legacy project text transform/rotation preserved for compatibility review. */

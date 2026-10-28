@@ -16,6 +16,8 @@ import { evaluateEditorItem, upsertEditorKeyframe } from './editorAnimation'
 import { editorColorFilter, editorColorMatrix } from './editorColor'
 import { releaseEditorMediaAudio, resumeEditorAudio, setEditorMediaGain } from './editorAudioGraph'
 import { EditorAudioMeter } from './EditorAudioMeter'
+import { EditorKeyedCanvas } from './EditorKeyedCanvas'
+import { normalizeEditorKeying } from './editorKeying'
 
 type CanvasInteractionMode = 'move' | 'resize'
 type PreviewQuality = 'auto' | 'original' | 'proxy' | 'mobile'
@@ -257,6 +259,9 @@ function PreviewVisual({
   ) => void
 }) {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const imageRef = useRef<HTMLImageElement>(null)
+  const keying = useMemo(() => normalizeEditorKeying(item.keying), [item.keying])
+  const keyingEnabled = keying.enabled && !asset.missing
   useEffect(() => {
     const element = videoRef.current
     return () => { if (element) releaseEditorMediaAudio(element) }
@@ -266,20 +271,21 @@ function PreviewVisual({
   const mediaPreview = useEditorMediaPreview(
     asset.type === 'video' ? asset : undefined,
     workspace,
-    previewQuality !== 'original',
+    previewQuality !== 'original' && !keyingEnabled,
     previewQuality === 'mobile' || (mobilePlayback && previewQuality === 'auto') ? 'mobile' : 'auto',
   )
   const waitingForMobileProxy = (
     (mobilePlayback || previewQuality === 'proxy' || previewQuality === 'mobile')
     && previewQuality !== 'original'
     && asset.type === 'video'
+    && !keyingEnabled
     && mediaPreview.loading
   )
   // On iPhone, starting against the original generation while FFmpeg builds
   // the lightweight proxy locks Safari onto the large source for the rest of
   // that clip. Wait briefly for the proxy instead; fall back to the original
   // only when preview preparation actually fails or returns no proxy.
-  const resolvedSourceUrl = previewQuality === 'original' ? asset.url : mediaPreview.data?.proxy_url
+  const resolvedSourceUrl = previewQuality === 'original' || keyingEnabled ? asset.url : mediaPreview.data?.proxy_url
     || (waitingForMobileProxy ? '' : asset.url)
   const [sourceState, setSourceState] = useState({ assetId: asset.id, url: resolvedSourceUrl })
   const sourceAssetChanged = sourceState.assetId !== asset.id
@@ -289,6 +295,7 @@ function PreviewVisual({
     && playing
     && Boolean(sourceState.url)
     && !sourceAssetChanged
+    && (!keyingEnabled || sourceState.url === asset.url)
   )
   const promotionSyncPendingRef = useRef(false)
   const transform = previewTransform || item.transform
@@ -408,7 +415,10 @@ function PreviewVisual({
         <filter id={colorFilterId} colorInterpolationFilters="sRGB"><feColorMatrix type="matrix" values={editorColorMatrix(item.color)} /></filter>
       </defs></svg>}
       {asset.type === 'image' ? (
-        <img src={asset.url} alt="" draggable={false} className="pointer-events-none h-full w-full select-none" style={{ objectFit: item.fit, filter: mediaFilter }} />
+        <>
+          <img ref={imageRef} src={asset.url} alt="" draggable={false} className="pointer-events-none h-full w-full select-none" style={{ objectFit: item.fit, filter: keyingEnabled ? undefined : mediaFilter, opacity: keyingEnabled ? 0 : 1 }} />
+          {keyingEnabled && <EditorKeyedCanvas sourceRef={imageRef} sourceUrl={asset.url} settings={keying} active={active} fit={item.fit} filter={mediaFilter} />}
+        </>
       ) : asset.missing ? (
         <div className="grid h-full w-full place-items-center bg-red-950/70 text-[10px] font-semibold uppercase tracking-wider text-red-100">Media offline</div>
       ) : (
@@ -417,7 +427,7 @@ function PreviewVisual({
             ref={videoRef}
             src={sourceUrl || undefined}
             className="pointer-events-none h-full w-full"
-            style={{ objectFit: item.fit, filter: mediaFilter }}
+            style={{ objectFit: item.fit, filter: keyingEnabled ? undefined : mediaFilter, opacity: keyingEnabled ? 0 : 1 }}
             playsInline
             preload="auto"
             data-editor-media-active={active ? 'true' : 'false'}
@@ -435,6 +445,7 @@ function PreviewVisual({
               syncActiveVideo(false)
             }}
           />
+          {keyingEnabled && <EditorKeyedCanvas sourceRef={videoRef} sourceUrl={sourceUrl} settings={keying} active={active} fit={item.fit} filter={mediaFilter} />}
           {!sourceUrl && waitingForMobileProxy && (
             <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/75 px-4 text-center text-[10px] font-semibold uppercase tracking-[0.16em] text-white/70">
               Preparing smooth mobile preview…
