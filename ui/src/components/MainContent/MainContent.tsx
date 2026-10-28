@@ -1099,6 +1099,8 @@ export function MainContent() {
             className="rounded-lg p-1.5 text-text-secondary hover:bg-bg-hover hover:text-text-primary disabled:opacity-35">
             <Maximize2 size={16} />
           </button>
+          <WorkspaceSelector />
+          {!isMobile && <GlobalQueuePopover />}
           {(outputs.length > 0 || outputsLoading) && (
             <button
               type="button"
@@ -1114,8 +1116,6 @@ export function MainContent() {
               {thumbnailsOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
             </button>
           )}
-          <WorkspaceSelector />
-          {!isMobile && <GlobalQueuePopover />}
         </div>
       </div>
 
