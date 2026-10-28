@@ -1199,7 +1199,7 @@ export function EditorPreview() {
       </div>
 
       <div className="flex h-11 shrink-0 items-center gap-2 border-t border-border bg-bg-secondary px-3 md:px-4">
-        <EditorAudioMeter playing={playing} />
+        {!isMobile && <EditorAudioMeter playing={playing} />}
         <select aria-label="Preview quality" title="Preview quality; exports always use the original sources"
           value={previewQuality} onChange={event => {
             const quality = event.target.value as PreviewQuality
@@ -1245,7 +1245,7 @@ export function EditorPreview() {
           className="min-w-0 flex-1 accent-[var(--color-accent-blue)]"
           aria-label="Playhead"
         />
-        <span className="hidden w-11 text-right font-mono text-[9px] text-text-muted sm:block">{formatEditorTime(duration)}</span>
+        {!isMobile && <span className="hidden w-11 text-right font-mono text-[9px] text-text-muted sm:block">{formatEditorTime(duration)}</span>}
         <button type="button" onClick={() => void canvasRef.current?.requestFullscreen?.()} className="rounded p-1.5 text-text-muted hover:bg-bg-hover hover:text-text-primary" title="Fullscreen preview">
           <Maximize2 size={13} />
         </button>

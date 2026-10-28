@@ -14,6 +14,7 @@ import {
   RotateCcw,
   Save,
   Settings,
+  Sparkles,
   Trash2,
   Undo2,
 } from 'lucide-react'
@@ -25,6 +26,7 @@ import { EditorExportDialog } from './EditorExportDialog'
 import { EditorCaptionsDialog } from './EditorCaptionsDialog'
 import { EditorAudioTools } from './EditorAudioTools'
 import { EditorProjectTools } from './EditorProjectTools'
+import { EditorAutoEditDialog } from './EditorAutoEditDialog'
 import { useEditorStore } from './useEditorStore'
 
 const CANVAS_PRESETS = [
@@ -75,6 +77,7 @@ export function EditorTopBar() {
   const [captionsDialogOpen, setCaptionsDialogOpen] = useState(false)
   const [audioToolsOpen, setAudioToolsOpen] = useState(false)
   const [projectToolsOpen, setProjectToolsOpen] = useState(false)
+  const [autoEditOpen, setAutoEditOpen] = useState(false)
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
   const [discardConfirmed, setDiscardConfirmed] = useState(false)
   const project = useEditorStore(state => state.project)
@@ -258,6 +261,11 @@ export function EditorTopBar() {
       )}
 
       <div className={`ml-auto flex shrink-0 items-center gap-0.5 md:gap-1 ${isMobile ? 'order-2' : ''}`}>
+        <button type="button" aria-label="Auto-edit" title="Review an automatic edit plan" disabled={!project}
+          onClick={() => { setExportDialogOpen(false); setProjectToolsOpen(false); setAudioToolsOpen(false); setCaptionsDialogOpen(false); setAutoEditOpen(true) }}
+          className="flex items-center gap-1.5 rounded-lg p-2 text-accent-blue hover:bg-accent-blue/10 disabled:opacity-40">
+          <Sparkles size={isMobile ? 18 : 16} /><span className="hidden text-xs font-medium xl:inline">Auto-edit</span>
+        </button>
         <button
           type="button"
           onClick={() => { setCaptionsDialogOpen(false); setAudioToolsOpen(false); setExportDialogOpen(false); setProjectToolsOpen(true) }}
@@ -331,6 +339,7 @@ export function EditorTopBar() {
       <EditorCaptionsDialog open={captionsDialogOpen} onClose={() => setCaptionsDialogOpen(false)} />
       <EditorAudioTools open={audioToolsOpen} onClose={() => setAudioToolsOpen(false)} />
       <EditorProjectTools open={projectToolsOpen} onClose={() => setProjectToolsOpen(false)} />
+      <EditorAutoEditDialog open={autoEditOpen} onClose={() => setAutoEditOpen(false)} />
     </header>
   )
 }

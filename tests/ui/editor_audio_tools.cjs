@@ -261,13 +261,11 @@ function makeDeferred() {
     assert.deepEqual(await page.evaluate(() => window.audioStore.getState().project.tracks[0].items[0].keyframes.volume), beforeNormalize.keyframes,
       'One undo restores the prior volume envelope');
 
+    await page.evaluate(() => window.audioStore.getState().selectItem('music-item', 'music-track'));
     const beforeDuck = await page.evaluate(() => ({
       history: window.audioStore.getState().history.length,
       keyframes: window.audioStore.getState().project.tracks[0].items[0].keyframes.volume,
-      selectedItemId: window.audioStore.getState().selectedItemId,
-      selectedTrackId: window.audioStore.getState().selectedTrackId,
     }));
-    console.log('duck diagnostic', beforeDuck, await dialog.getByRole('combobox', {name: 'Narration track'}).inputValue(), await dialog.getByRole('button', {name: 'Apply duck envelope'}).isDisabled());
     await dialog.getByRole('button', {name: 'Apply duck envelope'}).click();
     const ducked = await page.evaluate(() => {
       const state = window.audioStore.getState();
@@ -281,6 +279,7 @@ function makeDeferred() {
     assert.deepEqual(await page.evaluate(() => window.audioStore.getState().project.tracks[0].items[0].keyframes.volume), beforeDuck.keyframes,
       'One undo restores the original music envelope');
 
+    await page.evaluate(() => window.audioStore.getState().selectItem('music-item', 'music-track'));
     let transcribeStartedResolveLocal;
     const transcribeStarted = new Promise(resolve => { transcribeStartedResolveLocal = resolve; });
     transcribeStartedResolve = transcribeStartedResolveLocal;
@@ -291,7 +290,7 @@ function makeDeferred() {
     assert.deepEqual(transcribeBodies[0], {
       workspace: 'Audio tools workspace',
       project_id: 'audio-tools-project',
-      revision: 11,
+      revision: 10,
       item_id: 'music-item',
     }, 'Transcription is tied to the saved project revision and selected clip');
     await page.evaluate(() => window.audioStore.getState().updateItem('music-item', {asset_id: 'alternateMusic'}));

@@ -310,6 +310,18 @@ def _validate_editor_project_input(project: Mapping[str, Any]) -> None:
         raise EditorProjectError(
             f"Editor project has more than {MAX_EDITOR_EXPORTS} export records"
         )
+    auto_history = project.get("auto_edit_history", [])
+    if not isinstance(auto_history, list) or len(auto_history) > 20:
+        raise EditorProjectError("Editor auto-edit history must contain at most 20 records")
+    for entry in auto_history:
+        if not isinstance(entry, Mapping) or not isinstance(entry.get("action_ids"), list):
+            raise EditorProjectError("Editor auto-edit history has an invalid record")
+        if len(entry["action_ids"]) > 64 or any(not isinstance(value, str) or len(value) > 200 for value in entry["action_ids"]):
+            raise EditorProjectError("Editor auto-edit history has invalid action ids")
+        if not isinstance(entry.get("proposal_id"), str) or len(entry["proposal_id"]) > 160:
+            raise EditorProjectError("Editor auto-edit history has an invalid proposal id")
+        if not isinstance(entry.get("summary", ""), str) or len(entry.get("summary", "")) > 400:
+            raise EditorProjectError("Editor auto-edit history summary is too long")
 
 
 def _editor_font_family(value: Any) -> str:
@@ -744,6 +756,7 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
                     item["fit"] = "cover" if str(item.get("fit")) == "cover" else "contain"
                     item["muted"] = bool(item.get("muted", False))
                     item["disabled"] = bool(item.get("disabled", False))
+                    item["pinned"] = bool(item.get("pinned", False))
                     if track_type == "text":
                         style = text_style_source
                         color = str(style.get("color") or "#ffffff")

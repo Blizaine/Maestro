@@ -32184,6 +32184,103 @@ def editor_media_cache(preview_id: str, kind: str, workspace: str = ""):
     )
 
 
+def _editor_auto_edit_directory():
+    return Path(_app_dir) / "settings" / "editor_auto_edit"
+
+
+@api.get("/api/v1/editor/auto-edit/capabilities")
+def editor_auto_edit_capability_list():
+    from services import llm_service
+    from services.editor_auto_edit_runtime import editor_auto_edit_capabilities
+    return editor_auto_edit_capabilities(llm_service)
+
+
+@api.get("/api/v1/editor/auto-edit/proposals")
+def editor_auto_edit_proposal_list(workspace: str, project_id: str):
+    from services.editor_auto_edit import list_editor_auto_edit_proposals
+    records = list_editor_auto_edit_proposals(
+        _editor_auto_edit_directory(), workspace=workspace, project_id=project_id, limit=20,
+    )
+    keys = ("proposal_id", "project_id", "workspace", "base_revision", "mode", "status", "summary", "created_at", "updated_at")
+    return {"proposals": [{key: record.get(key) for key in keys} for record in records]}
+
+
+@api.get("/api/v1/editor/auto-edit/proposals/{proposal_id}")
+def editor_auto_edit_proposal_get(proposal_id: str):
+    from services.editor_auto_edit import EditorAutoEditError, get_editor_auto_edit_proposal
+    try:
+        return get_editor_auto_edit_proposal(_editor_auto_edit_directory(), proposal_id)
+    except EditorAutoEditError as error:
+        raise HTTPException(404, str(error)) from error
+
+
+@api.post("/api/v1/editor/auto-edit/plan")
+async def editor_auto_edit_plan(request: Request):
+    from services import llm_service
+    from services.editor_auto_edit import (
+        EditorAutoEditError, create_editor_auto_edit_proposal, get_editor_auto_edit_proposal,
+    )
+    from services.editor_auto_edit_runtime import editor_auto_edit_capabilities, editor_auto_edit_writer
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError) as error:
+        raise HTTPException(400, "Request body must be valid JSON") from error
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Request body must be an object")
+    workspace = body.get("workspace") or _get_active_workspace()
+    project_id = str(body.get("project_id") or "")
+    revision = body.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int):
+        raise HTTPException(400, "Save this project before planning an edit")
+    proposal_id = str(body.get("proposal_id") or "")
+    try:
+        project = load_editor_project(_editor_save_root(), workspace, project_id)
+        options = dict(mode=body.get("mode"), workspace=workspace,
+                       brief=body.get("brief", ""), target_seconds=body.get("target_seconds"),
+                       client_intent_id=proposal_id, client_signature=body.get("client_signature", ""))
+        try:
+            previous = get_editor_auto_edit_proposal(_editor_auto_edit_directory(), proposal_id)
+        except EditorAutoEditError:
+            previous = None
+        if previous is not None:
+            # Durable intent is authoritative even if its writer is now unloaded.
+            # Creation validates identical request identity and never repeats it.
+            return create_editor_auto_edit_proposal(_editor_auto_edit_directory(), project, **options)
+        if project.get("revision", 0) != revision:
+            raise HTTPException(409, "This project changed. Reload or save a new version before planning.")
+        if body.get("mode") == "director":
+            return create_editor_auto_edit_proposal(_editor_auto_edit_directory(), project, **options)
+        capabilities = editor_auto_edit_capabilities(llm_service)
+        if not capabilities["writer_available"]:
+            raise HTTPException(409, capabilities["reason"])
+        _guard_interactive_llm_against_generation()
+        if not _gen_lock.acquire(blocking=False):
+            raise HTTPException(409, "Generation resources are busy. Auto-edit planning has not started.")
+        try:
+            def plan():
+                with llm_service.keep_loaded():
+                    return create_editor_auto_edit_proposal(
+                        _editor_auto_edit_directory(), project,
+                        writer=editor_auto_edit_writer(llm_service), writer_identity=llm_service.get_status(), **options,
+                    )
+            worker = asyncio.create_task(asyncio.to_thread(plan))
+            try:
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # Keep the GPU lease until the writer has persisted its result.
+                # A lost browser receipt can be recovered with GET, never POST.
+                try:
+                    await worker
+                finally:
+                    raise
+        finally:
+            _gen_lock.release()
+    except FileNotFoundError as error:
+        raise HTTPException(404, "Editor project not found") from error
+    except EditorAutoEditError as error:
+        raise HTTPException(400, str(error)) from error
+
+
 @api.get("/api/v1/editor/export/capabilities")
 def editor_export_capability_list():
     return editor_export_capabilities()

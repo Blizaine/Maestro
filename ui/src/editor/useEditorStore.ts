@@ -33,6 +33,7 @@ import { DEFAULT_EDITOR_FONT } from './editorFonts'
 import { flashvsrScale } from '../lib/flashvsr'
 import { invalidateEditorMediaPreview } from './editorMediaPreview'
 import { applyEditorEditOperation, type EditorEditOperation } from './editorEditOperations'
+import { previewEditorAutoEdit, type EditorAutoProposal } from './editorAutoEdit'
 
 const HISTORY_LIMIT = 60
 const MIN_ITEM_DURATION = 1 / 30
@@ -146,6 +147,7 @@ interface EditorState {
   setAIWorkspaceOpen: (open: boolean) => void
   updateItem: (itemId: string, patch: Partial<EditorTimelineItem>) => void
   executeEditOperations: (operations: EditorEditOperation[]) => boolean
+  applyAutoEditProposal: (proposal: EditorAutoProposal, actionIds: string[]) => boolean
   moveItem: (itemId: string, start: number, trackId?: string) => void
   trimItem: (itemId: string, edge: 'start' | 'end', time: number) => void
   splitSelected: () => void
@@ -315,7 +317,7 @@ function editorSavedProjectSignature(project: EditorProject): string {
   // updated_at, and exports are deliberately excluded because export history
   // writes those fields without changing the timeline document.
   const assets = Object.fromEntries(Object.entries(project.assets).map(([id, asset]) => {
-    const { missing: _missing, ...content } = asset
+    const content = Object.fromEntries(Object.entries(asset).filter(([key]) => key !== 'missing'))
     return [id, content]
   }))
   const content = JSON.stringify({
@@ -1867,6 +1869,27 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   removeMarker: markerId => commitProject(set, get, project => {
     project.markers = (project.markers || []).filter(marker => marker.id !== markerId)
   }),
+  applyAutoEditProposal: (proposal, actionIds) => {
+    const current = get().project
+    if (!current) return false
+    try {
+      if (current.auto_edit_history?.some(entry => entry.proposal_id === proposal.proposal_id)) {
+        throw new Error('This proposal was already applied. Undo it or request a revised plan.')
+      }
+      const { project: next } = previewEditorAutoEdit(current, proposal, actionIds)
+      next.updated_at = Date.now() / 1000
+      next.auto_edit_history = [...(current.auto_edit_history || []), {
+        proposal_id: proposal.proposal_id, action_ids: [...actionIds],
+        base_revision: proposal.base_revision, applied_at: next.updated_at, summary: proposal.summary,
+      }].slice(-20)
+      set(state => ({ project: next, dirty: true, playing: false,
+        history: [...state.history, current].slice(-HISTORY_LIMIT), future: [], error: null }))
+      return true
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : 'This automatic edit could not be applied.' })
+      return false
+    }
+  },
   executeEditOperations: operations => {
     if (!get().project || operations.length === 0) return false
     try {

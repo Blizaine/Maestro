@@ -791,6 +791,8 @@ export interface EditorTimelineItem {
   transform: EditorTransform
   muted?: boolean
   disabled?: boolean
+  /** Preserve this clip when accepting an automatic edit plan. Manual edits remain available. */
+  pinned?: boolean
   fade_in?: number
   fade_out?: number
   transition_in?: EditorTransitionType
@@ -894,6 +896,13 @@ export interface EditorProject {
   markers: EditorMarker[]
   export: EditorExportSettings
   exports: EditorExportRecord[]
+  auto_edit_history?: Array<{
+    proposal_id: string
+    action_ids: string[]
+    base_revision: number
+    applied_at: number
+    summary: string
+  }>
 }
 
 export interface EditorProjectSummary {

@@ -1,6 +1,6 @@
 # Editor modernization and local auto-edit plan
 
-Status: implementation started, 2026-10-28. Owner: Maestro development.
+Status: implemented for local Dev review, 2026-10-28. Owner: Maestro development.
 
 Build a readable, responsive timeline editor with non-destructive Maestro AI
 operations. Complete and verify the manual editing foundation before enabling
@@ -123,8 +123,8 @@ change OS/network settings, or push public branches as part of a local checkpoin
 
 - Audit complete: current UI rendered with synthetic media; code-level integrity,
   queue-correlation and performance risks identified, not benchmarked incidents.
-- Phases 0–5: implemented; final combined export/save gate in progress.
-- Manual verification: 81 CPU tests passed, including real FFmpeg media fixtures.
+- Phases 0–5: implemented and verified, including concurrent export/save recovery.
+- Manual verification: 85 CPU tests passed, including real FFmpeg media fixtures.
   Browser checks cover layout, selection, source ranges, A/B takes, captions,
   animation, audio envelopes, recovery/packages, Director import/drafts and exact
   AI ownership, with all HTTP mocked. Portrait and touch landscape reviewed.
@@ -132,7 +132,12 @@ change OS/network settings, or push public branches as part of a local checkpoin
   60 initial / 52 far-scroll clip nodes, with distant selection verified. The
   measured 383 ms initial mount and 47 ms far-scroll render are synthetic browser
   observations, not playback or hardware benchmarks.
-- Phase 6: waits for the final manual export gate; no auto-edit generation begun.
+- Phase 6: implemented last, after the manual gate. Auto-edit has explicit
+  proposal review, action checkboxes, one-step undo, pinned/locked protection,
+  exact request recovery, retained drafts and project-revision guards.
+- Combined verification: 112 Python CPU tests and 18 browser/command harnesses,
+  including 15 deterministic auto-edit cases. All browser HTTP is intercepted.
+  No user media, inference, transcription or GPU export job was submitted.
 
 ### Known verification limits
 
@@ -143,6 +148,12 @@ pre-export; the final audio renderer applies a safety limiter, so deliberately
 overloaded mixes can sound different. Reduce clipping before export. Dissolves
 preserve authored transparency rather than forcing opaque sources. Current text
 rotation is unsupported; legacy ignored rotation migrates visibly with a warning.
+Creative auto-edit quality has been tested with mock writers; actual local-writer
+outputs still require user review. The first auto planner accepts up to 128
+project assets, 200 timeline clips and 64 proposed actions; it reports those bounds
+rather than silently planning only part of a larger project. Writer calls have a
+6,000-token output allowance and at most one focused structural repair. Drafts
+retain up to 64 KiB each, with truncation flagged.
 
 ### Auto-edit first implementation contract
 
@@ -164,3 +175,25 @@ let users revise the brief or accept only valid independent actions. Persist the
 proposal and applied action IDs for later review. A changed project requires a new
 review instead of silently applying an old plan. Missing-material suggestions do
 not submit a render; ordinary Studio tools remain the explicit next step.
+
+## Trying the Editor
+
+Open **Editor**. Drag panel dividers or use their arrow keys; **Reset layout**
+restores the layout. Preview media with the eye button, set source In/Out and
+insert the selected range. Select a timeline clip for Basic, Audio, Motion and AI
+controls. The Clip actions menu contains slip, roll, gap and overlap edits.
+
+Use **Captions** for SRT/WebVTT or **Audio tools** for range analysis, normalization,
+ducking and transcription when the supported local speech-recognition model is
+already installed. **Project tools** exposes prior revisions and portable ZIP
+packages. Export presets distinguish the edit canvas, render size and final
+finishing size, and report actual encoder readiness.
+
+Use **Auto-edit** in the toolbar after saving/importing your media or Director
+package. **Director order** works without a writer. **Assemble**, **Polish** and
+**Revise** use an already loaded local/private-network writer. Pin important clips
+in Basic and lock tracks to protect them. Review the proposed actions, deselect
+anything unwanted and apply the selection once; Undo restores the entire previous
+timeline. Failed drafts and lost receipts remain available through proposal
+history. A changed project requires a fresh plan. Missing-media notes never queue
+generation automatically.

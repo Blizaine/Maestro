@@ -323,6 +323,11 @@ function EditorInspectorContent({
             {visibleClipTab === 'basic' && (
               <div id={`${inspectorId}-panel-basic`} role="tabpanel" aria-labelledby={`${inspectorId}-tab-basic`} className="space-y-4">
                 <div className="space-y-2">
+                  <button type="button" aria-pressed={Boolean(item.pinned)} disabled={track.locked}
+                    onClick={() => updateItem(item.id, { pinned: !item.pinned })}
+                    className={`w-full rounded-lg border px-3 py-2 text-xs disabled:opacity-40 ${item.pinned ? 'border-accent-blue/50 bg-accent-blue/10 text-accent-blue' : 'border-border text-text-secondary hover:bg-bg-hover'}`}>
+                    {item.pinned ? 'Pinned · protected from auto-edit' : 'Pin this clip for auto-edit'}
+                  </button>
                   <FieldLabel>Timing</FieldLabel>
                   <div className="grid grid-cols-2 gap-2">
                     <NumberField label="Start" value={item.start} min={0} step={1 / project.canvas.fps} onChange={value => updateItem(item.id, { start: value })} />
