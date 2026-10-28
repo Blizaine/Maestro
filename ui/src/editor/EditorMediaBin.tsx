@@ -181,52 +181,92 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
 
   return (
     <section className={`flex min-h-0 flex-col bg-bg-secondary ${compact ? 'h-full' : 'w-[260px] shrink-0 border-r border-border'}`}>
-      <div className="space-y-2 border-b border-border p-2.5">
-        <div className="flex items-center justify-between">
-          <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-text-secondary">Media</h2>
-          <div className="ml-auto flex items-center gap-1">
+      <div data-testid="editor-media-bin-header" className="shrink-0 space-y-1.5 border-b border-border p-2">
+        <div className="flex min-w-0 items-center gap-1">
+          <h2 className="min-w-0 flex-1 whitespace-nowrap text-[11px] font-semibold uppercase tracking-[0.12em] text-text-secondary">Media</h2>
+          <button type="button" onClick={() => setUsedOnly(value => !value)} aria-pressed={usedOnly}
+            aria-label="Used in project" title="Used in project"
+            className={`min-h-9 shrink-0 rounded-md border px-1 text-[10px] font-medium ${usedOnly ? 'border-accent-blue/50 bg-accent-blue/10 text-accent-blue' : 'border-border text-text-secondary'}`}>Used</button>
+          {/* Global range styling outranks width utilities, so inline dimensions keep this slider inside the compact header and touch-sized. */}
+          {cards && <input type="range" min={100} max={220} step={10} value={thumbnailSize} aria-label="Media thumbnail size"
+            title="Thumbnail size" onChange={event => setThumbnailSize(Number(event.target.value))}
+            className="shrink-0 accent-[var(--color-accent-blue)]"
+            style={{
+              width: 44,
+              height: 36,
+              background: 'linear-gradient(to bottom, transparent calc(50% - 2px), var(--color-border) calc(50% - 2px), var(--color-border) calc(50% + 2px), transparent calc(50% + 2px))',
+            }} />}
+          <div className="flex shrink-0 items-center gap-0.5">
             <button type="button" aria-label="Grid view" aria-pressed={view === 'grid'} onClick={() => setView('grid')}
-              className={`rounded p-1.5 ${view === 'grid' ? 'bg-bg-active text-accent-blue' : 'text-text-muted'}`}><Grid2X2 size={14} /></button>
+              className={`grid min-h-9 min-w-8 place-items-center rounded-md ${view === 'grid' ? 'bg-bg-active text-accent-blue' : 'text-text-muted hover:bg-bg-hover'}`}><Grid2X2 size={14} /></button>
             <button type="button" aria-label="List view" aria-pressed={view === 'list'} onClick={() => setView('list')}
-              className={`rounded p-1.5 ${view === 'list' ? 'bg-bg-active text-accent-blue' : 'text-text-muted'}`}><List size={14} /></button>
+              className={`grid min-h-9 min-w-8 place-items-center rounded-md ${view === 'list' ? 'bg-bg-active text-accent-blue' : 'text-text-muted hover:bg-bg-hover'}`}><List size={14} /></button>
           </div>
-          <button type="button" onClick={() => void refreshLibrary()} className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text-primary" title="Refresh media">
-            <RefreshCw size={12} />
+          <button type="button" aria-label="Refresh media" onClick={() => void refreshLibrary()}
+            className="grid min-h-9 min-w-8 shrink-0 place-items-center rounded-md text-text-muted hover:bg-bg-hover hover:text-text-primary" title="Refresh media">
+            <RefreshCw size={13} />
           </button>
         </div>
-        <div className="relative">
-          <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
+        <div className="grid grid-cols-2 gap-1">
+          <div className="relative min-w-0">
+            <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
+            <input
+              aria-label="Search media"
+              value={search}
+              onChange={event => {
+                setSearch(event.target.value)
+                setVisibleLimit(MEDIA_BATCH_SIZE)
+              }}
+              placeholder="Search media"
+              className="h-8 w-full min-w-0 rounded-lg border border-border bg-bg-tertiary pl-7 pr-2 text-[11px] text-text-primary outline-none placeholder:text-text-muted focus:border-accent-blue/60"
+            />
+          </div>
+          <label className="relative flex min-w-0 items-center">
+            <FolderOpen size={11} className="pointer-events-none absolute left-2 text-text-muted" />
+            <select
+              value={workspaceFilter}
+              onChange={event => {
+                setWorkspaceFilter(event.target.value)
+                setVisibleLimit(MEDIA_BATCH_SIZE)
+              }}
+              className="h-8 w-full min-w-0 appearance-none rounded-lg border border-border bg-bg-tertiary pl-6 pr-5 text-[10px] text-text-secondary outline-none focus:border-accent-blue/60"
+              aria-label="Filter media by workspace"
+            >
+              <option value="all">All workspaces</option>
+              {libraryWorkspaces.map(workspace => (
+                <option key={workspace} value={workspace}>{workspace === 'default' ? 'Default workspace' : workspace}</option>
+              ))}
+              <option value="__uploads__">Uploads</option>
+            </select>
+            <span className="pointer-events-none absolute right-2 text-[10px] text-text-muted">▾</span>
+          </label>
+        </div>
+        <div data-testid="editor-media-bin-toolbar" className="grid grid-cols-3 gap-1">
+          <button type="button" aria-label="Upload media" title="Upload media" onClick={() => inputRef.current?.click()}
+            disabled={uploading}
+            className="flex min-h-9 min-w-0 items-center justify-center gap-1 rounded-lg border border-dashed border-border-light bg-bg-tertiary px-1.5 text-[11px] font-medium text-text-secondary hover:border-accent-blue/50 hover:text-accent-blue disabled:opacity-50">
+            {uploading ? <Loader2 size={12} className="shrink-0 animate-spin" /> : <Upload size={12} className="shrink-0" />}<span className="truncate">Upload</span>
+          </button>
+          <button type="button" aria-label="Add text title" title="Add text title" onClick={() => addTitle(undefined, selectedTrackId || undefined)}
+            className="flex min-h-9 min-w-0 items-center justify-center gap-1 rounded-lg border border-border bg-bg-tertiary px-1.5 text-[11px] font-medium text-text-secondary hover:border-accent-blue/40 hover:text-accent-blue">
+            <Type size={12} className="shrink-0" /><span className="truncate">Text</span>
+          </button>
+          <button type="button" aria-label="Create animated title" title="Create animated title" disabled={!project} onClick={() => setTitleOpen(true)}
+            className="flex min-h-9 min-w-0 items-center justify-center gap-1 rounded-lg border border-accent-blue/30 bg-accent-blue/5 px-1.5 text-[11px] font-medium text-accent-blue disabled:opacity-40">
+            <Sparkles size={12} className="shrink-0" /><span className="truncate">Animated</span>
+          </button>
           <input
-            value={search}
-            onChange={event => {
-              setSearch(event.target.value)
-              setVisibleLimit(MEDIA_BATCH_SIZE)
-            }}
-            placeholder="Search media"
-            className="w-full rounded-lg border border-border bg-bg-tertiary py-1.5 pl-7 pr-2 text-[10px] text-text-primary outline-none placeholder:text-text-muted focus:border-accent-blue/60"
+            ref={inputRef}
+            type="file"
+            accept="video/*,image/*,audio/*,.mkv,.webm,.mov,.mp4,.wav,.mp3,.m4a,.flac,.ogg"
+            multiple
+            className="hidden"
+            onChange={event => void handleFiles(event.target.files)}
           />
         </div>
-        <label className="relative flex items-center">
-          <FolderOpen size={11} className="pointer-events-none absolute left-2.5 text-text-muted" />
-          <select
-            value={workspaceFilter}
-            onChange={event => {
-              setWorkspaceFilter(event.target.value)
-              setVisibleLimit(MEDIA_BATCH_SIZE)
-            }}
-            className="w-full appearance-none rounded-lg border border-border bg-bg-tertiary py-1.5 pl-7 pr-7 text-[11px] text-text-secondary outline-none focus:border-accent-blue/60"
-            aria-label="Filter media by workspace"
-          >
-            <option value="all">All workspaces</option>
-            {libraryWorkspaces.map(workspace => (
-              <option key={workspace} value={workspace}>{workspace === 'default' ? 'Default workspace' : workspace}</option>
-            ))}
-            <option value="__uploads__">Uploads</option>
-          </select>
-          <span className="pointer-events-none absolute right-2.5 text-[11px] text-text-muted">▾</span>
-        </label>
-        <div className="grid grid-cols-6 gap-1">
+        <div data-testid="editor-media-bin-filters" className="grid grid-cols-6 gap-1">
           {(['all', 'video', 'image', 'audio', 'director', 'favorites'] as Filter[]).map(value => {
+            const label = value === 'all' ? 'All media' : value[0].toUpperCase() + value.slice(1)
             const Icon = value === 'video'
               ? Film
               : value === 'image'
@@ -242,60 +282,29 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
               <button
                 key={value}
                 type="button"
+                aria-label={label}
+                aria-pressed={filter === value}
                 onClick={() => {
                   setFilter(value)
                   setVisibleLimit(MEDIA_BATCH_SIZE)
                 }}
-                className={`rounded-md px-1 py-1 text-[11px] capitalize transition-colors ${filter === value ? value === 'favorites' ? 'bg-red-500/15 text-red-400' : 'bg-accent-blue/15 text-accent-blue' : 'text-text-muted hover:bg-bg-hover hover:text-text-secondary'}`}
-                title={value === 'favorites' ? 'Favorites' : value}
+                className={`grid min-h-9 min-w-0 place-items-center rounded-md px-1 text-[11px] capitalize transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/60 ${filter === value ? value === 'favorites' ? 'bg-red-500/15 text-red-400' : 'bg-accent-blue/15 text-accent-blue' : 'text-text-muted hover:bg-bg-hover hover:text-text-secondary'}`}
+                title={label}
               >
-                {Icon ? <Icon size={10} className="mx-auto" fill={value === 'favorites' && filter === 'favorites' ? 'currentColor' : 'none'} /> : 'All'}
+                {Icon ? <Icon size={12} className="mx-auto" fill={value === 'favorites' && filter === 'favorites' ? 'currentColor' : 'none'} /> : 'All'}
               </button>
             )
           })}
         </div>
-        <div className="grid grid-cols-2 gap-1.5">
-          <button
-            type="button"
-            onClick={() => inputRef.current?.click()}
-            disabled={uploading}
-            className="flex items-center justify-center gap-1 rounded-lg border border-dashed border-border-light bg-bg-tertiary px-2 py-1.5 text-[11px] text-text-secondary hover:border-accent-blue/50 hover:text-accent-blue disabled:opacity-50"
-          >
-            {uploading ? <Loader2 size={11} className="animate-spin" /> : <Upload size={11} />} Upload
-          </button>
-          <button
-            type="button"
-            onClick={() => addTitle(undefined, selectedTrackId || undefined)}
-            className="flex items-center justify-center gap-1 rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-[11px] text-text-secondary hover:border-accent-blue/40 hover:text-accent-blue"
-          >
-            <Type size={11} /> Text title
-          </button>
-          <button type="button" disabled={!project} onClick={() => setTitleOpen(true)}
-            className="col-span-2 flex items-center justify-center gap-1 rounded-lg border border-accent-blue/30 bg-accent-blue/5 px-2 py-2 text-[11px] text-accent-blue disabled:opacity-40">
-            <Sparkles size={12} /> Create animated title
-          </button>
-          <input
-            ref={inputRef}
-            type="file"
-            accept="video/*,image/*,audio/*,.mkv,.webm,.mov,.mp4,.wav,.mp3,.m4a,.flac,.ogg"
-            multiple
-            className="hidden"
-            onChange={event => void handleFiles(event.target.files)}
-          />
-        </div>
-        <div className="flex items-center justify-between gap-2 text-[11px] text-text-secondary">
-          <button type="button" onClick={() => setUsedOnly(value => !value)} aria-pressed={usedOnly}
-            className={`rounded-md border px-2 py-1 ${usedOnly ? 'border-accent-blue/50 bg-accent-blue/10 text-accent-blue' : 'border-border'}`}>Used in project</button>
-          {cards && <input type="range" min={100} max={220} step={10} value={thumbnailSize} aria-label="Media thumbnail size"
-            onChange={event => setThumbnailSize(Number(event.target.value))} className="w-20 accent-[var(--color-accent-blue)]" />}
-        </div>
       </div>
 
       <div className={`min-h-0 flex-1 overflow-y-auto p-2.5 ${cards ? 'grid auto-rows-max gap-2.5' : 'space-y-1.5'}`}
+        data-testid="editor-media-bin-scroller"
         style={cards ? { gridTemplateColumns: `repeat(auto-fill, minmax(${thumbnailSize}px, 1fr))` } : undefined}>
         {renderedDirectorRuns.map(run => (
           <article
             key={run.id}
+            data-testid="editor-media-director-run"
             className={`group overflow-hidden rounded-xl border border-accent-warm/20 bg-gradient-to-br from-accent-warm/10 via-bg-tertiary to-bg-tertiary transition-all hover:border-accent-warm/40 ${compact ? 'shadow-sm' : 'p-2'}`}
           >
             <DirectorRunPreview
@@ -326,6 +335,7 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
         {rendered.map(asset => (
           <article
             key={`${asset.origin}:${asset.name}`}
+            data-testid="editor-media-asset"
             draggable
             onDragStart={event => {
               event.dataTransfer.effectAllowed = 'copy'
