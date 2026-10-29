@@ -37,6 +37,7 @@ import {
   h3WindowOverrideKey,
   h3OmniSequenceWindowCount,
   h3SlidingWindowCount,
+  normalizeH3ClipFrames,
   normalizeH3ClipFrameSchedule,
   normalizeH3NativeFrames,
   recommendedH3PassProfile,
@@ -66,6 +67,41 @@ const DIRECTOR_REPAIR_POLL_MS = 2000
 const DIRECTOR_REPAIR_ACTIVE = new Set(['queued', 'running', 'cancelling'])
 const DIRECTOR_PIPELINE_ACTIVE = new Set(['running', 'paused'])
 const EDITOR_AI_ROUND_TRIP_STORAGE_KEY = 'maestro-editor-ai-round-trip-v1'
+const PIKA_FLEX_STALE_SEQUENCE_FIELDS = [
+  'minimax_h3_sequence_clip_frames',
+  'minimax_h3_sequence_continuity',
+  'minimax_h3_sequence_memory_override',
+  'minimax_h3_sequence_prompt_mode',
+  'minimax_h3_window_storyboard',
+  'h3_window_prompts',
+  'h3_window_plan_signature',
+  'h3_window_plan',
+  '_h3_window_plan_reviewed',
+  '_reviewed_h3_runtime_geometry',
+  'per_clip_frames',
+  'per_clip_minimax_h3_references',
+  'per_clip_output_frames',
+  'multi_clip_concat_audio',
+  '_omni_sequence_continuity',
+  '_omni_sequence_target_frames',
+] as const
+
+function hasPikaFlexStaleSequenceFields(params: GenerateParams): boolean {
+  const values = params as unknown as Record<string, unknown>
+  return params.multi_prompts_gen_type !== 2
+    || PIKA_FLEX_STALE_SEQUENCE_FIELDS.some(key => values[key] !== undefined && values[key] !== null)
+}
+
+function clearPikaFlexSequenceFields(params: object): void {
+  const values = params as unknown as Record<string, unknown>
+  values.multi_prompts_gen_type = 2
+  values.minimax_h3_multi_window = false
+  values.minimax_h3_reference_sequence = false
+  values.minimax_h3_extended_duration = false
+  values.sliding_window_memory_override = false
+  for (const key of PIKA_FLEX_STALE_SEQUENCE_FIELDS) delete values[key]
+}
+
 type EditorOperationSubmission = {
   _editor_operation_id: string
   _client_submission_id: string
@@ -6698,6 +6734,51 @@ export const useStore = create<AppState>((set, get) => ({
         minimax_h3_multi_window: false, minimax_h3_reference_sequence: false } })
       return
     }
+    if (options?.minimax_h3_pika_flex === true) {
+      if (!Number.isFinite(requested)) return
+      const fps = options.fps || 24
+      const minimumFrames = options.frames_minimum || 124
+      const maximumFrames = h3MaximumFrames(options, false) ?? options.frames_maximum ?? 362
+      const step = Math.max(1, options.frames_steps || 17)
+      const frames = normalizeH3ClipFrames(
+        Math.round(requested * fps),
+        minimumFrames,
+        maximumFrames,
+        step,
+      )
+      const seconds = frames / fps
+      if (state.params.video_length === frames
+        && state.params.sliding_window_size === frames
+        && state.durationSeconds === seconds
+        && state.slidingWindowSeconds === seconds
+        && state.params.sliding_window_memory_override === false
+        && state.params.minimax_h3_extended_duration === false
+        && state.params.minimax_h3_multi_window === false
+        && state.params.minimax_h3_reference_sequence === false
+        && !hasPikaFlexStaleSequenceFields(state.params)) return
+      const nextParams = {
+        ...state.params,
+        video_length: frames,
+        sliding_window_size: frames,
+        sliding_window_overlap: 0,
+        sliding_window_discard_last_frames: 0,
+        sliding_window_memory_override: false,
+        minimax_h3_extended_duration: false,
+        minimax_h3_multi_window: false,
+        minimax_h3_reference_sequence: false,
+      }
+      clearPikaFlexSequenceFields(nextParams)
+      delete nextParams.ltx_window_prompts
+      set({
+        durationSeconds: seconds,
+        slidingWindowSeconds: seconds,
+        slidingWindowLocked: false,
+        params: nextParams,
+        h3WindowPlan: null,
+        promptEnhanceError: null,
+      })
+      return
+    }
     if (!Number.isFinite(requested)) return
     const fps = options?.fps || 16
     const isH3 = String(options?.architecture || '').startsWith('minimax_h3')
@@ -7682,6 +7763,7 @@ export const useStore = create<AppState>((set, get) => ({
       : state.modelOptions?.i2v_class && !state.modelOptions?.t2v_class
     const isOmniReference = isOmniPromptModel
     const isH3Model = architecture.startsWith('minimax_h3')
+    const isPikaFlex = state.modelOptions?.minimax_h3_pika_flex === true
     const isLtxSequenceModel = state.modelOptions?.multi_window_sequence_controls === true
     const hasStartImage = state.startImage || state.params.image_start
     const hasMultiClipImages = state.clips.some(c => c.startImage || c.startImagePath)
@@ -8384,10 +8466,14 @@ export const useStore = create<AppState>((set, get) => ({
       const minimumFrames = state.modelOptions?.frames_minimum ?? 1
       const maximumFrames = h3MaximumFrames(state.modelOptions, params.minimax_h3_extended_duration)
       const h3ReferenceSequenceRequested = (
+        !isPikaFlex
+        &&
         isOmniReference
         && params.minimax_h3_reference_sequence === true
       )
       const h3FirstLastMultiWindowRequested = (
+        !isPikaFlex
+        &&
         isH3Model
         && !isOmniReference
         && params.minimax_h3_multi_window === true
@@ -8460,7 +8546,14 @@ export const useStore = create<AppState>((set, get) => ({
             })
           : selectedWindowFrames,
       })
-      if (h3DirectOmniPass && maximumFrames != null) {
+      if (isPikaFlex && maximumFrames != null) {
+        requestedFrames = normalizeH3ClipFrames(
+          Math.round(state.durationSeconds * fps),
+          minimumFrames,
+          maximumFrames,
+          state.modelOptions?.frames_steps ?? 17,
+        )
+      } else if (h3DirectOmniPass && maximumFrames != null) {
         // Ordinary Omni generation is one native pass. Duration is the
         // user's requested pass length; Window Length is only the VRAM-aware
         // default. Never silently shorten a visible Duration merely because
@@ -8493,7 +8586,7 @@ export const useStore = create<AppState>((set, get) => ({
           requestedFrames,
         )
       }
-      if (isH3Model && maximumFrames != null) {
+      if (!isPikaFlex && isH3Model && maximumFrames != null) {
         // A rolling Frames storyboard can end on a partial continuation span;
         // snapping its total timeline onto the native clip lattice creates an
         // extra window (for example 336 becomes 345 at 24 fps). Single-pass,
@@ -8515,7 +8608,14 @@ export const useStore = create<AppState>((set, get) => ({
         params.minimax_h3_reference_sequence = false
       }
 
-      if (supportsSlidingWindows) {
+      if (isPikaFlex) {
+        // Pika Flex is one native pass. Keep the old window/memory fields
+        // harmlessly synchronized so restored Auto state cannot shorten it.
+        params.sliding_window_size = requestedFrames
+        params.sliding_window_overlap = 0
+        params.sliding_window_discard_last_frames = 0
+        clearPikaFlexSequenceFields(params)
+      } else if (supportsSlidingWindows) {
         const swDefaults = state.modelOptions?.sliding_window_defaults
         let windowFrames = h3DirectOmniPass
           ? requestedFrames
@@ -9511,6 +9611,7 @@ export const useStore = create<AppState>((set, get) => ({
       delete params.h3_window_plan_signature
       delete params.h3_window_plan
     }
+    if (isPikaFlex) clearPikaFlexSequenceFields(params)
 
     // Editor operations belong only to their explicit edit/tool submission
     // handlers above. Generic generation can be used to create helper images
@@ -10510,7 +10611,33 @@ export const useStore = create<AppState>((set, get) => ({
           nextAspectRatio,
         )
       }
-      if (isH3) {
+      if (options.minimax_h3_pika_flex === true) {
+        const minimumFrames = options.frames_minimum ?? 124
+        const maximumFrames = effectiveMaximumFrames ?? options.frames_maximum ?? 362
+        const step = options.frames_steps ?? 17
+        const frames = normalizeH3ClipFrames(
+          Math.round(nextDurationSeconds * fps),
+          minimumFrames,
+          maximumFrames,
+          step,
+        )
+        nextDurationSeconds = frames / fps
+        nextWindowFrames = frames
+        nextWindowSeconds = nextDurationSeconds
+        nextWindowLocked = false
+        Object.assign(paramUpdates, {
+          video_length: frames,
+          sliding_window_size: frames,
+          sliding_window_overlap: 0,
+          sliding_window_discard_last_frames: 0,
+          sliding_window_memory_override: false,
+          minimax_h3_extended_duration: false,
+          minimax_h3_multi_window: false,
+          minimax_h3_reference_sequence: false,
+          minimax_h3_sequence_clip_frames: undefined,
+          minimax_h3_sequence_memory_override: false,
+        })
+      } else if (isH3) {
         const selectedResolution = String(
           paramUpdates.resolution || activeState.params.resolution || '',
         )
@@ -13938,6 +14065,7 @@ export const useStore = create<AppState>((set, get) => ({
     const restoredIsH3 = String(
       restoredModelOptions?.architecture || modelType,
     ).startsWith('minimax_h3')
+    const restoredPikaFlex = restoredModelOptions?.minimax_h3_pika_flex === true
 
     // Detect I2V: if image_start was used or image_prompt_type contains "S"
     const hadStartImage = isDirectorClip
@@ -14528,6 +14656,38 @@ export const useStore = create<AppState>((set, get) => ({
     }
     newParams.image_end = p.image_end ? (p.image_end as string) : ''
 
+    let restoredPikaDuration = 0
+    if (restoredPikaFlex) {
+      const fps = restoredModelOptions?.fps ?? 24
+      const minimumFrames = restoredModelOptions?.frames_minimum ?? 124
+      const maximumFrames = h3MaximumFrames(restoredModelOptions, false)
+        ?? restoredModelOptions?.frames_maximum ?? 362
+      const frames = normalizeH3ClipFrames(
+        Number(newParams.video_length) || minimumFrames,
+        minimumFrames,
+        maximumFrames,
+        restoredModelOptions?.frames_steps ?? 17,
+      )
+      newParams.video_length = frames
+      newParams.sliding_window_size = frames
+      newParams.sliding_window_overlap = 0
+      newParams.sliding_window_discard_last_frames = 0
+      newParams.sliding_window_memory_override = false
+      newParams.minimax_h3_extended_duration = false
+      newParams.minimax_h3_multi_window = false
+      newParams.minimax_h3_reference_sequence = false
+      newParams.minimax_h3_sequence_clip_frames = undefined
+      newParams.minimax_h3_sequence_memory_override = false
+      newParams.minimax_h3_window_storyboard = false
+      newParams.h3_window_prompts = undefined
+      newParams.h3_window_plan_signature = undefined
+      newParams.h3_window_plan = undefined
+      newParams.multi_prompts_gen_type = 2
+      newParams.per_clip_frames = undefined
+      newParams._duration_planning_mode = 'duration'
+      restoredPikaDuration = frames / fps
+    }
+
     // Rebuild lora weights from multipliers string
     const loraWeights: Record<string, number[]> = {}
     const loras = newParams.activated_loras || []
@@ -14538,7 +14698,9 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     // Restore duration from metadata
-    const restoredDuration = Number(p.duration_seconds ?? p._duration_seconds ?? 0) || 0
+    const restoredDuration = restoredPikaFlex
+      ? restoredPikaDuration
+      : Number(p.duration_seconds ?? p._duration_seconds ?? 0) || 0
     const restoredFishAutoDuration = restoredModelOptions?.speech_auto_duration === true && p.duration_seconds === 0
     // Restore post-processing settings from metadata
     const restoredSpatialUpsampling = (p.spatial_upsampling as string) || ''

@@ -5,7 +5,8 @@ export function normalizeH3Attention(
   options: ModelOptions,
   requested: unknown,
 ): GenerateParams['override_attention'] {
-  if (!options.sla_attention && !options.sol_attention && !options.veda_attention) return undefined
+  if (!options.sla_attention && !options.sol_attention && !options.veda_attention && !options.minimax_h3_pika_flex) return undefined
+  if (requested === 'sage2') return 'sage2'
   if (requested === 'sdpa') return 'sdpa'
   if (
     requested === 'veda'
@@ -17,6 +18,7 @@ export function normalizeH3Attention(
   if (requested === 'sol' && options.sol_attention && options.sol_attention_status?.supported) {
     return 'sol'
   }
+  if (options.minimax_h3_pika_flex) return 'sage2'
   return options.sla_attention
     && (options.sla_attention_default ?? options.minimax_h3_fused_turbo) === true ? 'sla' : ''
 }

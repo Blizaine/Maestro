@@ -63,6 +63,7 @@ export function MiniMaxH3Optimizations() {
   const architecture = String(modelOptions?.architecture || '')
   const isH3 = architecture.startsWith('minimax_h3')
   const fusedTurbo = modelOptions?.minimax_h3_fused_turbo === true
+  const pikaFlex = modelOptions?.minimax_h3_pika_flex === true
   const solEnabled = params.override_attention === 'sol'
   const slaEnabled = params.override_attention === 'sla'
   const vedaEnabled = params.override_attention === 'veda'
@@ -304,6 +305,25 @@ export function MiniMaxH3Optimizations() {
               </div>
             )}
 
+            {pikaFlex && (
+              <div className="flex items-center gap-3 px-3 py-2">
+                <div className="min-w-0 flex-1">
+                  <label htmlFor="pika-dense-attention" className="block text-[11px] font-medium text-text-primary">Dense attention</label>
+                  <p className="text-[9px] text-text-muted">Choosing a dense backend turns sparse attention off.</p>
+                </div>
+                <select
+                  id="pika-dense-attention"
+                  value={solEnabled || slaEnabled ? 'sparse' : params.override_attention === 'sdpa' ? 'sdpa' : 'sage2'}
+                  onChange={event => setParam('override_attention', event.target.value as 'sage2' | 'sdpa')}
+                  className="rounded-md border border-border bg-bg-secondary px-2 py-1.5 text-[10px] text-text-primary outline-none focus:border-accent-blue"
+                >
+                  {(solEnabled || slaEnabled) && <option value="sparse" disabled>Sparse attention active</option>}
+                  <option value="sage2">Sage2 (default)</option>
+                  <option value="sdpa">SDPA</option>
+                </select>
+              </div>
+            )}
+
             {modelOptions?.sol_attention && (
               <div className={`flex items-center gap-2 px-3 py-2 transition-colors ${
                 solEnabled ? 'bg-accent-blue/10' : ''
@@ -323,7 +343,7 @@ export function MiniMaxH3Optimizations() {
                   />
                   <Gauge size={13} className={solEnabled ? 'text-accent-blue' : 'text-text-muted'} />
                   <span className="min-w-0">
-                    <span className="block text-[11px] font-medium text-text-primary">Sol Engine</span>
+                    <span className="block text-[11px] font-medium text-text-primary">Sol Engine{pikaFlex ? ' — Experimental' : ''}</span>
                     <span className="block text-[9px] text-text-muted">
                       {solSupported ? 'H3 sparse attention' : 'Unavailable in this runtime'}
                     </span>

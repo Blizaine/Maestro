@@ -307,6 +307,7 @@ function useAdvancedActiveSections(): Record<AdvancedSectionKey, string[]> {
   if (String(modelOptions?.architecture || '').startsWith('minimax_h3')) {
     if (params.minimax_h3_turbo_mode && modelOptions?.minimax_h3_turbo) items.performance.push('H3 Turbo')
     if (params.override_attention === 'sol') items.performance.push('H3 Sol Engine')
+    if (params.override_attention === 'sage2') items.performance.push('Sage2')
     if (params.override_attention === 'sla') items.performance.push('H3 SLA')
     if (params.override_attention === 'veda') items.performance.push('H3 Veda')
     if (params.skip_steps_cache_type === 'first_block') items.performance.push('First Block Cache')

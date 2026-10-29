@@ -29,6 +29,21 @@ accelerators, continuation, control video, timed frame injection, First Block
 Cache, and Audio Refinement are unavailable. References are ordered; changing
 their order changes the request meaning.
 
+### Attention choices
+
+Sage2 is the default dense attention backend; SDPA remains available for a
+comparison or compatibility fallback. SOL and SLA can be selected as
+experimental sparse attention in Advanced → Performance. These choices leave
+the six evaluations, sampling knots, shifts, and managed adapter unchanged.
+Sparse attention can change motion, reference fidelity and audio, so compare
+outputs before relying on it for a project. Hardware/runtime availability is
+reported beside each option. Sage2 falls back to SDPA if unavailable; the
+existing SOL/SLA recovery path uses a supported dense backend.
+
+First Block Cache remains disabled for this freshly re-noised six-step recipe.
+The selected output duration is authoritative for this single-pass model;
+older saved sliding-window lengths must not shorten a Flex request.
+
 ## Inputs and output sizes
 
 Frames supports text-to-video and optional first and last images. References

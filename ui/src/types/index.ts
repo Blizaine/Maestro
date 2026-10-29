@@ -122,7 +122,7 @@ export interface GenerateParams {
   /** Percentage of denoising steps to run before caching may begin. */
   skip_steps_start_step_perc?: number
   /** Per-generation attention override. Sol and Veda are H3-only experiments. */
-  override_attention?: '' | 'sol' | 'sla' | 'veda' | 'sdpa'
+  override_attention?: '' | 'sol' | 'sla' | 'veda' | 'sdpa' | 'sage2'
   guidance_phases?: number
   video_prompt_type?: string
   audio_prompt_type?: string
@@ -1140,6 +1140,8 @@ export interface ModelOptions {
     protect_audio: boolean
   } | null
   minimax_h3_fused_turbo?: boolean
+  /** Fixed single-pass Pika H3 Flex recipe; duration never follows a window. */
+  minimax_h3_pika_flex?: boolean
   minimax_h3_fasth3?: boolean
   minimax_h3_fasth3_omniref?: boolean
   minimax_h3_full_checkpoint?: boolean

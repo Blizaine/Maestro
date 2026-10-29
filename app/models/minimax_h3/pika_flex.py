@@ -14,6 +14,18 @@ from typing import Any
 
 PIKA_FLEX_KNOTS = (1000, 750, 500, 250, 100, 40, 0)
 PIKA_FLEX_STEPS = len(PIKA_FLEX_KNOTS) - 1
+PIKA_FLEX_ATTENTION_MODES = ("sage2", "sdpa", "sol", "sla")
+
+
+def normalize_pika_flex_attention(value: Any) -> str:
+    """Keep attention selection separate from the fixed six-step sampler."""
+
+    mode = str(value or "sage2").strip().lower()
+    if mode in {"", "auto", "default"}:
+        mode = "sage2"
+    if mode not in PIKA_FLEX_ATTENTION_MODES:
+        raise ValueError("Pika H3 Flex supports Sage2, SDPA, experimental SOL or experimental SLA attention.")
+    return mode
 
 
 def _finite_float(value: Any, *, name: str) -> float:
@@ -231,6 +243,8 @@ def validate_pika_flex_request(
 
     if not isinstance(inputs, Mapping):
         raise TypeError("Pika H3 Flex request settings must be a mapping.")
+
+    normalize_pika_flex_attention(inputs.get("override_attention"))
 
     for key in ("num_inference_steps", "sampling_steps"):
         _require_value(inputs, key, float(PIKA_FLEX_STEPS))

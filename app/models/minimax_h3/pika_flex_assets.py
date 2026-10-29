@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import fasth3
+from .pika_flex import normalize_pika_flex_attention
 
 PIKA_FLEX_REPO = "Pika-Labs/Pika-H3-Flex"
 PIKA_FLEX_REVISION = "0ddf55ad7067ca1e76812253bd7b4600df87f759"
@@ -92,6 +93,7 @@ PIKA_FLEX_HELP = (
     "adapter strength 1, and video/audio shifts 12/3. Frames supports text-to-video "
     "and first/last images. References supports ordered image, video, and audio "
     "references and needs at least one image or video. Begin at 480p / 5.17 seconds. "
+    "Sage2 is the dense default; SOL and SLA are optional experimental attention. "
     "Continuation, control video, extra adapters, cache, and refinement are unavailable. "
     "Maestro has no Pika 4K upsampler or stem extraction, and consumer-GPU real-time "
     "performance has not been verified. The initial experimental stack uses the stock Comfy scaled-FP8 base, BF16 Pika adapter, and INT8 ConvRot video VAE."
@@ -175,10 +177,10 @@ def pika_flex_capabilities(reference: bool) -> dict[str, Any]:
         "director_endpoint_continuity": False,
         "custom_settings": [],
         "runtime_custom_settings": [],
-        "sol_attention": False,
-        "sla_attention": False,
+        "sol_attention": True,
+        "sla_attention": True,
         "sla_attention_default": False,
-        "sla_attention_experimental": False,
+        "sla_attention_experimental": True,
         "veda_attention": False,
         "veda_attention_experimental": False,
         "first_block_cache": False,
@@ -206,7 +208,7 @@ def pika_flex_capabilities(reference: bool) -> dict[str, Any]:
     }
 
 
-def pika_flex_defaults(reference: bool) -> dict[str, Any]:
+def pika_flex_defaults(reference: bool, *, attention: Any = None) -> dict[str, Any]:
     """Return the fixed, conservative first-run generation settings."""
 
     reference = _check_reference_flag(reference)
@@ -219,7 +221,7 @@ def pika_flex_defaults(reference: bool) -> dict[str, Any]:
         "sample_solver": "euler",
         "denoising_strength": 1.0,
 
-        "override_attention": "sdpa",
+        "override_attention": normalize_pika_flex_attention(attention),
         "skip_steps_cache_type": "",
         "minimax_h3_turbo_mode": False,
         "minimax_h3_turbo_preset": "",

@@ -375,11 +375,32 @@ def normalize_h3_window_geometry(inputs: dict, model_def: dict) -> None:
     Rounding that total to 345 silently adds a fourth window.
     """
 
-    if any((model_def or {}).get(key) for key in (
+    model_def = model_def or {}
+    if model_def.get("minimax_h3_pika_flex"):
+        minimum = int(model_def.get("frames_minimum") or _H3_MIN_FRAMES)
+        maximum = int(model_def.get("frames_maximum") or _H3_MAX_FRAMES)
+        step = int(model_def.get("frames_steps") or _H3_FRAME_STEP)
+        total = normalize_h3_clip_frame_count(
+            inputs.get("video_length", minimum),
+            minimum_frames=minimum,
+            maximum_frames=maximum,
+            frame_step=step,
+        )
+        # Flex renders one native pass. Legacy window and memory settings are
+        # not duration limits for this workflow, so keep its inert geometry in
+        # sync with the authoritative requested duration.
+        inputs["video_length"] = total
+        inputs["sliding_window_size"] = total
+        inputs["sliding_window_overlap"] = 0
+        inputs["sliding_window_discard_last_frames"] = 0
+        inputs["minimax_h3_multi_window"] = False
+        inputs["minimax_h3_reference_sequence"] = False
+        return
+    if any(model_def.get(key) for key in (
         "omni_reference", "audio_only", "minimax_h3_viggle",
     )):
         return  # These workflows own their separate timing rules.
-    maximum = int((model_def or {}).get("frames_maximum") or _H3_MAX_FRAMES)
+    maximum = int(model_def.get("frames_maximum") or _H3_MAX_FRAMES)
     window = normalize_h3_clip_frame_count(
         inputs.get("sliding_window_size", maximum), maximum_frames=maximum,
     )
@@ -407,6 +428,41 @@ def normalize_h3_window_geometry(inputs: dict, model_def: dict) -> None:
     inputs["sliding_window_discard_last_frames"] = resolve_h3_long_sequence_discard_frames(
         inputs.get("custom_settings"), enabled=multi_window and total > window,
     )
+
+
+def validate_pika_flex_single_pass_request(inputs: dict, model_def: dict) -> None:
+    """Reject explicit continuation requests that Pika Flex cannot honor."""
+
+    model_def = model_def or {}
+    if not model_def.get("minimax_h3_pika_flex"):
+        return
+
+    multi_prompts_type = inputs.get("multi_prompts_gen_type", 0)
+    try:
+        requests_multi_clip = int(multi_prompts_type or 0) == 3
+    except (TypeError, ValueError, OverflowError):
+        requests_multi_clip = False
+    if (
+        inputs.get("minimax_h3_multi_window") is True
+        or inputs.get("minimax_h3_reference_sequence") is True
+        or requests_multi_clip
+        or bool(inputs.get("per_clip_frames"))
+    ):
+        raise ValueError(
+            "Pika H3 Flex supports one native pass; remove multi-window, "
+            "reference-sequence, or per-clip settings."
+        )
+
+    try:
+        requested_frames = float(inputs.get("video_length"))
+    except (TypeError, ValueError, OverflowError):
+        return
+    maximum = int(model_def.get("frames_maximum") or _H3_MAX_FRAMES)
+    if requested_frames > maximum:
+        raise ValueError(
+            f"Pika H3 Flex supports at most {maximum} frames per native pass."
+        )
+
 
 # First Block Cache is intentionally opt-in. It compares a compact signature
 # from block one and can reuse the remaining 49-block residual when adjacent
@@ -1322,6 +1378,8 @@ def apply_h3_omni_sequence_memory_policy(
         "omni_reference"
     ):
         return None
+    if (model_def or {}).get("minimax_h3_pika_flex"):
+        return None
     hardware = hardware or {}
     minimum = max(1, int(model_def.get("frames_minimum") or _H3_MIN_FRAMES))
     maximum = max(minimum, int(model_def.get("frames_maximum") or _H3_MAX_FRAMES))
@@ -1408,6 +1466,7 @@ def apply_h3_native_omni_memory_policy(
     if (
         not isinstance(inputs, dict)
         or not (model_def or {}).get("omni_reference")
+        or (model_def or {}).get("minimax_h3_pika_flex")
         or inputs.get("minimax_h3_reference_sequence") is True
     ):
         return None
@@ -1593,7 +1652,11 @@ def apply_h3_window_memory_policy(
     memory lever WanGP documents for long H3 generations.
     """
 
-    if not isinstance(inputs, dict) or (model_def or {}).get("omni_reference"):
+    if (
+        not isinstance(inputs, dict)
+        or (model_def or {}).get("omni_reference")
+        or (model_def or {}).get("minimax_h3_pika_flex")
+    ):
         return None
     if inputs.get("sliding_window_memory_override", False) is True:
         return None
@@ -3142,7 +3205,10 @@ class family_handler:
         if (model_def or {}).get("minimax_h3_pika_flex"):
             from models.minimax_h3.pika_flex_assets import pika_flex_defaults
 
-            ui_defaults.update(pika_flex_defaults(reference=base_model_type == _REF2VA_MODEL_TYPE))
+            ui_defaults.update(pika_flex_defaults(
+                reference=base_model_type == _REF2VA_MODEL_TYPE,
+                attention=ui_defaults.get("override_attention"),
+            ))
         import_profile = (model_def or {}).get("minimax_h3_import_profile")
         if import_profile:
             ui_defaults.update({"num_inference_steps": import_profile["default_steps"],
@@ -3199,6 +3265,9 @@ class family_handler:
         from models.minimax_h3.duration import apply_h3_duration_override
         model_def = apply_h3_duration_override(ui_defaults, model_def or {})
         maximum_frames = int(model_def.get("frames_maximum") or _H3_MAX_FRAMES)
+        pika_flex = bool(model_def.get("minimax_h3_pika_flex"))
+        minimum_frames = int(model_def.get("frames_minimum") or _H3_MIN_FRAMES)
+        frame_step = int(model_def.get("frames_steps") or _H3_FRAME_STEP)
 
         try:
             requested_frames = int(ui_defaults.get("video_length", 124))
@@ -3216,7 +3285,17 @@ class family_handler:
         outpaint_text = str(ui_defaults.get("video_guide_outpainting") or "").strip()
         outpainting = bool(outpaint_text) and not outpaint_text.startswith("#")
         exact_outpaint_timeline = outpainting and ui_defaults.get("minimax_h3_multi_window") is True
-        if not omni_reference:
+        if pika_flex:
+            ui_defaults["video_length"] = normalize_h3_clip_frame_count(
+                requested_frames,
+                minimum_frames=minimum_frames,
+                maximum_frames=maximum_frames,
+                frame_step=frame_step,
+            )
+            ui_defaults["minimax_h3_multi_window"] = False
+            ui_defaults["minimax_h3_reference_sequence"] = False
+            ui_defaults["minimax_h3_extended_duration"] = False
+        elif not omni_reference:
             normalize_h3_window_geometry(ui_defaults, model_def)
         elif requested_frames <= maximum_frames + 1 and not exact_outpaint_timeline:
             ui_defaults["video_length"] = min(
@@ -3233,37 +3312,43 @@ class family_handler:
                 requested_frames,
             )
 
-        try:
-            requested_window = int(
-                ui_defaults.get("sliding_window_size", maximum_frames)
+        if pika_flex:
+            ui_defaults["sliding_window_size"] = ui_defaults["video_length"]
+        else:
+            try:
+                requested_window = int(
+                    ui_defaults.get("sliding_window_size", maximum_frames)
+                )
+            except (TypeError, ValueError):
+                requested_window = maximum_frames
+            aligned_window = align_num_frames(max(1, requested_window))
+            ui_defaults["sliding_window_size"] = min(
+                maximum_frames,
+                max(_H3_MIN_FRAMES, aligned_window),
             )
-        except (TypeError, ValueError):
-            requested_window = maximum_frames
-        aligned_window = align_num_frames(max(1, requested_window))
-        ui_defaults["sliding_window_size"] = min(
-            maximum_frames,
-            max(_H3_MIN_FRAMES, aligned_window),
-        )
         if (
-            not omni_reference
+            not pika_flex and not omni_reference
             and ui_defaults.get("minimax_h3_multi_window") is not True
         ):
             ui_defaults["video_length"] = min(
                 ui_defaults["video_length"],
                 ui_defaults["sliding_window_size"],
             )
-        raw_overlap = ui_defaults.get(
-            "sliding_window_overlap",
-            _H3_OVERLAP_DEFAULT,
-        )
-        # Existing Maestro H3 presets used a zero/one-frame anchor. Upgrade
-        # that legacy default once for both FL2VA and Ref2VA.
-        if settings_version < 2.58 and raw_overlap in (None, 0, 1, "1"):
-            raw_overlap = _H3_OVERLAP_DEFAULT
-        ui_defaults["sliding_window_overlap"] = normalize_h3_overlap_frames(
-            raw_overlap,
-            window_frames=ui_defaults["sliding_window_size"],
-        )
+        if pika_flex:
+            ui_defaults["sliding_window_overlap"] = 0
+        else:
+            raw_overlap = ui_defaults.get(
+                "sliding_window_overlap",
+                _H3_OVERLAP_DEFAULT,
+            )
+            # Existing Maestro H3 presets used a zero/one-frame anchor. Upgrade
+            # that legacy default once for both FL2VA and Ref2VA.
+            if settings_version < 2.58 and raw_overlap in (None, 0, 1, "1"):
+                raw_overlap = _H3_OVERLAP_DEFAULT
+            ui_defaults["sliding_window_overlap"] = normalize_h3_overlap_frames(
+                raw_overlap,
+                window_frames=ui_defaults["sliding_window_size"],
+            )
         ui_defaults["sliding_window_discard_last_frames"] = 0
         ui_defaults["resolution"] = _normalize_h3_resolution(
             ui_defaults.get("resolution", "864x480"),
@@ -3273,7 +3358,10 @@ class family_handler:
         if (model_def or {}).get("minimax_h3_pika_flex"):
             from models.minimax_h3.pika_flex_assets import pika_flex_defaults
 
-            ui_defaults.update(pika_flex_defaults(reference=omni_reference))
+            ui_defaults.update(pika_flex_defaults(
+                reference=omni_reference,
+                attention=ui_defaults.get("override_attention"),
+            ))
             ui_defaults["sliding_window_size"] = ui_defaults["video_length"]
         if (model_def or {}).get("minimax_h3_fasth3"):
             ui_defaults.update({"num_inference_steps": 8, "flow_shift": 12.0 if (model_def or {}).get("minimax_h3_fasth3_omniref") else 10.0,

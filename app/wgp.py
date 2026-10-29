@@ -8481,11 +8481,19 @@ def generate_video(
             "H3 SLA is unavailable in this runtime; this generation will "
             f"use the safe dense {attn} backend.",
         )
+    elif attn == "sage2" and model_def.get("minimax_h3_pika_flex") and attn not in override_attention_modes_supported:
+        # A missing optional dense kernel must not make the default Flex
+        # recipe unusable on otherwise supported CUDA installations.
+        print("[Pika H3 Flex] Sage2 is unavailable in this runtime; using dense SDPA.")
+        attn = "sdpa"
     elif attn not in override_attention_modes_supported:
         send_cmd("info", f"You have selected attention mode '{attn}'. However it is not installed or supported on your system. You should either install it or switch to the default 'sdpa' attention.")
         send_cmd("exit")
         return True
     
+    if model_def.get("minimax_h3_pika_flex"):
+        print(f"[Pika H3 Flex] Effective attention backend: {attn}.")
+
     # Track whether user selected auto aspect (resolution was "auto*") vs fixed (e.g. "1280x720")
     _auto_aspect = not resolution or "x" not in resolution or resolution.startswith("auto")
     _h3_model = str(model_def.get("architecture") or "").startswith("minimax_h3")

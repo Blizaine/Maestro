@@ -1016,7 +1016,7 @@ def _normalize_studio_preferences(values, current=None):
             raise ValueError("h3_optimizations must be an object.")
         override_attention = raw_h3.get("override_attention", "")
         cache_type = raw_h3.get("skip_steps_cache_type", "")
-        if override_attention not in ("", "sol", "sla", "veda", "sdpa"):
+        if override_attention not in ("", "sol", "sla", "veda", "sdpa", "sage2"):
             raise ValueError("override_attention is invalid.")
         if cache_type not in ("", "first_block"):
             raise ValueError("skip_steps_cache_type is invalid.")
@@ -11770,7 +11770,15 @@ async def _prepare_generation_submission(
             normalize_h3_clip_frame_schedule,
             normalize_h3_window_geometry,
             resolve_h3_long_sequence_discard_frames,
+            validate_pika_flex_single_pass_request,
         )
+
+        try:
+            # Reject unsupported explicit continuation requests before the
+            # generic multi-clip schedule path can reinterpret them.
+            validate_pika_flex_single_pass_request(body, _generation_model_def)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
         raw_h3_clip_frames = body.get("per_clip_frames")
         if (
@@ -11831,7 +11839,7 @@ async def _prepare_generation_submission(
                 "Requested output duration is unchanged."
             )
 
-        if (
+        if _generation_model_def.get("minimax_h3_pika_flex") or (
             not _generation_model_def.get("omni_reference")
             and int(body.get("multi_prompts_gen_type") or 0) != 3
         ):
