@@ -331,9 +331,18 @@ class TestJobLifecycleWiring(unittest.TestCase):
                 for node in ast.walk(submission)
                 if isinstance(node, ast.Constant) and isinstance(node.value, str)
             }
-            self.assertIn("_client_submission_id", constants)
+            self.assertIn("_pop_editor_submission", _called_names(submission))
             self.assertIn("client_submission_id", constants)
             self.assertIn("show_in_gallery", constants)
+
+        editor_submission = _function(self.launch, "_pop_editor_submission")
+        editor_submission_constants = {
+            node.value
+            for node in ast.walk(editor_submission)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        self.assertIn("_client_submission_id", editor_submission_constants)
+        self.assertIn("client_submission_id", editor_submission_constants)
 
         with open(
             os.path.join(_ROOT, "ui", "src", "stores", "useStore.ts"),

@@ -43,7 +43,7 @@ def load_routes():
     names = {
         "_is_minimax_h3_identity", "_validate_h3_source_quote_boundaries",
         "llm_plan_h3_windows", "llm_plan_h3_sequence",
-        "_prepare_generation_submission",
+        "_prepare_generation_submission", "_pop_editor_submission",
     }
     nodes = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
     for node in ast.parse(path.read_text(encoding="utf-8")).body:

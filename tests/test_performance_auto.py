@@ -16,6 +16,14 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app"))
 from services import hardware_detect, perf_recommend as perf  # noqa: E402
+from services.memory_runtime import RuntimeSelection  # noqa: E402
+
+
+class HTTPError(Exception):
+    def __init__(self, status_code, detail):
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
 
 
 def hardware(ram=28.0, vram=18.7):
@@ -361,14 +369,21 @@ class TestAutomaticProfileEntryPoints(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
+        app_dir = (ROOT / "app").resolve()
         self.wgp = SimpleNamespace(
             server_config=legacy_config(),
             server_config_filename=str(Path(temp.name) / "config.json"),
             args=SimpleNamespace(vram_safety_coefficient=0.8),
             attention_mode="auto", vae_config=0, compile="", transformer_quantization="int8",
+            memory_runtime_selection=RuntimeSelection(
+                backend="legacy", app_dir=app_dir,
+                module_root=app_dir, package_dir=app_dir / "mmgp",
+            ),
         )
         self.globals = {
             "wgp": self.wgp, "json": json, "Request": object,
+            "_app_dir": str(ROOT / "app"),
+            "HTTPException": HTTPError,
             "_services": self.wgp.server_config["services"],
             "_auto_perf_needs_refresh": perf.auto_performance_needs_refresh,
             "_jobs": {},
@@ -446,7 +461,7 @@ class TestAutomaticProfileEntryPoints(unittest.TestCase):
         for body, expected_auto in (
             ({"video_profile": 4.5}, False),
             ({"video_profile": 5}, True),
-            ({"video_output_codec": "h264"}, True),
+            ({"video_output_codec": "libx264_8"}, True),
         ):
             with self.subTest(body=body):
                 self.wgp.server_config = legacy_config()

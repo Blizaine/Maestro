@@ -69,6 +69,7 @@ jobs:
           "librosa==0.11.0"
           "timm==1.0.24"
           "ftfy==6.3.1"
+          "loguru==0.7.3"
           "pytest==8.4.2"
       - name: Install CPU PyTorch test dependency
         run: >-
@@ -112,6 +113,8 @@ jobs:
           tests/test_media_flow.py
           tests/test_tinyvae.py
           tests/test_conv_bands.py
+          tests/test_pika_flex_attention.py
+          tests/test_pika_flex_handler.py
 
   ui-build:
     name: UI type-check + build
@@ -139,6 +142,8 @@ jobs:
           node tests/ui/h3_checkpoint_download_ui.cjs
       - name: FlashVSR versioned selection regressions
         run: node tests/ui/flashvsr_options.cjs
+      - name: Pika Flex attention default regressions
+        run: node tests/ui/pika_attention.cjs
       - name: Type-check + build (tsc -b && vite build)
         working-directory: ui
         run: npm run build

@@ -195,15 +195,17 @@ class EditorArchiveRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.routes["_jobs"], {})
 
     async def test_package_worker_rejects_traversal_before_export(self):
-        job = {
-            "id": "bad-package", "status": "queued", "workspace": "workspace-a",
-            "package_root": os.path.join(self.root, "workspace-a"),
-            "package_filename": "..\\escape.zip", "params": {"project": self.project},
-        }
-        self.routes["_jobs"][job["id"]] = job
-        self.routes["_run_editor_package"](job["id"])
-        self.assertEqual(job["status"], "failed")
-        self.assertEqual(self.exports, [])
+        for filename in ("../escape.zip", "..\\escape.zip", "/escape.zip", r"C:\escape.zip"):
+            with self.subTest(filename=filename):
+                job = {
+                    "id": "bad-package", "status": "queued", "workspace": "workspace-a",
+                    "package_root": os.path.join(self.root, "workspace-a"),
+                    "package_filename": filename, "params": {"project": self.project},
+                }
+                self.routes["_jobs"][job["id"]] = job
+                self.routes["_run_editor_package"](job["id"])
+                self.assertEqual(job["status"], "failed")
+                self.assertEqual(self.exports, [])
 
     async def test_revision_listing_and_restore_route_shapes(self):
         result = self.routes["editor_project_revisions"]("project-a", "workspace-a")

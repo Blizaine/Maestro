@@ -1312,7 +1312,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("elif minimax_h3_references:", wgp)
         self.assertIn("_h3_auto_budgets", wgp)
         self.assertIn("_h3_auto_fallbacks", wgp)
-        self.assertIn("resolveResolution(get().modelOptions, preset, ratio)", store)
+        self.assertIn("resolveResolution(state.modelOptions, preset, ratio)", store)
         self.assertIn("findResolutionSelection(res, get().modelOptions)", store)
         self.assertIn("modelOptions?.resolution_preset_order", presets)
         self.assertNotIn("value !== '768p'", director)

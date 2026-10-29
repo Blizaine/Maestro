@@ -790,7 +790,7 @@ def _is_managed_moss_edit_lora(model_def: dict, filename: str) -> bool:
     """Keep the MOSS edit adapters out of the optional user-LoRA picker."""
     return (
         (model_def or {}).get("architecture") == "moss_image"
-        and os.path.basename(str(filename or "")).casefold() in _MANAGED_MOSS_EDIT_LORAS
+        and os.path.basename(str(filename or "").replace("\\", "/")).casefold() in _MANAGED_MOSS_EDIT_LORAS
     )
 
 
@@ -31620,7 +31620,7 @@ def _run_editor_package(job_id: str) -> bool:
         if os.path.normcase(package_root) != os.path.normcase(requested_root):
             raise EditorProjectError("Editor package destination changed after submission")
         filename = str(job.get("package_filename") or "")
-        if not filename or os.path.basename(filename) != filename or filename in {".", ".."}:
+        if not filename or os.path.basename(filename.replace("\\", "/")) != filename or filename in {".", ".."}:
             raise EditorProjectError("Editor package filename is invalid")
         output_path = os.path.join(package_root, filename)
         if os.path.normcase(os.path.realpath(os.path.dirname(output_path))) != os.path.normcase(package_root):

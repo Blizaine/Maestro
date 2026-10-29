@@ -18,13 +18,22 @@ LAUNCH_PATH = ROOT / "app" / "launch.py"
 def _load_worker(namespace: dict):
     source = LAUNCH_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(LAUNCH_PATH))
-    function = next(
+    functions = [
         node
         for node in tree.body
         if isinstance(node, ast.FunctionDef)
-        and node.name == "_run_tool_film_grain"
-    )
-    module = ast.Module(body=[function], type_ignores=[])
+        and node.name in {
+            "_cleanup_editor_operation_tool_source",
+            "_run_tool_film_grain",
+        }
+    ]
+    self_contained = {node.name for node in functions}
+    if self_contained != {
+        "_cleanup_editor_operation_tool_source",
+        "_run_tool_film_grain",
+    }:
+        raise AssertionError("Film Grain worker dependency is missing")
+    module = ast.Module(body=functions, type_ignores=[])
     ast.fix_missing_locations(module)
     exec(compile(module, str(LAUNCH_PATH), "exec"), namespace)
     return namespace["_run_tool_film_grain"]

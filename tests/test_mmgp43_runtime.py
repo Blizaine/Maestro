@@ -37,6 +37,12 @@ from services.memory_runtime import (  # noqa: E402
 )
 
 
+def write_vmm_fixture(directory: Path, content: bytes) -> None:
+    """Exercise static presence gates on either supported CI host, never load a library."""
+    for name in ("vmm_alloc_win_amd64.dll", "vmm_alloc_linux_x86_64.so"):
+        (directory / name).write_bytes(content)
+
+
 class IsolatedMmgpImportTests(unittest.TestCase):
     def setUp(self):
         self.saved_path = list(sys.path)
@@ -163,7 +169,7 @@ print("saved runtime read without torch/mmgp")
             experimental = select_runtime(app, EXPERIMENTAL_PROFILE0_RUNTIME)
             allocator_dir = experimental.package_dir / "allocator"
             allocator_dir.mkdir(parents=True)
-            (allocator_dir / "vmm_alloc_win_amd64.dll").write_bytes(b"")
+            write_vmm_fixture(allocator_dir, b"")
             empty_snapshot = runtime_snapshot(experimental, cfg)
             self.assertFalse(empty_snapshot["profile0_native_available"])
             self.assertFalse(empty_snapshot["experimental_runtime_selectable"])
@@ -173,7 +179,7 @@ print("saved runtime read without torch/mmgp")
                 )
             # Non-empty fixture bytes exercise only the static asset gate; the
             # file is never loaded or treated as an ABI/GPU validation result.
-            (allocator_dir / "vmm_alloc_win_amd64.dll").write_bytes(b"fixture-only")
+            write_vmm_fixture(allocator_dir, b"fixture-only")
             snapshot = runtime_snapshot(experimental, cfg)
             self.assertTrue(snapshot["profile0_native_available"])
             self.assertTrue(snapshot["experimental_runtime_selectable"])
@@ -187,7 +193,7 @@ print("saved runtime read without torch/mmgp")
             self.assertFalse(snapshot["fish_supported"])
             self.assertFalse(snapshot["active_fish_supported"])
             self.assertFalse(snapshot["profile0_ram_native_available"])
-            self.assertIn("ram_alloc_win_amd64.dll", snapshot["profile0_ram_capability_reason"])
+            self.assertIn("ram_alloc_", snapshot["profile0_ram_capability_reason"])
 
     def test_memory_runtime_preflight_rejects_unsupported_saved_choices_without_mutation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -214,7 +220,7 @@ print("saved runtime read without torch/mmgp")
 
             allocator_dir = app / "mmgp_backends" / "v43" / "mmgp" / "allocator"
             allocator_dir.mkdir(parents=True)
-            (allocator_dir / "vmm_alloc_win_amd64.dll").write_bytes(b"fixture-only")
+            write_vmm_fixture(allocator_dir, b"fixture-only")
             for body, message in (
                 (
                     {"memory_runtime": EXPERIMENTAL_PROFILE0_RUNTIME, "read_ahead": True},
@@ -276,7 +282,7 @@ print("saved runtime read without torch/mmgp")
             experimental = select_runtime(app, EXPERIMENTAL_PROFILE0_RUNTIME)
             allocator_dir = experimental.package_dir / "allocator"
             allocator_dir.mkdir(parents=True)
-            (allocator_dir / "vmm_alloc_win_amd64.dll").write_bytes(b"fixture-only")
+            write_vmm_fixture(allocator_dir, b"fixture-only")
 
             cfg = {
                 "memory_runtime": LEGACY_RUNTIME,

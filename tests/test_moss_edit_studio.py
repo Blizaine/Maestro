@@ -236,6 +236,7 @@ class MossEditStudioTests(unittest.TestCase):
         self.assertFalse(managed({"architecture": "moss_image"}, "my-style.safetensors"))
         self.assertFalse(managed({"architecture": "flux"}, "armV5.safetensors"))
         self.assertTrue(managed({"architecture": "moss_image"}, r"C:\loras\ARMV5.SAFETENSORS"))
+        self.assertTrue(managed({"architecture": "moss_image"}, "/loras/ARMV5.SAFETENSORS"))
 
     def test_edit_types_are_enabled_through_additive_visibility_migration(self):
         source = (ROOT / "ui" / "src" / "stores" / "useStore.ts").read_text(encoding="utf-8")

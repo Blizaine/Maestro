@@ -37,6 +37,11 @@ def _load_prepare_route():
         if isinstance(item, ast.AsyncFunctionDef)
         and item.name == "_prepare_generation_submission"
     )
+    editor_submission_helper = next(
+        item for item in module.body
+        if isinstance(item, ast.FunctionDef)
+        and item.name == "_pop_editor_submission"
+    )
     node.decorator_list = []
     tree = ast.Module(
         body=[
@@ -45,6 +50,7 @@ def _load_prepare_route():
                 names=[ast.alias(name="annotations")],
                 level=0,
             ),
+            editor_submission_helper,
             node,
         ],
         type_ignores=[],

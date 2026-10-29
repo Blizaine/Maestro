@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app"))
 from services.memory_settings import (apply_memory_defaults, memory_settings_snapshot,
                                      dynamic_preload_supported, preload_for_output, reserved_ram_fraction, validate_memory_updates)
+from services.memory_runtime import RuntimeSelection
 
 
 class MemorySettingsTests(unittest.TestCase):
@@ -94,13 +95,19 @@ class MemorySettingsApiTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.config_path = Path(temporary.name) / "config.json"
         self.config = apply_memory_defaults({"attention_mode": "auto", "services": {"auto_performance": True}})
+        app_dir = (ROOT / "app").resolve()
         self.wgp = SimpleNamespace(server_config=self.config, server_config_filename=str(self.config_path),
-                                   args=SimpleNamespace(vram_safety_coefficient=.8), reload_needed=False)
+                                   args=SimpleNamespace(vram_safety_coefficient=.8), reload_needed=False,
+                                   memory_runtime_selection=RuntimeSelection(
+                                       backend="legacy", app_dir=app_dir,
+                                       module_root=app_dir, package_dir=app_dir / "mmgp",
+                                   ))
         tree = ast.parse((ROOT / "app/launch.py").read_text(encoding="utf-8"))
         node = copy.deepcopy(next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef)
                                   and node.name == "update_system_config"))
         node.decorator_list = []
         self.namespace = {"wgp": self.wgp, "json": json, "Request": object, "HTTPException": HTTPError,
+                          "_app_dir": str(ROOT / "app"),
                           "PREVIEW_MODES": ("off", "rgb", "tiny_vae", "tiny_vae_video")}
         exec(compile(ast.Module(body=[node], type_ignores=[]), "launch.py", "exec"), self.namespace)
 

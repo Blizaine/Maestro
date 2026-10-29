@@ -75,6 +75,9 @@ class EnhancedJobWiringTests(unittest.TestCase):
             _get_active_workspace=lambda: 'captured', _workspace_dir=lambda name: 'captured-output',
             _run_generation=Mock())
         self.run_enhancement = load('_prepare_job_enhancement', self.ns)
+        load('_pop_editor_submission', self.ns)
+        load('_existing_editor_operation_job', self.ns)
+        load('_bind_editor_operation_job', self.ns)
         for method in ('is_loaded', 'unload_model'):
             mock = patch.object(llm_service, method, return_value=(method == 'is_loaded'))
             mock.start()

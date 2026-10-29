@@ -19,6 +19,12 @@ from services.memory_runtime import (  # noqa: E402
 )
 
 
+def write_vmm_fixture(directory: Path) -> None:
+    # Fixtures are never loaded; create the static asset names for both CI hosts.
+    for name in ("vmm_alloc_win_amd64.dll", "vmm_alloc_linux_x86_64.so"):
+        (directory / name).write_bytes(b"fixture-only")
+
+
 class MemoryRuntimeSystemBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.saved_path = list(sys.path)
@@ -56,7 +62,7 @@ class MemoryRuntimeSystemBoundaryTests(unittest.TestCase):
             active = select_runtime(app, LEGACY_RUNTIME)
             allocator_dir = app / "mmgp_backends" / "v43" / "mmgp" / "allocator"
             allocator_dir.mkdir(parents=True)
-            (allocator_dir / "vmm_alloc_win_amd64.dll").write_bytes(b"fixture-only")
+            write_vmm_fixture(allocator_dir)
             cfg = {
                 "memory_runtime": LEGACY_RUNTIME,
                 "vram_allocator": "default",
@@ -86,7 +92,7 @@ class MemoryRuntimeSystemBoundaryTests(unittest.TestCase):
             active = select_runtime(app, LEGACY_RUNTIME)
             allocator_dir = app / "mmgp_backends" / "v43" / "mmgp" / "allocator"
             allocator_dir.mkdir(parents=True)
-            (allocator_dir / "vmm_alloc_win_amd64.dll").write_bytes(b"fixture-only")
+            write_vmm_fixture(allocator_dir)
             cfg = {
                 "memory_runtime": LEGACY_RUNTIME,
                 "vram_allocator": "default",
