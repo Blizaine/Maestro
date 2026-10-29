@@ -233,7 +233,7 @@ export function titlePlanIsCurrent(settings: AnimatedTitleSettings): boolean {
   if (settings.plannedKey === titlePlanningKey(settings)) return true
   // Older H3 drafts and durable Editor receipts used this compact key. Keep
   // those plans valid when the settings have no selected-model snapshot.
-  return !settings.model && settings.backgroundColor === undefined
+  return !settings.model && (settings.background === undefined || settings.background === 'chroma' || settings.background === 'black')
     && settings.plannedKey === legacyTitlePlanningKey(settings)
 }
 

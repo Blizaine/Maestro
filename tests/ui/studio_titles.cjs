@@ -115,11 +115,11 @@ async function bundleUi() {
         import {useEditorStore} from './src/editor/useEditorStore';
         import {useEditorTitleStore} from './src/editor/useEditorTitleStore';
         import {Sidebar} from './src/components/Sidebar/Sidebar';
-        import {TITLE_EFFECT_LABELS, TITLE_SEQUENCE_DURATIONS, alignTitleSequence, setTitlePhraseSeconds, titleDimensions, titleFrames, titleSequenceTimeline, newTitlePhrases, animatedTitlePrompt, animatedTitleParams, insertAnimatedTitle} from './src/editor/editorAnimatedTitles';
+        import {TITLE_EFFECT_LABELS, TITLE_SEQUENCE_DURATIONS, alignTitleSequence, setTitlePhraseSeconds, titleDimensions, titleFrames, titleSequenceTimeline, newTitlePhrases, animatedTitlePrompt, animatedTitleParams, insertAnimatedTitle, titlePlanIsCurrent} from './src/editor/editorAnimatedTitles';
         window.store = useStore;
         window.editorStore = useEditorStore;
         window.titleStore = useEditorTitleStore;
-        window.titleHelpers = {TITLE_EFFECT_LABELS, TITLE_SEQUENCE_DURATIONS, alignTitleSequence, setTitlePhraseSeconds, titleDimensions, titleFrames, titleSequenceTimeline, newTitlePhrases, animatedTitlePrompt, animatedTitleParams, insertAnimatedTitle};
+        window.titleHelpers = {TITLE_EFFECT_LABELS, TITLE_SEQUENCE_DURATIONS, alignTitleSequence, setTitlePhraseSeconds, titleDimensions, titleFrames, titleSequenceTimeline, newTitlePhrases, animatedTitlePrompt, animatedTitleParams, insertAnimatedTitle, titlePlanIsCurrent};
         window.baseParams = {...useStore.getState().params};
         window.seedScenario = (scenario = {}) => {
           const model = scenario.model || '${TITLE_MODEL}';
@@ -1259,6 +1259,16 @@ async function uploadedPixel(page, upload) {
     assert.deepEqual(editorKeying, [{background: 'blue', enabled: true, color: '#0000ff'},
       {background: 'white', enabled: false}, {background: 'custom', enabled: false}],
       'Blue keys with blue; white and custom title backgrounds remain opaque in the Editor.');
+    const legacyPlan = await page.evaluate(() => {
+      const settings = {...window.titleStore.getState().intent.settings, model: undefined, background: 'black'};
+      settings.plannedKey = JSON.stringify([settings.brief.trim(), settings.stylePreset ?? 'custom',
+        window.titleHelpers.titleFrames(settings.seconds), 'black']);
+      return {accepted: window.titleHelpers.titlePlanIsCurrent(settings),
+        changed: window.titleHelpers.titlePlanIsCurrent({...settings, brief: settings.brief + ' changed'}),
+        otherModel: window.titleHelpers.titlePlanIsCurrent({...settings, model: window.titleStore.getState().intent.settings.model})};
+    });
+    assert.deepEqual(legacyPlan, {accepted: true, changed: false, otherModel: false},
+      'Old H3 signatures survive an unused color-picker default without accepting changed wording or model context.');
     assert.deepEqual(await stateInputs(page), normalBeforeModel, 'All title model/color submissions preserve unrelated Studio inputs.');
     assert.ok(preferenceUpdates.some(preference => preference.studio_video_workflow === 'titles'),
       'The title workflow is persisted as a normal Studio preference.');
