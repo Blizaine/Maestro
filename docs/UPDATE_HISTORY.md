@@ -4,6 +4,17 @@ Every dated update announcement from Maestro's first public release onward, newe
 
 [Back to the README](../README.md#updates) · [Detailed changelog](../CHANGELOG.md)
 
+### v4.0.0 (2026-10-29) — Dev preview
+
+The next major Main release is being prepared on **Dev** as v4.0.0.
+
+- **A fresh appearance:** first opening v4 switches to Graphite Studio in Dark
+  mode, including browsers with a saved theme. This happens once; choose another
+  theme or appearance in Settings afterward and that choice stays saved.
+
+The existing Dev updates are included. See the
+[v4.0.0 preview notes](RELEASE_NOTES_V4.0.0.md).
+
 ### v3.3.0 (2026-10-26) — Dev testing
 
 - **Qwen Image 2.1 reference caching:** optional INT8 caches in VRAM or system

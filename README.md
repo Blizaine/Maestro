@@ -35,6 +35,17 @@ Runtime upgrades are explicit menu actions. A missing performance-runtime marker
 does not automatically run Update when you open the launcher. If offered,
 **Start with Compatibility Runtime** keeps the existing runtime available.
 
+### v4.0.0 (2026-10-29) — Dev preview
+
+The next major Main release is being prepared on **Dev** as v4.0.0.
+
+- **A fresh appearance:** first opening v4 switches to Graphite Studio in Dark
+  mode, including browsers with a saved theme. This happens once; choose another
+  theme or appearance in Settings afterward and that choice stays saved.
+
+The existing Dev updates are included. See the
+[v4.0.0 preview notes](docs/RELEASE_NOTES_V4.0.0.md).
+
 ### v3.3.0 (2026-10-26) — Dev testing
 
 - **Qwen Image 2.1 reference caching:** optional INT8 caches in VRAM or system
@@ -259,32 +270,6 @@ My Music training, multi-LoRA mixing and extended H3 duration remain experimenta
 Use **Update** in Pinokio, restart Maestro and refresh the browser. Existing models, recordings, projects, LoRAs and outputs stay in place. New models and optional tools download their assets when first used.
 
 [Full v2.3.0 release notes](docs/RELEASE_NOTES_V2.3.0.md) · [Validation and limits](docs/VALIDATION_V2.3.0.md) · [Changelog](CHANGELOG.md)
-
-### v2.2.4 (2026-09-18)
-
-**Unified AI enhancement, YuE2 music, and more control over Director productions**
-
-Includes the full v2.2.0 feature release and v2.2.1–v2.2.3 fixes below. **New in v2.2.4:** retry flagged H3 windows without rewriting the accepted prompts, and choose clearly whether to repair, edit or generate the complete saved draft.
-
-- **Keep the windows that already passed:** if window 4 needs review in a six-window job, retry its camera plan while retaining the other five prompts, shared story, dialogue and continuity. Works in Frames and References with Enhance now or queued enhancement. Saved repair progress survives restarts.
-- **Clearer prompt review:** **Generate all 6 windows with this draft** uses the complete saved draft. **Retry window 4 & generate** repairs the flagged window, then generates the full job if checks pass. **Edit prompts in Studio** opens the draft without starting generation. Full rewrites and generation from the original prompt are under **Other options**. Older drafts need a fresh enhancement to support targeted retries.
-- **Silent product prompts:** fixes the reported logotype-timeline heading being counted as a speaking character. Duration and aspect qualifiers in silent-video briefs no longer hide the no-dialogue instruction.
-
-- **More reliable H3 enhancement:** complete supplied conversations keep every line and its speaker; impossible dialogue durations receive a clear explanation before the LLM loads. Faithful camera paraphrases, colon-timed storyboards and silent reactions no longer trigger the same false review failures. Queued Enhance preserves reference names and actual voice bindings.
-- **Lower H3 memory peaks:** bounded normalization addresses the allocation hotspot reported on an A100 40 GB in [#139](https://github.com/Blizaine/Maestro/issues/139), preserving reference detail and precision. The isolated operation is validated; a complete run on the reporter's hardware remains unverified.
-
-- **One Enhance workflow:** develops short ideas and adapts detailed scripts to the selected model. Enhance now, or let a queued job enhance immediately before generation. An optional **Use by default** setting remembers Enhance on generation; saved source prompts and drafts remain available for review and retries.
-- **Stronger H3 prompt writing:** improved silent-action parsing, dialogue ownership, choreography, camera direction, first-frame continuity and multi-window timing. Director shares the relevant writing guidance. Prompt review remains available for drafts that need attention.
-- **YuE2 3B music:** the new default music model produces 48 kHz stereo songs, with Direct generation selected initially, optional composition planning, ABC scores and source-song covers. Later model choices are remembered.
-- **My music (Experimental):** prepare full songs with automatic transcription, voice selection and reviewed clips, or supply recordings and lyrics yourself. Train and resume personal style adapters, compare checkpoint auditions, reconstruct source audio, and import/export styles. New projects recommend the matched v9 tokenizer and decoder. Style and vocal resemblance vary; this is not a promise of reliable singer cloning. [Preparation guide](docs/YuE2-music.md#prepare-full-songs-automatically-guided).
-- **Director music controls:** adjustable clip maximum and GPU limit, working Cut Speed, full-song timing, and musical/vocal cues for camera planning. Longer H3 clips can approach 14.4s; instrument cutaways retain the assigned singer's voice off screen. Shot edits now save reliably.
-- **All folders gallery:** browse and search across output folders while keeping each item's source folder and the generation destination clear. Refresh, pagination and folder-qualified actions are fixed.
-- **TaoMate H3:** optional experimental three-step Frames acceleration, with pinned downloads and compatibility checks. Includes internal token-refiner weights; it is not a separate video-refinement pass.
-- **Image, queue and runtime fixes:** 21:9 image aspect, original/enhanced prompt details, multiline-image and Z-Image decoding fixes, corrected CivitAI model reloads, collapsible completed-job history, repeated-upload deduplication, and improved Linux local-LLM setup and diagnostics.
-
-Use **Update** in Pinokio, restart Maestro and refresh the browser. Existing models, characters, outputs and projects stay in place. New models and optional music tools download their assets when used. YuE2 model/tokenizer weights have separate noncommercial terms; see the [music guide](docs/YuE2-music.md).
-
-[Full release notes and issue status](docs/RELEASE_NOTES_V2.2.0.md) · [Validation and known limits](docs/VALIDATION_V2.2.0.md)
 
 ## Requirements
 

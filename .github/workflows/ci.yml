@@ -146,6 +146,8 @@ jobs:
         run: |
           node tests/ui/pika_attention.cjs
           node tests/ui/h3_autotune_advice_unit.cjs
+      - name: v4 theme introduction and preference recovery
+        run: node tests/ui/theme_migration.cjs
       - name: Type-check + build (tsc -b && vite build)
         working-directory: ui
         run: npm run build

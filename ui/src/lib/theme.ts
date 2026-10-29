@@ -13,12 +13,13 @@
  * than separate user-facing theme names.
  *
  * Persistence: localStorage under "maestro-theme-mode" and
- * "maestro-theme-family". Legacy keys are migrated on first load so
- * nobody's chosen look changes: the original single-theme key
- * ("maestro-theme", may hold a light variant id) and the short-lived
- * per-variant key ("maestro-theme-dark") both seed the family. An
- * inline script in index.html applies the resolved theme to <html>
- * before React mounts so there's no flash of the default theme.
+ * "maestro-theme-family". On the first v4 load, existing theme settings
+ * are reset once to Graphite Studio dark. The fixed v4 migration marker
+ * keeps that reset from running again on patch updates. Afterward, the
+ * original single-theme key ("maestro-theme", may hold a light variant
+ * id) and short-lived per-variant key ("maestro-theme-dark") remain
+ * readable for compatibility. An inline script in index.html applies
+ * the same migration and resolved theme before React mounts.
  *
  * Adding a new family: add `[data-theme]` blocks for both variants in
  * index.css, add the family to FAMILIES below, and extend the maps in
@@ -104,6 +105,9 @@ export interface ThemePrefs {
 
 const MODE_KEY = 'maestro-theme-mode'
 const FAMILY_KEY = 'maestro-theme-family'
+/** Fixed major-version marker: v4 patch releases must preserve user choices. */
+const V4_MIGRATION_KEY = 'maestro-theme-v4-migrated'
+const V4_MIGRATION_VALUE = '4'
 /** Short-lived key from the interim two-picker build; holds a dark id. */
 const INTERIM_DARK_KEY = 'maestro-theme-dark'
 /** Original single-theme key; may hold either variant. Still written
@@ -112,24 +116,54 @@ const LEGACY_KEY = 'maestro-theme'
 
 const DEFAULT_PREFS: ThemePrefs = { mode: 'dark', family: 'graphite-studio' }
 
+/** Persist the compatible theme keys, then mark the one-time v4 reset complete. */
+function writeThemePrefs(storage: Storage, prefs: ThemePrefs): boolean {
+  try {
+    storage.setItem(MODE_KEY, prefs.mode)
+    storage.setItem(FAMILY_KEY, prefs.family)
+    // Keep the legacy key pointing at the resolved theme so a downgrade to
+    // an older build still shows something sensible.
+    storage.setItem(LEGACY_KEY, resolveTheme(prefs))
+    // This must remain the final write. If any preference write fails, a
+    // later load can safely retry the migration instead of trusting partial
+    // theme state as a completed v4 migration.
+    storage.setItem(V4_MIGRATION_KEY, V4_MIGRATION_VALUE)
+    return true
+  } catch {
+    /* Storage can be blocked or quota-limited; keep the current session usable. */
+    return false
+  }
+}
+
 function isFamily(id: string | null): id is FamilyId {
   return !!id && FAMILIES.some(f => f.id === id)
 }
 
 export function getStoredPrefs(): ThemePrefs {
   try {
-    const legacyRaw = localStorage.getItem(LEGACY_KEY)
-    const legacy = legacyRaw && legacyRaw in FAMILY_OF ? (legacyRaw as ThemeId) : null
+    const storage = localStorage
+    if (storage.getItem(V4_MIGRATION_KEY) !== V4_MIGRATION_VALUE) {
+      // v4 intentionally starts every existing install on the new default.
+      // If storage is partially writable, leave the marker absent so this is
+      // retried on a later load; the current page still uses these defaults.
+      writeThemePrefs(storage, DEFAULT_PREFS)
+      return { ...DEFAULT_PREFS }
+    }
 
-    const modeRaw = localStorage.getItem(MODE_KEY)
+    const legacyRaw = storage.getItem(LEGACY_KEY)
+    const legacy = legacyRaw && Object.prototype.hasOwnProperty.call(FAMILY_OF, legacyRaw)
+      ? (legacyRaw as ThemeId)
+      : null
+
+    const modeRaw = storage.getItem(MODE_KEY)
     const mode: ThemeMode =
       modeRaw === 'dark' || modeRaw === 'light' || modeRaw === 'auto'
         ? modeRaw
         // Migration: a stored light variant means the user chose light.
         : legacy && LIGHT_IDS.has(legacy) ? 'light' : 'dark'
 
-    const familyRaw = localStorage.getItem(FAMILY_KEY)
-    const interimDark = localStorage.getItem(INTERIM_DARK_KEY)
+    const familyRaw = storage.getItem(FAMILY_KEY)
+    const interimDark = storage.getItem(INTERIM_DARK_KEY)
     const family: FamilyId = isFamily(familyRaw)
       ? familyRaw
       : isFamily(interimDark) ? interimDark
@@ -224,11 +258,7 @@ export function applyThemePrefs(prefs: ThemePrefs): void {
   installOsListener()
   applyResolvedTheme(prefs)
   try {
-    localStorage.setItem(MODE_KEY, prefs.mode)
-    localStorage.setItem(FAMILY_KEY, prefs.family)
-    // Keep the legacy key pointing at the resolved theme so a
-    // downgrade to an older build still shows something sensible.
-    localStorage.setItem(LEGACY_KEY, resolveTheme(prefs))
+    writeThemePrefs(localStorage, prefs)
   } catch {
     /* localStorage blocked — theme still applies for this session */
   }

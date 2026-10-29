@@ -60,6 +60,7 @@ Start with the [README](../README.md) for installation and the feature overview.
 - [Complete update history](UPDATE_HISTORY.md) — every dated update announcement, including those summarized in the README.
 - [WanGP October ports](WanGP-October-2026-Ports.md) — first-batch scope and validation limits.
 - [Detailed changelog](../CHANGELOG.md) — development changes and release entries.
-- [Dev v3.3.0 release notes](RELEASE_NOTES_V3.3.0.md) — new ports, validation and testing instructions.
+- [Dev v4.0.0 preview notes](RELEASE_NOTES_V4.0.0.md) — current Dev version and the one-time Graphite Dark introduction.
+- [v3.3.0 porting notes](RELEASE_NOTES_V3.3.0.md) — port scope, validation and testing instructions.
 - [Main v3.2.5 release notes](RELEASE_NOTES_V3.2.5.md) — stable release behavior and known limits.
 - [API examples](../README.md#notification-and-remote-access-api) and [developer prompt bench](../README.md#developer-prompt-bench).

@@ -8,6 +8,7 @@ const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
 
 (async () => {
   const htmlSource = fs.readFileSync(path.join(root, 'ui/index.html'), 'utf8');
+  const migrated = {'maestro-theme-v4-migrated': '4'};
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'ui/public/manifest.webmanifest'), 'utf8'));
   assert.equal(manifest.background_color, '#111316', 'Home-screen launch uses the new default canvas');
   assert.equal(manifest.theme_color, '#111316');
@@ -69,8 +70,8 @@ const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
   const close = async ({context}) => context.close();
 
   try {
-    // The new family is the picker/default family. Earlier family IDs stay valid,
-    // and each former light CSS ID still migrates to its original family + light mode.
+    // The new family is the picker/default family. An unmigrated install starts
+    // on Graphite dark, regardless of its pre-v4 family, mode or legacy theme.
     {
       const {context, page, prepaintState} = await boot();
       const result = await page.evaluate(() => ({families: window.themeApi.FAMILIES.map(f => f.id), prefs: window.themeApi.getStoredPrefs()}));
@@ -80,16 +81,24 @@ const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
       await close({context});
     }
     for (const family of ['golden-hour', 'default', 'onyx']) {
-      const {context, page} = await boot({values: {'maestro-theme-family': family}});
-      assert.deepEqual(await page.evaluate(() => window.themeApi.getStoredPrefs()), {mode: 'dark', family});
+      const {context, page, prepaintState} = await boot({values: {'maestro-theme-family': family}});
+      assert.deepEqual(await page.evaluate(() => window.themeApi.getStoredPrefs()), {mode: 'dark', family: 'graphite-studio'});
+      assert.deepEqual(prepaintState, prepaintAppearance('graphite-studio', 'dark'));
+      assert.equal(await page.evaluate(() => localStorage.getItem('maestro-theme-v4-migrated')), '4');
       await close({context});
     }
     for (const [legacy, family] of [['graphite-daylight', 'graphite-studio'], ['ivory', 'golden-hour'], ['daylight', 'default'], ['pearl', 'onyx']]) {
       const {context, page, prepaintState} = await boot({values: {'maestro-theme': legacy}});
       const prefs = await page.evaluate(() => window.themeApi.getStoredPrefs());
-      assert.deepEqual(prefs, {mode: 'light', family});
-      assert.deepEqual(prepaintState, prepaintAppearance(family, 'light'));
+      assert.deepEqual(prefs, {mode: 'dark', family: 'graphite-studio'});
+      assert.deepEqual(prepaintState, prepaintAppearance('graphite-studio', 'dark'));
       await close({context});
+      // These legacy variants remain readable on an already-migrated v4 install.
+      const migratedPage = await boot({values: {...migrated, 'maestro-theme': legacy}});
+      const migratedPrefs = await migratedPage.page.evaluate(() => window.themeApi.getStoredPrefs());
+      assert.deepEqual(migratedPrefs, {mode: 'light', family});
+      assert.deepEqual(migratedPage.prepaintState, prepaintAppearance(family, 'light'));
+      await close(migratedPage);
     }
     {
       const {context, page, prepaintState} = await boot({values: {
@@ -115,7 +124,7 @@ const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
       for (const mode of ['dark', 'light', 'auto']) {
         for (const colorScheme of mode === 'auto' ? ['dark', 'light'] : ['dark']) {
           const {context, page, prepaintState} = await boot({
-            values: {'maestro-theme-mode': mode, 'maestro-theme-family': family}, colorScheme,
+            values: {...migrated, 'maestro-theme-mode': mode, 'maestro-theme-family': family}, colorScheme,
           });
           const variant = mode === 'light' || (mode === 'auto' && colorScheme === 'light') ? 'light' : 'dark';
           const expected = appearance(family, variant);
@@ -141,7 +150,7 @@ const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
     // Auto mode responds to OS changes for both directions, updating the DOM,
     // browser tint and subscriber while retaining the selected family.
     for (const family of ['graphite-studio', 'golden-hour', 'default', 'onyx']) {
-      const {context, page} = await boot({values: {'maestro-theme-mode': 'auto', 'maestro-theme-family': family}, colorScheme: 'dark'});
+      const {context, page} = await boot({values: {...migrated, 'maestro-theme-mode': 'auto', 'maestro-theme-family': family}, colorScheme: 'dark'});
       await page.evaluate(() => {
         window.themeChanges = 0;
         window.themeApi.onOsThemeChange(() => window.themeChanges++);
@@ -175,7 +184,7 @@ const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
     };
     for (const mode of ['dark', 'light']) {
       const {context, page} = await boot({values: {
-        'maestro-theme-family': 'graphite-studio', 'maestro-theme-mode': mode,
+        ...migrated, 'maestro-theme-family': 'graphite-studio', 'maestro-theme-mode': mode,
       }});
       await page.addStyleTag({content: stylesheet + '*{transition:none!important}'});
       const colors = await page.evaluate(() => {

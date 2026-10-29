@@ -3,6 +3,16 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [4.0.0] - 2026-10-29 — Dev preview
+
+Label public Dev v4.0.0 in preparation for the next public Main release.
+The first visit to v4 switches existing and new browser profiles to Graphite
+Studio in Dark mode. Apply that one-time change before the UI mounts, then
+retain any theme or appearance the user chooses afterward, including across
+reloads and v4 patch updates. Other preferences stay unchanged.
+
+See the [v4.0.0 Dev preview notes](docs/RELEASE_NOTES_V4.0.0.md).
+
 ## [3.3.0] - 2026-10-26
 
 **Gallery:** resize the thumbnail panel with a draggable, keyboard-accessible

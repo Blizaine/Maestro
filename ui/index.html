@@ -24,11 +24,11 @@
     <div id="root"></div>
     <script>
       // Apply theme BEFORE React mounts to avoid a flash of the wrong
-      // theme on load. Resolves the preference (mode: dark/light/auto
-      // + theme family) exactly like src/lib/theme.ts, including
-      // migrating the legacy keys. Hardcoded here because this script
-      // runs before any module imports — keep the maps in sync with
-      // FAMILIES in src/lib/theme.ts.
+      // theme on load. The first v4 load resets every install to Graphite
+      // Studio dark; a fixed v4 marker preserves later choices across patch
+      // updates. Afterward this resolves mode + family, including legacy
+      // keys, like src/lib/theme.ts. Hardcoded because this runs before
+      // module imports — keep the maps and migration marker in sync there.
       (function () {
         // Family -> its light-variant CSS id. Keys double as the
         // valid family-id set.
@@ -42,20 +42,42 @@
         var bg = { 'graphite-studio': '#111316', 'golden-hour': '#0a0a0a', 'default': '#0a0a0f', 'onyx': '#000000',
                    'graphite-daylight': '#d9dfe6',
                    'ivory': '#f2ede2', 'daylight': '#f4f5f7', 'pearl': '#f2f2f2' };
+        var MIGRATION_KEY = 'maestro-theme-v4-migrated';
+        var MIGRATION_VALUE = '4';
+        var MODE_KEY = 'maestro-theme-mode';
+        var FAMILY_KEY = 'maestro-theme-family';
+        var LEGACY_KEY = 'maestro-theme';
+        var INTERIM_DARK_KEY = 'maestro-theme-dark';
         var mode = 'dark', family = 'graphite-studio';
         try {
-          var legacy = localStorage.getItem('maestro-theme');
-          if (legacy && !FAMILY_OF[legacy]) legacy = null;
-          var m = localStorage.getItem('maestro-theme-mode');
-          mode = (m === 'dark' || m === 'light' || m === 'auto') ? m
-               : (legacy && FAMILY_OF[legacy] !== legacy) ? 'light' : 'dark';
-          var f = localStorage.getItem('maestro-theme-family');
-          var d = localStorage.getItem('maestro-theme-dark'); // interim two-picker build
-          family = LIGHT_OF[f] ? f : LIGHT_OF[d] ? d
-                 : legacy ? FAMILY_OF[legacy] : 'graphite-studio';
+          var storage = localStorage;
+          if (storage.getItem(MIGRATION_KEY) !== MIGRATION_VALUE) {
+            // Write all supported theme keys before the marker. If storage is
+            // blocked or partially writable, the page still paints the v4
+            // default and runtime can retry without a false completion mark.
+            storage.setItem(MODE_KEY, 'dark');
+            storage.setItem(FAMILY_KEY, 'graphite-studio');
+            storage.setItem(LEGACY_KEY, 'graphite-studio');
+            storage.setItem(MIGRATION_KEY, MIGRATION_VALUE);
+          } else {
+            var legacy = storage.getItem(LEGACY_KEY);
+            if (!Object.prototype.hasOwnProperty.call(FAMILY_OF, legacy)) legacy = null;
+            var m = storage.getItem(MODE_KEY);
+            var nextMode = (m === 'dark' || m === 'light' || m === 'auto') ? m
+                         : (legacy && FAMILY_OF[legacy] !== legacy) ? 'light' : 'dark';
+            var f = storage.getItem(FAMILY_KEY);
+            var d = storage.getItem(INTERIM_DARK_KEY); // interim two-picker build
+            var nextFamily = Object.prototype.hasOwnProperty.call(LIGHT_OF, f) ? f
+                           : Object.prototype.hasOwnProperty.call(LIGHT_OF, d) ? d
+                           : legacy ? FAMILY_OF[legacy] : 'graphite-studio';
+            mode = nextMode;
+            family = nextFamily;
+          }
         } catch (e) {
-          // localStorage blocked (private mode etc) — fall through with
-          // the hardcoded defaults so the user still gets the intended look.
+          // Blocked/partial storage — keep the Graphite dark paint and leave
+          // the marker absent unless every theme write completed successfully.
+          mode = 'dark';
+          family = 'graphite-studio';
         }
         var wantLight = mode === 'light' || (mode === 'auto' && window.matchMedia &&
           window.matchMedia('(prefers-color-scheme: light)').matches);
