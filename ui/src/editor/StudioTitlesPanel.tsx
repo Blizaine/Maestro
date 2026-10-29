@@ -4,10 +4,11 @@ import { createPortal } from 'react-dom'
 import { useStore } from '../stores/useStore'
 import { AnimatedTitleControls } from './AnimatedTitleControls'
 import { EditorAnimatedTitleStatus } from './EditorAnimatedTitleDialog'
-import { alignTitleSequence, DEFAULT_TITLE_SETTINGS, TITLE_EFFECTS, titleComposerValidation, titleEnhancementEnabled, titlePlanIsCurrent, TITLE_MODEL } from './editorAnimatedTitles'
+import { alignTitleSequence, DEFAULT_TITLE_SETTINGS, TITLE_EFFECTS, titleBrief, titleComposerValidation, titleEnhancementEnabled, titlePlanIsCurrent, TITLE_MODEL } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 import { useEditorTitleStore } from './useEditorTitleStore'
 import { useTitleComposer } from './useTitleComposer'
+import { StudioTitleFormatControls } from './StudioTitleFormatControls'
 
 const DRAFT = 'maestro-studio-title-draft-v1'
 const CANVAS = { width: 1920, height: 1080 }
@@ -31,8 +32,8 @@ function normalizeDraft(raw: unknown): AnimatedTitleSettings {
       direction: typeof value.direction === 'string' ? value.direction.slice(0, 1200) : defaults.direction,
       effect: typeof value.effect === 'string' && (value.effect === 'custom' || Object.hasOwn(TITLE_EFFECTS, value.effect)) ? value.effect : defaults.effect,
       seconds: typeof value.seconds === 'number' && Number.isFinite(value.seconds) ? Math.max(5, Math.min(14.5, value.seconds)) : defaults.seconds,
-      aspect: value.aspect === '16:9' || value.aspect === '9:16' || value.aspect === '1:1' ? value.aspect : defaults.aspect,
-      resolution: value.resolution === '480p' || value.resolution === '720p' ? value.resolution : defaults.resolution,
+      aspect: value.aspect === '21:9' || value.aspect === '16:9' || value.aspect === '9:16' || value.aspect === '1:1' || value.aspect === '4:3' || value.aspect === '3:4' ? value.aspect : defaults.aspect,
+      resolution: value.resolution === '480p' || value.resolution === '540p' || value.resolution === '720p' || value.resolution === '768p' || value.resolution === '1080p' ? value.resolution : defaults.resolution,
       background: value.background === 'black' ? 'black' : 'chroma',
       mode: value.mode === 'sequence' ? 'sequence' : 'single',
       sequenceDirection: typeof value.sequenceDirection === 'string' ? value.sequenceDirection.slice(0, 1200) : '',
@@ -83,6 +84,14 @@ export function StudioTitlesPanel({ footerHost }: { footerHost?: HTMLElement | n
   }
   const composer = useTitleComposer(settings, patch, workspace)
   const controlBusy = busy || composer.busy
+  const changeDuration = (frames: number) => {
+    composer.clearFeedback()
+    const base = { ...settings, brief: titleBrief(settings), manualPlanEdited: false, seconds: frames / 24, sequenceFrames: frames }
+    if (base.mode === 'sequence' && (base.phrases?.length ?? 0) >= 2 && (base.phrases?.length ?? 0) <= 6) {
+      try { patch(alignTitleSequence(base, frames)); return } catch { /* Keep the chosen whole-clip duration visible while an invalid sequence is repaired. */ }
+    }
+    patch(base)
+  }
   const validation = titleComposerValidation(settings, CANVAS)
   let reviewReady = false
   try { reviewReady = settings.titleReviewRequired === true && titlePlanIsCurrent(settings) }
@@ -108,6 +117,7 @@ export function StudioTitlesPanel({ footerHost }: { footerHost?: HTMLElement | n
         <Sparkles size={13}/><span>Enhance on generation</span><X size={13}/>
       </button>
     </div>}
+    <StudioTitleFormatControls settings={settings} patch={patch} onDurationChange={changeDuration} busy={controlBusy} />
     <div data-testid="studio-generate-bar" className="flex min-w-0 items-center gap-1.5">
       <div aria-label="Title generation model" data-model-type={TITLE_MODEL}
         className="flex min-h-11 min-w-0 flex-1 items-center rounded-lg border border-border bg-bg-tertiary px-2 py-2 text-[11px] leading-tight text-text-primary">

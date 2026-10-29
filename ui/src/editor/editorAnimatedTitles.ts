@@ -75,8 +75,8 @@ export interface AnimatedTitleSettings {
   effect: 'custom' | keyof typeof TITLE_EFFECTS
   direction: string
   seconds: number
-  aspect: 'project' | '16:9' | '9:16' | '1:1'
-  resolution: '480p' | '720p'
+  aspect: 'project' | '21:9' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
+  resolution: '480p' | '540p' | '720p' | '768p' | '1080p'
   keepAudio: boolean
   /** Missing on older saved title intents, which always used green keying. */
   background?: TitleBackground
@@ -289,11 +289,41 @@ export function titleBackground(settings: { background?: TitleBackground }) {
   throw new Error('Choose a supported title background.')
 }
 
+type TitleCanvas = { width: number; height: number }
+type StandardTitleAspect = Exclude<AnimatedTitleSettings['aspect'], 'project'>
+const H3_TITLE_DIMENSIONS: Record<AnimatedTitleSettings['resolution'], Record<StandardTitleAspect, TitleCanvas>> = {
+  '480p': { '21:9': { width: 1120, height: 480 }, '16:9': { width: 864, height: 480 }, '9:16': { width: 480, height: 864 }, '1:1': { width: 640, height: 640 }, '4:3': { width: 640, height: 480 }, '3:4': { width: 480, height: 640 } },
+  '540p': { '21:9': { width: 1280, height: 544 }, '16:9': { width: 960, height: 544 }, '9:16': { width: 544, height: 960 }, '1:1': { width: 736, height: 736 }, '4:3': { width: 736, height: 544 }, '3:4': { width: 544, height: 736 } },
+  '720p': { '21:9': { width: 1632, height: 704 }, '16:9': { width: 1280, height: 704 }, '9:16': { width: 704, height: 1280 }, '1:1': { width: 704, height: 704 }, '4:3': { width: 928, height: 704 }, '3:4': { width: 704, height: 928 } },
+  '768p': { '21:9': { width: 1792, height: 768 }, '16:9': { width: 1344, height: 768 }, '9:16': { width: 768, height: 1344 }, '1:1': { width: 768, height: 768 }, '4:3': { width: 1024, height: 768 }, '3:4': { width: 768, height: 1024 } },
+  '1080p': { '21:9': { width: 2528, height: 1088 }, '16:9': { width: 1920, height: 1088 }, '9:16': { width: 1088, height: 1920 }, '1:1': { width: 1088, height: 1088 }, '4:3': { width: 1440, height: 1088 }, '3:4': { width: 1088, height: 1440 } },
+}
+
 export function titleDimensions(settings: AnimatedTitleSettings, canvas: { width: number; height: number }) {
+  const preset = H3_TITLE_DIMENSIONS[settings.resolution]
+  if (!preset || (settings.aspect !== 'project' && !Object.hasOwn(preset, settings.aspect))) throw new Error('Choose a supported title resolution and aspect ratio.')
   const ratio = settings.aspect === 'project' ? canvas.width / canvas.height
-    : settings.aspect === '1:1' ? 1 : settings.aspect === '9:16' ? 9 / 16 : 16 / 9
+    : settings.aspect === '1:1' ? 1 : settings.aspect === '9:16' ? 9 / 16
+      : settings.aspect === '21:9' ? 21 / 9 : settings.aspect === '4:3' ? 4 / 3
+        : settings.aspect === '3:4' ? 3 / 4 : 16 / 9
   if (!Number.isFinite(ratio) || ratio <= 0 || ratio < .25 || ratio > 4) throw new Error('Choose a supported title aspect ratio.')
-  const area = settings.resolution === '480p' ? 832 * 480 : 1280 * 704
+  // Keep the dimensions used by saved 480p / 720p title settings. New format
+  // choices use the same native canvases as MiniMax H3 Video.
+  const legacyResolution = settings.resolution === '480p' || settings.resolution === '720p'
+  const legacyAspect = settings.aspect === 'project' || settings.aspect === '16:9'
+    || settings.aspect === '9:16' || settings.aspect === '1:1'
+  if (legacyResolution && legacyAspect) {
+    const area = settings.resolution === '480p' ? 832 * 480 : 1280 * 704
+    return {
+      width: Math.max(32, Math.round(Math.sqrt(area * ratio) / 32) * 32),
+      height: Math.max(32, Math.round(Math.sqrt(area / ratio) / 32) * 32),
+    }
+  }
+
+  if (settings.aspect !== 'project') return preset[settings.aspect]
+
+  const base = preset['16:9']
+  const area = base.width * base.height
   return {
     width: Math.max(32, Math.round(Math.sqrt(area * ratio) / 32) * 32),
     height: Math.max(32, Math.round(Math.sqrt(area / ratio) / 32) * 32),

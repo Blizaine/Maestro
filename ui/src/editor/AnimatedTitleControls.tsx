@@ -86,18 +86,29 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
   }
 
   return <div className="space-y-4">
-    <label className="block space-y-1.5 text-xs text-text-secondary">Describe your title animation
-      <textarea aria-label="Describe your title animation" value={brief} maxLength={4000} rows={5} disabled={busy}
-        onChange={event => changeBrief(event.target.value)}
-        placeholder="A silver title spelling ‘ORION’ forms from fine particles, holds clearly, then dissolves into a soft blue glow."
-        className={FIELD} />
+    <div className="block space-y-1.5 text-xs text-text-secondary">
+      <span className="block">Describe your title animation</span>
+      <div data-testid={destination === 'studio' ? 'title-prompt-field' : undefined}
+        className={destination === 'studio' ? 'relative min-w-0' : undefined}>
+        <textarea aria-label="Describe your title animation" value={brief} maxLength={4000} rows={5} disabled={busy}
+          onChange={event => changeBrief(event.target.value)}
+          placeholder="A silver title spelling ‘ORION’ forms from fine particles, holds clearly, then dissolves into a soft blue glow."
+          className={destination === 'studio' ? `${FIELD} min-h-[120px] pb-12 pr-20` : FIELD} />
+        {destination === 'studio' && enhancement && <div role="group" aria-label="Title prompt tools"
+          className="absolute bottom-2 right-2 flex items-center rounded-lg border border-border bg-bg-secondary/95 shadow-sm">
+          <TitleEnhancementControls enabled={enhancement.enabled} defaultEnabled={enhancement.defaultEnabled}
+            busy={busy} canEnhance={!!brief.trim() && brief.length <= 4000}
+            onToggle={enhancement.onToggle} onDefaultChange={enhancement.onDefaultChange}
+            onEnhanceNow={() => { void composer.enhance() }} />
+        </div>}
+      </div>
       <span className="block text-[11px] leading-relaxed text-text-muted">
         Write the words exactly as they should appear, including spelling, punctuation and language. The plan shows the detected wording, order and timing for review.
         <span className="block">{brief.length}/4,000 characters</span>
       </span>
-    </label>
+    </div>
 
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+    <div className={`grid grid-cols-1 gap-3 ${destination === 'studio' ? 'sm:grid-cols-1' : 'sm:grid-cols-2'}`}>
       <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Title style preset <span className="font-normal text-text-muted">(optional)</span>
         <select aria-label="Title style preset" value={settings.stylePreset ?? 'custom'} disabled={busy}
           onChange={event => patchCreative({ stylePreset: event.target.value as AnimatedTitleSettings['stylePreset'] })}
@@ -107,16 +118,16 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
         </select>
       </label>
 
-      <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Title clip duration
+      {destination === 'editor' && <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Title clip duration
         <select aria-label="Title clip duration" value={selectedFrames} disabled={busy}
           onChange={event => changeDuration(Number(event.target.value))} className={FIELD}>
           {TITLE_SEQUENCE_DURATIONS.map(option => <option key={option.frames} value={option.frames}>{option.label}</option>)}
         </select>
         <span className="block text-[11px] leading-relaxed text-text-muted">Whole-frame H3 duration at 24 fps.</span>
-      </label>
+      </label>}
     </div>
 
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+    <div className={`grid grid-cols-1 gap-3 ${destination === 'studio' ? '' : 'sm:grid-cols-3'}`}>
       <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Title background
         <select aria-label="Title background" value={background} disabled={busy}
           onChange={event => patchCreative({ background: event.target.value as NonNullable<AnimatedTitleSettings['background']> })} className={FIELD}>
@@ -127,23 +138,23 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
           : destination === 'studio' ? 'Studio keeps the opaque black background in the saved clip.' : 'Black stays opaque and covers footage below for the title clip.'}</span>
       </label>
 
-      <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Aspect ratio
+      {destination === 'editor' && <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Aspect ratio
         <select aria-label="Title aspect ratio" value={settings.aspect} disabled={busy}
           onChange={event => patch({ aspect: event.target.value as AnimatedTitleSettings['aspect'] })} className={FIELD}>
           {destination === 'editor' && <option value="project">Match project</option>}
-          <option value="16:9">16:9 · landscape</option><option value="9:16">9:16 · portrait</option><option value="1:1">1:1 · square</option>
+          <option value="21:9">21:9 · ultrawide</option><option value="16:9">16:9 · landscape</option><option value="9:16">9:16 · portrait</option><option value="1:1">1:1 · square</option><option value="4:3">4:3</option><option value="3:4">3:4</option>
         </select>
-      </label>
+      </label>}
 
-      <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Resolution
+      {destination === 'editor' && <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Resolution
         <select aria-label="Title resolution" value={settings.resolution} disabled={busy}
           onChange={event => patch({ resolution: event.target.value as AnimatedTitleSettings['resolution'] })} className={FIELD}>
-          <option value="480p">480p · faster</option><option value="720p">720p</option>
+          <option value="480p">480p · faster</option><option value="540p">540p</option><option value="720p">720p</option><option value="768p">768p · native H3</option><option value="1080p">1080p · experimental</option>
         </select>
-      </label>
+      </label>}
     </div>
 
-    <div className="flex min-h-8 flex-wrap items-center gap-2">
+    {destination === 'editor' && <div className="flex min-h-8 flex-wrap items-center gap-2">
       {enhancement ? <TitleEnhancementControls enabled={enhancement.enabled} defaultEnabled={enhancement.defaultEnabled}
         busy={busy} canEnhance={!!brief.trim() && brief.length <= 4000}
         onToggle={enhancement.onToggle} onDefaultChange={enhancement.onDefaultChange}
@@ -153,7 +164,8 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
         {composer.busy ? 'Enhancing…' : 'Enhance with AI'}
       </button>}
       {composer.message && <p role="status" className="min-w-0 flex-1 text-xs text-text-secondary">{composer.message}</p>}
-    </div>
+    </div>}
+    {destination === 'studio' && composer.message && <p role="status" className="min-w-0 text-xs text-text-secondary">{composer.message}</p>}
     {composer.error && <p role="alert" className="rounded-lg border border-red-500/25 bg-red-500/5 p-3 text-xs text-red-400">{composer.error}</p>}
 
     {settings.directDescription && enhancement && !enhancement.enabled && <p role="status" className="text-[11px] text-text-muted">Using your description directly; AI enhancement is off.</p>}

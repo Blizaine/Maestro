@@ -278,6 +278,23 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
   assert.equal(footerLayout.hostVisible, true, 'The fixed Titles footer host is shown in Titles mode.');
   assert.equal(footerLayout.modelType, TITLE_MODEL, 'The title footer identifies its fixed H3 model.');
   assert.equal(footerLayout.hardwareVisible, true, 'The global hardware monitor stays visible below the title footer.');
+  const formatControls = page.getByTestId('titles-output-format-controls');
+  assert.equal(await formatControls.locator('button.studio-setting-chip').count(), 3,
+    'Resolution, aspect and duration use the same compact chips as the other Studio modes.');
+  assert.equal(await formatControls.evaluate(element => !!element.closest('[data-testid="titles-generate-footer"]')), true,
+    'The everyday format controls remain in the fixed footer rather than the scrolling title form.');
+  const promptToolbar = await page.getByTestId('title-prompt-field').evaluate(element => {
+    const input = element.querySelector('textarea');
+    const enhance = element.querySelector('[aria-label="Enhance title now"]');
+    const options = element.querySelector('[aria-label="Title enhancement options"]');
+    const field = element.getBoundingClientRect();
+    const button = enhance?.getBoundingClientRect();
+    return {input: !!input, enhance: !!enhance, options: !!options,
+      buttonInside: !!button && button.left >= field.left && button.right <= field.right
+        && button.top >= field.top && button.bottom <= field.bottom};
+  });
+  assert.deepEqual(promptToolbar, {input: true, enhance: true, options: true, buttonInside: true},
+    'The title enhancement split button belongs to the prompt field and fits inside its bounds.');
   const hardware = sidebar.locator('.studio-hardware');
   const collapse = hardware.locator('button[title="Collapse"]');
   const expand = hardware.locator('button[title="Show hardware status"]');
@@ -665,6 +682,71 @@ async function acceptManualTitlePlan(panel) {
     await chooseWorkflow(page, 'Titles');
     await assertTitleModeHasOnlyItsOwnComposer(page);
     assert.match(await sidebar.innerText(), new RegExp(`Save to ${WORKSPACE}`));
+    const ordinaryFormat = await page.evaluate(() => {
+      const state = window.store.getState();
+      return {resolution: state.resolutionPreset, aspect: state.aspectRatio,
+        duration: state.durationSeconds, resolutionParam: state.params.resolution,
+        frames: state.params.video_length};
+    });
+    const titleFormats = page.getByTestId('titles-output-format-controls');
+    const titleCanvases = await page.evaluate(() => {
+      const base = JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1'));
+      return [['480p', '9:16'], ['720p', '9:16'], ['540p', '4:3'], ['768p', '21:9'], ['1080p', '3:4']]
+        .map(([resolution, aspect]) => window.titleHelpers.titleDimensions({...base, resolution, aspect}, {width: 1920, height: 1080}));
+    });
+    assert.deepEqual(titleCanvases, [{width: 480, height: 832}, {width: 704, height: 1280},
+      {width: 736, height: 544}, {width: 1792, height: 768}, {width: 1088, height: 1440}],
+      'Saved portrait title canvases stay compatible; added format choices use native H3 canvases.');
+    assert.equal(await sidebar.locator('select[aria-label="Title resolution"]:visible').count(), 0,
+      'Studio no longer repeats the footer resolution control in the composer body.');
+    assert.equal(await sidebar.locator('select[aria-label="Title aspect ratio"]:visible').count(), 0,
+      'Studio no longer repeats the footer aspect control in the composer body.');
+    assert.equal(await sidebar.locator('select[aria-label="Title clip duration"]:visible').count(), 0,
+      'Studio no longer repeats the footer duration control in the composer body.');
+    await titleFormats.getByRole('button', {name: /^Resolution:/}).click();
+    const titleResolutionMenu = page.getByRole('menu', {name: 'Resolution', exact: true});
+    assert.deepEqual(await titleResolutionMenu.getByRole('menuitemradio').allTextContents()
+      .then(rows => rows.map(row => /^\s*(\d+p)/.exec(row)?.[1])), ['480p', '540p', '720p', '768p', '1080p'],
+      'Titles offers the standard video resolution tiers.');
+    await titleResolutionMenu.getByRole('menuitemradio', {name: /540p/}).click();
+    await titleFormats.getByRole('button', {name: 'Resolution: 540p', exact: true}).waitFor();
+    await titleFormats.getByRole('button', {name: /^Aspect ratio:/}).click();
+    await page.getByRole('menu', {name: 'Aspect ratio', exact: true})
+      .getByRole('menuitemradio', {name: '4:3', exact: true}).click();
+    await titleFormats.getByRole('button', {name: 'Aspect ratio: 4:3', exact: true}).waitFor();
+    await titleFormats.getByRole('button', {name: /^Duration:/}).click();
+    const titleDurationDialog = page.getByRole('dialog', {name: 'Title duration', exact: true});
+    const titleDurationSlider = titleDurationDialog.getByRole('slider', {name: 'Title clip duration', exact: true});
+    await titleDurationSlider.focus();
+    await titleDurationSlider.press('Home');
+    for (let step = 0; step < 7; step++) await titleDurationSlider.press('ArrowRight');
+    await waitFor(page, () => JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1')).sequenceFrames === 243,
+      'native title duration selected from the footer slider');
+    await page.keyboard.press('Escape');
+    assert.equal(await titleDurationDialog.count(), 0, 'Escape closes the title duration popover.');
+    assert.equal(await titleFormats.getByRole('button', {name: /^Duration:/}).evaluate(button => button === document.activeElement), true,
+      'Closing the duration popover restores focus to its chip.');
+    const selectedTitleFormat = await page.evaluate(() => {
+      const draft = JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1'));
+      return {resolution: draft.resolution, aspect: draft.aspect, frames: draft.sequenceFrames};
+    });
+    assert.deepEqual(selectedTitleFormat, {resolution: '540p', aspect: '4:3', frames: 243},
+      'The standard-looking controls persist the isolated title draft.');
+    assert.deepEqual(await page.evaluate(() => {
+      const state = window.store.getState();
+      return {resolution: state.resolutionPreset, aspect: state.aspectRatio,
+        duration: state.durationSeconds, resolutionParam: state.params.resolution,
+        frames: state.params.video_length};
+    }), ordinaryFormat, 'Changing title format never changes the ordinary Studio model format or frame count.');
+    assert.equal(generationRequests.length, 0, 'Changing format never submits a generation.');
+    await chooseWorkflow(page, 'Frames');
+    await chooseWorkflow(page, 'Titles');
+    await titleFormats.getByRole('button', {name: 'Resolution: 540p', exact: true}).waitFor();
+    await titleFormats.getByRole('button', {name: 'Aspect ratio: 4:3', exact: true}).waitFor();
+    assert.match(await titleFormats.getByRole('button', {name: /^Duration:/}).getAttribute('aria-label'), /10\.1/,
+      'A native duration and the added format choices survive closing and reopening Titles.');
+    await page.locator('[data-testid="studio-body-scroll"]').evaluate(element => { element.scrollTop = 0; });
+    await page.screenshot({path: path.join(SCREENSHOTS, 'studio-titles-format-desktop.png'), fullPage: true});
     await sidebar.getByText('Advanced title controls', {exact: true}).click();
     const advancedSidebar = sidebar.locator('details').filter({hasText: 'Advanced title controls'}).first();
     const presetSummary = advancedSidebar.getByText('Use an animation preset (optional)', {exact: true});
@@ -677,14 +759,23 @@ async function acceptManualTitlePlan(panel) {
     await advancedSidebar.getByLabel('Title background').selectOption('black');
     await advancedSidebar.getByLabel('Title visual style').fill('Bright chrome lettering with a restrained blue rim light');
     await advancedSidebar.getByLabel('Title animation description').fill('The chrome words fly inward, hold, then fade to black.');
-    await advancedSidebar.locator('label').filter({hasText: 'Duration (seconds)'}).locator('input[type="number"]').fill('8.4');
-    await advancedSidebar.locator('label').filter({hasText: 'Aspect ratio'}).locator('select').selectOption('9:16');
-    await advancedSidebar.locator('label').filter({hasText: 'Resolution'}).locator('select').selectOption('720p');
+    await titleFormats.getByRole('button', {name: /^Duration:/}).click();
+    await page.getByRole('dialog', {name: 'Title duration', exact: true})
+      .getByLabel('Native title duration preset', {exact: true}).selectOption('209');
+    await page.keyboard.press('Escape');
+    await titleFormats.getByRole('button', {name: /^Aspect ratio:/}).click();
+    await page.getByRole('menu', {name: 'Aspect ratio', exact: true})
+      .getByRole('menuitemradio', {name: '9:16', exact: true}).click();
+    await titleFormats.getByRole('button', {name: /^Resolution:/}).click();
+    await page.getByRole('menu', {name: 'Resolution', exact: true})
+      .getByRole('menuitemradio', {name: /720p/}).click();
     assert.equal(await preset.inputValue(), 'custom',
       'Editing a preset description switches the title to its custom motion field.');
     const dimensions720 = await sidebar.getByText(/704×1280/).count();
     assert.equal(dimensions720, 1, 'Portrait 720p title dimensions are shown before submit.');
-    await advancedSidebar.locator('label').filter({hasText: 'Resolution'}).locator('select').selectOption('480p');
+    await titleFormats.getByRole('button', {name: /^Resolution:/}).click();
+    await page.getByRole('menu', {name: 'Resolution', exact: true})
+      .getByRole('menuitemradio', {name: /480p/}).click();
     assert.equal(await sidebar.getByText(/480×832/).count(), 1,
       'Portrait 480p title dimensions use the aligned output size.');
     await advancedSidebar.getByRole('button', {name: 'Use manual title plan'}).click();
@@ -846,6 +937,26 @@ async function acceptManualTitlePlan(panel) {
     await page.setViewportSize({width: 390, height: 844});
     await page.waitForTimeout(100);
     await assertHardwareExpandable(page, 'Mobile');
+    const mobileAdvanced = sidebar.locator('details').filter({hasText: 'Advanced title controls'}).first();
+    if (await mobileAdvanced.evaluate(element => element.open)) await mobileAdvanced.locator(':scope > summary').click();
+    await page.locator('[data-testid="studio-body-scroll"]').evaluate(element => { element.scrollTop = 0; });
+    await titleFormats.getByRole('button', {name: /^Resolution:/}).click();
+    const phoneResolutionMenu = page.getByRole('menu', {name: 'Resolution', exact: true});
+    const phoneResolutionBounds = await phoneResolutionMenu.boundingBox();
+    assert.ok(phoneResolutionBounds && phoneResolutionBounds.x >= 0
+      && phoneResolutionBounds.x + phoneResolutionBounds.width <= 391,
+      'The standard title resolution menu fits the phone viewport.');
+    await page.screenshot({path: path.join(SCREENSHOTS, 'studio-titles-mobile-resolution.png'), fullPage: true});
+    await page.keyboard.press('Escape');
+    await titleFormats.getByRole('button', {name: /^Duration:/}).click();
+    const phoneDurationDialog = page.getByRole('dialog', {name: 'Title duration', exact: true});
+    const phoneDurationBounds = await phoneDurationDialog.boundingBox();
+    assert.ok(phoneDurationBounds && phoneDurationBounds.x >= 0 && phoneDurationBounds.y >= 0
+      && phoneDurationBounds.x + phoneDurationBounds.width <= 391
+      && phoneDurationBounds.y + phoneDurationBounds.height <= 845,
+      'The title duration popover fits above the fixed footer on a phone.');
+    await page.screenshot({path: path.join(SCREENSHOTS, 'studio-titles-mobile-duration.png'), fullPage: true});
+    await page.keyboard.press('Escape');
     await page.screenshot({path: path.join(SCREENSHOTS, 'studio-titles-mobile.png'), fullPage: true});
     await page.locator('.maestro-sidebar').locator('.studio-workflow-header button[title]').click();
     const mobileDialog = page.getByRole('dialog', {name: 'Choose a workflow'});

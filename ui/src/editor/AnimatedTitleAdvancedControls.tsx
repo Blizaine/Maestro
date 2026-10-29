@@ -311,20 +311,20 @@ export function AnimatedTitleAdvancedControls({ settings, patch, busy, canvas, d
           <p className="mt-2 text-[11px] leading-relaxed text-text-muted">A preset fills the description as a starting point. Edit it freely; only the description is sent as the animation direction.</p>
         </details>}
         <div className="grid grid-cols-2 gap-3">
-          {!sequenceMode && <label className="space-y-1.5 text-xs text-text-secondary">Duration (seconds)
+          {destination === 'editor' && !sequenceMode && <label className="space-y-1.5 text-xs text-text-secondary">Duration (seconds)
             <input aria-label="Title duration" type="number" min={5} max={14.5} step={.1} value={settings.seconds} disabled={busy}
               onChange={event => patch({ seconds: Number(event.target.value) })} className={FIELD} />
           </label>}
-          <label className="space-y-1.5 text-xs text-text-secondary">Aspect ratio
+          {destination === 'editor' && <label className="space-y-1.5 text-xs text-text-secondary">Aspect ratio
             <select aria-label="Title aspect ratio" value={settings.aspect} disabled={busy} onChange={event => patch({ aspect: event.target.value as AnimatedTitleSettings['aspect'] })} className={FIELD}>
-              {destination === 'editor' && <option value="project">Match project</option>}<option value="16:9">16:9 · landscape</option><option value="9:16">9:16 · portrait</option><option value="1:1">1:1 · square</option>
+              <option value="project">Match project</option><option value="21:9">21:9 · ultrawide</option><option value="16:9">16:9 · landscape</option><option value="9:16">9:16 · portrait</option><option value="1:1">1:1 · square</option><option value="4:3">4:3</option><option value="3:4">3:4</option>
             </select>
-          </label>
-          <label className="space-y-1.5 text-xs text-text-secondary">Resolution
+          </label>}
+          {destination === 'editor' && <label className="space-y-1.5 text-xs text-text-secondary">Resolution
             <select aria-label="Title resolution" value={settings.resolution} disabled={busy} onChange={event => patch({ resolution: event.target.value as AnimatedTitleSettings['resolution'] })} className={FIELD}>
-              <option value="480p">480p · faster</option><option value="720p">720p</option>
+              <option value="480p">480p · faster</option><option value="540p">540p</option><option value="720p">720p</option><option value="768p">768p · native H3</option><option value="1080p">1080p · experimental</option>
             </select>
-          </label>
+          </label>}
         </div>
         {destination === 'editor' && <label className="flex items-center gap-2 text-xs text-text-secondary"><input type="checkbox" checked={settings.keepAudio} disabled={busy}
           onChange={event => patch({ keepAudio: event.target.checked })} className="accent-[var(--color-accent-blue)]" />Keep generated clip audio</label>}

@@ -57,6 +57,10 @@ interpretation when enabled.
 
 Studio's title generation controls stay at the bottom of the sidebar while the
 composer scrolls. The standard expandable resource monitor remains below them.
+Resolution, aspect ratio and duration use the same compact footer controls as
+other Studio modes. Duration snaps to H3's supported whole-frame clip lengths.
+The sparkle button and enhancement options sit inside the title description
+field, with the same saved enhancement preference as the other Studio modes.
 
 Planning makes one bounded writer call. It shares Maestro's existing GPU lease, so
 it cannot compete with an active generation. Writer drafts and reasons are saved
