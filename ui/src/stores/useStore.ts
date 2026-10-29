@@ -578,7 +578,7 @@ interface PersistedModeSettings {
   kreaIdentitySettingsPerModel?: Record<string, KreaIdentitySettings>
   enhanceOnGenerationDefault?: boolean
   h3OptimizationPreferences?: {
-    override_attention?: '' | 'sol' | 'sla' | 'veda' | 'sdpa'
+    override_attention?: '' | 'sol' | 'sla' | 'veda' | 'sdpa' | 'sage2'
     skip_steps_cache_type?: '' | 'first_block'
     skip_steps_multiplier?: number
     skip_steps_start_step_perc?: number
@@ -1918,7 +1918,7 @@ interface AppState {
   /** H3 accelerations live outside per-mode params so visiting Audio/Image
    *  cannot erase the user's Video optimization choices. */
   h3OptimizationPreferences: {
-    override_attention: '' | 'sol' | 'sla' | 'veda' | 'sdpa'
+    override_attention: '' | 'sol' | 'sla' | 'veda' | 'sdpa' | 'sage2'
     skip_steps_cache_type: '' | 'first_block'
     skip_steps_multiplier?: number
     skip_steps_start_step_perc?: number
@@ -5214,10 +5214,10 @@ export const useStore = create<AppState>((set, get) => ({
           ...s.h3OptimizationPreferences,
           ...(key === 'override_attention' ? {
             override_attention: (
-              value === 'sol' || value === 'sla' || value === 'veda' || value === 'sdpa'
+              value === 'sol' || value === 'sla' || value === 'veda' || value === 'sdpa' || value === 'sage2'
                 ? value
                 : ''
-            ) as '' | 'sol' | 'sla' | 'veda' | 'sdpa',
+            ) as '' | 'sol' | 'sla' | 'veda' | 'sdpa' | 'sage2',
           } : {}),
           ...(key === 'skip_steps_cache_type' ? {
             skip_steps_cache_type: value === 'first_block' ? 'first_block' as const : '' as const,
@@ -6452,11 +6452,12 @@ export const useStore = create<AppState>((set, get) => ({
       const h3Preferences = durableConfigured
         ? studioPreferences.h3_optimizations
         : saved?.h3OptimizationPreferences
-      const restoredH3Attention: '' | 'sol' | 'sla' | 'veda' | 'sdpa' = (
+      const restoredH3Attention: '' | 'sol' | 'sla' | 'veda' | 'sdpa' | 'sage2' = (
         h3Preferences?.override_attention === 'sol'
         || h3Preferences?.override_attention === 'sla'
         || h3Preferences?.override_attention === 'veda'
         || h3Preferences?.override_attention === 'sdpa'
+        || h3Preferences?.override_attention === 'sage2'
       ) ? h3Preferences.override_attention : ''
       const restoredH3OptimizationPreferences = {
         override_attention: restoredH3Attention,
@@ -14388,6 +14389,7 @@ export const useStore = create<AppState>((set, get) => ({
           p.override_attention === 'sol'
           || p.override_attention === 'sla'
           || p.override_attention === 'sdpa'
+          || p.override_attention === 'sage2'
         ) ? p.override_attention : ''
     newParams.skip_steps_cache_type = (
       p.skip_steps_cache_type === 'first_block' ? 'first_block' : ''

@@ -61,8 +61,11 @@ export function h3PerformanceAdvice(input: H3PerformanceAdviceInput): H3Performa
     || targetRows > policy.bands.medium_max_target_rows
   if (beyondEvidence) split = 2
   const fused = options.minimax_h3_fused_turbo === true
+  const pikaSlaUnavailable = options.minimax_h3_pika_flex === true
+    && options.sla_attention_status?.supported !== true
   const attention = input.attention === 'auto' || !input.attention
-    ? options.sla_attention_default ? 'sla' : 'auto' : input.attention
+    ? (options.sla_attention_default && !pikaSlaUnavailable ? 'sla' : 'auto')
+    : (pikaSlaUnavailable && input.attention === 'sla' ? 'auto' : input.attention)
   const sparseAttention = attention === 'sla' || attention === 'veda'
   const slow = !fused && !sparseAttention
     && input.steps >= 20 && frames >= 243 && area >= 1920 * 1088

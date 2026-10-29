@@ -41,6 +41,18 @@ function importedPair() {
   ];
 }
 
+const pikaFlexId = 'minimax_h3_pika_flex';
+const pikaFlexModel = {
+  model_type: pikaFlexId, name: 'Pika H3 Flex', family: 'minimax_h3',
+  architecture: 'minimax_h3', is_t2v: true, is_i2v: true,
+  is_downloaded: true, fps: 24, guidance_max_phases: 0,
+};
+const pikaFlexOptions = {
+  model_type: pikaFlexId, name: 'Pika H3 Flex', architecture: 'minimax_h3', family: 'minimax_h3',
+  default_num_inference_steps: 6, default_guidance_scale: 1,
+  minimax_h3_pika_flex: true, sla_attention: true, sla_attention_default: true,
+  sla_attention_status: {supported: true},
+};
 const pair = importedPair();
 const optionById = Object.fromEntries(pair.map(model => [model.model_type, {
   ...model, default_num_inference_steps: 8, default_guidance_scale: 1,
@@ -57,9 +69,10 @@ function fixture({
   visibility = {configured: true, defaults_version: 999, enabled_models: [], initialized_mature_models: []},
   studioPreferences = {configured: false},
   downloads = [],
+  storage: storageState,
 } = {}) {
-  const modules = new Map(), storage = new Map();
-  const calls = {fetchModels: 0, reloadModels: 0, visibilityUpdates: [], submissions: []};
+  const modules = new Map(), storage = storageState || new Map();
+  const calls = {fetchModels: 0, reloadModels: 0, visibilityUpdates: [], studioPreferenceUpdates: [], submissions: []};
   const api = new Proxy({
     submitGeneration: async params => {calls.submissions.push({...params}); return {job_id: 'fixture', status: 'held'};},
     fetchModels: async () => {
@@ -72,7 +85,7 @@ function fixture({
     fetchModelVisibility: async () => visibility,
     updateModelVisibility: async value => { calls.visibilityUpdates.push(value); },
     fetchStudioPreferences: async () => studioPreferences,
-    updateStudioPreferences: async () => ({}),
+    updateStudioPreferences: async value => {calls.studioPreferenceUpdates.push({...value}); return {};},
     fetchH3WindowOverrides: async () => ({overrides: {}}),
     fetchModelOptions: async modelType => options[modelType] || {},
     fetchDefaults: async modelType => ({
@@ -280,6 +293,62 @@ async function testCompletedCheckpointRefreshPreservesUserStateAndOptOuts() {
     'An older completed download record does not undo the user’s opt-out');
 }
 
+async function testPikaDenseOptOutPersistsAcrossReload() {
+  const common = {
+    catalog: () => [...pair, pikaFlexModel],
+    options: {...optionById, [pikaFlexId]: pikaFlexOptions},
+    visibility: {
+      configured: true, defaults_version: 999,
+      enabled_models: [pikaFlexId], initialized_mature_models: [],
+    },
+  };
+  const initial = fixture({
+    ...common,
+    studioPreferences: {
+      configured: true, generation_mode: 'video', studio_image_workflow: 'generate',
+      studio_video_workflow: 'frames', audio_sub_mode: 'speech',
+      selected_model_per_mode: {video: pikaFlexId}, selected_model_per_audio_sub_mode: {},
+      inference_steps_per_model: {}, h3_optimizations: {},
+    },
+  });
+  await initial.store.getState().loadModels();
+  await initial.settle();
+  assert.equal(initial.store.getState().params.model_type, pikaFlexId);
+  assert.equal(initial.store.getState().params.override_attention, 'sla',
+    'Pika defaults to SLA when the capability is supported');
+
+  initial.store.getState().setParam('override_attention', 'sage2');
+  await initial.settle();
+  await new Promise(resolve => setImmediate(resolve));
+  const localSnapshot = [...initial.storage.values()]
+    .map(value => JSON.parse(value))
+    .find(value => value.h3OptimizationPreferences?.override_attention === 'sage2');
+  assert.ok(localSnapshot, 'The explicit Sage2 opt-out is serialized to the browser settings');
+  const durableUpdate = initial.calls.studioPreferenceUpdates.at(-1);
+  assert.equal(durableUpdate.h3_optimizations.override_attention, 'sage2',
+    'The explicit Sage2 opt-out is mirrored to durable Studio preferences');
+
+  const restored = fixture({
+    ...common,
+    studioPreferences: {configured: false},
+    storage: initial.storage,
+  });
+  await restored.store.getState().loadModels();
+  await restored.settle();
+  assert.equal(restored.store.getState().params.model_type, pikaFlexId);
+  assert.equal(restored.store.getState().h3OptimizationPreferences.override_attention, 'sage2');
+  assert.equal(restored.store.getState().params.override_attention, 'sage2',
+    'Pika restores the explicit dense opt-out after reload');
+
+  const durableRestored = fixture({
+    ...common,
+    studioPreferences: {...durableUpdate, configured: true},
+  });
+  await durableRestored.store.getState().loadModels();
+  await durableRestored.settle();
+  assert.equal(durableRestored.store.getState().params.override_attention, 'sage2',
+    'A fresh browser also restores the dense opt-out from durable Studio preferences');
+}
 async function testImportedAttentionRouting() {
   const f = fixture();
   const store = f.store;
@@ -313,6 +382,7 @@ async function testImportedAttentionRouting() {
 (async () => {
   await testDynamicPairRoutingAndTurboStepMemory();
   await testImportedAttentionRouting();
+  await testPikaDenseOptOutPersistsAcrossReload();
   await testCompletedCheckpointRefreshPreservesUserStateAndOptOuts();
   console.log('Imported H3 dynamic pairing, native LoRA basis, baked Turbo step memory, and completed-download refresh checks passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});

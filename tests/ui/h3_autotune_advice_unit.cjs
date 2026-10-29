@@ -40,6 +40,15 @@ for (const attention of ['sla','veda']) {
   assert.equal(sparsePruned.slow,false,`${attention} must not inherit the dense/Sage2 duration warning`);
   assert.ok(!sparsePruned.notes.some(text=>text.includes('116 minutes')));
 }
+const pikaOptions={...options,minimax_h3_fused_turbo:false,minimax_h3_pika_flex:true,sla_attention_default:true};
+const pikaSupported=h3PerformanceAdvice(input({options:{...pikaOptions,sla_attention_status:{supported:true}},
+  steps:20,attention:'sla'}));
+assert.equal(pikaSupported.slow,false,'supported Pika SLA remains sparse');
+for (const sla_attention_status of [{supported:false},undefined]) {
+  const denseFallback=h3PerformanceAdvice(input({options:{...pikaOptions,sla_attention_status},
+    steps:20,attention:'sla'}));
+  assert.equal(denseFallback.slow,true,'unsupported or missing Pika SLA status uses dense advice');
+}
 const fused=h3PerformanceAdvice(input());
 assert.equal(fused.slow,false);
 assert.ok(fused.notes.some(text=>text.includes('individual test results')));

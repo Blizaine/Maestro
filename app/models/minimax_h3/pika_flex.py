@@ -20,9 +20,9 @@ PIKA_FLEX_ATTENTION_MODES = ("sage2", "sdpa", "sol", "sla")
 def normalize_pika_flex_attention(value: Any) -> str:
     """Keep attention selection separate from the fixed six-step sampler."""
 
-    mode = str(value or "sage2").strip().lower()
+    mode = str(value or "sla").strip().lower()
     if mode in {"", "auto", "default"}:
-        mode = "sage2"
+        mode = "sla"
     if mode not in PIKA_FLEX_ATTENTION_MODES:
         raise ValueError("Pika H3 Flex supports Sage2, SDPA, experimental SOL or experimental SLA attention.")
     return mode

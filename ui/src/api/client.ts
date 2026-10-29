@@ -319,7 +319,7 @@ export interface StudioPreferenceSettings {
   music_defaults_version?: number
   director_music_model?: string
   h3_optimizations?: {
-    override_attention?: '' | 'sol' | 'sla' | 'veda' | 'sdpa'
+    override_attention?: '' | 'sol' | 'sla' | 'veda' | 'sdpa' | 'sage2'
     skip_steps_cache_type?: '' | 'first_block'
     skip_steps_multiplier?: number
     skip_steps_start_step_perc?: number

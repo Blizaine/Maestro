@@ -6865,6 +6865,24 @@ def get_overridden_attention(model_type):
     if override_attention is not None and override_attention not in attention_modes_supported: return None
     return override_attention
 
+def resolve_h3_attention_override(model_type, override_attention, model_def):
+    """Resolve explicit overrides before applying the Pika Flex SLA default."""
+
+    requested = str(override_attention or "").strip().lower()
+    if requested not in {"", "auto", "default"}:
+        from models.minimax_h3.pika_flex import normalize_pika_flex_attention
+
+        return normalize_pika_flex_attention(requested)
+    model_override = get_overridden_attention(model_type)
+    if model_override is not None:
+        return model_override
+    if (
+        model_def.get("minimax_h3_pika_flex")
+        and model_def.get("sla_attention_default")
+    ):
+        return "sla"
+    return None
+
 def get_transformer_loras(model_type):
     model_def = get_model_def(model_type)
     transformer_loras_filenames = get_model_recursive_prop(model_type, "loras", return_list=True)
@@ -8255,7 +8273,18 @@ def generate_video(
         from services.worlds_runtime import world_runtime_context, world_generation_context
         model_kwargs.update(world_runtime_context(model_def, custom_settings))
         world_generate_kwargs = world_generation_context(model_def, custom_settings)
-    overridden_attention = override_attention if len(override_attention) else get_overridden_attention(model_type)
+    if model_def.get("minimax_h3_pika_flex"):
+        overridden_attention = resolve_h3_attention_override(
+            model_type,
+            override_attention,
+            model_def,
+        )
+    else:
+        overridden_attention = (
+            override_attention
+            if len(override_attention)
+            else get_overridden_attention(model_type)
+        )
     requested_h3_veda = (
         overridden_attention if overridden_attention is not None else attention_mode
     ) == "veda"

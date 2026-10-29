@@ -143,7 +143,9 @@ jobs:
       - name: FlashVSR versioned selection regressions
         run: node tests/ui/flashvsr_options.cjs
       - name: Pika Flex attention default regressions
-        run: node tests/ui/pika_attention.cjs
+        run: |
+          node tests/ui/pika_attention.cjs
+          node tests/ui/h3_autotune_advice_unit.cjs
       - name: Type-check + build (tsc -b && vite build)
         working-directory: ui
         run: npm run build

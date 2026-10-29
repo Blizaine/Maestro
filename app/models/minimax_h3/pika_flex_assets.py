@@ -93,7 +93,7 @@ PIKA_FLEX_HELP = (
     "adapter strength 1, and video/audio shifts 12/3. Frames supports text-to-video "
     "and first/last images. References supports ordered image, video, and audio "
     "references and needs at least one image or video. Begin at 480p / 5.17 seconds. "
-    "Sage2 is the dense default; SOL and SLA are optional experimental attention. "
+    "SLA is the default on supported GPUs and safely falls back to dense attention when unavailable; SOL is optional experimental attention. "
     "Continuation, control video, extra adapters, cache, and refinement are unavailable. "
     "Maestro has no Pika 4K upsampler or stem extraction, and consumer-GPU real-time "
     "performance has not been verified. The initial experimental stack uses the stock Comfy scaled-FP8 base, BF16 Pika adapter, and INT8 ConvRot video VAE."
@@ -179,7 +179,7 @@ def pika_flex_capabilities(reference: bool) -> dict[str, Any]:
         "runtime_custom_settings": [],
         "sol_attention": True,
         "sla_attention": True,
-        "sla_attention_default": False,
+        "sla_attention_default": True,
         "sla_attention_experimental": True,
         "veda_attention": False,
         "veda_attention_experimental": False,
