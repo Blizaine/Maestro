@@ -10454,6 +10454,13 @@ def generate_video(
                 # an empty tensor whose height/width must match torch.cat's
                 # generated chunk, which fails when the control video chose
                 # a different canvas.
+                if model_def.get("minimax_h3_pika_flex"):
+                    from models.minimax_h3.pika_flex import normalize_pika_flex_start_prefix
+
+                    prefix_video, source_video_frames_count, source_video_overlap_frames_count = normalize_pika_flex_start_prefix(
+                        prefix_video, source_video_frames_count, source_video_overlap_frames_count,
+                        image_start=image_start, window_no=window_no,
+                    )
                 if fake_start_image and window_no == 1:
                     prefix_video = None
                 elif prefix_video != None and window_no == 1 :

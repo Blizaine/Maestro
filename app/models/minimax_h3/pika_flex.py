@@ -184,6 +184,37 @@ def _require_value(inputs: Mapping[str, Any], key: str, expected: float) -> None
         raise ValueError(f"Pika H3 Flex requires {key}={expected:g}.")
 
 
+def normalize_pika_flex_start_prefix(
+    prefix_video: Any,
+    source_frame_count: int,
+    overlap_frame_count: int,
+    *,
+    image_start: Any,
+    window_no: int,
+) -> tuple[Any, int, int]:
+    """Remove the generic image carrier from Flex's already complete timeline.
+
+    Native Flex returns the first pixel frame and its corresponding audio.
+    Treating that conditioning image as a source-video prefix trims native
+    audio and then prepends silence. The finite concat can also clip B-frames
+    at muxing. Genuine video/history prefixes keep their existing handling.
+    """
+
+    if (
+        window_no == 1
+        and source_frame_count == 1
+        and is_pika_flex_single_frame_start_anchor(
+            image_start=image_start,
+            input_video=prefix_video,
+            prefix_frames_count=overlap_frame_count,
+            window_start_frame_no=0,
+            allow_frames=True,
+        )
+    ):
+        return None, 0, 0
+    return prefix_video, source_frame_count, overlap_frame_count
+
+
 def validate_pika_flex_request(
     inputs: Mapping[str, Any],
     *,
