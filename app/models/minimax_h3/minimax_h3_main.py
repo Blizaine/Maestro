@@ -2548,7 +2548,10 @@ class MiniMaxH3Model:
         if not isinstance(input_prompt, str):
             raise ValueError("MiniMax H3 accepts one text prompt per generation.")
         if getattr(self, "pika_flex", False):
-            from .pika_flex import validate_pika_flex_request
+            from .pika_flex import (
+                is_pika_flex_single_frame_start_anchor,
+                validate_pika_flex_request,
+            )
 
             pika_request = {
                 key: value
@@ -2605,6 +2608,17 @@ class MiniMaxH3Model:
                     "face_refinement": _face_refinement,
                 }
             )
+            if is_pika_flex_single_frame_start_anchor(
+                image_start=image_start,
+                input_video=input_video,
+                prefix_frames_count=prefix_frames_count,
+                window_start_frame_no=window_start_frame_no,
+                allow_frames=not self.omni_reference,
+            ):
+                # WGP passes its first image again as input_video for ordinary
+                # Frames requests. Explicit image_start makes H3 discard this
+                # single-frame carrier before continuation preparation.
+                pika_request["input_video"] = None
             if audio_prompt_type:
                 raise ValueError(
                     "Pika H3 Flex does not support source-audio prompt modes; "

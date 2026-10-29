@@ -18,6 +18,7 @@ if str(APP) not in sys.path:
 from models.minimax_h3.pika_flex import (
     PIKA_FLEX_KNOTS,
     PIKA_FLEX_STEPS,
+    is_pika_flex_single_frame_start_anchor,
     pika_flex_sigmas,
     pika_flex_step,
     validate_pika_flex_request,
@@ -232,10 +233,101 @@ class PikaFlexRequestTests(unittest.TestCase):
 
         validate_pika_flex_request({})  # Model-owned defaults may be omitted.
         validate_pika_flex_request(
-            {"image_start": "first.png", "image_end": "last.png"},
+            {
+                "image_start": "first.png",
+                "image_end": "last.png",
+                "prefix_frames_count": 1,
+                "window_start_frame_no": 0,
+                "input_video": None,
+                "frames_to_inject": None,
+            },
             allow_frames=True,
             allow_references=False,
         )
+
+    def test_only_a_single_start_frame_can_explain_the_first_window_prefix(self):
+        class OneFrameVideo:
+            shape = (3, 1, 32, 32)
+
+            @staticmethod
+            def numel():
+                return 3 * 32 * 32
+
+        request = {
+            "image_start": "first.png",
+            "input_video": None,
+            "prefix_frames_count": 1,
+            "window_start_frame_no": 0,
+        }
+        validate_pika_flex_request(request, allow_frames=True)
+
+        valid_anchor = {
+            "image_start": "first.png",
+            "input_video": OneFrameVideo(),
+            "prefix_frames_count": 1,
+            "window_start_frame_no": 0,
+        }
+        self.assertTrue(
+            is_pika_flex_single_frame_start_anchor(
+                **valid_anchor,
+                allow_frames=True,
+            )
+        )
+        for request in (
+            {
+                **valid_anchor,
+                "input_video": type("TwoFrameVideo", (), {
+                    "shape": (3, 2, 32, 32),
+                    "numel": staticmethod(lambda: 3 * 2 * 32 * 32),
+                })(),
+            },
+            {**valid_anchor, "prefix_frames_count": 2},
+            {
+                **valid_anchor,
+                "input_video": type("InvalidChannels", (), {
+                    "shape": (4, 1, 32, 32),
+                    "numel": staticmethod(lambda: 4 * 32 * 32),
+                })(),
+            },
+            {**valid_anchor, "window_start_frame_no": 1},
+            {**valid_anchor, "image_start": None},
+        ):
+            self.assertFalse(
+                is_pika_flex_single_frame_start_anchor(
+                    **request,
+                    allow_frames=True,
+                )
+            )
+        self.assertFalse(
+            is_pika_flex_single_frame_start_anchor(
+                **valid_anchor,
+                allow_frames=False,
+            )
+        )
+
+    def test_prefix_exception_still_requires_the_runtime_to_remove_video_carrier(self):
+        with self.assertRaisesRegex(ValueError, "continuation"):
+            validate_pika_flex_request(
+                {
+                    "image_start": "first.png",
+                    "input_video": object(),
+                    "prefix_frames_count": 1,
+                    "window_start_frame_no": 0,
+                },
+                allow_frames=True,
+            )
+        for request in (
+            {"image_start": "first.png", "prefix_frames_count": 2},
+            {
+                "image_start": "first.png",
+                "prefix_frames_count": 1,
+                "window_start_frame_no": 1,
+            },
+        ):
+            with self.subTest(request=request), self.assertRaisesRegex(
+                ValueError, "continuation"
+            ):
+                validate_pika_flex_request(request, allow_frames=True)
 
     def test_rejects_wrong_recipe_values(self):
         cases = (

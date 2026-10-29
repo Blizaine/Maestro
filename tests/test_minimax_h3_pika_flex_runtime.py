@@ -322,6 +322,49 @@ class PikaFlexRuntimeTests(unittest.TestCase):
                 audio_prompt_type="A",
             )
 
+    def test_wgp_one_frame_start_carrier_does_not_become_a_continuation(self):
+        model = self._flex_model(reference=False)
+        start_image = self.torch.zeros((3, 8, 8), dtype=self.torch.float32)
+        # WGP's input_video carrier is C,T,H,W; image_start is C,H,W.
+        # H3's explicit-start branch discards this one-frame carrier.
+        start_carrier = self.torch.ones((3, 1, 8, 8), dtype=self.torch.float32)
+        with self.assertRaisesRegex(ValueError, "does not support H3 Two-Pass"):
+            model.generate(
+                "a test prompt",
+                sampling_steps=6,
+                image_start=start_image,
+                image_end=start_image,
+                input_video=start_carrier,
+                prefix_frames_count=1,
+                window_start_frame_no=0,
+                frames_to_inject=None,
+                custom_settings={"h3_two_pass_enabled": "on"},
+            )
+
+    def test_wgp_prefix_allowance_does_not_open_later_windows_or_video_guides(self):
+        model = self._flex_model(reference=False)
+        start_image = self.torch.zeros((3, 8, 8), dtype=self.torch.float32)
+        start_carrier = self.torch.zeros((3, 1, 8, 8), dtype=self.torch.float32)
+        with self.assertRaisesRegex(ValueError, "continuation"):
+            model.generate(
+                "a test prompt",
+                sampling_steps=6,
+                image_start=start_image,
+                input_video=start_carrier,
+                prefix_frames_count=1,
+                window_start_frame_no=17,
+            )
+        with self.assertRaisesRegex(ValueError, "control video"):
+            model.generate(
+                "a test prompt",
+                sampling_steps=6,
+                image_start=start_image,
+                input_video=start_carrier,
+                prefix_frames_count=1,
+                window_start_frame_no=0,
+                video_prompt_type="GV",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

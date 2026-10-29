@@ -133,6 +133,49 @@ def _is_enabled(value: Any) -> bool:
     return bool(value)
 
 
+def is_pika_flex_single_frame_start_anchor(
+    *,
+    image_start: Any,
+    input_video: Any,
+    prefix_frames_count: Any,
+    window_start_frame_no: Any,
+    allow_frames: bool,
+) -> bool:
+    """Recognize WGP's one-frame start-image carrier, not continuation video.
+
+    WGP forwards its start image both as ``image_start`` and as a one-frame
+    ``input_video`` carrier with ``prefix_frames_count=1``. H3 discards that
+    carrier when an explicit start image is present. Requiring a first window,
+    one frame, and the exact one-frame prefix keeps this exception away from
+    continuation and multi-window requests.
+    """
+
+    if not allow_frames or not _has_payload(image_start):
+        return False
+    try:
+        if _finite_float(prefix_frames_count, name="prefix_frames_count") != 1.0:
+            return False
+        if _finite_float(window_start_frame_no, name="window_start_frame_no") != 0.0:
+            return False
+    except (TypeError, ValueError):
+        return False
+
+    if not _has_payload(input_video):
+        return False
+    shape = getattr(input_video, "shape", None)
+    if shape is None:
+        return False
+    try:
+        dimensions = tuple(int(dimension) for dimension in shape)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not dimensions or dimensions[0] != 3 or any(dimension <= 0 for dimension in dimensions):
+        return False
+    if len(dimensions) == 3:
+        return True  # C,H,W is one frame in H3's native input convention.
+    return len(dimensions) == 4 and dimensions[1] == 1  # C,T,H,W
+
+
 def _require_value(inputs: Mapping[str, Any], key: str, expected: float) -> None:
     if key not in inputs or inputs[key] is None:
         return
@@ -196,6 +239,28 @@ def validate_pika_flex_request(
         if _is_enabled(inputs.get(key)):
             raise ValueError("Pika H3 Flex does not support additional LoRAs or accelerators.")
 
+    one_frame_start_prefix = (
+        allow_frames
+        and _has_payload(inputs.get("image_start"))
+        and not _has_payload(inputs.get("input_video"))
+    )
+    if one_frame_start_prefix:
+        try:
+            one_frame_start_prefix = (
+                _finite_float(
+                    inputs.get("prefix_frames_count"),
+                    name="prefix_frames_count",
+                )
+                == 1.0
+                and _finite_float(
+                    inputs.get("window_start_frame_no", 0),
+                    name="window_start_frame_no",
+                )
+                == 0.0
+            )
+        except (TypeError, ValueError):
+            one_frame_start_prefix = False
+
     for key in (
         "prefix_frames_count",
         "window_start_frame_no",
@@ -204,6 +269,8 @@ def validate_pika_flex_request(
         "continuation",
         "continue_video",
     ):
+        if key == "prefix_frames_count" and one_frame_start_prefix:
+            continue
         if _is_enabled(inputs.get(key)):
             raise ValueError("Pika H3 Flex does not support continuation or multi-window generation.")
 
