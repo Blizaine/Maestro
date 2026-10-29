@@ -2760,6 +2760,10 @@ class MiniMaxH3Model:
             if minimax_h3_extended_duration is True and not self.viggle
             else MINIMAX_H3_MAX_DURATION
         )
+        if getattr(self, "pika_flex", False):
+            # Flex's advertised 15s preset is the legal 17*n+5 lattice point
+            # 362/24 = 15.083s. Honor that endpoint without extending its pass.
+            maximum_duration = 362 / MINIMAX_H3_FPS
         if _face_refinement is None and not self.audio_only and not MINIMAX_H3_MIN_DURATION <= duration <= maximum_duration:
             raise ValueError(
                 f"MiniMax H3's selected duration limit is {MINIMAX_H3_MIN_DURATION:g}-{maximum_duration:g}s at 24 fps; "

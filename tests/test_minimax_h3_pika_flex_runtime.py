@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import ast
+import math
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -51,6 +53,7 @@ class PikaFlexRuntimeTests(unittest.TestCase):
             "torch": torch,
             "MINIMAX_H3_FPS": 24,
         }
+        cls.generate_ast = model_methods["generate"]
         for name, node in {**selected, **model_methods}.items():
             code = compile(ast.Module(body=[node], type_ignores=[]), str(main_path), "exec")
             exec(code, runtime_namespace)
@@ -103,6 +106,30 @@ class PikaFlexRuntimeTests(unittest.TestCase):
         model._pdd_lora_strength = 0.4
         model._ptd_lora_paths = ("stale-ptd.safetensors",)
         return model
+
+    def test_native_duration_guard_accepts_flex_362_frame_endpoint_only(self):
+        body = self.generate_ast.body
+        start = next(i for i, node in enumerate(body) if isinstance(node, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == "duration" for t in node.targets))
+        end = next(i for i in range(start, len(body))
+                   if "selected duration limit" in ast.unparse(body[i]))
+        code = compile(ast.Module(body=body[start:end + 1], type_ignores=[]), "native-duration", "exec")
+        for pika, frames, valid in ((True, 362, True), (True, 363, False),
+                                    (False, 362, False), (False, 345, True)):
+            with self.subTest(pika=pika, frames=frames):
+                namespace = {
+                    "__package__": "models.minimax_h3", "math": math,
+                    "self": SimpleNamespace(pika_flex=pika, _pdd_lora_active=False,
+                                            viggle=False, audio_only=False),
+                    "frame_num": frames, "fps": 24, "_face_refinement": None,
+                    "minimax_h3_extended_duration": False, "MINIMAX_H3_FPS": 24,
+                    "MINIMAX_H3_MIN_DURATION": 5, "MINIMAX_H3_MAX_DURATION": 15,
+                }
+                if valid:
+                    exec(code, namespace)
+                else:
+                    with self.assertRaisesRegex(ValueError, "selected duration limit"):
+                        exec(code, namespace)
 
     def test_adapter_validation_uses_the_model_owned_frames_or_references_pin(self):
         from models.minimax_h3.pika_flex_assets import (
