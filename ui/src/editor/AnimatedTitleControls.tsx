@@ -25,7 +25,7 @@ function framesFor(settings: AnimatedTitleSettings) {
 }
 
 /** The shared, natural-language title composer. Workspace-specific submission stays in its caller. */
-export function AnimatedTitleControls({ settings, patch, busy, canvas, destination = 'editor', at = 0, composer, enhancement, advanced }: {
+export function AnimatedTitleControls({ settings, patch, busy, canvas, destination = 'editor', at = 0, composer, enhancement, advanced, showAdvanced = true }: {
   settings: AnimatedTitleSettings
   patch: (value: Partial<AnimatedTitleSettings>) => void
   busy: boolean
@@ -34,6 +34,7 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
   at?: number
   composer: TitleComposerController
   advanced?: { open: boolean; anchor: HTMLElement | null; id: string; onClose: () => void }
+  showAdvanced?: boolean
   enhancement?: {
     enabled: boolean
     defaultEnabled: boolean
@@ -227,11 +228,11 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
       <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed">{settings.rawTitleDraft}</pre>
     </details>}
 
-    {advanced ? <SidebarDialog id={advanced.id} open={advanced.open} title="Advanced title settings" variant="settings"
+    {showAdvanced && (advanced ? <SidebarDialog id={advanced.id} open={advanced.open} title="Advanced title settings" variant="settings"
       anchor={advanced.anchor} onClose={advanced.onClose}>{advancedContents}</SidebarDialog>
       : <details className="rounded-xl border border-border bg-bg-tertiary p-3 text-xs text-text-secondary">
         <summary className="cursor-pointer select-none font-medium">Advanced title controls</summary>
         <div className="mt-3">{advancedContents}</div>
-      </details>}
+      </details>)}
   </div>
 }

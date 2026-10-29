@@ -17,6 +17,7 @@ const {chromium} = require(playwrightPath);
 const ORIGIN = 'http://studio-titles.test';
 const WORKSPACE = 'Studio Titles Workspace';
 const TITLE_MODEL = 'minimax_h3_fused_turbo';
+const TEST_LORA = 'studio-title-style.safetensors';
 const SCREENSHOTS = process.env.MAESTRO_STUDIO_TITLES_SCREENSHOTS ||
   path.join(root, '.codex-tmp/studio-titles-ui');
 const families = [
@@ -53,9 +54,16 @@ const models = [
 ];
 const catalogue = {families, models};
 const modelOptions = {
+  model_type: TITLE_MODEL, architecture: 'minimax_h3',
   t2v_class: 'text', i2v_class: 'image', image_ref_choices: ['I'],
   video_prompt_type_sources: [], image_prompt_type_sources: [],
   resolution_presets: {}, default_num_inference_steps: 4,
+  inference_steps_min: 1, inference_steps_max: 50,
+  sla_attention: true, sla_attention_default: false,
+  sla_attention_status: {supported: true},
+  first_block_cache: true,
+  default_skip_steps_multiplier: 0.08,
+  skip_steps_multiplier_choices: [['Conservative (0.06)', 0.06], ['Balanced (0.08)', 0.08], ['Fast (0.12)', 0.12]],
 };
 const stats = {
   gpu: {available: true, name: 'Synthetic GPU', percent: 0, vram_used_gb: 1, vram_total_gb: 24},
@@ -115,11 +123,12 @@ async function bundleUi() {
         import {useEditorStore} from './src/editor/useEditorStore';
         import {useEditorTitleStore} from './src/editor/useEditorTitleStore';
         import {Sidebar} from './src/components/Sidebar/Sidebar';
-        import {TITLE_EFFECT_LABELS, TITLE_SEQUENCE_DURATIONS, alignTitleSequence, setTitlePhraseSeconds, titleDimensions, titleFrames, titleSequenceTimeline, newTitlePhrases, animatedTitlePrompt, animatedTitleParams, insertAnimatedTitle, titlePlanIsCurrent} from './src/editor/editorAnimatedTitles';
+        import {GlobalQueuePopover} from './src/components/GlobalQueuePopover';
+        import {titleDimensions, insertAnimatedTitle, titlePlanningKey} from './src/editor/editorAnimatedTitles';
         window.store = useStore;
         window.editorStore = useEditorStore;
         window.titleStore = useEditorTitleStore;
-        window.titleHelpers = {TITLE_EFFECT_LABELS, TITLE_SEQUENCE_DURATIONS, alignTitleSequence, setTitlePhraseSeconds, titleDimensions, titleFrames, titleSequenceTimeline, newTitlePhrases, animatedTitlePrompt, animatedTitleParams, insertAnimatedTitle, titlePlanIsCurrent};
+        window.titleHelpers = {titleDimensions, insertAnimatedTitle, titlePlanningKey};
         window.baseParams = {...useStore.getState().params};
         window.seedScenario = (scenario = {}) => {
           const model = scenario.model || '${TITLE_MODEL}';
@@ -170,7 +179,7 @@ async function bundleUi() {
         window.mount = () => {
           document.documentElement.dataset.theme = 'graphite-studio';
           window.reactRoot = createRoot(document.getElementById('root'));
-          window.reactRoot.render(<Sidebar onOpenWorlds={() => {window.worldsOpened = (window.worldsOpened || 0) + 1;}}/>);
+          window.reactRoot.render(<><Sidebar onOpenWorlds={() => {window.worldsOpened = (window.worldsOpened || 0) + 1;}}/><div style={{position:'fixed',top:8,right:8,zIndex:100}}><GlobalQueuePopover/></div></>);
         };
       `,
       resolveDir: ui,
@@ -256,6 +265,23 @@ async function stateInputs(page) {
       prompt: state.params.prompt,
       imageRefs: state.params.image_refs,
       referenceFiles: state.imageRefs.map(file => file.name),
+      voiceA: state.params.audio_guide,
+      voiceB: state.params.audio_guide2,
+      voiceFilenameA: state.audioGuideFilename,
+      voiceFilenameB: state.audioGuide2Filename,
+      speakers: state.params.speakers_locations,
+      advanced: {
+        steps: state.params.num_inference_steps,
+        seed: state.params.seed,
+        activatedLoras: [...(state.params.activated_loras || [])],
+        loraMultipliers: state.params.loras_multipliers,
+        loraWeights: JSON.parse(JSON.stringify(state.loraWeights || {})),
+        attention: state.params.override_attention ?? '',
+        cache: state.params.skip_steps_cache_type,
+        cacheThreshold: state.params.skip_steps_multiplier,
+        cacheWarmup: state.params.skip_steps_start_step_perc,
+        spatialUpsampling: state.spatialUpsampling,
+      },
     };
   });
 }
@@ -263,16 +289,20 @@ async function stateInputs(page) {
 async function assertTitleModeHasOnlyItsOwnComposer(page) {
   const sidebar = page.locator('.maestro-sidebar');
   await page.getByRole('region', {name: 'Studio Titles'}).waitFor();
+  await waitFor(page, () => {
+    const state = window.store.getState();
+    return !!state.titleGenerationContext && !state.modelOptionsLoading
+      && state.modelOptions?.model_type === state.params.model_type;
+  }, 'active title model controls');
   assert.equal(await sidebar.locator('textarea[aria-label="Generation prompt"]').count(), 0,
     'Titles replaces the ordinary generation prompt.');
   assert.equal(await sidebar.locator('[data-studio-footer]').count(), 0,
     'Titles hides the ordinary settings/footer controls.');
-  assert.equal(await sidebar.getByRole('button', {name: 'Open model browser'}).count(), 0,
-    'Titles does not expose the ordinary model/LoRA browser.');
   assert.equal(await sidebar.getByText('Control video', {exact: true}).count(), 0,
     'Titles hides the ordinary control-video input.');
-  assert.equal(await sidebar.getByText(/LoRA/i).count(), 0,
-    'Titles does not expose ordinary LoRA controls.');
+  const advancedTrigger = sidebar.locator('button[aria-label^="Advanced settings"]');
+  assert.equal(await advancedTrigger.count(), 1,
+    'Titles uses the shared compact Advanced settings control.');
   const footerLayout = await page.evaluate(() => {
     const body = document.querySelector('[data-testid="studio-body-scroll"]');
     const host = document.querySelector('[data-testid="titles-footer-host"]');
@@ -293,9 +323,15 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
   assert.equal(footerLayout.hardwareVisible, true, 'The global hardware monitor stays visible below the title footer.');
   const formatControls = page.getByTestId('titles-output-format-controls');
   assert.equal(await formatControls.locator('button.studio-setting-chip').count(), 4,
-    'Resolution, aspect, duration and Advanced use the same compact chips as the other Studio modes.');
+    'Resolution, aspect, duration and shared Advanced use the same compact chips as the other Studio modes.');
   assert.equal(await formatControls.evaluate(element => !!element.closest('[data-testid="titles-generate-footer"]')), true,
     'The everyday format controls remain in the fixed footer rather than the scrolling title form.');
+  assert.equal(await formatControls.locator('button[aria-label^="Advanced settings"]').count(), 1,
+    'Titles mounts the shared compact Advanced settings trigger in the format row.');
+  assert.equal(await page.getByRole('button', {name: 'Generate', exact: true}).count(), 1,
+    'Titles uses the shared Generate split button.');
+  assert.equal(await page.getByRole('button', {name: 'Add current Studio settings to the queue', exact: true}).count(), 1,
+    'Titles exposes the shared Add current Studio settings to the queue action.');
   const promptToolbar = await page.getByTestId('title-prompt-field').evaluate(element => {
     const input = element.querySelector('textarea');
     const enhance = element.querySelector('[aria-label="Enhance title now"]');
@@ -344,16 +380,33 @@ async function assertHardwareExpandable(page, label) {
   await collapse.waitFor({state: 'visible'});
 }
 
-async function acceptManualTitlePlan(panel) {
-  const advanced = await openTitleAdvanced(panel.page());
-  await advanced.getByRole('button', {name: 'Use manual title plan'}).click();
+async function openTitleAdvanced(page) {
+  const trigger = page.locator('button[aria-label^="Advanced settings"]');
+  const advanced = page.getByRole('dialog', {name: 'Advanced settings', exact: true});
+  if (!await advanced.isVisible()) await trigger.click();
+  await advanced.waitFor();
+  assert.match(await trigger.getAttribute('aria-label'), /^Advanced settings/,
+    'The compact trigger exposes the shared Advanced settings label.');
+  return advanced;
 }
 
-async function openTitleAdvanced(page) {
-  const advanced = page.getByRole('dialog', {name: 'Advanced title settings', exact: true});
-  if (!await advanced.isVisible()) await page.getByRole('button', {name: 'Advanced title settings', exact: true}).click();
-  await advanced.waitFor();
-  return advanced;
+async function setRangeValue(locator, value) {
+  await locator.evaluate((input, next) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, String(next));
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+    input.dispatchEvent(new Event('change', {bubbles: true}));
+  }, value);
+}
+
+async function setStudioSeed(page, value) {
+  const advanced = await openTitleAdvanced(page);
+  const generation = advanced.locator('[data-testid="advanced-generation"]');
+  const seed = generation.getByText('Seed', {exact: true}).locator('..').locator('..').locator('input[type="number"]');
+  if (!await seed.isVisible()) await generation.locator('summary').click();
+  await generation.getByText('Seed', {exact: true}).locator('..').locator('..').locator('input[type="number"]').fill(String(value));
+  await waitFor(page, expected => window.store.getState().params.seed === Number(expected),
+    'shared Studio seed setting', 10000, value);
+  await page.keyboard.press('Escape');
 }
 
 async function uploadedPixel(page, upload) {
@@ -394,6 +447,7 @@ async function uploadedPixel(page, upload) {
   const receipts = new Map();
   const statuses = new Map();
   const submissionModes = [];
+  const startQueueRequests = [];
   let generationGate = null;
   let failNextTitleUpload = false;
   let nextSubmissionMode = {status: 'queued', loseResponse: true};
@@ -424,9 +478,14 @@ async function uploadedPixel(page, upload) {
       }
       if (endpoint === '/api/v1/models') return json(catalogue);
       if (endpoint.startsWith('/api/v1/model-options/test_frames_')) return json({...modelOptions,
-        architecture: 'wan', fps: endpoint.endsWith('_text') ? 16 : 24,
+        model_type: endpoint.endsWith('_text') ? 'test_frames_text' : 'test_frames_image',
+        architecture: 'wan', sla_attention: false, first_block_cache: false,
+        fps: endpoint.endsWith('_text') ? 16 : 24,
         frames_minimum: 1, frames_steps: endpoint.endsWith('_text') ? 4 : 8, frames_maximum: endpoint.endsWith('_text') ? 161 : 241,
         default_num_inference_steps: endpoint.endsWith('_text') ? 12 : 8, default_guidance_scale: 2.5});
+      if (/^\/api\/v1\/loras\/[^/]+$/.test(endpoint)) return json({loras: [TEST_LORA], guidance_max_phases: 1});
+      if (/^\/api\/v1\/loras\/[^/]+\/details$/.test(endpoint)) return json({loras: [{filename: TEST_LORA,
+        recommended_weights: {min: 0.4, max: 1.2, default: 0.75, source: 'default'}}], guidance_max_phases: 1});
       if (endpoint.startsWith('/api/v1/model-options/')) return json(modelOptions);
       if (endpoint.startsWith('/api/v1/defaults/test_frames_')) return json({
         num_inference_steps: endpoint.endsWith('_text') ? 12 : 8, guidance_scale: 2.5, sample_solver: 'euler',
@@ -448,7 +507,17 @@ async function uploadedPixel(page, upload) {
       }
       if (endpoint === '/api/v1/outputs') {
         outputRefreshes.push(url.searchParams.get('workspace'));
-        return json({outputs: currentOutput ? [currentOutput] : [], total: currentOutput ? 1 : 0, next_cursor: null});
+        const outputs = Array.isArray(currentOutput) ? currentOutput : currentOutput ? [currentOutput] : [];
+        return json({outputs, total: outputs.length, next_cursor: null});
+      }
+      if (endpoint === '/api/v1/jobs/queue/start' && method === 'POST') {
+        startQueueRequests.push({method, endpoint});
+        const jobIds = [...statuses.entries()].filter(([, status]) => status.status === 'held').map(([jobId]) => jobId);
+        for (const jobId of jobIds) {
+          const held = statuses.get(jobId);
+          statuses.set(jobId, {...held, status: 'queued', message: 'Synthetic queue release'});
+        }
+        return json({status: jobIds.length ? 'started' : 'idle', job_ids: jobIds, released: jobIds.length});
       }
       if (endpoint === '/api/v1/jobs' || endpoint === '/api/v1/jobs/active') return json({jobs: []});
       if (endpoint.startsWith('/api/v1/status/')) {
@@ -479,13 +548,14 @@ async function uploadedPixel(page, upload) {
         const jobId = `studio-title-job-${generationRequests.length}`;
         const clientId = body._client_submission_id;
         const mode = nextSubmissionMode;
-        submissionModes.push(mode);
+        const statusName = body._queue_mode === 'held' ? 'held' : mode.status;
+        submissionModes.push({...mode, queueMode: body._queue_mode || 'now'});
         nextSubmissionMode = {status: 'queued', loseResponse: false};
         const outputPath = `/outputs/${WORKSPACE}/studio-title-${generationRequests.length}.mp4`;
-        const status = jobStatus(jobId, clientId, mode.status,
-          mode.status === 'completed' ? [outputPath] : []);
+        const status = jobStatus(jobId, clientId, statusName,
+          statusName === 'completed' ? [outputPath] : []);
         statuses.set(jobId, status);
-        receipts.set(clientId, {job_id: jobId, client_submission_id: clientId, status: mode.status});
+        receipts.set(clientId, {job_id: jobId, client_submission_id: clientId, status: statusName});
         if (generationGate) {
           const gate = generationGate;
           generationGate = null;
@@ -561,7 +631,7 @@ async function uploadedPixel(page, upload) {
     })));
     await chooseWorkflow(page, 'Titles');
     await assertTitleModeHasOnlyItsOwnComposer(page);
-    assert.deepEqual(await stateInputs(page), before, 'Selecting Titles preserves Frames prompt, references, and model.');
+    assert.equal(await page.getByRole('region', {name: 'Studio Titles'}).count(), 1, 'Titles shows its dedicated creative composer.');
     await waitFor(page, text => document.querySelector('[aria-label="Describe your title animation"]')?.value.includes(text),
       'gallery title settings restored into the Studio composer', 10000, 'Loaded from gallery');
 
@@ -609,7 +679,7 @@ async function uploadedPixel(page, upload) {
       'A one-shot title enhancement can override the saved default.');
 
     await page.getByLabel('Describe your title animation').fill('Edited loaded gallery title');
-    await page.locator('[data-testid="titles-generate-footer"]').getByRole('button', {name: 'Generate title'}).click();
+    await page.locator('[data-testid="titles-generate-footer"]').getByRole('button', {name: 'Generate'}).click();
     await waitFor(page, () => window.store.getState().params._studio_title_settings?.titleReviewRequired === true
       || document.querySelector('[aria-label="Title plan review"]')?.open === true,
     'AI title plan review pause');
@@ -655,13 +725,8 @@ async function uploadedPixel(page, upload) {
     assert.equal(avatarVoices.voiceA, avatarScenario.audioGuide);
     assert.equal(avatarVoices.voiceB, avatarScenario.audioGuide2);
     await chooseWorkflow(page, 'Titles');
-    assert.deepEqual(await page.evaluate(() => {
-      const state = window.store.getState();
-      return {model: state.params.model_type, mode: state.params.audio_prompt_type,
-        voiceA: state.params.audio_guide, voiceB: state.params.audio_guide2,
-        filenameA: state.audioGuideFilename, filenameB: state.audioGuide2Filename,
-        speakers: state.params.speakers_locations};
-    }), avatarVoices, 'Opening Titles preserves Avatar model and both voice channels.');
+    assert.equal(await page.getByRole('region', {name: 'Studio Titles'}).count(), 1,
+      'The Avatar detour presents the dedicated title composer while active.');
     await chooseWorkflow(page, 'Avatar');
     assert.deepEqual(await page.evaluate(() => {
       const state = window.store.getState();
@@ -703,7 +768,7 @@ async function uploadedPixel(page, upload) {
     await chooseWorkflow(page, 'Titles');
     await assertTitleModeHasOnlyItsOwnComposer(page);
     let after = await stateInputs(page);
-    assert.deepEqual(after, before, 'Selecting Titles preserves Blend prompt, references, and model.');
+    assert.equal(after.model, TITLE_MODEL, 'Titles runs with its active video model.');
     assert.equal(await page.evaluate(() => window.store.getState().params.image_mode), 0,
       'Titles clears image_mode=4 so it cannot route through Blend.');
     await chooseWorkflow(page, 'Blend');
@@ -717,13 +782,20 @@ async function uploadedPixel(page, upload) {
     assert.equal(before.model, 'viggle_animate');
     await chooseWorkflow(page, 'Titles');
     await assertTitleModeHasOnlyItsOwnComposer(page);
-    assert.deepEqual(await stateInputs(page), before, 'Titles leaves the active Viggle model and references unchanged.');
+    await chooseWorkflow(page, 'Animate');
+    assert.deepEqual(await stateInputs(page), before, 'Returning from Titles restores Viggle model, prompt and reference.');
     await chooseWorkflow(page, 'Frames');
     after = await stateInputs(page);
     assert.equal(after.prompt, before.prompt);
     assert.deepEqual(after.imageRefs, before.imageRefs);
     assert.deepEqual(after.referenceFiles, before.referenceFiles);
     assert.notEqual(after.model, 'viggle_animate', 'Leaving Animate restores the regular video model.');
+    const ordinaryFormat = await page.evaluate(() => {
+      const state = window.store.getState();
+      return {resolution: state.resolutionPreset, aspect: state.aspectRatio,
+        duration: state.durationSeconds, resolutionParam: state.params.resolution,
+        frames: state.params.video_length};
+    });
 
     // Create a portrait black title with custom-written motion. No Editor project is present.
     await chooseWorkflow(page, 'Titles');
@@ -735,12 +807,7 @@ async function uploadedPixel(page, upload) {
       prompt: document.querySelector('[data-testid="title-prompt-field"]').getBoundingClientRect().top,
     }));
     assert.ok(appearanceOrder.controls < appearanceOrder.prompt, 'Style and background selectors precede the prompt.');
-    const ordinaryFormat = await page.evaluate(() => {
-      const state = window.store.getState();
-      return {resolution: state.resolutionPreset, aspect: state.aspectRatio,
-        duration: state.durationSeconds, resolutionParam: state.params.resolution,
-        frames: state.params.video_length};
-    });
+
     const titleFormats = page.getByTestId('titles-output-format-controls');
     const titleCanvases = await page.evaluate(() => {
       const base = JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1'));
@@ -785,14 +852,15 @@ async function uploadedPixel(page, upload) {
     });
     assert.deepEqual(selectedTitleFormat, {resolution: '540p', aspect: '4:3', frames: 243},
       'The standard-looking controls persist the isolated title draft.');
+
+    assert.equal(generationRequests.length, 0, 'Changing format never submits a generation.');
+    await chooseWorkflow(page, 'Frames');
     assert.deepEqual(await page.evaluate(() => {
       const state = window.store.getState();
       return {resolution: state.resolutionPreset, aspect: state.aspectRatio,
         duration: state.durationSeconds, resolutionParam: state.params.resolution,
         frames: state.params.video_length};
-    }), ordinaryFormat, 'Changing title format never changes the ordinary Studio model format or frame count.');
-    assert.equal(generationRequests.length, 0, 'Changing format never submits a generation.');
-    await chooseWorkflow(page, 'Frames');
+    }), ordinaryFormat, 'Leaving Titles restores the ordinary Studio model format and frame count.');
     await chooseWorkflow(page, 'Titles');
     await titleFormats.getByRole('button', {name: 'Resolution: 540p', exact: true}).waitFor();
     await titleFormats.getByRole('button', {name: 'Aspect ratio: 4:3', exact: true}).waitFor();
@@ -800,20 +868,67 @@ async function uploadedPixel(page, upload) {
       'A native duration and the added format choices survive closing and reopening Titles.');
     await page.locator('[data-testid="studio-body-scroll"]').evaluate(element => { element.scrollTop = 0; });
     await page.screenshot({path: path.join(SCREENSHOTS, 'studio-titles-format-desktop.png'), fullPage: true});
-    const advancedSidebar = await openTitleAdvanced(page);
-    const presetSummary = advancedSidebar.getByText('Use an animation preset (optional)', {exact: true});
-    await presetSummary.click();
-    const preset = advancedSidebar.getByLabel('Animation preset');
-    const presetCount = await preset.locator('option').count();
-    assert.equal(presetCount, 21, 'The custom option and all 20 animation presets are available.');
-    await preset.selectOption('dust');
-    await advancedSidebar.getByLabel('Animated title text').fill('Maestro After Dark');
-    await advancedSidebar.getByLabel('Title background').selectOption('black');
-    await advancedSidebar.getByLabel('Title visual style').fill('Bright chrome lettering with a restrained blue rim light');
-    await advancedSidebar.getByLabel('Title animation description').fill('The chrome words fly inward, hold, then fade to black.');
+    const advancedDialog = await openTitleAdvanced(page);
+    const sectionNames = await advancedDialog.locator('details[data-testid^="advanced-"]:not([hidden]) summary').allTextContents();
+    for (const section of ['LoRAs & presets', 'Performance', 'Finishing', 'Generation']) {
+      assert.ok(sectionNames.some(text => text.trim().startsWith(section)), `Shared Advanced includes ${section}.`);
+    }
+    assert.doesNotMatch(await advancedDialog.innerText(), /single\s+title|phrase\s+sequence|use\s+manual\s+title\s+plan/i,
+      'The shared Studio Advanced dialog contains no title mode or manual-plan controls.');
+
+    const loras = advancedDialog.locator('[data-testid="advanced-loras"]');
+    if (!await advancedDialog.getByTitle('Default settings').isVisible()) await loras.locator('summary').click();
+    await advancedDialog.getByTitle('Default settings').waitFor();
+    await advancedDialog.getByTitle(`File: ${TEST_LORA}`, {exact: true}).click();
+    await waitFor(page, filename => window.store.getState().params.activated_loras.includes(filename),
+      'Studio title LoRA activation', 10000, TEST_LORA);
+    await waitFor(page, filename => window.store.getState().loraWeights[filename]?.[0] === 0.75,
+      'recommended title LoRA weight', 10000, TEST_LORA);
+    const loraWeight = loras.locator('input[type="range"]:visible').first();
+    await loraWeight.waitFor();
+    await setRangeValue(loraWeight, 0.65);
+    await waitFor(page, filename => window.store.getState().loraWeights[filename]?.[0] === 0.65,
+      'title LoRA weight from its Advanced slider', 10000, TEST_LORA);
+
+    const performance = advancedDialog.locator('[data-testid="advanced-performance"]');
+    if (!await performance.locator('input[type="checkbox"]').first().isVisible()) await performance.locator('summary').click();
+    const slaToggle = performance.locator('label').filter({hasText: 'SLA Sparse Attention'}).locator('input[type="checkbox"]');
+    await slaToggle.check();
+    const cacheToggle = performance.locator('label').filter({hasText: 'First Block Cache'}).locator('input[type="checkbox"]');
+    await cacheToggle.check();
+    await performance.locator('select').first().selectOption('0.12');
+    const warmup = performance.locator('input[type="range"]:visible').first();
+    await setRangeValue(warmup, 35);
+    await waitFor(page, () => window.store.getState().params.override_attention === 'sla'
+      && window.store.getState().params.skip_steps_cache_type === 'first_block'
+      && window.store.getState().params.skip_steps_multiplier === 0.12
+      && window.store.getState().params.skip_steps_start_step_perc === 35,
+    'title attention and First Block Cache settings');
+
+    const finishing = advancedDialog.locator('[data-testid="advanced-finishing"]');
+    const spatialUpsampling = finishing.getByText('Spatial Upsampling', {exact: true}).locator('..').locator('select');
+    if (!await spatialUpsampling.isVisible()) await finishing.locator('summary').click();
+    await spatialUpsampling.selectOption('lanczos2');
+    await waitFor(page, () => window.store.getState().spatialUpsampling === 'lanczos2',
+      'title finishing choice');
+
+    const generation = advancedDialog.locator('[data-testid="advanced-generation"]');
+    const h3Steps = generation.getByText('Inference Steps', {exact: true}).locator('..').locator('input[type="number"]');
+    const seed = generation.getByText('Seed', {exact: true}).locator('..').locator('..').locator('input[type="number"]');
+    if (!await h3Steps.isVisible()) await generation.locator('summary').click();
+    assert.equal(await h3Steps.inputValue(), '4', 'The shared control reflects the selected H3 4-step model default.');
+    assert.equal(await h3Steps.isDisabled(), false, 'The shared H3 step control follows the active model options.');
+    await h3Steps.fill('17');
+    await seed.fill('314159');
+    await waitFor(page, () => window.store.getState().params.num_inference_steps === 17
+      && window.store.getState().params.seed === 314159, 'title generation steps and seed');
+    await page.screenshot({path: path.join(SCREENSHOTS, 'studio-title-standard-advanced.png'), fullPage: true});
+    await page.keyboard.press('Escape');
+
+    // Native title duration remains bounded and separate from ordinary Studio format.
     await titleFormats.getByRole('button', {name: /^Duration:/}).click();
-    await page.getByRole('dialog', {name: 'Title duration', exact: true})
-      .getByLabel('Native title duration preset', {exact: true}).selectOption('209');
+    const durationDialog = page.getByRole('dialog', {name: 'Title duration', exact: true});
+    await durationDialog.getByLabel('Native title duration preset', {exact: true}).selectOption('209');
     await page.keyboard.press('Escape');
     await titleFormats.getByRole('button', {name: /^Aspect ratio:/}).click();
     await page.getByRole('menu', {name: 'Aspect ratio', exact: true})
@@ -821,18 +936,11 @@ async function uploadedPixel(page, upload) {
     await titleFormats.getByRole('button', {name: /^Resolution:/}).click();
     await page.getByRole('menu', {name: 'Resolution', exact: true})
       .getByRole('menuitemradio', {name: /720p/}).click();
-    await openTitleAdvanced(page);
-    assert.equal(await preset.inputValue(), 'custom',
-      'Editing a preset description switches the title to its custom motion field.');
-    const dimensions720 = await advancedSidebar.getByText(/704×1280/).count();
-    assert.equal(dimensions720, 1, 'Portrait 720p title dimensions are shown before submit.');
     await titleFormats.getByRole('button', {name: /^Resolution:/}).click();
     await page.getByRole('menu', {name: 'Resolution', exact: true})
       .getByRole('menuitemradio', {name: /480p/}).click();
-    await openTitleAdvanced(page);
-    assert.equal(await advancedSidebar.getByText(/480×832/).count(), 1,
-      'Portrait 480p title dimensions use the aligned output size.');
-    await advancedSidebar.getByRole('button', {name: 'Use manual title plan'}).click();
+    await page.setViewportSize({width: 1360, height: 700});
+    await page.waitForTimeout(40);
     const bodyScroll = page.locator('[data-testid="studio-body-scroll"]');
     const desktopFooterBefore = await page.evaluate(() => ({
       top: document.querySelector('[data-testid="titles-generate-footer"]')?.getBoundingClientRect().top,
@@ -854,6 +962,7 @@ async function uploadedPixel(page, upload) {
     assert.ok(Math.abs(desktopFooterAfter.hardwareTop - desktopFooterBefore.hardwareTop) < 1,
       'The hardware monitor stays below the title footer while the form scrolls.');
     await bodyScroll.evaluate(element => { element.scrollTop = 0; });
+    await page.setViewportSize({width: 1360, height: 900});
     const requestedDimensions = await page.evaluate(() => window.titleHelpers.titleDimensions({
       text: 'Maestro After Dark', look: 'chrome', direction: 'fly inward', effect: 'custom',
       seconds: 8.4, aspect: '9:16', resolution: '480p', keepAudio: false, background: 'black',
@@ -864,8 +973,19 @@ async function uploadedPixel(page, upload) {
 
     // Simulate a lost HTTP response after acceptance. The client performs one exact lookup,
     // adopts the accepted job into the ordinary queue, and never posts again after reload.
-    const generationButton = sidebar.getByRole('button', {name: 'Generate title'});
+    const generationButton = sidebar.getByRole('button', {name: 'Generate'});
+    const plansBeforeGeneration = titlePlanRequests.length;
     await generationButton.dblclick({timeout: 2000}).catch(() => {});
+    await waitForNode(() => generationRequests.length > 0 || titlePlanRequests.length > plansBeforeGeneration,
+      'title generation submission or AI-plan review');
+    if (generationRequests.length === 0) {
+      assert.equal(titlePlanRequests.length, plansBeforeGeneration + 1,
+        'A stale creative plan returns to the AI review flow before submission.');
+      assert.equal(await page.evaluate(() => window.titleStore.getState().intent), null,
+        'An AI-plan review pause still creates no generation intent.');
+      await generationButton.click();
+      await waitForNode(() => generationRequests.length > 0, 'accepted reviewed title submission');
+    }
     await waitFor(page, () => window.store.getState().jobs.some(job => job.id === 'studio-title-job-1'),
       'accepted title adoption into the normal generation queue');
     assert.equal(generationRequests.length, 1, 'A rapid double click sends only one generation POST.');
@@ -886,6 +1006,19 @@ async function uploadedPixel(page, upload) {
     assert.equal(firstRequest.model_type, TITLE_MODEL);
     assert.equal(firstRequest.image_mode, 0);
     assert.deepEqual(firstRequest.image_refs, [], 'Normal Studio references do not leak into the title generation.');
+    assert.equal(firstRequest.num_inference_steps, 17, 'The shared H3 inference-step edit reaches the title payload.');
+    assert.equal(firstRequest.seed, 314159, 'The shared Advanced seed is included in the title payload.');
+    assert.equal(firstRequest._studio_title_settings.generationParams.num_inference_steps, 17,
+      'The Title payload preserves the shared inference-step value inside its settings snapshot.');
+    assert.equal(firstRequest._studio_title_settings.generationParams.seed, 314159,
+      'The Title payload keeps the same seed inside its immutable standard-settings snapshot.');
+    assert.ok(firstRequest.activated_loras.includes(TEST_LORA), 'The shared LoRA selection reaches the title payload.');
+    assert.match(String(firstRequest.loras_multipliers), /0\.65/, 'The chosen LoRA weight reaches the title payload.');
+    assert.equal(firstRequest.override_attention, 'sla', 'The selected H3 attention setting reaches the title payload.');
+    assert.equal(firstRequest.skip_steps_cache_type, 'first_block', 'First Block Cache activation reaches the title payload.');
+    assert.equal(firstRequest.skip_steps_multiplier, 0.12, 'The chosen cache threshold reaches the title payload.');
+    assert.equal(firstRequest.skip_steps_start_step_perc, 35, 'The chosen cache warmup reaches the title payload.');
+    assert.equal(firstRequest.spatial_upsampling, 'lanczos2', 'The finishing choice reaches the title payload.');
     for (const key of ['_prompt_enhancement', 'h3_window_plan', 'enhanceOnGeneration', 'enhance_on_generation']) {
       assert.equal(Object.hasOwn(firstRequest, key), false, `Ordinary Studio enhancement state does not leak into title params (${key}).`);
     }
@@ -910,18 +1043,83 @@ async function uploadedPixel(page, upload) {
     assert.equal(await page.evaluate(() => window.titleStore.getState().intent?.workspace), WORKSPACE,
       'The accepted title retains its original workspace after the user switches workspaces.');
 
+    // An already-running title does not block adding multiple immutable held jobs.
+    assert.equal(await page.evaluate(() => window.titleStore.getState().intent?.status), 'queued',
+      'The first title remains active while queued titles are added.');
+    const queueAction = sidebar.getByRole('button', {name: 'Add current Studio settings to the queue', exact: true});
+    const setSeedBeforeQueue = async value => setStudioSeed(page, value);
+    await setSeedBeforeQueue(271828);
+    const queueOneIndex = generationRequests.length + 1;
+    const lookupsBeforeLostQueueReceipt = receiptLookups.length;
+    nextSubmissionMode = {status: 'queued', loseResponse: true};
+    await queueAction.click();
+    await waitFor(page, expectedId => window.store.getState().jobs.some(job => job.id === expectedId && job.status === 'held')
+      && window.titleStore.getState().queueIntent === null,
+    'exact lost-receipt recovery for held title one', 10000, `studio-title-job-${queueOneIndex}`);
+    const queuedOne = generationRequests.at(-1);
+    assert.equal(generationRequests.length, queueOneIndex, 'Recovering the lost held receipt does not duplicate its POST.');
+    assert.equal(queuedOne._queue_mode, 'held', 'The shared queue action asks the backend to hold this title.');
+    assert.equal(queuedOne.seed, 271828, 'The first held title snapshots its current shared seed.');
+    assert.equal(queuedOne._studio_title_settings.generationParams.seed, 271828,
+      'The held payload carries the same immutable shared-settings snapshot.');
+    assert.equal(statuses.get(`studio-title-job-${queueOneIndex}`).status, 'held');
+    assert.equal(receiptLookups.length, lookupsBeforeLostQueueReceipt + 1,
+      'An ambiguous held receipt is looked up exactly once by its client submission ID.');
+    assert.equal(receiptLookups.at(-1), queuedOne._client_submission_id);
+    assert.ok(statusLookups.includes(`studio-title-job-${queueOneIndex}`),
+      'The exact receipt is confirmed through the job status endpoint before queue adoption.');
+    assert.equal(await page.evaluate(() => window.titleStore.getState().intent?.clientId), firstRequest._client_submission_id,
+      'Adding a held title keeps the active generation intent intact.');
+
+    await setSeedBeforeQueue(123456);
+    const queueTwoIndex = generationRequests.length + 1;
+    await queueAction.click();
+    await waitFor(page, expectedId => window.store.getState().jobs.some(job => job.id === expectedId && job.status === 'held')
+      && window.titleStore.getState().queueIntent === null,
+    'second held title adoption while the first is active', 10000, `studio-title-job-${queueTwoIndex}`);
+    const queuedTwo = generationRequests.at(-1);
+    assert.equal(generationRequests.length, queueTwoIndex, 'Each held title is posted once.');
+    assert.equal(queuedTwo._queue_mode, 'held');
+    assert.equal(queuedTwo.seed, 123456, 'The second held title captures the later shared seed.');
+    assert.equal(queuedOne.seed, 271828, 'Changing shared settings after the first POST does not mutate its payload snapshot.');
+    assert.deepEqual(generationRequests.slice(1).map(body => body._queue_mode), ['held', 'held'],
+      'Both Add to queue actions remain held and never start generation.');
+
+    const generationQueueButton = page.getByRole('button', {name: /^Generation queue,/});
+    await generationQueueButton.click();
+    const generationQueue = page.getByRole('dialog', {name: 'Generation queue', exact: true});
+    await generationQueue.getByRole('button', {name: 'Start queue', exact: true}).click();
+    const heldIds = [`studio-title-job-${queueOneIndex}`, `studio-title-job-${queueTwoIndex}`];
+    await waitFor(page, ids => ids.every(id => window.store.getState().jobs.find(job => job.id === id)?.status === 'queued'),
+      'normal Studio Start queue releases the held titles', 10000, heldIds);
+    assert.equal(startQueueRequests.length, 1, 'Start queue calls the normal mocked Studio queue endpoint once.');
+    assert.equal(generationRequests.length, queueTwoIndex, 'Releasing held jobs does not issue another generation POST.');
+
+    const nativeTitleOutput = `/outputs/${WORKSPACE}/title-black-480x832-native.mp4`;
+    const processedTitleOutput = `/outputs/${WORKSPACE}/title-black-960x1664.mp4`;
     statuses.set('studio-title-job-1', jobStatus('studio-title-job-1', firstRequest._client_submission_id,
-      'completed', [`/outputs/${WORKSPACE}/title-black-480x832.mp4`]));
-    currentOutput = {id: 'title-gallery-entry', name: 'title-black-480x832.mp4',
-      type: 'video', mode: 'video', size: 1234, created_at: 100, url: '/outputs/title-black-480x832.mp4',
-      path: `/outputs/${WORKSPACE}/title-black-480x832.mp4`, workspace: WORKSPACE};
+      'completed', [nativeTitleOutput, processedTitleOutput]));
+    currentOutput = [
+      {id: 'title-gallery-entry-native', name: 'title-black-480x832-native.mp4',
+        type: 'video', mode: 'video', size: 1234, created_at: 101, url: '/outputs/title-black-480x832-native.mp4',
+        path: nativeTitleOutput, workspace: WORKSPACE},
+      {id: 'title-gallery-entry-processed', name: 'title-black-960x1664.mp4',
+        type: 'video', mode: 'video', size: 2345, created_at: 100, url: '/outputs/title-black-960x1664.mp4',
+        path: processedTitleOutput, workspace: WORKSPACE},
+    ];
+    const probesBeforeComplete = probes.length;
     const refreshesBeforeComplete = outputRefreshes.length;
     await page.evaluate(() => window.titleStore.getState().reconcile());
     await waitFor(page, () => window.titleStore.getState().intent?.status === 'completed',
       'completed title verification');
-    await waitFor(page, () => window.store.getState().outputs.some(output => output.name === 'title-black-480x832.mp4'),
+    await waitFor(page, () => window.store.getState().outputs.some(output => output.name === 'title-black-960x1664.mp4'),
       'normal gallery refresh');
     assert.ok(outputRefreshes.length > refreshesBeforeComplete, 'Completion refreshes the ordinary gallery.');
+    assert.deepEqual(probes.slice(probesBeforeComplete).map(probe => probe.asset?.path).sort(),
+      [nativeTitleOutput, processedTitleOutput].sort(),
+      'Studio completion probes every native and processed video in a multi-output result.');
+    assert.ok(await page.evaluate(() => window.store.getState().outputs.some(output => output.name === 'title-black-480x832-native.mp4')),
+      'The ordinary gallery retains the native output alongside its processed video.');
     assert.equal(probes.at(-1).workspace, WORKSPACE, 'Media verification uses the frozen title workspace.');
     assert.equal(await page.evaluate(() => window.store.getState().activeWorkspace), 'Changed While Running');
     assert.equal(await page.evaluate(() => window.editorStore.getState().project), null,
@@ -932,11 +1130,11 @@ async function uploadedPixel(page, upload) {
     await page.evaluate(() => window.store.getState().setEnhanceOnGeneration(true));
     const prepareFailureRevision = await page.evaluate(() => window.store.getState().enhanceOnGenerationRevision);
     failNextTitleUpload = true;
-    await page.getByRole('button', {name: 'Generate title'}).click();
+    await page.getByRole('button', {name: 'Generate'}).click();
     await waitFor(page, () => window.titleStore.getState().error?.includes('Upload failed'),
       'title upload preparation failure');
     assert.equal(uploadFailures.length, 1, 'The title background upload failure is synthetic and isolated.');
-    assert.equal(generationRequests.length, 1, 'A title preparation failure never sends a GPU generation request.');
+    assert.equal(generationRequests.length, queueTwoIndex, 'A title preparation failure never sends a GPU generation request.');
     assert.equal(await page.evaluate(() => window.titleStore.getState().intent), null,
       'A pre-intent upload failure does not create a title submission identity.');
     const afterPrepareFailure = await page.evaluate(() => ({
@@ -948,13 +1146,12 @@ async function uploadedPixel(page, upload) {
       'A pre-intent failure does not consume or revise the one-shot choice.');
     await page.evaluate(() => window.titleStore.getState().dismiss());
     nextSubmissionMode = {status: 'failed', loseResponse: false};
-    await page.getByLabel('Title background').first().selectOption('chroma');
-    await acceptManualTitlePlan(sidebar);
+
     await page.evaluate(() => window.store.getState().setEnhanceOnGeneration(true));
     const raceRevision = await page.evaluate(() => window.store.getState().enhanceOnGenerationRevision);
     const racedGeneration = {started: deferred(), release: deferred()};
     generationGate = racedGeneration;
-    await page.getByRole('button', {name: 'Generate title'}).click();
+    await page.getByRole('button', {name: 'Generate'}).click();
     await racedGeneration.started.promise;
     await page.evaluate(() => window.store.getState().setEnhanceOnGeneration(false));
     const laterPreferenceRevision = await page.evaluate(() => window.store.getState().enhanceOnGenerationRevision);
@@ -970,19 +1167,19 @@ async function uploadedPixel(page, upload) {
       'Submitting an older title intent preserves a later explicit enhancement choice.');
     assert.equal(preservedLaterChoice.revision, laterPreferenceRevision,
       'The submission completion does not increment or clear a newer enhancement revision.');
-    assert.equal(generationRequests.length, 2);
-    assert.equal(generationRequests[1]._studio_title_settings.background, 'chroma');
-    assert.match(uploadRequests[1].body, /title-green-/);
+    assert.equal(generationRequests.length, queueTwoIndex + 1);
+    assert.equal(generationRequests.at(-1)._studio_title_settings.background, 'black');
+    assert.match(uploadRequests.at(-1).body, /title-black-/);
     assert.equal(await page.getByRole('alert').filter({hasText: 'Synthetic generation failure'}).count(), 1);
     assert.equal(await page.getByRole('button', {name: 'Dismiss', exact: true}).count(), 0,
       'The title sidebar does not show the old status banner actions.');
 
     await page.evaluate(() => window.titleStore.getState().dismiss());
     nextSubmissionMode = {status: 'cancelled', loseResponse: false};
-    await page.getByRole('button', {name: 'Generate title'}).click();
+    await page.getByRole('button', {name: 'Generate'}).click();
     await waitFor(page, () => window.titleStore.getState().intent?.status === 'failed'
       && window.titleStore.getState().intent?.error === 'Synthetic cancellation', 'cancelled title generation');
-    assert.equal(generationRequests.length, 3);
+    assert.equal(generationRequests.length, queueTwoIndex + 2);
     assert.equal(await page.getByRole('alert').filter({hasText: 'Synthetic cancellation'}).count(), 1);
     assert.equal(await page.getByRole('link', {name: 'Preview', exact: true}).count(), 0);
     assert.deepEqual(projectApiRequests, [], 'No Studio title path calls Editor project APIs.');
@@ -992,7 +1189,7 @@ async function uploadedPixel(page, upload) {
     await page.setViewportSize({width: 390, height: 844});
     await page.waitForTimeout(100);
     await assertHardwareExpandable(page, 'Mobile');
-    if (await page.getByRole('dialog', {name: 'Advanced title settings', exact: true}).isVisible()) await page.keyboard.press('Escape');
+    if (await page.getByRole('dialog', {name: 'Advanced settings', exact: true}).isVisible()) await page.keyboard.press('Escape');
     await page.locator('[data-testid="studio-body-scroll"]').evaluate(element => { element.scrollTop = 0; });
     await titleFormats.getByRole('button', {name: /^Resolution:/}).click();
     const phoneResolutionMenu = page.getByRole('menu', {name: 'Resolution', exact: true});
@@ -1028,7 +1225,19 @@ async function uploadedPixel(page, upload) {
       'The phone workflow popover lets keyboard focus continue naturally.');
     await page.keyboard.press('Escape');
     await openTitleAdvanced(page);
-    await page.getByLabel('Title animation description').waitFor();
+    const mobileAdvanced = page.getByRole('dialog', {name: 'Advanced settings', exact: true});
+    const mobileAdvancedSections = [
+      ['advanced-loras', advancedDialog.getByTitle('Default settings')],
+      ['advanced-performance', page.locator('[data-testid="advanced-performance"] input[type="checkbox"]').first()],
+      ['advanced-finishing', page.locator('[data-testid="advanced-finishing"]').getByText('Spatial Upsampling', {exact: true}).locator('..').locator('select')],
+      ['advanced-generation', page.locator('[data-testid="advanced-generation"]').getByText('Seed', {exact: true})],
+    ];
+    for (const [id, control] of mobileAdvancedSections) {
+      const section = mobileAdvanced.locator(`[data-testid="${id}"]`);
+      if (!await control.isVisible()) await section.locator('summary').click();
+    }
+    assert.doesNotMatch(await mobileAdvanced.innerText(), /single\s+title|phrase\s+sequence|use\s+manual\s+title\s+plan/i);
+    await page.screenshot({path: path.join(SCREENSHOTS, 'studio-title-standard-advanced-mobile.png'), fullPage: true});
     await page.keyboard.press('Escape');
     await page.getByLabel('Describe your title animation').focus();
     await page.getByLabel('Describe your title animation').fill('Mobile title motion stays in the visible sidebar.');
@@ -1064,114 +1273,14 @@ async function uploadedPixel(page, upload) {
       'The title footer stays within the visible mobile sidebar while the keyboard is open.');
     assert.ok(mobileScroll.scrollTop > 0, 'Mobile scrolling continues inside the title form rather than the footer.');
 
-    // Sequence settings survive the real Studio normalization, submission and
-    // browser reload paths. All GPU endpoints remain synthetic.
     await page.setViewportSize({width: 1360, height: 900});
     await page.evaluate(() => window.titleStore.getState().dismiss());
-    const sequenceSettings = {mode: 'sequence', text: 'STALE SINGLE TITLE', look: 'Hand-drawn blue ink',
-      effect: 'fire', direction: 'Sparks trace the complete title and hold it together.', sequenceDirection: 'Keep the camera locked.',
-      seconds: 5.2, aspect: '9:16', resolution: '480p', keepAudio: false, background: 'black',
-      phrases: [
-        {id: 'seq-a', text: 'CREATE', seconds: 3, animation: 'Scale in, hold, then clear.'},
-        {id: 'seq-b', text: 'EXPLORE', seconds: 3, animation: 'Rotate in, hold, then clear.'},
-        {id: 'seq-c', text: 'INSPIRE', seconds: 4, animation: ''},
-      ]};
-    const planning = await page.evaluate(settings => {
-      const h = window.titleHelpers;
-      const invalids = [[], settings.phrases.slice(0, 1), [...settings.phrases, ...settings.phrases, settings.phrases[0]],
-        settings.phrases.map(p => ({...p, seconds: .5})), settings.phrases.map(p => ({...p, seconds: 7})),
-        settings.phrases.map(p => ({...p, text: ''})), settings.phrases.map(p => ({...p, id: 'duplicate'})),
-        settings.phrases.map(p => ({...p, text: 'x'.repeat(60)}))];
-      return {timeline: h.titleSequenceTimeline(settings),
-        prompt: h.animatedTitlePrompt(settings),
-        body: h.animatedTitleParams(settings, {width: 1920, height: 1080}, '/uploads/black.png', 'test', 'synthetic-id'),
-        invalids: invalids.map(phrases => {try { h.animatedTitlePrompt({...settings, phrases}); return ''; } catch (error) {return error.message;}}),
-        converted: h.newTitlePhrases('One\nTwo\nThree\nFour\nFive\nSix', 5.2)};
-    }, sequenceSettings);
-    assert.equal(planning.timeline.requestedSeconds, 10);
-    assert.equal(planning.timeline.duration, 243 / 24);
-    assert.equal(planning.timeline.phrases[0].start, 0);
-    assert.equal(planning.timeline.phrases.at(-1).end, planning.timeline.duration);
-    for (let i = 1; i < 3; i++) assert.equal(planning.timeline.phrases[i].start, planning.timeline.phrases[i - 1].end);
-    assert.equal(planning.body.video_length, 243, 'The summed phrase duration overrides the hidden single-title duration.');
-    assert.match(planning.prompt, /exactly ONE phrase at a time/);
-    assert.match(planning.prompt, /Final slot: show ONLY "INSPIRE"; no earlier phrase returns/);
-    assert.doesNotMatch(planning.prompt, /complete-title hold|Sparks trace|STALE SINGLE TITLE/,
-      'Sequence prompts do not inherit the previous title or full-title preset instructions.');
-    assert.ok(planning.invalids.every(Boolean), 'Invalid phrase counts, durations, texts and identities block submission.');
-    assert.ok(planning.converted.every(phrase => phrase.seconds >= 1), 'Converting six lines allocates usable slots.');
-    assert.equal(new Set(planning.converted.map(phrase => phrase.id)).size, 6);
-    const nativeChecks = await page.evaluate(settings => {
-      const h = window.titleHelpers;
-      let checked = 0;
-      const check = (value, frames) => {
-        const counts = value.phrases.map(phrase => Math.round(phrase.seconds * 24));
-        if (counts.some(count => count < 24 || count > 240)
-          || counts.reduce((sum, count) => sum + count, 0) !== frames) throw new Error('Invalid bounded frame allocation');
-        const timeline = h.titleSequenceTimeline(value);
-        if (timeline.duration !== frames / 24 || timeline.phrases.at(-1).end !== frames / 24
-          || timeline.phrases.some((row, i) => i && row.start !== timeline.phrases[i - 1].end)) throw new Error('Non-contiguous native slots');
-        const params = h.animatedTitleParams(value, {width: 1920, height: 1080}, '/uploads/black.png', 'test', 'synthetic-native-id');
-        if (params.video_length !== frames) throw new Error('Payload changed the selected native duration');
-        checked++;
-      };
-      for (let count = 2; count <= 6; count++) for (const choice of h.TITLE_SEQUENCE_DURATIONS) {
-        if (choice.frames < count * 24) continue;
-        for (const skewed of [false, true]) {
-          const original = {...settings, sequenceFrames: undefined,
-            phrases: Array.from({length: count}, (_, i) => ({id: `n-${i}`, text: `WORD ${i}`, animation: '', seconds: skewed && i === 0 ? 10 : 1}))};
-          const before = JSON.stringify(original);
-          const aligned = h.alignTitleSequence(original, choice.frames);
-          check(aligned, choice.frames);
-          if (JSON.stringify(original) !== before) throw new Error('Alignment mutated an existing draft');
-          for (const phrase of aligned.phrases) for (const seconds of [0, 1, 3.333, 10, 99]) {
-            check(h.setTitlePhraseSeconds(aligned, phrase.id, seconds), choice.frames);
-          }
-        }
-      }
-      const six = {...settings, phrases: Array.from({length: 6}, (_, i) => ({id: `six-${i}`, text: `TEXT ${i}`, seconds: 1, animation: ''}))};
-      const sixAligned = h.alignTitleSequence(six, 124);
-      return {checked, sixFrames: sixAligned.sequenceFrames,
-        invalidFrames: [123, 142, 346, NaN].map(sequenceFrames => {
-          try {h.animatedTitlePrompt({...settings, sequenceFrames}); return false;} catch {return true;}
-        })};
-    }, sequenceSettings);
-    assert.ok(nativeChecks.checked > 2000, 'Every compatible native length is checked with even/skewed slots and edited phrase limits.');
-    assert.equal(nativeChecks.sixFrames, 158, 'Six phrases get the next native duration that can fit at least one second each.');
-    assert.ok(nativeChecks.invalidFrames.every(Boolean), 'Invalid native frame selections cannot generate.');
-    await page.evaluate(settings => window.store.setState(state => ({params: {...state.params, _studio_title_settings: settings}})), sequenceSettings);
-    await openTitleAdvanced(page);
-    await waitFor(page, () => document.querySelector('[aria-label="Phrase 1 text"]')?.value === 'CREATE', 'gallery sequence settings restore');
-    assert.equal(await page.getByLabel('Phrase 3 text', {exact: true}).inputValue(), 'INSPIRE');
-    await page.getByLabel('Phrase 1 text', {exact: true}).fill('CREATE MORE');
-    await waitFor(page, () => window.store.getState().params._studio_title_settings === undefined, 'sequence override becomes local draft');
-    nextSubmissionMode = {status: 'running', loseResponse: true};
-    await page.getByRole('button', {name: 'Generate title', exact: true}).click();
-    await waitFor(page, () => window.titleStore.getState().intent?.jobId === 'studio-title-job-4', 'sequence lost-receipt adoption');
-    const sequenceBody = generationRequests.at(-1);
-    assert.equal(sequenceBody._studio_title_settings.mode, 'sequence');
-    assert.deepEqual(sequenceBody._studio_title_settings.phrases.map(p => p.text), ['CREATE MORE', 'EXPLORE', 'INSPIRE']);
-    assert.equal(sequenceBody._studio_title_settings.text, 'CREATE MORE\nEXPLORE\nINSPIRE');
-    assert.equal(sequenceBody.video_length, 243);
-    assert.equal(sequenceBody._studio_title_settings.sequenceFrames, 243, 'The saved title records the selected native duration.');
-    assert.match(sequenceBody.prompt, /Keep the camera locked/);
-    assert.equal(generationRequests.length, 4, 'One sequence sends one POST, without per-phrase jobs.');
-    assert.equal(receiptLookups.at(-1), sequenceBody._client_submission_id);
-    const beforeSequenceReload = generationRequests.length;
-    await page.reload();
-    await mount(page, bundle, css, {workflow: 'titles', workspace: 'Changed While Running'});
-    await waitFor(page, () => window.titleStore.getState().intent?.jobId === 'studio-title-job-4', 'sequence receipt reload');
-    await openTitleAdvanced(page);
-    assert.equal(await page.getByLabel('Phrase 1 text', {exact: true}).inputValue(), 'CREATE MORE');
-    assert.equal(await page.getByLabel('Sequence duration', {exact: true}).inputValue(), '243');
-    const recoveredPhrases = await page.evaluate(() => window.titleStore.getState().intent.settings.phrases);
-    assert.equal(recoveredPhrases.reduce((sum, phrase) => sum + Math.round(phrase.seconds * 24), 0), 243,
-      'Recovered phrase slots add up to the selected native frame count.');
-    assert.equal(generationRequests.length, beforeSequenceReload, 'Sequence reload never resubmits.');
-    assert.deepEqual(projectApiRequests, [], 'Sequence generation remains independent of Editor projects.');
 
     // Controlled Frames catalog, native timing/defaults, and all chosen background colors.
     await page.keyboard.press('Escape');
+    await chooseWorkflow(page, 'Frames');
+    const normalBeforeModel = await stateInputs(page);
+    await chooseWorkflow(page, 'Titles');
     await page.evaluate(() => {
       window.titleStore.getState().dismiss();
       window.store.setState(state => ({enhanceOnGeneration: false, enhanceOnGenerationDefault: false,
@@ -1180,27 +1289,55 @@ async function uploadedPixel(page, upload) {
           effect: 'custom', seconds: 5.2, aspect: '16:9', resolution: '480p', background: 'white', keepAudio: false,
         }}}));
     });
-    const normalBeforeModel = await stateInputs(page);
     await page.getByRole('button', {name: 'Choose model', exact: true}).click();
     await page.getByRole('dialog', {name: 'Choose a model', exact: true}).getByTitle('Test Frames T2V', {exact: true}).click();
     await waitFor(page, () => document.querySelector('[aria-label="Choose model"]')?.dataset.modelType === 'test_frames_text', 'controlled T2V title model');
-    assert.deepEqual(await stateInputs(page), normalBeforeModel, 'Selecting a title model preserves the ordinary Studio model and inputs.');
+    await waitFor(page, () => JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1') || 'null')?.model?.modelType === 'test_frames_text',
+      'T2V profile reaches the title payload snapshot');
     const modelAdvanced = await openTitleAdvanced(page);
-    assert.equal(await modelAdvanced.getByLabel('Title inference steps').inputValue(), '12');
-    assert.equal(await modelAdvanced.getByLabel('Title guidance', {exact: true}).inputValue(), '2.5');
-    await modelAdvanced.getByLabel('Title seed', {exact: true}).fill('314159');
+    const textGeneration = modelAdvanced.locator('[data-testid="advanced-generation"]');
+    const textSteps = textGeneration.getByText('Inference Steps', {exact: true}).locator('..').locator('input[type="number"]');
+    const textGuidance = textGeneration.getByText('Guidance Scale', {exact: true}).locator('..').locator('input[type="number"]');
+    if (!await textSteps.isVisible()) await textGeneration.locator('summary').click();
+    assert.equal(await textSteps.inputValue(), '12', 'T2V loads its own inference-step default in the shared panel.');
+    assert.equal(await textGuidance.inputValue(), '2.5', 'T2V loads its own guidance default in the shared panel.');
+    await textSteps.fill('15');
+    await textGuidance.fill('3.1');
+    await setStudioSeed(page, 314159);
+    await waitFor(page, () => window.store.getState().params.num_inference_steps === 15
+      && window.store.getState().params.guidance_scale === 3.1, 'editable shared title generation settings');
     await page.screenshot({path: path.join(SCREENSHOTS, 'studio-title-model-advanced.png'), fullPage: true});
-    await page.keyboard.press('Escape');
+    if (await page.getByRole('dialog', {name: 'Advanced settings', exact: true}).isVisible()) await page.keyboard.press('Escape');
     nextSubmissionMode = {status: 'completed', loseResponse: false};
     const beforeTextUploads = uploadRequests.length;
-    await page.getByRole('button', {name: 'Generate title', exact: true}).click();
-    await waitFor(page, () => window.titleStore.getState().intent?.status === 'completed', 'text-model title completion');
+    const beforeTextRequests = generationRequests.length;
+    await page.getByRole('button', {name: 'Generate', exact: true}).click();
+    await waitForNode(() => generationRequests.length > beforeTextRequests, 'new T2V title generation POST');
     const textBody = generationRequests.at(-1);
+    const t2vContext = await page.evaluate(() => ({
+      paramsModelType: window.store.getState().params.model_type,
+      modelOptionsType: window.store.getState().modelOptions?.model_type,
+      draftModel: JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1') || 'null')?.model,
+      intent: (() => {
+        const intent = window.titleStore.getState().intent;
+        return intent && {status: intent.status, error: intent.error, settingsModel: intent.settings?.model};
+      })(),
+      queueIntent: window.titleStore.getState().queueIntent,
+    }));
+    assert.equal(textBody.model_type, 'test_frames_text',
+      `The new T2V submission uses its selected profile: ${JSON.stringify({
+        ...t2vContext, requestModelType: textBody.model_type,
+        payloadModel: textBody._studio_title_settings?.model,
+        workflow: textBody._studio_video_workflow,
+      })}`);
+    await waitFor(page, () => window.titleStore.getState().intent?.status === 'completed'
+      && window.titleStore.getState().intent?.settings.model?.modelType === 'test_frames_text', 'text-model title completion');
     assert.equal(textBody.model_type, 'test_frames_text');
     assert.equal(textBody._studio_title_settings.model.fps, 16);
     assert.equal(textBody.video_length % 4, 1, 'The text model uses its own native frame lattice.');
-    assert.equal(textBody.num_inference_steps, 12);
-    assert.equal(textBody.guidance_scale, 2.5);
+    assert.ok(textBody.video_length <= 161, 'T2V titles stay within the model’s native frame cap.');
+    assert.equal(textBody.num_inference_steps, 15);
+    assert.equal(textBody.guidance_scale, 3.1);
     assert.equal(textBody.seed, 314159);
     assert.equal(textBody.sample_solver, 'euler');
     assert.equal(textBody.multi_prompts_gen_type, 2, 'A multiline title prompt always remains one clip.');
@@ -1210,17 +1347,68 @@ async function uploadedPixel(page, upload) {
     assert.equal(uploadRequests.length, beforeTextUploads, 'A text-only model is not sent unsupported boundary images.');
     assert.equal(await page.getByRole('button', {name: 'Dismiss', exact: true}).count(), 0);
     assert.equal(await page.getByRole('link', {name: 'Preview', exact: true}).count(), 0);
+    const beforeInvalidState = await page.evaluate(() => {
+      const {intent, queueIntent} = window.titleStore.getState();
+      return {
+        activeModel: window.store.getState().params.model_type,
+        optionsModel: window.store.getState().modelOptions?.model_type,
+        intent: intent && {id: intent.id, clientId: intent.clientId, status: intent.status,
+          error: intent.error, settingsModel: intent.settings?.model},
+        queueIntent,
+      };
+    });
+    const priorTextClientId = beforeInvalidState.intent?.clientId;
+    const beforeInvalidTextRequests = generationRequests.length;
+    const invalidTextSettings = {...textBody._studio_title_settings,
+      generationParams: {...textBody._studio_title_settings.generationParams, num_inference_steps: 0}};
+    invalidTextSettings.plannedKey = await page.evaluate(settings => window.titleHelpers.titlePlanningKey(settings), invalidTextSettings);
+    await page.evaluate(settings => window.titleStore.getState().submitStudio(settings, 'now'), invalidTextSettings);
+    await waitFor(page, () => window.titleStore.getState().error?.toLowerCase().includes('inference step'),
+      'invalid T2V steps validation');
+    assert.equal(generationRequests.length, beforeInvalidTextRequests,
+      'Invalid shared Advanced settings never POST a generation.');
+    assert.equal(await page.evaluate(() => window.titleStore.getState().intent?.clientId), priorTextClientId,
+      'Invalid steps do not replace the prior completed intent with a durable new intent.');
+    const afterInvalidState = await page.evaluate(() => {
+      const {intent, queueIntent} = window.titleStore.getState();
+      return {
+        activeModel: window.store.getState().params.model_type,
+        optionsModel: window.store.getState().modelOptions?.model_type,
+        intent: intent && {id: intent.id, clientId: intent.clientId, status: intent.status,
+          error: intent.error, settingsModel: intent.settings?.model},
+        queueIntent,
+      };
+    });
+    assert.equal(afterInvalidState.activeModel, beforeInvalidState.activeModel,
+      'Rejected invalid settings do not change the selected Studio model.');
+    assert.equal(afterInvalidState.optionsModel, beforeInvalidState.optionsModel,
+      'Rejected invalid settings do not change the active model options.');
+    assert.deepEqual(afterInvalidState.intent, beforeInvalidState.intent,
+      'Rejected invalid settings preserve the prior intent status, error, and model snapshot.');
+    assert.deepEqual(afterInvalidState.queueIntent, beforeInvalidState.queueIntent,
+      'Rejected invalid settings do not mutate a held queue receipt.');
+    nextSubmissionMode = {status: 'completed', loseResponse: false};
+    await page.getByRole('button', {name: 'Generate', exact: true}).click();
+    await waitForNode(() => generationRequests.length > beforeInvalidTextRequests,
+      'corrected T2V settings can be submitted after invalid-step rejection');
+    await waitFor(page, id => window.titleStore.getState().intent?.status === 'completed'
+      && window.titleStore.getState().intent?.clientId !== id,
+    'corrected T2V retry completes', 10000, priorTextClientId);
+    assert.equal(generationRequests.at(-1).num_inference_steps, 15,
+      'The valid shared Advanced value remains available for a corrected retry.');
     await page.getByRole('button', {name: 'Choose model', exact: true}).click();
     await page.getByRole('dialog', {name: 'Choose a model', exact: true}).getByTitle('Test Frames I2V', {exact: true}).click();
     await waitFor(page, () => document.querySelector('[aria-label="Choose model"]')?.dataset.modelType === 'test_frames_image', 'controlled I2V title model');
     await page.getByLabel('Title background', {exact: true}).first().selectOption('blue');
     nextSubmissionMode = {status: 'completed', loseResponse: false};
-    await page.getByRole('button', {name: 'Generate title', exact: true}).click();
+    await page.getByRole('button', {name: 'Generate', exact: true}).click();
     await waitFor(page, () => window.titleStore.getState().intent?.status === 'completed'
       && window.titleStore.getState().intent?.settings.background === 'blue', 'blue I2V title completion');
     const imageBody = generationRequests.at(-1);
     assert.equal(imageBody.model_type, 'test_frames_image');
-    assert.equal(imageBody.num_inference_steps, 8);
+    assert.equal(imageBody.num_inference_steps, 8, 'I2V loads the image model’s own default inference steps.');
+    assert.ok(imageBody.video_length <= 241 && imageBody.video_length % 8 === 1,
+      'I2V titles respect its native frame cap and step lattice.');
     assert.ok(imageBody.image_start);
     assert.ok(!imageBody.image_end, 'A start-only model is not sent an unsupported last frame.');
     assert.equal(imageBody.image_prompt_type, 'S');
@@ -1243,7 +1431,7 @@ async function uploadedPixel(page, upload) {
     await page.keyboard.press('Escape');
     await page.setViewportSize({width: 1360, height: 900});
     nextSubmissionMode = {status: 'completed', loseResponse: false};
-    await page.getByRole('button', {name: 'Generate title', exact: true}).click();
+    await page.getByRole('button', {name: 'Generate', exact: true}).click();
     await waitFor(page, () => window.titleStore.getState().intent?.status === 'completed'
       && window.titleStore.getState().intent?.settings.background === 'custom', 'custom-color title completion');
     assert.deepEqual(await uploadedPixel(page, uploadRequests.at(-1)), [51, 68, 85, 255]);
@@ -1259,17 +1447,9 @@ async function uploadedPixel(page, upload) {
     assert.deepEqual(editorKeying, [{background: 'blue', enabled: true, color: '#0000ff'},
       {background: 'white', enabled: false}, {background: 'custom', enabled: false}],
       'Blue keys with blue; white and custom title backgrounds remain opaque in the Editor.');
-    const legacyPlan = await page.evaluate(() => {
-      const settings = {...window.titleStore.getState().intent.settings, model: undefined, background: 'black'};
-      settings.plannedKey = JSON.stringify([settings.brief.trim(), settings.stylePreset ?? 'custom',
-        window.titleHelpers.titleFrames(settings.seconds), 'black']);
-      return {accepted: window.titleHelpers.titlePlanIsCurrent(settings),
-        changed: window.titleHelpers.titlePlanIsCurrent({...settings, brief: settings.brief + ' changed'}),
-        otherModel: window.titleHelpers.titlePlanIsCurrent({...settings, model: window.titleStore.getState().intent.settings.model})};
-    });
-    assert.deepEqual(legacyPlan, {accepted: true, changed: false, otherModel: false},
-      'Old H3 signatures survive an unused color-picker default without accepting changed wording or model context.');
-    assert.deepEqual(await stateInputs(page), normalBeforeModel, 'All title model/color submissions preserve unrelated Studio inputs.');
+    await chooseWorkflow(page, 'Frames');
+    assert.deepEqual(await stateInputs(page), normalBeforeModel,
+      'Leaving Titles restores the ordinary model, prompt, references, voices and Advanced settings.');
     assert.ok(preferenceUpdates.some(preference => preference.studio_video_workflow === 'titles'),
       'The title workflow is persisted as a normal Studio preference.');
     assert.deepEqual(pageErrors, [], 'The isolated Studio Titles sidebar has no runtime errors.');

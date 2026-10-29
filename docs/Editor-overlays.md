@@ -72,8 +72,12 @@ their own model selection and generation settings. Each model uses its own
 native frame timing and default inference settings; models with image guidance
 receive a matching background start image, plus an end image when supported.
 Text-only models follow the background instruction in the prompt. Use
-**Advanced**, immediately to the right of duration, for generation settings and
-the detailed title plan. Completed titles appear in the gallery without a
+**Advanced**, immediately to the right of duration, for the same model-dependent
+LoRAs and presets, performance, finishing and generation controls as Frames.
+The Generate button and its adjacent add-to-queue button also use the standard
+Studio controls. Queued titles remain held until you start the queue; each keeps
+the title, model and advanced settings selected when it was queued.
+Completed titles appear in the gallery without a
 separate completion banner in the composer.
 
 Planning makes one bounded writer call. It shares Maestro's existing GPU lease, so
@@ -82,9 +86,10 @@ locally and exposed under **AI draft and diagnostics**. A malformed reply preser
 the description and available draft; it does not submit a video or silently replace
 the text. There is no automatic retry loop.
 
-**Advanced** retains exact text, lettering, animation and phrase controls. Use it
-to adjust the AI plan or prepare a title without an LLM, then choose **Use manual
-title plan**. Existing saved title settings and pending render receipts remain usable.
+Studio's description and optional style control define the lettering, animation
+and phrase sequence. Single-title and phrase-sequence switches are not part of
+Studio Advanced. The Editor dialog retains its manual title-plan controls for
+precise edits. Existing saved title settings and pending render receipts remain usable.
 
 **Chroma key (green)** is selected by default. Maestro prepares matching, flat green
 start/end images at the requested dimensions and automatically keys the generated

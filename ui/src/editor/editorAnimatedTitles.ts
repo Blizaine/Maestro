@@ -179,6 +179,29 @@ export interface AnimatedTitleSettings {
   /** Missing on old Editor intents, which always used the native H3 Frames recipe. */
   model?: TitleModelProfile
   generation?: { steps?: number; guidance?: number; seed?: number }
+  /** Frozen standard Studio Advanced controls; title inputs remain owned by the composer. */
+  generationParams?: Record<string, unknown>
+}
+
+const TITLE_COMPOSER_INPUT_KEYS = new Set([
+  'prompt', 'alt_prompt', 'model_type', 'resolution', 'video_length', 'image_mode', 'generation_mode',
+  'workspace', 'settings_version', 'image_start', 'image_end', 'image_refs', 'image_guide', 'image_mask',
+  'image_prompt_type', 'video_prompt_type', 'audio_prompt_type', 'video_guide', 'video_mask', 'video_source',
+  'video_frame_offset', 'video_guide_outpainting', 'voice_reference', 'frames_positions', 'per_clip_frames',
+  'duration_seconds', 'remove_background_images_ref', 'minimax_h3_references', 'minimax_h3_control_visual_mode',
+  'minimax_h3_multi_window', 'minimax_h3_reference_sequence', 'minimax_h3_window_storyboard',
+  'minimax_h3_extended_duration', 'h3_window_prompts', 'h3_window_plan', 'h3_window_plan_signature',
+  'ltx_multi_window', 'ltx_window_prompt_mode', 'ltx_window_prompts',
+  'sliding_window_size', 'sliding_window_overlap', 'sliding_window_discard_last_frames', 'sliding_window_memory_override',
+  'multi_prompts_gen_type', 'input_video_strength', 'speakers_locations', 'viggle_character', 'audio_mixer_tracks',
+])
+
+/** Keep the ordinary generation controls without importing scene inputs or recursive UI metadata. */
+export function titleAdvancedParams(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const result = Object.fromEntries(Object.entries(value).filter(([key, item]) => item !== undefined
+    && !key.startsWith('_') && !TITLE_COMPOSER_INPUT_KEYS.has(key) && !/^audio_guide\d*$/.test(key)))
+  return JSON.parse(JSON.stringify(result)) as Record<string, unknown>
 }
 
 export interface TitleCreativePlan {
@@ -613,7 +636,13 @@ export function animatedTitleParams(settings: AnimatedTitleSettings, canvas: { w
     activated_loras: [], loras_multipliers: '', repeat_generation: 1, multi_prompts_gen_type: 2, custom_settings: {},
     _client_submission_id: clientId,
   }
-  const { steps, guidance, seed } = generationOverrides(settings, context, profile.modelType === TITLE_MODEL)
+  const advanced = titleAdvancedParams(settings.generationParams)
+  const generation = { ...settings.generation,
+    ...(typeof advanced.num_inference_steps === 'number' ? { steps: advanced.num_inference_steps } : {}),
+    ...(typeof advanced.guidance_scale === 'number' ? { guidance: advanced.guidance_scale } : {}),
+    ...(typeof advanced.seed === 'number' ? { seed: advanced.seed } : {}),
+  }
+  const { steps, guidance, seed } = generationOverrides({ ...settings, generation }, context, profile.modelType === TITLE_MODEL)
   if (steps !== undefined) params.num_inference_steps = steps
   if (guidance !== undefined) params.guidance_scale = guidance
   if (seed !== undefined) params.seed = seed
@@ -653,6 +682,24 @@ export function animatedTitleParams(settings: AnimatedTitleSettings, canvas: { w
     }
   } else {
     params.negative_prompt = ''
+  }
+  if (settings.generationParams) {
+    Object.assign(params, advanced)
+    // These are the mode-specific inputs: Advanced never changes a title into
+    // a source edit, independent prompt batch, or rolling continuation.
+    params.multi_prompts_gen_type = 2
+    params.sliding_window_size = frames
+    if (profile.nativeH3) {
+      params.minimax_h3_multi_window = false
+      params.minimax_h3_reference_sequence = false
+      params.minimax_h3_window_storyboard = false
+    } else {
+      for (const key of Object.keys(params)) if (key.startsWith('minimax_h3_')) delete params[key]
+      if (params.override_attention !== '' && params.override_attention !== 'sdpa') delete params.override_attention
+    }
+    if (steps !== undefined) params.num_inference_steps = steps
+    if (guidance !== undefined) params.guidance_scale = guidance
+    if (seed !== undefined) params.seed = seed
   }
   return params
 }

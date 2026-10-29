@@ -25,6 +25,7 @@ import type { EditorAIRoundTripTool, MiniMaxH3VideoAudioRole, SavedOmniCharacter
 import { applyTtsVoices, ttsAudioModeForCount, ttsCharacterEnhancePrompt, ttsSpeakingVoiceCount, ttsVoiceLimit, ttsVoicePaths } from '../lib/ttsVoices'
 import { vigglePreparationKey, viggleSourceReady, viggleTimeline } from '../lib/viggle'
 import { DEFAULT_AVATAR_SPEAKER_LOCATIONS, isLongCatAvatarModel, isMultiSpeakerAvatarModel, parseAvatarSpeakerRegions } from '../lib/avatarWorkflow'
+import { TITLE_MODEL } from '../editor/editorAnimatedTitles'
 import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, StudioVideoCreateRoute, StudioVideoEffectiveCreateRoute, StudioImageWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference, AppMode } from '../types'
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
@@ -696,7 +697,12 @@ function _stripEphemeralParams(perMode: Partial<Record<GenerationMode, SavedMode
 function _saveSettings(
   state: PersistedModeSettings,
   filenameToLoraId?: Record<string, string>,
+  allowTitleContext = false,
 ) {
+  // While Titles borrows the video controls, ordinary per-mode saves must
+  // keep writing the stashed Frames/References/Avatar context. The sticky
+  // navigation save opts in explicitly and supplies that stashed state.
+  if (_titleGenerationContextActive && !allowTitleContext) return
   try {
     // Older save call sites intentionally pass only the core per-mode state.
     // Preserve the explicitly sticky UI fields already on disk so a later
@@ -884,6 +890,9 @@ const _PRIMARY_MODEL_DEFAULT_FIELDS: ReadonlyArray<string> = [
 // Monotonic sequence for loadModelOptions staleness detection — only the
 // most recently requested model's options may touch the store.
 let _modelOptionsSeq = 0
+let _loraLoadSeq = 0
+let _titleGenerationContextEpoch = 0
+let _titleGenerationContextActive = false
 let _modelsLoadInFlight: Promise<void> | null = null
 let _modelCatalogReadFailed = false
 let _startupDefaultsPending: { modelType: string; baseline: GenerateParams } | null = null
@@ -972,6 +981,7 @@ function _applyModelDefaults(
   preserveEditsSince?: GenerateParams,
 ): Promise<boolean> {
   const before = storeGet()
+  const contextEpoch = _titleGenerationContextEpoch
   const pending = before.modelsLoading || before.modelsLoadError || preserveEditsSince
     ? {modelType, baseline: preserveEditsSince || before.params} : null
   // A model can be changed while a startup error is visible. Track its
@@ -982,6 +992,7 @@ function _applyModelDefaults(
     // Race guard: model may have been switched again while this fetch
     // was in flight. Apply only if still the active model in current mode.
     const state = storeGet()
+    if (contextEpoch !== _titleGenerationContextEpoch) return true
     const active = state.selectedModelPerMode[state.generationMode]
     if (active !== modelType) return true
     const overrides: Record<string, unknown> = {}
@@ -1604,6 +1615,11 @@ interface AppState {
   studioVideoWorkflow: StudioVideoWorkflow
   /** Route a Studio workflow to its legacy video/avatar/tools engine. */
   setStudioVideoWorkflow: (workflow: StudioVideoWorkflow) => void
+  /** Active video context saved while Titles uses the regular Advanced controls. */
+  titleGenerationContext: TitleGenerationContext | null
+  titleGenerationContextParamsHydrationKey: string | null
+  enterTitleGenerationContext: (modelType?: string, params?: TitleGenerationParams) => void
+  leaveTitleGenerationContext: () => void
   /** Compatibility field for saved state; Studio Generate is always automatic. */
   studioVideoCreateRoute: StudioVideoCreateRoute
   studioVideoEffectiveCreateRoute: StudioVideoEffectiveCreateRoute
@@ -2220,7 +2236,7 @@ interface AppState {
   setSettingsTab: (tab: SettingsTab) => void
 
   // Select model (triggers side effects)
-  selectModel: (modelType: string) => void
+  selectModel: (modelType: string, preserveEditsSince?: GenerateParams) => void
 
   // Workspaces
   workspaces: Array<{ name: string; path: string; file_count?: number }>
@@ -2879,6 +2895,75 @@ interface VideoSubModeStash {
   singlePromptMode: boolean
 }
 
+/** Temporary live state used by Studio Titles while it borrows the normal
+ *  video Advanced controls. The ordinary video context is restored as a
+ *  single snapshot when Titles closes. Title draft persistence belongs to
+ *  the title composer; this object only protects the current video session. */
+interface TitleGenerationContext {
+  workflow: StudioVideoWorkflow
+  generationMode: GenerationMode
+  params: GenerateParams
+  selectedModelPerMode: Partial<Record<GenerationMode, string>>
+  savedLoraPerMode: Partial<Record<GenerationMode, LoraModeBlob>>
+  savedParamsPerMode: Partial<Record<GenerationMode, SavedModeParams>>
+  savedPromptPerMode: Partial<Record<string, string>>
+  studioVideoCreateRoute: StudioVideoCreateRoute
+  studioVideoEffectiveCreateRoute: StudioVideoEffectiveCreateRoute
+  studioVideoModelPerCreateRoute: Partial<Record<StudioVideoEffectiveCreateRoute, string>>
+  studioVideoRouteNotice: {
+    message: string
+    previousRoute: StudioVideoEffectiveCreateRoute
+    previousModel: string
+    undoable?: boolean
+  } | null
+  videoSubModeStash: Partial<Record<number, VideoSubModeStash>>
+  modelOptions: ModelOptions | null
+  modelOptionsLoading: boolean
+  modelsLoadError: string | null
+  loraWeights: Record<string, number[]>
+  availableLoras: string[]
+  lorasLoading: boolean
+  resolutionPreset: ResolutionPreset
+  aspectRatio: AspectRatio
+  durationSeconds: number
+  slidingWindowSeconds: number
+  slidingWindowOverlap: number
+  slidingWindowLocked: boolean
+  restoredWindowSelectionKey: string | null
+  h3WindowPlan: H3WindowPlan | null
+  h3WindowOverrides: Record<string, number>
+  promptEnhanceError: string | null
+  startImage: File | null
+  endImage: File | null
+  continueVideo: File | null
+  continueVideoPath: string
+  continueVideoUrl: string
+  continueVideoDuration: number
+  audioGuideFilename: string | null
+  imageRefs: File[]
+  imageRefType: string
+  removeBackgroundRefs: boolean
+  guideVideoFps: number | null
+  clips: MultiClip[]
+  singlePromptMode: boolean
+  spatialUpsampling: string
+  filmGrainIntensity: number
+  filmGrainSaturation: number
+  voiceCloneEnabled: boolean
+  voiceCloneMode: 'single' | 'two'
+  voiceCloneRefs: { filename: string; path: string }[]
+  outputCount: number
+  inferenceStepsPerModel: Record<string, number>
+  kreaIdentitySettingsPerModel: Record<string, KreaIdentitySettings>
+  h3OptimizationPreferences: AppState['h3OptimizationPreferences']
+}
+
+type TitleGenerationParams = Partial<GenerateParams> & {
+  spatial_upsampling?: string
+  film_grain_intensity?: number
+  film_grain_saturation?: number
+}
+
 const captureVideoSubModeStash = (s: AppState): VideoSubModeStash => ({
   params: { ...s.params },
   startImage: s.startImage,
@@ -2897,6 +2982,141 @@ const captureVideoSubModeStash = (s: AppState): VideoSubModeStash => ({
   clips: s.clips,
   singlePromptMode: s.singlePromptMode,
 })
+
+function _titleModelTypeFromSettings(settings: unknown): string | undefined {
+  const model = _record(_record(settings).model)
+  const value = model.modelType ?? model.model_type
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function _titleParamsHydrationSignature(params: TitleGenerationParams): string | null {
+  const ancestors = new WeakSet<object>()
+  const normalize = (value: unknown): unknown => {
+    if (!value || typeof value !== 'object') return value
+    if (ancestors.has(value)) return '[Circular]'
+    ancestors.add(value)
+    const normalized = Array.isArray(value)
+      ? value.map(normalize)
+      : Object.fromEntries(Object.entries(value as Record<string, unknown>)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, child]) => [key, normalize(child)]))
+    ancestors.delete(value)
+    return normalized
+  }
+  try { return JSON.stringify(normalize(params)) ?? null }
+  catch { return null }
+}
+
+function _cloneLoraModeBlob(blob: LoraModeBlob): LoraModeBlob {
+  return {
+    activated_loras: [...(blob.activated_loras || [])],
+    loras_multipliers: blob.loras_multipliers || '',
+    loraWeights: Object.fromEntries(Object.entries(blob.loraWeights || {}).map(([name, weights]) => [name, [...weights]])),
+    availableLoras: [...(blob.availableLoras || [])],
+  }
+}
+
+function _snapshotTitleGenerationContext(state: AppState): TitleGenerationContext {
+  const returnModelType = state.selectedModelPerMode.video || state.params.model_type
+  const returnModel = state.models.find(model => model.model_type === returnModelType)
+  const persistedWorkflow = state.savedParamsPerMode.video?._studio_video_workflow
+  const returnWorkflow = state.studioVideoWorkflow === 'titles'
+    ? (_normalizeStudioVideoWorkflow(persistedWorkflow, returnModel)
+      ?? 'frames')
+    : state.studioVideoWorkflow
+  const params = {
+    ...state.params,
+    activated_loras: [...(state.params.activated_loras || [])],
+    image_refs: Array.isArray(state.params.image_refs) ? [...state.params.image_refs] : state.params.image_refs,
+    custom_settings: state.params.custom_settings ? { ...state.params.custom_settings } : undefined,
+  }
+  if (state.studioVideoWorkflow === 'titles') {
+    const savedImageMode = state.savedParamsPerMode.video?.image_mode
+    params._studio_video_workflow = returnWorkflow
+    params.image_mode = typeof savedImageMode === 'number'
+      ? savedImageMode
+      : returnWorkflow === 'extend' ? 3 : returnWorkflow === 'blend' ? 4 : 0
+  }
+  const savedLoraPerMode = Object.fromEntries(
+    Object.entries(state.savedLoraPerMode).map(([mode, blob]) => [mode, blob ? _cloneLoraModeBlob(blob) : blob]),
+  ) as AppState['savedLoraPerMode']
+  const savedParamsPerMode = Object.fromEntries(
+    Object.entries(state.savedParamsPerMode).map(([mode, saved]) => [mode, saved ? { ...saved } : saved]),
+  ) as AppState['savedParamsPerMode']
+  const videoSubModeStash = Object.fromEntries(
+    Object.entries(state.videoSubModeStash).map(([mode, saved]) => [mode, saved ? {
+      ...saved,
+      params: { ...saved.params },
+      imageRefs: [...saved.imageRefs],
+      clips: saved.clips.map(clip => ({ ...clip })),
+    } : saved]),
+  ) as AppState['videoSubModeStash']
+  return {
+    workflow: returnWorkflow,
+    generationMode: state.generationMode,
+    params,
+    selectedModelPerMode: { ...state.selectedModelPerMode },
+    savedLoraPerMode,
+    savedParamsPerMode,
+    savedPromptPerMode: { ...state.savedPromptPerMode },
+    studioVideoCreateRoute: state.studioVideoCreateRoute,
+    studioVideoEffectiveCreateRoute: state.studioVideoEffectiveCreateRoute,
+    studioVideoModelPerCreateRoute: { ...state.studioVideoModelPerCreateRoute },
+    studioVideoRouteNotice: state.studioVideoRouteNotice ? { ...state.studioVideoRouteNotice } : null,
+    videoSubModeStash,
+    modelOptions: state.modelOptions,
+    modelOptionsLoading: state.modelOptionsLoading,
+    modelsLoadError: state.modelsLoadError,
+    loraWeights: Object.fromEntries(Object.entries(state.loraWeights).map(([name, weights]) => [name, [...weights]])),
+    availableLoras: [...state.availableLoras],
+    lorasLoading: state.lorasLoading,
+    resolutionPreset: state.resolutionPreset,
+    aspectRatio: state.aspectRatio,
+    durationSeconds: state.durationSeconds,
+    slidingWindowSeconds: state.slidingWindowSeconds,
+    slidingWindowOverlap: state.slidingWindowOverlap,
+    slidingWindowLocked: state.slidingWindowLocked,
+    restoredWindowSelectionKey: state.restoredWindowSelectionKey,
+    h3WindowPlan: state.h3WindowPlan,
+    h3WindowOverrides: { ...state.h3WindowOverrides },
+    promptEnhanceError: state.promptEnhanceError,
+    startImage: state.startImage,
+    endImage: state.endImage,
+    continueVideo: state.continueVideo,
+    continueVideoPath: state.continueVideoPath,
+    continueVideoUrl: state.continueVideoUrl,
+    continueVideoDuration: state.continueVideoDuration,
+    audioGuideFilename: state.audioGuideFilename,
+    imageRefs: [...state.imageRefs],
+    imageRefType: state.imageRefType,
+    removeBackgroundRefs: state.removeBackgroundRefs,
+    guideVideoFps: state.guideVideoFps,
+    clips: state.clips.map(clip => ({ ...clip })),
+    singlePromptMode: state.singlePromptMode,
+    spatialUpsampling: state.spatialUpsampling,
+    filmGrainIntensity: state.filmGrainIntensity,
+    filmGrainSaturation: state.filmGrainSaturation,
+    voiceCloneEnabled: state.voiceCloneEnabled,
+    voiceCloneMode: state.voiceCloneMode,
+    voiceCloneRefs: state.voiceCloneRefs.map(reference => ({ ...reference })),
+    outputCount: state.outputCount,
+    inferenceStepsPerModel: { ...state.inferenceStepsPerModel },
+    kreaIdentitySettingsPerModel: Object.fromEntries(
+      Object.entries(state.kreaIdentitySettingsPerModel).map(([model, settings]) => [model, { ...settings }]),
+    ),
+    h3OptimizationPreferences: { ...state.h3OptimizationPreferences },
+  }
+}
+
+function _titleLoraWeightsFromParams(params: Partial<GenerateParams>): Record<string, number[]> {
+  const weights: Record<string, number[]> = {}
+  const loras = params.activated_loras || []
+  const multipliers = String(params.loras_multipliers || '').split(' ').filter(Boolean)
+  for (let index = 0; index < loras.length; index++) {
+    weights[loras[index]] = (multipliers[index] || '1.00').split(';').map(Number)
+  }
+  return weights
+}
 
 // The "input spec" — everything the Inputs panel + prompt box write into
 // params. Blanked when entering a sub-mode with no stash yet; the
@@ -3413,33 +3633,40 @@ export function shouldEnhanceOnGeneration(state: Pick<AppState,
  *  seeds, LoRAs, or other Advanced controls. The server mirror makes the
  *  choices survive Pinokio assigning a different browser origin/port. */
 function _persistStickyStudioPreferences(state: AppState) {
+  const titleContext = state.titleGenerationContext
+  const selectedModelPerMode = titleContext?.selectedModelPerMode ?? state.selectedModelPerMode
+  const savedParamsPerMode = titleContext?.savedParamsPerMode ?? state.savedParamsPerMode
+  const savedLoraPerMode = titleContext?.savedLoraPerMode ?? state.savedLoraPerMode
+  const savedPromptPerMode = titleContext?.savedPromptPerMode ?? state.savedPromptPerMode
+  const inferenceStepsPerModel = titleContext?.inferenceStepsPerModel ?? state.inferenceStepsPerModel
+  const kreaIdentitySettingsPerModel = titleContext?.kreaIdentitySettingsPerModel ?? state.kreaIdentitySettingsPerModel
+  const h3OptimizationPreferences = titleContext?.h3OptimizationPreferences ?? state.h3OptimizationPreferences
   const durableGenerationMode: Exclude<GenerationMode, 'tools'> = (
     state.generationMode === 'tools'
       ? state.toolsUpscaleMedia === 'image' ? 'image' : 'video'
       : state.generationMode
   )
-  const h3OptimizationPreferences = state.h3OptimizationPreferences
   // Startup callbacks may save other Studio choices before preferences arrive.
   // Do not replace a saved opt-in with the store's initial false value.
   const enhancementDefault = _studioPreferencesHydrated || _enhancementDefaultChanged
     ? state.enhanceOnGenerationDefault : undefined
   const kreaIdentitySettings = _studioPreferencesHydrated || _kreaIdentitySettingsChanged
-    ? state.kreaIdentitySettingsPerModel : undefined
+    ? kreaIdentitySettingsPerModel : undefined
   _saveSettings({
     generationMode: durableGenerationMode,
-    selectedModelPerMode: state.selectedModelPerMode,
-    savedParamsPerMode: state.savedParamsPerMode,
-    savedLoraPerMode: state.savedLoraPerMode,
-    savedPromptPerMode: state.savedPromptPerMode,
+    selectedModelPerMode,
+    savedParamsPerMode,
+    savedLoraPerMode,
+    savedPromptPerMode,
     studioVideoWorkflow: state.studioVideoWorkflow,
     studioImageWorkflow: state.studioImageWorkflow,
     audioSubMode: state.audioSubMode,
     selectedModelPerAudioSubMode: state.selectedModelPerAudioSubMode,
-    inferenceStepsPerModel: state.inferenceStepsPerModel,
+    inferenceStepsPerModel,
     kreaIdentitySettingsPerModel: kreaIdentitySettings,
     enhanceOnGenerationDefault: enhancementDefault,
     h3OptimizationPreferences,
-  }, state.loraIdByFilename)
+  }, state.loraIdByFilename, Boolean(titleContext))
 
   const update: api.StudioPreferenceUpdate = {
     generation_mode: durableGenerationMode,
@@ -3447,13 +3674,13 @@ function _persistStickyStudioPreferences(state: AppState) {
     studio_image_workflow: state.studioImageWorkflow,
     audio_sub_mode: state.audioSubMode,
     selected_model_per_mode: Object.fromEntries(
-      Object.entries(state.selectedModelPerMode).filter(([, model]) => Boolean(model)),
+      Object.entries(selectedModelPerMode).filter(([, model]) => Boolean(model)),
     ),
     selected_model_per_audio_sub_mode: Object.fromEntries(
       Object.entries(state.selectedModelPerAudioSubMode).filter(([, model]) => Boolean(model)),
     ),
     h3_optimizations: h3OptimizationPreferences,
-    inference_steps_per_model: state.inferenceStepsPerModel,
+    inference_steps_per_model: inferenceStepsPerModel,
     krea_identity_settings_per_model: kreaIdentitySettings,
     enhance_on_generation_default: enhancementDefault,
     ...(_musicDefaultsVersion > 0 ? {music_defaults_version: _musicDefaultsVersion} : {}),
@@ -3508,6 +3735,289 @@ export const useStore = create<AppState>((set, get) => ({
   // Generation mode
   generationMode: 'video',
   studioVideoWorkflow: 'frames' as StudioVideoWorkflow,
+  titleGenerationContext: null,
+  titleGenerationContextParamsHydrationKey: null,
+  enterTitleGenerationContext: (requestedModelType, requestedParams) => {
+    if (get().generationMode !== 'video') get().setGenerationMode('video')
+    let state = get()
+    const firstEntry = !state.titleGenerationContext
+
+    if (firstEntry && state.studioVideoWorkflow !== 'titles') {
+      const previousImageMode = Number(state.params.image_mode) || 0
+      set(current => ({
+        videoSubModeStash: {
+          ...current.videoSubModeStash,
+          [previousImageMode]: captureVideoSubModeStash(current),
+        },
+      }))
+      state = get()
+    }
+
+    const currentTitleContext = state.titleGenerationContext
+    const titleSettingsModel = _titleModelTypeFromSettings(state.params._studio_title_settings)
+    const requestedFromParams = typeof requestedParams?.model_type === 'string'
+      ? requestedParams.model_type : undefined
+    const wantedModelType = requestedModelType || requestedFromParams
+      || (currentTitleContext ? state.params.model_type : titleSettingsModel || TITLE_MODEL)
+    const isVideoModel = (type: string | undefined) => {
+      const model = state.models.find(candidate => candidate.model_type === type)
+      return !!model && getModelMode(type!, model.family) === 'video'
+    }
+    const modelType = isVideoModel(wantedModelType)
+      ? wantedModelType
+      : isVideoModel(TITLE_MODEL) ? TITLE_MODEL : state.params.model_type
+    const currentModelType = String(state.params.model_type || '')
+    const context = currentTitleContext || _snapshotTitleGenerationContext(state)
+    const requestedParamsSignature = requestedParams
+      ? _titleParamsHydrationSignature(requestedParams) : null
+    const applyRequestedParams = Boolean(requestedParams)
+      && (firstEntry
+        || requestedParamsSignature == null
+        || requestedParamsSignature !== state.titleGenerationContextParamsHydrationKey
+        || modelType !== currentModelType)
+    const titleParams = applyRequestedParams && requestedParams
+      ? { ...requestedParams }
+      : undefined
+    const titleExtras = _record(titleParams)
+    const titleVoicePaths = Array.isArray(titleExtras.voice_clone_refs)
+      ? titleExtras.voice_clone_refs.filter((path): path is string => typeof path === 'string' && Boolean(path)).slice(0, 2)
+      : []
+    if (titleParams) {
+      delete titleParams.model_type
+      delete titleParams.image_mode
+      delete titleParams._studio_video_workflow
+    }
+
+    const baseParams: GenerateParams = firstEntry
+      ? {
+          ...defaultParams,
+          prompt: '',
+          model_type: currentModelType,
+          image_mode: 0,
+          _studio_video_workflow: 'titles',
+          _studio_title_settings: state.params._studio_title_settings,
+        }
+      : { ...state.params }
+    const preserveDefaultsSince = { ...baseParams } as GenerateParams
+    if (titleParams) {
+      for (const key of Object.keys(titleParams)) {
+        delete (preserveDefaultsSince as unknown as Record<string, unknown>)[key]
+      }
+    }
+    const initialTitleParams = {
+      ...baseParams,
+      ...(titleParams || {}),
+      model_type: modelType,
+      image_mode: 0,
+      _studio_video_workflow: 'titles' as const,
+    }
+
+    if (firstEntry) {
+      _titleGenerationContextActive = true
+      _titleGenerationContextEpoch += 1
+      _modelOptionsSeq += 1
+      _loraLoadSeq += 1
+      set({
+        titleGenerationContext: context,
+        titleGenerationContextParamsHydrationKey: titleParams ? requestedParamsSignature : null,
+        studioVideoWorkflow: 'titles',
+        params: initialTitleParams,
+        modelOptions: state.modelOptions?.model_type === modelType ? state.modelOptions : null,
+        modelOptionsLoading: false,
+        loraWeights: titleParams ? _titleLoraWeightsFromParams(initialTitleParams) : {},
+        availableLoras: [],
+        lorasLoading: false,
+        startImage: null,
+        endImage: null,
+        continueVideo: null,
+        continueVideoPath: '',
+        continueVideoUrl: '',
+        continueVideoDuration: 0,
+        audioGuideFilename: null,
+        imageRefs: [],
+        imageRefType: '',
+        removeBackgroundRefs: false,
+        guideVideoFps: null,
+        clips: [],
+        singlePromptMode: false,
+        resolutionPreset: '720p',
+        aspectRatio: '16:9',
+        durationSeconds: typeof titleExtras.duration_seconds === 'number'
+          ? Number(titleExtras.duration_seconds) : 5,
+        slidingWindowSeconds: 5,
+        slidingWindowOverlap: 5,
+        slidingWindowLocked: false,
+        h3WindowPlan: null,
+        promptEnhanceError: null,
+        spatialUpsampling: typeof titleExtras.spatial_upsampling === 'string'
+          ? titleExtras.spatial_upsampling : '',
+        filmGrainIntensity: typeof titleExtras.film_grain_intensity === 'number'
+          ? titleExtras.film_grain_intensity : 0,
+        filmGrainSaturation: typeof titleExtras.film_grain_saturation === 'number'
+          ? titleExtras.film_grain_saturation : 0.5,
+        voiceCloneEnabled: titleExtras.voice_clone_enabled === true,
+        voiceCloneMode: titleExtras.voice_clone_mode === 'two' ? 'two' : 'single',
+        voiceCloneRefs: titleVoicePaths.map(path => ({ filename: _assetName(path, 'Voice reference'), path })),
+        outputCount: typeof titleParams?.repeat_generation === 'number' ? titleParams.repeat_generation : 1,
+      })
+    } else if (titleParams || modelType !== currentModelType) {
+      set({
+        params: initialTitleParams,
+        ...(titleParams
+          ? { titleGenerationContextParamsHydrationKey: requestedParamsSignature } : {}),
+        ...(titleParams ? {
+          loraWeights: _titleLoraWeightsFromParams(initialTitleParams),
+          durationSeconds: typeof titleExtras.duration_seconds === 'number' ? titleExtras.duration_seconds : 5,
+          spatialUpsampling: typeof titleExtras.spatial_upsampling === 'string' ? titleExtras.spatial_upsampling : '',
+          filmGrainIntensity: typeof titleExtras.film_grain_intensity === 'number' ? titleExtras.film_grain_intensity : 0,
+          filmGrainSaturation: typeof titleExtras.film_grain_saturation === 'number' ? titleExtras.film_grain_saturation : 0.5,
+          voiceCloneEnabled: titleExtras.voice_clone_enabled === true,
+          voiceCloneMode: titleExtras.voice_clone_mode === 'two' ? 'two' : 'single',
+          voiceCloneRefs: titleVoicePaths.map(path => ({ filename: _assetName(path, 'Voice reference'), path })),
+          outputCount: typeof titleParams.repeat_generation === 'number' ? titleParams.repeat_generation : 1,
+        } : {}),
+      })
+    }
+
+    state = get()
+    const selectedDuringEntry = firstEntry || modelType !== currentModelType
+    if (selectedDuringEntry) {
+      _titleGenerationContextEpoch += 1
+      get().selectModel(modelType, titleParams ? preserveDefaultsSince : undefined)
+      if (titleParams) {
+        set(current => ({
+          params: {
+            ...current.params,
+            ...titleParams,
+            model_type: modelType,
+            image_mode: 0,
+            _studio_video_workflow: 'titles',
+          },
+          loraWeights: _titleLoraWeightsFromParams({ ...current.params, ...titleParams }),
+          ...(typeof (titleParams as Record<string, unknown>).duration_seconds === 'number'
+            ? { durationSeconds: Number((titleParams as Record<string, unknown>).duration_seconds) } : {}),
+          ...(typeof (titleParams as Record<string, unknown>).spatial_upsampling === 'string'
+            ? { spatialUpsampling: String((titleParams as Record<string, unknown>).spatial_upsampling) } : {}),
+          ...(typeof (titleParams as Record<string, unknown>).film_grain_intensity === 'number'
+            ? { filmGrainIntensity: Number((titleParams as Record<string, unknown>).film_grain_intensity) } : {}),
+          ...(typeof (titleParams as Record<string, unknown>).film_grain_saturation === 'number'
+            ? { filmGrainSaturation: Number((titleParams as Record<string, unknown>).film_grain_saturation) } : {}),
+          ...(typeof titleExtras.voice_clone_enabled === 'boolean'
+            ? { voiceCloneEnabled: titleExtras.voice_clone_enabled } : {}),
+          ...(titleExtras.voice_clone_mode === 'single' || titleExtras.voice_clone_mode === 'two'
+            ? { voiceCloneMode: titleExtras.voice_clone_mode } : {}),
+          ...(Array.isArray(titleExtras.voice_clone_refs) ? {
+            voiceCloneRefs: titleVoicePaths.map(path => ({ filename: _assetName(path, 'Voice reference'), path })),
+          } : {}),
+          ...(typeof titleParams.repeat_generation === 'number'
+            ? { outputCount: titleParams.repeat_generation } : {}),
+        }))
+      }
+    } else if (titleParams && (state.modelOptionsLoading || state.modelOptions?.model_type !== modelType)) {
+      _titleGenerationContextEpoch += 1
+      _modelOptionsSeq += 1
+      get().loadModelOptions(modelType, preserveDefaultsSince)
+      void _applyModelDefaults(get, set, modelType, preserveDefaultsSince)
+    }
+
+    const finalState = get()
+    if (modelType && finalState.params.model_type === modelType && !sfxModelTypes.has(modelType)) {
+      if (!selectedDuringEntry) get().loadLoras(modelType)
+      if (finalState.modelOptions?.model_type !== modelType && !finalState.modelOptionsLoading) {
+        get().loadModelOptions(modelType, titleParams ? preserveDefaultsSince : undefined)
+        void _applyModelDefaults(get, set, modelType, titleParams ? preserveDefaultsSince : undefined)
+      }
+    }
+    _persistStickyStudioPreferences(get())
+  },
+  leaveTitleGenerationContext: () => {
+    const context = get().titleGenerationContext
+    if (!context) return
+    const restoredModelType = String(context.params.model_type || '')
+    const hasRestoredOptions = context.modelOptions?.model_type === restoredModelType
+    const preserveRestoredParams = { ...context.params } as GenerateParams
+    for (const field of [..._PRIMARY_MODEL_DEFAULT_FIELDS, 'custom_settings']) {
+      delete (preserveRestoredParams as unknown as Record<string, unknown>)[field]
+    }
+    _titleGenerationContextActive = false
+    _titleGenerationContextEpoch += 1
+    _modelOptionsSeq += 1
+    _loraLoadSeq += 1
+    set({
+      titleGenerationContext: null,
+      titleGenerationContextParamsHydrationKey: null,
+      generationMode: context.generationMode,
+      studioVideoWorkflow: context.workflow,
+      studioVideoCreateRoute: context.studioVideoCreateRoute,
+      studioVideoEffectiveCreateRoute: context.studioVideoEffectiveCreateRoute,
+      studioVideoModelPerCreateRoute: context.studioVideoModelPerCreateRoute,
+      studioVideoRouteNotice: context.studioVideoRouteNotice,
+      selectedModelPerMode: context.selectedModelPerMode,
+      savedLoraPerMode: context.savedLoraPerMode,
+      savedParamsPerMode: context.savedParamsPerMode,
+      savedPromptPerMode: context.savedPromptPerMode,
+      videoSubModeStash: context.videoSubModeStash,
+      modelOptions: context.modelOptions,
+      modelOptionsLoading: false,
+      modelsLoadError: context.modelsLoadError,
+      params: {
+        ...context.params,
+        image_mode: context.workflow === 'extend' ? 3
+          : context.workflow === 'blend' ? 4 : context.params.image_mode,
+        _studio_video_workflow: context.workflow,
+        _studio_title_settings: undefined,
+      },
+      loraWeights: context.loraWeights,
+      availableLoras: context.availableLoras,
+      lorasLoading: false,
+      resolutionPreset: context.resolutionPreset,
+      aspectRatio: context.aspectRatio,
+      durationSeconds: context.durationSeconds,
+      slidingWindowSeconds: context.slidingWindowSeconds,
+      slidingWindowOverlap: context.slidingWindowOverlap,
+      slidingWindowLocked: context.slidingWindowLocked,
+      restoredWindowSelectionKey: context.restoredWindowSelectionKey,
+      h3WindowPlan: context.h3WindowPlan,
+      h3WindowOverrides: context.h3WindowOverrides,
+      promptEnhanceError: context.promptEnhanceError,
+      startImage: context.startImage,
+      endImage: context.endImage,
+      continueVideo: context.continueVideo,
+      continueVideoPath: context.continueVideoPath,
+      continueVideoUrl: context.continueVideoUrl,
+      continueVideoDuration: context.continueVideoDuration,
+      audioGuideFilename: context.audioGuideFilename,
+      imageRefs: context.imageRefs,
+      imageRefType: context.imageRefType,
+      removeBackgroundRefs: context.removeBackgroundRefs,
+      guideVideoFps: context.guideVideoFps,
+      clips: context.clips,
+      singlePromptMode: context.singlePromptMode,
+      spatialUpsampling: context.spatialUpsampling,
+      filmGrainIntensity: context.filmGrainIntensity,
+      filmGrainSaturation: context.filmGrainSaturation,
+      voiceCloneEnabled: context.voiceCloneEnabled,
+      voiceCloneMode: context.voiceCloneMode,
+      voiceCloneRefs: context.voiceCloneRefs,
+      outputCount: context.outputCount,
+      inferenceStepsPerModel: context.inferenceStepsPerModel,
+      kreaIdentitySettingsPerModel: context.kreaIdentitySettingsPerModel,
+      h3OptimizationPreferences: context.h3OptimizationPreferences,
+    })
+    if (restoredModelType && !sfxModelTypes.has(restoredModelType)) {
+      if (!hasRestoredOptions) {
+        get().loadModelOptions(restoredModelType, preserveRestoredParams)
+        void _applyModelDefaults(get, set, restoredModelType, preserveRestoredParams)
+      } else if (context.modelOptionsLoading) {
+        get().loadModelOptions(restoredModelType, preserveRestoredParams)
+        void _applyModelDefaults(get, set, restoredModelType, preserveRestoredParams)
+      } else if (_startupDefaultsPending?.modelType === restoredModelType) {
+        void _applyModelDefaults(get, set, restoredModelType, preserveRestoredParams)
+      }
+      if (context.lorasLoading) get().loadLoras(restoredModelType)
+    }
+    _persistStickyStudioPreferences(get())
+  },
   studioVideoCreateRoute: 'auto',
   studioVideoEffectiveCreateRoute: 'generate',
   studioVideoModelPerCreateRoute: _initialStudioVideoRoutePreferences.models,
@@ -3600,42 +4110,47 @@ export const useStore = create<AppState>((set, get) => ({
     get().selectModel(modelType)
   },
   setStudioVideoWorkflow: (workflow) => {
+    if (get().titleGenerationContext && workflow !== 'titles') {
+      get().leaveTitleGenerationContext()
+    }
     const previousWorkflow = get().studioVideoWorkflow
-    set(state => ({
-      studioVideoWorkflow: workflow,
-      ...(previousWorkflow === 'titles' && workflow !== 'titles' ? {
-        params: { ...state.params, _studio_title_settings: undefined },
-      } : workflow !== 'titles' && previousWorkflow === 'avatar' && workflow !== 'avatar' ? {
-        params: { ...state.params, audio_prompt_type: String(state.params.audio_prompt_type || '').replace(/B/g, '') },
-      } : {}),
-    }))
     const persist = () => _persistStickyStudioPreferences(get())
 
     if (workflow === 'titles') {
       if (get().generationMode !== 'video') get().setGenerationMode('video')
-      // This form owns its inputs. Leave the selected model, prompt, references,
-      // and other video parameters intact while clearing any Blend/Extend mode
-      // residue from the engine-facing selector.
-      set(state => {
-        const previousImageMode = Number(state.params.image_mode) || 0
-        const nextSubModeStash = previousWorkflow === 'titles'
-          ? state.videoSubModeStash
-          : {
-              ...state.videoSubModeStash,
-              [previousImageMode]: captureVideoSubModeStash({
-                ...state,
-                params: { ...state.params, _studio_title_settings: undefined },
-              }),
-            }
-        return {
-          studioVideoWorkflow: workflow,
-          videoSubModeStash: nextSubModeStash,
-          params: { ...state.params, image_mode: 0, _studio_video_workflow: workflow },
-        }
-      })
+      const state = get()
+      get().enterTitleGenerationContext(
+        state.titleGenerationContext ? undefined : _titleModelTypeFromSettings(state.params._studio_title_settings),
+      )
       persist()
       return
     }
+
+    set(state => {
+      const leavingAvatar = previousWorkflow === 'avatar' && workflow !== 'avatar'
+      const imageMode = Number(state.params.image_mode) || 0
+      const savedSubMode = state.videoSubModeStash[imageMode]
+      return {
+        studioVideoWorkflow: workflow,
+        ...(previousWorkflow === 'titles' ? {
+          params: { ...state.params, _studio_title_settings: undefined },
+        } : leavingAvatar ? {
+          params: { ...state.params, audio_prompt_type: String(state.params.audio_prompt_type || '').replace(/B/g, '') },
+        } : {}),
+        ...(leavingAvatar && savedSubMode ? {
+          videoSubModeStash: {
+            ...state.videoSubModeStash,
+            [imageMode]: {
+              ...savedSubMode,
+              params: {
+                ...savedSubMode.params,
+                audio_prompt_type: String(savedSubMode.params.audio_prompt_type || '').replace(/B/g, ''),
+              },
+            },
+          },
+        } : {}),
+      }
+    })
 
     if (workflow === 'animate') {
       if (get().generationMode !== 'video') get().setGenerationMode('video')
@@ -4277,6 +4792,10 @@ export const useStore = create<AppState>((set, get) => ({
   savedPromptPerMode: {} as Partial<Record<string, string>>,
 
   setGenerationMode: (mode) => {
+    if (get().titleGenerationContext) {
+      if (mode !== 'video') get().leaveTitleGenerationContext()
+      else if (get().generationMode === 'video') return
+    }
     // Tools is a non-generative post-processing area — it owns no model, so
     // skip the per-mode model/LoRA/params RESTORE machinery entirely. We still
     // SAVE the leaving mode's state (prompt / model / LoRAs / params snapshot)
@@ -6435,6 +6954,7 @@ export const useStore = create<AppState>((set, get) => ({
   h3WindowOverrides: {},
   saveH3WindowOverride: (modelType, resolution, frames) => {
     const state = get()
+    if (state.titleGenerationContext) return
     const minimum = state.modelOptions?.frames_minimum ?? 124
     const maximum = state.modelOptions?.frames_maximum ?? 345
     const step = state.modelOptions?.frames_steps ?? 17
@@ -6451,6 +6971,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
   clearH3WindowOverride: (modelType, resolution) => {
     const state = get()
+    if (state.titleGenerationContext) return
     const key = h3WindowOverrideKey(modelType, resolution)
     if (!(key in state.h3WindowOverrides)) return
     const next = { ...state.h3WindowOverrides }
@@ -7017,6 +7538,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   startGeneration: async (submissionMode = 'now') => {
     let state = get()
+    if (state.generationMode === 'video' && state.studioVideoWorkflow === 'titles') return
     const primaryStudioCreate = (
       state.generationMode === 'video'
       && ['frames', 'references', 'avatar'].includes(state.studioVideoWorkflow)
@@ -9560,11 +10082,14 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   loadLoras: async (modelType) => {
+    const seq = ++_loraLoadSeq
     set({ lorasLoading: true })
     try {
       const data = await api.fetchLoras(modelType)
+      if (seq !== _loraLoadSeq || get().params.model_type !== modelType) return
       set({ availableLoras: data.loras, lorasLoading: false })
     } catch {
+      if (seq !== _loraLoadSeq || get().params.model_type !== modelType) return
       set({ availableLoras: [], lorasLoading: false })
     }
   },
@@ -12604,7 +13129,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  selectModel: (modelType) => {
+  selectModel: (modelType, preserveEditsSince) => {
     const currentMode = get().generationMode
     const previousModelType = String(get().params.model_type || '')
     const switchesWithinH3SingularityPair = (
@@ -12653,8 +13178,8 @@ export const useStore = create<AppState>((set, get) => ({
     // Virtual SFX models don't have backend model options or LoRAs
     if (!sfxModelTypes.has(modelType)) {
       get().loadLoras(modelType)
-      get().loadModelOptions(modelType)
-      _applyModelDefaults(get, set, modelType)
+      get().loadModelOptions(modelType, preserveEditsSince)
+      _applyModelDefaults(get, set, modelType, preserveEditsSince)
     }
     _persistStickyStudioPreferences(get())
   },

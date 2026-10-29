@@ -37,7 +37,7 @@ export function useTitleComposer(settings: AnimatedTitleSettings, patch: (value:
         plannerWarnings: response.warnings, titleReviewRequired: response.review_required }
       patch(diagnostics)
       if (!response.plan) {
-        throw new Error(response.warnings.join(' ') || 'The AI draft needs review. Your description was retained; you can edit the plan manually in Advanced.')
+        throw new Error(response.warnings.join(' ') || 'The AI draft needs review. Your description was retained; revise it and enhance again.')
       }
       const planned = { ...applyTitleCreativePlan(captured, response.plan), ...diagnostics }
       if (titleFrames(titleSeconds(planned), planned) !== titleFrames(titleSeconds(captured), captured)) {

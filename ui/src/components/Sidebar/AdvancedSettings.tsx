@@ -491,6 +491,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
   const isSfx = isAudio && audioSubMode === 'sfx'
   const isAudioOnly = modelOptions?.audio_only || isSfx
   const isVideo = generationMode === 'video'
+  const isTitles = useStore(s => s.generationMode === 'video' && s.studioVideoWorkflow === 'titles')
   const isAvatar = generationMode === 'avatar'
   const isOutpaint = isAvatar && editSubMode === 'outpaint'
   const isRecast = isAvatar && editSubMode === 'recast'
@@ -1423,7 +1424,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
               {/* Dedicated SCAIL edit endpoints own their source video,
                   edited/reference frames, masks, and process selection. */}
               {(modelOptions?.guide_preprocessing || modelOptions?.guide_custom_choices) &&
-                !isScailEdit && params.model_type !== 'viggle_animate' && !modelOptions?.minimax_h3_media_sources && (
+                !isTitles && !isScailEdit && params.model_type !== 'viggle_animate' && !modelOptions?.minimax_h3_media_sources && (
                 <ControlVideoSection />
               )}
 
