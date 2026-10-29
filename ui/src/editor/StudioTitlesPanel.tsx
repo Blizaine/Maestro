@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Globe, Sparkles, X } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { useStore } from '../stores/useStore'
@@ -99,8 +99,11 @@ export function StudioTitlesPanel({ footerHost }: { footerHost?: HTMLElement | n
   const loaded = useMemo(() => restored ? normalizeDraft(restored) : null, [restored])
   const base = loaded ?? draft
   const initialization = useRef<{done: boolean; restored: unknown}>({done: false, restored: undefined})
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!modelsLoaded) return
+    // Consume a restored snapshot before the controls become interactive.
+    // A delayed passive effect must not undo a model the user just selected.
+    if (useStore.getState().params._studio_title_settings !== restored) return
     if (!initialization.current.done || (restored && initialization.current.restored !== restored)) {
       initialization.current = {done: true, restored}
       const initial = loaded ?? draft
@@ -112,6 +115,11 @@ export function StudioTitlesPanel({ footerHost }: { footerHost?: HTMLElement | n
         ...(legacy.seed !== undefined ? {seed: legacy.seed} : {}),
         ...titleAdvancedParams(initial.generationParams),
       })
+      if (restored) {
+        setDraft(initial)
+        useStore.setState(state => state.params._studio_title_settings === restored
+          ? {params: {...state.params, _studio_title_settings: undefined}} : {})
+      }
     }
     if (!restored) initialization.current.restored = undefined
   }, [modelsLoaded, restored, loaded, draft, enterContext])
