@@ -250,6 +250,12 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
     'The Studio panel renders without an Editor project.');
 }
 
+async function acceptManualTitlePlan(panel) {
+  const advanced = panel.locator('details').filter({hasText: 'Advanced title controls'}).first();
+  if (!await advanced.evaluate(element => element.open)) await advanced.locator(':scope > summary').click();
+  await advanced.getByRole('button', {name: 'Use manual title plan'}).click();
+}
+
 (async () => {
   const css = appCss();
   const bundle = await bundleUi();
@@ -400,9 +406,9 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
     await chooseWorkflow(page, 'Titles');
     await assertTitleModeHasOnlyItsOwnComposer(page);
     assert.deepEqual(await stateInputs(page), before, 'Selecting Titles preserves Frames prompt, references, and model.');
-    await waitFor(page, text => document.querySelector('[aria-label="Animated title text"]')?.value === text,
-      'gallery title settings restored into the Studio form', 10000, 'Loaded from gallery');
-    await page.getByLabel('Animated title text').fill('Edited loaded gallery title');
+    await waitFor(page, text => document.querySelector('[aria-label="Describe your title animation"]')?.value.includes(text),
+      'gallery title settings restored into the Studio composer', 10000, 'Loaded from gallery');
+    await page.getByLabel('Describe your title animation').fill('Edited loaded gallery title');
     await waitFor(page, () => window.store.getState().params._studio_title_settings === undefined,
       'one-shot gallery title settings cleared after the first edit');
     await chooseWorkflow(page, 'Frames');
@@ -410,7 +416,7 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
     assert.equal(await page.evaluate(() => window.store.getState().params._studio_title_settings), undefined,
       'Frames does not inherit one-shot title settings from its stored prompt snapshot.');
     await chooseWorkflow(page, 'Titles');
-    await waitFor(page, text => document.querySelector('[aria-label="Animated title text"]')?.value === text,
+    await waitFor(page, text => document.querySelector('[aria-label="Describe your title animation"]')?.value === text,
       'edited gallery title draft after a Frames round trip', 10000, 'Edited loaded gallery title');
     assert.equal(await page.evaluate(() => window.store.getState().params._studio_title_settings), undefined,
       'Reopening Titles keeps the edited draft without restoring the old one-shot override.');
@@ -511,26 +517,29 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
     await chooseWorkflow(page, 'Titles');
     await assertTitleModeHasOnlyItsOwnComposer(page);
     assert.match(await sidebar.innerText(), new RegExp(`Save to ${WORKSPACE}`));
-    const presetSummary = sidebar.getByText('Use an animation preset (optional)', {exact: true});
+    await sidebar.getByText('Advanced title controls', {exact: true}).click();
+    const advancedSidebar = sidebar.locator('details').filter({hasText: 'Advanced title controls'}).first();
+    const presetSummary = advancedSidebar.getByText('Use an animation preset (optional)', {exact: true});
     await presetSummary.click();
     const preset = sidebar.getByLabel('Animation preset');
     const presetCount = await preset.locator('option').count();
     assert.equal(presetCount, 21, 'The custom option and all 20 animation presets are available.');
     await preset.selectOption('dust');
-    await sidebar.getByLabel('Animated title text').fill('Maestro After Dark');
-    await sidebar.getByLabel('Title background').selectOption('black');
-    await sidebar.getByLabel('Title visual style').fill('Bright chrome lettering with a restrained blue rim light');
-    await sidebar.getByLabel('Title animation description').fill('The chrome words fly inward, hold, then fade to black.');
-    await sidebar.locator('label').filter({hasText: 'Duration (seconds)'}).locator('input[type="number"]').fill('8.4');
-    await sidebar.locator('label').filter({hasText: 'Aspect ratio'}).locator('select').selectOption('9:16');
-    await sidebar.locator('label').filter({hasText: 'Resolution'}).locator('select').selectOption('720p');
+    await advancedSidebar.getByLabel('Animated title text').fill('Maestro After Dark');
+    await advancedSidebar.getByLabel('Title background').selectOption('black');
+    await advancedSidebar.getByLabel('Title visual style').fill('Bright chrome lettering with a restrained blue rim light');
+    await advancedSidebar.getByLabel('Title animation description').fill('The chrome words fly inward, hold, then fade to black.');
+    await advancedSidebar.locator('label').filter({hasText: 'Duration (seconds)'}).locator('input[type="number"]').fill('8.4');
+    await advancedSidebar.locator('label').filter({hasText: 'Aspect ratio'}).locator('select').selectOption('9:16');
+    await advancedSidebar.locator('label').filter({hasText: 'Resolution'}).locator('select').selectOption('720p');
     assert.equal(await preset.inputValue(), 'custom',
       'Editing a preset description switches the title to its custom motion field.');
     const dimensions720 = await sidebar.getByText(/704×1280/).count();
     assert.equal(dimensions720, 1, 'Portrait 720p title dimensions are shown before submit.');
-    await sidebar.locator('label').filter({hasText: 'Resolution'}).locator('select').selectOption('480p');
+    await advancedSidebar.locator('label').filter({hasText: 'Resolution'}).locator('select').selectOption('480p');
     assert.equal(await sidebar.getByText(/480×832/).count(), 1,
       'Portrait 480p title dimensions use the aligned output size.');
+    await advancedSidebar.getByRole('button', {name: 'Use manual title plan'}).click();
     const requestedDimensions = await page.evaluate(() => window.titleHelpers.titleDimensions({
       text: 'Maestro After Dark', look: 'chrome', direction: 'fly inward', effect: 'custom',
       seconds: 8.4, aspect: '9:16', resolution: '480p', keepAudio: false, background: 'black',
@@ -597,15 +606,16 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
     // Failed and cancelled jobs report errors without a success state. Use green on the failure case.
     await page.evaluate(() => window.titleStore.getState().dismiss());
     nextSubmissionMode = {status: 'failed', loseResponse: false};
-    await page.getByLabel('Title background').selectOption('chroma');
+    await page.getByLabel('Title background').first().selectOption('chroma');
+    await acceptManualTitlePlan(sidebar);
     await page.getByRole('button', {name: 'Generate title'}).click();
     await waitFor(page, () => window.titleStore.getState().intent?.status === 'failed',
       'failed title generation');
     assert.equal(generationRequests.length, 2);
     assert.equal(generationRequests[1]._studio_title_settings.background, 'chroma');
     assert.match(uploadRequests[1].body, /title-green-/);
-    assert.match(await page.locator('[role="status"]').innerText(), /Synthetic generation failure/);
-    assert.doesNotMatch(await page.locator('[role="status"]').innerText(), /Title saved to/);
+    assert.match(await page.locator('div[role="status"]').innerText(), /Synthetic generation failure/);
+    assert.doesNotMatch(await page.locator('div[role="status"]').innerText(), /Title saved to/);
 
     await page.evaluate(() => window.titleStore.getState().dismiss());
     nextSubmissionMode = {status: 'cancelled', loseResponse: false};
@@ -613,8 +623,8 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
     await waitFor(page, () => window.titleStore.getState().intent?.status === 'failed'
       && window.titleStore.getState().intent?.error === 'Synthetic cancellation', 'cancelled title generation');
     assert.equal(generationRequests.length, 3);
-    assert.match(await page.locator('[role="status"]').innerText(), /Synthetic cancellation/);
-    assert.doesNotMatch(await page.locator('[role="status"]').innerText(), /Title saved to/);
+    assert.match(await page.locator('div[role="status"]').innerText(), /Synthetic cancellation/);
+    assert.doesNotMatch(await page.locator('div[role="status"]').innerText(), /Title saved to/);
     assert.deepEqual(projectApiRequests, [], 'No Studio title path calls Editor project APIs.');
 
     // Phone layout keeps the title form scrollable while the keyboard is open, and the
@@ -637,6 +647,7 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
     assert.equal(await page.evaluate(() => window.lastTabPrevented), false,
       'The phone workflow popover lets keyboard focus continue naturally.');
     await page.keyboard.press('Escape');
+    await page.getByText('Advanced title controls', {exact: true}).click();
     await page.getByLabel('Title animation description').focus();
     await page.getByLabel('Title animation description').fill('Mobile title motion stays in the visible sidebar.');
     await page.setViewportSize({width: 390, height: 500});
@@ -725,6 +736,7 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
     assert.equal(nativeChecks.sixFrames, 158, 'Six phrases get the next native duration that can fit at least one second each.');
     assert.ok(nativeChecks.invalidFrames.every(Boolean), 'Invalid native frame selections cannot generate.');
     await page.evaluate(settings => window.store.setState(state => ({params: {...state.params, _studio_title_settings: settings}})), sequenceSettings);
+    await page.getByText('Advanced title controls', {exact: true}).click();
     await waitFor(page, () => document.querySelector('[aria-label="Phrase 1 text"]')?.value === 'CREATE', 'gallery sequence settings restore');
     assert.equal(await page.getByLabel('Phrase 3 text', {exact: true}).inputValue(), 'INSPIRE');
     await page.getByLabel('Phrase 1 text', {exact: true}).fill('CREATE MORE');
@@ -745,6 +757,7 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
     await page.reload();
     await mount(page, bundle, css, {workflow: 'titles', workspace: 'Changed While Running'});
     await waitFor(page, () => window.titleStore.getState().intent?.jobId === 'studio-title-job-4', 'sequence receipt reload');
+    await page.getByText('Advanced title controls', {exact: true}).click();
     assert.equal(await page.getByLabel('Phrase 1 text', {exact: true}).inputValue(), 'CREATE MORE');
     assert.equal(await page.getByLabel('Sequence duration', {exact: true}).inputValue(), '243');
     const recoveredPhrases = await page.evaluate(() => window.titleStore.getState().intent.settings.phrases);

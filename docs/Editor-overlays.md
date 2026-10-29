@@ -9,8 +9,8 @@ non-destructive clip setting: the original media file stays unchanged.
 ### From Studio
 
 Choose **Video → Create → Titles**, below **Blend**, to generate a title without
-opening an Editor project. The same text, lettering, custom animation, optional
-presets, background, shape, duration and resolution controls are available here.
+opening an Editor project. Describe the title and animation naturally, optionally
+choose a style preset, and set the background, native duration, shape and resolution.
 The title has its own draft; unrelated Studio prompts, references and LoRAs are
 not reused. **Load Settings** on a title output restores its title controls.
 
@@ -26,14 +26,34 @@ source clip and can be muted or removed during editing.
 
 ### From the Editor
 
-Choose **Create animated title** in the Editor media panel. Enter the exact text,
-describe its lettering/style and animation, choose a title background, then choose
-duration, aspect and resolution before pressing **Generate title**. H3 Fused 4-Step —
-Frames must already be installed. The animation description is blank by default.
-Write your own timing and motion, or expand **Use an animation preset (optional)**
-for starting ideas such as dust, smoke, neon, typewriter, glitch, liquid metal, fire,
-frost and paper effects. Picking a preset fills the description; edit it freely to
-make it your own.
+Choose **Create animated title** in the Editor media panel. Use the same composer:
+describe the exact words, their lettering, order and motion in one request. H3 Fused
+4-Step — Frames must already be installed. The description starts blank. The optional
+style list offers dust, smoke, neon, typewriter, glitch, liquid metal and the other
+animation presets; leaving it unset follows your own description.
+
+### AI planning and review
+
+For example: `Show “CREATE”, then “EXPLORE”, then “INSPIRE”, one at a time. White
+lettering on black. Each word assembles from dust and clears before the next appears.`
+Put exact on-screen text in quotes. Choose the actual background with its control.
+
+**Enhance** asks the configured prompt-enhancement writer to prepare a plan without
+rendering a video. **Generate title** prepares a plan first when the description,
+style, duration or background has changed. **Review plan** shows the inferred words,
+order, motion and timing. Potential wording changes require reviewing the proposal
+and pressing Generate again. The application controls native frame counts and
+backgrounds; the LLM supplies the creative interpretation.
+
+Planning makes one bounded writer call. It shares Maestro's existing GPU lease, so
+it cannot compete with an active generation. Writer drafts and reasons are saved
+locally and exposed under **AI draft and diagnostics**. A malformed reply preserves
+the description and available draft; it does not submit a video or silently replace
+the text. There is no automatic retry loop.
+
+**Advanced** retains exact text, lettering, animation and phrase controls. Use it
+to adjust the AI plan or prepare a title without an LLM, then choose **Use manual
+title plan**. Existing saved title settings and pending render receipts remain usable.
 
 **Chroma key (green)** is selected by default. Maestro prepares matching, flat green
 start/end images at the requested dimensions and automatically keys the generated
@@ -52,8 +72,9 @@ can vary, and changing baked-in lettering requires another render.
 
 ### Phrase sequences
 
-Choose **Single title** for one composition, or **Phrase sequence** to reveal
-different wording in order. Each sequence card specifies the exact text, its time
+The composer infers a single composition or a sequence from the description.
+Under **Advanced**, choose **Single title** for one composition, or **Phrase sequence**
+to adjust different wording in order. Each sequence card specifies the exact text, its time
 slot and its animation. A slot includes the entrance, a readable hold and the exit.
 Move cards up or down, add or remove cards, or paste one phrase per line. Describe
 custom motion directly, or use an optional preset as an editable starting point.

@@ -3,9 +3,10 @@ import { Loader2, Sparkles } from 'lucide-react'
 import { useStore } from '../stores/useStore'
 import { AnimatedTitleControls } from './AnimatedTitleControls'
 import { EditorAnimatedTitleStatus } from './EditorAnimatedTitleDialog'
-import { alignTitleSequence, DEFAULT_TITLE_SETTINGS, TITLE_EFFECTS, titleFormState } from './editorAnimatedTitles'
+import { alignTitleSequence, DEFAULT_TITLE_SETTINGS, TITLE_EFFECTS, titleComposerValidation, titlePlanIsCurrent } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 import { useEditorTitleStore } from './useEditorTitleStore'
+import { useTitleComposer } from './useTitleComposer'
 
 const DRAFT = 'maestro-studio-title-draft-v1'
 const CANVAS = { width: 1920, height: 1080 }
@@ -15,6 +16,13 @@ function normalizeDraft(raw: unknown): AnimatedTitleSettings {
     const value = raw as Partial<AnimatedTitleSettings>
     const normalized: AnimatedTitleSettings = {
       ...defaults,
+      ...(typeof value.brief === 'string' ? { brief: value.brief.slice(0, 4000) } : {}),
+      stylePreset: typeof value.stylePreset === 'string' && (value.stylePreset === 'custom' || Object.hasOwn(TITLE_EFFECTS, value.stylePreset)) ? value.stylePreset : 'custom',
+      ...(typeof value.plannedKey === 'string' ? { plannedKey: value.plannedKey.slice(0, 9000) } : {}),
+      ...(Array.isArray(value.plannerWarnings) ? { plannerWarnings: value.plannerWarnings.filter((item): item is string => typeof item === 'string').slice(0, 12).map(item => item.slice(0, 1000)) } : {}),
+      ...(typeof value.rawTitleDraft === 'string' ? { rawTitleDraft: value.rawTitleDraft.slice(0, 64000) } : {}),
+      ...(typeof value.titleDraftHistoryId === 'string' && /^[a-f0-9-]+$/.test(value.titleDraftHistoryId) ? { titleDraftHistoryId: value.titleDraftHistoryId } : {}),
+      titleReviewRequired: value.titleReviewRequired === true,
       text: typeof value.text === 'string' ? value.text.slice(0, 160) : defaults.text,
       look: typeof value.look === 'string' ? value.look.slice(0, 1200) : defaults.look,
       direction: typeof value.direction === 'string' ? value.direction.slice(0, 1200) : defaults.direction,
@@ -59,23 +67,28 @@ export function StudioTitlesPanel() {
   useEffect(() => {
     try { localStorage.setItem(DRAFT, JSON.stringify(settings)) } catch { /* Submission separately requires durable storage. */ }
   }, [settings])
-  const { validation } = titleFormState(settings, CANVAS)
   const blocked = busy || Boolean(intent && !['inserted', 'completed', 'failed'].includes(intent.status))
   const patch = (value: Partial<AnimatedTitleSettings>) => {
     setDraft({ ...settings, ...value })
     if (restored) useStore.setState(state => state.params._studio_title_settings === restored
       ? { params: { ...state.params, _studio_title_settings: undefined } } : state)
   }
+  const composer = useTitleComposer(settings, patch, workspace)
+  const controlBusy = busy || composer.busy
+  const validation = titleComposerValidation(settings, CANVAS)
+  let reviewReady = false
+  try { reviewReady = settings.titleReviewRequired === true && titlePlanIsCurrent(settings) }
+  catch { /* Invalid settings stay editable; they cannot be approved as a current plan. */ }
   return <section aria-label="Studio Titles" className="mx-3 mb-3 min-w-0 space-y-4 rounded-2xl border border-border bg-bg-primary/30 p-3">
     <div className="flex items-center gap-2 text-sm font-semibold text-text-primary"><Sparkles size={16} className="text-accent-blue" />Titles</div>
     <p className="break-words text-xs text-text-secondary">Save to <strong>{workspace}</strong> · No Editor project needed.</p>
     <EditorAnimatedTitleStatus />
-    <AnimatedTitleControls settings={settings} patch={patch} busy={busy} canvas={CANVAS} destination="studio" />
+    <AnimatedTitleControls settings={settings} patch={patch} busy={controlBusy} canvas={CANVAS} destination="studio" composer={composer} />
     {error && <p role="alert" className="text-xs text-red-400">{error}</p>}
-    {blocked && !busy && <p className="text-xs text-text-secondary">A title is already being tracked. Its progress is shown above.</p>}
-    <button type="button" disabled={blocked || Boolean(validation)} onClick={() => void submit(settings)} title={validation || undefined}
+    {blocked && !controlBusy && <p className="text-xs text-text-secondary">A title is already being tracked. Its progress is shown above.</p>}
+    <button type="button" disabled={blocked || controlBusy || Boolean(validation)} onClick={() => void composer.generate(submit)} title={validation || undefined}
       className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">
-      {busy ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}Generate title
+      {controlBusy ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}{reviewReady ? 'Generate reviewed plan' : 'Generate title'}
     </button>
   </section>
 }

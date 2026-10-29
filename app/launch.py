@@ -9192,6 +9192,57 @@ def _interactive_enhancement_slot(function):
     return wrapped
 
 
+@api.post("/api/v1/llm/plan-title")
+@_interactive_enhancement_slot
+async def llm_plan_animated_title(request: Request):
+    """Plan an animated title card with the configured prompt enhancement writer."""
+    from services import llm_service
+    from services.animated_title_planner import (
+        TITLE_PLAN_JSON_SCHEMA,
+        plan_animated_title,
+        validate_title_request,
+    )
+    from services.enhancement_diagnostics import record_advisory, record_rejection
+
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="The request body must be a JSON object.")
+    brief = body.get("brief")
+    style_hint = body.get("style_hint", "")
+    frames = body.get("frames")
+    background = body.get("background")
+    try:
+        validate_title_request(brief, style_hint, frames, background)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    services = enhancement_settings(wgp.server_config.get("services", {}))
+    enhance_model = services.get("enhance_llm_model_id", "")
+    enhance_device = services.get("enhance_llm_device", "cuda")
+    if enhance_model:
+        _ensure_llm_loaded(model_id=enhance_model, device=enhance_device)
+    else:
+        _ensure_llm_loaded()
+
+    provider = services.get("llm_provider", "local")
+    result = plan_animated_title(
+        brief,
+        style_hint,
+        frames,
+        background,
+        llm_service.generate,
+        json_schema=TITLE_PLAN_JSON_SCHEMA if provider == "local" else None,
+    )
+    if result["plan"] is None:
+        record_rejection(result["warnings"], stage="Animated title planning")
+    elif result["review_required"] or result["warnings"]:
+        record_advisory(
+            "animated_title_review",
+            {"review_required": result["review_required"], "warnings": result["warnings"]},
+        )
+    return result
+
+
 @api.get("/api/v1/llm/drafts/{history_id}")
 def get_interactive_writer_drafts(history_id: str):
     from services.enhancement_diagnostics import DraftHistoryArchive

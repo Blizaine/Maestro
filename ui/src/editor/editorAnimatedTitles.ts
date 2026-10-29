@@ -55,6 +55,14 @@ export const TITLE_PHRASE_ANIMATIONS = {
 } as const
 
 export interface AnimatedTitleSettings {
+  brief?: string
+  stylePreset?: 'custom' | keyof typeof TITLE_EFFECTS
+  plannedKey?: string
+  plannerWarnings?: string[]
+  rawTitleDraft?: string
+  titleDraftHistoryId?: string
+  titleReviewRequired?: boolean
+  manualPlanEdited?: boolean
   /** Missing on older saved titles, which use one title and a free-form direction. */
   mode?: 'single' | 'sequence'
   phrases?: TitlePhrase[]
@@ -71,6 +79,58 @@ export interface AnimatedTitleSettings {
   keepAudio: boolean
   /** Missing on older saved title intents, which always used green keying. */
   background?: TitleBackground
+}
+
+export interface TitleCreativePlan {
+  phrases: { text: string; animation: string; weight: number }[]
+  look: string; direction: string; sequence: boolean
+}
+
+export function titleBrief(settings: AnimatedTitleSettings): string {
+  if (settings.brief !== undefined) return settings.brief
+  if (settings.mode === 'sequence' && settings.phrases?.length) return [
+    `Show ${settings.phrases.map(phrase => JSON.stringify(phrase.text)).join(', then ')} one at a time.`,
+    ...settings.phrases.map(phrase => phrase.animation ? `${JSON.stringify(phrase.text)}: ${phrase.animation}` : ''),
+    settings.look, settings.sequenceDirection,
+  ].filter(Boolean).join('\n')
+  return settings.text.trim() ? [`Animate ${JSON.stringify(settings.text.trim())}.`, settings.look, settings.direction].filter(Boolean).join('\n') : ''
+}
+
+export function titlePlanningKey(settings: AnimatedTitleSettings): string {
+  return JSON.stringify([titleBrief(settings).trim(), settings.stylePreset ?? 'custom',
+    titleFrames(titleSeconds(settings)), settings.background ?? 'chroma'])
+}
+
+export function titlePlanIsCurrent(settings: AnimatedTitleSettings): boolean {
+  return settings.brief === undefined || settings.plannedKey === titlePlanningKey(settings)
+}
+
+/** Creative descriptions are allowed before a concrete render prompt exists. */
+export function titleComposerValidation(settings: AnimatedTitleSettings, canvas: { width: number; height: number }): string {
+  try {
+    if (settings.manualPlanEdited) return 'Choose Use manual title plan to keep your Advanced edits, or Enhance to create a new AI plan.'
+    titleDimensions(settings, canvas); titleFrames(titleSeconds(settings)); titleBackground(settings)
+    if (settings.brief !== undefined && !titlePlanIsCurrent(settings)) {
+      if (!settings.brief.trim() || settings.brief.length > 4000) return 'Describe your title animation in 1–4,000 characters.'
+      return ''
+    }
+    return titleFormState(settings, canvas).validation
+  } catch (reason) { return reason instanceof Error ? reason.message : 'Check the title settings.' }
+}
+
+export function applyTitleCreativePlan(settings: AnimatedTitleSettings, plan: TitleCreativePlan): AnimatedTitleSettings {
+  const frames = titleFrames(titleSeconds(settings))
+  const phrases = plan.phrases.map(phrase => ({ id: titleSubmissionId(), text: phrase.text,
+    seconds: Number.isFinite(phrase.weight) && phrase.weight > 0 ? Math.min(10, phrase.weight) : 1, animation: phrase.animation }))
+  let result: AnimatedTitleSettings = { ...settings, brief: titleBrief(settings), manualPlanEdited: false, effect: 'custom', look: plan.look,
+    text: phrases.map(phrase => phrase.text).join(plan.sequence ? '\n' : ' '),
+    direction: phrases[0]?.animation || plan.direction || 'Reveal the title, hold it clearly, then clear the frame.',
+    sequenceDirection: plan.direction, seconds: frames / 24, mode: plan.sequence && phrases.length > 1 ? 'sequence' : 'single',
+    phrases: plan.sequence && phrases.length > 1 ? phrases : undefined, sequenceFrames: frames }
+  if (result.mode === 'sequence') result = alignTitleSequence(result, frames)
+  result.plannedKey = titlePlanningKey(result)
+  animatedTitlePrompt(result)
+  return result
 }
 
 export const TITLE_SEQUENCE_DURATIONS = Array.from({ length: 14 }, (_, index) => {
@@ -225,6 +285,8 @@ export function titleFrames(seconds: number): number {
 }
 
 export function animatedTitlePrompt(settings: AnimatedTitleSettings): string {
+  if (settings.manualPlanEdited) throw new Error('Choose Use manual title plan before generating with your Advanced edits.')
+  if (!titlePlanIsCurrent(settings)) throw new Error('The description or style changed. Enhance it or review the manual plan before generating.')
   const background = titleBackground(settings)
   if (settings.mode !== undefined && settings.mode !== 'single' && settings.mode !== 'sequence') throw new Error('Choose a supported title layout.')
   const sequence = settings.mode === 'sequence' ? titleSequenceTimeline(settings) : null

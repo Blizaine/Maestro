@@ -1,73 +1,46 @@
-import { useState } from 'react'
 import {
-  newTitlePhrases,
-  titleSubmissionId,
-  titleFormState,
-  titleSequenceTimeline,
-  titleFrames,
   alignTitleSequence,
-  setTitlePhraseSeconds,
-  TITLE_SEQUENCE_DURATIONS,
-  TITLE_EFFECTS,
+  titleBrief,
+  titleFrames,
+  titlePlanIsCurrent,
+  titleSeconds,
+  titleSequenceTimeline,
   TITLE_EFFECT_LABELS,
-  TITLE_PHRASE_ANIMATIONS,
+  TITLE_SEQUENCE_DURATIONS,
 } from './editorAnimatedTitles'
-import type { AnimatedTitleSettings, TitlePhrase } from './editorAnimatedTitles'
+import type { AnimatedTitleSettings } from './editorAnimatedTitles'
+import { AnimatedTitleAdvancedControls } from './AnimatedTitleAdvancedControls'
+import type { TitleComposerController } from './useTitleComposer'
 
 const FIELD = 'w-full min-w-0 rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-xs text-text-primary outline-none focus:border-accent-blue/60'
-const MAX_PHRASES = 6
-const MIN_PHRASES = 2
-const MAX_PHRASE_LENGTH = 80
 
-function averagePhraseSeconds(phrases: TitlePhrase[]) {
-  if (phrases.length === 0) return 2.6
-  const total = phrases.reduce((sum, phrase) => sum + (Number.isFinite(phrase.seconds) ? phrase.seconds : 0), 0)
-  return Math.round(Math.max(1, Math.min(10, total / phrases.length)) * 10) / 10
+function framesFor(settings: AnimatedTitleSettings) {
+  try { return titleFrames(titleSeconds(settings)) } catch { return TITLE_SEQUENCE_DURATIONS[0].frames }
 }
 
-function selectedSequenceFrames(settings: AnimatedTitleSettings, phrases: TitlePhrase[]) {
-  const minimumFrames = phrases.length * 24
-  let frames: number
-  if (Number.isInteger(settings.sequenceFrames)) frames = settings.sequenceFrames!
-  else {
-    const total = phrases.reduce((sum, phrase) => sum + (Number.isFinite(phrase.seconds) ? phrase.seconds : 0), 0)
-    try { frames = titleFrames(total) } catch { frames = TITLE_SEQUENCE_DURATIONS[0]?.frames ?? 124 }
-  }
-  if (frames >= minimumFrames && TITLE_SEQUENCE_DURATIONS.some(option => option.frames === frames)) return frames
-  const compatible = TITLE_SEQUENCE_DURATIONS.find(option => option.frames >= Math.max(frames, minimumFrames))
-  if (compatible) return compatible.frames
-  return TITLE_SEQUENCE_DURATIONS.at(-1)?.frames ?? frames
-}
-
-function alignPhrases(settings: AnimatedTitleSettings, phrases: TitlePhrase[], frames = selectedSequenceFrames(settings, settings.phrases ?? [])) {
-  return alignTitleSequence({ ...settings, mode: 'sequence', phrases }, frames)
-}
-
-/** Shared title fields; placement and submission remain owned by each workspace. */
-export function AnimatedTitleControls({ settings, patch, busy, canvas, destination = 'editor', at = 0 }: {
+/** The shared, natural-language title composer. Workspace-specific submission stays in its caller. */
+export function AnimatedTitleControls({ settings, patch, busy, canvas, destination = 'editor', at = 0, composer }: {
   settings: AnimatedTitleSettings
   patch: (value: Partial<AnimatedTitleSettings>) => void
   busy: boolean
   canvas: { width: number; height: number }
   destination?: 'editor' | 'studio'
   at?: number
+  composer: TitleComposerController
 }) {
   const background = settings.background ?? 'chroma'
-  const sequenceMode = settings.mode === 'sequence'
+  const brief = titleBrief(settings)
+  const selectedFrames = framesFor(settings)
+  let currentPlan = false
+  try { currentPlan = settings.brief !== undefined && Boolean(settings.plannedKey) && titlePlanIsCurrent(settings) }
+  catch { /* Invalid manual duration and other malformed settings remain editable instead of breaking render. */ }
+  const sequence = settings.mode === 'sequence'
   const phrases = settings.phrases ?? []
-  const [pasteLines, setPasteLines] = useState('')
-  const [pasteError, setPasteError] = useState('')
-  const [modeError, setModeError] = useState('')
-  const formState = titleFormState(settings, canvas)
-  const sequenceTotal = phrases.reduce((sum, phrase) => sum + (Number.isFinite(phrase.seconds) ? phrase.seconds : 0), 0)
-  const nativeFrames = selectedSequenceFrames(settings, phrases)
-  const nativeDuration = TITLE_SEQUENCE_DURATIONS.find(option => option.frames === nativeFrames)
-  const sequenceDurationOptions = TITLE_SEQUENCE_DURATIONS.filter(option => option.frames >= phrases.length * 24)
-  const sequenceCharacters = phrases.map(phrase => phrase.text.trim()).join('\n').length
-  const timeline = sequenceMode ? (() => {
-    try { return titleSequenceTimeline(settings) } catch { return null }
-  })() : null
-  const timelineRows = timeline?.phrases ?? (() => {
+  let timeline: ReturnType<typeof titleSequenceTimeline> | null = null
+  if (sequence) {
+    try { timeline = titleSequenceTimeline(settings) } catch { /* Show the available wording while an invalid advanced plan is repaired. */ }
+  }
+  const reviewRows = sequence ? (timeline?.phrases ?? (() => {
     let start = 0
     return phrases.map(phrase => {
       const seconds = Number.isFinite(phrase.seconds) && phrase.seconds > 0 ? phrase.seconds : 0
@@ -75,267 +48,152 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
       start += seconds
       return row
     })
-  })()
-  const { geometry, duration, prompt, validation } = formState
+  })()) : []
 
-  function setMode(mode: 'single' | 'sequence') {
-    if (mode === 'sequence') {
-      try {
-        const nextPhrases = settings.phrases?.length
-          ? settings.phrases
-          : newTitlePhrases(settings.text, settings.seconds)
-        const frames = selectedSequenceFrames(settings, nextPhrases)
-        patch(alignPhrases({ ...settings, mode }, nextPhrases, frames))
-        setModeError('')
-      } catch (reason) {
-        setModeError(reason instanceof Error ? reason.message : 'Check the title text before switching to a sequence.')
-      }
-      return
+  function patchCreative(value: Partial<AnimatedTitleSettings>) {
+    composer.clearFeedback()
+    patch({ ...value, brief: titleBrief(settings), manualPlanEdited: false })
+  }
+
+  function changeBrief(value: string) {
+    composer.clearFeedback()
+    patch({ brief: value, manualPlanEdited: false })
+  }
+
+  function changeDuration(frames: number) {
+    composer.clearFeedback()
+    const base = { ...settings, brief: titleBrief(settings), manualPlanEdited: false, seconds: frames / 24, sequenceFrames: frames }
+    if (base.mode === 'sequence' && (base.phrases?.length ?? 0) >= 2 && (base.phrases?.length ?? 0) <= 6) {
+      try { patch(alignTitleSequence(base, frames)); return } catch { /* Keep the chosen whole-clip duration visible while the invalid sequence is repaired. */ }
     }
-    patch({ mode })
-    setModeError('')
+    patch(base)
   }
 
-  function patchPhrase(id: string, changes: Partial<TitlePhrase>) {
-    const nextPhrases = phrases.map(phrase => phrase.id === id ? { ...phrase, ...changes } : phrase)
-    patch({ phrases: nextPhrases })
+  function patchAdvanced(value: Partial<AnimatedTitleSettings>) {
+    const creativeFields: (keyof AnimatedTitleSettings)[] = [
+      'text', 'look', 'effect', 'direction', 'mode', 'phrases', 'sequenceDirection', 'sequenceFrames', 'seconds', 'background',
+    ]
+    const creativeChange = creativeFields.some(field => Object.hasOwn(value, field))
+    if (creativeChange && settings.brief !== undefined) composer.clearFeedback()
+    patch({ ...value, ...(creativeChange && settings.brief !== undefined ? { plannedKey: undefined, manualPlanEdited: true } : {}) })
   }
 
-  function reorderPhrase(index: number, direction: -1 | 1) {
-    const destinationIndex = index + direction
-    if (destinationIndex < 0 || destinationIndex >= phrases.length) return
-    const nextPhrases = [...phrases]
-    ;[nextPhrases[index], nextPhrases[destinationIndex]] = [nextPhrases[destinationIndex], nextPhrases[index]]
-    patch({ phrases: nextPhrases })
-  }
+  return <div className="space-y-4">
+    <label className="block space-y-1.5 text-xs text-text-secondary">Describe your title animation
+      <textarea aria-label="Describe your title animation" value={brief} maxLength={4000} rows={5} disabled={busy}
+        onChange={event => changeBrief(event.target.value)}
+        placeholder="A silver title spelling ‘ORION’ forms from fine particles, holds clearly, then dissolves into a soft blue glow."
+        className={FIELD} />
+      <span className="block text-[11px] leading-relaxed text-text-muted">
+        Write the words exactly as they should appear, including spelling, punctuation and language. The plan shows the detected wording, order and timing for review.
+        <span className="block">{brief.length}/4,000 characters</span>
+      </span>
+    </label>
 
-  function addPhrase() {
-    if (phrases.length >= MAX_PHRASES) return
-    const nextPhrases = [...phrases, {
-      id: titleSubmissionId(), text: '', seconds: averagePhraseSeconds(phrases), animation: '',
-    }]
-    patch(alignPhrases(settings, nextPhrases))
-  }
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Title style preset <span className="font-normal text-text-muted">(optional)</span>
+        <select aria-label="Title style preset" value={settings.stylePreset ?? 'custom'} disabled={busy}
+          onChange={event => patchCreative({ stylePreset: event.target.value as AnimatedTitleSettings['stylePreset'] })}
+          className={FIELD}>
+          <option value="custom">Custom description</option>
+          {Object.entries(TITLE_EFFECT_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+        </select>
+      </label>
 
-  function removePhrase(id: string) {
-    if (phrases.length <= MIN_PHRASES) return
-    const nextPhrases = phrases.filter(phrase => phrase.id !== id)
-    patch(alignPhrases(settings, nextPhrases))
-  }
+      <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Title clip duration
+        <select aria-label="Title clip duration" value={selectedFrames} disabled={busy}
+          onChange={event => changeDuration(Number(event.target.value))} className={FIELD}>
+          {TITLE_SEQUENCE_DURATIONS.map(option => <option key={option.frames} value={option.frames}>{option.label}</option>)}
+        </select>
+        <span className="block text-[11px] leading-relaxed text-text-muted">Whole-frame H3 duration at 24 fps.</span>
+      </label>
+    </div>
 
-  function applyPastedLines(value: string) {
-    try {
-      const nextPhrases = newTitlePhrases(value, nativeDuration?.seconds ?? (sequenceTotal || settings.seconds))
-      patch(alignPhrases(settings, nextPhrases))
-      setPasteError('')
-    } catch (reason) {
-      setPasteError(reason instanceof Error ? reason.message : 'Check the pasted phrase lines.')
-    }
-  }
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Title background
+        <select aria-label="Title background" value={background} disabled={busy}
+          onChange={event => patchCreative({ background: event.target.value as NonNullable<AnimatedTitleSettings['background']> })} className={FIELD}>
+          <option value="chroma">Chroma key (green)</option><option value="black">Black background</option>
+        </select>
+        <span className="block text-[11px] leading-relaxed text-text-muted">{background === 'chroma'
+          ? destination === 'studio' ? 'Studio keeps the green background in the saved clip, ready for keying.' : 'The Editor removes green automatically so the title shows over footage below.'
+          : destination === 'studio' ? 'Studio keeps the opaque black background in the saved clip.' : 'Black stays opaque and covers footage below for the title clip.'}</span>
+      </label>
 
-  return <>
-        <p className="text-xs leading-relaxed text-text-secondary">H3 Fused 4-Step · Frames. Matching {background === 'chroma' ? 'green' : 'black'} start/end frames are prepared automatically. {destination === 'studio' ? 'The finished clip is saved to your gallery.' : background === 'chroma' ? 'The result is inserted with chroma key enabled so footage below shows through.' : 'The result stays opaque, so its black background covers footage below.'}</p>
+      <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Aspect ratio
+        <select aria-label="Title aspect ratio" value={settings.aspect} disabled={busy}
+          onChange={event => patch({ aspect: event.target.value as AnimatedTitleSettings['aspect'] })} className={FIELD}>
+          {destination === 'editor' && <option value="project">Match project</option>}
+          <option value="16:9">16:9 · landscape</option><option value="9:16">9:16 · portrait</option><option value="1:1">1:1 · square</option>
+        </select>
+      </label>
 
-        <div role="group" aria-label="Title format" className="grid grid-cols-2 gap-2 rounded-xl border border-border bg-bg-tertiary p-1">
-          <button type="button" aria-pressed={!sequenceMode} disabled={busy} onClick={() => setMode('single')}
-            className={`min-h-9 rounded-lg px-3 py-2 text-xs font-medium transition-colors ${!sequenceMode ? 'bg-bg-secondary text-text-primary shadow-sm' : 'text-text-secondary hover:text-text-primary'}`}>
-            Single title
-          </button>
-          <button type="button" aria-pressed={sequenceMode} disabled={busy} onClick={() => setMode('sequence')}
-            className={`min-h-9 rounded-lg px-3 py-2 text-xs font-medium transition-colors ${sequenceMode ? 'bg-bg-secondary text-text-primary shadow-sm' : 'text-text-secondary hover:text-text-primary'}`}>
-            Phrase sequence
-          </button>
-        </div>
-        {modeError && <p role="alert" className="text-xs text-red-400">{modeError}</p>}
+      <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Resolution
+        <select aria-label="Title resolution" value={settings.resolution} disabled={busy}
+          onChange={event => patch({ resolution: event.target.value as AnimatedTitleSettings['resolution'] })} className={FIELD}>
+          <option value="480p">480p · faster</option><option value="720p">720p</option>
+        </select>
+      </label>
+    </div>
 
-        {!sequenceMode && <label className="block space-y-1.5 text-xs text-text-secondary">Title text
-          <textarea aria-label="Animated title text" value={settings.text} maxLength={160} rows={2} disabled={busy}
-            onChange={event => patch({ text: event.target.value })} placeholder="Create something extraordinary" className={FIELD} />
-          <span className="block text-[11px] leading-relaxed text-text-muted">{settings.text.length}/160 characters</span>
-        </label>}
+    <div className="flex flex-wrap items-center gap-2">
+      <button type="button" disabled={busy || !brief.trim() || brief.length > 4000} onClick={() => void composer.enhance()}
+        className="flex min-h-10 items-center gap-2 rounded-lg border border-border px-3 py-2 text-xs font-semibold text-text-primary hover:border-accent-blue/60 disabled:opacity-40">
+        {composer.busy ? <span aria-hidden="true" className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-r-transparent" /> : null}
+        {composer.busy ? 'Enhancing…' : 'Enhance with AI'}
+      </button>
+      {composer.message && <p role="status" className="min-w-0 flex-1 text-xs text-text-secondary">{composer.message}</p>}
+    </div>
+    {composer.error && <p role="alert" className="rounded-lg border border-red-500/25 bg-red-500/5 p-3 text-xs text-red-400">{composer.error}</p>}
 
-        {sequenceMode && <section aria-label="Phrase sequence" className="space-y-3">
-          <div>
-            <h3 className="text-sm font-medium text-text-primary">Phrase sequence</h3>
-            <p className="mt-1 text-[11px] leading-relaxed text-text-muted">Each phrase appears in order with its own timing and motion. Use 2–6 phrases.</p>
-          </div>
-
-          <label className="block space-y-1.5 text-xs text-text-secondary">Sequence duration
-            <select aria-label="Sequence duration" value={nativeFrames} disabled={busy}
-              onChange={event => patch(alignTitleSequence(settings, Number(event.target.value)))} className={FIELD}>
-              {sequenceDurationOptions.map(option => <option key={option.frames} value={option.frames}>{option.label}</option>)}
-            </select>
-            <span className="block text-[11px] leading-relaxed text-text-muted">
-              {nativeDuration ? `${nativeDuration.seconds.toFixed(3)} seconds · ${nativeDuration.frames} frames at 24 fps.` : `${(nativeFrames / 24).toFixed(3)} seconds · ${nativeFrames} frames at 24 fps.`} Changing a phrase time adjusts the other phrases to keep the selected clip length.
+    {currentPlan && <details data-testid="title-plan-review" aria-label="Title plan review" open={settings.titleReviewRequired || undefined}
+      className="rounded-xl border border-accent-blue/25 bg-accent-blue/5 p-3 text-xs text-text-secondary">
+      <summary className="cursor-pointer select-none">
+        <span className="block font-semibold text-text-primary">Review title plan · {sequence ? `${phrases.length} phrases` : 'one title'} · {(framesFor(settings) / 24).toFixed(3)}s</span>
+        <span className="mt-1 block break-words text-[11px] text-text-muted">Detected wording: {sequence
+          ? phrases.map(phrase => phrase.text.trim() || 'Untitled phrase').join(' → ') || 'No wording detected'
+          : settings.text || 'No wording detected'}</span>
+      </summary>
+      <div className="mt-3 space-y-3">
+        <p className="text-[11px] leading-relaxed text-text-secondary">Check the detected wording, order and timing before generating.</p>
+        {sequence ? <ol className="space-y-2 text-xs text-text-secondary">
+          {reviewRows.map((phrase, index) => <li key={phrase.id} className="flex flex-wrap justify-between gap-x-3 gap-y-1 rounded-lg bg-bg-secondary/70 px-3 py-2">
+            <span className="min-w-0"><strong>{index + 1}.</strong> {phrase.text || `Phrase ${index + 1}`}
+              {phrase.animation && <span className="mt-1 block text-[11px] text-text-muted">{phrase.animation}</span>}
             </span>
-          </label>
+            <span className="shrink-0 text-text-muted">{phrase.start.toFixed(3)}–{phrase.end.toFixed(3)}s</span>
+          </li>)}
+        </ol> : <div className="rounded-lg bg-bg-secondary/70 px-3 py-2 text-xs text-text-secondary">
+          <strong>Title wording:</strong> {settings.text || 'No wording detected'}
+          <span className="mt-1 block text-[11px] text-text-muted">One title · {titleSeconds(settings).toFixed(3)}s at 24 fps</span>
+          {settings.direction && <span className="mt-1 block text-[11px] text-text-muted">Motion: {settings.direction}</span>}
+        </div>}
+        <p className="text-[11px] text-text-muted">Clip: {framesFor(settings)} frames · {(framesFor(settings) / 24).toFixed(3)}s at 24 fps. Review the generated video before using it; results can vary.</p>
+      </div>
+    </details>}
 
-          <div className="space-y-3">
-            {phrases.map((phrase, index) => {
-              const row = timelineRows.find(item => item.id === phrase.id)
-              const selectedPreset = Object.entries(TITLE_PHRASE_ANIMATIONS)
-                .find(([, preset]) => preset.direction === phrase.animation)?.[0] ?? 'custom'
-              const phraseLength = phrase.text.length
-              return <section key={phrase.id} data-testid="title-phrase-card" role="group" aria-label={`Phrase ${index + 1}`}
-                className="min-w-0 space-y-3 rounded-xl border border-border bg-bg-tertiary p-3">
-                <div className="flex min-w-0 items-center justify-between gap-2">
-                  <h4 className="text-xs font-semibold text-text-primary">Phrase {index + 1}</h4>
-                  <div className="flex shrink-0 items-center gap-1">
-                    <button type="button" aria-label={`Move phrase ${index + 1} up`} title="Move up" disabled={busy || index === 0}
-                      onClick={() => reorderPhrase(index, -1)} className="min-h-9 min-w-9 rounded-md border border-border px-2 text-xs text-text-secondary disabled:opacity-40">↑</button>
-                    <button type="button" aria-label={`Move phrase ${index + 1} down`} title="Move down" disabled={busy || index === phrases.length - 1}
-                      onClick={() => reorderPhrase(index, 1)} className="min-h-9 min-w-9 rounded-md border border-border px-2 text-xs text-text-secondary disabled:opacity-40">↓</button>
-                    <button type="button" aria-label={`Remove phrase ${index + 1}`} title="Remove phrase" disabled={busy || phrases.length <= MIN_PHRASES}
-                      onClick={() => removePhrase(phrase.id)} className="min-h-9 rounded-md border border-border px-2 text-xs text-text-secondary disabled:opacity-40">Remove</button>
-                  </div>
-                </div>
+    {settings.plannerWarnings?.length ? <ul aria-label="Title planner warnings" className="space-y-1 rounded-lg border border-amber-400/20 bg-amber-400/5 p-3 text-[11px] text-amber-400">
+      {settings.plannerWarnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}
+    </ul> : null}
 
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_8rem]">
-                  <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Phrase text
-                    <input aria-label={`Phrase ${index + 1} text`} type="text" value={phrase.text} maxLength={MAX_PHRASE_LENGTH} disabled={busy}
-                      onChange={event => patchPhrase(phrase.id, { text: event.target.value })}
-                      placeholder={index === 0 ? 'CREATE' : index === 1 ? 'EXPLORE' : 'INSPIRE'} className={FIELD} />
-                    <span className={`block text-[11px] leading-relaxed ${phraseLength >= MAX_PHRASE_LENGTH ? 'text-amber-400' : 'text-text-muted'}`}>
-                      {phraseLength}/{MAX_PHRASE_LENGTH} characters{phraseLength >= MAX_PHRASE_LENGTH ? ' · limit reached' : ''}
-                    </span>
-                  </label>
+    {settings.rawTitleDraft && <details className="rounded-lg border border-border bg-bg-tertiary p-3 text-xs text-text-secondary">
+      <summary className="cursor-pointer">Raw planner draft diagnostics</summary>
+      {settings.titleDraftHistoryId && <a className="mt-2 inline-flex text-accent-blue underline" href={`/api/v1/llm/drafts/${encodeURIComponent(settings.titleDraftHistoryId)}`} target="_blank" rel="noreferrer">Open saved draft history</a>}
+      <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed">{settings.rawTitleDraft}</pre>
+    </details>}
 
-                  <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Time on screen (seconds)
-                    <input aria-label={`Phrase ${index + 1} duration`} type="number" min={1} max={10} step="any"
-                      value={Number.isFinite(phrase.seconds) ? Number(phrase.seconds.toFixed(3)) : ''} disabled={busy}
-                      onChange={event => patchPhrase(phrase.id, { seconds: Number(event.target.value) })}
-                      onBlur={event => {
-                        const seconds = Number(event.currentTarget.value)
-                        if (Number.isFinite(seconds)) patch(setTitlePhraseSeconds(settings, phrase.id, seconds))
-                      }} className={FIELD} />
-                  </label>
-                </div>
-
-                <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Describe this phrase’s motion
-                  <textarea aria-label={`Phrase ${index + 1} animation`} value={phrase.animation} maxLength={800} rows={2} disabled={busy}
-                    onChange={event => patchPhrase(phrase.id, { animation: event.target.value })}
-                    placeholder="Describe how this phrase appears, holds, and clears before the next one." className={FIELD} />
-                  <span className="block text-[11px] leading-relaxed text-text-muted">Optional. Leave blank for a simple fade in, readable hold, and complete fade out.</span>
-                </label>
-
-                <details className="rounded-lg border border-border p-2 text-xs text-text-secondary">
-                  <summary className="cursor-pointer">Use a motion preset (optional)</summary>
-                  <label className="mt-2 block min-w-0 space-y-1.5">Animation preset
-                    <select aria-label={`Phrase ${index + 1} animation preset`} value={selectedPreset} disabled={busy}
-                      onChange={event => {
-                        const value = event.target.value as keyof typeof TITLE_PHRASE_ANIMATIONS | 'custom'
-                        patchPhrase(phrase.id, { animation: value === 'custom' ? '' : TITLE_PHRASE_ANIMATIONS[value].direction })
-                      }} className={FIELD}>
-                      <option value="custom">Custom description</option>
-                      {Object.entries(TITLE_PHRASE_ANIMATIONS).map(([value, preset]) => <option key={value} value={value}>{preset.label}</option>)}
-                    </select>
-                  </label>
-                  <p className="mt-2 text-[11px] leading-relaxed text-text-muted">A preset fills the motion description; edit it freely.</p>
-                </details>
-
-                {row && <p className="text-[11px] text-text-muted">Approx. {row.start.toFixed(3)}–{row.end.toFixed(3)}s · {Math.round((row.end - row.start) * 24)} frames</p>}
-                {!phrase.text.trim() && <p className="text-[11px] text-amber-400">Add wording for this phrase.</p>}
-                {phraseLength > MAX_PHRASE_LENGTH && <p role="alert" className="text-[11px] text-red-400">Phrase text must be 80 characters or fewer.</p>}
-                {(!Number.isFinite(phrase.seconds) || phrase.seconds < 1 || phrase.seconds > 10) && <p role="alert" className="text-[11px] text-red-400">Use a time between 1 and 10 seconds.</p>}
-              </section>
-            })}
-          </div>
-
-          {phrases.length < MAX_PHRASES && <button type="button" disabled={busy} onClick={addPhrase}
-            className="min-h-10 w-full rounded-lg border border-dashed border-border px-3 py-2 text-xs font-medium text-text-secondary hover:border-accent-blue/60 hover:text-text-primary disabled:opacity-50">
-            + Add phrase
-          </button>}
-          {phrases.length > MAX_PHRASES && <p role="alert" className="text-xs text-red-400">A sequence can contain at most 6 phrases.</p>}
-
-          <details className="rounded-lg border border-border bg-bg-tertiary p-3 text-xs text-text-secondary">
-            <summary className="cursor-pointer">Paste lines to make phrases</summary>
-            <label className="mt-3 block space-y-1.5">One phrase per line
-              <textarea aria-label="Paste phrases, one per line" rows={4} disabled={busy} value={pasteLines}
-                onChange={event => { setPasteLines(event.target.value); setPasteError('') }}
-                placeholder={'CREATE\nEXPLORE\nINSPIRE'} className={FIELD} />
-              <span className="block text-[11px] text-text-muted">{pasteLines.split(/\r?\n/).map(line => line.trim()).filter(Boolean).length} non-empty lines · maximum 6</span>
-            </label>
-            {pasteError && <p role="alert" className="mt-2 text-[11px] text-red-400">{pasteError}</p>}
-            <button type="button" disabled={busy} className="mt-3 min-h-9 rounded-lg border border-border px-3 py-2 text-xs text-text-secondary disabled:opacity-50"
-              onClick={() => applyPastedLines(pasteLines)}>
-              Replace phrases from lines
-            </button>
-          </details>
-
-          <div aria-label="Approximate sequence timeline" className="space-y-2 rounded-lg border border-border bg-bg-tertiary p-3 text-[11px] leading-relaxed text-text-muted">
-            <h4 className="text-xs font-medium text-text-secondary">Approximate timeline</h4>
-            <ol className="space-y-1">
-              {timelineRows.map((row, index) => <li key={row.id} className="flex min-w-0 justify-between gap-3">
-                <span className="min-w-0 truncate">{index + 1}. {row.text.trim() || `Phrase ${index + 1}`}</span>
-                <span className="shrink-0">{row.start.toFixed(3)}–{row.end.toFixed(3)}s · {Math.round((row.end - row.start) * 24)} frames</span>
-              </li>)}
-            </ol>
-            <p>Selected clip: {nativeFrames} frames · {(nativeFrames / 24).toFixed(3)}s at 24 fps. Phrase timings align to whole frames; H3 can interpret the requested timing approximately.</p>
-            <p>{sequenceCharacters}/160 total text characters</p>
-            {phrases.length < MIN_PHRASES && <p role="alert" className="text-amber-400">Add at least 2 phrases.</p>}
-            {sequenceCharacters > 160 && <p role="alert" className="text-amber-400">Shorten the phrases to stay within 160 characters total.</p>}
-            <p>Each phrase clears before the next one; the last clears to the selected {background === 'chroma' ? 'green' : 'black'} background.</p>
-          </div>
-        </section>}
-
-        <label className="block space-y-1.5 text-xs text-text-secondary">Title background
-          <select aria-label="Title background" value={background} disabled={busy}
-            onChange={event => patch({ background: event.target.value as NonNullable<AnimatedTitleSettings['background']> })} className={FIELD}>
-            <option value="chroma">Chroma key (green)</option><option value="black">Black background</option>
-          </select>
-          <span className="block text-[11px] leading-relaxed text-text-muted">{background === 'chroma'
-            ? destination === 'studio' ? 'The video keeps its green background for keying in the Editor or another editing app.' : 'Green is keyed automatically so the title and effects show over footage below.'
-            : destination === 'studio' ? 'The video keeps its opaque black background.' : 'Black stays opaque. The title clip covers footage below for its full frame.'}</span>
-        </label>
-        <label className="block space-y-1.5 text-xs text-text-secondary">Lettering and visual style
-          <input aria-label="Title visual style" value={settings.look} maxLength={1200} disabled={busy}
-            onChange={event => patch({ look: event.target.value })} placeholder="Describe any style: anime, hand-drawn, metallic, minimal…" className={FIELD} />
-        </label>
-        <label className="block space-y-1.5 text-xs text-text-secondary">{sequenceMode ? 'Shared direction (optional)' : 'Describe the animation'}
-          <textarea aria-label={sequenceMode ? 'Shared title direction' : 'Title animation description'} value={sequenceMode ? settings.sequenceDirection ?? '' : settings.direction} maxLength={1200} rows={3} disabled={busy}
-            onChange={event => patch(sequenceMode ? { sequenceDirection: event.target.value } : { direction: event.target.value, effect: 'custom' })}
-            placeholder={sequenceMode ? 'Optional direction shared across the phrase sequence.' : 'Describe how the title appears, moves and disappears, including any timing you want.'} className={FIELD} />
-        </label>
-        {!sequenceMode && <details className="rounded-lg border border-border bg-bg-tertiary p-3 text-xs text-text-secondary">
-          <summary className="cursor-pointer">Use an animation preset (optional)</summary>
-          <label className="mt-3 block space-y-1.5">Animation preset
-            <select aria-label="Title animation preset" value={settings.effect} disabled={busy}
-              onChange={event => {
-                const effect = event.target.value as AnimatedTitleSettings['effect']
-                patch({ effect, ...(effect !== 'custom' ? { direction: TITLE_EFFECTS[effect] } : {}) })
-              }} className={FIELD}>
-              <option value="custom">None — use my description</option>
-              {Object.entries(TITLE_EFFECT_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-            </select>
-          </label>
-          <p className="mt-2 text-[11px] leading-relaxed text-text-muted">A preset fills the description as a starting point. Edit it freely; only the description is sent as the animation direction.</p>
-        </details>}
-        <div className="grid grid-cols-2 gap-3">
-          {!sequenceMode && <label className="space-y-1.5 text-xs text-text-secondary">Duration (seconds)
-            <input aria-label="Title duration" type="number" min={5} max={14.5} step={.1} value={settings.seconds} disabled={busy}
-              onChange={event => patch({ seconds: Number(event.target.value) })} className={FIELD} />
-          </label>}
-          <label className="space-y-1.5 text-xs text-text-secondary">Aspect ratio
-            <select aria-label="Title aspect ratio" value={settings.aspect} disabled={busy} onChange={event => patch({ aspect: event.target.value as AnimatedTitleSettings['aspect'] })} className={FIELD}>
-              {destination === 'editor' && <option value="project">Match project</option>}<option value="16:9">16:9 · landscape</option><option value="9:16">9:16 · portrait</option><option value="1:1">1:1 · square</option>
-            </select>
-          </label>
-          <label className="space-y-1.5 text-xs text-text-secondary">Resolution
-            <select aria-label="Title resolution" value={settings.resolution} disabled={busy} onChange={event => patch({ resolution: event.target.value as AnimatedTitleSettings['resolution'] })} className={FIELD}>
-              <option value="480p">480p · faster</option><option value="720p">720p</option>
-            </select>
-          </label>
-        </div>
-        {destination === 'editor' && <label className="flex items-center gap-2 text-xs text-text-secondary"><input type="checkbox" checked={settings.keepAudio} disabled={busy}
-          onChange={event => patch({ keepAudio: event.target.checked })} className="accent-[var(--color-accent-blue)]" />Keep generated clip audio</label>}
-        {destination === 'studio' && <p className="text-[11px] leading-relaxed text-text-muted">Generated video audio is retained. You can mute it in the Editor or another editing app.</p>}
-        <div className="rounded-lg border border-border bg-bg-tertiary p-3 text-[11px] leading-relaxed text-text-muted">
-          {geometry.width}×{geometry.height} · {duration ? sequenceMode ? `${nativeFrames} frames · ${(nativeFrames / 24).toFixed(3)}s at 24 fps` : `${duration.toFixed(2)}s at 24 fps` : sequenceMode ? `about ${sequenceTotal.toFixed(1)}s requested` : 'Check duration'}{destination === 'editor' ? ` · inserts at ${at.toFixed(2)}s.` : ' · saved to the gallery.'}<br />
-          Background: {background === 'chroma' ? destination === 'studio' ? 'Green screen, ready for keying.' : 'Chroma key (green), removed automatically.' : 'Black, opaque.'}<br />
-          No reference characters or Studio settings are reused. Review the wording, timing and edge quality; generated results can vary.
-        </div>
-        {prompt && <details className="text-xs text-text-secondary"><summary className="cursor-pointer">View prepared prompt</summary><pre className="mt-2 whitespace-pre-wrap rounded-lg bg-bg-tertiary p-3 text-[11px] leading-relaxed">{prompt}</pre></details>}
-        {sequenceMode && validation && <p role="alert" className="text-xs text-red-400">{validation}</p>}
-        {!sequenceMode && validation && (!geometry.width || !duration) && <p role="alert" className="text-xs text-red-400">{validation}</p>}
-  </>
+    <details className="rounded-xl border border-border bg-bg-tertiary p-3 text-xs text-text-secondary">
+      <summary className="cursor-pointer select-none font-medium">Advanced title controls</summary>
+      <div className="mt-3 space-y-3">
+        <AnimatedTitleAdvancedControls settings={settings} patch={patchAdvanced} busy={busy} canvas={canvas} destination={destination} at={at} />
+        <button type="button" disabled={busy} onClick={composer.acceptManual}
+          className="min-h-9 rounded-lg border border-border px-3 py-2 text-xs font-medium text-text-primary hover:border-accent-blue/60 disabled:opacity-40">
+          Use manual title plan
+        </button>
+        <p className="text-[11px] leading-relaxed text-text-muted">{settings.manualPlanEdited
+          ? 'Advanced edits are waiting for approval. Use this manual plan to keep them, or Enhance to replace them with a new AI plan.'
+          : 'Use this when you want to set the exact title wording and motion yourself. The manual plan is validated before it can be generated.'}</p>
+      </div>
+    </details>
+  </div>
 }

@@ -462,28 +462,33 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
     await page.getByRole('button', {name: 'Open title generator'}).click();
     const dialog = page.getByRole('dialog', {name: 'Create animated title'});
     await dialog.waitFor();
-    assert.equal(await dialog.getByLabel('Title background').inputValue(), 'chroma', 'Chroma key is the default title background.');
-    assert.match(await dialog.innerText(), /Green is keyed automatically/);
-    assert.equal(await dialog.getByLabel('Title visual style').inputValue(), '', 'A new title does not impose metallic, 3D or another visual style.');
-    await dialog.getByRole('textbox', {name: 'Animated title text'}).fill('  Orion / Q4!  ');
-    await dialog.getByRole('textbox', {name: 'Title visual style'}).fill('Chromed serif lettering with a blue edge light');
-    const animation = dialog.getByRole('textbox', {name: 'Title animation description'});
+    const mainBackground = dialog.locator('select[aria-label="Title background"]').first();
+    assert.equal(await mainBackground.inputValue(), 'chroma', 'Chroma key is the default title background.');
+    assert.match(await dialog.innerText(), /Editor removes green automatically/);
+    assert.equal(await dialog.getByLabel('Title style preset').inputValue(), 'custom', 'A new title does not impose a visual effect preset.');
+    assert.equal(await dialog.getByLabel('Title style preset').locator('option').count(), 21,
+      'The optional visual preset list contains custom plus 20 effects.');
+    await dialog.getByText('Advanced title controls', {exact: true}).click();
+    const advancedDialog = dialog.locator('details').filter({hasText: 'Advanced title controls'}).first();
+    await advancedDialog.getByRole('textbox', {name: 'Animated title text'}).fill('  Orion / Q4!  ');
+    await advancedDialog.getByRole('textbox', {name: 'Title visual style'}).fill('Chromed serif lettering with a blue edge light');
+    const animation = advancedDialog.getByRole('textbox', {name: 'Title animation description'});
     assert.equal(await animation.inputValue(), '', 'Custom animation is blank and visible by default.');
-    assert.equal(await dialog.getByLabel('Title animation preset').isVisible(), false, 'Preset dropdown is optional and collapsed initially.');
-    await dialog.getByText('Use an animation preset (optional)', {exact: true}).click();
-    const presets = dialog.getByLabel('Title animation preset');
+    assert.equal(await advancedDialog.getByLabel('Title animation preset').isVisible(), false, 'The legacy animation preset remains optional and collapsed in Advanced.');
+    await advancedDialog.getByText('Use an animation preset (optional)', {exact: true}).click();
+    const presets = advancedDialog.getByLabel('Title animation preset');
     assert.equal(await presets.locator('option').count(), 21, 'Twenty presets plus the custom option are offered.');
     await presets.selectOption('neon');
     assert.equal(await animation.inputValue(), await page.evaluate(() => window.titleHelpers.TITLE_EFFECTS.neon), 'A preset fills the editable description.');
     await animation.fill('Reveal the exact spelling first; hold it clearly before it disappears.');
     assert.equal(await presets.inputValue(), 'custom', 'Editing a starter description returns to custom animation.');
-    await dialog.getByText('Use an animation preset (optional)', {exact: true}).click();
-    await dialog.getByLabel('Title duration').fill('6.8');
-    await dialog.getByLabel('Title aspect ratio').selectOption('project');
-    await dialog.getByLabel('Title resolution').selectOption('480p');
+    await advancedDialog.getByText('Use an animation preset (optional)', {exact: true}).click();
+    await advancedDialog.getByLabel('Title duration').fill('6.8');
+    await advancedDialog.getByLabel('Title aspect ratio').selectOption('project');
+    await advancedDialog.getByLabel('Title resolution').selectOption('480p');
     const expectedPrompt = await page.evaluate(settings => window.titleHelpers.animatedTitlePrompt(settings), expectedTitleSettings);
-    await dialog.getByText('View prepared prompt').click();
-    assert.equal(await dialog.locator('pre').innerText(), expectedPrompt,
+    await advancedDialog.getByText('View prepared prompt').click();
+    assert.equal(await advancedDialog.locator('pre').innerText(), expectedPrompt,
       'The reviewed prompt preserves the exact title, selected visual style, effect, and direction.');
     assert.match(expectedPrompt, /ONLY visible lettering is exactly "Orion \/ Q4!"/);
     assert.match(expectedPrompt, /Start and end on the supplied perfectly uniform bright green background \(#00FF00\)/);
@@ -505,7 +510,7 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
       ? path.resolve(process.env.MAESTRO_EDITOR_TITLE_SCREENSHOTS)
       : path.join(root, '.codex-tmp', 'editor-title-backgrounds-20261028');
     fs.mkdirSync(screenshotDirectory, {recursive: true});
-    await page.getByLabel('Title background').selectOption('chroma');
+    await page.getByLabel('Title background').first().selectOption('chroma');
     await page.screenshot({path: path.join(screenshotDirectory, 'chroma-title-dialog-desktop.png'), fullPage: true});
     await page.setViewportSize({width: 390, height: 844});
     const mobileDialog = await dialog.evaluate(element => ({
@@ -525,12 +530,13 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
       console.warn('Mobile title viewport assertion deferred: the current ui/dist CSS bundle predates the title dialog utilities.');
     }
     await page.screenshot({path: path.join(screenshotDirectory, 'chroma-title-dialog-mobile.png'), fullPage: true});
-    await page.getByLabel('Title background').selectOption('black');
+    await page.getByLabel('Title background').first().selectOption('black');
     assert.match(await dialog.innerText(), /Black stays opaque\. The title clip covers footage below for its full frame\./);
     await page.screenshot({path: path.join(screenshotDirectory, 'black-title-dialog-mobile.png'), fullPage: true});
     await page.setViewportSize({width: 1440, height: 960});
     await page.screenshot({path: path.join(screenshotDirectory, 'black-title-dialog-desktop.png'), fullPage: true});
-    await page.getByLabel('Title background').selectOption('chroma');
+    await page.getByLabel('Title background').first().selectOption('chroma');
+    await advancedDialog.getByRole('button', {name: 'Use manual title plan'}).click();
 
     const uploadCountBefore = uploads.length;
     await dialog.getByRole('button', {name: 'Generate title'}).dblclick();
@@ -797,17 +803,20 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
       direction: 'Las letras flotan en una órbita imposible, se ordenan para que se puedan leer, quedan quietas un momento y luego se desvanecen.',
       seconds: 6.8, aspect: 'project', resolution: '480p', keepAudio: false, background: 'black',
     };
-    await blackDialog.getByLabel('Title text').fill(blackTitleSettings.text);
-    await blackDialog.getByLabel('Title visual style').fill(blackTitleSettings.look);
-    await blackDialog.getByLabel('Title animation description').fill(blackTitleSettings.direction);
-    await blackDialog.getByLabel('Title background').selectOption('black');
-    await blackDialog.getByLabel('Title duration').fill(String(blackTitleSettings.seconds));
-    await blackDialog.getByLabel('Title aspect ratio').selectOption(blackTitleSettings.aspect);
-    await blackDialog.getByLabel('Title resolution').selectOption(blackTitleSettings.resolution);
+    await blackDialog.getByText('Advanced title controls', {exact: true}).click();
+    const blackAdvanced = blackDialog.locator('details').filter({hasText: 'Advanced title controls'}).first();
+    await blackAdvanced.getByLabel('Title text').fill(blackTitleSettings.text);
+    await blackAdvanced.getByLabel('Title visual style').fill(blackTitleSettings.look);
+    await blackAdvanced.getByLabel('Title animation description').fill(blackTitleSettings.direction);
+    await blackAdvanced.getByLabel('Title background').selectOption('black');
+    await blackAdvanced.getByLabel('Title duration').fill(String(blackTitleSettings.seconds));
+    await blackAdvanced.getByLabel('Title aspect ratio').selectOption(blackTitleSettings.aspect);
+    await blackAdvanced.getByLabel('Title resolution').selectOption(blackTitleSettings.resolution);
+    await blackAdvanced.getByRole('button', {name: 'Use manual title plan'}).click();
     assert.match(await blackDialog.innerText(), /Black stays opaque\. The title clip covers footage below for its full frame\./);
     const blackPrompt = await page.evaluate(settings => window.titleHelpers.animatedTitlePrompt(settings), blackTitleSettings);
-    await blackDialog.getByText('View prepared prompt').click();
-    assert.equal(await blackDialog.locator('pre').innerText(), blackPrompt,
+    await blackAdvanced.getByText('View prepared prompt').click();
+    assert.equal(await blackAdvanced.locator('pre').innerText(), blackPrompt,
       'The black prepared prompt preserves the exact Unicode title, Spanish direction and requested lettering style.');
     assert.match(blackPrompt, /ONLY visible lettering is exactly "Mañana — Ω-2049 · ½"/);
     assert.match(blackPrompt, /Letras de vidrio verde lima, surrealistas y con geometría imposible\./);
@@ -867,8 +876,8 @@ const waitUntil = async (page, predicate, label, argument = null) => page.waitFo
       jobId: blackJobId, status: 'running',
     }, 'The running intent freezes its selected black mode and exact title settings.');
 
-    await blackDialog.getByLabel('Title background').selectOption('chroma');
-    assert.equal(await blackDialog.getByLabel('Title background').inputValue(), 'chroma', 'The dialog draft can change while the job runs.');
+    await blackDialog.locator('select[aria-label="Title background"]').first().selectOption('chroma');
+    assert.equal(await blackDialog.locator('select[aria-label="Title background"]').first().inputValue(), 'chroma', 'The dialog draft can change while the job runs.');
     assert.equal(await page.evaluate(() => window.titleStore.getState().intent.settings.background), 'black',
       'Changing the live dialog draft does not change the submitted job mode.');
     const blackGenerationCountBeforeReload = generationBodies.length;

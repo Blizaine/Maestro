@@ -2399,6 +2399,24 @@ export async function fetchLlmModels(): Promise<{ models: import('../types').Llm
   return getJson(`${BASE}/api/v1/llm/models`, 'Failed to fetch LLM models')
 }
 
+export async function planAnimatedTitle(params: {
+  brief: string; style_hint: string; frames: number; background: 'chroma' | 'black'
+}): Promise<{
+  plan: import('../editor/editorAnimatedTitles').TitleCreativePlan | null
+  warnings: string[]; raw_draft: string; review_required: boolean; draft_history_id?: string
+}> {
+  const response = await fetch(`${BASE}/api/v1/llm/plan-title`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
+  })
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Title planning failed.' }))
+    throw Object.assign(new Error(error.detail || 'Title planning failed.'), {
+      draft_history_id: response.headers.get('X-Maestro-Draft-History') || undefined,
+    })
+  }
+  return response.json()
+}
+
 export async function llmEnhancePrompt(params: {
   prompt: string
   mode?: string

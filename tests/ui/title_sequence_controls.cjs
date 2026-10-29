@@ -61,7 +61,7 @@ async function bundleControls() {
       contents: `
         import {useState} from 'react';
         import {createRoot} from 'react-dom/client';
-        import {AnimatedTitleControls} from './src/editor/AnimatedTitleControls';
+        import {AnimatedTitleAdvancedControls} from './src/editor/AnimatedTitleAdvancedControls';
         import {DEFAULT_TITLE_SETTINGS, TITLE_EFFECTS} from './src/editor/editorAnimatedTitles';
         function Harness() {
           const [settings, setSettings] = useState({
@@ -75,7 +75,7 @@ async function bundleControls() {
           const patch = value => setSettings(current => ({...current, ...value}));
           window.titleHarness = {getSettings: () => settings, getBusy: () => busy, setBusy, setSettings};
           return <main className="mx-auto flex w-full max-w-2xl flex-col gap-4 p-4">
-            <AnimatedTitleControls settings={settings} patch={patch} busy={busy}
+            <AnimatedTitleAdvancedControls settings={settings} patch={patch} busy={busy}
               canvas={{width: 1920, height: 1080}} destination="editor" at={3.25} />
           </main>;
         }
