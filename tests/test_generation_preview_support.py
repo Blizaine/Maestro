@@ -84,7 +84,11 @@ def test_model_catalog_publishes_exact_variant_support(monkeypatch):
     monkeypatch.setitem(sys.modules, director.__name__, director)
     definitions = {
         "fused-h3": {"architecture": "minimax_h3", "name": "H3 Fused"},
-        "custom-flux-dev": {"architecture": "flux", "name": "Custom checkpoint"},
+        "custom-flux-dev": {
+            "architecture": "flux",
+            "name": "Custom checkpoint",
+            "one_image_ref_needed": True,
+        },
         "custom-flux-schnell": {"architecture": "flux_schnell", "name": "Custom checkpoint"},
         "audio-h3": {"architecture": "minimax_h3", "audio_only": True},
     }
@@ -99,16 +103,24 @@ def test_model_catalog_publishes_exact_variant_support(monkeypatch):
         test_class_t2v=lambda model: True,
     )
     tree = ast.parse((APP / "launch.py").read_text(encoding="utf-8"))
+    reference_helper = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_requires_image_reference"
+    )
     node = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "list_models")
     node.decorator_list = []
     namespace = {"wgp": runtime, "_check_model_downloaded": lambda model: False}
-    exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), "launch.py", "exec"), namespace)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[reference_helper, node], type_ignores=[])),
+                 "launch.py", "exec"), namespace)
     models = {model["model_type"]: model for model in namespace["list_models"]()["models"]}
     assert models["fused-h3"]["preview_support"] == {
         "rgb": False, "tiny_vae_frames": True, "tiny_vae_video": True,
     }
     assert models["custom-flux-dev"]["preview_support"]["tiny_vae_frames"] is True
+    assert models["custom-flux-dev"]["requires_image_reference"] is True
     assert models["custom-flux-schnell"]["preview_support"] == {
         "rgb": True, "tiny_vae_frames": False, "tiny_vae_video": False,
     }
+    assert models["custom-flux-schnell"]["requires_image_reference"] is False
     assert not any(models["audio-h3"]["preview_support"].values())

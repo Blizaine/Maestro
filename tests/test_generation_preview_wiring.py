@@ -17,6 +17,17 @@ APP = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP))
 
 from services.generation_preview import configured_preview_mode, preview_mode
+from services.memory_runtime import RuntimeSelection
+
+
+def legacy_runtime_selection():
+    app_dir = APP.resolve()
+    return RuntimeSelection(
+        backend="legacy",
+        app_dir=app_dir,
+        module_root=app_dir,
+        package_dir=app_dir / "mmgp",
+    )
 
 
 def isolated_function(path, name, namespace):
@@ -38,7 +49,9 @@ def test_system_config_defaults_only_when_saved_preference_is_missing(saved_mode
             server_config=config,
             attention_modes_supported=[],
             args=SimpleNamespace(vram_safety_coefficient=0.8),
+            memory_runtime_selection=legacy_runtime_selection(),
         ),
+        "_app_dir": str(APP),
         "_APP_VERSION": "test",
         "configured_preview_mode": configured_preview_mode,
         "_get_linked_model_folders": lambda: [],
@@ -258,10 +271,22 @@ def test_window_preparation_clears_old_media_before_next_callback():
 def isolated_profile_setup(decoder, error):
     tree = ast.parse((APP / "wgp.py").read_text(encoding="utf-8"))
     load = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "load_models")
+    initialize_kwargs = next(
+        node for node in load.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "kwargs" for target in node.targets)
+        and isinstance(node.value, ast.Dict)
+    )
     index = next(i for i, node in enumerate(load.body) if isinstance(node, ast.Assign)
                  and any(isinstance(target, ast.Name) and target.id == "previous_last_offload" for target in node.targets))
+    recovery_index = next(
+        i for i, node in enumerate(load.body[index + 1 :], start=index + 1)
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test) == "preview_profile_failed"
+    )
     return_nodes = ast.parse("return wan_model, offloadobj").body
-    body = [ast.Global(names=["preview_decoder", "wan_model", "offloadobj"])] + load.body[index:index + 4] + return_nodes
+    body = [ast.Global(names=["preview_decoder", "wan_model", "offloadobj"]), initialize_kwargs]
+    body += load.body[index:recovery_index + 1] + return_nodes
     function = ast.FunctionDef(name="recover_profile", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[],
                                                                         kw_defaults=[], defaults=[]),
                                body=body, decorator_list=[])
@@ -270,10 +295,11 @@ def isolated_profile_setup(decoder, error):
     fresh_model, fresh_offload = object(), SimpleNamespace()
     old_pipeline = {"transformer": object(), "tiny_vae": decoder}
     ns = {"preview_decoder": decoder, "preview_key": "taeh3", "pipe": old_pipeline,
-          "mmgp_profile": 1, "compile_modules": "", "loras_transformer": [], "perc_reserved_mem_max": 0.5,
+          "mmgp_profile": 1, "profile": 1, "compile_modules": "", "loras_transformer": [], "perc_reserved_mem_max": 0.5,
           "vram_safety_coefficient": 0.9, "transformer_dtype": torch.float16, "kwargs": {},
           "gc": SimpleNamespace(collect=mock.Mock()), "args": SimpleNamespace(gpu=""), "torch": torch,
           "model_type": "h3", "override_profile": 1, "output_type": "video", "preview_gen": {}, "model_kwargs": {},
+          "memory_runtime_selection": legacy_runtime_selection(),
           "wan_model": object(), "offloadobj": None,
           "offload": SimpleNamespace(LoadingCancelled=cancelled, last_offload_obj=None, flush_torch_caches=mock.Mock()),
           "load_models": mock.Mock(return_value=(fresh_model, fresh_offload))}

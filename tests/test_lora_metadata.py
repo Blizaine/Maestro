@@ -11,7 +11,7 @@ from pathlib import Path, PureWindowsPath
 import sys
 import tempfile
 import time
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -312,6 +312,14 @@ class EnhancementLoRaWiringTests(unittest.TestCase):
         (folder / Path(FILENAME).with_suffix(".guide.md")).write_text("A frozen instant. Only the camera moves in a continuous 360 orbit.", encoding="utf-8")
         self.wgp = SimpleNamespace(server_config={"services": {}}, get_model_def=lambda _: {},
                                    get_lora_search_dirs=lambda _: [str(folder)])
+        # enhance_guides lazily imports the app's model catalogue. Keep that
+        # lookup bound to this test fixture instead of importing the live GPU
+        # server while exercising the real guide-selection path.
+        catalog = ModuleType("wgp")
+        catalog.get_model_def = self.wgp.get_model_def
+        catalog_patch = patch.dict(sys.modules, {"wgp": catalog})
+        catalog_patch.start()
+        self.addCleanup(catalog_patch.stop)
         self.ns = launch_functions({"_active_lora_hint", "_llm_enhance_prompt_payload"}, {
             "wgp": self.wgp, "_ensure_llm_loaded": Mock(), "HTTPException": HttpError,
             "enhancement_settings": lambda value: value, "enhancement_warnings": lambda: [],
