@@ -2400,7 +2400,7 @@ export async function fetchLlmModels(): Promise<{ models: import('../types').Llm
 }
 
 export async function planAnimatedTitle(params: {
-  brief: string; style_hint: string; frames: number; background: 'chroma' | 'black'
+  brief: string; style_hint: string; frames: number; background: string; fps?: number; native_h3?: boolean
 }): Promise<{
   plan: import('../editor/editorAnimatedTitles').TitleCreativePlan | null
   warnings: string[]; raw_draft: string; review_required: boolean; draft_history_id?: string

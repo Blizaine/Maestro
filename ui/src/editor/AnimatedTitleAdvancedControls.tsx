@@ -7,12 +7,15 @@ import {
   titleFrames,
   alignTitleSequence,
   setTitlePhraseSeconds,
-  TITLE_SEQUENCE_DURATIONS,
+  titleDurationChoices,
+  titleFps,
+  titleBackground,
   TITLE_EFFECTS,
   TITLE_EFFECT_LABELS,
   TITLE_PHRASE_ANIMATIONS,
 } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings, TitlePhrase } from './editorAnimatedTitles'
+import { TitleBackgroundControl } from './TitleBackgroundControl'
 
 const FIELD = 'w-full min-w-0 rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-xs text-text-primary outline-none focus:border-accent-blue/60'
 const MAX_PHRASES = 6
@@ -26,17 +29,18 @@ function averagePhraseSeconds(phrases: TitlePhrase[]) {
 }
 
 function selectedSequenceFrames(settings: AnimatedTitleSettings, phrases: TitlePhrase[]) {
-  const minimumFrames = phrases.length * 24
+  const choices = titleDurationChoices(settings)
+  const minimumFrames = phrases.length * titleFps(settings)
   let frames: number
   if (Number.isInteger(settings.sequenceFrames)) frames = settings.sequenceFrames!
   else {
     const total = phrases.reduce((sum, phrase) => sum + (Number.isFinite(phrase.seconds) ? phrase.seconds : 0), 0)
-    try { frames = titleFrames(total) } catch { frames = TITLE_SEQUENCE_DURATIONS[0]?.frames ?? 124 }
+    try { frames = titleFrames(total, settings) } catch { frames = choices[0]?.frames ?? 124 }
   }
-  if (frames >= minimumFrames && TITLE_SEQUENCE_DURATIONS.some(option => option.frames === frames)) return frames
-  const compatible = TITLE_SEQUENCE_DURATIONS.find(option => option.frames >= Math.max(frames, minimumFrames))
+  if (frames >= minimumFrames && choices.some(option => option.frames === frames)) return frames
+  const compatible = choices.find(option => option.frames >= Math.max(frames, minimumFrames))
   if (compatible) return compatible.frames
-  return TITLE_SEQUENCE_DURATIONS.at(-1)?.frames ?? frames
+  return choices.at(-1)?.frames ?? frames
 }
 
 function alignPhrases(settings: AnimatedTitleSettings, phrases: TitlePhrase[], frames = selectedSequenceFrames(settings, settings.phrases ?? [])) {
@@ -52,7 +56,9 @@ export function AnimatedTitleAdvancedControls({ settings, patch, busy, canvas, d
   destination?: 'editor' | 'studio'
   at?: number
 }) {
-  const background = settings.background ?? 'chroma'
+  const background = titleBackground(settings)
+  const fps = titleFps(settings)
+  const durationChoices = titleDurationChoices(settings)
   const sequenceMode = settings.mode === 'sequence'
   const phrases = settings.phrases ?? []
   const [pasteLines, setPasteLines] = useState('')
@@ -61,8 +67,8 @@ export function AnimatedTitleAdvancedControls({ settings, patch, busy, canvas, d
   const formState = titleFormState(settings, canvas)
   const sequenceTotal = phrases.reduce((sum, phrase) => sum + (Number.isFinite(phrase.seconds) ? phrase.seconds : 0), 0)
   const nativeFrames = selectedSequenceFrames(settings, phrases)
-  const nativeDuration = TITLE_SEQUENCE_DURATIONS.find(option => option.frames === nativeFrames)
-  const sequenceDurationOptions = TITLE_SEQUENCE_DURATIONS.filter(option => option.frames >= phrases.length * 24)
+  const nativeDuration = durationChoices.find(option => option.frames === nativeFrames)
+  const sequenceDurationOptions = durationChoices.filter(option => option.frames >= phrases.length * fps)
   const sequenceCharacters = phrases.map(phrase => phrase.text.trim()).join('\n').length
   const timeline = sequenceMode ? (() => {
     try { return titleSequenceTimeline(settings) } catch { return null }
@@ -134,7 +140,9 @@ export function AnimatedTitleAdvancedControls({ settings, patch, busy, canvas, d
   }
 
   return <>
-        <p className="text-xs leading-relaxed text-text-secondary">H3 Fused 4-Step · Frames. Matching {background === 'chroma' ? 'green' : 'black'} start/end frames are prepared automatically. {destination === 'studio' ? 'The finished clip is saved to your gallery.' : background === 'chroma' ? 'The result is inserted with chroma key enabled so footage below shows through.' : 'The result stays opaque, so its black background covers footage below.'}</p>
+        <p className="text-xs leading-relaxed text-text-secondary">{settings.model?.name ?? 'H3 Fused 4-Step · Frames'}. Background: {background.label}.
+          {settings.model?.startFrame === false ? ' The model follows the background instruction in the prompt.' : ' Matching boundary images are prepared for the model’s supported frame inputs.'}
+          {destination === 'editor' && (background.chromaKey ? ' Chroma key is enabled on insertion.' : ' The background stays opaque.')}</p>
 
         <div role="group" aria-label="Title format" className="grid grid-cols-2 gap-2 rounded-xl border border-border bg-bg-tertiary p-1">
           <button type="button" aria-pressed={!sequenceMode} disabled={busy} onClick={() => setMode('single')}
@@ -166,7 +174,7 @@ export function AnimatedTitleAdvancedControls({ settings, patch, busy, canvas, d
               {sequenceDurationOptions.map(option => <option key={option.frames} value={option.frames}>{option.label}</option>)}
             </select>
             <span className="block text-[11px] leading-relaxed text-text-muted">
-              {nativeDuration ? `${nativeDuration.seconds.toFixed(3)} seconds · ${nativeDuration.frames} frames at 24 fps.` : `${(nativeFrames / 24).toFixed(3)} seconds · ${nativeFrames} frames at 24 fps.`} Changing a phrase time adjusts the other phrases to keep the selected clip length.
+              {nativeDuration ? `${nativeDuration.seconds.toFixed(3)} seconds · ${nativeDuration.frames} frames at ${fps} fps.` : `${(nativeFrames / fps).toFixed(3)} seconds · ${nativeFrames} frames at ${fps} fps.`} Changing a phrase time adjusts the other phrases to keep the selected clip length.
             </span>
           </label>
 
@@ -233,7 +241,7 @@ export function AnimatedTitleAdvancedControls({ settings, patch, busy, canvas, d
                   <p className="mt-2 text-[11px] leading-relaxed text-text-muted">A preset fills the motion description; edit it freely.</p>
                 </details>
 
-                {row && <p className="text-[11px] text-text-muted">Approx. {row.start.toFixed(3)}–{row.end.toFixed(3)}s · {Math.round((row.end - row.start) * 24)} frames</p>}
+                {row && <p className="text-[11px] text-text-muted">Approx. {row.start.toFixed(3)}–{row.end.toFixed(3)}s · {Math.round((row.end - row.start) * fps)} frames</p>}
                 {!phrase.text.trim() && <p className="text-[11px] text-amber-400">Add wording for this phrase.</p>}
                 {phraseLength > MAX_PHRASE_LENGTH && <p role="alert" className="text-[11px] text-red-400">Phrase text must be 80 characters or fewer.</p>}
                 {(!Number.isFinite(phrase.seconds) || phrase.seconds < 1 || phrase.seconds > 10) && <p role="alert" className="text-[11px] text-red-400">Use a time between 1 and 10 seconds.</p>}
@@ -267,26 +275,18 @@ export function AnimatedTitleAdvancedControls({ settings, patch, busy, canvas, d
             <ol className="space-y-1">
               {timelineRows.map((row, index) => <li key={row.id} className="flex min-w-0 justify-between gap-3">
                 <span className="min-w-0 truncate">{index + 1}. {row.text.trim() || `Phrase ${index + 1}`}</span>
-                <span className="shrink-0">{row.start.toFixed(3)}–{row.end.toFixed(3)}s · {Math.round((row.end - row.start) * 24)} frames</span>
+                <span className="shrink-0">{row.start.toFixed(3)}–{row.end.toFixed(3)}s · {Math.round((row.end - row.start) * fps)} frames</span>
               </li>)}
             </ol>
-            <p>Selected clip: {nativeFrames} frames · {(nativeFrames / 24).toFixed(3)}s at 24 fps. Phrase timings align to whole frames; H3 can interpret the requested timing approximately.</p>
+            <p>Selected clip: {nativeFrames} frames · {(nativeFrames / fps).toFixed(3)}s at {fps} fps. Phrase timings align to whole frames; The model can interpret the requested timing approximately.</p>
             <p>{sequenceCharacters}/160 total text characters</p>
             {phrases.length < MIN_PHRASES && <p role="alert" className="text-amber-400">Add at least 2 phrases.</p>}
             {sequenceCharacters > 160 && <p role="alert" className="text-amber-400">Shorten the phrases to stay within 160 characters total.</p>}
-            <p>Each phrase clears before the next one; the last clears to the selected {background === 'chroma' ? 'green' : 'black'} background.</p>
+            <p>Each phrase clears before the next one; the last clears to the selected {background.label} background.</p>
           </div>
         </section>}
 
-        <label className="block space-y-1.5 text-xs text-text-secondary">Title background
-          <select aria-label="Title background" value={background} disabled={busy}
-            onChange={event => patch({ background: event.target.value as NonNullable<AnimatedTitleSettings['background']> })} className={FIELD}>
-            <option value="chroma">Chroma key (green)</option><option value="black">Black background</option>
-          </select>
-          <span className="block text-[11px] leading-relaxed text-text-muted">{background === 'chroma'
-            ? destination === 'studio' ? 'The video keeps its green background for keying in the Editor or another editing app.' : 'Green is keyed automatically so the title and effects show over footage below.'
-            : destination === 'studio' ? 'The video keeps its opaque black background.' : 'Black stays opaque. The title clip covers footage below for its full frame.'}</span>
-        </label>
+        <TitleBackgroundControl settings={settings} patch={patch} busy={busy} editor={destination === 'editor'} />
         <label className="block space-y-1.5 text-xs text-text-secondary">Lettering and visual style
           <input aria-label="Title visual style" value={settings.look} maxLength={1200} disabled={busy}
             onChange={event => patch({ look: event.target.value })} placeholder="Describe any style: anime, hand-drawn, metallic, minimal…" className={FIELD} />
@@ -330,8 +330,8 @@ export function AnimatedTitleAdvancedControls({ settings, patch, busy, canvas, d
           onChange={event => patch({ keepAudio: event.target.checked })} className="accent-[var(--color-accent-blue)]" />Keep generated clip audio</label>}
         {destination === 'studio' && <p className="text-[11px] leading-relaxed text-text-muted">Generated video audio is retained. You can mute it in the Editor or another editing app.</p>}
         <div className="rounded-lg border border-border bg-bg-tertiary p-3 text-[11px] leading-relaxed text-text-muted">
-          {geometry.width}×{geometry.height} · {duration ? sequenceMode ? `${nativeFrames} frames · ${(nativeFrames / 24).toFixed(3)}s at 24 fps` : `${duration.toFixed(2)}s at 24 fps` : sequenceMode ? `about ${sequenceTotal.toFixed(1)}s requested` : 'Check duration'}{destination === 'editor' ? ` · inserts at ${at.toFixed(2)}s.` : ' · saved to the gallery.'}<br />
-          Background: {background === 'chroma' ? destination === 'studio' ? 'Green screen, ready for keying.' : 'Chroma key (green), removed automatically.' : 'Black, opaque.'}<br />
+          {geometry.width}×{geometry.height} · {duration ? sequenceMode ? `${nativeFrames} frames · ${(nativeFrames / fps).toFixed(3)}s at ${fps} fps` : `${duration.toFixed(2)}s at ${fps} fps` : sequenceMode ? `about ${sequenceTotal.toFixed(1)}s requested` : 'Check duration'}{destination === 'editor' ? ` · inserts at ${at.toFixed(2)}s.` : ' · saved to the gallery.'}<br />
+          Background: {background.label}{background.chromaKey ? destination === 'studio' ? ', ready for keying.' : ', removed automatically.' : ', opaque.'}<br />
           No reference characters or Studio settings are reused. Review the wording, timing and edge quality; generated results can vary.
         </div>
         {prompt && <details className="text-xs text-text-secondary"><summary className="cursor-pointer">View prepared prompt</summary><pre className="mt-2 whitespace-pre-wrap rounded-lg bg-bg-tertiary p-3 text-[11px] leading-relaxed">{prompt}</pre></details>}

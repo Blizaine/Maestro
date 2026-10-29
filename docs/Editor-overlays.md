@@ -62,6 +62,20 @@ other Studio modes. Duration snaps to H3's supported whole-frame clip lengths.
 The sparkle button and enhancement options sit inside the title description
 field, with the same saved enhancement preference as the other Studio modes.
 
+The Studio title sidebar starts with style and background selectors. Choose
+green or blue for chroma key, black or white for an opaque title card, or pick a
+custom color. The chosen color is used in both the prompt and any boundary
+images. The Editor keys green and blue automatically; other colors stay opaque.
+
+The model picker offers the same enabled models as **Frames**. Titles retain
+their own model selection and generation settings. Each model uses its own
+native frame timing and default inference settings; models with image guidance
+receive a matching background start image, plus an end image when supported.
+Text-only models follow the background instruction in the prompt. Use
+**Advanced**, immediately to the right of duration, for generation settings and
+the detailed title plan. Completed titles appear in the gallery without a
+separate completion banner in the composer.
+
 Planning makes one bounded writer call. It shares Maestro's existing GPU lease, so
 it cannot compete with an active generation. Writer drafts and reasons are saved
 locally and exposed under **AI draft and diagnostics**. A malformed reply preserves

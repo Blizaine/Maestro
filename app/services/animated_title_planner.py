@@ -18,6 +18,10 @@ MAX_LOOK_CHARS = 1200
 MAX_DIRECTION_CHARS = 1200
 MAX_ANIMATION_CHARS = 800
 NATIVE_FRAME_LENGTHS = tuple(range(124, 346, 17))
+MIN_CLIP_DURATION_SECONDS = 5
+MAX_CLIP_DURATION_SECONDS = 15
+MAX_CLIP_FRAMES = 120 * MAX_CLIP_DURATION_SECONDS
+_HEX_COLOR = re.compile(r"#[0-9A-Fa-f]{6}\Z")
 
 TITLE_PLAN_JSON_SCHEMA = {
     "type": "object",
@@ -55,6 +59,9 @@ def validate_title_request(
     style_hint: object,
     frames: object,
     background: object,
+    *,
+    fps: object = 24,
+    native_h3: object = True,
 ) -> None:
     """Reject invalid request values before loading or calling the writer."""
     if not isinstance(brief, str) or not brief.strip():
@@ -65,10 +72,26 @@ def validate_title_request(
         raise ValueError("style_hint must be a string.")
     if len(style_hint) > MAX_STYLE_HINT_CHARS:
         raise ValueError(f"style_hint must be at most {MAX_STYLE_HINT_CHARS} characters.")
-    if type(frames) is not int or frames not in NATIVE_FRAME_LENGTHS:
+    try:
+        finite_fps = type(fps) in (int, float) and math.isfinite(fps)
+    except OverflowError:
+        finite_fps = False
+    if not finite_fps or not 1 <= fps <= 120:
+        raise ValueError("fps must be a finite number from 1 to 120.")
+    if type(native_h3) is not bool:
+        raise ValueError("native_h3 must be a boolean.")
+    if type(frames) is not int or not 1 <= frames <= MAX_CLIP_FRAMES:
+        raise ValueError(f"frames must be a positive integer no greater than {MAX_CLIP_FRAMES}.")
+    duration_seconds = frames / fps
+    if not MIN_CLIP_DURATION_SECONDS <= duration_seconds <= MAX_CLIP_DURATION_SECONDS:
+        raise ValueError("clip duration must be between 5 and 15 seconds.")
+    if native_h3 and frames not in NATIVE_FRAME_LENGTHS:
         raise ValueError("frames must be a native title duration from 124 to 345 in steps of 17.")
-    if background not in ("chroma", "black"):
-        raise ValueError("background must be 'chroma' or 'black'.")
+    if not (
+        background in ("chroma", "black", "blue", "white")
+        or isinstance(background, str) and _HEX_COLOR.fullmatch(background)
+    ):
+        raise ValueError("background must be 'chroma', 'black', 'blue', 'white', or a #RRGGBB hex color.")
 
 
 def _guide_text() -> str:
@@ -81,18 +104,31 @@ def _guide_text() -> str:
     return guide_path.read_text(encoding="utf-8").strip()
 
 
-def _writer_prompt(brief: str, style_hint: str, frames: int, background: str) -> str:
+def _writer_prompt(
+    brief: str,
+    style_hint: str,
+    frames: int,
+    background: str,
+    *,
+    fps: int | float = 24,
+    native_h3: bool = True,
+) -> str:
     style_text = style_hint if style_hint else "No additional style hint."
     background_text = {
         "chroma": "solid chroma green",
         "black": "solid black",
-    }[background]
-    duration_seconds = frames / 24
+        "blue": "solid blue",
+        "white": "solid white",
+    }.get(background)
+    if background_text is None:
+        background_text = f"solid custom color {background}"
+    duration_seconds = frames / fps
+    duration_context = "Native H3 duration" if native_h3 else "Selected-model duration"
     return (
         "Plan an animated title from the user's request. The application owns the "
         "duration and background; treat these values as fixed context and do not "
         "return or change them.\n"
-        f"Frame rate: 24 fps. Native duration: {frames} frames ({duration_seconds:.3f} seconds).\n"
+        f"Frame rate: {fps:g} fps. {duration_context}: {frames} frames ({duration_seconds:.3f} seconds).\n"
         f"Background: {background_text}.\n"
         f"Style hint for the current phrase(s):\n{style_text}\n\n"
         "User brief (preserve its language, exact quoted copy, and requested order):\n"
@@ -335,11 +371,27 @@ def plan_animated_title(
     writer: Callable,
     *,
     json_schema: dict | None = TITLE_PLAN_JSON_SCHEMA,
+    fps: int | float = 24,
+    native_h3: bool = True,
 ) -> dict:
     """Validate the request, make exactly one bounded writer call, and parse it."""
-    validate_title_request(brief, style_hint, frames, background)
+    validate_title_request(
+        brief,
+        style_hint,
+        frames,
+        background,
+        fps=fps,
+        native_h3=native_h3,
+    )
     kwargs = {
-        "prompt": _writer_prompt(brief, style_hint, frames, background),
+        "prompt": _writer_prompt(
+            brief,
+            style_hint,
+            frames,
+            background,
+            fps=fps,
+            native_h3=native_h3,
+        ),
         "system_prompt": _guide_text(),
         "max_new_tokens": MAX_DRAFT_TOKENS,
         "temperature": 0.45,

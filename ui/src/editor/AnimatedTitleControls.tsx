@@ -5,6 +5,8 @@ import {
   titlePlanIsCurrent,
   titleSeconds,
   titleSequenceTimeline,
+  titleFps,
+  titleDurationChoices,
   TITLE_EFFECT_LABELS,
   TITLE_SEQUENCE_DURATIONS,
 } from './editorAnimatedTitles'
@@ -12,15 +14,18 @@ import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 import { AnimatedTitleAdvancedControls } from './AnimatedTitleAdvancedControls'
 import { TitleEnhancementControls } from './TitleEnhancementControls'
 import type { TitleComposerController } from './useTitleComposer'
+import { TitleBackgroundControl } from './TitleBackgroundControl'
+import { SidebarDialog } from '../components/Sidebar/SidebarPanels'
+import { TitleGenerationControls } from './TitleGenerationControls'
 
 const FIELD = 'w-full min-w-0 rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-xs text-text-primary outline-none focus:border-accent-blue/60'
 
 function framesFor(settings: AnimatedTitleSettings) {
-  try { return titleFrames(titleSeconds(settings)) } catch { return TITLE_SEQUENCE_DURATIONS[0].frames }
+  try { return titleFrames(titleSeconds(settings), settings) } catch { return TITLE_SEQUENCE_DURATIONS[0].frames }
 }
 
 /** The shared, natural-language title composer. Workspace-specific submission stays in its caller. */
-export function AnimatedTitleControls({ settings, patch, busy, canvas, destination = 'editor', at = 0, composer, enhancement }: {
+export function AnimatedTitleControls({ settings, patch, busy, canvas, destination = 'editor', at = 0, composer, enhancement, advanced }: {
   settings: AnimatedTitleSettings
   patch: (value: Partial<AnimatedTitleSettings>) => void
   busy: boolean
@@ -28,6 +33,7 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
   destination?: 'editor' | 'studio'
   at?: number
   composer: TitleComposerController
+  advanced?: { open: boolean; anchor: HTMLElement | null; id: string; onClose: () => void }
   enhancement?: {
     enabled: boolean
     defaultEnabled: boolean
@@ -35,7 +41,8 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
     onDefaultChange: (enabled: boolean) => void
   }
 }) {
-  const background = settings.background ?? 'chroma'
+  const fps = titleFps(settings)
+  const durationChoices = titleDurationChoices(settings)
   const brief = titleBrief(settings)
   const selectedFrames = framesFor(settings)
   let currentPlan = false
@@ -69,7 +76,7 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
 
   function changeDuration(frames: number) {
     composer.clearFeedback()
-    const base = { ...settings, brief: titleBrief(settings), manualPlanEdited: false, seconds: frames / 24, sequenceFrames: frames }
+    const base = { ...settings, brief: titleBrief(settings), manualPlanEdited: false, seconds: frames / fps, sequenceFrames: frames }
     if (base.mode === 'sequence' && (base.phrases?.length ?? 0) >= 2 && (base.phrases?.length ?? 0) <= 6) {
       try { patch(alignTitleSequence(base, frames)); return } catch { /* Keep the chosen whole-clip duration visible while the invalid sequence is repaired. */ }
     }
@@ -78,14 +85,36 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
 
   function patchAdvanced(value: Partial<AnimatedTitleSettings>) {
     const creativeFields: (keyof AnimatedTitleSettings)[] = [
-      'text', 'look', 'effect', 'direction', 'mode', 'phrases', 'sequenceDirection', 'sequenceFrames', 'seconds', 'background',
+      'text', 'look', 'effect', 'direction', 'mode', 'phrases', 'sequenceDirection', 'sequenceFrames', 'seconds', 'background', 'backgroundColor',
     ]
     const creativeChange = creativeFields.some(field => Object.hasOwn(value, field))
     if (creativeChange && settings.brief !== undefined) composer.clearFeedback()
     patch({ ...value, ...(creativeChange && settings.brief !== undefined ? { plannedKey: undefined, manualPlanEdited: true } : {}) })
   }
 
+  const advancedContents = <div className="space-y-4 text-xs text-text-secondary">
+    {destination === 'studio' && <TitleGenerationControls settings={settings} patch={patch} busy={busy} />}
+    <AnimatedTitleAdvancedControls settings={settings} patch={patchAdvanced} busy={busy} canvas={canvas} destination={destination} at={at} />
+    <button type="button" disabled={busy} onClick={() => { composer.acceptManual(); advanced?.onClose() }}
+      className="min-h-9 rounded-lg border border-border px-3 py-2 text-xs font-medium text-text-primary hover:border-accent-blue/60 disabled:opacity-40">
+      Use manual title plan
+    </button>
+    <p className="text-[11px] leading-relaxed text-text-muted">{settings.manualPlanEdited
+      ? 'Advanced edits are waiting for approval. Use this manual plan to keep them, or Enhance to replace them with a new AI plan.'
+      : 'Set exact wording and motion here. Use this manual plan to keep your edits.'}</p>
+  </div>
+
   return <div className="space-y-4">
+    {destination === 'studio' && <div data-testid="title-appearance-controls" className="grid grid-cols-2 gap-3">
+      <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Style <span className="text-text-muted">(optional)</span>
+        <select aria-label="Title style preset" value={settings.stylePreset ?? 'custom'} disabled={busy}
+          onChange={event => patchCreative({ stylePreset: event.target.value as AnimatedTitleSettings['stylePreset'] })} className={FIELD}>
+          <option value="custom">Custom</option>
+          {Object.entries(TITLE_EFFECT_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+        </select>
+      </label>
+      <TitleBackgroundControl settings={settings} patch={patchCreative} busy={busy} />
+    </div>}
     <div className="block space-y-1.5 text-xs text-text-secondary">
       <span className="block">Describe your title animation</span>
       <div data-testid={destination === 'studio' ? 'title-prompt-field' : undefined}
@@ -108,35 +137,27 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
       </span>
     </div>
 
-    <div className={`grid grid-cols-1 gap-3 ${destination === 'studio' ? 'sm:grid-cols-1' : 'sm:grid-cols-2'}`}>
-      <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Title style preset <span className="font-normal text-text-muted">(optional)</span>
+    {destination === 'editor' && <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      {destination === 'editor' && <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Title style preset <span className="font-normal text-text-muted">(optional)</span>
         <select aria-label="Title style preset" value={settings.stylePreset ?? 'custom'} disabled={busy}
           onChange={event => patchCreative({ stylePreset: event.target.value as AnimatedTitleSettings['stylePreset'] })}
           className={FIELD}>
           <option value="custom">Custom description</option>
           {Object.entries(TITLE_EFFECT_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select>
-      </label>
+      </label>}
 
       {destination === 'editor' && <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Title clip duration
         <select aria-label="Title clip duration" value={selectedFrames} disabled={busy}
           onChange={event => changeDuration(Number(event.target.value))} className={FIELD}>
-          {TITLE_SEQUENCE_DURATIONS.map(option => <option key={option.frames} value={option.frames}>{option.label}</option>)}
+          {durationChoices.map(option => <option key={option.frames} value={option.frames}>{option.label}</option>)}
         </select>
-        <span className="block text-[11px] leading-relaxed text-text-muted">Whole-frame H3 duration at 24 fps.</span>
+        <span className="block text-[11px] leading-relaxed text-text-muted">Native clip duration at {fps} fps.</span>
       </label>}
-    </div>
+    </div>}
 
-    <div className={`grid grid-cols-1 gap-3 ${destination === 'studio' ? '' : 'sm:grid-cols-3'}`}>
-      <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Title background
-        <select aria-label="Title background" value={background} disabled={busy}
-          onChange={event => patchCreative({ background: event.target.value as NonNullable<AnimatedTitleSettings['background']> })} className={FIELD}>
-          <option value="chroma">Chroma key (green)</option><option value="black">Black background</option>
-        </select>
-        <span className="block text-[11px] leading-relaxed text-text-muted">{background === 'chroma'
-          ? destination === 'studio' ? 'Studio keeps the green background in the saved clip, ready for keying.' : 'The Editor removes green automatically so the title shows over footage below.'
-          : destination === 'studio' ? 'Studio keeps the opaque black background in the saved clip.' : 'Black stays opaque and covers footage below for the title clip.'}</span>
-      </label>
+    {destination === 'editor' && <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      {destination === 'editor' && <TitleBackgroundControl settings={settings} patch={patchCreative} busy={busy} editor />}
 
       {destination === 'editor' && <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Aspect ratio
         <select aria-label="Title aspect ratio" value={settings.aspect} disabled={busy}
@@ -152,7 +173,7 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
           <option value="480p">480p · faster</option><option value="540p">540p</option><option value="720p">720p</option><option value="768p">768p · native H3</option><option value="1080p">1080p · experimental</option>
         </select>
       </label>}
-    </div>
+    </div>}
 
     {destination === 'editor' && <div className="flex min-h-8 flex-wrap items-center gap-2">
       {enhancement ? <TitleEnhancementControls enabled={enhancement.enabled} defaultEnabled={enhancement.defaultEnabled}
@@ -173,7 +194,7 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
     {currentPlan && !settings.directDescription && <details data-testid="title-plan-review" aria-label="Title plan review" open={settings.titleReviewRequired || undefined}
       className="rounded-xl border border-accent-blue/25 bg-accent-blue/5 p-3 text-xs text-text-secondary">
       <summary className="cursor-pointer select-none">
-        <span className="block font-semibold text-text-primary">Review title plan · {sequence ? `${phrases.length} phrases` : 'one title'} · {(framesFor(settings) / 24).toFixed(3)}s</span>
+        <span className="block font-semibold text-text-primary">Review title plan · {sequence ? `${phrases.length} phrases` : 'one title'} · {(framesFor(settings) / fps).toFixed(3)}s</span>
         <span className="mt-1 block break-words text-[11px] text-text-muted">Detected wording: {sequence
           ? phrases.map(phrase => phrase.text.trim() || 'Untitled phrase').join(' → ') || 'No wording detected'
           : settings.text || 'No wording detected'}</span>
@@ -189,10 +210,10 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
           </li>)}
         </ol> : <div className="rounded-lg bg-bg-secondary/70 px-3 py-2 text-xs text-text-secondary">
           <strong>Title wording:</strong> {settings.text || 'No wording detected'}
-          <span className="mt-1 block text-[11px] text-text-muted">One title · {titleSeconds(settings).toFixed(3)}s at 24 fps</span>
+          <span className="mt-1 block text-[11px] text-text-muted">One title · {titleSeconds(settings).toFixed(3)}s at {fps} fps</span>
           {settings.direction && <span className="mt-1 block text-[11px] text-text-muted">Motion: {settings.direction}</span>}
         </div>}
-        <p className="text-[11px] text-text-muted">Clip: {framesFor(settings)} frames · {(framesFor(settings) / 24).toFixed(3)}s at 24 fps. Review the generated video before using it; results can vary.</p>
+        <p className="text-[11px] text-text-muted">Clip: {framesFor(settings)} frames · {(framesFor(settings) / fps).toFixed(3)}s at {fps} fps. Review the generated video before using it; results can vary.</p>
       </div>
     </details>}
 
@@ -206,18 +227,11 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
       <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed">{settings.rawTitleDraft}</pre>
     </details>}
 
-    <details className="rounded-xl border border-border bg-bg-tertiary p-3 text-xs text-text-secondary">
-      <summary className="cursor-pointer select-none font-medium">Advanced title controls</summary>
-      <div className="mt-3 space-y-3">
-        <AnimatedTitleAdvancedControls settings={settings} patch={patchAdvanced} busy={busy} canvas={canvas} destination={destination} at={at} />
-        <button type="button" disabled={busy} onClick={composer.acceptManual}
-          className="min-h-9 rounded-lg border border-border px-3 py-2 text-xs font-medium text-text-primary hover:border-accent-blue/60 disabled:opacity-40">
-          Use manual title plan
-        </button>
-        <p className="text-[11px] leading-relaxed text-text-muted">{settings.manualPlanEdited
-          ? 'Advanced edits are waiting for approval. Use this manual plan to keep them, or Enhance to replace them with a new AI plan.'
-          : 'Use this when you want to set the exact title wording and motion yourself. The manual plan is validated before it can be generated.'}</p>
-      </div>
-    </details>
+    {advanced ? <SidebarDialog id={advanced.id} open={advanced.open} title="Advanced title settings" variant="settings"
+      anchor={advanced.anchor} onClose={advanced.onClose}>{advancedContents}</SidebarDialog>
+      : <details className="rounded-xl border border-border bg-bg-tertiary p-3 text-xs text-text-secondary">
+        <summary className="cursor-pointer select-none font-medium">Advanced title controls</summary>
+        <div className="mt-3">{advancedContents}</div>
+      </details>}
   </div>
 }

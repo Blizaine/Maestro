@@ -9211,8 +9211,17 @@ async def llm_plan_animated_title(request: Request):
     style_hint = body.get("style_hint", "")
     frames = body.get("frames")
     background = body.get("background")
+    fps = body.get("fps", 24)
+    native_h3 = body.get("native_h3", True)
     try:
-        validate_title_request(brief, style_hint, frames, background)
+        validate_title_request(
+            brief,
+            style_hint,
+            frames,
+            background,
+            fps=fps,
+            native_h3=native_h3,
+        )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -9232,6 +9241,8 @@ async def llm_plan_animated_title(request: Request):
         background,
         llm_service.generate,
         json_schema=TITLE_PLAN_JSON_SCHEMA if provider == "local" else None,
+        fps=fps,
+        native_h3=native_h3,
     )
     if result["plan"] is None:
         record_rejection(result["warnings"], stage="Animated title planning")

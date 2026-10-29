@@ -1,4 +1,4 @@
-import type { EditorAsset, EditorProject } from '../types'
+import type { EditorAsset, EditorProject, ModelDef, ModelOptions } from '../types'
 import { DEFAULT_EDITOR_KEYING } from './editorKeying'
 
 export const TITLE_MODEL = 'minimax_h3_fused_turbo'
@@ -43,7 +43,102 @@ export const TITLE_EFFECT_LABELS: Record<keyof typeof TITLE_EFFECTS, string> = {
   kinetic: 'Kinetic typography', collision: 'Word collision', rebuild: 'Deconstruct and rebuild', offset: 'Offset and overlap',
 }
 
-export type TitleBackground = 'chroma' | 'black'
+export type TitleBackground = 'chroma' | 'blue' | 'black' | 'white' | 'custom'
+export interface TitleModelProfile {
+  modelType: string
+  name: string
+  fps: number
+  minimumFrames: number
+  maximumFrames: number
+  frameStep: number
+  nativeH3: boolean
+  startFrame: boolean
+  endFrame: boolean
+}
+
+const LEGACY_H3_TITLE_PROFILE: TitleModelProfile = {
+  modelType: TITLE_MODEL, name: 'H3 Fused 4-Step — Frames', fps: 24,
+  minimumFrames: 124, maximumFrames: 345, frameStep: 17,
+  nativeH3: true, startFrame: true, endFrame: true,
+}
+
+function profileChoices(profile: TitleModelProfile) {
+  const frames: number[] = []
+  const minimum = Math.max(profile.minimumFrames, Math.ceil(5 * profile.fps))
+  const maximum = Math.min(profile.maximumFrames, Math.floor(14.5 * profile.fps))
+  const first = profile.minimumFrames + Math.max(0, Math.ceil((minimum - profile.minimumFrames) / profile.frameStep)) * profile.frameStep
+  for (let value = first; value <= maximum; value += profile.frameStep) frames.push(value)
+  return frames.map(value => ({ frames: value, seconds: value / profile.fps,
+    label: `${(value / profile.fps).toFixed(3)}s · ${value} frames` }))
+}
+
+/** Build a bounded title profile from the selected model's current metadata. */
+export function titleModelProfile(model: ModelDef, options: ModelOptions): TitleModelProfile {
+  const isLegacyH3 = model.model_type === TITLE_MODEL
+  const nativeH3 = model.model_type.startsWith('minimax_h3')
+  const fps = Number.isFinite(options?.fps) && options.fps > 0 ? options.fps
+    : isLegacyH3 && Number.isFinite(model?.fps) && model.fps > 0 ? model.fps : isLegacyH3 ? 24 : 0
+  const minimumFrames = Number.isInteger(options?.frames_minimum) && options.frames_minimum > 0
+    ? options.frames_minimum : isLegacyH3 ? LEGACY_H3_TITLE_PROFILE.minimumFrames : 0
+  const frameStep = Number.isInteger(options?.frames_steps) && options.frames_steps > 0
+    ? options.frames_steps : isLegacyH3 ? LEGACY_H3_TITLE_PROFILE.frameStep : 0
+  const maximumFrames = options?.frames_maximum === null || options?.frames_maximum === undefined
+    ? (isLegacyH3 ? LEGACY_H3_TITLE_PROFILE.maximumFrames
+      : minimumFrames > 0 && frameStep > 0 && fps > 0
+        ? minimumFrames + Math.max(0, Math.floor((14.5 * fps - minimumFrames) / frameStep)) * frameStep : 0)
+    : options.frames_maximum
+  if (!model?.model_type || !model.name?.trim() || !Number.isFinite(fps) || fps < 1 || fps > 120
+    || !Number.isInteger(minimumFrames) || minimumFrames <= 0 || minimumFrames > 1_000_000
+    || !Number.isInteger(maximumFrames) || maximumFrames < minimumFrames || maximumFrames > 1_000_000
+    || !Number.isInteger(frameStep) || frameStep <= 0 || frameStep > 1_000_000) {
+    throw new Error('The selected video model has invalid title timing settings.')
+  }
+  const profile: TitleModelProfile = {
+    modelType: model.model_type, name: model.name, fps, minimumFrames, maximumFrames, frameStep,
+    nativeH3,
+    startFrame: isLegacyH3 || model.is_i2v === true,
+    endFrame: isLegacyH3 || (model.is_i2v === true && (model.supports_end_frame === true || options?.supports_end_frame === true)),
+  }
+  if (!profileChoices(profile).length) throw new Error('The selected video model has no native title duration between 5 and 14.5 seconds.')
+  return profile
+}
+
+/** Validate a persisted profile before using it to restore a Studio draft. */
+export function normalizeTitleModelProfile(raw: unknown): TitleModelProfile | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const value = raw as Record<string, unknown>
+  if (typeof value.modelType !== 'string' || !value.modelType.trim() || value.modelType.length > 160
+    || typeof value.name !== 'string' || !value.name.trim() || value.name.length > 240
+    || typeof value.fps !== 'number' || !Number.isFinite(value.fps) || value.fps < 1 || value.fps > 120
+    || typeof value.minimumFrames !== 'number' || !Number.isInteger(value.minimumFrames) || value.minimumFrames <= 0 || value.minimumFrames > 1_000_000
+    || typeof value.maximumFrames !== 'number' || !Number.isInteger(value.maximumFrames) || value.maximumFrames < value.minimumFrames || value.maximumFrames > 1_000_000
+    || typeof value.frameStep !== 'number' || !Number.isInteger(value.frameStep) || value.frameStep <= 0 || value.frameStep > 1_000_000
+    || typeof value.nativeH3 !== 'boolean' || value.nativeH3 !== (value.modelType.startsWith('minimax_h3'))
+    || typeof value.startFrame !== 'boolean' || typeof value.endFrame !== 'boolean'
+    || (value.endFrame && !value.startFrame)) return undefined
+  const profile = value as unknown as TitleModelProfile
+  return profileChoices(profile).length ? profile : undefined
+}
+
+function settingsProfile(settings?: Pick<AnimatedTitleSettings, 'model'>): TitleModelProfile {
+  if (!settings?.model) return LEGACY_H3_TITLE_PROFILE
+  const profile = normalizeTitleModelProfile(settings.model)
+  if (!profile) throw new Error('Choose a supported video model before generating this title.')
+  return profile
+}
+
+export function titleModelType(settings?: Pick<AnimatedTitleSettings, 'model'>): string {
+  return settings?.model ? settingsProfile(settings).modelType : TITLE_MODEL
+}
+
+export function titleFps(settings?: Pick<AnimatedTitleSettings, 'model'>): number {
+  return settings?.model ? settingsProfile(settings).fps : 24
+}
+
+export function titleDurationChoices(settings?: Pick<AnimatedTitleSettings, 'model'>) {
+  return profileChoices(settings?.model ? settingsProfile(settings) : LEGACY_H3_TITLE_PROFILE)
+}
+
 export interface TitlePhrase { id: string; text: string; seconds: number; animation: string }
 export const TITLE_PHRASE_ANIMATIONS = {
   fade: { label: 'Fade', direction: 'Fade this phrase in, hold clearly, then fade it out completely.' },
@@ -80,6 +175,10 @@ export interface AnimatedTitleSettings {
   keepAudio: boolean
   /** Missing on older saved title intents, which always used green keying. */
   background?: TitleBackground
+  backgroundColor?: string
+  /** Missing on old Editor intents, which always used the native H3 Frames recipe. */
+  model?: TitleModelProfile
+  generation?: { steps?: number; guidance?: number; seed?: number }
 }
 
 export interface TitleCreativePlan {
@@ -94,12 +193,12 @@ export function titleEnhancementEnabled(state: { enhanceOnGeneration: boolean | 
 
 /** The ordinary no-enhancement path: send the authored description to H3. */
 export function directTitleDescription(settings: AnimatedTitleSettings): AnimatedTitleSettings {
-  const frames = titleFrames(titleSeconds(settings))
+  const frames = titleFrames(titleSeconds(settings), settings)
   const brief = titleBrief(settings)
   const quoted = [...brief.matchAll(/“([^”]+)”|‘([^’]+)’|"([^"\n]+)"/g)].map(match => match.slice(1).find(value => value !== undefined) ?? '').join('\n')
   const direct: AnimatedTitleSettings = { ...settings, brief, directDescription: true,
     text: quoted.length <= 160 ? quoted : '', mode: 'single', phrases: undefined, look: '', direction: '', sequenceDirection: '',
-    seconds: frames / 24, sequenceFrames: frames, effect: 'custom', titleReviewRequired: false,
+    seconds: frames / titleFps(settings), sequenceFrames: frames, effect: 'custom', titleReviewRequired: false,
     plannerWarnings: [], rawTitleDraft: undefined, titleDraftHistoryId: undefined }
   direct.plannedKey = titlePlanningKey(direct)
   animatedTitlePrompt(direct)
@@ -118,18 +217,31 @@ export function titleBrief(settings: AnimatedTitleSettings): string {
 
 export function titlePlanningKey(settings: AnimatedTitleSettings): string {
   return JSON.stringify([titleBrief(settings).trim(), settings.stylePreset ?? 'custom',
+    titleFrames(titleSeconds(settings), settings), titleModelType(settings), titleFps(settings),
+    settings.model ? [settings.model.minimumFrames, settings.model.maximumFrames, settings.model.frameStep,
+      settings.model.nativeH3, settings.model.startFrame, settings.model.endFrame] : null,
+    titleBackground(settings).plannerToken])
+}
+
+function legacyTitlePlanningKey(settings: AnimatedTitleSettings): string {
+  return JSON.stringify([titleBrief(settings).trim(), settings.stylePreset ?? 'custom',
     titleFrames(titleSeconds(settings)), settings.background ?? 'chroma'])
 }
 
 export function titlePlanIsCurrent(settings: AnimatedTitleSettings): boolean {
-  return settings.brief === undefined || settings.plannedKey === titlePlanningKey(settings)
+  if (settings.brief === undefined) return true
+  if (settings.plannedKey === titlePlanningKey(settings)) return true
+  // Older H3 drafts and durable Editor receipts used this compact key. Keep
+  // those plans valid when the settings have no selected-model snapshot.
+  return !settings.model && settings.backgroundColor === undefined
+    && settings.plannedKey === legacyTitlePlanningKey(settings)
 }
 
 /** Creative descriptions are allowed before a concrete render prompt exists. */
 export function titleComposerValidation(settings: AnimatedTitleSettings, canvas: { width: number; height: number }): string {
   try {
     if (settings.manualPlanEdited) return 'Choose Use manual title plan to keep your Advanced edits, or Enhance to create a new AI plan.'
-    titleDimensions(settings, canvas); titleFrames(titleSeconds(settings)); titleBackground(settings)
+    titleDimensions(settings, canvas); titleFrames(titleSeconds(settings), settings); titleBackground(settings)
     if (settings.brief !== undefined && !titlePlanIsCurrent(settings)) {
       if (!settings.brief.trim() || settings.brief.length > 4000) return 'Describe your title animation in 1–4,000 characters.'
       return ''
@@ -139,13 +251,14 @@ export function titleComposerValidation(settings: AnimatedTitleSettings, canvas:
 }
 
 export function applyTitleCreativePlan(settings: AnimatedTitleSettings, plan: TitleCreativePlan): AnimatedTitleSettings {
-  const frames = titleFrames(titleSeconds(settings))
+  const frames = titleFrames(titleSeconds(settings), settings)
+  const fps = titleFps(settings)
   const phrases = plan.phrases.map(phrase => ({ id: titleSubmissionId(), text: phrase.text,
     seconds: Number.isFinite(phrase.weight) && phrase.weight > 0 ? Math.min(10, phrase.weight) : 1, animation: phrase.animation }))
   let result: AnimatedTitleSettings = { ...settings, brief: titleBrief(settings), directDescription: false, manualPlanEdited: false, effect: 'custom', look: plan.look,
     text: phrases.map(phrase => phrase.text).join(plan.sequence ? '\n' : ' '),
     direction: phrases[0]?.animation || plan.direction || 'Reveal the title, hold it clearly, then clear the frame.',
-    sequenceDirection: plan.direction, seconds: frames / 24, mode: plan.sequence && phrases.length > 1 ? 'sequence' : 'single',
+    sequenceDirection: plan.direction, seconds: frames / fps, mode: plan.sequence && phrases.length > 1 ? 'sequence' : 'single',
     phrases: plan.sequence && phrases.length > 1 ? phrases : undefined, sequenceFrames: frames }
   if (result.mode === 'sequence') result = alignTitleSequence(result, frames)
   result.plannedKey = titlePlanningKey(result)
@@ -153,28 +266,28 @@ export function applyTitleCreativePlan(settings: AnimatedTitleSettings, plan: Ti
   return result
 }
 
-export const TITLE_SEQUENCE_DURATIONS = Array.from({ length: 14 }, (_, index) => {
-  const frames = 124 + index * 17
-  return { frames, seconds: frames / 24, label: `${(frames / 24).toFixed(3)}s · ${frames} frames` }
-})
+/** Legacy H3 choices remain exported for Editor controls and old drafts. */
+export const TITLE_SEQUENCE_DURATIONS = profileChoices(LEGACY_H3_TITLE_PROFILE)
 
-function nativeSequenceFrames(frames: number): number {
-  if (!TITLE_SEQUENCE_DURATIONS.some(choice => choice.frames === frames)) throw new Error('Choose an H3 native sequence duration.')
+function nativeSequenceFrames(frames: number, settings?: Pick<AnimatedTitleSettings, 'model'>): number {
+  if (!titleDurationChoices(settings).some(choice => choice.frames === frames)) throw new Error('Choose a native duration supported by the selected video model.')
   return frames
 }
 
 /** Proportional integer-frame allocation with a one-second minimum per phrase. */
-function allocatePhraseFrames(weights: number[], total: number): number[] {
-  if (total < weights.length * 24 || total > weights.length * 240) throw new Error('The phrases do not fit the selected clip length.')
+function allocatePhraseFrames(weights: number[], total: number, fps: number): number[] {
+  const minimum = Math.ceil(fps)
+  const maximum = Math.floor(10 * fps)
+  if (total < weights.length * minimum || total > weights.length * maximum) throw new Error('The phrases do not fit the selected clip length.')
   const result = weights.map(() => 0)
   const safeWeights = weights.map(weight => Number.isFinite(weight) && weight > 0 ? Math.min(10, weight) : 1)
   let remaining = total
   let active = weights.map((_, index) => index)
   while (active.length) {
     const sum = active.reduce((value, index) => value + safeWeights[index], 0)
-    const fixed = active.find(index => remaining * safeWeights[index] / sum < 24 || remaining * safeWeights[index] / sum > 240)
+    const fixed = active.find(index => remaining * safeWeights[index] / sum < minimum || remaining * safeWeights[index] / sum > maximum)
     if (fixed !== undefined) {
-      result[fixed] = remaining * safeWeights[fixed] / sum < 24 ? 24 : 240
+      result[fixed] = remaining * safeWeights[fixed] / sum < minimum ? minimum : maximum
       remaining -= result[fixed]
       active = active.filter(index => index !== fixed)
       continue
@@ -193,30 +306,36 @@ function allocatePhraseFrames(weights: number[], total: number): number[] {
 export function alignTitleSequence(settings: AnimatedTitleSettings, frames?: number): AnimatedTitleSettings {
   const phrases = settings.phrases ?? []
   if (phrases.length < 2 || phrases.length > 6) throw new Error('Use 2–6 phrases in a title sequence.')
+  const fps = titleFps(settings)
   const requested = frames ?? settings.sequenceFrames ?? titleFrames(Math.max(5, Math.min(14.5,
-    phrases.reduce((sum, phrase) => sum + (Number.isFinite(phrase.seconds) ? phrase.seconds : 1), 0))))
-  nativeSequenceFrames(requested)
-  // Adding a sixth phrase may need the next longer native clip to retain 1s slots.
-  const choices = TITLE_SEQUENCE_DURATIONS.filter(choice => choice.frames >= phrases.length * 24)
+    phrases.reduce((sum, phrase) => sum + (Number.isFinite(phrase.seconds) ? phrase.seconds : 1), 0))), settings)
+  if (frames !== undefined || settings.sequenceFrames !== undefined) nativeSequenceFrames(requested, settings)
+  // Longer clips may be needed to retain one second per phrase.
+  const choices = titleDurationChoices(settings).filter(choice => choice.frames >= phrases.length * Math.ceil(fps)
+    && choice.frames <= phrases.length * Math.floor(10 * fps))
+  if (!choices.length) throw new Error('The phrases do not fit a native clip length for the selected video model.')
   const selected = choices.reduce((best, choice) => Math.abs(choice.frames - requested) < Math.abs(best.frames - requested) ? choice : best)
-  const counts = allocatePhraseFrames(phrases.map(phrase => phrase.seconds), selected.frames)
-  return { ...settings, sequenceFrames: selected.frames, phrases: phrases.map((phrase, index) => ({ ...phrase, seconds: counts[index] / 24 })) }
+  const counts = allocatePhraseFrames(phrases.map(phrase => phrase.seconds), selected.frames, fps)
+  return { ...settings, sequenceFrames: selected.frames,
+    phrases: phrases.map((phrase, index) => ({ ...phrase, seconds: counts[index] / fps })) }
 }
 
 /** Keep the edited slot; redistribute the rest without changing the native clip length. */
 export function setTitlePhraseSeconds(settings: AnimatedTitleSettings, id: string, seconds: number): AnimatedTitleSettings {
   const aligned = alignTitleSequence(settings)
+  const fps = titleFps(aligned)
   const phrases = aligned.phrases!
   const index = phrases.findIndex(phrase => phrase.id === id)
   if (index < 0 || !Number.isFinite(seconds)) return aligned
   const frames = aligned.sequenceFrames!
-  const selected = Math.max(24, frames - (phrases.length - 1) * 240,
-    Math.min(240, frames - (phrases.length - 1) * 24, Math.round(seconds * 24)))
+  const minimum = Math.ceil(fps), maximum = Math.floor(10 * fps)
+  const selected = Math.max(minimum, frames - (phrases.length - 1) * maximum,
+    Math.min(maximum, frames - (phrases.length - 1) * minimum, Math.round(seconds * fps)))
   const others = phrases.filter((_, position) => position !== index)
-  const counts = allocatePhraseFrames(others.map(phrase => phrase.seconds), frames - selected)
+  const counts = allocatePhraseFrames(others.map(phrase => phrase.seconds), frames - selected, fps)
   let otherIndex = 0
   return { ...aligned, phrases: phrases.map((phrase, position) => ({ ...phrase,
-    seconds: (position === index ? selected : counts[otherIndex++]) / 24 })) }
+    seconds: (position === index ? selected : counts[otherIndex++]) / fps })) }
 }
 
 /** Converting pasted lines is explicit; ordinary multiline titles remain supported. */
@@ -236,7 +355,8 @@ export function titleText(settings: AnimatedTitleSettings): string {
 }
 
 export function titleSeconds(settings: AnimatedTitleSettings): number {
-  return settings.mode === 'sequence' ? settings.sequenceFrames !== undefined ? settings.sequenceFrames / 24
+  const fps = titleFps(settings)
+  return settings.mode === 'sequence' ? settings.sequenceFrames !== undefined ? settings.sequenceFrames / fps
     : Math.round((settings.phrases ?? []).reduce((sum, phrase) => sum + phrase.seconds, 0) * 1000) / 1000 : settings.seconds
 }
 
@@ -252,17 +372,18 @@ export function titleSequenceTimeline(settings: AnimatedTitleSettings) {
   }
   if (new Set(phrases.map(phrase => phrase.id)).size !== phrases.length) throw new Error('Each phrase needs a unique identity.')
   if (phrases.map(phrase => phrase.text.trim()).join('\n').length > 160) throw new Error('Keep the entire sequence within 160 characters.')
+  const fps = titleFps(settings)
   const requestedSeconds = Math.round(phrases.reduce((sum, phrase) => sum + phrase.seconds, 0) * 1000) / 1000
-  const frames = settings.sequenceFrames === undefined ? titleFrames(requestedSeconds) : nativeSequenceFrames(settings.sequenceFrames)
-  const counts = settings.sequenceFrames === undefined ? null : allocatePhraseFrames(phrases.map(phrase => phrase.seconds), frames)
+  const frames = settings.sequenceFrames === undefined ? titleFrames(requestedSeconds, settings) : nativeSequenceFrames(settings.sequenceFrames, settings)
+  const counts = settings.sequenceFrames === undefined ? null : allocatePhraseFrames(phrases.map(phrase => phrase.seconds), frames, fps)
   let elapsed = 0
   let elapsedFrames = 0
-  return { requestedSeconds, duration: frames / 24, phrases: phrases.map((phrase, index) => {
-    const start = counts ? elapsedFrames / 24 : Math.round(elapsed / requestedSeconds * frames) / 24
+  return { requestedSeconds, duration: frames / fps, phrases: phrases.map((phrase, index) => {
+    const start = counts ? elapsedFrames / fps : Math.round(elapsed / requestedSeconds * frames) / fps
     elapsed += phrase.seconds
     elapsedFrames += counts?.[index] ?? 0
-    const end = counts ? elapsedFrames / 24 : index === phrases.length - 1 ? frames / 24 : Math.round(elapsed / requestedSeconds * frames) / 24
-    return { ...phrase, seconds: counts ? counts[index] / 24 : phrase.seconds, text: phrase.text.trim(), start, end }
+    const end = counts ? elapsedFrames / fps : index === phrases.length - 1 ? frames / fps : Math.round(elapsed / requestedSeconds * frames) / fps
+    return { ...phrase, seconds: counts ? counts[index] / fps : phrase.seconds, text: phrase.text.trim(), start, end }
   }) }
 }
 
@@ -275,17 +396,36 @@ export function titleFormState(settings: AnimatedTitleSettings, canvas: { width:
   let geometry = { width: 0, height: 0 }, prompt = '', duration = 0, validation = ''
   try {
     geometry = titleDimensions(settings, canvas)
-    duration = titleFrames(titleSeconds(settings)) / 24
+    duration = titleFrames(titleSeconds(settings), settings) / titleFps(settings)
     prompt = animatedTitlePrompt(settings)
   } catch (reason) { validation = reason instanceof Error ? reason.message : 'Check the title settings.' }
   return { geometry, prompt, duration, validation }
 }
 
-/** One choice governs the boundary images, prompt and inserted clip's keying. */
-export function titleBackground(settings: { background?: TitleBackground }) {
+/** One choice governs the prompt, boundary image and Editor keying. */
+export interface ResolvedTitleBackground {
+  mode: TitleBackground
+  color: string
+  fileLabel: string
+  label: string
+  chromaKey: boolean
+  plannerToken: string
+}
+
+export function titleBackground(settings: { background?: TitleBackground; backgroundColor?: string }): ResolvedTitleBackground {
   const mode = settings.background === undefined ? 'chroma' : settings.background
-  if (mode === 'chroma') return { mode, color: '#00FF00', fileLabel: 'green', chromaKey: true } as const
-  if (mode === 'black') return { mode, color: '#000000', fileLabel: 'black', chromaKey: false } as const
+  if (mode === 'chroma') return { mode, color: '#00FF00', fileLabel: 'green', label: 'Green', chromaKey: true, plannerToken: mode }
+  if (mode === 'blue') return { mode, color: '#0000FF', fileLabel: 'blue', label: 'Blue', chromaKey: true, plannerToken: mode }
+  if (mode === 'black') return { mode, color: '#000000', fileLabel: 'black', label: 'Black', chromaKey: false, plannerToken: mode }
+  if (mode === 'white') return { mode, color: '#FFFFFF', fileLabel: 'white', label: 'White', chromaKey: false, plannerToken: mode }
+  if (mode === 'custom') {
+    if (typeof settings.backgroundColor !== 'string' || !/^#[0-9a-f]{6}$/i.test(settings.backgroundColor)) {
+      throw new Error('Enter a custom title background as a six-digit hex color, such as #123ABC.')
+    }
+    const color = settings.backgroundColor.toUpperCase()
+    return { mode, color, fileLabel: `custom-${color.slice(1).toLowerCase()}`, label: `Custom ${color}`,
+      chromaKey: false, plannerToken: color }
+  }
   throw new Error('Choose a supported title background.')
 }
 
@@ -330,15 +470,44 @@ export function titleDimensions(settings: AnimatedTitleSettings, canvas: { width
   }
 }
 
-export function titleFrames(seconds: number): number {
+export function titleFrames(seconds: number, settings?: Pick<AnimatedTitleSettings, 'model'>): number {
   if (!Number.isFinite(seconds) || seconds < 5 || seconds > 14.5) throw new Error('Title duration must be between 5 and 14.5 seconds.')
-  return Math.max(124, Math.min(345, Math.round((seconds * 24 - 5) / 17) * 17 + 5))
+  const profile = settings?.model ? settingsProfile(settings) : LEGACY_H3_TITLE_PROFILE
+  if (profile.nativeH3 && profile.fps === 24 && profile.minimumFrames === 124
+    && profile.maximumFrames === 345 && profile.frameStep === 17) {
+    return Math.max(124, Math.min(345, Math.round((seconds * 24 - 5) / 17) * 17 + 5))
+  }
+  const choices = titleDurationChoices(settings)
+  if (!choices.length) throw new Error('The selected video model has no native title duration between 5 and 14.5 seconds.')
+  return choices.reduce((best, choice) => Math.abs(choice.seconds - seconds) <= Math.abs(best.seconds - seconds) ? choice : best).frames
 }
 
-function titleBackdropDirection(background: ReturnType<typeof titleBackground>) {
-  return background.chromaKey
-    ? 'Start and end on the supplied perfectly uniform bright green background (#00FF00). Keep that same flat green backdrop throughout, with no texture, horizon, floor, shadows or lighting changes.'
-    : 'Start and end on the supplied perfectly uniform pure black background (#000000). Keep that same flat black backdrop throughout, with no texture, horizon, floor, shadows or lighting changes. The black background is part of the finished title card.'
+function titleBackdropDirection(background: ResolvedTitleBackground, settings: AnimatedTitleSettings) {
+  const profile = settingsProfile(settings)
+  if (profile.nativeH3 && background.mode === 'chroma') {
+    return 'Start and end on the supplied perfectly uniform bright green background (#00FF00). Keep that same flat green backdrop throughout, with no texture, horizon, floor, shadows or lighting changes.'
+  }
+  if (profile.nativeH3 && background.mode === 'black') {
+    return 'Start and end on the supplied perfectly uniform pure black background (#000000). Keep that same flat black backdrop throughout, with no texture, horizon, floor, shadows or lighting changes. The black background is part of the finished title card.'
+  }
+  const hue = background.mode === 'chroma' ? 'bright green' : background.mode === 'blue' ? 'bright blue'
+    : background.mode === 'black' ? 'pure black' : background.mode === 'white' ? 'pure white' : `solid ${background.color}`
+  const uniform = `uniform ${hue} background (${background.color})`
+  const treatment = background.chromaKey
+    ? `Keep that same flat ${background.label.toLowerCase()} backdrop throughout, with no texture, horizon, floor, shadows or lighting changes.`
+    : `Keep that same flat ${background.label.toLowerCase()} backdrop throughout, with no texture, horizon, floor, shadows or lighting changes. The ${background.label.toLowerCase()} background is part of the finished title card.`
+  if (profile.startFrame) {
+    const boundary = profile.endFrame ? 'Start and end on the supplied perfectly ' : 'Start with the supplied perfectly '
+    return `${boundary}${uniform}. ${treatment}`
+  }
+  return `Use a perfectly ${uniform} throughout the clip. ${treatment}`
+}
+
+function backgroundGlyphConstraint(background: ResolvedTitleBackground) {
+  if (background.mode === 'chroma') return 'No green lettering, green particles or green reflections; reserve bright green for the removable backdrop.'
+  if (background.mode === 'blue') return 'No blue lettering, blue particles or blue reflections; reserve bright blue for the removable backdrop.'
+  if (background.mode === 'custom') return `Do not use ${background.color} for the lettering or its effects; reserve it for the flat background.`
+  return ''
 }
 
 export function animatedTitlePrompt(settings: AnimatedTitleSettings): string {
@@ -355,10 +524,10 @@ export function animatedTitlePrompt(settings: AnimatedTitleSettings): string {
       'Animated title typography. Follow the user\'s requested title wording, language, order and motion. Preserve exact quoted on-screen text and punctuation; no extra lettering.',
       `User description:\n${brief}`,
       preset === 'custom' ? '' : `Optional animation treatment: ${TITLE_EFFECTS[preset]} Apply this separately to the current phrase within the user's requested sequence; the user's wording and order take priority.`,
-      titleBackdropDirection(background),
+      titleBackdropDirection(background, settings),
       'Only title lettering and its animation effect are visible. No people, faces, characters, bodies, scenery, logos or additional objects. Do not visualize people or objects mentioned by the title words.',
       'Keep readable lettering inside the frame with safe margins unless the description requests intentional cropping. Preserve the requested lettering style and language. No speech or music.',
-      background.chromaKey ? 'No green lettering, green particles or green reflections; reserve bright green for the removable backdrop.' : '',
+      backgroundGlyphConstraint(background),
     ].filter(Boolean).join('\n\n')
   }
   const sequence = settings.mode === 'sequence' ? titleSequenceTimeline(settings) : null
@@ -379,38 +548,118 @@ export function animatedTitlePrompt(settings: AnimatedTitleSettings): string {
       settings.sequenceDirection?.trim() ? `Additional motion direction, applied separately to each phrase within its slot: ${settings.sequenceDirection.trim()}` : '',
       'The phrase schedule and single-phrase visibility take priority over any style or animation direction suggesting repeated, overlapping or combined titles.',
     ].filter(Boolean).join('\n') : animation,
-    titleBackdropDirection(background),
+    titleBackdropDirection(background, settings),
     'Only title lettering and its animation effect are visible. No people, faces, characters, bodies, scenery, logos or additional objects. Do not visualize people or objects mentioned by the title words.',
     sequence ? 'The typography itself is the visual subject. Give the current phrase a readable hold within its own slot. Transitions must clear the previous phrase completely; never overlap readable words from different slots.'
       : 'The typography itself is the visual subject, not captions over a scene. Animate the lettering according to the requested motion; give each word or requested text group a clear readable moment. Include a complete-title hold unless the animation description explicitly requests otherwise. Repeated or rearranged text uses only the supplied title words.',
     'Keep important readable lettering inside the frame with safe margins; follow any explicit request for intentional edge cropping. Use a locked camera unless the animation description requests a camera move. Preserve the requested lettering style and language. No speech or music.',
-    background.chromaKey ? 'No green lettering, green particles or green reflections; reserve bright green for the removable backdrop.' : '',
+    backgroundGlyphConstraint(background),
   ].filter(Boolean).join('\n\n')
 }
 
-export function animatedTitleParams(settings: AnimatedTitleSettings, canvas: { width: number; height: number }, backgroundPath: string, workspace: string, clientId: string) {
+export interface TitleGenerationContext {
+  options?: Pick<ModelOptions, 'model_type' | 'default_num_inference_steps' | 'default_guidance_scale'
+    | 'inference_steps_min' | 'inference_steps_max' | 'lock_inference_steps' | 'lock_guidance_scale'>
+  defaults?: Record<string, unknown>
+}
+
+function defaultNumber(defaults: Record<string, unknown>, key: string, fallback?: number): number | undefined {
+  const value = defaults[key]
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  return fallback !== undefined && Number.isFinite(fallback) ? fallback : undefined
+}
+
+function generationOverrides(settings: AnimatedTitleSettings, context: TitleGenerationContext, legacyH3: boolean) {
+  const defaults = context.defaults ?? {}
+  const options = context.options
+  const stepsDefault = defaultNumber(defaults, 'num_inference_steps', options?.default_num_inference_steps ?? undefined)
+    ?? (legacyH3 ? 4 : undefined)
+  const guidanceDefault = defaultNumber(defaults, 'guidance_scale', options?.default_guidance_scale ?? undefined)
+    ?? (legacyH3 ? 1 : undefined)
+  const steps = settings.generation?.steps ?? stepsDefault
+  const guidance = settings.generation?.guidance ?? guidanceDefault
+  const seed = settings.generation?.seed ?? defaultNumber(defaults, 'seed', -1)
+  if (settings.generation?.steps !== undefined && (!Number.isInteger(steps) || steps! < 1
+    || (options?.inference_steps_min != null && steps! < options.inference_steps_min)
+    || (options?.inference_steps_max != null && steps! > options.inference_steps_max))) {
+    throw new Error('Choose an inference step count supported by the selected video model.')
+  }
+  if (settings.generation?.guidance !== undefined && (!Number.isFinite(guidance) || guidance! < 0)) {
+    throw new Error('Choose a valid guidance scale for the selected video model.')
+  }
+  if (settings.generation?.seed !== undefined && (!Number.isInteger(seed) || seed! < -1)) {
+    throw new Error('Choose a valid integer seed or -1 for a random seed.')
+  }
+  if (options?.lock_inference_steps && settings.generation?.steps !== undefined && steps !== stepsDefault) {
+    throw new Error('The selected video model locks its inference step count.')
+  }
+  if (options?.lock_guidance_scale && settings.generation?.guidance !== undefined && guidance !== guidanceDefault) {
+    throw new Error('The selected video model locks its guidance scale.')
+  }
+  return { steps, guidance, seed }
+}
+
+export function animatedTitleParams(settings: AnimatedTitleSettings, canvas: { width: number; height: number }, backgroundPath: string, workspace: string, clientId: string, context: TitleGenerationContext = {}) {
   const dimensions = titleDimensions(settings, canvas)
-  const frames = titleFrames(titleSeconds(settings))
-  if (!backgroundPath || !clientId) throw new Error('The title background or submission identity is missing.')
-  return {
-    model_type: TITLE_MODEL, generation_mode: 'video', workspace,
+  const profile = settingsProfile(settings)
+  const frames = titleFrames(titleSeconds(settings), settings)
+  if ((profile.startFrame && !backgroundPath) || !clientId) throw new Error('The title background or submission identity is missing.')
+  const defaults = context.defaults ?? {}
+  const params: Record<string, unknown> = {
+    model_type: titleModelType(settings), generation_mode: 'video', workspace,
     prompt: animatedTitlePrompt(settings), resolution: `${dimensions.width}x${dimensions.height}`,
-    video_length: frames, num_inference_steps: 4, guidance_scale: 1,
-    image_start: backgroundPath, image_end: backgroundPath, image_prompt_type: 'SE',
+    video_length: frames,
     image_refs: [], video_prompt_type: '', audio_prompt_type: '', image_mode: 0,
-    activated_loras: [], loras_multipliers: '', override_attention: 'sla',
-    minimax_h3_multi_window: false, minimax_h3_reference_sequence: false,
-    minimax_h3_window_storyboard: false, sliding_window_size: frames,
-    sliding_window_overlap: 18, sliding_window_discard_last_frames: 0,
-    multi_prompts_gen_type: 2, repeat_generation: 1, seed: -1,
-    spatial_upsampling: '', film_grain_intensity: 0, custom_settings: {},
+    activated_loras: [], loras_multipliers: '', repeat_generation: 1, multi_prompts_gen_type: 2, custom_settings: {},
     _client_submission_id: clientId,
   }
+  const { steps, guidance, seed } = generationOverrides(settings, context, profile.modelType === TITLE_MODEL)
+  if (steps !== undefined) params.num_inference_steps = steps
+  if (guidance !== undefined) params.guidance_scale = guidance
+  if (seed !== undefined) params.seed = seed
+  for (const field of ['sample_solver', 'flow_shift', 'embedded_guidance_scale', 'audio_guidance_scale',
+    'sliding_window_size', 'sliding_window_overlap', 'sliding_window_discard_last_frames'] as const) {
+    const value = defaults[field]
+    if ((typeof value === 'string' && value.length > 0) || (typeof value === 'number' && Number.isFinite(value))) params[field] = value
+  }
+  if (profile.startFrame) {
+    params.image_start = backgroundPath
+    params.image_prompt_type = profile.endFrame ? 'SE' : 'S'
+    if (profile.endFrame) params.image_end = backgroundPath
+  }
+  if (!profile.nativeH3) {
+    // Use one window matching the chosen clip length so model defaults cannot
+    // stretch a title into a longer multi-window generation.
+    params.sliding_window_size = frames
+    params.sliding_window_overlap = 0
+    params.sliding_window_discard_last_frames = 0
+  }
+  if (profile.nativeH3) {
+    params.minimax_h3_multi_window = false
+    params.minimax_h3_reference_sequence = false
+    params.minimax_h3_window_storyboard = false
+    params.sliding_window_size = frames
+    if (profile.modelType === TITLE_MODEL) {
+      params.override_attention = 'sla'
+      params.sliding_window_overlap = 18
+      params.sliding_window_discard_last_frames = 0
+      params.spatial_upsampling = ''
+      params.film_grain_intensity = 0
+    } else {
+      const attention = defaults.override_attention
+      if (attention === 'sol' || attention === 'sla' || attention === 'veda' || attention === 'sdpa' || attention === '') {
+        params.override_attention = attention
+      }
+    }
+  } else {
+    params.negative_prompt = ''
+  }
+  return params
 }
 
 /** One undoable, idempotent insertion above all existing visual layers. */
 export function insertAnimatedTitle(project: EditorProject, asset: EditorAsset, options: {
-  id: string; at: number; text: string; keepAudio: boolean; itemId: string; trackId: string; background?: TitleBackground
+  id: string; at: number; text: string; keepAudio: boolean; itemId: string; trackId: string; background?: TitleBackground; backgroundColor?: string
 }) {
   const existingTrack = project.tracks.find(track => track.items.some(item => item.animated_title_id === options.id))
   const existing = existingTrack?.items.find(item => item.animated_title_id === options.id)
@@ -428,7 +677,9 @@ export function insertAnimatedTitle(project: EditorProject, asset: EditorAsset, 
       animated_title_id: options.id, start, duration: asset.duration, source_in: 0,
       speed: 1, opacity: 1, volume: 1, muted: !options.keepAudio, fit: 'contain',
       transform: { x: 0, y: 0, scale: 1, rotation: 0 }, fade_in: 0, fade_out: 0,
-      keying: { ...DEFAULT_EDITOR_KEYING, enabled: background.chromaKey, similarity: .23, softness: .12, spill: .65 },
+      keying: { ...DEFAULT_EDITOR_KEYING, enabled: background.chromaKey,
+        color: background.chromaKey ? background.color.toLowerCase() : DEFAULT_EDITOR_KEYING.color,
+        similarity: .23, softness: .12, spill: .65 },
     }],
   })
   return { itemId: options.itemId, trackId: options.trackId, start }

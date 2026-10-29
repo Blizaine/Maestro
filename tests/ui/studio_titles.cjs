@@ -23,8 +23,13 @@ const families = [
   {id: 'minimax_h3', label: 'MiniMax H3', order: 1},
   {id: 'viggle', label: 'Viggle', order: 2},
   {id: 'longcat', label: 'LongCat', order: 3},
+  {id: 'synthetic_video', label: 'Other Frames models', order: 4},
 ];
 const models = [
+  {model_type: 'test_frames_text', name: 'Test Frames T2V', family: 'synthetic_video', architecture: 'wan',
+    is_t2v: true, is_i2v: false, supports_end_frame: false, guidance_max_phases: 1, fps: 16, is_downloaded: true},
+  {model_type: 'test_frames_image', name: 'Test Frames I2V', family: 'synthetic_video', architecture: 'wan',
+    is_t2v: false, is_i2v: true, supports_end_frame: false, guidance_max_phases: 1, fps: 24, is_downloaded: true},
   {
     model_type: TITLE_MODEL, name: 'H3 Fused 4-Step · Frames', family: 'minimax_h3',
     architecture: 'minimax_h3', is_i2v: true, is_t2v: true, supports_end_frame: true,
@@ -110,11 +115,11 @@ async function bundleUi() {
         import {useEditorStore} from './src/editor/useEditorStore';
         import {useEditorTitleStore} from './src/editor/useEditorTitleStore';
         import {Sidebar} from './src/components/Sidebar/Sidebar';
-        import {TITLE_EFFECT_LABELS, TITLE_SEQUENCE_DURATIONS, alignTitleSequence, setTitlePhraseSeconds, titleDimensions, titleFrames, titleSequenceTimeline, newTitlePhrases, animatedTitlePrompt, animatedTitleParams} from './src/editor/editorAnimatedTitles';
+        import {TITLE_EFFECT_LABELS, TITLE_SEQUENCE_DURATIONS, alignTitleSequence, setTitlePhraseSeconds, titleDimensions, titleFrames, titleSequenceTimeline, newTitlePhrases, animatedTitlePrompt, animatedTitleParams, insertAnimatedTitle} from './src/editor/editorAnimatedTitles';
         window.store = useStore;
         window.editorStore = useEditorStore;
         window.titleStore = useEditorTitleStore;
-        window.titleHelpers = {TITLE_EFFECT_LABELS, TITLE_SEQUENCE_DURATIONS, alignTitleSequence, setTitlePhraseSeconds, titleDimensions, titleFrames, titleSequenceTimeline, newTitlePhrases, animatedTitlePrompt, animatedTitleParams};
+        window.titleHelpers = {TITLE_EFFECT_LABELS, TITLE_SEQUENCE_DURATIONS, alignTitleSequence, setTitlePhraseSeconds, titleDimensions, titleFrames, titleSequenceTimeline, newTitlePhrases, animatedTitlePrompt, animatedTitleParams, insertAnimatedTitle};
         window.baseParams = {...useStore.getState().params};
         window.seedScenario = (scenario = {}) => {
           const model = scenario.model || '${TITLE_MODEL}';
@@ -199,7 +204,15 @@ async function waitFor(page, expression, description, timeout = 10000, argument 
   try {
     await page.waitForFunction(expression, argument, {timeout});
   } catch (error) {
-    throw new Error(`Timed out waiting for ${description}: ${error.message}`);
+    const diagnostic = await page.evaluate(() => ({
+      status: window.titleStore?.getState().intent?.status,
+      error: window.titleStore?.getState().error || window.titleStore?.getState().intent?.error,
+      alerts: [...document.querySelectorAll('[role="alert"]')].map(element => element.textContent),
+      enhance: window.store?.getState().enhanceOnGeneration,
+      enhanceDefault: window.store?.getState().enhanceOnGenerationDefault,
+      draft: JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1') || 'null'),
+    }));
+    throw new Error(`Timed out waiting for ${description}: ${error.message}\n${JSON.stringify(diagnostic)}`);
   }
 }
 
@@ -269,7 +282,7 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
       hostOutsideBody: !!body && !!host && !body.contains(host),
       footerInHost: !!host && !!footer && footer.parentElement === host,
       hostVisible: !!host && !host.hidden,
-      modelType: document.querySelector('[aria-label="Title generation model"]')?.getAttribute('data-model-type'),
+      modelType: document.querySelector('[aria-label="Choose model"]')?.getAttribute('data-model-type'),
       hardwareVisible: !!hardware && getComputedStyle(hardware).display !== 'none' && hardware.getBoundingClientRect().height > 0,
     };
   });
@@ -279,8 +292,8 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
   assert.equal(footerLayout.modelType, TITLE_MODEL, 'The title footer identifies its fixed H3 model.');
   assert.equal(footerLayout.hardwareVisible, true, 'The global hardware monitor stays visible below the title footer.');
   const formatControls = page.getByTestId('titles-output-format-controls');
-  assert.equal(await formatControls.locator('button.studio-setting-chip').count(), 3,
-    'Resolution, aspect and duration use the same compact chips as the other Studio modes.');
+  assert.equal(await formatControls.locator('button.studio-setting-chip').count(), 4,
+    'Resolution, aspect, duration and Advanced use the same compact chips as the other Studio modes.');
   assert.equal(await formatControls.evaluate(element => !!element.closest('[data-testid="titles-generate-footer"]')), true,
     'The everyday format controls remain in the fixed footer rather than the scrolling title form.');
   const promptToolbar = await page.getByTestId('title-prompt-field').evaluate(element => {
@@ -332,9 +345,35 @@ async function assertHardwareExpandable(page, label) {
 }
 
 async function acceptManualTitlePlan(panel) {
-  const advanced = panel.locator('details').filter({hasText: 'Advanced title controls'}).first();
-  if (!await advanced.evaluate(element => element.open)) await advanced.locator(':scope > summary').click();
+  const advanced = await openTitleAdvanced(panel.page());
   await advanced.getByRole('button', {name: 'Use manual title plan'}).click();
+}
+
+async function openTitleAdvanced(page) {
+  const advanced = page.getByRole('dialog', {name: 'Advanced title settings', exact: true});
+  if (!await advanced.isVisible()) await page.getByRole('button', {name: 'Advanced title settings', exact: true}).click();
+  await advanced.waitFor();
+  return advanced;
+}
+
+async function uploadedPixel(page, upload) {
+  const body = upload.buffer;
+  const start = body.indexOf(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  assert.ok(start >= 0, 'The selected background was uploaded as PNG.');
+  let end = start + 8;
+  while (end < body.length) {
+    const size = body.readUInt32BE(end);
+    const type = body.toString('ascii', end + 4, end + 8);
+    end += size + 12;
+    if (type === 'IEND') break;
+  }
+  return page.evaluate(async base64 => {
+    const bytes = Uint8Array.from(atob(base64), character => character.charCodeAt(0));
+    const bitmap = await createImageBitmap(new Blob([bytes], {type: 'image/png'}));
+    const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+    const context = canvas.getContext('2d'); context.drawImage(bitmap, 0, 0);
+    return Array.from(context.getImageData(0, 0, 1, 1).data);
+  }, body.subarray(start, end).toString('base64'));
 }
 
 (async () => {
@@ -384,7 +423,14 @@ async function acceptManualTitlePlan(panel) {
         return route.fulfill({contentType: 'text/html', body: '<meta name="viewport" content="width=device-width,initial-scale=1"><button id="outside">Outside sidebar</button><div id="root" style="height:100dvh;display:flex"></div>'});
       }
       if (endpoint === '/api/v1/models') return json(catalogue);
+      if (endpoint.startsWith('/api/v1/model-options/test_frames_')) return json({...modelOptions,
+        architecture: 'wan', fps: endpoint.endsWith('_text') ? 16 : 24,
+        frames_minimum: 1, frames_steps: endpoint.endsWith('_text') ? 4 : 8, frames_maximum: endpoint.endsWith('_text') ? 161 : 241,
+        default_num_inference_steps: endpoint.endsWith('_text') ? 12 : 8, default_guidance_scale: 2.5});
       if (endpoint.startsWith('/api/v1/model-options/')) return json(modelOptions);
+      if (endpoint.startsWith('/api/v1/defaults/test_frames_')) return json({
+        num_inference_steps: endpoint.endsWith('_text') ? 12 : 8, guidance_scale: 2.5, sample_solver: 'euler',
+      });
       if (endpoint === '/api/v1/studio-preferences' && method === 'PUT') {
         const update = request.postDataJSON();
         preferenceUpdates.push(update);
@@ -423,7 +469,7 @@ async function acceptManualTitlePlan(panel) {
           uploadFailures.push({search: url.search, contentType: request.headers()['content-type'] || '', body});
           return route.fulfill({status: 500, contentType: 'application/json', body: '{"detail":"Synthetic title upload failure"}'});
         }
-        uploadRequests.push({search: url.search, contentType: request.headers()['content-type'] || '', body});
+        uploadRequests.push({search: url.search, contentType: request.headers()['content-type'] || '', body, buffer: request.postDataBuffer()});
         const filename = /filename="([^"]+)"/.exec(body)?.[1] || 'title-background.png';
         return json({filename, path: `/uploads/${filename}`, url: `/uploads/${filename}`});
       }
@@ -453,7 +499,8 @@ async function acceptManualTitlePlan(panel) {
         const body = request.postDataJSON();
         probes.push(body);
         const asset = body.asset || {};
-        const dimensions = /(\d+)x(\d+)/.exec(asset.path || asset.name || '');
+        const dimensions = /(\d+)x(\d+)/.exec(asset.path || asset.name || '')
+          || /(\d+)x(\d+)/.exec(generationRequests.at(-1)?.resolution || '');
         return json({type: 'video', path: asset.path, duration: 5.2,
           width: Number(dimensions?.[1] || 480), height: Number(dimensions?.[2] || 832),
           fps: 24, has_audio: true, size: 1234});
@@ -681,7 +728,13 @@ async function acceptManualTitlePlan(panel) {
     // Create a portrait black title with custom-written motion. No Editor project is present.
     await chooseWorkflow(page, 'Titles');
     await assertTitleModeHasOnlyItsOwnComposer(page);
-    assert.match(await sidebar.innerText(), new RegExp(`Save to ${WORKSPACE}`));
+    assert.doesNotMatch(await sidebar.innerText(), /No Editor project needed|Save to/,
+      'Titles omits the redundant save-location text.');
+    const appearanceOrder = await page.evaluate(() => ({
+      controls: document.querySelector('[data-testid="title-appearance-controls"]').getBoundingClientRect().top,
+      prompt: document.querySelector('[data-testid="title-prompt-field"]').getBoundingClientRect().top,
+    }));
+    assert.ok(appearanceOrder.controls < appearanceOrder.prompt, 'Style and background selectors precede the prompt.');
     const ordinaryFormat = await page.evaluate(() => {
       const state = window.store.getState();
       return {resolution: state.resolutionPreset, aspect: state.aspectRatio,
@@ -747,11 +800,10 @@ async function acceptManualTitlePlan(panel) {
       'A native duration and the added format choices survive closing and reopening Titles.');
     await page.locator('[data-testid="studio-body-scroll"]').evaluate(element => { element.scrollTop = 0; });
     await page.screenshot({path: path.join(SCREENSHOTS, 'studio-titles-format-desktop.png'), fullPage: true});
-    await sidebar.getByText('Advanced title controls', {exact: true}).click();
-    const advancedSidebar = sidebar.locator('details').filter({hasText: 'Advanced title controls'}).first();
+    const advancedSidebar = await openTitleAdvanced(page);
     const presetSummary = advancedSidebar.getByText('Use an animation preset (optional)', {exact: true});
     await presetSummary.click();
-    const preset = sidebar.getByLabel('Animation preset');
+    const preset = advancedSidebar.getByLabel('Animation preset');
     const presetCount = await preset.locator('option').count();
     assert.equal(presetCount, 21, 'The custom option and all 20 animation presets are available.');
     await preset.selectOption('dust');
@@ -769,14 +821,16 @@ async function acceptManualTitlePlan(panel) {
     await titleFormats.getByRole('button', {name: /^Resolution:/}).click();
     await page.getByRole('menu', {name: 'Resolution', exact: true})
       .getByRole('menuitemradio', {name: /720p/}).click();
+    await openTitleAdvanced(page);
     assert.equal(await preset.inputValue(), 'custom',
       'Editing a preset description switches the title to its custom motion field.');
-    const dimensions720 = await sidebar.getByText(/704×1280/).count();
+    const dimensions720 = await advancedSidebar.getByText(/704×1280/).count();
     assert.equal(dimensions720, 1, 'Portrait 720p title dimensions are shown before submit.');
     await titleFormats.getByRole('button', {name: /^Resolution:/}).click();
     await page.getByRole('menu', {name: 'Resolution', exact: true})
       .getByRole('menuitemradio', {name: /480p/}).click();
-    assert.equal(await sidebar.getByText(/480×832/).count(), 1,
+    await openTitleAdvanced(page);
+    assert.equal(await advancedSidebar.getByText(/480×832/).count(), 1,
       'Portrait 480p title dimensions use the aligned output size.');
     await advancedSidebar.getByRole('button', {name: 'Use manual title plan'}).click();
     const bodyScroll = page.locator('[data-testid="studio-body-scroll"]');
@@ -919,8 +973,9 @@ async function acceptManualTitlePlan(panel) {
     assert.equal(generationRequests.length, 2);
     assert.equal(generationRequests[1]._studio_title_settings.background, 'chroma');
     assert.match(uploadRequests[1].body, /title-green-/);
-    assert.match(await page.locator('div[role="status"]').innerText(), /Synthetic generation failure/);
-    assert.doesNotMatch(await page.locator('div[role="status"]').innerText(), /Title saved to/);
+    assert.equal(await page.getByRole('alert').filter({hasText: 'Synthetic generation failure'}).count(), 1);
+    assert.equal(await page.getByRole('button', {name: 'Dismiss', exact: true}).count(), 0,
+      'The title sidebar does not show the old status banner actions.');
 
     await page.evaluate(() => window.titleStore.getState().dismiss());
     nextSubmissionMode = {status: 'cancelled', loseResponse: false};
@@ -928,8 +983,8 @@ async function acceptManualTitlePlan(panel) {
     await waitFor(page, () => window.titleStore.getState().intent?.status === 'failed'
       && window.titleStore.getState().intent?.error === 'Synthetic cancellation', 'cancelled title generation');
     assert.equal(generationRequests.length, 3);
-    assert.match(await page.locator('div[role="status"]').innerText(), /Synthetic cancellation/);
-    assert.doesNotMatch(await page.locator('div[role="status"]').innerText(), /Title saved to/);
+    assert.equal(await page.getByRole('alert').filter({hasText: 'Synthetic cancellation'}).count(), 1);
+    assert.equal(await page.getByRole('link', {name: 'Preview', exact: true}).count(), 0);
     assert.deepEqual(projectApiRequests, [], 'No Studio title path calls Editor project APIs.');
 
     // Phone layout keeps the title form scrollable while the keyboard is open, and the
@@ -937,8 +992,7 @@ async function acceptManualTitlePlan(panel) {
     await page.setViewportSize({width: 390, height: 844});
     await page.waitForTimeout(100);
     await assertHardwareExpandable(page, 'Mobile');
-    const mobileAdvanced = sidebar.locator('details').filter({hasText: 'Advanced title controls'}).first();
-    if (await mobileAdvanced.evaluate(element => element.open)) await mobileAdvanced.locator(':scope > summary').click();
+    if (await page.getByRole('dialog', {name: 'Advanced title settings', exact: true}).isVisible()) await page.keyboard.press('Escape');
     await page.locator('[data-testid="studio-body-scroll"]').evaluate(element => { element.scrollTop = 0; });
     await titleFormats.getByRole('button', {name: /^Resolution:/}).click();
     const phoneResolutionMenu = page.getByRole('menu', {name: 'Resolution', exact: true});
@@ -973,9 +1027,11 @@ async function acceptManualTitlePlan(panel) {
     assert.equal(await page.evaluate(() => window.lastTabPrevented), false,
       'The phone workflow popover lets keyboard focus continue naturally.');
     await page.keyboard.press('Escape');
-    await page.getByText('Advanced title controls', {exact: true}).click();
-    await page.getByLabel('Title animation description').focus();
-    await page.getByLabel('Title animation description').fill('Mobile title motion stays in the visible sidebar.');
+    await openTitleAdvanced(page);
+    await page.getByLabel('Title animation description').waitFor();
+    await page.keyboard.press('Escape');
+    await page.getByLabel('Describe your title animation').focus();
+    await page.getByLabel('Describe your title animation').fill('Mobile title motion stays in the visible sidebar.');
     await page.setViewportSize({width: 390, height: 500});
     await waitFor(page, () => document.querySelector('.maestro-sidebar')?.getAttribute('data-keyboard-open') === 'true',
       'mobile keyboard viewport handling');
@@ -1084,7 +1140,7 @@ async function acceptManualTitlePlan(panel) {
     assert.equal(nativeChecks.sixFrames, 158, 'Six phrases get the next native duration that can fit at least one second each.');
     assert.ok(nativeChecks.invalidFrames.every(Boolean), 'Invalid native frame selections cannot generate.');
     await page.evaluate(settings => window.store.setState(state => ({params: {...state.params, _studio_title_settings: settings}})), sequenceSettings);
-    await page.getByText('Advanced title controls', {exact: true}).click();
+    await openTitleAdvanced(page);
     await waitFor(page, () => document.querySelector('[aria-label="Phrase 1 text"]')?.value === 'CREATE', 'gallery sequence settings restore');
     assert.equal(await page.getByLabel('Phrase 3 text', {exact: true}).inputValue(), 'INSPIRE');
     await page.getByLabel('Phrase 1 text', {exact: true}).fill('CREATE MORE');
@@ -1105,7 +1161,7 @@ async function acceptManualTitlePlan(panel) {
     await page.reload();
     await mount(page, bundle, css, {workflow: 'titles', workspace: 'Changed While Running'});
     await waitFor(page, () => window.titleStore.getState().intent?.jobId === 'studio-title-job-4', 'sequence receipt reload');
-    await page.getByText('Advanced title controls', {exact: true}).click();
+    await openTitleAdvanced(page);
     assert.equal(await page.getByLabel('Phrase 1 text', {exact: true}).inputValue(), 'CREATE MORE');
     assert.equal(await page.getByLabel('Sequence duration', {exact: true}).inputValue(), '243');
     const recoveredPhrases = await page.evaluate(() => window.titleStore.getState().intent.settings.phrases);
@@ -1114,6 +1170,96 @@ async function acceptManualTitlePlan(panel) {
     assert.equal(generationRequests.length, beforeSequenceReload, 'Sequence reload never resubmits.');
     assert.deepEqual(projectApiRequests, [], 'Sequence generation remains independent of Editor projects.');
 
+    // Controlled Frames catalog, native timing/defaults, and all chosen background colors.
+    await page.keyboard.press('Escape');
+    await page.evaluate(() => {
+      window.titleStore.getState().dismiss();
+      window.store.setState(state => ({enhanceOnGeneration: false, enhanceOnGenerationDefault: false,
+        params: {...state.params, _studio_title_settings: {
+          brief: 'Show “COLOR” with a clean reveal, readable hold, then dissolve.', text: '', look: '', direction: '',
+          effect: 'custom', seconds: 5.2, aspect: '16:9', resolution: '480p', background: 'white', keepAudio: false,
+        }}}));
+    });
+    const normalBeforeModel = await stateInputs(page);
+    await page.getByRole('button', {name: 'Choose model', exact: true}).click();
+    await page.getByRole('dialog', {name: 'Choose a model', exact: true}).getByTitle('Test Frames T2V', {exact: true}).click();
+    await waitFor(page, () => document.querySelector('[aria-label="Choose model"]')?.dataset.modelType === 'test_frames_text', 'controlled T2V title model');
+    assert.deepEqual(await stateInputs(page), normalBeforeModel, 'Selecting a title model preserves the ordinary Studio model and inputs.');
+    const modelAdvanced = await openTitleAdvanced(page);
+    assert.equal(await modelAdvanced.getByLabel('Title inference steps').inputValue(), '12');
+    assert.equal(await modelAdvanced.getByLabel('Title guidance', {exact: true}).inputValue(), '2.5');
+    await modelAdvanced.getByLabel('Title seed', {exact: true}).fill('314159');
+    await page.screenshot({path: path.join(SCREENSHOTS, 'studio-title-model-advanced.png'), fullPage: true});
+    await page.keyboard.press('Escape');
+    nextSubmissionMode = {status: 'completed', loseResponse: false};
+    const beforeTextUploads = uploadRequests.length;
+    await page.getByRole('button', {name: 'Generate title', exact: true}).click();
+    await waitFor(page, () => window.titleStore.getState().intent?.status === 'completed', 'text-model title completion');
+    const textBody = generationRequests.at(-1);
+    assert.equal(textBody.model_type, 'test_frames_text');
+    assert.equal(textBody._studio_title_settings.model.fps, 16);
+    assert.equal(textBody.video_length % 4, 1, 'The text model uses its own native frame lattice.');
+    assert.equal(textBody.num_inference_steps, 12);
+    assert.equal(textBody.guidance_scale, 2.5);
+    assert.equal(textBody.seed, 314159);
+    assert.equal(textBody.sample_solver, 'euler');
+    assert.equal(textBody.multi_prompts_gen_type, 2, 'A multiline title prompt always remains one clip.');
+    assert.ok(!textBody.image_start && !textBody.image_end && !textBody.image_prompt_type);
+    assert.notEqual(textBody.override_attention, 'sla', 'Foreign models never inherit the Fused SLA override.');
+    assert.match(textBody.prompt, /#FFFFFF/i);
+    assert.equal(uploadRequests.length, beforeTextUploads, 'A text-only model is not sent unsupported boundary images.');
+    assert.equal(await page.getByRole('button', {name: 'Dismiss', exact: true}).count(), 0);
+    assert.equal(await page.getByRole('link', {name: 'Preview', exact: true}).count(), 0);
+    await page.getByRole('button', {name: 'Choose model', exact: true}).click();
+    await page.getByRole('dialog', {name: 'Choose a model', exact: true}).getByTitle('Test Frames I2V', {exact: true}).click();
+    await waitFor(page, () => document.querySelector('[aria-label="Choose model"]')?.dataset.modelType === 'test_frames_image', 'controlled I2V title model');
+    await page.getByLabel('Title background', {exact: true}).first().selectOption('blue');
+    nextSubmissionMode = {status: 'completed', loseResponse: false};
+    await page.getByRole('button', {name: 'Generate title', exact: true}).click();
+    await waitFor(page, () => window.titleStore.getState().intent?.status === 'completed'
+      && window.titleStore.getState().intent?.settings.background === 'blue', 'blue I2V title completion');
+    const imageBody = generationRequests.at(-1);
+    assert.equal(imageBody.model_type, 'test_frames_image');
+    assert.equal(imageBody.num_inference_steps, 8);
+    assert.ok(imageBody.image_start);
+    assert.ok(!imageBody.image_end, 'A start-only model is not sent an unsupported last frame.');
+    assert.equal(imageBody.image_prompt_type, 'S');
+    assert.equal(imageBody.multi_prompts_gen_type, 2);
+    assert.deepEqual(await uploadedPixel(page, uploadRequests.at(-1)), [0, 0, 255, 255]);
+    assert.match(imageBody.prompt, /#0000FF/i);
+    await page.getByRole('button', {name: 'Choose model', exact: true}).click();
+    await page.getByRole('dialog', {name: 'Choose a model', exact: true}).getByTitle('H3 Fused 4-Step · Frames', {exact: true}).click();
+    await waitFor(page, () => document.querySelector('[aria-label="Choose model"]')?.dataset.modelType === 'minimax_h3_fused_turbo', 'return to H3 title model');
+    await page.getByLabel('Title background', {exact: true}).first().selectOption('custom');
+    await page.getByLabel('Title background color', {exact: true}).first().evaluate(input => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '#334455');
+      input.dispatchEvent(new Event('input', {bubbles: true}));
+    });
+    await page.setViewportSize({width: 390, height: 844});
+    await page.locator('[data-testid="studio-body-scroll"]').evaluate(element => { element.scrollTop = 0; });
+    await page.screenshot({path: path.join(SCREENSHOTS, 'studio-title-custom-mobile.png'), fullPage: true});
+    await page.getByRole('button', {name: 'Choose model', exact: true}).click();
+    await page.screenshot({path: path.join(SCREENSHOTS, 'studio-title-model-picker-mobile.png'), fullPage: true});
+    await page.keyboard.press('Escape');
+    await page.setViewportSize({width: 1360, height: 900});
+    nextSubmissionMode = {status: 'completed', loseResponse: false};
+    await page.getByRole('button', {name: 'Generate title', exact: true}).click();
+    await waitFor(page, () => window.titleStore.getState().intent?.status === 'completed'
+      && window.titleStore.getState().intent?.settings.background === 'custom', 'custom-color title completion');
+    assert.deepEqual(await uploadedPixel(page, uploadRequests.at(-1)), [51, 68, 85, 255]);
+    assert.match(generationRequests.at(-1).prompt, /#334455/i);
+    const editorKeying = await page.evaluate(() => ['blue', 'white', 'custom'].map(background => {
+      const project = {assets: {}, tracks: []};
+      window.titleHelpers.insertAnimatedTitle(project, {id: 'overlay', type: 'video', duration: 5}, {
+        id: 'title', at: 0, text: 'COLOR', keepAudio: false, itemId: 'item', trackId: 'track', background, backgroundColor: '#334455',
+      });
+      const key = project.tracks[0].items[0].keying;
+      return {background, enabled: key.enabled, ...(key.enabled ? {color: key.color} : {})};
+    }));
+    assert.deepEqual(editorKeying, [{background: 'blue', enabled: true, color: '#0000ff'},
+      {background: 'white', enabled: false}, {background: 'custom', enabled: false}],
+      'Blue keys with blue; white and custom title backgrounds remain opaque in the Editor.');
+    assert.deepEqual(await stateInputs(page), normalBeforeModel, 'All title model/color submissions preserve unrelated Studio inputs.');
     assert.ok(preferenceUpdates.some(preference => preference.studio_video_workflow === 'titles'),
       'The title workflow is persisted as a normal Studio preference.');
     assert.deepEqual(pageErrors, [], 'The isolated Studio Titles sidebar has no runtime errors.');

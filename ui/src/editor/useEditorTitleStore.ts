@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 import * as api from '../api/client'
-import type { EditorAsset } from '../types'
-import { useStore } from '../stores/useStore'
-import { animatedTitleParams, animatedTitlePrompt, titleBackground, titleDimensions, titleFrames, titleSeconds, titleText, titleSubmissionId, TITLE_MODEL } from './editorAnimatedTitles'
+import type { EditorAsset, ModelDef } from '../types'
+import { modelSupportsStudioVideoMediaIntent, useStore } from '../stores/useStore'
+import { animatedTitleParams, animatedTitlePrompt, titleBackground, titleDimensions, titleFps, titleFrames, titleModelProfile, titleModelType, titlePlanIsCurrent, titlePlanningKey, titleSeconds, titleText, titleSubmissionId } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 import { useEditorStore } from './useEditorStore'
 
@@ -22,7 +22,7 @@ function restore(): TitleIntent | null {
       || (value.destination !== undefined && !['editor', 'studio'].includes(value.destination))
       || (value.destination !== 'studio' && typeof value.projectId !== 'string') || typeof value.workspace !== 'string'
       || !Number.isFinite(value.at) || value.at < 0 || !value.settings) return null
-    animatedTitlePrompt(value.settings); titleFrames(titleSeconds(value.settings))
+    animatedTitlePrompt(value.settings); titleFrames(titleSeconds(value.settings), value.settings)
     if (!['submitting', 'uncertain', 'queued', 'running', 'ready', 'inserted', 'completed', 'failed'].includes(value.status)) return null
     return value.status === 'submitting' ? { ...value, status: 'uncertain' } : value
   } catch { return null }
@@ -72,23 +72,44 @@ export const useEditorTitleStore = create<TitleState>((set, get) => {
         const workspace = current?.workspace ?? useStore.getState().activeWorkspace
         if (!workspace || ['__all__', '__uploads__'].includes(workspace)) throw new Error('Choose a workspace for the title.')
         const canvas = current ? { ...current.canvas } : { width: 1920, height: 1080 }
-        const settingsCopy = { ...settings, text: settings.mode === 'sequence'
+        const authoredSettings = { ...settings, text: settings.mode === 'sequence'
           ? (settings.phrases ?? []).map(phrase => phrase.text.trim()).join('\n') : settings.text.trim(),
           ...(settings.phrases ? { phrases: settings.phrases.map(phrase => ({ ...phrase })) } : {}) }
-        animatedTitlePrompt(settingsCopy); titleFrames(titleSeconds(settingsCopy))
+        const selectedModelType = titleModelType(authoredSettings)
+        const { models } = await api.fetchModels()
+        const model = models.find(item => item.model_type === selectedModelType)
+        if (!model) throw new Error('The selected video model is no longer available. Choose another model and try again.')
+        if (model.is_downloaded !== true) throw new Error(`Install ${model.name} in Settings before generating an animated title.`)
+        const modelDefinition = model as ModelDef
+        if (modelDefinition.world_model || !modelSupportsStudioVideoMediaIntent(modelDefinition, { workflow: 'frames', hasFrameGuidance: false,
+          hasOmniReferences: false, hasAudioDrive: false })) {
+          throw new Error('Choose a video model compatible with the standard Frames workflow.')
+        }
+        const [options, defaults] = await Promise.all([
+          api.fetchModelOptions(selectedModelType), api.fetchDefaults(selectedModelType),
+        ])
+        if (options.model_type !== undefined && options.model_type !== selectedModelType) throw new Error('The selected model options changed. Refresh Titles and try again.')
+        const profile = titleModelProfile(model as ModelDef, options)
+        const settingsCopy = { ...authoredSettings, model: profile }
+        // Legacy Editor plans have no model profile in their saved key. The
+        // Editor remains bound to H3, so migrate only that fixed-model key.
+        if (!authoredSettings.model && authoredSettings.brief !== undefined && titlePlanIsCurrent(authoredSettings)) {
+          settingsCopy.plannedKey = titlePlanningKey(settingsCopy)
+        }
+        animatedTitlePrompt(settingsCopy); titleFrames(titleSeconds(settingsCopy), settingsCopy)
         const { width, height } = titleDimensions(settingsCopy, canvas)
         const at = current ? useEditorStore.getState().playhead : 0
-        if (at + titleFrames(titleSeconds(settingsCopy)) / 24 > 86400) throw new Error('The title would exceed the 24-hour timeline limit.')
-        const { models } = await api.fetchModels()
-        if (!models.some(model => model.model_type === TITLE_MODEL && model.is_downloaded === true)) {
-          throw new Error('Install H3 Fused 4-Step — Frames in Settings before generating an animated title.')
+        if (at + titleFrames(titleSeconds(settingsCopy), settingsCopy) / titleFps(settingsCopy) > 86400) {
+          throw new Error('The title would exceed the 24-hour timeline limit.')
         }
         if (current) {
           const saved = await useEditorStore.getState().saveProject()
           if (!saved || saved.id !== current.id || saved.workspace !== current.workspace
             || useEditorStore.getState().project?.id !== current.id) throw new Error('The Editor project changed while preparing the title.')
         }
-        const background = await api.uploadImage(await backgroundFrame(width, height, settingsCopy), { reuseIdentical: true })
+        const background = profile.startFrame
+          ? await api.uploadImage(await backgroundFrame(width, height, settingsCopy), { reuseIdentical: true })
+          : null
         if (current && (useEditorStore.getState().project?.id !== current.id || useEditorStore.getState().project?.workspace !== current.workspace)) {
           throw new Error('The Editor project changed before submission. No title was generated.')
         }
@@ -98,7 +119,8 @@ export const useEditorTitleStore = create<TitleState>((set, get) => {
         intent = { id: titleSubmissionId(), clientId: titleSubmissionId(), projectId: current?.id,
           destination, workspace, at, settings: settingsCopy, width, height, status: 'submitting' }
         remember(intent); set({ intent }) // Durable before the one and only generation POST.
-        const params = { ...animatedTitleParams(settingsCopy, canvas, background.path, workspace, intent.clientId),
+        const params = { ...animatedTitleParams(settingsCopy, canvas, background?.path ?? '', workspace, intent.clientId,
+          { options, defaults }),
           ...(destination === 'studio' ? { _studio_video_workflow: 'titles', _studio_title_settings: settingsCopy } : {}) }
         posted = true
         const receipt = await api.submitGeneration(params)
@@ -168,8 +190,11 @@ export const useEditorTitleStore = create<TitleState>((set, get) => {
           fps: probe.fps, has_audio: probe.has_audio, size: probe.size }
         const sizeMatches = probe.width === intent.width && probe.height === intent.height
         if (intent.destination === 'studio') {
+          const titleBackgroundInfo = titleBackground(intent.settings)
           update({ ...intent, jobId, asset, status: 'completed', progress: 100,
-            message: `Title saved to ${intent.workspace}. ${titleBackground(intent.settings).chromaKey ? 'The video keeps its green background for keying.' : 'The video keeps its black background.'}`,
+            message: `Title saved to ${intent.workspace}. ${titleBackgroundInfo.chromaKey
+              ? `The ${titleBackgroundInfo.label.toLowerCase()} background is ready for keying.`
+              : `The ${titleBackgroundInfo.label.toLowerCase()} background is part of the video.`}`,
             error: sizeMatches ? undefined : `The video is ${probe.width}×${probe.height}; ${intent.width}×${intent.height} was requested.` })
           await useStore.getState().refreshOutputs()
           return
@@ -187,14 +212,21 @@ export const useEditorTitleStore = create<TitleState>((set, get) => {
       const intent = get().intent
       if (!intent?.asset || intent.destination === 'studio' || !intent.projectId || !['ready', 'inserted'].includes(intent.status)) return
       try {
-        const added = useEditorStore.getState().addAnimatedTitle(intent.asset, {
+        const addAnimatedTitle = useEditorStore.getState().addAnimatedTitle as unknown as (asset: EditorAsset, options: {
+          id: string; projectId: string; workspace: string; at: number; text: string; keepAudio: boolean
+          background?: AnimatedTitleSettings['background']; backgroundColor?: string
+        }) => boolean
+        const added = addAnimatedTitle(intent.asset, {
           id: intent.id, projectId: intent.projectId, workspace: intent.workspace,
           at: intent.at, text: titleText(intent.settings), keepAudio: intent.settings.keepAudio,
-          background: intent.settings.background,
+          background: intent.settings.background, backgroundColor: intent.settings.backgroundColor,
         })
-        if (added) update({ ...intent, status: 'inserted', error: undefined, message: titleBackground(intent.settings).chromaKey
-          ? 'Title added above your footage. Review spelling and key edges.'
-          : 'Title added above your footage with its black background intact. Review spelling and timing.' })
+        if (added) {
+          const titleBackgroundInfo = titleBackground(intent.settings)
+          update({ ...intent, status: 'inserted', error: undefined, message: titleBackgroundInfo.chromaKey
+            ? `Title added above your footage with a ${titleBackgroundInfo.label.toLowerCase()} key. Review spelling and key edges.`
+            : `Title added above your footage with its ${titleBackgroundInfo.label.toLowerCase()} background intact. Review spelling and timing.` })
+        }
       } catch (error) { set({ error: error instanceof Error ? error.message : 'Could not add the title to this project.' }) }
     },
     dismiss: () => { remember(null); set({ intent: null, error: null }) },

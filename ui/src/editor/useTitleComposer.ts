@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { planAnimatedTitle } from '../api/client'
-import { animatedTitlePrompt, applyTitleCreativePlan, directTitleDescription, titleBrief, titleFrames, titlePlanIsCurrent, titlePlanningKey, titleSeconds, TITLE_EFFECTS } from './editorAnimatedTitles'
+import { animatedTitlePrompt, applyTitleCreativePlan, directTitleDescription, titleBackground, titleBrief, titleFps, titleFrames, titlePlanIsCurrent, titlePlanningKey, titleSeconds, TITLE_EFFECTS } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 
 function keyOf(settings: AnimatedTitleSettings) {
-  try { return titlePlanningKey(settings) } catch { return JSON.stringify([settings.brief, settings.seconds, settings.sequenceFrames]) }
+  try { return titlePlanningKey(settings) } catch { return JSON.stringify([settings.brief, settings.seconds, settings.sequenceFrames, settings.model, settings.background, settings.backgroundColor]) }
 }
 
 export function useTitleComposer(settings: AnimatedTitleSettings, patch: (value: Partial<AnimatedTitleSettings>) => void, scope: string) {
@@ -27,8 +27,11 @@ export function useTitleComposer(settings: AnimatedTitleSettings, patch: (value:
       const brief = titleBrief(captured).trim()
       if (!brief || brief.length > 4000) throw new Error('Describe your title animation in 1–4,000 characters.')
       const preset = captured.stylePreset ?? 'custom'
+      const resolvedBackground = titleBackground(captured)
+      const model = captured.model
       const response = await planAnimatedTitle({ brief, style_hint: preset === 'custom' ? '' : TITLE_EFFECTS[preset],
-        frames: titleFrames(titleSeconds(captured)), background: captured.background ?? 'chroma' })
+        frames: titleFrames(titleSeconds(captured), captured), background: resolvedBackground.plannerToken,
+        fps: titleFps(captured), native_h3: model?.nativeH3 ?? true })
       if (!stillHere()) return
       const diagnostics = { rawTitleDraft: response.raw_draft.slice(0, 64000), titleDraftHistoryId: response.draft_history_id,
         plannerWarnings: response.warnings, titleReviewRequired: response.review_required }
@@ -37,7 +40,7 @@ export function useTitleComposer(settings: AnimatedTitleSettings, patch: (value:
         throw new Error(response.warnings.join(' ') || 'The AI draft needs review. Your description was retained; you can edit the plan manually in Advanced.')
       }
       const planned = { ...applyTitleCreativePlan(captured, response.plan), ...diagnostics }
-      if (titleFrames(titleSeconds(planned)) !== titleFrames(titleSeconds(captured))) {
+      if (titleFrames(titleSeconds(planned), planned) !== titleFrames(titleSeconds(captured), captured)) {
         planned.plannerWarnings = [...(planned.plannerWarnings ?? []), 'The clip length was increased to fit at least one second per phrase.']
         planned.titleReviewRequired = true
       }

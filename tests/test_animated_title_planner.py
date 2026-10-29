@@ -252,12 +252,94 @@ class TestAnimatedTitlePlanner(unittest.TestCase):
         self.assertEqual(len(NATIVE_FRAME_LENGTHS), 14)
         writer.assert_not_called()
 
+    def test_blue_white_and_custom_backgrounds_are_described_accurately(self):
+        cases = (
+            ("blue", "solid blue"),
+            ("white", "solid white"),
+            ("#12abEF", "solid custom color #12abEF"),
+        )
+        for background, prompt_text in cases:
+            with self.subTest(background=background):
+                calls = []
+                result = plan_animated_title(
+                    "A title",
+                    "",
+                    150,
+                    background,
+                    lambda **kwargs: calls.append(kwargs) or '{"title":"Title"}',
+                    fps=30,
+                    native_h3=False,
+                )
+
+                prompt = calls[0]["prompt"]
+                self.assertIn(prompt_text, prompt)
+                self.assertNotIn("green", prompt.lower())
+                self.assertNotIn("solid black", prompt.lower())
+                self.assertIn("Selected-model duration: 150 frames (5.000 seconds)", prompt)
+                self.assertTrue(result["plan"])
+                self.assertEqual(set(result["plan"]), {"phrases", "look", "direction", "sequence"})
+
+    def test_timing_validation_supports_generic_models_and_keeps_h3_presets(self):
+        validate_title_request("A title", "", 124, "chroma")
+        validate_title_request("A title", "", 125, "blue", fps=25, native_h3=False)
+        validate_title_request("A title", "", 450, "white", fps=30, native_h3=False)
+        validate_title_request("A title", "", 150, "white", fps=29.97, native_h3=False)
+
+        with self.assertRaisesRegex(ValueError, "native title duration"):
+            validate_title_request("A title", "", 125, "black")
+
+        invalid_timings = (
+            {"frames": 0, "fps": 24, "native_h3": False},
+            {"frames": -1, "fps": 24, "native_h3": False},
+            {"frames": 1801, "fps": 120, "native_h3": False},
+            {"frames": 149, "fps": 30, "native_h3": False},
+            {"frames": 451, "fps": 30, "native_h3": False},
+            {"frames": 150, "fps": 0, "native_h3": False},
+            {"frames": 150, "fps": 0.99, "native_h3": False},
+            {"frames": 150, "fps": 121, "native_h3": False},
+            {"frames": 150, "fps": float("nan"), "native_h3": False},
+            {"frames": 150, "fps": float("inf"), "native_h3": False},
+            {"frames": 150, "fps": 10**1000, "native_h3": False},
+            {"frames": 150, "fps": "30", "native_h3": False},
+            {"frames": 150, "fps": True, "native_h3": False},
+            {"frames": 150, "fps": 30, "native_h3": "false"},
+        )
+        for timing in invalid_timings:
+            with self.subTest(timing=timing), self.assertRaises(ValueError):
+                validate_title_request(
+                    "A title",
+                    "",
+                    timing["frames"],
+                    "black",
+                    fps=timing["fps"],
+                    native_h3=timing["native_h3"],
+                )
+
+    def test_writer_prompt_uses_fps_and_default_h3_context(self):
+        calls = []
+        plan_animated_title(
+            "A title",
+            "",
+            141,
+            "black",
+            lambda **kwargs: calls.append(kwargs) or '{"title":"Title"}',
+        )
+        prompt = calls[0]["prompt"]
+        self.assertIn("Frame rate: 24 fps.", prompt)
+        self.assertIn("Native H3 duration: 141 frames (5.875 seconds)", prompt)
+
     def test_request_limits_and_background_are_validated(self):
         validate_title_request("x" * 4000, "y" * 1600, 345, "chroma")
+        for background in ("chroma", "black", "blue", "white", "#aBc123"):
+            validate_title_request("brief", "", 124, background)
+
         for args in (
             ("x" * 4001, "", 124, "black"),
             ("brief", "y" * 1601, 124, "black"),
             ("brief", "", 124, "green"),
+            ("brief", "", 124, "#fff"),
+            ("brief", "", 124, "#GG0000"),
+            ("brief", "", 124, "#12345678"),
         ):
             with self.subTest(args=args), self.assertRaises(ValueError):
                 validate_title_request(*args)
@@ -339,9 +421,26 @@ class TestAnimatedTitleApiWiring(unittest.TestCase):
             writer.assert_called_once()
             self.assertEqual(writer.call_args.kwargs["max_new_tokens"], MAX_DRAFT_TOKENS)
             self.assertEqual(writer.call_args.kwargs["json_schema"], TITLE_PLAN_JSON_SCHEMA)
+            self.assertIn("Frame rate: 24 fps.", writer.call_args.kwargs["prompt"])
+            self.assertIn("Native H3 duration: 141 frames", writer.call_args.kwargs["prompt"])
             self.assertEqual(result["plan"]["phrases"][0]["text"], "À bientôt")
             self.assertTrue(result["draft_history_id"])
             self.assertEqual(result["raw_draft"], raw)
+
+            request_body.update(
+                frames=300,
+                background="#12abEF",
+                fps=30,
+                native_h3=False,
+            )
+            with patch.object(llm_service, "generate", return_value=raw) as generic_writer:
+                generic_result = asyncio.run(endpoint(Request()))
+
+            generic_writer.assert_called_once()
+            self.assertIn("Frame rate: 30 fps.", generic_writer.call_args.kwargs["prompt"])
+            self.assertIn("Selected-model duration: 300 frames (10.000 seconds)", generic_writer.call_args.kwargs["prompt"])
+            self.assertIn("solid custom color #12abEF", generic_writer.call_args.kwargs["prompt"])
+            self.assertTrue(generic_result["plan"])
 
     def test_endpoint_rejects_invalid_duration_before_loading_writer(self):
         namespace = {
