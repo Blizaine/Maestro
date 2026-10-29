@@ -5,9 +5,22 @@ const screenshotPath = name => path.resolve(__dirname, '../../.codex-tmp/sidebar
 
 async function assertExplicitEnhancement(page, sidebar, requests, llmRequests) {
   const prompt = sidebar.getByRole('textbox', {name: 'Generation prompt'});
-  const main = sidebar.getByRole('button', {name: 'Enhance prompt', exact: true});
-  const choices = sidebar.getByRole('button', {name: 'Prompt enhancement options'});
+  const promptTools = sidebar.getByRole('group', {name: 'Prompt controls', exact: true});
+  const main = promptTools.getByRole('button', {name: 'Enhance prompt', exact: true});
+  const choices = promptTools.getByRole('button', {name: 'Prompt enhancement options'});
+  const badge = sidebar.locator('.studio-prompt-field > button[aria-label="Remove Enhance on generation"]');
   const isArmed = () => page.evaluate(() => window.shouldEnhanceOnGeneration(window.store.getState()));
+  const assertPromptBadge = async () => {
+    await badge.waitFor();
+    assert.deepEqual(await page.evaluate(() => {
+      const field = document.querySelector('.studio-prompt-field');
+      const prompt = field?.querySelector('textarea[aria-label="Generation prompt"]');
+      const badge = field?.querySelector(':scope > button[aria-label="Remove Enhance on generation"]');
+      const footer = document.querySelector('[data-studio-footer]');
+      return {insidePromptField: !!field && !!prompt && !!badge && badge.parentElement === prompt.parentElement,
+        outsideFooter: !!badge && !!footer && !footer.contains(badge)};
+    }), {insidePromptField: true, outsideFooter: true}, 'Enabled enhancement has a removable badge attached to the prompt');
+  };
   const enhance = async (fromMenu = false) => {
     const style = await page.evaluate(() => String(window.store.getState().modelOptions?.architecture || '').startsWith('minimax_h3') ? 'adaptive' : 'faithful');
     const before = llmRequests.length;
@@ -273,7 +286,7 @@ async function assertExplicitEnhancement(page, sidebar, requests, llmRequests) {
     await page.evaluate(() => window.store.setState({isGenerating: true}));
     await choices.click();
     await page.getByRole('menuitemcheckbox', {name: 'Enhance on generation', exact: true}).click();
-    await sidebar.getByRole('button', {name: 'Remove Enhance on generation'}).waitFor();
+    await assertPromptBadge();
     const calls = llmRequests.length, before = requests.length;
     const accepted = page.waitForResponse(response => response.url().endsWith('/api/v1/generate'));
     await sidebar.getByRole('button', {name: action === 'queue' ? 'Add current Studio settings to the queue' : 'Generate', exact: true}).click();
@@ -297,15 +310,18 @@ async function assertExplicitEnhancement(page, sidebar, requests, llmRequests) {
   assert.equal(await page.evaluate(() => window.store.getState().enhanceOnGeneration), true, 'Failed submission keeps its instruction');
   await page.unroute('**/api/v1/generate');
   await page.setViewportSize({width: 390, height: 720});
-  const badge = sidebar.getByRole('button', {name: 'Remove Enhance on generation'});
+  const mobileBadge = badge;
+  await mobileBadge.scrollIntoViewIfNeeded();
   await page.waitForFunction(() => {
-    const rect = document.querySelector('[aria-label="Remove Enhance on generation"]')?.getBoundingClientRect();
-    return rect && rect.x >= 0 && rect.right <= window.innerWidth;
+    const rect = document.querySelector('.studio-prompt-field > [aria-label="Remove Enhance on generation"]')?.getBoundingClientRect();
+    return rect && rect.width > 0 && rect.height > 0 && rect.x >= 0 && rect.right <= window.innerWidth
+      && rect.y >= 0 && rect.bottom <= window.innerHeight;
   });
-  const rect = await badge.boundingBox();
+  await assertPromptBadge();
+  const rect = await mobileBadge.boundingBox();
   assert.ok(rect && rect.x >= 0 && rect.x + rect.width <= 390, 'Armed instruction fits mobile');
   await page.screenshot({path: screenshotPath('mobile-enhance-on-generation.png')});
-  await badge.click();
+  await mobileBadge.click();
   assert.equal(await page.evaluate(() => window.store.getState().enhanceOnGeneration), false);
   await page.setViewportSize({width: 1360, height: 900});
 
@@ -337,7 +353,7 @@ async function assertExplicitEnhancement(page, sidebar, requests, llmRequests) {
   assert.equal(await isArmed(), true);
   const defaultCalls = llmRequests.length;
   for (const action of ['queue', 'now']) {
-    await sidebar.getByRole('button', {name: 'Remove Enhance on generation'}).click();
+    await badge.click();
     assert.equal(await isArmed(), false);
     await page.route('**/api/v1/generate', route => route.fulfill({status: 503, json: {detail: 'Test rejection'}}));
     await page.evaluate(action => window.store.getState().startGeneration(action), action);
@@ -396,7 +412,7 @@ async function assertExplicitEnhancement(page, sidebar, requests, llmRequests) {
   });
   await page.evaluate(() => {window.pendingSubmit = window.store.getState().startGeneration('queue')});
   await pendingSubmission;
-  await sidebar.getByRole('button', {name: 'Remove Enhance on generation'}).click();
+  await badge.click();
   acceptSubmission();
   await page.evaluate(() => window.pendingSubmit);
   assert.equal(await isArmed(), false, 'Late acceptance does not clear a newly chosen skip');

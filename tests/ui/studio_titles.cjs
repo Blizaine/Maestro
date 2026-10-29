@@ -332,18 +332,26 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
     'Titles uses the shared Generate split button.');
   assert.equal(await page.getByRole('button', {name: 'Add current Studio settings to the queue', exact: true}).count(), 1,
     'Titles exposes the shared Add current Studio settings to the queue action.');
+  const titleTools = page.getByRole('group', {name: 'Title prompt tools', exact: true});
+  assert.equal(await titleTools.count(), 1, 'Titles keeps its distinct title enhancer controls.');
   const promptToolbar = await page.getByTestId('title-prompt-field').evaluate(element => {
     const input = element.querySelector('textarea');
     const enhance = element.querySelector('[aria-label="Enhance title now"]');
     const options = element.querySelector('[aria-label="Title enhancement options"]');
-    const field = element.getBoundingClientRect();
-    const button = enhance?.getBoundingClientRect();
-    return {input: !!input, enhance: !!enhance, options: !!options,
-      buttonInside: !!button && button.left >= field.left && button.right <= field.right
-        && button.top >= field.top && button.bottom <= field.bottom};
+    return {input: !!input, enhance: !!enhance, options: !!options};
   });
-  assert.deepEqual(promptToolbar, {input: true, enhance: true, options: true, buttonInside: true},
-    'The title enhancement split button belongs to the prompt field and fits inside its bounds.');
+  assert.deepEqual(promptToolbar, {input: true, enhance: false, options: false},
+    'The title field keeps its writing space clear of the enhancement toolbar.');
+  assert.deepEqual(await titleTools.evaluate(element => {
+    const footer = document.querySelector('[data-testid="titles-generate-footer"]');
+    const formats = document.querySelector('[data-testid="titles-output-format-controls"]');
+    const field = document.querySelector('[data-testid="title-prompt-field"]');
+    return {insideFooter: !!footer && footer.contains(element), insideFormatRow: !!formats && formats.contains(element),
+      outsidePromptField: !!field && !field.contains(element),
+      enhance: !!element.querySelector('[aria-label="Enhance title now"]'),
+      options: !!element.querySelector('[aria-label="Title enhancement options"]')};
+  }), {insideFooter: true, insideFormatRow: true, outsidePromptField: true, enhance: true, options: true},
+  'Title prompt tools stay in the pinned footer beside the format controls.');
   const hardware = sidebar.locator('.studio-hardware');
   const collapse = hardware.locator('button[title="Collapse"]');
   const expand = hardware.locator('button[title="Show hardware status"]');
@@ -652,8 +660,9 @@ async function uploadedPixel(page, upload) {
     await waitForNode(() => savedEnhancementDefault === true, 'server-persisted title enhancement default');
     assert.equal(await page.evaluate(() => window.store.getState().enhanceOnGeneration), null,
       'Saving the shared default clears the temporary one-shot choice.');
-    assert.equal(await page.locator('[data-testid="titles-generate-footer"]').getByRole('button', {name: 'Remove Enhance on generation'}).count(), 1,
-      'The footer shows the effective enhancement choice.');
+    const titleBadge = page.getByTestId('title-prompt-field').getByRole('button', {name: 'Remove Enhance on generation', exact: true});
+    assert.equal(await titleBadge.count(), 1,
+      'The title field shows the effective enhancement choice as a removable badge.');
 
     await page.reload();
     await mount(page, bundle, css, {workflow: 'titles', workspace: WORKSPACE});
@@ -669,6 +678,8 @@ async function uploadedPixel(page, upload) {
       'The shared enhancement default survives reload.');
     assert.equal(await titleEnhancementMenu.getByRole('menuitemcheckbox', {name: 'Enhance on generation'}).getAttribute('aria-checked'), 'true',
       'The effective title enhancement checkbox reflects the saved default after reload.');
+    await titleBadge.waitFor();
+    assert.equal(await titleBadge.isVisible(), true, 'The enabled title enhancement badge stays inside the title field after reload.');
     await titleEnhancementMenu.getByRole('menuitemcheckbox', {name: 'Use by default'}).click();
     await waitFor(page, () => window.store.getState().enhanceOnGenerationDefault === false,
       'turning off the shared title enhancement default');
@@ -1415,7 +1426,26 @@ async function uploadedPixel(page, upload) {
         }}}));
     });
     await page.getByRole('button', {name: 'Choose model', exact: true}).click();
-    await page.getByRole('dialog', {name: 'Choose a model', exact: true}).getByTitle('Test Frames T2V', {exact: true}).click();
+    const titleModelPicker = page.getByRole('dialog', {name: 'Choose a model', exact: true});
+    await titleModelPicker.waitFor();
+    await page.screenshot({path: path.join(SCREENSHOTS, 'studio-title-model-picker-open.png')});
+    await titleModelPicker.getByTitle('Test Frames T2V', {exact: true}).click();
+    const immediateT2vSelection = await page.evaluate(() => {
+      const state = window.store.getState();
+      return {paramsModelType: state.params.model_type, modelOptionsType: state.modelOptions?.model_type,
+        modelOptionsLoading: state.modelOptionsLoading, selectedVideoModel: state.selectedModelPerMode?.video,
+        workflow: state.studioVideoWorkflow, titleContextActive: !!state.titleGenerationContext,
+        titleHydrationKey: state.titleGenerationContextParamsHydrationKey,
+        selectorModelType: document.querySelector('[aria-label="Choose model"]')?.getAttribute('data-model-type'),
+        titleDraftModelType: JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1') || 'null')?.model?.modelType};
+    });
+    assert.deepEqual({params: immediateT2vSelection.paramsModelType, options: immediateT2vSelection.modelOptionsType,
+      selected: immediateT2vSelection.selectedVideoModel, selector: immediateT2vSelection.selectorModelType,
+      draft: immediateT2vSelection.titleDraftModelType},
+    {params: 'test_frames_text', options: 'test_frames_text', selected: 'test_frames_text',
+      selector: 'test_frames_text', draft: 'test_frames_text'},
+    'Selecting a title model updates the global model, options, selector, and saved draft together');
+    await page.screenshot({path: path.join(SCREENSHOTS, 'studio-title-model-selected.png')});
     await waitFor(page, () => document.querySelector('[aria-label="Choose model"]')?.dataset.modelType === 'test_frames_text', 'controlled T2V title model');
     await waitFor(page, () => JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1') || 'null')?.model?.modelType === 'test_frames_text',
       'T2V profile reaches the title payload snapshot');
@@ -1431,6 +1461,22 @@ async function uploadedPixel(page, upload) {
     await setStudioSeed(page, 314159);
     await waitFor(page, () => window.store.getState().params.num_inference_steps === 15
       && window.store.getState().params.guidance_scale === 3.1, 'editable shared title generation settings');
+    const t2vBeforeGenerate = await page.evaluate(() => {
+      const state = window.store.getState();
+      return {paramsModelType: state.params.model_type, modelOptionsType: state.modelOptions?.model_type,
+        modelOptionsLoading: state.modelOptionsLoading, selectedVideoModel: state.selectedModelPerMode?.video,
+        workflow: state.studioVideoWorkflow, titleHydrationKey: state.titleGenerationContextParamsHydrationKey,
+        steps: state.params.num_inference_steps, guidance: state.params.guidance_scale,
+        draftModelType: JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1') || 'null')?.model?.modelType,
+        selectorModelType: document.querySelector('[aria-label="Choose model"]')?.getAttribute('data-model-type')};
+    });
+    assert.deepEqual({params: t2vBeforeGenerate.paramsModelType, options: t2vBeforeGenerate.modelOptionsType,
+      selected: t2vBeforeGenerate.selectedVideoModel, draft: t2vBeforeGenerate.draftModelType,
+      steps: t2vBeforeGenerate.steps, guidance: t2vBeforeGenerate.guidance},
+    {params: 'test_frames_text', options: 'test_frames_text', selected: 'test_frames_text',
+      draft: 'test_frames_text', steps: 15, guidance: 3.1},
+    'Editing shared Advanced settings does not restore the prior title model before submission');
+    await page.screenshot({path: path.join(SCREENSHOTS, 'studio-title-model-before-generate.png')});
     await page.screenshot({path: path.join(SCREENSHOTS, 'studio-title-model-advanced.png'), fullPage: true});
     if (await page.getByRole('dialog', {name: 'Advanced settings', exact: true}).isVisible()) await page.keyboard.press('Escape');
     nextSubmissionMode = {status: 'completed', loseResponse: false};

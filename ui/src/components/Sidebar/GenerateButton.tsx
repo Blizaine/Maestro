@@ -57,15 +57,15 @@ function GenerateButtonPresentation({
 }: GenerateButtonPresentationProps) {
   if (blockedLabel) {
     return (
-      <div className={`grid ${stretch ? 'w-full min-h-11' : 'w-[132px]'} shrink-0 grid-cols-[2fr_1fr] overflow-hidden rounded-xl bg-amber-500/20 text-indicator-warning`}>
+      <div className={`studio-generate-actions grid ${stretch ? 'w-full min-h-11' : 'w-[132px]'} shrink-0 grid-cols-[2fr_1fr] overflow-hidden rounded-xl bg-amber-500/20 text-indicator-warning`}>
         <button
           type="button"
           disabled
           title={blockedTitle}
-          className="flex cursor-not-allowed items-center justify-center gap-1.5 whitespace-nowrap px-2 py-2 text-xs font-medium"
+          className="flex min-w-0 cursor-not-allowed items-center justify-center gap-1.5 whitespace-nowrap px-2 py-2 text-xs font-medium"
         >
-          <AlertTriangle size={13} />
-          {blockedLabel}
+          <AlertTriangle size={13} className="shrink-0" />
+          <span className="truncate">{blockedLabel}</span>
         </button>
         <button
           type="button"
@@ -81,7 +81,7 @@ function GenerateButtonPresentation({
   }
 
   return (
-    <div className={`grid ${stretch ? 'w-full min-h-11' : 'w-[132px]'} shrink-0 grid-cols-[2fr_1fr] overflow-hidden rounded-xl font-medium text-white shadow-accent-glow transition-all ${
+    <div className={`studio-generate-actions grid ${stretch ? 'w-full min-h-11' : 'w-[132px]'} shrink-0 grid-cols-[2fr_1fr] overflow-hidden rounded-xl font-medium text-white shadow-accent-glow transition-all ${
       busy ? 'bg-bg-active text-text-muted' : 'bg-cta'
     }`}>
       <button

@@ -76,6 +76,7 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
   const selectedModel = useStore(s => s.models.find(model => model.model_type === s.params.model_type))
   const isMobile = useIsMobileSidecar()
   const [characterSlot, setCharacterSlot] = useState<HTMLDivElement | null>(null)
+  const [enhancementSlot, setEnhancementSlot] = useState<HTMLDivElement | null>(null)
   const [titlesFooterHost, setTitlesFooterHost] = useState<HTMLDivElement | null>(null)
   const [sidebarElement, setSidebarElement] = useState<HTMLElement | null>(null)
   const [settingsElement, setSettingsElement] = useState<HTMLDivElement | null>(null)
@@ -350,13 +351,13 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
       </div>
 
       {hasPrompt && (
-        <PromptDock>{isMultiClip ? <MultiClipEditor /> : <PromptInput />}</PromptDock>
+        <PromptDock toolbarHost={enhancementSlot}>{isMultiClip ? <MultiClipEditor /> : <PromptInput />}</PromptDock>
       )}
       </div>
       )}
       </div>
       {/* Keep generation controls outside the scrolling prompt/input body. */}
-      {!isStandaloneTool && !isTitles && <StudioFooter onCharacterSlot={setCharacterSlot} onAnchor={setSettingsElement} />}
+      {!isStandaloneTool && !isTitles && <StudioFooter onCharacterSlot={setCharacterSlot} onEnhancementSlot={hasPrompt && !isMultiClip ? setEnhancementSlot : undefined} onAnchor={setSettingsElement} />}
       <div ref={setTitlesFooterHost} data-testid="titles-footer-host" className="studio-footer shrink-0" hidden={!isTitles} />
       </>
     </CharacterToolbarContext.Provider>

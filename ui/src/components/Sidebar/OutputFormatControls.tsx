@@ -7,6 +7,7 @@ import { DurationSlider } from './DurationSlider'
 import { AudioDurationControl } from './AudioDurationControl'
 import { H3MultiWindowControls } from './H3MultiWindowControls'
 import { formatDuration } from '../../lib/durationPlanning'
+import { composerDuration } from '../../lib/composerDuration'
 import { SidebarDialog } from './SidebarPanels'
 import { SidebarMenu } from './SidebarMenu'
 import { isFishSpeechArchitecture } from '../../lib/fishSpeech'
@@ -59,12 +60,15 @@ export function OutputFormatControls() {
         {hasDuration && <button ref={setDurationAnchor} type="button" aria-label={`Duration: ${durationLabel}`} aria-expanded={expanded === 'duration'} aria-haspopup="dialog"
           aria-controls={`${id}-duration`}
           onClick={() => toggle('duration')} title={fishSpeech ? `${durationLabel} · speech length` : `${durationLabel} · duration and window settings`}
-          className={`${chip} ${expanded === 'duration' ? 'border-accent-blue bg-accent-blue/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-secondary hover:border-border-light'}`}>
+          className={`${chip} studio-duration-chip ${expanded === 'duration' ? 'border-accent-blue bg-accent-blue/10 text-text-primary' : 'border-border bg-bg-tertiary text-text-secondary hover:border-border-light'}`}>
           <Clock size={13} className="studio-setting-icon"/>
           <span className="flex flex-col items-center tabular-nums leading-3">
-            {fishSpeech ? <span>{durationLabel}</span> : <>
+            {fishSpeech ? <>
+              {!fishAuto && <span className="text-[9px] leading-[10px] text-text-muted">Max</span>}
+              <span>{fishAuto ? 'Auto' : composerDuration(duration)}</span>
+            </> : <>
               {durationMode === 'auto' && <span className="text-[9px] leading-[10px] text-text-muted">Auto</span>}
-              <span>{formatDuration(duration, true)}</span>
+              <span>{composerDuration(duration)}</span>
             </>}
           </span>
         </button>}

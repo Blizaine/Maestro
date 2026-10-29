@@ -15,6 +15,7 @@ import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 import { Trash2 } from 'lucide-react'
 import { AnimatedTitleAdvancedControls } from './AnimatedTitleAdvancedControls'
 import { TitleEnhancementControls } from './TitleEnhancementControls'
+import { EnhancementBadge } from '../components/Sidebar/EnhancementBadge'
 import type { TitleComposerController } from './useTitleComposer'
 import { TitleBackgroundControl } from './TitleBackgroundControl'
 import { SidebarDialog } from '../components/Sidebar/SidebarPanels'
@@ -126,14 +127,8 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
         <textarea aria-label="Describe your title animation" value={brief} maxLength={MAX_TITLE_BRIEF_CHARS} rows={5} disabled={busy}
           onChange={event => changeBrief(event.target.value)}
           placeholder="A silver title spelling ‘ORION’ forms from fine particles, holds clearly, then dissolves into a soft blue glow."
-          className={destination === 'studio' ? `${FIELD} min-h-[120px] pb-12 pr-20` : FIELD} />
-        {destination === 'studio' && enhancement && <div role="group" aria-label="Title prompt tools"
-          className="absolute bottom-2 right-2 flex items-center rounded-lg border border-border bg-bg-secondary/95 shadow-sm">
-          <TitleEnhancementControls enabled={enhancement.enabled} defaultEnabled={enhancement.defaultEnabled}
-            busy={busy} canEnhance={!!brief.trim() && brief.length <= MAX_TITLE_BRIEF_CHARS}
-            onToggle={enhancement.onToggle} onDefaultChange={enhancement.onDefaultChange}
-            onEnhanceNow={() => { void composer.enhance() }} />
-        </div>}
+          className={destination === 'studio' ? `${FIELD} min-h-[120px] ${enhancement?.enabled ? 'pb-12' : ''}` : FIELD} />
+        {destination === 'studio' && enhancement?.enabled && <EnhancementBadge onRemove={() => enhancement.onToggle(false)} />}
       </div>
       <span className="block text-[11px] leading-relaxed text-text-muted">
         Write the words exactly as they should appear, including spelling, punctuation and language. The plan shows the detected wording, order and timing for review.

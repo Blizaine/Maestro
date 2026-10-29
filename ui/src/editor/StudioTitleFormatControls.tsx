@@ -3,6 +3,7 @@ import { Clock, Monitor, RectangleHorizontal } from 'lucide-react'
 import { SidebarDialog } from '../components/Sidebar/SidebarPanels'
 import { SidebarMenu } from '../components/Sidebar/SidebarMenu'
 import { formatDuration } from '../lib/durationPlanning'
+import { composerDuration } from '../lib/composerDuration'
 import {
   TITLE_SEQUENCE_DURATIONS,
   titleFrames,
@@ -51,7 +52,7 @@ export function StudioTitleFormatControls({ settings, patch, onDurationChange, b
 
   return <>
     <div data-testid="titles-output-format-controls" role="group" aria-label="Title output format"
-      className="mb-2 flex min-w-0 flex-wrap items-center justify-end gap-1">
+      className="studio-settings-row mb-2 flex min-w-0 items-center gap-1">
       <button ref={setResolutionAnchor} type="button" aria-label={`Resolution: ${settings.resolution}`}
         aria-expanded={expanded === 'resolution'} aria-haspopup="menu" aria-controls={`${id}-resolution`}
         title="Resolution" disabled={busy} onClick={() => toggle('resolution')}
@@ -67,8 +68,8 @@ export function StudioTitleFormatControls({ settings, patch, onDurationChange, b
       <button ref={setDurationAnchor} type="button" aria-label={`Duration: ${durationLabel}`}
         aria-expanded={expanded === 'duration'} aria-haspopup="dialog" aria-controls={`${id}-duration`}
         title="Title duration" disabled={busy} onClick={() => toggle('duration')}
-        className={`${chip} ${expanded === 'duration' ? selectedChip : idleChip} disabled:opacity-40`}>
-        <Clock size={13} className="studio-setting-icon" /><span className="tabular-nums">{durationLabel}</span>
+        className={`${chip} studio-duration-chip ${expanded === 'duration' ? selectedChip : idleChip} disabled:opacity-40`}>
+        <Clock size={13} className="studio-setting-icon" /><span className="tabular-nums">{composerDuration(frames / fps)}</span>
       </button>
       {children}
     </div>

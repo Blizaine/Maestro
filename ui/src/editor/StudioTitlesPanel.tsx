@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Globe, Sparkles, X } from 'lucide-react'
+import { Globe } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { useStore } from '../stores/useStore'
 import { AnimatedTitleControls } from './AnimatedTitleControls'
@@ -11,6 +11,7 @@ import { StudioTitleFormatControls } from './StudioTitleFormatControls'
 import { ModelSelector } from '../components/Sidebar/ModelSelector'
 import { AdvancedSettings } from '../components/Sidebar/AdvancedSettings'
 import { GenerateButton } from '../components/Sidebar/GenerateButton'
+import { TitleEnhancementControls } from './TitleEnhancementControls'
 import { sanitizeH3VaeUpsampling } from '../lib/h3VaeUpsampling'
 
 const DRAFT = 'maestro-studio-title-draft-v1'
@@ -205,19 +206,19 @@ export function StudioTitlesPanel({ footerHost }: { footerHost?: HTMLElement | n
   }
   const disabled = Boolean(validation || queueIntent) || controlBusy
   const footer = <div data-testid="titles-generate-footer" className="studio-footer shrink-0 bg-bg-secondary px-3 pb-2 pt-2">
-    {enhancementEnabled && <div className="mb-2 flex justify-end">
-      <button type="button" onClick={() => setEnhancement(false)} aria-label="Remove Enhance on generation" title="Skip enhancement for the next submission"
-        className="flex min-h-8 max-w-full items-center gap-1.5 rounded-lg border border-accent-blue/40 bg-accent-blue/10 px-2 text-xs text-accent-blue">
-        <Sparkles size={13}/><span>Enhance on generation</span><X size={13}/>
-      </button>
-    </div>}
     <StudioTitleFormatControls settings={settings} patch={patch} onDurationChange={changeDuration} busy={controlBusy}>
       <AdvancedSettings compact />
+      <div role="group" aria-label="Title prompt tools" className="studio-footer-enhancer ml-auto flex shrink-0 items-center rounded-lg border border-border bg-bg-tertiary">
+        <TitleEnhancementControls enabled={enhancementEnabled} defaultEnabled={defaultEnhancement}
+          busy={controlBusy} canEnhance={!!titleBrief(settings).trim() && titleBrief(settings).length <= MAX_TITLE_BRIEF_CHARS}
+          onToggle={setEnhancement} onDefaultChange={setDefaultEnhancement}
+          onEnhanceNow={() => { void composer.enhance() }} />
+      </div>
     </StudioTitleFormatControls>
     <div data-testid="studio-generate-bar" className="flex min-w-0 items-center gap-1.5">
       <button type="button" aria-label="Open model browser" aria-haspopup="dialog" title="Model Browser"
         onClick={() => useStore.getState().setLoraBrowserOpen(true, params.model_type)}
-        className="flex min-h-11 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-secondary hover:bg-bg-hover"><Globe size={17}/></button>
+        className="studio-footer-library flex min-h-11 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-secondary hover:bg-bg-hover"><Globe size={17}/></button>
       <ModelSelector placement="footer" selection={{modelType: params.model_type, onSelect: type => useStore.getState().selectModel(type), disabled: controlBusy}} />
       <div className="min-w-[132px] flex-1"><GenerateButton stretch submission={{
         onGenerate: () => generate('now'), onQueue: () => generate('queue'), busy: busy || composer.busy,

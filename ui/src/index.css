@@ -850,6 +850,19 @@ input[type="range"]::-webkit-slider-thumb {
 .studio-character-trigger .lucide-chevron-down { display: none; }
 .studio-character-trigger .text-xs { font-size: 11px; font-weight: 500; }
 .studio-character-trigger svg { width: 14px; height: 14px; }
+.studio-duration-chip { width: 76px; }
+.studio-footer-enhancer { min-height: 38px; }
+.studio-footer-enhancer:empty { display: none; }
+.studio-footer-enhancer > div { gap: 0; }
+.studio-footer-enhancer button { min-height: 36px; }
+.studio-footer .studio-generate-actions { grid-template-columns: minmax(0, 1fr) 36px; }
+.studio-enhancement-badge {
+  background: color-mix(in srgb, var(--color-accent-blue) 10%, var(--color-bg-secondary));
+}
+/* The enabled flag belongs to the field, without covering the final line or
+ * reserving a separate row when enhancement is off. */
+[data-enhancement-enabled="true"] > .studio-prompt-mirror,
+[data-enhancement-enabled="true"] > .studio-prompt-textarea { padding-bottom: 48px; }
 /* Writing extensions insert measured overlays beside the textarea. Keep their
  * transient bounds from adding outer scrollbars and feeding back into sizing. */
 .studio-prompt-field { overflow: clip; }
@@ -873,6 +886,7 @@ input[type="range"]::-webkit-slider-thumb {
   top: var(--studio-visual-viewport-top, 0px);
 }
 .studio-prompt-toolbar { min-height: 32px; }
+.studio-prompt-toolbar:not(:has(button)) { display: none; }
 @media (max-width: 767px) {
   /* The keyboard leaves the same body scroller available, with more room for
      the active field and without changing saved panel preferences. */
@@ -886,8 +900,24 @@ input[type="range"]::-webkit-slider-thumb {
 @container studio-footer (max-width: 400px) {
   .studio-advanced-label { display: none; }
 }
+@container studio-footer (max-width: 440px) {
+  .studio-character-trigger .studio-character-label { display: none; }
+  .studio-character-trigger > button { width: 32px; }
+}
 @container studio-footer (max-width: 380px) {
   .studio-setting-icon { display: none; }
+  .studio-duration-chip { width: 66px; }
+}
+@container studio-footer (max-width: 320px) {
+  .studio-setting-chip { padding-inline: 5px; font-size: 10px; gap: 3px; }
+  .studio-duration-chip { width: 56px; }
+  .studio-character-trigger > button { width: 28px; }
+  .studio-footer-enhancer button:first-child { padding-inline: 6px; }
+  .studio-footer-enhancer button:last-child { padding-inline: 5px; }
+  .studio-footer-library { width: 28px; }
+  .studio-footer .studio-generate-actions { grid-template-columns: minmax(0, 1fr) 32px; }
+  .studio-footer .studio-generate-actions > button:first-child { padding-inline: 5px; gap: 3px; font-size: 11px; }
+  .studio-footer .studio-generate-actions .lucide-triangle-alert { display: none; }
 }
 @container studio-footer (max-width: 320px) {
   .studio-character-trigger .studio-character-label { display: none; }

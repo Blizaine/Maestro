@@ -35,7 +35,20 @@ exports.assertPromptStability = async (page, sidebar) => {
       const empty = await prompt.evaluate(geometry);
       const toolbar = sidebar.getByRole('group', {name: 'Prompt controls', exact: true});
       const toolbarBounds = await toolbar.boundingBox();
-      assert.ok(toolbarBounds.y >= empty[1] + empty[3], 'Prompt tools sit below the writing area: ' + fixture[0]);
+      const settingsBounds = await page.getByTestId('studio-settings-strip').boundingBox();
+      assert.ok(toolbarBounds && settingsBounds && toolbarBounds.y >= settingsBounds.y
+        && toolbarBounds.y + toolbarBounds.height <= settingsBounds.y + settingsBounds.height + 1,
+      'Prompt tools stay in the pinned settings row: ' + fixture[0]);
+      assert.deepEqual(await page.evaluate(() => {
+        const toolbar = document.querySelector('[role="group"][aria-label="Prompt controls"]');
+        const footer = document.querySelector('[data-studio-footer]');
+        const settings = document.querySelector('[data-testid="studio-settings-strip"]');
+        const scroller = document.querySelector('[data-testid="studio-body-scroll"]');
+        return {insideFooter: !!footer && !!toolbar && footer.contains(toolbar),
+          insideSettingsRow: !!settings && !!toolbar && settings.contains(toolbar),
+          outsideBodyScroller: !!scroller && !!toolbar && !scroller.contains(toolbar)};
+      }), {insideFooter: true, insideSettingsRow: true, outsideBodyScroller: true},
+      'Prompt tools remain attached to the pinned footer rather than the writing area');
       assert.equal(await sidebar.locator('.studio-composer').getByText('Prompt', {exact: true}).count(), 0, 'The dock has no redundant Prompt heading');
       await prompt.pressSequentially('this is a test', {delay: 30});
       assert.deepEqual(await prompt.evaluate(geometry), empty, 'First keystrokes keep the prompt frame steady: ' + fixture[0]);
