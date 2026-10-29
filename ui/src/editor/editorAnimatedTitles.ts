@@ -63,6 +63,7 @@ export interface AnimatedTitleSettings {
   titleDraftHistoryId?: string
   titleReviewRequired?: boolean
   manualPlanEdited?: boolean
+  directDescription?: boolean
   /** Missing on older saved titles, which use one title and a free-form direction. */
   mode?: 'single' | 'sequence'
   phrases?: TitlePhrase[]
@@ -84,6 +85,25 @@ export interface AnimatedTitleSettings {
 export interface TitleCreativePlan {
   phrases: { text: string; animation: string; weight: number }[]
   look: string; direction: string; sequence: boolean
+}
+
+/** Titles own their planner; never route through the ordinary video enhancer. */
+export function titleEnhancementEnabled(state: { enhanceOnGeneration: boolean | null; enhanceOnGenerationDefault: boolean }): boolean {
+  return state.enhanceOnGeneration ?? state.enhanceOnGenerationDefault
+}
+
+/** The ordinary no-enhancement path: send the authored description to H3. */
+export function directTitleDescription(settings: AnimatedTitleSettings): AnimatedTitleSettings {
+  const frames = titleFrames(titleSeconds(settings))
+  const brief = titleBrief(settings)
+  const quoted = [...brief.matchAll(/“([^”]+)”|‘([^’]+)’|"([^"\n]+)"/g)].map(match => match.slice(1).find(value => value !== undefined) ?? '').join('\n')
+  const direct: AnimatedTitleSettings = { ...settings, brief, directDescription: true,
+    text: quoted.length <= 160 ? quoted : '', mode: 'single', phrases: undefined, look: '', direction: '', sequenceDirection: '',
+    seconds: frames / 24, sequenceFrames: frames, effect: 'custom', titleReviewRequired: false,
+    plannerWarnings: [], rawTitleDraft: undefined, titleDraftHistoryId: undefined }
+  direct.plannedKey = titlePlanningKey(direct)
+  animatedTitlePrompt(direct)
+  return direct
 }
 
 export function titleBrief(settings: AnimatedTitleSettings): string {
@@ -122,7 +142,7 @@ export function applyTitleCreativePlan(settings: AnimatedTitleSettings, plan: Ti
   const frames = titleFrames(titleSeconds(settings))
   const phrases = plan.phrases.map(phrase => ({ id: titleSubmissionId(), text: phrase.text,
     seconds: Number.isFinite(phrase.weight) && phrase.weight > 0 ? Math.min(10, phrase.weight) : 1, animation: phrase.animation }))
-  let result: AnimatedTitleSettings = { ...settings, brief: titleBrief(settings), manualPlanEdited: false, effect: 'custom', look: plan.look,
+  let result: AnimatedTitleSettings = { ...settings, brief: titleBrief(settings), directDescription: false, manualPlanEdited: false, effect: 'custom', look: plan.look,
     text: phrases.map(phrase => phrase.text).join(plan.sequence ? '\n' : ' '),
     direction: phrases[0]?.animation || plan.direction || 'Reveal the title, hold it clearly, then clear the frame.',
     sequenceDirection: plan.direction, seconds: frames / 24, mode: plan.sequence && phrases.length > 1 ? 'sequence' : 'single',
@@ -211,6 +231,7 @@ export function newTitlePhrases(text: string, seconds = 10): TitlePhrase[] {
 }
 
 export function titleText(settings: AnimatedTitleSettings): string {
+  if (settings.directDescription && !settings.text.trim()) return 'Title animation'
   return settings.mode === 'sequence' ? (settings.phrases ?? []).map(phrase => phrase.text.trim()).join(' → ') : settings.text.trim()
 }
 
@@ -284,11 +305,32 @@ export function titleFrames(seconds: number): number {
   return Math.max(124, Math.min(345, Math.round((seconds * 24 - 5) / 17) * 17 + 5))
 }
 
+function titleBackdropDirection(background: ReturnType<typeof titleBackground>) {
+  return background.chromaKey
+    ? 'Start and end on the supplied perfectly uniform bright green background (#00FF00). Keep that same flat green backdrop throughout, with no texture, horizon, floor, shadows or lighting changes.'
+    : 'Start and end on the supplied perfectly uniform pure black background (#000000). Keep that same flat black backdrop throughout, with no texture, horizon, floor, shadows or lighting changes. The black background is part of the finished title card.'
+}
+
 export function animatedTitlePrompt(settings: AnimatedTitleSettings): string {
   if (settings.manualPlanEdited) throw new Error('Choose Use manual title plan before generating with your Advanced edits.')
   if (!titlePlanIsCurrent(settings)) throw new Error('The description or style changed. Enhance it or review the manual plan before generating.')
   const background = titleBackground(settings)
   if (settings.mode !== undefined && settings.mode !== 'single' && settings.mode !== 'sequence') throw new Error('Choose a supported title layout.')
+  if (settings.directDescription) {
+    const brief = titleBrief(settings).trim()
+    if (!brief || brief.length > 4000) throw new Error('Describe your title animation in 1–4,000 characters.')
+    const preset = settings.stylePreset ?? 'custom'
+    if (preset !== 'custom' && !Object.hasOwn(TITLE_EFFECTS, preset)) throw new Error('Choose a supported title style.')
+    return [
+      'Animated title typography. Follow the user\'s requested title wording, language, order and motion. Preserve exact quoted on-screen text and punctuation; no extra lettering.',
+      `User description:\n${brief}`,
+      preset === 'custom' ? '' : `Optional animation treatment: ${TITLE_EFFECTS[preset]} Apply this separately to the current phrase within the user's requested sequence; the user's wording and order take priority.`,
+      titleBackdropDirection(background),
+      'Only title lettering and its animation effect are visible. No people, faces, characters, bodies, scenery, logos or additional objects. Do not visualize people or objects mentioned by the title words.',
+      'Keep readable lettering inside the frame with safe margins unless the description requests intentional cropping. Preserve the requested lettering style and language. No speech or music.',
+      background.chromaKey ? 'No green lettering, green particles or green reflections; reserve bright green for the removable backdrop.' : '',
+    ].filter(Boolean).join('\n\n')
+  }
   const sequence = settings.mode === 'sequence' ? titleSequenceTimeline(settings) : null
   const text = settings.text.trim()
   if (!sequence && (!text || text.length > 160)) throw new Error('Enter a title of 1–160 characters.')
@@ -307,9 +349,7 @@ export function animatedTitlePrompt(settings: AnimatedTitleSettings): string {
       settings.sequenceDirection?.trim() ? `Additional motion direction, applied separately to each phrase within its slot: ${settings.sequenceDirection.trim()}` : '',
       'The phrase schedule and single-phrase visibility take priority over any style or animation direction suggesting repeated, overlapping or combined titles.',
     ].filter(Boolean).join('\n') : animation,
-    background.chromaKey
-      ? 'Start and end on the supplied perfectly uniform bright green background (#00FF00). Keep that same flat green backdrop throughout, with no texture, horizon, floor, shadows or lighting changes.'
-      : 'Start and end on the supplied perfectly uniform pure black background (#000000). Keep that same flat black backdrop throughout, with no texture, horizon, floor, shadows or lighting changes. The black background is part of the finished title card.',
+    titleBackdropDirection(background),
     'Only title lettering and its animation effect are visible. No people, faces, characters, bodies, scenery, logos or additional objects. Do not visualize people or objects mentioned by the title words.',
     sequence ? 'The typography itself is the visual subject. Give the current phrase a readable hold within its own slot. Transitions must clear the previous phrase completely; never overlap readable words from different slots.'
       : 'The typography itself is the visual subject, not captions over a scene. Animate the lettering according to the requested motion; give each word or requested text group a clear readable moment. Include a complete-title hold unless the animation description explicitly requests otherwise. Repeated or rearranged text uses only the supplied title words.',

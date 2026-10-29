@@ -38,12 +38,25 @@ For example: `Show “CREATE”, then “EXPLORE”, then “INSPIRE”, one at 
 lettering on black. Each word assembles from dust and clears before the next appears.`
 Put exact on-screen text in quotes. Choose the actual background with its control.
 
-**Enhance** asks the configured prompt-enhancement writer to prepare a plan without
-rendering a video. **Generate title** prepares a plan first when the description,
-style, duration or background has changed. **Review plan** shows the inferred words,
-order, motion and timing. Potential wording changes require reviewing the proposal
-and pressing Generate again. The application controls native frame counts and
-backgrounds; the LLM supplies the creative interpretation.
+**Enhance now** asks the configured prompt-enhancement writer to prepare a plan
+without rendering a video. In the Studio sidebar, its options menu also offers
+**Enhance on generation** and **Use by default**, using the same saved Studio
+enhancement preference as the other generation workflows. An explicit override
+applies to one submitted title; review pauses and preparation failures do not
+consume that choice. A later preference change is preserved while a title is
+being prepared.
+
+With enhancement off, a new description goes directly to H3 with the chosen style,
+background and native duration. A current reviewed AI or manual plan remains usable
+without another writer call. With enhancement on, Generate prepares a plan when
+needed. The Editor's title dialog retains its existing automatic planning behavior.
+**Review plan** shows AI-inferred words, order, motion and timing. Potential wording
+changes require reviewing the proposal and pressing Generate again. The application
+controls native frame counts and backgrounds; the LLM supplies the creative
+interpretation when enabled.
+
+Studio's title generation controls stay at the bottom of the sidebar while the
+composer scrolls. The standard expandable resource monitor remains below them.
 
 Planning makes one bounded writer call. It shares Maestro's existing GPU lease, so
 it cannot compete with an active generation. Writer drafts and reasons are saved

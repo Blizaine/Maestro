@@ -63,11 +63,12 @@ async function bundleComposer() {
         import {useState} from 'react';
         import {createRoot} from 'react-dom/client';
         import {AnimatedTitleControls} from './src/editor/AnimatedTitleControls';
-        import {DEFAULT_TITLE_SETTINGS, titleComposerValidation, titlePlanIsCurrent} from './src/editor/editorAnimatedTitles';
+        import {DEFAULT_TITLE_SETTINGS, animatedTitlePrompt, titleComposerValidation, titlePlanIsCurrent} from './src/editor/editorAnimatedTitles';
         import {useTitleComposer} from './src/editor/useTitleComposer';
         function Composer({scope}) {
           const [settings, setSettings] = useState({...DEFAULT_TITLE_SETTINGS, brief: ''});
           const [submitted, setSubmitted] = useState([]);
+          const [enhanceOnGenerate, setEnhanceOnGenerate] = useState(true);
           const patch = value => setSettings(current => ({...current, ...value}));
           const composer = useTitleComposer(settings, patch, scope);
           const validation = titleComposerValidation(settings, {width: 1920, height: 1080});
@@ -76,12 +77,14 @@ async function bundleComposer() {
           const submit = async value => setSubmitted(current => [...current, JSON.parse(JSON.stringify(value))]);
           window.titleHarness = {...window.titleHarness, settings, submitted, composer,
             getSettings: () => settings, getSubmitted: () => submitted,
+            getSubmittedPrompt: index => animatedTitlePrompt(submitted[index]),
+            setEnhanceOnGenerate,
             setSettings: value => setSettings(current => ({...current, ...value}))};
           return <main className="mx-auto flex w-full max-w-2xl flex-col gap-4 p-4">
             <AnimatedTitleControls settings={settings} patch={patch} busy={composer.busy}
               composer={composer} canvas={{width: 1920, height: 1080}} destination="editor" at={3.25} />
             {validation && <p role="alert">{validation}</p>}
-            <button type="button" disabled={composer.busy || Boolean(validation)} onClick={() => void composer.generate(submit)}>
+            <button type="button" disabled={composer.busy || Boolean(validation)} onClick={() => void composer.generate(submit, {enhance: enhanceOnGenerate})}>
               {reviewReady ? 'Generate reviewed plan' : 'Generate title'}
             </button>
           </main>;
@@ -303,6 +306,28 @@ async function main() {
       assert.ok(mobile.rootWidth <= mobile.viewportWidth + 1, `Composer has no mobile horizontal overflow: ${JSON.stringify(mobile)}`);
     }
 
+    const directBrief = 'Keep the exact wording “MAESTRO” in silver lettering, then dissolve into a blue glow.';
+    const plannerRequestsBeforeDirect = planRequests.length;
+    await page.getByLabel('Describe your title animation').fill(directBrief);
+    await page.evaluate(() => window.titleHarness.setEnhanceOnGenerate(false));
+    await page.getByRole('button', {name: 'Generate title'}).click();
+    await page.waitForFunction(() => window.titleHarness.getSubmitted().length === 4);
+    const directSubmission = await page.evaluate(() => ({
+      settings: window.titleHarness.getSubmitted().at(-1),
+      prompt: window.titleHarness.getSubmittedPrompt(3),
+    }));
+    assert.equal(planRequests.length, plannerRequestsBeforeDirect,
+      'AI-off title generation sends no title-planner request.');
+    assert.equal(directSubmission.settings.directDescription, true,
+      'AI-off generation keeps the authored description as its direct title plan.');
+    assert.equal(directSubmission.settings.brief, directBrief,
+      'The direct title plan preserves the raw description exactly.');
+    assert.ok(directSubmission.prompt.includes(`User description:\n${directBrief}`),
+      'The H3 title prompt contains the user description verbatim.');
+    assert.equal(directSubmission.settings.mode, 'single',
+      'AI-off generation does not invent a phrase sequence.');
+    await page.evaluate(() => window.titleHarness.setEnhanceOnGenerate(true));
+
     const unmountGate = {started: deferred(), release: deferred(), response: {
       plan: {sequence: false, phrases: [{text: 'UNMOUNTED', animation: 'Fade.', weight: 1}], look: '', direction: 'Fade.'},
       warnings: [], raw_draft: '', review_required: false,
@@ -318,7 +343,7 @@ async function main() {
     await page.waitForTimeout(50);
     assert.deepEqual(await page.evaluate(() => window.titleHarness.getSettings()), beforeUnmount,
       'An in-flight response cannot apply after the composer unmounts.');
-    assert.equal(await page.evaluate(() => window.titleHarness.getSubmitted().length), 3,
+    assert.equal(await page.evaluate(() => window.titleHarness.getSubmitted().length), 4,
       'An in-flight response cannot submit after unmount.');
     assert.deepEqual(pageErrors, [], 'The isolated title composer has no browser runtime errors.');
     console.log(`Unified title composer passed: single/sequence plans, review approval, manual acceptance, stale scope and unmount guards, retained diagnostics, whole-frame duration, and ${planRequests.length} synthetic planner requests.`);

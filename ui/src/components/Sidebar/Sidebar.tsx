@@ -76,6 +76,7 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
   const selectedModel = useStore(s => s.models.find(model => model.model_type === s.params.model_type))
   const isMobile = useIsMobileSidecar()
   const [characterSlot, setCharacterSlot] = useState<HTMLDivElement | null>(null)
+  const [titlesFooterHost, setTitlesFooterHost] = useState<HTMLDivElement | null>(null)
   const [sidebarElement, setSidebarElement] = useState<HTMLElement | null>(null)
   const [settingsElement, setSettingsElement] = useState<HTMLDivElement | null>(null)
   const layout = useMemo(() => ({ sidebar: sidebarElement, settings: settingsElement }), [sidebarElement, settingsElement])
@@ -263,6 +264,7 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
   const studioControls = (
     <SidebarLayoutContext.Provider value={layout}>
     <CharacterToolbarContext.Provider value={characterSlot}>
+      <>
       <div data-testid="studio-body-scroll" className="studio-scroll-body flex min-h-0 flex-1 flex-col">
       {/* Prompt Edit/Recast → Image Mode round-trip banner. Visible while
           a boundary anchor or Recast reference is being edited; null otherwise. */}
@@ -280,7 +282,7 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
       </div>}
       {isTitles ? (
         <Suspense fallback={<p role="status" className="m-3 text-xs text-text-muted">Loading Titles…</p>}>
-          <StudioTitlesPanel />
+          <StudioTitlesPanel footerHost={titlesFooterHost} />
         </Suspense>
       ) : (
       <div className="studio-composition mx-3 flex grow shrink-0 basis-auto flex-col rounded-2xl border border-border bg-bg-primary/30" data-has-prompt={hasPrompt}>
@@ -354,6 +356,8 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
       )}
       {!isStandaloneTool && !isTitles && <StudioFooter onCharacterSlot={setCharacterSlot} onAnchor={setSettingsElement} />}
       </div>
+      <div ref={setTitlesFooterHost} data-testid="titles-footer-host" className="studio-footer shrink-0" hidden={!isTitles} />
+      </>
     </CharacterToolbarContext.Provider>
     </SidebarLayoutContext.Provider>
   )

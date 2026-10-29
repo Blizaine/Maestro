@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { planAnimatedTitle } from '../api/client'
-import { animatedTitlePrompt, applyTitleCreativePlan, titleBrief, titleFrames, titlePlanIsCurrent, titlePlanningKey, titleSeconds, TITLE_EFFECTS } from './editorAnimatedTitles'
+import { animatedTitlePrompt, applyTitleCreativePlan, directTitleDescription, titleBrief, titleFrames, titlePlanIsCurrent, titlePlanningKey, titleSeconds, TITLE_EFFECTS } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 
 function keyOf(settings: AnimatedTitleSettings) {
@@ -57,21 +57,25 @@ export function useTitleComposer(settings: AnimatedTitleSettings, patch: (value:
     }
   }
 
-  const generate = async (submit: (value: AnimatedTitleSettings) => Promise<void>) => {
+  const generate = async (submit: (value: AnimatedTitleSettings) => Promise<void>, options: { enhance?: boolean } = {}) => {
     if (inFlight.current) return
     try {
       if (settings.manualPlanEdited) throw new Error('Choose Use manual title plan to keep your Advanced edits, or Enhance to create a new AI plan.')
-      if (titlePlanIsCurrent(settings)) {
+      if (titlePlanIsCurrent(settings) && !(settings.directDescription && options.enhance !== false)) {
         const accepted = { ...settings, titleReviewRequired: false }
         animatedTitlePrompt(accepted)
         patch({ titleReviewRequired: false }); await submit(accepted)
+      } else if (options.enhance === false) {
+        const direct = directTitleDescription(settings)
+        patch(direct); setError(''); setMessage('Using your description directly, with AI enhancement off.')
+        await submit(direct)
       } else await enhance(submit)
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'Review the title plan before generating.') }
   }
 
   const acceptManual = () => {
     try {
-      const accepted = { ...settings, brief: titleBrief(settings), manualPlanEdited: false, titleReviewRequired: false, plannerWarnings: [] }
+      const accepted = { ...settings, brief: titleBrief(settings), directDescription: false, manualPlanEdited: false, titleReviewRequired: false, plannerWarnings: [] }
       accepted.plannedKey = titlePlanningKey(accepted)
       animatedTitlePrompt(accepted); patch(accepted); setError(''); setMessage('Manual title plan ready.')
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'Check the manual title settings.') }

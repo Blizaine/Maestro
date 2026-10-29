@@ -10,6 +10,7 @@ import {
 } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 import { AnimatedTitleAdvancedControls } from './AnimatedTitleAdvancedControls'
+import { TitleEnhancementControls } from './TitleEnhancementControls'
 import type { TitleComposerController } from './useTitleComposer'
 
 const FIELD = 'w-full min-w-0 rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-xs text-text-primary outline-none focus:border-accent-blue/60'
@@ -19,7 +20,7 @@ function framesFor(settings: AnimatedTitleSettings) {
 }
 
 /** The shared, natural-language title composer. Workspace-specific submission stays in its caller. */
-export function AnimatedTitleControls({ settings, patch, busy, canvas, destination = 'editor', at = 0, composer }: {
+export function AnimatedTitleControls({ settings, patch, busy, canvas, destination = 'editor', at = 0, composer, enhancement }: {
   settings: AnimatedTitleSettings
   patch: (value: Partial<AnimatedTitleSettings>) => void
   busy: boolean
@@ -27,6 +28,12 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
   destination?: 'editor' | 'studio'
   at?: number
   composer: TitleComposerController
+  enhancement?: {
+    enabled: boolean
+    defaultEnabled: boolean
+    onToggle: (enabled: boolean) => void
+    onDefaultChange: (enabled: boolean) => void
+  }
 }) {
   const background = settings.background ?? 'chroma'
   const brief = titleBrief(settings)
@@ -136,17 +143,22 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
       </label>
     </div>
 
-    <div className="flex flex-wrap items-center gap-2">
-      <button type="button" disabled={busy || !brief.trim() || brief.length > 4000} onClick={() => void composer.enhance()}
+    <div className="flex min-h-8 flex-wrap items-center gap-2">
+      {enhancement ? <TitleEnhancementControls enabled={enhancement.enabled} defaultEnabled={enhancement.defaultEnabled}
+        busy={busy} canEnhance={!!brief.trim() && brief.length <= 4000}
+        onToggle={enhancement.onToggle} onDefaultChange={enhancement.onDefaultChange}
+        onEnhanceNow={() => { void composer.enhance() }} /> : <button type="button" disabled={busy || !brief.trim() || brief.length > 4000} onClick={() => void composer.enhance()}
         className="flex min-h-10 items-center gap-2 rounded-lg border border-border px-3 py-2 text-xs font-semibold text-text-primary hover:border-accent-blue/60 disabled:opacity-40">
         {composer.busy ? <span aria-hidden="true" className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-r-transparent" /> : null}
         {composer.busy ? 'Enhancing…' : 'Enhance with AI'}
-      </button>
+      </button>}
       {composer.message && <p role="status" className="min-w-0 flex-1 text-xs text-text-secondary">{composer.message}</p>}
     </div>
     {composer.error && <p role="alert" className="rounded-lg border border-red-500/25 bg-red-500/5 p-3 text-xs text-red-400">{composer.error}</p>}
 
-    {currentPlan && <details data-testid="title-plan-review" aria-label="Title plan review" open={settings.titleReviewRequired || undefined}
+    {settings.directDescription && enhancement && !enhancement.enabled && <p role="status" className="text-[11px] text-text-muted">Using your description directly; AI enhancement is off.</p>}
+
+    {currentPlan && !settings.directDescription && <details data-testid="title-plan-review" aria-label="Title plan review" open={settings.titleReviewRequired || undefined}
       className="rounded-xl border border-accent-blue/25 bg-accent-blue/5 p-3 text-xs text-text-secondary">
       <summary className="cursor-pointer select-none">
         <span className="block font-semibold text-text-primary">Review title plan · {sequence ? `${phrases.length} phrases` : 'one title'} · {(framesFor(settings) / 24).toFixed(3)}s</span>

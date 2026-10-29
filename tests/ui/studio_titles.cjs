@@ -203,6 +203,20 @@ async function waitFor(page, expression, description, timeout = 10000, argument 
   }
 }
 
+async function waitForNode(predicate, description, timeout = 10000) {
+  const started = Date.now();
+  while (!predicate()) {
+    if (Date.now() - started > timeout) throw new Error(`Timed out waiting for ${description}.`);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return {promise, resolve};
+}
+
 async function mount(page, bundle, css, scenario = {}) {
   await page.addStyleTag({content: css});
   await page.addScriptTag({content: bundle});
@@ -246,8 +260,58 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
     'Titles hides the ordinary control-video input.');
   assert.equal(await sidebar.getByText(/LoRA/i).count(), 0,
     'Titles does not expose ordinary LoRA controls.');
+  const footerLayout = await page.evaluate(() => {
+    const body = document.querySelector('[data-testid="studio-body-scroll"]');
+    const host = document.querySelector('[data-testid="titles-footer-host"]');
+    const footer = document.querySelector('[data-testid="titles-generate-footer"]');
+    const hardware = document.querySelector('.studio-hardware');
+    return {
+      hostOutsideBody: !!body && !!host && !body.contains(host),
+      footerInHost: !!host && !!footer && footer.parentElement === host,
+      hostVisible: !!host && !host.hidden,
+      modelType: document.querySelector('[aria-label="Title generation model"]')?.getAttribute('data-model-type'),
+      hardwareVisible: !!hardware && getComputedStyle(hardware).display !== 'none' && hardware.getBoundingClientRect().height > 0,
+    };
+  });
+  assert.equal(footerLayout.hostOutsideBody, true, 'The Titles footer host is a sibling outside the scrolling title form.');
+  assert.equal(footerLayout.footerInHost, true, 'The title generate row is portaled into its fixed footer host.');
+  assert.equal(footerLayout.hostVisible, true, 'The fixed Titles footer host is shown in Titles mode.');
+  assert.equal(footerLayout.modelType, TITLE_MODEL, 'The title footer identifies its fixed H3 model.');
+  assert.equal(footerLayout.hardwareVisible, true, 'The global hardware monitor stays visible below the title footer.');
+  const hardware = sidebar.locator('.studio-hardware');
+  const collapse = hardware.locator('button[title="Collapse"]');
+  const expand = hardware.locator('button[title="Show hardware status"]');
+  if (await collapse.isVisible()) {
+    await collapse.click();
+    await expand.waitFor({state: 'visible'});
+    await expand.click();
+  } else {
+    await expand.waitFor({state: 'visible'});
+    await expand.click();
+    await collapse.waitFor({state: 'visible'});
+    await collapse.click();
+  }
+  await collapse.waitFor({state: 'visible'});
   assert.equal(await page.evaluate(() => window.editorStore.getState().project), null,
     'The Studio panel renders without an Editor project.');
+}
+
+async function assertHardwareExpandable(page, label) {
+  const hardware = page.locator('.studio-hardware');
+  assert.equal(await hardware.isVisible(), true, `${label}: the global hardware monitor remains visible.`);
+  const collapse = hardware.locator('button[title="Collapse"]');
+  const expand = hardware.locator('button[title="Show hardware status"]');
+  if (await collapse.isVisible()) {
+    await collapse.click();
+    await expand.waitFor({state: 'visible'});
+    await expand.click();
+  } else {
+    await expand.waitFor({state: 'visible'});
+    await expand.click();
+    await collapse.waitFor({state: 'visible'});
+    await collapse.click();
+  }
+  await collapse.waitFor({state: 'visible'});
 }
 
 async function acceptManualTitlePlan(panel) {
@@ -261,16 +325,21 @@ async function acceptManualTitlePlan(panel) {
   const bundle = await bundleUi();
   const requestLog = [];
   const generationRequests = [];
+  const titlePlanRequests = [];
   const uploadRequests = [];
+  const uploadFailures = [];
   const receiptLookups = [];
   const statusLookups = [];
   const probes = [];
   const preferenceUpdates = [];
+  let savedEnhancementDefault = false;
   const outputRefreshes = [];
   const projectApiRequests = [];
   const receipts = new Map();
   const statuses = new Map();
   const submissionModes = [];
+  let generationGate = null;
+  let failNextTitleUpload = false;
   let nextSubmissionMode = {status: 'queued', loseResponse: true};
   let currentOutput = null;
   const pageErrors = [];
@@ -300,11 +369,16 @@ async function acceptManualTitlePlan(panel) {
       if (endpoint === '/api/v1/models') return json(catalogue);
       if (endpoint.startsWith('/api/v1/model-options/')) return json(modelOptions);
       if (endpoint === '/api/v1/studio-preferences' && method === 'PUT') {
-        preferenceUpdates.push(request.postDataJSON());
+        const update = request.postDataJSON();
+        preferenceUpdates.push(update);
+        if (typeof update.enhance_on_generation_default === 'boolean') {
+          savedEnhancementDefault = update.enhance_on_generation_default;
+        }
         return json({generation_mode: 'video', studio_video_workflow: 'titles'});
       }
       if (endpoint === '/api/v1/studio-preferences') {
-        return json({generation_mode: 'video', studio_video_workflow: 'frames', selected_model_per_mode: {video: TITLE_MODEL}});
+        return json({generation_mode: 'video', studio_video_workflow: 'frames',
+          selected_model_per_mode: {video: TITLE_MODEL}, enhance_on_generation_default: savedEnhancementDefault});
       }
       if (endpoint === '/api/v1/workspaces') {
         return json({workspaces: [{name: WORKSPACE, path: '/workspaces/titles', file_count: 0}], active: WORKSPACE});
@@ -327,6 +401,11 @@ async function acceptManualTitlePlan(panel) {
       }
       if (endpoint === '/api/v1/upload') {
         const body = request.postData() || '';
+        if (failNextTitleUpload) {
+          failNextTitleUpload = false;
+          uploadFailures.push({search: url.search, contentType: request.headers()['content-type'] || '', body});
+          return route.fulfill({status: 500, contentType: 'application/json', body: '{"detail":"Synthetic title upload failure"}'});
+        }
         uploadRequests.push({search: url.search, contentType: request.headers()['content-type'] || '', body});
         const filename = /filename="([^"]+)"/.exec(body)?.[1] || 'title-background.png';
         return json({filename, path: `/uploads/${filename}`, url: `/uploads/${filename}`});
@@ -344,6 +423,12 @@ async function acceptManualTitlePlan(panel) {
           mode.status === 'completed' ? [outputPath] : []);
         statuses.set(jobId, status);
         receipts.set(clientId, {job_id: jobId, client_submission_id: clientId, status: mode.status});
+        if (generationGate) {
+          const gate = generationGate;
+          generationGate = null;
+          gate.started.resolve();
+          await gate.release.promise;
+        }
         if (mode.loseResponse) return route.abort('failed');
         return json({job_id: jobId, status: 'queued'});
       }
@@ -362,6 +447,13 @@ async function acceptManualTitlePlan(panel) {
       }
       if (endpoint === '/api/v1/system-stats') return json(stats);
       if (endpoint === '/api/v1/system-config') return json({configured: true});
+      if (endpoint === '/api/v1/llm/plan-title' && method === 'POST') {
+        titlePlanRequests.push(request.postDataJSON());
+        return json({plan: {sequence: false, phrases: [{text: 'EDITED GALLERY TITLE', animation: 'Reveal, hold clearly, then dissolve away.', weight: 1}],
+          look: 'Clean silver lettering', direction: 'Reveal, hold clearly, then dissolve away.'},
+          warnings: [], raw_draft: '{"plan":"review this title wording"}', review_required: true,
+          draft_history_id: 'studio-title-review'});
+      }
       if (endpoint.endsWith('/media-flow/capabilities')) return json({
         neural_rendering: {available: false, reason: 'Isolated browser test', scales: []},
         frame_generation: {available: false, reason: 'Isolated browser test', factors: []},
@@ -408,7 +500,63 @@ async function acceptManualTitlePlan(panel) {
     assert.deepEqual(await stateInputs(page), before, 'Selecting Titles preserves Frames prompt, references, and model.');
     await waitFor(page, text => document.querySelector('[aria-label="Describe your title animation"]')?.value.includes(text),
       'gallery title settings restored into the Studio composer', 10000, 'Loaded from gallery');
+
+    // Titles uses the shared Studio enhancement preference and its own one-shot override.
+    const titleEnhancementTrigger = sidebar.getByRole('button', {name: 'Title enhancement options'});
+    await titleEnhancementTrigger.click();
+    let titleEnhancementMenu = page.getByRole('menu', {name: 'Title enhancement options'});
+    assert.equal(await titleEnhancementMenu.getByRole('menuitemcheckbox', {name: 'Enhance on generation'}).getAttribute('aria-checked'), 'false');
+    assert.equal(await titleEnhancementMenu.getByRole('menuitemcheckbox', {name: 'Use by default'}).getAttribute('aria-checked'), 'false');
+    await titleEnhancementMenu.getByRole('menuitemcheckbox', {name: 'Enhance on generation'}).click();
+    assert.equal(await page.evaluate(() => window.store.getState().enhanceOnGeneration), true,
+      'The title enhancement checkbox sets a one-shot Studio choice.');
+    await titleEnhancementTrigger.click();
+    titleEnhancementMenu = page.getByRole('menu', {name: 'Title enhancement options'});
+    await titleEnhancementMenu.getByRole('menuitemcheckbox', {name: 'Use by default'}).click();
+    await waitFor(page, () => window.store.getState().enhanceOnGenerationDefault === true,
+      'shared default title enhancement preference');
+    await waitForNode(() => savedEnhancementDefault === true, 'server-persisted title enhancement default');
+    assert.equal(await page.evaluate(() => window.store.getState().enhanceOnGeneration), null,
+      'Saving the shared default clears the temporary one-shot choice.');
+    assert.equal(await page.locator('[data-testid="titles-generate-footer"]').getByRole('button', {name: 'Remove Enhance on generation'}).count(), 1,
+      'The footer shows the effective enhancement choice.');
+
+    await page.reload();
+    await mount(page, bundle, css, {workflow: 'titles', workspace: WORKSPACE});
+    await page.evaluate(async workspace => {
+      await window.store.getState().loadModels();
+      window.seedScenario({workflow: 'titles', workspace});
+    }, WORKSPACE);
+    await waitFor(page, () => window.store.getState().enhanceOnGenerationDefault === true,
+      'shared title enhancement default after reload');
+    await page.locator('.maestro-sidebar').getByRole('button', {name: 'Title enhancement options'}).click();
+    titleEnhancementMenu = page.getByRole('menu', {name: 'Title enhancement options'});
+    assert.equal(await titleEnhancementMenu.getByRole('menuitemcheckbox', {name: 'Use by default'}).getAttribute('aria-checked'), 'true',
+      'The shared enhancement default survives reload.');
+    assert.equal(await titleEnhancementMenu.getByRole('menuitemcheckbox', {name: 'Enhance on generation'}).getAttribute('aria-checked'), 'true',
+      'The effective title enhancement checkbox reflects the saved default after reload.');
+    await titleEnhancementMenu.getByRole('menuitemcheckbox', {name: 'Use by default'}).click();
+    await waitFor(page, () => window.store.getState().enhanceOnGenerationDefault === false,
+      'turning off the shared title enhancement default');
+    await waitForNode(() => savedEnhancementDefault === false, 'server-persisted disabled title enhancement default');
+    await titleEnhancementMenu.getByRole('menuitemcheckbox', {name: 'Enhance on generation'}).click();
+    const oneShotEnhancementRevision = await page.evaluate(() => window.store.getState().enhanceOnGenerationRevision);
+    assert.equal(await page.evaluate(() => window.store.getState().enhanceOnGeneration), true,
+      'A one-shot title enhancement can override the saved default.');
+
     await page.getByLabel('Describe your title animation').fill('Edited loaded gallery title');
+    await page.locator('[data-testid="titles-generate-footer"]').getByRole('button', {name: 'Generate title'}).click();
+    await waitFor(page, () => window.store.getState().params._studio_title_settings?.titleReviewRequired === true
+      || document.querySelector('[aria-label="Title plan review"]')?.open === true,
+    'AI title plan review pause');
+    assert.equal(titlePlanRequests.length, 1, 'The one-shot title choice requests one title-specific plan.');
+    assert.equal(generationRequests.length, 0, 'A review-required title plan pauses before GPU submission.');
+    assert.equal(await page.evaluate(() => window.titleStore.getState().intent), null,
+      'A review pause creates no owned Studio title intent.');
+    assert.equal(await page.evaluate(() => window.store.getState().enhanceOnGeneration), true,
+      'A title plan review pause preserves the one-shot enhancement choice.');
+    assert.equal(await page.evaluate(() => window.store.getState().enhanceOnGenerationRevision), oneShotEnhancementRevision,
+      'A review pause does not revise or consume the one-shot choice.');
     await waitFor(page, () => window.store.getState().params._studio_title_settings === undefined,
       'one-shot gallery title settings cleared after the first edit');
     await chooseWorkflow(page, 'Frames');
@@ -540,6 +688,27 @@ async function acceptManualTitlePlan(panel) {
     assert.equal(await sidebar.getByText(/480×832/).count(), 1,
       'Portrait 480p title dimensions use the aligned output size.');
     await advancedSidebar.getByRole('button', {name: 'Use manual title plan'}).click();
+    const bodyScroll = page.locator('[data-testid="studio-body-scroll"]');
+    const desktopFooterBefore = await page.evaluate(() => ({
+      top: document.querySelector('[data-testid="titles-generate-footer"]')?.getBoundingClientRect().top,
+      hardwareTop: document.querySelector('.studio-hardware')?.getBoundingClientRect().top,
+    }));
+    const desktopScroll = await bodyScroll.evaluate(element => {
+      element.scrollTop = element.scrollHeight;
+      return {scrollTop: element.scrollTop, scrollHeight: element.scrollHeight, clientHeight: element.clientHeight};
+    });
+    await page.waitForTimeout(30);
+    const desktopFooterAfter = await page.evaluate(() => ({
+      top: document.querySelector('[data-testid="titles-generate-footer"]')?.getBoundingClientRect().top,
+      hardwareTop: document.querySelector('.studio-hardware')?.getBoundingClientRect().top,
+    }));
+    assert.ok(desktopScroll.scrollHeight > desktopScroll.clientHeight && desktopScroll.scrollTop > 0,
+      'The expanded title controls scroll inside the body.');
+    assert.ok(Math.abs(desktopFooterAfter.top - desktopFooterBefore.top) < 1,
+      'Scrolling title controls leaves the generate footer anchored at the sidebar bottom.');
+    assert.ok(Math.abs(desktopFooterAfter.hardwareTop - desktopFooterBefore.hardwareTop) < 1,
+      'The hardware monitor stays below the title footer while the form scrolls.');
+    await bodyScroll.evaluate(element => { element.scrollTop = 0; });
     const requestedDimensions = await page.evaluate(() => window.titleHelpers.titleDimensions({
       text: 'Maestro After Dark', look: 'chrome', direction: 'fly inward', effect: 'custom',
       seconds: 8.4, aspect: '9:16', resolution: '480p', keepAudio: false, background: 'black',
@@ -555,6 +724,13 @@ async function acceptManualTitlePlan(panel) {
     await waitFor(page, () => window.store.getState().jobs.some(job => job.id === 'studio-title-job-1'),
       'accepted title adoption into the normal generation queue');
     assert.equal(generationRequests.length, 1, 'A rapid double click sends only one generation POST.');
+    const consumedEnhancement = await page.evaluate(() => ({
+      oneShot: window.store.getState().enhanceOnGeneration,
+      revision: window.store.getState().enhanceOnGenerationRevision,
+    }));
+    assert.equal(consumedEnhancement.oneShot, null, 'An accepted Studio title intent consumes its one-shot enhancement override.');
+    assert.equal(consumedEnhancement.revision, oneShotEnhancementRevision + 1,
+      'Consuming the one-shot enhancement increments its revision exactly once.');
     const firstRequest = generationRequests[0];
     assert.equal(firstRequest._studio_video_workflow, 'titles');
     assert.equal(firstRequest._studio_title_settings.background, 'black');
@@ -565,6 +741,9 @@ async function acceptManualTitlePlan(panel) {
     assert.equal(firstRequest.model_type, TITLE_MODEL);
     assert.equal(firstRequest.image_mode, 0);
     assert.deepEqual(firstRequest.image_refs, [], 'Normal Studio references do not leak into the title generation.');
+    for (const key of ['_prompt_enhancement', 'h3_window_plan', 'enhanceOnGeneration', 'enhance_on_generation']) {
+      assert.equal(Object.hasOwn(firstRequest, key), false, `Ordinary Studio enhancement state does not leak into title params (${key}).`);
+    }
     assert.equal(uploadRequests.length, 1);
     assert.match(uploadRequests[0].body, /title-black-480x832\.png/);
     assert.equal(receiptLookups.length, 1, 'The lost receipt is looked up once by its exact client submission ID.');
@@ -605,12 +784,47 @@ async function acceptManualTitlePlan(panel) {
 
     // Failed and cancelled jobs report errors without a success state. Use green on the failure case.
     await page.evaluate(() => window.titleStore.getState().dismiss());
+    await page.evaluate(() => window.store.getState().setEnhanceOnGeneration(true));
+    const prepareFailureRevision = await page.evaluate(() => window.store.getState().enhanceOnGenerationRevision);
+    failNextTitleUpload = true;
+    await page.getByRole('button', {name: 'Generate title'}).click();
+    await waitFor(page, () => window.titleStore.getState().error?.includes('Upload failed'),
+      'title upload preparation failure');
+    assert.equal(uploadFailures.length, 1, 'The title background upload failure is synthetic and isolated.');
+    assert.equal(generationRequests.length, 1, 'A title preparation failure never sends a GPU generation request.');
+    assert.equal(await page.evaluate(() => window.titleStore.getState().intent), null,
+      'A pre-intent upload failure does not create a title submission identity.');
+    const afterPrepareFailure = await page.evaluate(() => ({
+      oneShot: window.store.getState().enhanceOnGeneration,
+      revision: window.store.getState().enhanceOnGenerationRevision,
+    }));
+    assert.equal(afterPrepareFailure.oneShot, true, 'A pre-intent preparation failure preserves the one-shot enhancement choice.');
+    assert.equal(afterPrepareFailure.revision, prepareFailureRevision,
+      'A pre-intent failure does not consume or revise the one-shot choice.');
+    await page.evaluate(() => window.titleStore.getState().dismiss());
     nextSubmissionMode = {status: 'failed', loseResponse: false};
     await page.getByLabel('Title background').first().selectOption('chroma');
     await acceptManualTitlePlan(sidebar);
+    await page.evaluate(() => window.store.getState().setEnhanceOnGeneration(true));
+    const raceRevision = await page.evaluate(() => window.store.getState().enhanceOnGenerationRevision);
+    const racedGeneration = {started: deferred(), release: deferred()};
+    generationGate = racedGeneration;
     await page.getByRole('button', {name: 'Generate title'}).click();
+    await racedGeneration.started.promise;
+    await page.evaluate(() => window.store.getState().setEnhanceOnGeneration(false));
+    const laterPreferenceRevision = await page.evaluate(() => window.store.getState().enhanceOnGenerationRevision);
+    assert.equal(laterPreferenceRevision, raceRevision + 1, 'A later user choice advances the enhancement revision during submit.');
+    racedGeneration.release.resolve();
     await waitFor(page, () => window.titleStore.getState().intent?.status === 'failed',
       'failed title generation');
+    const preservedLaterChoice = await page.evaluate(() => ({
+      oneShot: window.store.getState().enhanceOnGeneration,
+      revision: window.store.getState().enhanceOnGenerationRevision,
+    }));
+    assert.equal(preservedLaterChoice.oneShot, false,
+      'Submitting an older title intent preserves a later explicit enhancement choice.');
+    assert.equal(preservedLaterChoice.revision, laterPreferenceRevision,
+      'The submission completion does not increment or clear a newer enhancement revision.');
     assert.equal(generationRequests.length, 2);
     assert.equal(generationRequests[1]._studio_title_settings.background, 'chroma');
     assert.match(uploadRequests[1].body, /title-green-/);
@@ -631,6 +845,7 @@ async function acceptManualTitlePlan(panel) {
     // anchored workflow chooser remains a non-modal popover without a focus trap.
     await page.setViewportSize({width: 390, height: 844});
     await page.waitForTimeout(100);
+    await assertHardwareExpandable(page, 'Mobile');
     await page.screenshot({path: path.join(SCREENSHOTS, 'studio-titles-mobile.png'), fullPage: true});
     await page.locator('.maestro-sidebar').locator('.studio-workflow-header button[title]').click();
     const mobileDialog = page.getByRole('dialog', {name: 'Choose a workflow'});
@@ -659,6 +874,28 @@ async function acceptManualTitlePlan(panel) {
     }));
     assert.ok(scroll.scrollHeight > scroll.clientHeight, 'The mobile Studio Titles panel remains vertically scrollable.');
     assert.ok(scroll.width <= scroll.clientWidth, 'The mobile title form does not overflow horizontally.');
+    const mobileFooterBefore = await page.evaluate(() => ({
+      hostHidden: document.querySelector('[data-testid="titles-footer-host"]')?.hidden,
+      footerTop: document.querySelector('[data-testid="titles-generate-footer"]')?.getBoundingClientRect().top,
+      footerBottom: document.querySelector('[data-testid="titles-generate-footer"]')?.getBoundingClientRect().bottom,
+      sidebarBottom: document.querySelector('.maestro-sidebar')?.getBoundingClientRect().bottom,
+    }));
+    const mobileScroll = await page.locator('[data-testid="studio-body-scroll"]').evaluate(element => {
+      element.scrollTop = element.scrollHeight;
+      return {scrollTop: element.scrollTop};
+    });
+    await page.waitForTimeout(30);
+    const mobileFooterAfter = await page.evaluate(() => ({
+      footerTop: document.querySelector('[data-testid="titles-generate-footer"]')?.getBoundingClientRect().top,
+      footerBottom: document.querySelector('[data-testid="titles-generate-footer"]')?.getBoundingClientRect().bottom,
+      sidebarBottom: document.querySelector('.maestro-sidebar')?.getBoundingClientRect().bottom,
+    }));
+    assert.equal(mobileFooterBefore.hostHidden, false, 'The title footer remains visible while the mobile keyboard is open.');
+    assert.ok(Math.abs(mobileFooterAfter.footerTop - mobileFooterBefore.footerTop) < 1,
+      'Mobile body scrolling does not move the fixed title footer.');
+    assert.ok(mobileFooterAfter.footerBottom <= mobileFooterAfter.sidebarBottom + 1,
+      'The title footer stays within the visible mobile sidebar while the keyboard is open.');
+    assert.ok(mobileScroll.scrollTop > 0, 'Mobile scrolling continues inside the title form rather than the footer.');
 
     // Sequence settings survive the real Studio normalization, submission and
     // browser reload paths. All GPU endpoints remain synthetic.

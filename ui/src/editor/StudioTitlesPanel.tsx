@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Loader2, Sparkles } from 'lucide-react'
+import { Loader2, Sparkles, X } from 'lucide-react'
+import { createPortal } from 'react-dom'
 import { useStore } from '../stores/useStore'
 import { AnimatedTitleControls } from './AnimatedTitleControls'
 import { EditorAnimatedTitleStatus } from './EditorAnimatedTitleDialog'
-import { alignTitleSequence, DEFAULT_TITLE_SETTINGS, TITLE_EFFECTS, titleComposerValidation, titlePlanIsCurrent } from './editorAnimatedTitles'
+import { alignTitleSequence, DEFAULT_TITLE_SETTINGS, TITLE_EFFECTS, titleComposerValidation, titleEnhancementEnabled, titlePlanIsCurrent, TITLE_MODEL } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 import { useEditorTitleStore } from './useEditorTitleStore'
 import { useTitleComposer } from './useTitleComposer'
@@ -23,6 +24,8 @@ function normalizeDraft(raw: unknown): AnimatedTitleSettings {
       ...(typeof value.rawTitleDraft === 'string' ? { rawTitleDraft: value.rawTitleDraft.slice(0, 64000) } : {}),
       ...(typeof value.titleDraftHistoryId === 'string' && /^[a-f0-9-]+$/.test(value.titleDraftHistoryId) ? { titleDraftHistoryId: value.titleDraftHistoryId } : {}),
       titleReviewRequired: value.titleReviewRequired === true,
+      manualPlanEdited: value.manualPlanEdited === true,
+      directDescription: value.directDescription === true,
       text: typeof value.text === 'string' ? value.text.slice(0, 160) : defaults.text,
       look: typeof value.look === 'string' ? value.look.slice(0, 1200) : defaults.look,
       direction: typeof value.direction === 'string' ? value.direction.slice(0, 1200) : defaults.direction,
@@ -54,16 +57,21 @@ function loadDraft(): AnimatedTitleSettings {
 }
 
 /** Studio titles use the same fields and isolated generation payload as Editor titles. */
-export function StudioTitlesPanel() {
+export function StudioTitlesPanel({ footerHost }: { footerHost?: HTMLElement | null } = {}) {
   const [draft, setDraft] = useState(loadDraft)
   const workspace = useStore(state => state.activeWorkspace)
   const restored = useStore(state => state.params._studio_title_settings)
+  const enhanceOnGeneration = useStore(state => state.enhanceOnGeneration)
+  const enhanceOnGenerationDefault = useStore(state => state.enhanceOnGenerationDefault)
+  const setEnhanceOnGeneration = useStore(state => state.setEnhanceOnGeneration)
+  const setEnhanceOnGenerationDefault = useStore(state => state.setEnhanceOnGenerationDefault)
   const busy = useEditorTitleStore(state => state.busy)
   const intent = useEditorTitleStore(state => state.intent)
   const error = useEditorTitleStore(state => state.error)
   const submit = useEditorTitleStore(state => state.submitStudio)
   const loadedSettings = useMemo(() => restored ? normalizeDraft(restored) : null, [restored])
   const settings = loadedSettings ?? draft
+  const enhancementEnabled = titleEnhancementEnabled({ enhanceOnGeneration, enhanceOnGenerationDefault })
   useEffect(() => {
     try { localStorage.setItem(DRAFT, JSON.stringify(settings)) } catch { /* Submission separately requires durable storage. */ }
   }, [settings])
@@ -79,16 +87,50 @@ export function StudioTitlesPanel() {
   let reviewReady = false
   try { reviewReady = settings.titleReviewRequired === true && titlePlanIsCurrent(settings) }
   catch { /* Invalid settings stay editable; they cannot be approved as a current plan. */ }
-  return <section aria-label="Studio Titles" className="mx-3 mb-3 min-w-0 space-y-4 rounded-2xl border border-border bg-bg-primary/30 p-3">
+  const generate = async () => {
+    const capturedRevision = useStore.getState().enhanceOnGenerationRevision
+    const submitOwned = async (planned: AnimatedTitleSettings) => {
+      const priorClientId = useEditorTitleStore.getState().intent?.clientId
+      await submit(planned)
+      const created = useEditorTitleStore.getState().intent
+      if (created?.destination === 'studio' && created.clientId !== priorClientId) {
+        useStore.setState(state => state.enhanceOnGenerationRevision === capturedRevision
+          ? { enhanceOnGeneration: null, enhanceOnGenerationRevision: capturedRevision + 1 } : {})
+      }
+    }
+    await composer.generate(submitOwned, { enhance: enhancementEnabled })
+  }
+  const generateLabel = reviewReady ? 'Generate reviewed plan' : 'Generate title'
+  const footer = <div data-testid="titles-generate-footer" className="shrink-0 bg-bg-secondary px-3 pb-2 pt-2">
+    {enhancementEnabled && <div className="mb-2 flex justify-end">
+      <button type="button" onClick={() => setEnhanceOnGeneration(false)} aria-label="Remove Enhance on generation" title="Skip enhancement for the next submission"
+        className="flex min-h-8 max-w-full items-center gap-1.5 rounded-lg border border-accent-blue/40 bg-accent-blue/10 px-2 text-xs text-accent-blue">
+        <Sparkles size={13}/><span>Enhance on generation</span><X size={13}/>
+      </button>
+    </div>}
+    <div data-testid="studio-generate-bar" className="flex min-w-0 items-center gap-1.5">
+      <div aria-label="Title generation model" data-model-type={TITLE_MODEL}
+        className="flex min-h-11 min-w-0 flex-1 items-center rounded-lg border border-border bg-bg-tertiary px-2 py-2 text-[11px] leading-tight text-text-primary">
+        <span className="line-clamp-2 min-w-0">H3 Fused 4-Step · Frames</span>
+      </div>
+      <button type="button" aria-label={generateLabel} disabled={blocked || controlBusy || Boolean(validation)} onClick={() => void generate()} title={validation || undefined}
+        className="flex min-h-11 min-w-[132px] flex-1 items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 py-2 text-sm font-semibold text-white disabled:opacity-40">
+        {controlBusy ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}{generateLabel}
+      </button>
+    </div>
+  </div>
+  const footerNode = footerHost ? createPortal(footer, footerHost) : footer
+  return <>
+  <section aria-label="Studio Titles" className="mx-3 mb-3 min-w-0 space-y-4 rounded-2xl border border-border bg-bg-primary/30 p-3">
     <div className="flex items-center gap-2 text-sm font-semibold text-text-primary"><Sparkles size={16} className="text-accent-blue" />Titles</div>
     <p className="break-words text-xs text-text-secondary">Save to <strong>{workspace}</strong> · No Editor project needed.</p>
     <EditorAnimatedTitleStatus />
-    <AnimatedTitleControls settings={settings} patch={patch} busy={controlBusy} canvas={CANVAS} destination="studio" composer={composer} />
+    <AnimatedTitleControls settings={settings} patch={patch} busy={controlBusy} canvas={CANVAS} destination="studio" composer={composer}
+      enhancement={{enabled: enhancementEnabled, defaultEnabled: enhanceOnGenerationDefault,
+        onToggle: setEnhanceOnGeneration, onDefaultChange: setEnhanceOnGenerationDefault}} />
     {error && <p role="alert" className="text-xs text-red-400">{error}</p>}
     {blocked && !controlBusy && <p className="text-xs text-text-secondary">A title is already being tracked. Its progress is shown above.</p>}
-    <button type="button" disabled={blocked || controlBusy || Boolean(validation)} onClick={() => void composer.generate(submit)} title={validation || undefined}
-      className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">
-      {controlBusy ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}{reviewReady ? 'Generate reviewed plan' : 'Generate title'}
-    </button>
   </section>
+  {footerNode}
+  </>
 }
