@@ -50,6 +50,28 @@ automatic keying. Generated clip audio is muted unless **Keep generated clip aud
 was selected. Review the exact wording, timing and edge quality: generated results
 can vary, and changing baked-in lettering requires another render.
 
+### Phrase sequences
+
+Choose **Single title** for one composition, or **Phrase sequence** to reveal
+different wording in order. Each sequence card specifies the exact text, its time
+slot and its animation. A slot includes the entrance, a readable hold and the exit.
+Move cards up or down, add or remove cards, or paste one phrase per line. Describe
+custom motion directly, or use an optional preset as an editable starting point.
+
+For example, create cards for `CREATE`, `EXPLORE` and `INSPIRE`. Give each its own
+motion, such as scaling in, rotating in and fading in. Every phrase is instructed
+to clear before the next appears. The final phrase clears to the selected background;
+the complete list is never requested as a final composition. Appearance belongs in
+**Lettering and visual style**. Shared sequence motion is optional and separate from
+the single-title animation, so a previous full-title preset does not carry over.
+
+A sequence contains 2–6 phrases, up to 80 characters per phrase and 160 overall.
+The requested total must be 5–14.5 seconds. The timing preview adjusts the slots
+to H3's supported frame count at 24 fps. This creates one video with one generation
+job. H3 interprets the timing and typography: review the actual result for spelling,
+word isolation and transitions. For frame-accurate timing, generate separate
+single-title clips and place them on the Editor timeline.
+
 ### Writing a readable kinetic title
 
 Use the exact wording you want, including punctuation, and describe the lettering,

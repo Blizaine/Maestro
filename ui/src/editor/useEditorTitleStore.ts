@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import * as api from '../api/client'
 import type { EditorAsset } from '../types'
 import { useStore } from '../stores/useStore'
-import { animatedTitleParams, animatedTitlePrompt, titleBackground, titleDimensions, titleFrames, titleSubmissionId, TITLE_MODEL } from './editorAnimatedTitles'
+import { animatedTitleParams, animatedTitlePrompt, titleBackground, titleDimensions, titleFrames, titleSeconds, titleText, titleSubmissionId, TITLE_MODEL } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 import { useEditorStore } from './useEditorStore'
 
@@ -22,7 +22,7 @@ function restore(): TitleIntent | null {
       || (value.destination !== undefined && !['editor', 'studio'].includes(value.destination))
       || (value.destination !== 'studio' && typeof value.projectId !== 'string') || typeof value.workspace !== 'string'
       || !Number.isFinite(value.at) || value.at < 0 || !value.settings) return null
-    animatedTitlePrompt(value.settings); titleFrames(value.settings.seconds)
+    animatedTitlePrompt(value.settings); titleFrames(titleSeconds(value.settings))
     if (!['submitting', 'uncertain', 'queued', 'running', 'ready', 'inserted', 'completed', 'failed'].includes(value.status)) return null
     return value.status === 'submitting' ? { ...value, status: 'uncertain' } : value
   } catch { return null }
@@ -72,11 +72,13 @@ export const useEditorTitleStore = create<TitleState>((set, get) => {
         const workspace = current?.workspace ?? useStore.getState().activeWorkspace
         if (!workspace || ['__all__', '__uploads__'].includes(workspace)) throw new Error('Choose a workspace for the title.')
         const canvas = current ? { ...current.canvas } : { width: 1920, height: 1080 }
-        const settingsCopy = { ...settings, text: settings.text.trim() }
-        animatedTitlePrompt(settingsCopy); titleFrames(settingsCopy.seconds)
+        const settingsCopy = { ...settings, text: settings.mode === 'sequence'
+          ? (settings.phrases ?? []).map(phrase => phrase.text.trim()).join('\n') : settings.text.trim(),
+          ...(settings.phrases ? { phrases: settings.phrases.map(phrase => ({ ...phrase })) } : {}) }
+        animatedTitlePrompt(settingsCopy); titleFrames(titleSeconds(settingsCopy))
         const { width, height } = titleDimensions(settingsCopy, canvas)
         const at = current ? useEditorStore.getState().playhead : 0
-        if (at + titleFrames(settingsCopy.seconds) / 24 > 86400) throw new Error('The title would exceed the 24-hour timeline limit.')
+        if (at + titleFrames(titleSeconds(settingsCopy)) / 24 > 86400) throw new Error('The title would exceed the 24-hour timeline limit.')
         const { models } = await api.fetchModels()
         if (!models.some(model => model.model_type === TITLE_MODEL && model.is_downloaded === true)) {
           throw new Error('Install H3 Fused 4-Step — Frames in Settings before generating an animated title.')
@@ -187,7 +189,7 @@ export const useEditorTitleStore = create<TitleState>((set, get) => {
       try {
         const added = useEditorStore.getState().addAnimatedTitle(intent.asset, {
           id: intent.id, projectId: intent.projectId, workspace: intent.workspace,
-          at: intent.at, text: intent.settings.text, keepAudio: intent.settings.keepAudio,
+          at: intent.at, text: titleText(intent.settings), keepAudio: intent.settings.keepAudio,
           background: intent.settings.background,
         })
         if (added) update({ ...intent, status: 'inserted', error: undefined, message: titleBackground(intent.settings).chromaKey

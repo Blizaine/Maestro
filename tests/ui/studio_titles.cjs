@@ -110,11 +110,11 @@ async function bundleUi() {
         import {useEditorStore} from './src/editor/useEditorStore';
         import {useEditorTitleStore} from './src/editor/useEditorTitleStore';
         import {Sidebar} from './src/components/Sidebar/Sidebar';
-        import {TITLE_EFFECT_LABELS, titleDimensions} from './src/editor/editorAnimatedTitles';
+        import {TITLE_EFFECT_LABELS, titleDimensions, titleFrames, titleSequenceTimeline, newTitlePhrases, animatedTitlePrompt, animatedTitleParams} from './src/editor/editorAnimatedTitles';
         window.store = useStore;
         window.editorStore = useEditorStore;
         window.titleStore = useEditorTitleStore;
-        window.titleHelpers = {TITLE_EFFECT_LABELS, titleDimensions};
+        window.titleHelpers = {TITLE_EFFECT_LABELS, titleDimensions, titleFrames, titleSequenceTimeline, newTitlePhrases, animatedTitlePrompt, animatedTitleParams};
         window.baseParams = {...useStore.getState().params};
         window.seedScenario = (scenario = {}) => {
           const model = scenario.model || '${TITLE_MODEL}';
@@ -648,6 +648,68 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
     }));
     assert.ok(scroll.scrollHeight > scroll.clientHeight, 'The mobile Studio Titles panel remains vertically scrollable.');
     assert.ok(scroll.width <= scroll.clientWidth, 'The mobile title form does not overflow horizontally.');
+
+    // Sequence settings survive the real Studio normalization, submission and
+    // browser reload paths. All GPU endpoints remain synthetic.
+    await page.setViewportSize({width: 1360, height: 900});
+    await page.evaluate(() => window.titleStore.getState().dismiss());
+    const sequenceSettings = {mode: 'sequence', text: 'STALE SINGLE TITLE', look: 'Hand-drawn blue ink',
+      effect: 'fire', direction: 'Sparks trace the complete title and hold it together.', sequenceDirection: 'Keep the camera locked.',
+      seconds: 5.2, aspect: '9:16', resolution: '480p', keepAudio: false, background: 'black',
+      phrases: [
+        {id: 'seq-a', text: 'CREATE', seconds: 3, animation: 'Scale in, hold, then clear.'},
+        {id: 'seq-b', text: 'EXPLORE', seconds: 3, animation: 'Rotate in, hold, then clear.'},
+        {id: 'seq-c', text: 'INSPIRE', seconds: 4, animation: ''},
+      ]};
+    const planning = await page.evaluate(settings => {
+      const h = window.titleHelpers;
+      const invalids = [[], settings.phrases.slice(0, 1), [...settings.phrases, ...settings.phrases, settings.phrases[0]],
+        settings.phrases.map(p => ({...p, seconds: .5})), settings.phrases.map(p => ({...p, seconds: 7})),
+        settings.phrases.map(p => ({...p, text: ''})), settings.phrases.map(p => ({...p, id: 'duplicate'})),
+        settings.phrases.map(p => ({...p, text: 'x'.repeat(60)}))];
+      return {timeline: h.titleSequenceTimeline(settings),
+        prompt: h.animatedTitlePrompt(settings),
+        body: h.animatedTitleParams(settings, {width: 1920, height: 1080}, '/uploads/black.png', 'test', 'synthetic-id'),
+        invalids: invalids.map(phrases => {try { h.animatedTitlePrompt({...settings, phrases}); return ''; } catch (error) {return error.message;}}),
+        converted: h.newTitlePhrases('One\nTwo\nThree\nFour\nFive\nSix', 5.2)};
+    }, sequenceSettings);
+    assert.equal(planning.timeline.requestedSeconds, 10);
+    assert.equal(planning.timeline.duration, 243 / 24);
+    assert.equal(planning.timeline.phrases[0].start, 0);
+    assert.equal(planning.timeline.phrases.at(-1).end, planning.timeline.duration);
+    for (let i = 1; i < 3; i++) assert.equal(planning.timeline.phrases[i].start, planning.timeline.phrases[i - 1].end);
+    assert.equal(planning.body.video_length, 243, 'The summed phrase duration overrides the hidden single-title duration.');
+    assert.match(planning.prompt, /exactly ONE phrase at a time/);
+    assert.match(planning.prompt, /Final slot: show ONLY "INSPIRE"; no earlier phrase returns/);
+    assert.doesNotMatch(planning.prompt, /complete-title hold|Sparks trace|STALE SINGLE TITLE/,
+      'Sequence prompts do not inherit the previous title or full-title preset instructions.');
+    assert.ok(planning.invalids.every(Boolean), 'Invalid phrase counts, durations, texts and identities block submission.');
+    assert.ok(planning.converted.every(phrase => phrase.seconds >= 1), 'Converting six lines allocates usable slots.');
+    assert.equal(new Set(planning.converted.map(phrase => phrase.id)).size, 6);
+    await page.evaluate(settings => window.store.setState(state => ({params: {...state.params, _studio_title_settings: settings}})), sequenceSettings);
+    await waitFor(page, () => document.querySelector('[aria-label="Phrase 1 text"]')?.value === 'CREATE', 'gallery sequence settings restore');
+    assert.equal(await page.getByLabel('Phrase 3 text', {exact: true}).inputValue(), 'INSPIRE');
+    await page.getByLabel('Phrase 1 text', {exact: true}).fill('CREATE MORE');
+    await waitFor(page, () => window.store.getState().params._studio_title_settings === undefined, 'sequence override becomes local draft');
+    nextSubmissionMode = {status: 'running', loseResponse: true};
+    await page.getByRole('button', {name: 'Generate title', exact: true}).click();
+    await waitFor(page, () => window.titleStore.getState().intent?.jobId === 'studio-title-job-4', 'sequence lost-receipt adoption');
+    const sequenceBody = generationRequests.at(-1);
+    assert.equal(sequenceBody._studio_title_settings.mode, 'sequence');
+    assert.deepEqual(sequenceBody._studio_title_settings.phrases.map(p => p.text), ['CREATE MORE', 'EXPLORE', 'INSPIRE']);
+    assert.equal(sequenceBody._studio_title_settings.text, 'CREATE MORE\nEXPLORE\nINSPIRE');
+    assert.equal(sequenceBody.video_length, 243);
+    assert.match(sequenceBody.prompt, /Keep the camera locked/);
+    assert.equal(generationRequests.length, 4, 'One sequence sends one POST, without per-phrase jobs.');
+    assert.equal(receiptLookups.at(-1), sequenceBody._client_submission_id);
+    const beforeSequenceReload = generationRequests.length;
+    await page.reload();
+    await mount(page, bundle, css, {workflow: 'titles', workspace: 'Changed While Running'});
+    await waitFor(page, () => window.titleStore.getState().intent?.jobId === 'studio-title-job-4', 'sequence receipt reload');
+    assert.equal(await page.getByLabel('Phrase 1 text', {exact: true}).inputValue(), 'CREATE MORE');
+    assert.equal(await page.getByLabel('Phrase 3 duration', {exact: true}).inputValue(), '4');
+    assert.equal(generationRequests.length, beforeSequenceReload, 'Sequence reload never resubmits.');
+    assert.deepEqual(projectApiRequests, [], 'Sequence generation remains independent of Editor projects.');
 
     assert.ok(preferenceUpdates.some(preference => preference.studio_video_workflow === 'titles'),
       'The title workflow is persisted as a normal Studio preference.');

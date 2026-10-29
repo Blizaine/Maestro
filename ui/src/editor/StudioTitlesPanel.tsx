@@ -23,6 +23,16 @@ function normalizeDraft(raw: unknown): AnimatedTitleSettings {
       aspect: value.aspect === '16:9' || value.aspect === '9:16' || value.aspect === '1:1' ? value.aspect : defaults.aspect,
       resolution: value.resolution === '480p' || value.resolution === '720p' ? value.resolution : defaults.resolution,
       background: value.background === 'black' ? 'black' : 'chroma',
+      mode: value.mode === 'sequence' ? 'sequence' : 'single',
+      sequenceDirection: typeof value.sequenceDirection === 'string' ? value.sequenceDirection.slice(0, 1200) : '',
+      // Keep malformed sequence drafts blocked for review rather than silently
+      // turning them into a different single-title generation.
+      ...(value.mode === 'sequence' || Array.isArray(value.phrases) ? { phrases: Array.isArray(value.phrases) ? value.phrases.slice(0, 7).map(phrase => ({
+        id: typeof phrase?.id === 'string' ? phrase.id.slice(0, 100) : '',
+        text: typeof phrase?.text === 'string' ? phrase.text.slice(0, 81) : '',
+        seconds: typeof phrase?.seconds === 'number' && Number.isFinite(phrase.seconds) ? phrase.seconds : 0,
+        animation: typeof phrase?.animation === 'string' ? phrase.animation.slice(0, 801) : '',
+      })) : [] } : {}),
     }
 }
 function loadDraft(): AnimatedTitleSettings {

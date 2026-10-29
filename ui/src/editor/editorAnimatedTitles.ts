@@ -44,8 +44,21 @@ export const TITLE_EFFECT_LABELS: Record<keyof typeof TITLE_EFFECTS, string> = {
 }
 
 export type TitleBackground = 'chroma' | 'black'
+export interface TitlePhrase { id: string; text: string; seconds: number; animation: string }
+export const TITLE_PHRASE_ANIMATIONS = {
+  fade: { label: 'Fade', direction: 'Fade this phrase in, hold clearly, then fade it out completely.' },
+  slide: { label: 'Slide', direction: 'Slide this phrase in, hold clearly, then slide every letter out of frame.' },
+  scale: { label: 'Scale', direction: 'Scale this phrase into view, hold clearly, then shrink it away completely.' },
+  rotate: { label: 'Rotate', direction: 'Rotate this phrase into place, hold clearly, then rotate it away completely.' },
+  shatter: { label: 'Shatter', direction: 'Assemble this phrase, hold clearly, then shatter its letters into fragments that disappear completely.' },
+  typewriter: { label: 'Typewriter', direction: 'Type this phrase one character at a time, hold clearly, then erase every character.' },
+} as const
 
 export interface AnimatedTitleSettings {
+  /** Missing on older saved titles, which use one title and a free-form direction. */
+  mode?: 'single' | 'sequence'
+  phrases?: TitlePhrase[]
+  sequenceDirection?: string
   text: string
   look: string
   effect: 'custom' | keyof typeof TITLE_EFFECTS
@@ -58,6 +71,48 @@ export interface AnimatedTitleSettings {
   background?: TitleBackground
 }
 
+/** Converting pasted lines is explicit; ordinary multiline titles remain supported. */
+export function newTitlePhrases(text: string, seconds = 10): TitlePhrase[] {
+  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  if (lines.length > 6) throw new Error('Paste at most 6 phrases; no lines have been discarded.')
+  while (lines.length < 2) lines.push('')
+  const totalTenths = Math.max(lines.length * 10, Math.round((Number.isFinite(seconds) ? Math.max(5, Math.min(14.5, seconds)) : 10) * 10))
+  const each = Math.floor(totalTenths / lines.length)
+  return lines.map((line, index) => ({ id: titleSubmissionId(), text: line,
+    seconds: (each + (index < totalTenths % lines.length ? 1 : 0)) / 10, animation: '' }))
+}
+
+export function titleText(settings: AnimatedTitleSettings): string {
+  return settings.mode === 'sequence' ? (settings.phrases ?? []).map(phrase => phrase.text.trim()).join(' → ') : settings.text.trim()
+}
+
+export function titleSeconds(settings: AnimatedTitleSettings): number {
+  return settings.mode === 'sequence' ? Math.round((settings.phrases ?? []).reduce((sum, phrase) => sum + phrase.seconds, 0) * 1000) / 1000 : settings.seconds
+}
+
+/** Slot lengths include the entrance, readable hold and exit, within one GPU clip. */
+export function titleSequenceTimeline(settings: AnimatedTitleSettings) {
+  const phrases = settings.phrases
+  if (!Array.isArray(phrases) || phrases.length < 2 || phrases.length > 6) throw new Error('Use 2–6 phrases in a title sequence.')
+  if (phrases.some(phrase => !phrase || typeof phrase.id !== 'string' || !phrase.id
+    || typeof phrase.text !== 'string' || !phrase.text.trim() || phrase.text.length > 80
+    || !Number.isFinite(phrase.seconds) || phrase.seconds < 1 || phrase.seconds > 10
+    || typeof phrase.animation !== 'string' || phrase.animation.length > 800)) {
+    throw new Error('Each phrase needs 1–80 characters, 1–10 seconds and an animation under 800 characters.')
+  }
+  if (new Set(phrases.map(phrase => phrase.id)).size !== phrases.length) throw new Error('Each phrase needs a unique identity.')
+  if (phrases.map(phrase => phrase.text.trim()).join('\n').length > 160) throw new Error('Keep the entire sequence within 160 characters.')
+  const requestedSeconds = Math.round(titleSeconds(settings) * 1000) / 1000
+  const frames = titleFrames(requestedSeconds)
+  let elapsed = 0
+  return { requestedSeconds, duration: frames / 24, phrases: phrases.map((phrase, index) => {
+    const start = Math.round(elapsed / requestedSeconds * frames) / 24
+    elapsed += phrase.seconds
+    const end = index === phrases.length - 1 ? frames / 24 : Math.round(elapsed / requestedSeconds * frames) / 24
+    return { ...phrase, text: phrase.text.trim(), start, end }
+  }) }
+}
+
 export const DEFAULT_TITLE_SETTINGS: AnimatedTitleSettings = {
   text: '', look: '', effect: 'custom', direction: '', seconds: 5.2,
   aspect: 'project', resolution: '720p', keepAudio: false, background: 'chroma',
@@ -67,7 +122,7 @@ export function titleFormState(settings: AnimatedTitleSettings, canvas: { width:
   let geometry = { width: 0, height: 0 }, prompt = '', duration = 0, validation = ''
   try {
     geometry = titleDimensions(settings, canvas)
-    duration = titleFrames(settings.seconds) / 24
+    duration = titleFrames(titleSeconds(settings)) / 24
     prompt = animatedTitlePrompt(settings)
   } catch (reason) { validation = reason instanceof Error ? reason.message : 'Check the title settings.' }
   return { geometry, prompt, duration, validation }
@@ -99,21 +154,31 @@ export function titleFrames(seconds: number): number {
 
 export function animatedTitlePrompt(settings: AnimatedTitleSettings): string {
   const background = titleBackground(settings)
+  if (settings.mode !== undefined && settings.mode !== 'single' && settings.mode !== 'sequence') throw new Error('Choose a supported title layout.')
+  const sequence = settings.mode === 'sequence' ? titleSequenceTimeline(settings) : null
   const text = settings.text.trim()
-  if (!text || text.length > 160) throw new Error('Enter a title of 1–160 characters.')
+  if (!sequence && (!text || text.length > 160)) throw new Error('Enter a title of 1–160 characters.')
   if (settings.effect !== 'custom' && !Object.hasOwn(TITLE_EFFECTS, settings.effect)) throw new Error('Choose an animation effect.')
-  if (settings.look.length > 1200 || settings.direction.length > 1200) throw new Error('Keep each direction under 1,200 characters.')
+  if (settings.look.length > 1200 || settings.direction.length > 1200 || (settings.sequenceDirection?.length ?? 0) > 1200) throw new Error('Keep each direction under 1,200 characters.')
   const animation = settings.direction.trim() || (settings.effect === 'custom' ? '' : TITLE_EFFECTS[settings.effect])
-  if (!animation) throw new Error('Describe the animation or choose an optional preset.')
+  if (!sequence && !animation) throw new Error('Describe the animation or choose an optional preset.')
   return [
-    `Animated title VFX. The ONLY visible lettering is exactly ${JSON.stringify(text)}. Preserve every word, spelling and punctuation; no extra text.`,
+    sequence ? 'Animated typography sequence. Show exactly ONE phrase at a time in the order below. Never combine phrases into a complete title, list, stacked layout or final recap. Preserve the spelling, punctuation and language of each phrase; no extra lettering.'
+      : `Animated title VFX. The ONLY visible lettering is exactly ${JSON.stringify(text)}. Preserve every word, spelling and punctuation; no extra text.`,
     settings.look.trim() ? `Lettering and visual style: ${settings.look.trim()}` : 'Clear, readable lettering.',
-    animation,
+    sequence ? [
+      `Phrase schedule for this ${sequence.duration.toFixed(3)}-second clip (each slot includes entrance, readable hold and complete exit):`,
+      ...sequence.phrases.map((phrase, index) => `${index + 1}. ${phrase.start.toFixed(3)}–${phrase.end.toFixed(3)}s: The ONLY readable text is ${JSON.stringify(phrase.text)}. ${phrase.animation.trim() || 'Reveal this phrase, hold it legibly, then fade it out completely.'} Clear every letter and recognizable fragment before the next phrase appears.`),
+      `Final slot: show ONLY ${JSON.stringify(sequence.phrases.at(-1)!.text)}; no earlier phrase returns. Fade all lettering and fragments to the supplied background before the final frame.`,
+      settings.sequenceDirection?.trim() ? `Additional motion direction, applied separately to each phrase within its slot: ${settings.sequenceDirection.trim()}` : '',
+      'The phrase schedule and single-phrase visibility take priority over any style or animation direction suggesting repeated, overlapping or combined titles.',
+    ].filter(Boolean).join('\n') : animation,
     background.chromaKey
       ? 'Start and end on the supplied perfectly uniform bright green background (#00FF00). Keep that same flat green backdrop throughout, with no texture, horizon, floor, shadows or lighting changes.'
       : 'Start and end on the supplied perfectly uniform pure black background (#000000). Keep that same flat black backdrop throughout, with no texture, horizon, floor, shadows or lighting changes. The black background is part of the finished title card.',
     'Only title lettering and its animation effect are visible. No people, faces, characters, bodies, scenery, logos or additional objects. Do not visualize people or objects mentioned by the title words.',
-    'The typography itself is the visual subject, not captions over a scene. Animate the lettering according to the requested motion; give each word or requested text group a clear readable moment. Include a complete-title hold unless the animation description explicitly requests otherwise. Repeated or rearranged text uses only the supplied title words.',
+    sequence ? 'The typography itself is the visual subject. Give the current phrase a readable hold within its own slot. Transitions must clear the previous phrase completely; never overlap readable words from different slots.'
+      : 'The typography itself is the visual subject, not captions over a scene. Animate the lettering according to the requested motion; give each word or requested text group a clear readable moment. Include a complete-title hold unless the animation description explicitly requests otherwise. Repeated or rearranged text uses only the supplied title words.',
     'Keep important readable lettering inside the frame with safe margins; follow any explicit request for intentional edge cropping. Use a locked camera unless the animation description requests a camera move. Preserve the requested lettering style and language. No speech or music.',
     background.chromaKey ? 'No green lettering, green particles or green reflections; reserve bright green for the removable backdrop.' : '',
   ].filter(Boolean).join('\n\n')
@@ -121,7 +186,7 @@ export function animatedTitlePrompt(settings: AnimatedTitleSettings): string {
 
 export function animatedTitleParams(settings: AnimatedTitleSettings, canvas: { width: number; height: number }, backgroundPath: string, workspace: string, clientId: string) {
   const dimensions = titleDimensions(settings, canvas)
-  const frames = titleFrames(settings.seconds)
+  const frames = titleFrames(titleSeconds(settings))
   if (!backgroundPath || !clientId) throw new Error('The title background or submission identity is missing.')
   return {
     model_type: TITLE_MODEL, generation_mode: 'video', workspace,

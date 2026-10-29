@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { AlertCircle, CheckCircle2, ExternalLink, Loader2, Sparkles, X } from 'lucide-react'
-import { DEFAULT_TITLE_SETTINGS, titleFormState } from './editorAnimatedTitles'
+import { DEFAULT_TITLE_SETTINGS, titleFormState, titleText } from './editorAnimatedTitles'
 import { AnimatedTitleControls } from './AnimatedTitleControls'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 import { useEditorDialog } from './useEditorDialog'
@@ -60,7 +60,7 @@ export function EditorAnimatedTitleStatus() {
   const readyHere = intent.destination !== 'studio' && intent.status === 'ready' && projectId === intent.projectId && workspace === intent.workspace
   return <div role="status" className="flex shrink-0 flex-wrap items-center gap-2 border-b border-accent-blue/20 bg-accent-blue/5 px-4 py-2 text-xs">
     {intent.status === 'failed' ? <AlertCircle size={14} className="text-red-400" /> : terminal || intent.status === 'ready' ? <CheckCircle2 size={14} className="text-accent-blue" /> : <Loader2 size={14} className="animate-spin text-accent-blue" />}
-    <span className="min-w-0 flex-1 break-words"><strong>{intent.settings.text}</strong> · {intent.error || intent.message || 'Preparing title'}
+    <span className="min-w-0 flex-1 break-words"><strong>{titleText(intent.settings)}</strong> · {intent.error || intent.message || 'Preparing title'}
       {intent.status === 'ready' && !readyHere && ' · Open the original project to add it.'}</span>
     {intent.asset && <a href={intent.asset.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 rounded-lg border border-border px-2 py-1.5"><ExternalLink size={12} />Preview</a>}
     {readyHere && <button type="button" onClick={() => void insertReady()} className="rounded-lg bg-accent-blue px-2 py-1.5 text-white">Add to project</button>}
