@@ -14,6 +14,7 @@ def h3_duration_model_def(model_def: dict, inputs: dict) -> dict:
         or model_def.get("audio_only")
         or model_def.get("minimax_h3_viggle")
         or model_def.get("minimax_h3_fasth3")
+        or model_def.get("minimax_h3_pika_flex")
     ):
         return model_def
     return {

@@ -167,6 +167,25 @@ def _set_h3_generation_shifts(
     video_scheduler.set_shift(shift)
 
 
+def _set_pika_flex_schedules(video_scheduler, audio_scheduler, device) -> None:
+    """Apply Pika Flex's fixed, independently shifted six-evaluation grids."""
+
+    from .pika_flex import pika_flex_sigmas
+
+    video_scheduler.set_shift(12.0)
+    audio_scheduler.set_shift(3.0)
+    video_scheduler.set_solver("euler")
+    audio_scheduler.set_solver("euler")
+    video_scheduler.set_timesteps(
+        sigmas=pika_flex_sigmas(12.0),
+        device=device,
+    )
+    audio_scheduler.set_timesteps(
+        sigmas=pika_flex_sigmas(3.0),
+        device=device,
+    )
+
+
 VIDEO_LATENTS_MEAN = (
     0.858090341091156,
     -0.9606591463088989,
@@ -347,6 +366,21 @@ def _first_path(value):
     if isinstance(value, (list, tuple)):
         return value[0]
     return value
+
+
+def _verify_pika_flex_base_checkpoint(
+    model_filename,
+    transformer_path: str,
+    *,
+    reference: bool,
+) -> None:
+    """Pin-check Flex's sole native FP8 checkpoint before model allocation."""
+
+    if isinstance(model_filename, (list, tuple)) and len(model_filename) != 1:
+        raise ValueError("Pika H3 Flex requires one pinned base transformer checkpoint.")
+    from .pika_flex_assets import verify_pika_flex_checkpoint
+
+    verify_pika_flex_checkpoint(transformer_path, reference=reference)
 
 
 def _tensor_to_pil(image) -> Image.Image | None:
@@ -537,6 +571,7 @@ def _h3_video_scheduler_step(
     audio_only: bool,
     frozen_target_video,
     generated_video_row_count: int,
+    pika_noise_generator=None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run one H3 video update, capturing its existing x0 only for due previews."""
 
@@ -552,6 +587,27 @@ def _h3_video_scheduler_step(
             preview_due = bool(wants_preview(index))
         except Exception as error:
             _report_h3_preview_error(callback, error)
+
+    if pika_noise_generator is not None:
+        from .pika_flex import pika_flex_step
+
+        sigma = scheduler.sigmas[index]
+        next_sigma = scheduler.sigmas[index + 1]
+        preview_clean = None
+        if preview_due:
+            preview_clean = (
+                sample.float()
+                + sigma.to(device=sample.device, dtype=torch.float32)
+                * model_output.float()
+            )
+        updated = pika_flex_step(
+            sample,
+            model_output,
+            float(sigma.item()),
+            float(next_sigma.item()),
+            pika_noise_generator,
+        )
+        return updated, preview_clean
 
     if preview_due:
         prev_sample, denoised = scheduler.step(
@@ -570,6 +626,32 @@ def _h3_video_scheduler_step(
         return_dict=False,
     )[0]
     return prev_sample, None
+
+
+def _pika_flex_update_generated_audio_rows(
+    audio_target_rows: torch.Tensor,
+    audio_velocity_rows: torch.Tensor,
+    generated_audio_local_indices: torch.Tensor,
+    audio_scheduler,
+    index: int,
+    noise_generator,
+) -> None:
+    """Update only generated audio rows, leaving all conditioning rows intact."""
+
+    if generated_audio_local_indices.numel() == 0:
+        return
+    from .pika_flex import pika_flex_step
+
+    sample = audio_target_rows[generated_audio_local_indices]
+    prediction = audio_velocity_rows[generated_audio_local_indices]
+    updated = pika_flex_step(
+        sample,
+        prediction,
+        float(audio_scheduler.sigmas[index].item()),
+        float(audio_scheduler.sigmas[index + 1].item()),
+        noise_generator,
+    )
+    audio_target_rows[generated_audio_local_indices] = updated
 
 
 def _prepare_h3_clean_preview(
@@ -1489,6 +1571,7 @@ class MiniMaxH3Model:
         self.device = torch.device("cuda")
         self.dtype = dtype
         self.model_def = model_def
+        self.pika_flex = bool(model_def.get("minimax_h3_pika_flex"))
         self.video_vae_variant = str(
             model_def.get("minimax_h3_video_vae_variant") or "auto"
         )
@@ -1537,12 +1620,34 @@ class MiniMaxH3Model:
         self.sample_solver = str(
             model_def.get("minimax_h3_sampler") or "euler"
         ).strip().lower()
-        if self.fasth3:
+        if self.fasth3 or self.pika_flex:
             self.sample_solver = "euler"
+        if self.pika_flex and (
+            self.fasth3
+            or self.vdn
+            or self._fused_turbo
+            or self.ptd_refasymopd
+            or self.singularity
+            or self.dasiwa
+            or self._baked_turbo
+            or self.audio_only
+            or self.viggle
+            or self.veda
+        ):
+            raise ValueError(
+                "Pika H3 Flex requires its native single-adapter H3 recipe and "
+                "cannot be combined with another H3 variant."
+            )
 
         transformer_path = _first_path(model_filename)
         if not transformer_path:
             raise FileNotFoundError("MiniMax H3 transformer checkpoint is missing.")
+        if self.pika_flex:
+            _verify_pika_flex_base_checkpoint(
+                model_filename,
+                transformer_path,
+                reference=self.omni_reference,
+            )
         if not text_encoder_filename and not self.viggle:
             raise FileNotFoundError("MiniMax H3 Qwen3-VL conditioner checkpoint is missing.")
 
@@ -1668,6 +1773,20 @@ class MiniMaxH3Model:
         # A retained model can be reused across jobs. Always restore its
         # ordinary heads before inspecting the next job's adapter selection.
         self.release_special_loras()
+        if getattr(self, "pika_flex", False):
+            from .pika_flex_assets import verify_pika_flex_loras
+
+            verify_pika_flex_loras(
+                loras_selected,
+                reference=self.omni_reference,
+            )
+            self._turbo_lora_paths = ()
+            self._turbo_lora_active = False
+            self._pdd_lora_active = False
+            self._pdd_lora_path = None
+            self._pdd_lora_strength = 1.0
+            self._ptd_lora_paths = ()
+            return
         if getattr(self, "fasth3", False) and loras_selected:
             raise ValueError("FastH3 V2 does not support additional LoRAs.")
         from .ptd import is_ptd_refasymopd_adapter, ordered_ptd_adapters
@@ -2428,6 +2547,88 @@ class MiniMaxH3Model:
             self._interrupt = False
         if not isinstance(input_prompt, str):
             raise ValueError("MiniMax H3 accepts one text prompt per generation.")
+        if getattr(self, "pika_flex", False):
+            from .pika_flex import validate_pika_flex_request
+
+            pika_request = {
+                key: value
+                for key, value in _kwargs.items()
+                if key != "loras_selected"
+            }
+            def has_requested_shift(value) -> bool:
+                return value is not None and not (
+                    isinstance(value, str) and not value.strip()
+                )
+
+            for shift_key in ("flow_shift", "shift"):
+                if has_requested_shift(_kwargs.get(shift_key)):
+                    validate_pika_flex_request(
+                        {"flow_shift": _kwargs[shift_key]}
+                    )
+            if has_requested_shift(_kwargs.get("flow_shift")):
+                pika_request["flow_shift"] = _kwargs["flow_shift"]
+            elif has_requested_shift(_kwargs.get("shift")):
+                pika_request["flow_shift"] = _kwargs["shift"]
+            else:
+                pika_request.pop("flow_shift", None)
+            pika_request.pop("shift", None)
+            pika_request.update(
+                {
+                    "sampling_steps": sampling_steps,
+                    "guidance_scale": _kwargs.get("guidance_scale"),
+                    "audio_flow_shift": (
+                        _kwargs.get("audio_flow_shift")
+                        if has_requested_shift(_kwargs.get("audio_flow_shift"))
+                        else None
+                    ),
+                    "guidance_phases": _kwargs.get(
+                        "guidance_phases",
+                        _kwargs.get("guide_phases"),
+                    ),
+                    "denoising_strength": denoising_strength,
+                    "masking_strength": masking_strength,
+                    "image_start": image_start,
+                    "image_end": image_end,
+                    "input_frames": input_frames,
+                    "input_ref_images": input_ref_images,
+                    "input_masks": input_masks,
+                    "input_video": input_video,
+                    "input_waveform": input_waveform,
+                    "audio_guide": audio_guide,
+                    "audio_guide2": audio_guide2,
+                    "minimax_h3_references": minimax_h3_references,
+                    "prefix_frames_count": prefix_frames_count,
+                    "window_start_frame_no": window_start_frame_no,
+                    "frames_to_inject": frames_to_inject,
+                    "video_prompt_type": video_prompt_type,
+                    "custom_settings": custom_settings,
+                    "face_refinement": _face_refinement,
+                }
+            )
+            if audio_prompt_type:
+                raise ValueError(
+                    "Pika H3 Flex does not support source-audio prompt modes; "
+                    "use ordered audio references in References."
+                )
+            if outpainting_dims is not None:
+                raise ValueError("Pika H3 Flex does not support masks or outpainting.")
+            if (
+                _h3_two_pass_internal
+                or _h3_capture_latents
+                or _h3_initial_video_latents is not None
+                or _h3_initial_audio_latents is not None
+                or _h3_freeze_audio
+                or _h3_phase2_noise is not None
+                or _h3_phase2_accelerator_strength is not None
+            ):
+                raise ValueError(
+                    "Pika H3 Flex does not support H3 Two-Pass or latent continuation."
+                )
+            validate_pika_flex_request(
+                pika_request,
+                allow_frames=not self.omni_reference,
+                allow_references=self.omni_reference,
+            )
         from .two_pass import (
             H3_TWO_PASS_ENABLED,
             build_two_pass_generate_request,
@@ -2833,7 +3034,9 @@ class MiniMaxH3Model:
             )
 
         request_seed = int(torch.seed() if seed is None else seed)
-        generator = torch.Generator(device=self.device).manual_seed(request_seed)
+        generator = torch.Generator(device=self.device).manual_seed(
+            request_seed + 7919 if self.pika_flex else request_seed
+        )
         num_latent_frames = video_latent_num_frames(target_frame_num)
         latent_height = height // self.vae.spatial_compression_ratio
         latent_width = width // self.vae.spatial_compression_ratio
@@ -3283,6 +3486,12 @@ class MiniMaxH3Model:
         if self._interrupt:
             return None
 
+        if self.pika_flex:
+            # Reference and visual-anchor augmentation use S+7919; target
+            # initial video/audio noise keeps the native stream at seed S.
+            generator = torch.Generator(device=self.device).manual_seed(
+                request_seed
+            )
         if _h3_initial_video_latents is not None:
             initial_video_latents = torch.as_tensor(_h3_initial_video_latents)
             expected_shape = (
@@ -3371,6 +3580,7 @@ class MiniMaxH3Model:
         # recipe or a model-enabled control may override the model default.
         fixed_schedule = bool(
             self.viggle
+            or self.pika_flex
             or self._fused_turbo
             or self.fasth3
             or self.vdn
@@ -3435,6 +3645,21 @@ class MiniMaxH3Model:
                 self.scheduler.set_timesteps(sigmas=fasth3_sigmas(10.0), device=self.device)
                 self.audio_scheduler.set_timesteps(sigmas=fasth3_sigmas(3.0), device=self.device)
                 print("[FastH3] V2 T2AV: 8 DMD forwards, Euler, shifts 10/3; required VSA-H3 80%, tiles 4×4×4; learned compression gates active.")
+        pika_noise_generator = None
+        if self.pika_flex:
+            _set_pika_flex_schedules(
+                self.scheduler,
+                self.audio_scheduler,
+                self.device,
+            )
+            pika_noise_generator = torch.Generator(
+                device=self.device
+            ).manual_seed(request_seed + 1)
+            print(
+                "[Pika H3 Flex] Experimental Maestro native packed sampler: "
+                "six evaluations, clean prediction with fresh target noise, "
+                "video/audio shifts 12/3, adapter strength 1.0."
+            )
         if _face_refinement is not None:
             from postprocessing.h3_face_refiner.runtime import refinement_sigmas
             if not self.omni_reference or self.audio_only or self._pdd_lora_active or input_masks is not None:
@@ -3593,6 +3818,7 @@ class MiniMaxH3Model:
             if cache_config is not None
             and getattr(cache_config, "cache_type", "") == "first_block"
             and not getattr(self, "fasth3", False)
+            and not self.pika_flex
             else None
         )
         if first_block_cache is not None:
@@ -3740,6 +3966,7 @@ class MiniMaxH3Model:
                             audio_only=self.audio_only,
                             frozen_target_video=frozen_target_video,
                             generated_video_row_count=generated_video_row_count,
+                            pika_noise_generator=pika_noise_generator,
                         )
                         video_rows[video_start:video_stop] = updated_video_rows
                         del updated_video_rows
@@ -3769,7 +3996,16 @@ class MiniMaxH3Model:
                         audio_velocity_target = audio_velocity[
                             0, layout.num_condition_audio_rows :
                         ]
-                        if res_multistep:
+                        if pika_noise_generator is not None:
+                            _pika_flex_update_generated_audio_rows(
+                                audio_target,
+                                audio_velocity_target,
+                                generated_audio_local_indices,
+                                self.audio_scheduler,
+                                index,
+                                pika_noise_generator,
+                            )
+                        elif res_multistep:
                             audio_sample = audio_target[
                                 generated_audio_local_indices
                             ]

@@ -1,0 +1,19 @@
+Pika H3 Flex adapter provenance
+
+Upstream repository: https://huggingface.co/Pika-Labs/Pika-H3-Flex/tree/0ddf55ad7067ca1e76812253bd7b4600df87f759
+Pinned revision: 0ddf55ad7067ca1e76812253bd7b4600df87f759
+
+Official Comfy BF16 adapters used by the experimental Maestro catalogue:
+- comfy/loras/pika_h3_flex_fl2va_comfy_bf16.safetensors
+- comfy/loras/pika_h3_flex_ref2va_comfy_bf16.safetensors
+
+Retain Pika Labs and MiniMax attribution when redistributing model weights.
+The MiniMax H3 base weights are governed by the MiniMax H3 Community License:
+https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE
+Review the pinned Pika repository for the applicable terms for its adapter
+weights. This notice records provenance and does not grant additional rights.
+
+Pika's upstream inference code is Apache-2.0 under its own license terms. That
+license does not apply to or relicense Maestro. Maestro is distributed under
+the WanGP Non-Commercial Evaluation License 1.1; see the repository LICENSE
+notice and app/LICENSE.txt for the full terms.

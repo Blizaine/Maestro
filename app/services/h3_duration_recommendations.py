@@ -45,6 +45,7 @@ def h3_duration_recommendations_enabled(model_def: Mapping[str, Any] | None) -> 
         "minimax_h3_dasiwa",
         "minimax_h3_baked_turbo",
         "minimax_h3_fasth3",
+        "minimax_h3_pika_flex",
         "vdn",
     )
     if any(bool(model_def.get(flag)) for flag in excluded_flags):

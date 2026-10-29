@@ -2699,6 +2699,14 @@ class family_handler:
             else:
                 from models.minimax_h3.fasth3 import fasth3_capabilities
             result.update(fasth3_capabilities())
+        if (model_def or {}).get("minimax_h3_pika_flex"):
+            if base_model_type not in {_MODEL_TYPE, _REF2VA_MODEL_TYPE} or any(
+                (fused_turbo, singularity, dasiwa, vdn, bool(import_profile))
+            ):
+                raise ValueError("Pika H3 Flex requires its separate Frames or References model.")
+            from models.minimax_h3.pika_flex_assets import pika_flex_capabilities
+
+            result.update(pika_flex_capabilities(reference=omni_reference))
         return result
 
     @staticmethod
@@ -2801,6 +2809,7 @@ class family_handler:
             return resolved
 
         forbidden = (
+            "minimax_h3_pika_flex",
             "minimax_h3_ptd_refasymopd",
             "minimax_h3_fused_turbo",
             "minimax_h3_fasth3",
@@ -3130,6 +3139,10 @@ class family_handler:
                                 "video_length": 124, "sliding_window_size": 124,
                                 "multi_prompts_gen_type": 2,
                                 "minimax_h3_multi_window": False, "minimax_h3_reference_sequence": False})
+        if (model_def or {}).get("minimax_h3_pika_flex"):
+            from models.minimax_h3.pika_flex_assets import pika_flex_defaults
+
+            ui_defaults.update(pika_flex_defaults(reference=base_model_type == _REF2VA_MODEL_TYPE))
         import_profile = (model_def or {}).get("minimax_h3_import_profile")
         if import_profile:
             ui_defaults.update({"num_inference_steps": import_profile["default_steps"],
@@ -3253,9 +3266,15 @@ class family_handler:
         )
         ui_defaults["sliding_window_discard_last_frames"] = 0
         ui_defaults["resolution"] = _normalize_h3_resolution(
-            ui_defaults.get("resolution", "864x480"), preserve_canvas=outpainting,
+            ui_defaults.get("resolution", "864x480"),
+            preserve_canvas=outpainting or bool((model_def or {}).get("minimax_h3_pika_flex")),
         )
         ui_defaults["guidance_scale"] = 1.0
+        if (model_def or {}).get("minimax_h3_pika_flex"):
+            from models.minimax_h3.pika_flex_assets import pika_flex_defaults
+
+            ui_defaults.update(pika_flex_defaults(reference=omni_reference))
+            ui_defaults["sliding_window_size"] = ui_defaults["video_length"]
         if (model_def or {}).get("minimax_h3_fasth3"):
             ui_defaults.update({"num_inference_steps": 8, "flow_shift": 12.0 if (model_def or {}).get("minimax_h3_fasth3_omniref") else 10.0,
                                 "audio_flow_shift": 3.0, "override_attention": "sdpa",
@@ -3362,6 +3381,31 @@ class family_handler:
     @staticmethod
     def validate_generative_settings(base_model_type, model_def, inputs):
         """Enforce H3's single-pass and continuation geometry server-side."""
+        if (model_def or {}).get("minimax_h3_pika_flex"):
+            from models.minimax_h3.pika_flex import validate_pika_flex_request
+            from models.minimax_h3.pika_flex_assets import pika_flex_capabilities
+
+            reference = base_model_type == _REF2VA_MODEL_TYPE
+            try:
+                validate_pika_flex_request(
+                    inputs, allow_frames=not reference, allow_references=reference,
+                )
+                capabilities = pika_flex_capabilities(reference=reference)
+                allowed = {
+                    value for preset in capabilities["resolution_presets"].values()
+                    for value in preset["values"].values()
+                }
+                if inputs.get("resolution") not in allowed:
+                    raise ValueError("Pika H3 Flex requires one of its published 480p or 768p canvas sizes.")
+                frames = int(inputs.get("video_length", 124))
+                if not 124 <= frames <= 362 or (frames - 5) % 17:
+                    raise ValueError("Pika H3 Flex requires 124–362 frames on the 17n+5 grid at 24 fps.")
+                if float(inputs.get("fps", 24)) != 24:
+                    raise ValueError("Pika H3 Flex requires 24 fps.")
+                if inputs.get("minimax_h3_extended_duration") is True:
+                    raise ValueError("Pika H3 Flex does not support extended duration.")
+            except (ValueError, TypeError) as error:
+                return str(error)
         if (model_def or {}).get("minimax_h3_fasth3"):
             if (model_def or {}).get("minimax_h3_fasth3_omniref"):
                 from models.minimax_h3.fasth3_omniref import validate_request as validate_fasth3_request
