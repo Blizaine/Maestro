@@ -9,6 +9,7 @@ import {
   titleDurationChoices,
   TITLE_EFFECT_LABELS,
   TITLE_SEQUENCE_DURATIONS,
+  MAX_TITLE_BRIEF_CHARS,
 } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 import { AnimatedTitleAdvancedControls } from './AnimatedTitleAdvancedControls'
@@ -120,21 +121,21 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
       <span className="block">Describe your title animation</span>
       <div data-testid={destination === 'studio' ? 'title-prompt-field' : undefined}
         className={destination === 'studio' ? 'relative min-w-0' : undefined}>
-        <textarea aria-label="Describe your title animation" value={brief} maxLength={4000} rows={5} disabled={busy}
+        <textarea aria-label="Describe your title animation" value={brief} maxLength={MAX_TITLE_BRIEF_CHARS} rows={5} disabled={busy}
           onChange={event => changeBrief(event.target.value)}
           placeholder="A silver title spelling ‘ORION’ forms from fine particles, holds clearly, then dissolves into a soft blue glow."
           className={destination === 'studio' ? `${FIELD} min-h-[120px] pb-12 pr-20` : FIELD} />
         {destination === 'studio' && enhancement && <div role="group" aria-label="Title prompt tools"
           className="absolute bottom-2 right-2 flex items-center rounded-lg border border-border bg-bg-secondary/95 shadow-sm">
           <TitleEnhancementControls enabled={enhancement.enabled} defaultEnabled={enhancement.defaultEnabled}
-            busy={busy} canEnhance={!!brief.trim() && brief.length <= 4000}
+            busy={busy} canEnhance={!!brief.trim() && brief.length <= MAX_TITLE_BRIEF_CHARS}
             onToggle={enhancement.onToggle} onDefaultChange={enhancement.onDefaultChange}
             onEnhanceNow={() => { void composer.enhance() }} />
         </div>}
       </div>
       <span className="block text-[11px] leading-relaxed text-text-muted">
         Write the words exactly as they should appear, including spelling, punctuation and language. The plan shows the detected wording, order and timing for review.
-        <span className="block">{brief.length}/4,000 characters</span>
+        <span className="block">{brief.length}/{MAX_TITLE_BRIEF_CHARS.toLocaleString('en-US')} characters</span>
       </span>
     </div>
 
@@ -178,9 +179,9 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
 
     {destination === 'editor' && <div className="flex min-h-8 flex-wrap items-center gap-2">
       {enhancement ? <TitleEnhancementControls enabled={enhancement.enabled} defaultEnabled={enhancement.defaultEnabled}
-        busy={busy} canEnhance={!!brief.trim() && brief.length <= 4000}
+        busy={busy} canEnhance={!!brief.trim() && brief.length <= MAX_TITLE_BRIEF_CHARS}
         onToggle={enhancement.onToggle} onDefaultChange={enhancement.onDefaultChange}
-        onEnhanceNow={() => { void composer.enhance() }} /> : <button type="button" disabled={busy || !brief.trim() || brief.length > 4000} onClick={() => void composer.enhance()}
+        onEnhanceNow={() => { void composer.enhance() }} /> : <button type="button" disabled={busy || !brief.trim() || brief.length > MAX_TITLE_BRIEF_CHARS} onClick={() => void composer.enhance()}
         className="flex min-h-10 items-center gap-2 rounded-lg border border-border px-3 py-2 text-xs font-semibold text-text-primary hover:border-accent-blue/60 disabled:opacity-40">
         {composer.busy ? <span aria-hidden="true" className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-r-transparent" /> : null}
         {composer.busy ? 'Enhancing…' : 'Enhance with AI'}

@@ -2,6 +2,10 @@ import type { EditorAsset, EditorProject, ModelDef, ModelOptions } from '../type
 import { DEFAULT_EDITOR_KEYING } from './editorKeying'
 
 export const TITLE_MODEL = 'minimax_h3_fused_turbo'
+export const MAX_TITLE_BRIEF_CHARS = 16_000
+// JSON can escape one input character into six characters in a saved plan key.
+export const MAX_TITLE_PLAN_KEY_CHARS = MAX_TITLE_BRIEF_CHARS * 6 + 8_000
+export const TITLE_BRIEF_LENGTH_ERROR = `Describe your title animation in 1–${MAX_TITLE_BRIEF_CHARS.toLocaleString('en-US')} characters.`
 /** randomUUID is secure-context-only; LAN HTTP still provides getRandomValues. */
 export function titleSubmissionId(): string {
   const crypto = globalThis.crypto
@@ -266,7 +270,7 @@ export function titleComposerValidation(settings: AnimatedTitleSettings, canvas:
     if (settings.manualPlanEdited) return 'Choose Use manual title plan to keep your Advanced edits, or Enhance to create a new AI plan.'
     titleDimensions(settings, canvas); titleFrames(titleSeconds(settings), settings); titleBackground(settings)
     if (settings.brief !== undefined && !titlePlanIsCurrent(settings)) {
-      if (!settings.brief.trim() || settings.brief.length > 4000) return 'Describe your title animation in 1–4,000 characters.'
+      if (!settings.brief.trim() || settings.brief.length > MAX_TITLE_BRIEF_CHARS) return TITLE_BRIEF_LENGTH_ERROR
       return ''
     }
     return titleFormState(settings, canvas).validation
@@ -540,7 +544,7 @@ export function animatedTitlePrompt(settings: AnimatedTitleSettings): string {
   if (settings.mode !== undefined && settings.mode !== 'single' && settings.mode !== 'sequence') throw new Error('Choose a supported title layout.')
   if (settings.directDescription) {
     const brief = titleBrief(settings).trim()
-    if (!brief || brief.length > 4000) throw new Error('Describe your title animation in 1–4,000 characters.')
+    if (!brief || brief.length > MAX_TITLE_BRIEF_CHARS) throw new Error(TITLE_BRIEF_LENGTH_ERROR)
     const preset = settings.stylePreset ?? 'custom'
     if (preset !== 'custom' && !Object.hasOwn(TITLE_EFFECTS, preset)) throw new Error('Choose a supported title style.')
     return [

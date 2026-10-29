@@ -306,7 +306,10 @@ async function main() {
       assert.ok(mobile.rootWidth <= mobile.viewportWidth + 1, `Composer has no mobile horizontal overflow: ${JSON.stringify(mobile)}`);
     }
 
-    const directBrief = 'Keep the exact wording “MAESTRO” in silver lettering, then dissolve into a blue glow.';
+    const directBrief = 'Keep the exact wording “MAESTRO” in silver lettering, then dissolve into a blue glow.\n'
+      + 'Keep the backdrop flat and the lettering legible throughout its changing layout.\n'.repeat(100);
+    assert.ok(directBrief.length > 5000);
+    assert.equal(await page.getByLabel('Describe your title animation').getAttribute('maxlength'), '16000');
     const plannerRequestsBeforeDirect = planRequests.length;
     await page.getByLabel('Describe your title animation').fill(directBrief);
     await page.evaluate(() => window.titleHarness.setEnhanceOnGenerate(false));

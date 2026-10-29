@@ -3,7 +3,7 @@ import { Globe, Sparkles, X } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { useStore } from '../stores/useStore'
 import { AnimatedTitleControls } from './AnimatedTitleControls'
-import { alignTitleSequence, DEFAULT_TITLE_SETTINGS, TITLE_EFFECTS, titleBrief, titleComposerValidation, titleEnhancementEnabled, titleFps, titleFrames, titleSeconds, titleModelType, titleModelProfile, normalizeTitleModelProfile, titleAdvancedParams, titleDimensions } from './editorAnimatedTitles'
+import { alignTitleSequence, DEFAULT_TITLE_SETTINGS, TITLE_EFFECTS, titleBrief, titleComposerValidation, titleEnhancementEnabled, titleFps, titleFrames, titleSeconds, titleModelType, titleModelProfile, normalizeTitleModelProfile, titleAdvancedParams, titleDimensions, MAX_TITLE_BRIEF_CHARS, MAX_TITLE_PLAN_KEY_CHARS } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 import { useEditorTitleStore } from './useEditorTitleStore'
 import { useTitleComposer } from './useTitleComposer'
@@ -21,9 +21,9 @@ function normalizeDraft(raw: unknown): AnimatedTitleSettings {
     const value = raw as Partial<AnimatedTitleSettings>
     const normalized: AnimatedTitleSettings = {
       ...defaults,
-      ...(typeof value.brief === 'string' ? { brief: value.brief.slice(0, 4000) } : {}),
+      ...(typeof value.brief === 'string' ? { brief: value.brief.slice(0, MAX_TITLE_BRIEF_CHARS) } : {}),
       stylePreset: typeof value.stylePreset === 'string' && (value.stylePreset === 'custom' || Object.hasOwn(TITLE_EFFECTS, value.stylePreset)) ? value.stylePreset : 'custom',
-      ...(typeof value.plannedKey === 'string' ? { plannedKey: value.plannedKey.slice(0, 9000) } : {}),
+      ...(typeof value.plannedKey === 'string' ? { plannedKey: value.plannedKey.slice(0, MAX_TITLE_PLAN_KEY_CHARS) } : {}),
       ...(Array.isArray(value.plannerWarnings) ? { plannerWarnings: value.plannerWarnings.filter((item): item is string => typeof item === 'string').slice(0, 12).map(item => item.slice(0, 1000)) } : {}),
       ...(typeof value.rawTitleDraft === 'string' ? { rawTitleDraft: value.rawTitleDraft.slice(0, 64000) } : {}),
       ...(typeof value.titleDraftHistoryId === 'string' && /^[a-f0-9-]+$/.test(value.titleDraftHistoryId) ? { titleDraftHistoryId: value.titleDraftHistoryId } : {}),

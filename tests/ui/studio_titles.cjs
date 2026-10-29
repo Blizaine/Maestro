@@ -124,11 +124,11 @@ async function bundleUi() {
         import {useEditorTitleStore} from './src/editor/useEditorTitleStore';
         import {Sidebar} from './src/components/Sidebar/Sidebar';
         import {GlobalQueuePopover} from './src/components/GlobalQueuePopover';
-        import {titleDimensions, insertAnimatedTitle, titlePlanningKey} from './src/editor/editorAnimatedTitles';
+        import {titleDimensions, insertAnimatedTitle, titlePlanningKey, titlePlanIsCurrent} from './src/editor/editorAnimatedTitles';
         window.store = useStore;
         window.editorStore = useEditorStore;
         window.titleStore = useEditorTitleStore;
-        window.titleHelpers = {titleDimensions, insertAnimatedTitle, titlePlanningKey};
+        window.titleHelpers = {titleDimensions, insertAnimatedTitle, titlePlanningKey, titlePlanIsCurrent};
         window.baseParams = {...useStore.getState().params};
         window.seedScenario = (scenario = {}) => {
           const model = scenario.model || '${TITLE_MODEL}';
@@ -1447,6 +1447,28 @@ async function uploadedPixel(page, upload) {
     assert.deepEqual(editorKeying, [{background: 'blue', enabled: true, color: '#0000ff'},
       {background: 'white', enabled: false}, {background: 'custom', enabled: false}],
       'Blue keys with blue; white and custom title backgrounds remain opaque in the Editor.');
+    const longStudioBrief = 'Show “ORBIT” on black, then transform its lettering.\n'
+      + 'Keep the lettering flat, readable and inside the frame throughout the animation.\n'.repeat(160);
+    assert.ok(longStudioBrief.length > 9000 && longStudioBrief.length < 16000);
+    assert.equal(await page.getByLabel('Describe your title animation').getAttribute('maxlength'), '16000');
+    await page.getByLabel('Describe your title animation').fill(longStudioBrief);
+    await page.evaluate(() => window.store.setState({enhanceOnGeneration: false, enhanceOnGenerationDefault: false}));
+    const beforeLongBriefRequests = generationRequests.length;
+    nextSubmissionMode = {status: 'completed', loseResponse: false};
+    await page.getByRole('button', {name: 'Generate', exact: true}).click();
+    await waitForNode(() => generationRequests.length === beforeLongBriefRequests + 1, 'long title generation POST');
+    await waitFor(page, brief => window.titleStore.getState().intent?.status === 'completed'
+      && window.titleStore.getState().intent?.settings.brief === brief, 'complete long title description', 10000, longStudioBrief);
+    assert.ok(generationRequests.at(-1).prompt.includes(`User description:\n${longStudioBrief}`));
+    assert.equal(generationRequests.at(-1)._studio_title_settings.brief, longStudioBrief);
+    await chooseWorkflow(page, 'Frames');
+    await chooseWorkflow(page, 'Titles');
+    assert.equal(await page.getByLabel('Describe your title animation').inputValue(), longStudioBrief,
+      'A long title description survives leaving and reopening Titles without truncation.');
+    await waitFor(page, () => {
+      const saved = JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1'));
+      return saved.plannedKey.length > 9000 && window.titleHelpers.titlePlanIsCurrent(saved);
+    }, 'long title plan signature survives draft normalization');
     await chooseWorkflow(page, 'Frames');
     assert.deepEqual(await stateInputs(page), normalBeforeModel,
       'Leaving Titles restores the ordinary model, prompt, references, voices and Advanced settings.');

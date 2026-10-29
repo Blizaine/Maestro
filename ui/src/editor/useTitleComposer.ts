@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { planAnimatedTitle } from '../api/client'
-import { animatedTitlePrompt, applyTitleCreativePlan, directTitleDescription, titleBackground, titleBrief, titleFps, titleFrames, titlePlanIsCurrent, titlePlanningKey, titleSeconds, TITLE_EFFECTS } from './editorAnimatedTitles'
+import { animatedTitlePrompt, applyTitleCreativePlan, directTitleDescription, titleBackground, titleBrief, titleFps, titleFrames, titlePlanIsCurrent, titlePlanningKey, titleSeconds, TITLE_EFFECTS, MAX_TITLE_BRIEF_CHARS, TITLE_BRIEF_LENGTH_ERROR } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 
 function keyOf(settings: AnimatedTitleSettings) {
@@ -25,7 +25,7 @@ export function useTitleComposer(settings: AnimatedTitleSettings, patch: (value:
     const stillHere = () => mounted.current && latest.current.key === capturedKey && latest.current.scope === capturedScope
     try {
       const brief = titleBrief(captured).trim()
-      if (!brief || brief.length > 4000) throw new Error('Describe your title animation in 1–4,000 characters.')
+      if (!brief || brief.length > MAX_TITLE_BRIEF_CHARS) throw new Error(TITLE_BRIEF_LENGTH_ERROR)
       const preset = captured.stylePreset ?? 'custom'
       const resolvedBackground = titleBackground(captured)
       const model = captured.model

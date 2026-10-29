@@ -38,6 +38,11 @@ For example: `Show “CREATE”, then “EXPLORE”, then “INSPIRE”, one at 
 lettering on black. Each word assembles from dust and clears before the next appears.`
 Put exact on-screen text in quotes. Choose the actual background with its control.
 
+Descriptions accept up to 16,000 characters in Studio and the Editor. Turn
+enhancement off to pass a detailed, ready-written motion brief through directly.
+The AI planner produces a compact plan of up to six phrases, so it can simplify
+more elaborate word lists or layouts. Review its plan before rendering.
+
 **Enhance now** asks the configured prompt-enhancement writer to prepare a plan
 without rendering a video. In the Studio sidebar, its options menu also offers
 **Enhance on generation** and **Use by default**, using the same saved Studio

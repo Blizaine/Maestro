@@ -329,12 +329,12 @@ class TestAnimatedTitlePlanner(unittest.TestCase):
         self.assertIn("Native H3 duration: 141 frames (5.875 seconds)", prompt)
 
     def test_request_limits_and_background_are_validated(self):
-        validate_title_request("x" * 4000, "y" * 1600, 345, "chroma")
+        validate_title_request("x" * 16000, "y" * 1600, 345, "chroma")
         for background in ("chroma", "black", "blue", "white", "#aBc123"):
             validate_title_request("brief", "", 124, background)
 
         for args in (
-            ("x" * 4001, "", 124, "black"),
+            ("x" * 16001, "", 124, "black"),
             ("brief", "y" * 1601, 124, "black"),
             ("brief", "", 124, "green"),
             ("brief", "", 124, "#fff"),
@@ -343,6 +343,23 @@ class TestAnimatedTitlePlanner(unittest.TestCase):
         ):
             with self.subTest(args=args), self.assertRaises(ValueError):
                 validate_title_request(*args)
+
+    def test_long_motion_brief_reaches_writer_without_truncation(self):
+        brief = 'Show “ORBIT” as flat white lettering.\n' + (
+            "Scale and rearrange the same lettering over the black background.\n" * 100
+        )
+        self.assertGreater(len(brief), 5000)
+        calls = []
+        plan_animated_title(
+            brief, "", 243, "black",
+            lambda **kwargs: calls.append(kwargs) or json.dumps({
+                "phrases": [{"text": "ORBIT", "animation": "Scale and rearrange.", "weight": 1}],
+                "look": "Flat white lettering.", "direction": "Keep the background black.", "sequence": False,
+            }),
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIn(f"<brief>\n{brief}\n</brief>", calls[0]["prompt"])
+        self.assertEqual(calls[0]["max_new_tokens"], MAX_DRAFT_TOKENS)
 
 
 class TestAnimatedTitleApiWiring(unittest.TestCase):
