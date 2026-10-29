@@ -674,7 +674,7 @@ async function uploadedPixel(page, upload) {
       'turning off the shared title enhancement default');
     await waitForNode(() => savedEnhancementDefault === false, 'server-persisted disabled title enhancement default');
     await titleEnhancementMenu.getByRole('menuitemcheckbox', {name: 'Enhance on generation'}).click();
-    const oneShotEnhancementRevision = await page.evaluate(() => window.store.getState().enhanceOnGenerationRevision);
+    let oneShotEnhancementRevision = await page.evaluate(() => window.store.getState().enhanceOnGenerationRevision);
     assert.equal(await page.evaluate(() => window.store.getState().enhanceOnGeneration), true,
       'A one-shot title enhancement can override the saved default.');
 
@@ -702,6 +702,131 @@ async function uploadedPixel(page, upload) {
       'edited gallery title draft after a Frames round trip', 10000, 'Edited loaded gallery title');
     assert.equal(await page.evaluate(() => window.store.getState().params._studio_title_settings), undefined,
       'Reopening Titles keeps the edited draft without restoring the old one-shot override.');
+
+    await waitFor(page, () => JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1') || 'null')?.titleReviewRequired === true,
+      'reviewed Studio title draft is saved separately');
+    const beforeStudioClear = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1') || 'null'));
+    const plannerRequestsBeforeStudioClear = titlePlanRequests.length;
+    await page.screenshot({path: path.join(SCREENSHOTS, 'studio-title-clear-plan-review.png'), fullPage: true});
+    await page.getByRole('button', {name: 'Clear plan', exact: true}).click();
+    await waitFor(page, () => {
+      const saved = JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1') || 'null');
+      return saved && !saved.plannedKey && saved.titleReviewRequired !== true
+        && !saved.rawTitleDraft && !saved.titleDraftHistoryId;
+    }, 'cleared Studio plan saved to the separate title draft');
+    const clearedStudioDraft = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1') || 'null'));
+    assert.equal(clearedStudioDraft.brief, beforeStudioClear.brief,
+      'Clear plan preserves the Studio brief.');
+    for (const field of ['stylePreset', 'background', 'backgroundColor', 'model', 'seconds', 'aspect', 'resolution', 'generationParams']) {
+      assert.deepEqual(clearedStudioDraft[field], beforeStudioClear[field],
+        `Clear plan preserves the Studio ${field} setting.`);
+    }
+    assert.equal(clearedStudioDraft.text, '');
+    assert.equal(clearedStudioDraft.look, '');
+    assert.equal(clearedStudioDraft.direction, '');
+    assert.deepEqual(clearedStudioDraft.phrases || [], []);
+    assert.equal(clearedStudioDraft.mode, 'single');
+    assert.equal(clearedStudioDraft.titleReviewRequired, false);
+    assert.equal(clearedStudioDraft.plannedKey, undefined);
+    assert.deepEqual(clearedStudioDraft.plannerWarnings || [], []);
+    assert.equal(clearedStudioDraft.rawTitleDraft, undefined);
+    assert.equal(clearedStudioDraft.titleDraftHistoryId, undefined);
+    assert.equal(await page.getByTestId('title-plan-review').count(), 0);
+    assert.equal(await page.getByText('Raw planner draft diagnostics', {exact: true}).count(), 0);
+    assert.equal(titlePlanRequests.length, plannerRequestsBeforeStudioClear,
+      'Clear plan makes no title planner request.');
+    assert.equal(generationRequests.length, 0, 'Clear plan does not submit or cancel a title job.');
+    assert.equal(await page.evaluate(() => window.titleStore.getState().intent), null,
+      'Clearing a plan leaves the Studio title job and receipt state untouched.');
+    assert.equal(await page.evaluate(() => window.store.getState().enhanceOnGeneration), false,
+      'Clear plan turns off the one-shot enhancement choice.');
+    assert.equal(await page.evaluate(() => window.store.getState().enhanceOnGenerationDefault), false,
+      'Clear plan leaves the saved enhancement default unchanged.');
+    oneShotEnhancementRevision = await page.evaluate(() => window.store.getState().enhanceOnGenerationRevision);
+
+    const studioBrief = page.getByLabel('Describe your title animation');
+    await studioBrief.fill('');
+    await waitFor(page, () => JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1') || 'null')?.brief === '',
+      'empty Studio brief reaches persistent title storage');
+    const emptyStudioDraft = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1') || 'null'));
+    assert.equal(emptyStudioDraft.text, '');
+    assert.equal(emptyStudioDraft.look, '');
+    assert.equal(emptyStudioDraft.direction, '');
+    assert.deepEqual(emptyStudioDraft.phrases || [], []);
+    assert.equal(emptyStudioDraft.titleReviewRequired, false);
+    assert.equal(emptyStudioDraft.plannedKey, undefined);
+    assert.deepEqual(emptyStudioDraft.plannerWarnings || [], []);
+    assert.equal(emptyStudioDraft.rawTitleDraft, undefined);
+    assert.equal(emptyStudioDraft.titleDraftHistoryId, undefined);
+    assert.equal(await page.getByTestId('title-plan-review').count(), 0);
+    assert.equal(await page.getByText('Raw planner draft diagnostics', {exact: true}).count(), 0);
+    const titleFooter = page.getByTestId('titles-generate-footer');
+    const needInputs = titleFooter.getByRole('button', {name: 'Need inputs', exact: true});
+    await needInputs.waitFor();
+    assert.equal(await needInputs.isDisabled(), true, 'Studio cannot generate an empty title description.');
+    const queueUnavailable = titleFooter.getByRole('button', {name: 'Add to queue unavailable', exact: true});
+    assert.equal(await queueUnavailable.isDisabled(), true, 'Studio cannot queue an empty title description.');
+    assert.equal(titlePlanRequests.length, plannerRequestsBeforeStudioClear,
+      'Deleting the Studio brief makes no planner request.');
+    assert.equal(generationRequests.length, 0, 'Deleting the Studio brief makes no generation request.');
+
+    await chooseWorkflow(page, 'Frames');
+    await chooseWorkflow(page, 'Titles');
+    await waitFor(page, () => document.querySelector('[aria-label="Describe your title animation"]')?.value === '',
+      'empty title draft after a Studio workflow round trip');
+    assert.equal(await page.evaluate(() => window.store.getState().params._studio_title_settings), undefined,
+      'A cleared title draft has no one-shot gallery settings to restore.');
+
+    await chooseWorkflow(page, 'Frames');
+    const staleModeTitleSettings = {
+      brief: 'STALE per-mode title settings', text: 'STALE', look: 'Stale look', direction: 'Stale motion',
+      mode: 'single', seconds: 8, aspect: '16:9', resolution: '480p', background: 'black',
+    };
+    await page.evaluate(settings => window.store.getState().setParam('_studio_title_settings', settings), staleModeTitleSettings);
+    assert.equal(await page.evaluate(() => window.store.getState().savedParamsPerMode.video?._studio_title_settings?.brief),
+      staleModeTitleSettings.brief, 'The regression fixture places stale title settings in the video mode snapshot.');
+    await page.evaluate(() => window.store.getState().setGenerationMode('tools'));
+    const persistedModeSettings = await page.evaluate(() => JSON.parse(localStorage.getItem('maestro_mode_settings') || 'null'));
+    assert.ok(persistedModeSettings, 'The real per-mode settings snapshot was written to localStorage.');
+    assert.equal(persistedModeSettings.savedParamsPerMode?.video?._studio_title_settings, undefined,
+      'Per-mode preference snapshots strip stale Studio title settings.');
+
+    await page.reload();
+    await mount(page, bundle, css, {workflow: 'titles', workspace: WORKSPACE});
+    await page.evaluate(async workspace => {
+      await window.store.getState().loadModels();
+      window.seedScenario({workflow: 'titles', workspace});
+    }, WORKSPACE);
+    await waitFor(page, () => document.querySelector('[aria-label="Describe your title animation"]')?.value === '',
+      'empty title draft remains empty after browser reload');
+    const reloadedTitleStorage = await page.evaluate(() => ({
+      draft: JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1') || 'null'),
+      savedMode: JSON.parse(localStorage.getItem('maestro_mode_settings') || 'null'),
+      currentTitleSettings: window.store.getState().params._studio_title_settings,
+      savedVideoTitleSettings: window.store.getState().savedParamsPerMode.video?._studio_title_settings,
+    }));
+    assert.equal(reloadedTitleStorage.draft.brief, '', 'Reload uses the real, empty title draft from localStorage.');
+    assert.equal(reloadedTitleStorage.draft.text, '');
+    assert.equal(reloadedTitleStorage.draft.rawTitleDraft, undefined);
+    assert.equal(reloadedTitleStorage.draft.titleDraftHistoryId, undefined);
+    assert.equal(reloadedTitleStorage.savedMode.savedParamsPerMode?.video?._studio_title_settings, undefined);
+    assert.equal(reloadedTitleStorage.currentTitleSettings, undefined,
+      'Reload does not let a stale per-mode title object override the empty title draft.');
+    assert.equal(reloadedTitleStorage.savedVideoTitleSettings, undefined);
+    assert.equal(await page.getByTestId('titles-generate-footer')
+      .getByRole('button', {name: 'Need inputs', exact: true}).isDisabled(), true);
+    assert.equal(titlePlanRequests.length, plannerRequestsBeforeStudioClear,
+      'Reload does not re-plan the cleared title.');
+    assert.equal(generationRequests.length, 0, 'Reload does not submit a title generation.');
+    await page.evaluate(() => window.store.getState().setEnhanceOnGeneration(true));
+    oneShotEnhancementRevision = await page.evaluate(() => window.store.getState().enhanceOnGenerationRevision);
+    await page.getByLabel('Describe your title animation').fill('Keep a fresh title description for the remaining Studio workflow checks.');
+    await waitFor(page, text => JSON.parse(localStorage.getItem('maestro-studio-title-draft-v1') || 'null')?.brief === text,
+      'fresh title description stored for subsequent workflow checks', 10000,
+      'Keep a fresh title description for the remaining Studio workflow checks.');
     await chooseWorkflow(page, 'Frames');
 
     // Two-speaker Avatar state survives detours through Titles and back to Avatar.

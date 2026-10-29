@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { planAnimatedTitle } from '../api/client'
-import { animatedTitlePrompt, applyTitleCreativePlan, directTitleDescription, titleBackground, titleBrief, titleFps, titleFrames, titlePlanIsCurrent, titlePlanningKey, titleSeconds, TITLE_EFFECTS, MAX_TITLE_BRIEF_CHARS, TITLE_BRIEF_LENGTH_ERROR } from './editorAnimatedTitles'
+import { animatedTitlePrompt, applyTitleCreativePlan, clearTitlePlan, directTitleDescription, titleBackground, titleBrief, titleFps, titleFrames, titlePlanIsCurrent, titlePlanningKey, titleSeconds, TITLE_EFFECTS, MAX_TITLE_BRIEF_CHARS, TITLE_BRIEF_LENGTH_ERROR } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 
 function keyOf(settings: AnimatedTitleSettings) {
@@ -12,6 +12,7 @@ export function useTitleComposer(settings: AnimatedTitleSettings, patch: (value:
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const inFlight = useRef(false)
+  const requestRevision = useRef(0)
   const mounted = useRef(false)
   const latest = useRef({ key: keyOf(settings), scope })
   useEffect(() => { latest.current = { key: keyOf(settings), scope } }, [settings, scope])
@@ -20,9 +21,11 @@ export function useTitleComposer(settings: AnimatedTitleSettings, patch: (value:
   const enhance = async (submit?: (value: AnimatedTitleSettings) => Promise<void>) => {
     if (inFlight.current) return
     inFlight.current = true; setBusy(true); setError(''); setMessage('')
+    const revision = ++requestRevision.current
     const captured = { ...settings, phrases: settings.phrases?.map(phrase => ({ ...phrase })) }
     const capturedKey = keyOf(captured), capturedScope = scope
-    const stillHere = () => mounted.current && latest.current.key === capturedKey && latest.current.scope === capturedScope
+    const stillHere = () => mounted.current && requestRevision.current === revision
+      && latest.current.key === capturedKey && latest.current.scope === capturedScope
     try {
       const brief = titleBrief(captured).trim()
       if (!brief || brief.length > MAX_TITLE_BRIEF_CHARS) throw new Error(TITLE_BRIEF_LENGTH_ERROR)
@@ -49,7 +52,7 @@ export function useTitleComposer(settings: AnimatedTitleSettings, patch: (value:
       else if (submit) await submit(planned)
       else setMessage('Title plan ready. Review it below or generate when you are ready.')
     } catch (reason) {
-      if (mounted.current) {
+      if (stillHere()) {
         setError(reason instanceof Error ? reason.message : 'Title planning failed. Your description was retained.')
         const historyId = (reason as { draft_history_id?: string })?.draft_history_id
         if (historyId && stillHere()) patch({ titleDraftHistoryId: historyId })
@@ -84,7 +87,12 @@ export function useTitleComposer(settings: AnimatedTitleSettings, patch: (value:
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'Check the manual title settings.') }
   }
   const clearFeedback = () => { setError(''); setMessage('') }
-  return { busy, error, message, enhance: () => enhance(), generate, acceptManual, clearFeedback }
+  const clearPlan = (brief?: string) => {
+    requestRevision.current++
+    clearFeedback()
+    patch(clearTitlePlan(settings, brief))
+  }
+  return { busy, error, message, enhance: () => enhance(), generate, acceptManual, clearFeedback, clearPlan }
 }
 
 export type TitleComposerController = ReturnType<typeof useTitleComposer>

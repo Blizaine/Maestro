@@ -197,15 +197,17 @@ async function main() {
     assert.equal(await page.getByTestId('title-plan-review').evaluate(element => element.open), false,
       'A normal generated plan stays compact until expanded.');
 
-    await brief.fill('Show ORBIT first, clear it completely, then show ARRIVE and fade it away.');
-    responseQueue.push({
+    const sequenceBrief = 'Show ORBIT first, clear it completely, then show ARRIVE and fade it away.';
+    const reviewedSequenceResponse = {
       plan: {sequence: true, phrases: [
         {text: 'ORBIT', animation: 'Trace in, hold, and clear completely.', weight: 1.25},
         {text: 'ARRIVE', animation: 'Reveal, hold, and fade out.', weight: 1.5},
       ], look: 'Clean white lettering', direction: 'Keep the camera still.'},
       warnings: ['The requested timing is approximate.'], raw_draft: '{"detected":["ORBIT","ARRIVE"]}',
       review_required: true, draft_history_id: 'def456-title-draft',
-    });
+    };
+    await brief.fill(sequenceBrief);
+    responseQueue.push(reviewedSequenceResponse);
     await page.getByRole('button', {name: 'Generate title'}).click();
     await page.waitForFunction(() => window.titleHarness.getSettings().titleReviewRequired === true);
     assert.equal(planRequests.length, 2, 'The changed description requests exactly one updated plan.');
@@ -221,9 +223,57 @@ async function main() {
     assert.match(await rawDraftDetails.locator('pre').innerText(), /detected/);
     assert.equal(await rawDraftDetails.getByRole('link', {name: 'Open saved draft history'}).getAttribute('href'),
       '/api/v1/llm/drafts/def456-title-draft');
+
+    const beforeClear = await page.evaluate(() => window.titleHarness.getSettings());
+    const plannerRequestsBeforeClear = planRequests.length;
+    await page.getByRole('button', {name: 'Clear plan', exact: true}).click();
+    await page.waitForFunction(() => {
+      const settings = window.titleHarness.getSettings();
+      return !settings.plannedKey && settings.titleReviewRequired !== true
+        && !settings.rawTitleDraft && !settings.titleDraftHistoryId;
+    });
+    const cleared = await page.evaluate(() => window.titleHarness.getSettings());
+    assert.equal(cleared.brief, sequenceBrief, 'Clear plan keeps the user-authored description.');
+    assert.equal(cleared.stylePreset, beforeClear.stylePreset);
+    assert.equal(cleared.background, beforeClear.background);
+    assert.equal(cleared.aspect, beforeClear.aspect);
+    assert.equal(cleared.resolution, beforeClear.resolution);
+    assert.equal(cleared.seconds, beforeClear.seconds);
+    assert.deepEqual(cleared.model, beforeClear.model);
+    assert.deepEqual(cleared.generationParams, beforeClear.generationParams,
+      'Clear plan preserves the selected model and Advanced settings.');
+    assert.equal(await page.getByLabel('Title clip duration').inputValue(), '158',
+      'Clear plan preserves the chosen whole-frame duration.');
+    assert.equal(cleared.text, '');
+    assert.equal(cleared.look, '');
+    assert.equal(cleared.direction, '');
+    assert.deepEqual(cleared.phrases || [], [], 'Clear plan removes all generated phrases.');
+    assert.equal(cleared.mode, 'single');
+    assert.equal(cleared.manualPlanEdited, false);
+    assert.equal(cleared.directDescription, false);
+    assert.equal(cleared.titleReviewRequired, false);
+    assert.equal(cleared.plannedKey, undefined, 'Clear plan invalidates the plan signature.');
+    assert.deepEqual(cleared.plannerWarnings || [], []);
+    assert.equal(cleared.rawTitleDraft, undefined);
+    assert.equal(cleared.titleDraftHistoryId, undefined);
+    assert.equal(await page.getByTestId('title-plan-review').count(), 0);
+    assert.equal(await page.getByLabel('Title planner warnings').count(), 0);
+    assert.equal(await page.getByText('Raw planner draft diagnostics', {exact: true}).count(), 0);
+    assert.equal(planRequests.length, plannerRequestsBeforeClear,
+      'Clear plan makes no planner request.');
+    assert.equal(await page.evaluate(() => window.titleHarness.getSubmitted().length), 1,
+      'Clear plan does not submit or cancel any title generation.');
+
+    responseQueue.push(reviewedSequenceResponse);
+    await page.getByRole('button', {name: 'Generate title'}).click();
+    await page.waitForFunction(() => window.titleHarness.getSettings().titleReviewRequired === true);
+    assert.equal(planRequests.length, plannerRequestsBeforeClear + 1,
+      'A cleared plan can be enhanced again on request.');
+    if (!await rawDraftDetails.evaluate(element => element.open)) await rawDraftDetails.locator('summary').click();
     await page.getByRole('button', {name: 'Generate reviewed plan'}).click();
     await page.waitForFunction(() => window.titleHarness.getSubmitted().length === 2);
-    assert.equal(planRequests.length, 2, 'Approving the review uses the saved plan without another planner request.');
+    assert.equal(planRequests.length, plannerRequestsBeforeClear + 1,
+      'Approving the review uses the saved plan without another planner request.');
     const sequencePlan = await page.evaluate(() => window.titleHarness.getSubmitted()[1]);
     assert.equal(sequencePlan.mode, 'sequence');
     assert.deepEqual(sequencePlan.phrases.map(phrase => phrase.text), ['ORBIT', 'ARRIVE']);
@@ -306,6 +356,30 @@ async function main() {
       assert.ok(mobile.rootWidth <= mobile.viewportWidth + 1, `Composer has no mobile horizontal overflow: ${JSON.stringify(mobile)}`);
     }
 
+    const plannerRequestsBeforeEmptyBrief = planRequests.length;
+    await brief.fill('');
+    await page.waitForFunction(() => {
+      const settings = window.titleHarness.getSettings();
+      return settings.brief === '' && !settings.plannedKey && !settings.rawTitleDraft
+        && settings.titleReviewRequired !== true;
+    });
+    const emptyBriefSettings = await page.evaluate(() => window.titleHarness.getSettings());
+    assert.equal(emptyBriefSettings.text, '');
+    assert.equal(emptyBriefSettings.look, '');
+    assert.equal(emptyBriefSettings.direction, '');
+    assert.deepEqual(emptyBriefSettings.phrases || [], []);
+    assert.deepEqual(emptyBriefSettings.plannerWarnings || [], []);
+    assert.equal(emptyBriefSettings.titleDraftHistoryId, undefined);
+    assert.equal(await page.getByTestId('title-plan-review').count(), 0);
+    assert.equal(await page.getByLabel('Title planner warnings').count(), 0);
+    assert.equal(await page.getByText('Raw planner draft diagnostics', {exact: true}).count(), 0);
+    assert.equal(await page.getByRole('button', {name: 'Generate title'}).isDisabled(), true,
+      'An empty description cannot be generated.');
+    assert.equal(planRequests.length, plannerRequestsBeforeEmptyBrief,
+      'Clearing the description makes no planner request.');
+    assert.equal(await page.evaluate(() => window.titleHarness.getSubmitted().length), 3,
+      'Clearing the description does not create or cancel a title submission.');
+
     const directBrief = 'Keep the exact wording “MAESTRO” in silver lettering, then dissolve into a blue glow.\n'
       + 'Keep the backdrop flat and the lettering legible throughout its changing layout.\n'.repeat(100);
     assert.ok(directBrief.length > 5000);
@@ -349,7 +423,7 @@ async function main() {
     assert.equal(await page.evaluate(() => window.titleHarness.getSubmitted().length), 4,
       'An in-flight response cannot submit after unmount.');
     assert.deepEqual(pageErrors, [], 'The isolated title composer has no browser runtime errors.');
-    console.log(`Unified title composer passed: single/sequence plans, review approval, manual acceptance, stale scope and unmount guards, retained diagnostics, whole-frame duration, and ${planRequests.length} synthetic planner requests.`);
+    console.log(`Unified title composer passed: single/sequence plans, review approval, Clear plan and empty-brief reset, manual acceptance, stale scope and unmount guards, retained diagnostics, whole-frame duration, and ${planRequests.length} synthetic planner requests.`);
   } finally {
     await browser.close();
   }

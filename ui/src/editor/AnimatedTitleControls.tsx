@@ -12,6 +12,7 @@ import {
   MAX_TITLE_BRIEF_CHARS,
 } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
+import { Trash2 } from 'lucide-react'
 import { AnimatedTitleAdvancedControls } from './AnimatedTitleAdvancedControls'
 import { TitleEnhancementControls } from './TitleEnhancementControls'
 import type { TitleComposerController } from './useTitleComposer'
@@ -73,7 +74,8 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
 
   function changeBrief(value: string) {
     composer.clearFeedback()
-    patch({ brief: value, manualPlanEdited: false })
+    if (!value.trim()) composer.clearPlan(value)
+    else patch({ brief: value, manualPlanEdited: false })
   }
 
   function changeDuration(frames: number) {
@@ -193,6 +195,15 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
 
     {settings.directDescription && enhancement && !enhancement.enabled && <p role="status" className="text-[11px] text-text-muted">Using your description directly; AI enhancement is off.</p>}
 
+    {Boolean((!settings.directDescription && (settings.plannedKey || settings.text || phrases.length || settings.manualPlanEdited))
+      || settings.rawTitleDraft || settings.titleDraftHistoryId || settings.plannerWarnings?.length) && <div className="flex items-center justify-between gap-3 text-xs text-text-secondary">
+      <span>Title plan</span>
+      <button type="button" disabled={busy} onClick={() => { composer.clearPlan(); enhancement?.onToggle(false) }}
+        title="Discard the plan, keep your description, and skip enhancement for the next submission"
+        className="flex min-h-8 items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 hover:border-accent-blue/60 hover:text-text-primary disabled:opacity-40">
+        <Trash2 size={13} />Clear plan
+      </button>
+    </div>}
     {currentPlan && !settings.directDescription && <details data-testid="title-plan-review" aria-label="Title plan review" open={settings.titleReviewRequired || undefined}
       className="rounded-xl border border-accent-blue/25 bg-accent-blue/5 p-3 text-xs text-text-secondary">
       <summary className="cursor-pointer select-none">

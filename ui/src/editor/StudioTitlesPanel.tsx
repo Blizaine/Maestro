@@ -175,7 +175,10 @@ export function StudioTitlesPanel({ footerHost }: { footerHost?: HTMLElement | n
     return () => window.clearInterval(timer)
   }, [reconcile])
   const patch = (value: Partial<AnimatedTitleSettings>) => {
-    setDraft({...settings, ...value})
+    const next = {...settings, ...value}
+    setDraft(next)
+    // Commit explicit edits before a refresh can reload the prior draft.
+    try { localStorage.setItem(DRAFT, JSON.stringify(next)) } catch { /* The current draft remains editable. */ }
     if (restored) useStore.setState(state => state.params._studio_title_settings === restored
       ? {params: {...state.params, _studio_title_settings: undefined}} : {})
   }

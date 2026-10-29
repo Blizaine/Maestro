@@ -43,6 +43,12 @@ enhancement off to pass a detailed, ready-written motion brief through directly.
 The AI planner produces a compact plan of up to six phrases, so it can simplify
 more elaborate word lists or layouts. Review its plan before rendering.
 
+Choose **Clear plan** to discard generated wording, timings and diagnostics while
+keeping your description, style and generation settings. In Studio this also
+skips enhancement for the next submission, without changing your saved default.
+Emptying the description clears its plan automatically. These edits persist
+after refreshing; clearing a draft does not cancel queued or running videos.
+
 **Enhance now** asks the configured prompt-enhancement writer to prepare a plan
 without rendering a video. In the Studio sidebar, its options menu also offers
 **Enhance on generation** and **Use by default**, using the same saved Studio

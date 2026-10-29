@@ -678,6 +678,9 @@ function _stripEphemeralParams(perMode: Partial<Record<GenerationMode, SavedMode
     for (const field of EPHEMERAL_PARAM_FIELDS) {
       delete copy[field]
     }
+    // Gallery title settings are a one-shot restore instruction. The title
+    // composer persists its own draft; stale mode snapshots must not revive it.
+    delete copy._studio_title_settings
     // The "T" temporal-alignment flag only means something alongside a
     // video_source — which is ephemeral-stripped above. Persisting a lone
     // "T" produced a ghost Advanced badge (counts as an active process

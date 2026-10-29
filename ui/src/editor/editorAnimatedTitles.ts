@@ -218,6 +218,20 @@ export function titleEnhancementEnabled(state: { enhanceOnGeneration: boolean | 
   return state.enhanceOnGeneration ?? state.enhanceOnGenerationDefault
 }
 
+/** Discard derived writing without changing the user's brief or generation choices. */
+export function clearTitlePlan(settings: AnimatedTitleSettings, brief = titleBrief(settings)): AnimatedTitleSettings {
+  let seconds = settings.seconds
+  let frames: number | undefined
+  try {
+    frames = titleFrames(titleSeconds(settings), settings)
+    seconds = frames / titleFps(settings)
+  } catch { /* An invalid old plan must still be discardable. Keep its editable format. */ }
+  return {...settings, brief, text: '', look: '', direction: '', effect: 'custom',
+    mode: 'single', phrases: undefined, sequenceDirection: '', seconds, sequenceFrames: frames,
+    plannedKey: undefined, directDescription: false, manualPlanEdited: false,
+    titleReviewRequired: false, plannerWarnings: [], rawTitleDraft: undefined, titleDraftHistoryId: undefined}
+}
+
 /** The ordinary no-enhancement path: send the authored description to H3. */
 export function directTitleDescription(settings: AnimatedTitleSettings): AnimatedTitleSettings {
   const frames = titleFrames(titleSeconds(settings), settings)
