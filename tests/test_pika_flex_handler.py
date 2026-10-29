@@ -1,5 +1,6 @@
 """The experimental recipe must survive normal catalogue/settings handling."""
 # ruff: noqa: E402 -- app imports follow the repository path bootstrap.
+import ast
 import json
 from pathlib import Path
 import sys
@@ -159,6 +160,19 @@ def test_api_validates_pika_single_pass_before_generic_clip_schedule_repair():
     assert prepare.index("validate_pika_flex_single_pass_request") < prepare.index(
         "raw_h3_clip_frames = body.get(\"per_clip_frames\")"
     )
+
+
+def test_api_exposes_pika_workflow_capability_to_studio():
+    tree = ast.parse((ROOT / "app/launch.py").read_text(encoding="utf-8"))
+    endpoint = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                    and node.name == "get_model_options")
+    values = [value for node in ast.walk(endpoint) if isinstance(node, ast.Dict)
+              for key, value in zip(node.keys, node.values)
+              if isinstance(key, ast.Constant) and key.value == "minimax_h3_pika_flex"]
+    assert len(values) == 1, "Studio needs the Flex capability in the actual API response"
+    expression = compile(ast.Expression(values[0]), "model-options", "eval")
+    assert eval(expression, {"md": {"minimax_h3_pika_flex": True}}) is True
+    assert eval(expression, {"md": {}}) is False
 
 
 def test_ordinary_h3_keeps_legacy_window_duration_clamp():

@@ -6730,6 +6730,7 @@ def get_model_options(model_type: str):
             "minimax_h3_fused_turbo", False
         ),
         "minimax_h3_baked_turbo": md.get("minimax_h3_baked_turbo", False),
+        "minimax_h3_pika_flex": md.get("minimax_h3_pika_flex", False),
         "minimax_h3_fasth3": md.get("minimax_h3_fasth3", False),
         "minimax_h3_fasth3_omniref": md.get("minimax_h3_fasth3_omniref", False),
         "minimax_h3_full_checkpoint": md.get("minimax_h3_full_checkpoint", False),
