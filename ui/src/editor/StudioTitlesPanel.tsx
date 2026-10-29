@@ -115,11 +115,6 @@ export function StudioTitlesPanel({ footerHost }: { footerHost?: HTMLElement | n
         ...(legacy.seed !== undefined ? {seed: legacy.seed} : {}),
         ...titleAdvancedParams(initial.generationParams),
       })
-      if (restored) {
-        setDraft(initial)
-        useStore.setState(state => state.params._studio_title_settings === restored
-          ? {params: {...state.params, _studio_title_settings: undefined}} : {})
-      }
     }
     if (!restored) initialization.current.restored = undefined
   }, [modelsLoaded, restored, loaded, draft, enterContext])
