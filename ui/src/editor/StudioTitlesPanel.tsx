@@ -3,7 +3,7 @@ import { Loader2, Sparkles } from 'lucide-react'
 import { useStore } from '../stores/useStore'
 import { AnimatedTitleControls } from './AnimatedTitleControls'
 import { EditorAnimatedTitleStatus } from './EditorAnimatedTitleDialog'
-import { DEFAULT_TITLE_SETTINGS, TITLE_EFFECTS, titleFormState } from './editorAnimatedTitles'
+import { alignTitleSequence, DEFAULT_TITLE_SETTINGS, TITLE_EFFECTS, titleFormState } from './editorAnimatedTitles'
 import type { AnimatedTitleSettings } from './editorAnimatedTitles'
 import { useEditorTitleStore } from './useEditorTitleStore'
 
@@ -13,7 +13,7 @@ function normalizeDraft(raw: unknown): AnimatedTitleSettings {
   const defaults: AnimatedTitleSettings = { ...DEFAULT_TITLE_SETTINGS, aspect: '16:9' }
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return defaults
     const value = raw as Partial<AnimatedTitleSettings>
-    return {
+    const normalized: AnimatedTitleSettings = {
       ...defaults,
       text: typeof value.text === 'string' ? value.text.slice(0, 160) : defaults.text,
       look: typeof value.look === 'string' ? value.look.slice(0, 1200) : defaults.look,
@@ -25,6 +25,7 @@ function normalizeDraft(raw: unknown): AnimatedTitleSettings {
       background: value.background === 'black' ? 'black' : 'chroma',
       mode: value.mode === 'sequence' ? 'sequence' : 'single',
       sequenceDirection: typeof value.sequenceDirection === 'string' ? value.sequenceDirection.slice(0, 1200) : '',
+      ...(value.sequenceFrames !== undefined ? { sequenceFrames: typeof value.sequenceFrames === 'number' ? value.sequenceFrames : NaN } : {}),
       // Keep malformed sequence drafts blocked for review rather than silently
       // turning them into a different single-title generation.
       ...(value.mode === 'sequence' || Array.isArray(value.phrases) ? { phrases: Array.isArray(value.phrases) ? value.phrases.slice(0, 7).map(phrase => ({
@@ -34,6 +35,10 @@ function normalizeDraft(raw: unknown): AnimatedTitleSettings {
         animation: typeof phrase?.animation === 'string' ? phrase.animation.slice(0, 801) : '',
       })) : [] } : {}),
     }
+    if (normalized.mode === 'sequence' && normalized.phrases?.every(phrase => Number.isFinite(phrase.seconds) && phrase.seconds >= 1 && phrase.seconds <= 10)) {
+      try { return alignTitleSequence(normalized) } catch { /* Keep an invalid saved draft visible for correction. */ }
+    }
+    return normalized
 }
 function loadDraft(): AnimatedTitleSettings {
   try { return normalizeDraft(JSON.parse(localStorage.getItem(DRAFT) || 'null')) }

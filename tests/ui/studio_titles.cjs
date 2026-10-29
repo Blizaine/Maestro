@@ -110,11 +110,11 @@ async function bundleUi() {
         import {useEditorStore} from './src/editor/useEditorStore';
         import {useEditorTitleStore} from './src/editor/useEditorTitleStore';
         import {Sidebar} from './src/components/Sidebar/Sidebar';
-        import {TITLE_EFFECT_LABELS, titleDimensions, titleFrames, titleSequenceTimeline, newTitlePhrases, animatedTitlePrompt, animatedTitleParams} from './src/editor/editorAnimatedTitles';
+        import {TITLE_EFFECT_LABELS, TITLE_SEQUENCE_DURATIONS, alignTitleSequence, setTitlePhraseSeconds, titleDimensions, titleFrames, titleSequenceTimeline, newTitlePhrases, animatedTitlePrompt, animatedTitleParams} from './src/editor/editorAnimatedTitles';
         window.store = useStore;
         window.editorStore = useEditorStore;
         window.titleStore = useEditorTitleStore;
-        window.titleHelpers = {TITLE_EFFECT_LABELS, titleDimensions, titleFrames, titleSequenceTimeline, newTitlePhrases, animatedTitlePrompt, animatedTitleParams};
+        window.titleHelpers = {TITLE_EFFECT_LABELS, TITLE_SEQUENCE_DURATIONS, alignTitleSequence, setTitlePhraseSeconds, titleDimensions, titleFrames, titleSequenceTimeline, newTitlePhrases, animatedTitlePrompt, animatedTitleParams};
         window.baseParams = {...useStore.getState().params};
         window.seedScenario = (scenario = {}) => {
           const model = scenario.model || '${TITLE_MODEL}';
@@ -686,6 +686,44 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
     assert.ok(planning.invalids.every(Boolean), 'Invalid phrase counts, durations, texts and identities block submission.');
     assert.ok(planning.converted.every(phrase => phrase.seconds >= 1), 'Converting six lines allocates usable slots.');
     assert.equal(new Set(planning.converted.map(phrase => phrase.id)).size, 6);
+    const nativeChecks = await page.evaluate(settings => {
+      const h = window.titleHelpers;
+      let checked = 0;
+      const check = (value, frames) => {
+        const counts = value.phrases.map(phrase => Math.round(phrase.seconds * 24));
+        if (counts.some(count => count < 24 || count > 240)
+          || counts.reduce((sum, count) => sum + count, 0) !== frames) throw new Error('Invalid bounded frame allocation');
+        const timeline = h.titleSequenceTimeline(value);
+        if (timeline.duration !== frames / 24 || timeline.phrases.at(-1).end !== frames / 24
+          || timeline.phrases.some((row, i) => i && row.start !== timeline.phrases[i - 1].end)) throw new Error('Non-contiguous native slots');
+        const params = h.animatedTitleParams(value, {width: 1920, height: 1080}, '/uploads/black.png', 'test', 'synthetic-native-id');
+        if (params.video_length !== frames) throw new Error('Payload changed the selected native duration');
+        checked++;
+      };
+      for (let count = 2; count <= 6; count++) for (const choice of h.TITLE_SEQUENCE_DURATIONS) {
+        if (choice.frames < count * 24) continue;
+        for (const skewed of [false, true]) {
+          const original = {...settings, sequenceFrames: undefined,
+            phrases: Array.from({length: count}, (_, i) => ({id: `n-${i}`, text: `WORD ${i}`, animation: '', seconds: skewed && i === 0 ? 10 : 1}))};
+          const before = JSON.stringify(original);
+          const aligned = h.alignTitleSequence(original, choice.frames);
+          check(aligned, choice.frames);
+          if (JSON.stringify(original) !== before) throw new Error('Alignment mutated an existing draft');
+          for (const phrase of aligned.phrases) for (const seconds of [0, 1, 3.333, 10, 99]) {
+            check(h.setTitlePhraseSeconds(aligned, phrase.id, seconds), choice.frames);
+          }
+        }
+      }
+      const six = {...settings, phrases: Array.from({length: 6}, (_, i) => ({id: `six-${i}`, text: `TEXT ${i}`, seconds: 1, animation: ''}))};
+      const sixAligned = h.alignTitleSequence(six, 124);
+      return {checked, sixFrames: sixAligned.sequenceFrames,
+        invalidFrames: [123, 142, 346, NaN].map(sequenceFrames => {
+          try {h.animatedTitlePrompt({...settings, sequenceFrames}); return false;} catch {return true;}
+        })};
+    }, sequenceSettings);
+    assert.ok(nativeChecks.checked > 2000, 'Every compatible native length is checked with even/skewed slots and edited phrase limits.');
+    assert.equal(nativeChecks.sixFrames, 158, 'Six phrases get the next native duration that can fit at least one second each.');
+    assert.ok(nativeChecks.invalidFrames.every(Boolean), 'Invalid native frame selections cannot generate.');
     await page.evaluate(settings => window.store.setState(state => ({params: {...state.params, _studio_title_settings: settings}})), sequenceSettings);
     await waitFor(page, () => document.querySelector('[aria-label="Phrase 1 text"]')?.value === 'CREATE', 'gallery sequence settings restore');
     assert.equal(await page.getByLabel('Phrase 3 text', {exact: true}).inputValue(), 'INSPIRE');
@@ -699,6 +737,7 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
     assert.deepEqual(sequenceBody._studio_title_settings.phrases.map(p => p.text), ['CREATE MORE', 'EXPLORE', 'INSPIRE']);
     assert.equal(sequenceBody._studio_title_settings.text, 'CREATE MORE\nEXPLORE\nINSPIRE');
     assert.equal(sequenceBody.video_length, 243);
+    assert.equal(sequenceBody._studio_title_settings.sequenceFrames, 243, 'The saved title records the selected native duration.');
     assert.match(sequenceBody.prompt, /Keep the camera locked/);
     assert.equal(generationRequests.length, 4, 'One sequence sends one POST, without per-phrase jobs.');
     assert.equal(receiptLookups.at(-1), sequenceBody._client_submission_id);
@@ -707,7 +746,10 @@ async function assertTitleModeHasOnlyItsOwnComposer(page) {
     await mount(page, bundle, css, {workflow: 'titles', workspace: 'Changed While Running'});
     await waitFor(page, () => window.titleStore.getState().intent?.jobId === 'studio-title-job-4', 'sequence receipt reload');
     assert.equal(await page.getByLabel('Phrase 1 text', {exact: true}).inputValue(), 'CREATE MORE');
-    assert.equal(await page.getByLabel('Phrase 3 duration', {exact: true}).inputValue(), '4');
+    assert.equal(await page.getByLabel('Sequence duration', {exact: true}).inputValue(), '243');
+    const recoveredPhrases = await page.evaluate(() => window.titleStore.getState().intent.settings.phrases);
+    assert.equal(recoveredPhrases.reduce((sum, phrase) => sum + Math.round(phrase.seconds * 24), 0), 243,
+      'Recovered phrase slots add up to the selected native frame count.');
     assert.equal(generationRequests.length, beforeSequenceReload, 'Sequence reload never resubmits.');
     assert.deepEqual(projectApiRequests, [], 'Sequence generation remains independent of Editor projects.');
 

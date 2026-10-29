@@ -73,7 +73,7 @@ async function bundleControls() {
           });
           const [busy, setBusy] = useState(false);
           const patch = value => setSettings(current => ({...current, ...value}));
-          window.titleHarness = {getSettings: () => settings, getBusy: () => busy, setBusy};
+          window.titleHarness = {getSettings: () => settings, getBusy: () => busy, setBusy, setSettings};
           return <main className="mx-auto flex w-full max-w-2xl flex-col gap-4 p-4">
             <AnimatedTitleControls settings={settings} patch={patch} busy={busy}
               canvas={{width: 1920, height: 1080}} destination="editor" at={3.25} />
@@ -119,6 +119,16 @@ async function main() {
     assert.equal(await page.getByLabel('Title animation description').inputValue(), legacyDirection);
 
     await page.getByRole('button', {name: 'Phrase sequence'}).click();
+    const sequenceDuration = page.getByLabel('Sequence duration');
+    assert.equal(await sequenceDuration.locator('option').count(), 14,
+      'Two phrases allow all 14 H3 native whole-clip durations.');
+    assert.equal(await sequenceDuration.inputValue(), '124', 'The single-title duration selects its nearest native sequence clip.');
+    assert.equal(await page.getByText('Sequence length', {exact: true}).count(), 0,
+      'The native duration picker replaces the former read-only total field.');
+    let initialSequence = await page.evaluate(() => window.titleHarness.getSettings());
+    assert.equal(initialSequence.sequenceFrames, 124);
+    assert.ok(initialSequence.phrases.every(phrase => Number.isInteger(phrase.seconds * 24)),
+      'Aligned phrase slots use integer frame counts.');
     assert.equal(await page.getByRole('group', {name: 'Phrase 1'}).getByLabel('Phrase 1 text').inputValue(), 'CREATE',
       'Multiline single-title text converts into ordered phrase cards.');
     assert.equal(await page.getByRole('group', {name: 'Phrase 2'}).getByLabel('Phrase 2 text').inputValue(), 'EXPLORE');
@@ -141,10 +151,14 @@ async function main() {
     await firstCard.getByRole('textbox', {name: 'Phrase 1 animation'}).fill('');
 
     await firstCard.getByLabel('Phrase 1 duration').fill('3.1');
+    await firstCard.getByLabel('Phrase 1 duration').blur();
     await firstCard.getByLabel('Phrase 1 text').fill('CREATE');
     await page.getByRole('group', {name: 'Phrase 2'}).getByLabel('Phrase 2 text').fill('EXPLORE');
-    assert.match(await page.getByLabel('Approximate sequence timeline').innerText(), /Requested total: 5\.7s/);
-    assert.match(await page.getByLabel('Approximate sequence timeline').innerText(), /0\.0–3\.2s/);
+    assert.match(await page.getByLabel('Approximate sequence timeline').innerText(), /Selected clip: 124 frames · 5\.167s at 24 fps/);
+    assert.match(await page.getByLabel('Approximate sequence timeline').innerText(), /0\.000–3\.083s · 74 frames/);
+    let editedSettings = await page.evaluate(() => window.titleHarness.getSettings());
+    assert.equal(editedSettings.sequenceFrames, 124, 'Editing one phrase keeps the selected clip length.');
+    assert.equal(Math.round(editedSettings.phrases.reduce((sum, phrase) => sum + phrase.seconds, 0) * 24), 124);
     await page.getByText('View prepared prompt').click();
     const sequencePrompt = await page.locator('pre').innerText();
     assert.match(sequencePrompt, /Phrase schedule for this/);
@@ -152,9 +166,12 @@ async function main() {
     assert.match(sequencePrompt, /fade it out completely/);
 
     await firstCard.getByLabel('Phrase 1 duration').fill('0');
-    assert.ok(await page.getByRole('alert').count() >= 2,
-      'Invalid per-phrase time and the parent sequence validation are visible.');
+    await firstCard.getByLabel('Phrase 1 duration').blur();
+    editedSettings = await page.evaluate(() => window.titleHarness.getSettings());
+    assert.ok(editedSettings.phrases[0].seconds >= 1, 'Blur clamps an edited slot to its one-second frame minimum.');
+    assert.equal(editedSettings.sequenceFrames, 124, 'A bounded phrase edit preserves the native clip length.');
     await firstCard.getByLabel('Phrase 1 duration').fill('3.1');
+    await firstCard.getByLabel('Phrase 1 duration').blur();
 
     await firstCard.getByLabel('Phrase 1 text').fill('A'.repeat(80));
     await page.getByRole('group', {name: 'Phrase 2'}).getByLabel('Phrase 2 text').fill('B'.repeat(80));
@@ -167,6 +184,8 @@ async function main() {
     await page.getByRole('button', {name: 'Move phrase 1 down'}).click();
     let currentPhrases = await page.evaluate(() => window.titleHarness.getSettings().phrases.map(phrase => phrase.text));
     assert.deepEqual(currentPhrases, ['EXPLORE', 'CREATE'], 'Up/down controls reorder the phrases.');
+    assert.equal((await page.evaluate(() => window.titleHarness.getSettings())).sequenceFrames, 124,
+      'Reordering keeps each phrase slot and the selected native clip length.');
 
     await page.getByRole('button', {name: '+ Add phrase'}).click();
     assert.equal(await page.getByTestId('title-phrase-card').count(), 3, 'Add phrase creates a third card.');
@@ -195,6 +214,10 @@ async function main() {
     await page.getByRole('button', {name: 'Replace phrases from lines'}).click();
     while (await page.getByTestId('title-phrase-card').count() < 6) await page.getByRole('button', {name: '+ Add phrase'}).click();
     assert.equal(await page.getByTestId('title-phrase-card').count(), 6);
+    assert.equal(await sequenceDuration.locator('option').count(), 12,
+      'Six phrases filter native durations below the 144-frame minimum.');
+    assert.ok(Number(await sequenceDuration.inputValue()) >= 144,
+      'Adding phrases selects a native clip long enough for one second per card.');
     assert.equal(await page.getByRole('button', {name: '+ Add phrase'}).count(), 0,
       'The sequence controls cap the number of cards at six.');
 
@@ -208,10 +231,19 @@ async function main() {
     await page.getByRole('button', {name: 'Replace phrases from lines'}).click();
     assert.equal(await page.getByTestId('title-phrase-card').count(), 3,
       'The visual review uses three valid phrase cards after checking the six-card limit.');
-    for (let index = 1; index <= 3; index++) {
-      await page.getByLabel(`Phrase ${index} duration`).fill('3');
-    }
-    assert.match(await page.getByLabel('Approximate sequence timeline').innerText(), /Requested total: 9\.0s/);
+    await sequenceDuration.selectOption('243');
+    assert.equal(await sequenceDuration.inputValue(), '243');
+    assert.match(await page.getByLabel('Approximate sequence timeline').innerText(), /Selected clip: 243 frames · 10\.125s at 24 fps/);
+    await page.getByLabel('Phrase 1 duration').fill('3.333');
+    await page.getByLabel('Phrase 1 duration').blur();
+    const resizedSettings = await page.evaluate(() => window.titleHarness.getSettings());
+    assert.equal(resizedSettings.sequenceFrames, 243, 'Changing a phrase slot preserves the chosen 243-frame clip.');
+    assert.equal(Math.round(resizedSettings.phrases.reduce((sum, phrase) => sum + phrase.seconds, 0) * 24), 243,
+      'All resized phrase slots still sum to the selected clip frames.');
+    assert.ok(resizedSettings.phrases.every(phrase => Number.isInteger(phrase.seconds * 24)),
+      'Every redistributed phrase slot remains frame-aligned.');
+    assert.equal(Math.round(resizedSettings.phrases[0].seconds * 24), 80,
+      'The edited 3.333-second phrase is rounded to its nearest 24fps frame.');
 
     if (screenshots) {
       await page.screenshot({path: path.join(screenshots, 'title-sequence-desktop.png'), fullPage: true});
@@ -231,6 +263,24 @@ async function main() {
     assert.ok(mobileWidth.document <= mobileWidth.viewport + 1, `No horizontal page overflow on mobile: ${JSON.stringify(mobileWidth)}`);
     assert.ok(mobileWidth.cards.every(card => card.scroll <= card.client + 1), `Phrase cards fit mobile width: ${JSON.stringify(mobileWidth)}`);
 
+    await page.evaluate(() => window.titleHarness.setSettings(current => ({
+      ...current,
+      mode: 'sequence',
+      sequenceFrames: undefined,
+      phrases: [
+        {id: 'legacy-one', text: 'LEGACY', seconds: 2.6, animation: ''},
+        {id: 'legacy-two', text: 'TIMING', seconds: 2.6, animation: ''},
+      ],
+    })));
+    assert.equal(await sequenceDuration.inputValue(), '124', 'Legacy sequences derive the picker value from their phrase total.');
+    assert.equal(await page.getByText('Sequence length', {exact: true}).count(), 0,
+      'Legacy sequence settings remain valid without the removed read-only total field.');
+    await page.getByRole('button', {name: '+ Add phrase'}).click();
+    const migratedSettings = await page.evaluate(() => window.titleHarness.getSettings());
+    assert.equal(migratedSettings.sequenceFrames, 124, 'The first edit of a legacy sequence stores an explicit native duration.');
+    assert.ok(migratedSettings.phrases.every(phrase => Number.isInteger(phrase.seconds * 24)),
+      'The first legacy sequence edit aligns all phrase slots to frames.');
+
     await page.getByRole('button', {name: 'Single title'}).click();
     assert.equal(await page.getByLabel('Animated title text').inputValue(), 'CREATE\nEXPLORE',
       'Returning to single mode restores the original single-title wording.');
@@ -242,7 +292,7 @@ async function main() {
       'The legacy full-title preset selector remains available in single mode.');
 
     assert.deepEqual(pageErrors, [], 'The mounted controls have no browser runtime errors.');
-    console.log('Phrase sequence controls passed: legacy single mode, multiline conversion, ordered editing, presets, paste limits, timing guidance, busy state, six-card limit, and mobile overflow.');
+    console.log('Phrase sequence controls passed: native duration selection, legacy conversion, frame-aligned editing, ordered editing, presets, paste limits, busy state, six-card limit, and mobile overflow.');
     if (screenshots) console.log(`Screenshots saved in ${screenshots}`);
   } finally {
     await browser.close();

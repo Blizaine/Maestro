@@ -66,11 +66,19 @@ the complete list is never requested as a final composition. Appearance belongs 
 the single-title animation, so a previous full-title preset does not carry over.
 
 A sequence contains 2–6 phrases, up to 80 characters per phrase and 160 overall.
-The requested total must be 5–14.5 seconds. The timing preview adjusts the slots
-to H3's supported frame count at 24 fps. This creates one video with one generation
-job. H3 interprets the timing and typography: review the actual result for spelling,
-word isolation and transitions. For frame-accurate timing, generate separate
-single-title clips and place them on the Editor timeline.
+Choose **Sequence duration** from H3's native clip lengths: 124–345 frames in
+17-frame steps at 24 fps (5.167–14.375 seconds). Changing the clip length fits the
+phrase slots proportionally into that exact frame count. Editing one phrase time
+snaps it to a video frame and redistributes the other slots to preserve the chosen
+total. Adding, removing or pasting phrases also keeps the slots aligned. Each slot
+allows 1–10 seconds; six phrases therefore require at least the 158-frame option.
+
+H3's native-duration rule applies to the whole generated clip. Individual phrases
+can be shorter. The timing preview uses contiguous, whole-frame slots whose sum
+matches the chosen clip length. This creates one video with one generation job.
+H3 still interprets the requested timing and typography: review the actual result
+for spelling, word isolation and transitions. For frame-accurate cuts, generate
+separate single-title clips and place them on the Editor timeline.
 
 ### Writing a readable kinetic title
 

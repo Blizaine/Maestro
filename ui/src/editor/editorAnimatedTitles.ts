@@ -59,6 +59,8 @@ export interface AnimatedTitleSettings {
   mode?: 'single' | 'sequence'
   phrases?: TitlePhrase[]
   sequenceDirection?: string
+  /** Whole-clip duration; phrase slots are individual video frames within it. */
+  sequenceFrames?: number
   text: string
   look: string
   effect: 'custom' | keyof typeof TITLE_EFFECTS
@@ -69,6 +71,72 @@ export interface AnimatedTitleSettings {
   keepAudio: boolean
   /** Missing on older saved title intents, which always used green keying. */
   background?: TitleBackground
+}
+
+export const TITLE_SEQUENCE_DURATIONS = Array.from({ length: 14 }, (_, index) => {
+  const frames = 124 + index * 17
+  return { frames, seconds: frames / 24, label: `${(frames / 24).toFixed(3)}s · ${frames} frames` }
+})
+
+function nativeSequenceFrames(frames: number): number {
+  if (!TITLE_SEQUENCE_DURATIONS.some(choice => choice.frames === frames)) throw new Error('Choose an H3 native sequence duration.')
+  return frames
+}
+
+/** Proportional integer-frame allocation with a one-second minimum per phrase. */
+function allocatePhraseFrames(weights: number[], total: number): number[] {
+  if (total < weights.length * 24 || total > weights.length * 240) throw new Error('The phrases do not fit the selected clip length.')
+  const result = weights.map(() => 0)
+  const safeWeights = weights.map(weight => Number.isFinite(weight) && weight > 0 ? Math.min(10, weight) : 1)
+  let remaining = total
+  let active = weights.map((_, index) => index)
+  while (active.length) {
+    const sum = active.reduce((value, index) => value + safeWeights[index], 0)
+    const fixed = active.find(index => remaining * safeWeights[index] / sum < 24 || remaining * safeWeights[index] / sum > 240)
+    if (fixed !== undefined) {
+      result[fixed] = remaining * safeWeights[fixed] / sum < 24 ? 24 : 240
+      remaining -= result[fixed]
+      active = active.filter(index => index !== fixed)
+      continue
+    }
+    const shares = active.map(index => ({ index, exact: remaining * safeWeights[index] / sum }))
+    for (const share of shares) result[share.index] = Math.floor(share.exact)
+    const extra = remaining - shares.reduce((value, share) => value + result[share.index], 0)
+    shares.sort((a, b) => (b.exact - Math.floor(b.exact)) - (a.exact - Math.floor(a.exact)) || a.index - b.index)
+    for (let index = 0; index < extra; index++) result[shares[index].index]++
+    break
+  }
+  return result
+}
+
+/** Used by editable drafts only; submitted legacy intents retain their original plan. */
+export function alignTitleSequence(settings: AnimatedTitleSettings, frames?: number): AnimatedTitleSettings {
+  const phrases = settings.phrases ?? []
+  if (phrases.length < 2 || phrases.length > 6) throw new Error('Use 2–6 phrases in a title sequence.')
+  const requested = frames ?? settings.sequenceFrames ?? titleFrames(Math.max(5, Math.min(14.5,
+    phrases.reduce((sum, phrase) => sum + (Number.isFinite(phrase.seconds) ? phrase.seconds : 1), 0))))
+  nativeSequenceFrames(requested)
+  // Adding a sixth phrase may need the next longer native clip to retain 1s slots.
+  const choices = TITLE_SEQUENCE_DURATIONS.filter(choice => choice.frames >= phrases.length * 24)
+  const selected = choices.reduce((best, choice) => Math.abs(choice.frames - requested) < Math.abs(best.frames - requested) ? choice : best)
+  const counts = allocatePhraseFrames(phrases.map(phrase => phrase.seconds), selected.frames)
+  return { ...settings, sequenceFrames: selected.frames, phrases: phrases.map((phrase, index) => ({ ...phrase, seconds: counts[index] / 24 })) }
+}
+
+/** Keep the edited slot; redistribute the rest without changing the native clip length. */
+export function setTitlePhraseSeconds(settings: AnimatedTitleSettings, id: string, seconds: number): AnimatedTitleSettings {
+  const aligned = alignTitleSequence(settings)
+  const phrases = aligned.phrases!
+  const index = phrases.findIndex(phrase => phrase.id === id)
+  if (index < 0 || !Number.isFinite(seconds)) return aligned
+  const frames = aligned.sequenceFrames!
+  const selected = Math.max(24, frames - (phrases.length - 1) * 240,
+    Math.min(240, frames - (phrases.length - 1) * 24, Math.round(seconds * 24)))
+  const others = phrases.filter((_, position) => position !== index)
+  const counts = allocatePhraseFrames(others.map(phrase => phrase.seconds), frames - selected)
+  let otherIndex = 0
+  return { ...aligned, phrases: phrases.map((phrase, position) => ({ ...phrase,
+    seconds: (position === index ? selected : counts[otherIndex++]) / 24 })) }
 }
 
 /** Converting pasted lines is explicit; ordinary multiline titles remain supported. */
@@ -87,7 +155,8 @@ export function titleText(settings: AnimatedTitleSettings): string {
 }
 
 export function titleSeconds(settings: AnimatedTitleSettings): number {
-  return settings.mode === 'sequence' ? Math.round((settings.phrases ?? []).reduce((sum, phrase) => sum + phrase.seconds, 0) * 1000) / 1000 : settings.seconds
+  return settings.mode === 'sequence' ? settings.sequenceFrames !== undefined ? settings.sequenceFrames / 24
+    : Math.round((settings.phrases ?? []).reduce((sum, phrase) => sum + phrase.seconds, 0) * 1000) / 1000 : settings.seconds
 }
 
 /** Slot lengths include the entrance, readable hold and exit, within one GPU clip. */
@@ -102,14 +171,17 @@ export function titleSequenceTimeline(settings: AnimatedTitleSettings) {
   }
   if (new Set(phrases.map(phrase => phrase.id)).size !== phrases.length) throw new Error('Each phrase needs a unique identity.')
   if (phrases.map(phrase => phrase.text.trim()).join('\n').length > 160) throw new Error('Keep the entire sequence within 160 characters.')
-  const requestedSeconds = Math.round(titleSeconds(settings) * 1000) / 1000
-  const frames = titleFrames(requestedSeconds)
+  const requestedSeconds = Math.round(phrases.reduce((sum, phrase) => sum + phrase.seconds, 0) * 1000) / 1000
+  const frames = settings.sequenceFrames === undefined ? titleFrames(requestedSeconds) : nativeSequenceFrames(settings.sequenceFrames)
+  const counts = settings.sequenceFrames === undefined ? null : allocatePhraseFrames(phrases.map(phrase => phrase.seconds), frames)
   let elapsed = 0
+  let elapsedFrames = 0
   return { requestedSeconds, duration: frames / 24, phrases: phrases.map((phrase, index) => {
-    const start = Math.round(elapsed / requestedSeconds * frames) / 24
+    const start = counts ? elapsedFrames / 24 : Math.round(elapsed / requestedSeconds * frames) / 24
     elapsed += phrase.seconds
-    const end = index === phrases.length - 1 ? frames / 24 : Math.round(elapsed / requestedSeconds * frames) / 24
-    return { ...phrase, text: phrase.text.trim(), start, end }
+    elapsedFrames += counts?.[index] ?? 0
+    const end = counts ? elapsedFrames / 24 : index === phrases.length - 1 ? frames / 24 : Math.round(elapsed / requestedSeconds * frames) / 24
+    return { ...phrase, seconds: counts ? counts[index] / 24 : phrase.seconds, text: phrase.text.trim(), start, end }
   }) }
 }
 

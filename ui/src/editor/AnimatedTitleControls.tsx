@@ -4,6 +4,10 @@ import {
   titleSubmissionId,
   titleFormState,
   titleSequenceTimeline,
+  titleFrames,
+  alignTitleSequence,
+  setTitlePhraseSeconds,
+  TITLE_SEQUENCE_DURATIONS,
   TITLE_EFFECTS,
   TITLE_EFFECT_LABELS,
   TITLE_PHRASE_ANIMATIONS,
@@ -19,6 +23,24 @@ function averagePhraseSeconds(phrases: TitlePhrase[]) {
   if (phrases.length === 0) return 2.6
   const total = phrases.reduce((sum, phrase) => sum + (Number.isFinite(phrase.seconds) ? phrase.seconds : 0), 0)
   return Math.round(Math.max(1, Math.min(10, total / phrases.length)) * 10) / 10
+}
+
+function selectedSequenceFrames(settings: AnimatedTitleSettings, phrases: TitlePhrase[]) {
+  const minimumFrames = phrases.length * 24
+  let frames: number
+  if (Number.isInteger(settings.sequenceFrames)) frames = settings.sequenceFrames!
+  else {
+    const total = phrases.reduce((sum, phrase) => sum + (Number.isFinite(phrase.seconds) ? phrase.seconds : 0), 0)
+    try { frames = titleFrames(total) } catch { frames = TITLE_SEQUENCE_DURATIONS[0]?.frames ?? 124 }
+  }
+  if (frames >= minimumFrames && TITLE_SEQUENCE_DURATIONS.some(option => option.frames === frames)) return frames
+  const compatible = TITLE_SEQUENCE_DURATIONS.find(option => option.frames >= Math.max(frames, minimumFrames))
+  if (compatible) return compatible.frames
+  return TITLE_SEQUENCE_DURATIONS.at(-1)?.frames ?? frames
+}
+
+function alignPhrases(settings: AnimatedTitleSettings, phrases: TitlePhrase[], frames = selectedSequenceFrames(settings, settings.phrases ?? [])) {
+  return alignTitleSequence({ ...settings, mode: 'sequence', phrases }, frames)
 }
 
 /** Shared title fields; placement and submission remain owned by each workspace. */
@@ -38,6 +60,9 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
   const [modeError, setModeError] = useState('')
   const formState = titleFormState(settings, canvas)
   const sequenceTotal = phrases.reduce((sum, phrase) => sum + (Number.isFinite(phrase.seconds) ? phrase.seconds : 0), 0)
+  const nativeFrames = selectedSequenceFrames(settings, phrases)
+  const nativeDuration = TITLE_SEQUENCE_DURATIONS.find(option => option.frames === nativeFrames)
+  const sequenceDurationOptions = TITLE_SEQUENCE_DURATIONS.filter(option => option.frames >= phrases.length * 24)
   const sequenceCharacters = phrases.map(phrase => phrase.text.trim()).join('\n').length
   const timeline = sequenceMode ? (() => {
     try { return titleSequenceTimeline(settings) } catch { return null }
@@ -59,7 +84,8 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
         const nextPhrases = settings.phrases?.length
           ? settings.phrases
           : newTitlePhrases(settings.text, settings.seconds)
-        patch({ mode, phrases: nextPhrases })
+        const frames = selectedSequenceFrames(settings, nextPhrases)
+        patch(alignPhrases({ ...settings, mode }, nextPhrases, frames))
         setModeError('')
       } catch (reason) {
         setModeError(reason instanceof Error ? reason.message : 'Check the title text before switching to a sequence.')
@@ -88,19 +114,19 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
     const nextPhrases = [...phrases, {
       id: titleSubmissionId(), text: '', seconds: averagePhraseSeconds(phrases), animation: '',
     }]
-    patch({ phrases: nextPhrases })
+    patch(alignPhrases(settings, nextPhrases))
   }
 
   function removePhrase(id: string) {
     if (phrases.length <= MIN_PHRASES) return
     const nextPhrases = phrases.filter(phrase => phrase.id !== id)
-    patch({ phrases: nextPhrases })
+    patch(alignPhrases(settings, nextPhrases))
   }
 
   function applyPastedLines(value: string) {
     try {
-      const nextPhrases = newTitlePhrases(value, sequenceTotal || settings.seconds)
-      patch({ phrases: nextPhrases })
+      const nextPhrases = newTitlePhrases(value, nativeDuration?.seconds ?? (sequenceTotal || settings.seconds))
+      patch(alignPhrases(settings, nextPhrases))
       setPasteError('')
     } catch (reason) {
       setPasteError(reason instanceof Error ? reason.message : 'Check the pasted phrase lines.')
@@ -134,6 +160,16 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
             <p className="mt-1 text-[11px] leading-relaxed text-text-muted">Each phrase appears in order with its own timing and motion. Use 2–6 phrases.</p>
           </div>
 
+          <label className="block space-y-1.5 text-xs text-text-secondary">Sequence duration
+            <select aria-label="Sequence duration" value={nativeFrames} disabled={busy}
+              onChange={event => patch(alignTitleSequence(settings, Number(event.target.value)))} className={FIELD}>
+              {sequenceDurationOptions.map(option => <option key={option.frames} value={option.frames}>{option.label}</option>)}
+            </select>
+            <span className="block text-[11px] leading-relaxed text-text-muted">
+              {nativeDuration ? `${nativeDuration.seconds.toFixed(3)} seconds · ${nativeDuration.frames} frames at 24 fps.` : `${(nativeFrames / 24).toFixed(3)} seconds · ${nativeFrames} frames at 24 fps.`} Changing a phrase time adjusts the other phrases to keep the selected clip length.
+            </span>
+          </label>
+
           <div className="space-y-3">
             {phrases.map((phrase, index) => {
               const row = timelineRows.find(item => item.id === phrase.id)
@@ -165,8 +201,13 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
                   </label>
 
                   <label className="block min-w-0 space-y-1.5 text-xs text-text-secondary">Time on screen (seconds)
-                    <input aria-label={`Phrase ${index + 1} duration`} type="number" min={1} max={10} step={.1} value={phrase.seconds} disabled={busy}
-                      onChange={event => patchPhrase(phrase.id, { seconds: Number(event.target.value) })} className={FIELD} />
+                    <input aria-label={`Phrase ${index + 1} duration`} type="number" min={1} max={10} step="any"
+                      value={Number.isFinite(phrase.seconds) ? Number(phrase.seconds.toFixed(3)) : ''} disabled={busy}
+                      onChange={event => patchPhrase(phrase.id, { seconds: Number(event.target.value) })}
+                      onBlur={event => {
+                        const seconds = Number(event.currentTarget.value)
+                        if (Number.isFinite(seconds)) patch(setTitlePhraseSeconds(settings, phrase.id, seconds))
+                      }} className={FIELD} />
                   </label>
                 </div>
 
@@ -192,7 +233,7 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
                   <p className="mt-2 text-[11px] leading-relaxed text-text-muted">A preset fills the motion description; edit it freely.</p>
                 </details>
 
-                {row && <p className="text-[11px] text-text-muted">Approx. {row.start.toFixed(1)}–{row.end.toFixed(1)}s</p>}
+                {row && <p className="text-[11px] text-text-muted">Approx. {row.start.toFixed(3)}–{row.end.toFixed(3)}s · {Math.round((row.end - row.start) * 24)} frames</p>}
                 {!phrase.text.trim() && <p className="text-[11px] text-amber-400">Add wording for this phrase.</p>}
                 {phraseLength > MAX_PHRASE_LENGTH && <p role="alert" className="text-[11px] text-red-400">Phrase text must be 80 characters or fewer.</p>}
                 {(!Number.isFinite(phrase.seconds) || phrase.seconds < 1 || phrase.seconds > 10) && <p role="alert" className="text-[11px] text-red-400">Use a time between 1 and 10 seconds.</p>}
@@ -226,15 +267,13 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
             <ol className="space-y-1">
               {timelineRows.map((row, index) => <li key={row.id} className="flex min-w-0 justify-between gap-3">
                 <span className="min-w-0 truncate">{index + 1}. {row.text.trim() || `Phrase ${index + 1}`}</span>
-                <span className="shrink-0">{row.start.toFixed(1)}–{row.end.toFixed(1)}s</span>
+                <span className="shrink-0">{row.start.toFixed(3)}–{row.end.toFixed(3)}s · {Math.round((row.end - row.start) * 24)} frames</span>
               </li>)}
             </ol>
-            <p>Requested total: {sequenceTotal.toFixed(1)}s{timeline ? ` · generated clip about ${timeline.duration.toFixed(2)}s` : ''}. Estimates can vary in the generated video.</p>
+            <p>Selected clip: {nativeFrames} frames · {(nativeFrames / 24).toFixed(3)}s at 24 fps. Phrase timings align to whole frames; H3 can interpret the requested timing approximately.</p>
             <p>{sequenceCharacters}/160 total text characters</p>
             {phrases.length < MIN_PHRASES && <p role="alert" className="text-amber-400">Add at least 2 phrases.</p>}
-            {(sequenceTotal < 5 || sequenceTotal > 14.5) && <p role="alert" className="text-amber-400">Phrase times should total between 5 and 14.5 seconds.</p>}
             {sequenceCharacters > 160 && <p role="alert" className="text-amber-400">Shorten the phrases to stay within 160 characters total.</p>}
-            {timeline && Math.abs(timeline.duration - timeline.requestedSeconds) > .05 && <p>Frame timing adjusts the clip to about {timeline.duration.toFixed(2)}s.</p>}
             <p>Each phrase clears before the next one; the last clears to the selected {background === 'chroma' ? 'green' : 'black'} background.</p>
           </div>
         </section>}
@@ -276,9 +315,6 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
             <input aria-label="Title duration" type="number" min={5} max={14.5} step={.1} value={settings.seconds} disabled={busy}
               onChange={event => patch({ seconds: Number(event.target.value) })} className={FIELD} />
           </label>}
-          {sequenceMode && <div className="space-y-1.5 text-xs text-text-secondary"><span className="block">Sequence length</span>
-            <p className="min-h-9 rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-xs text-text-primary">About {duration ? duration.toFixed(2) : sequenceTotal.toFixed(1)} seconds</p>
-          </div>}
           <label className="space-y-1.5 text-xs text-text-secondary">Aspect ratio
             <select aria-label="Title aspect ratio" value={settings.aspect} disabled={busy} onChange={event => patch({ aspect: event.target.value as AnimatedTitleSettings['aspect'] })} className={FIELD}>
               {destination === 'editor' && <option value="project">Match project</option>}<option value="16:9">16:9 · landscape</option><option value="9:16">9:16 · portrait</option><option value="1:1">1:1 · square</option>
@@ -294,7 +330,7 @@ export function AnimatedTitleControls({ settings, patch, busy, canvas, destinati
           onChange={event => patch({ keepAudio: event.target.checked })} className="accent-[var(--color-accent-blue)]" />Keep generated clip audio</label>}
         {destination === 'studio' && <p className="text-[11px] leading-relaxed text-text-muted">Generated video audio is retained. You can mute it in the Editor or another editing app.</p>}
         <div className="rounded-lg border border-border bg-bg-tertiary p-3 text-[11px] leading-relaxed text-text-muted">
-          {geometry.width}×{geometry.height} · {duration ? `${duration.toFixed(2)}s at 24 fps` : sequenceMode ? `about ${sequenceTotal.toFixed(1)}s requested` : 'Check duration'}{destination === 'editor' ? ` · inserts at ${at.toFixed(2)}s.` : ' · saved to the gallery.'}<br />
+          {geometry.width}×{geometry.height} · {duration ? sequenceMode ? `${nativeFrames} frames · ${(nativeFrames / 24).toFixed(3)}s at 24 fps` : `${duration.toFixed(2)}s at 24 fps` : sequenceMode ? `about ${sequenceTotal.toFixed(1)}s requested` : 'Check duration'}{destination === 'editor' ? ` · inserts at ${at.toFixed(2)}s.` : ' · saved to the gallery.'}<br />
           Background: {background === 'chroma' ? destination === 'studio' ? 'Green screen, ready for keying.' : 'Chroma key (green), removed automatically.' : 'Black, opaque.'}<br />
           No reference characters or Studio settings are reused. Review the wording, timing and edge quality; generated results can vary.
         </div>
