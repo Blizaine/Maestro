@@ -437,6 +437,9 @@ def validate_pika_flex_single_pass_request(inputs: dict, model_def: dict) -> Non
     if not model_def.get("minimax_h3_pika_flex"):
         return
 
+    if inputs.get("minimax_h3_extended_duration") is True:
+        raise ValueError("Pika H3 Flex does not support extended duration.")
+
     multi_prompts_type = inputs.get("multi_prompts_gen_type", 0)
     try:
         requests_multi_clip = int(multi_prompts_type or 0) == 3

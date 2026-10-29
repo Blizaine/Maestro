@@ -16,4 +16,7 @@ assert.equal(normalize({ ...pika, sla_attention_status: { supported: false } }, 
 assert.equal(normalize({}, 'sage2'), undefined)
 assert.equal(normalize({ sla_attention: true, sla_attention_default: true }, undefined), 'sla')
 assert.equal(normalize({ sol_attention: true, sol_attention_status: { supported: true } }, 'sol'), 'sol')
+const ordinaryH3 = { sol_attention: true, sla_attention: true, sla_attention_default: false, sol_attention_status: { supported: true } }
+assert.equal(normalize(ordinaryH3, 'sage2'), '')
+assert.equal(normalize({ ...ordinaryH3, sla_attention_default: true }, 'sage2'), 'sla')
 console.log('Pika attention choices, dense default, sparse fallback and ordinary H3 normalization passed.')

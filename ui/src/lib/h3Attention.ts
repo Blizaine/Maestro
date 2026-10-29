@@ -6,7 +6,9 @@ export function normalizeH3Attention(
   requested: unknown,
 ): GenerateParams['override_attention'] {
   if (!options.sla_attention && !options.sol_attention && !options.veda_attention && !options.minimax_h3_pika_flex) return undefined
-  if (requested === 'sage2') return 'sage2'
+  // Sage2 is the dense Pika default. Do not let that model-specific default
+  // leak into ordinary H3 when the user switches checkpoints.
+  if (requested === 'sage2' && options.minimax_h3_pika_flex) return 'sage2'
   if (requested === 'sdpa') return 'sdpa'
   if (
     requested === 'veda'

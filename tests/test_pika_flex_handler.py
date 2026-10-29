@@ -153,6 +153,17 @@ def test_pika_api_rejects_duration_above_native_limit_instead_of_shortening():
         )
 
 
+@pytest.mark.parametrize("reference", [False, True])
+def test_pika_api_rejects_explicit_extended_duration_before_geometry_normalization(reference):
+    _, _, model = definition(reference)
+
+    with pytest.raises(ValueError, match="does not support extended duration"):
+        validate_pika_flex_single_pass_request(
+            {"video_length": 362, "minimax_h3_extended_duration": True},
+            model,
+        )
+
+
 def test_api_validates_pika_single_pass_before_generic_clip_schedule_repair():
     source = (ROOT / "app/launch.py").read_text(encoding="utf-8")
     prepare = source[source.index("async def _prepare_generation_submission") :]
