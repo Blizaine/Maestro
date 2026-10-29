@@ -354,8 +354,9 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
       )}
       </div>
       )}
-      {!isStandaloneTool && !isTitles && <StudioFooter onCharacterSlot={setCharacterSlot} onAnchor={setSettingsElement} />}
       </div>
+      {/* Keep generation controls outside the scrolling prompt/input body. */}
+      {!isStandaloneTool && !isTitles && <StudioFooter onCharacterSlot={setCharacterSlot} onAnchor={setSettingsElement} />}
       <div ref={setTitlesFooterHost} data-testid="titles-footer-host" className="studio-footer shrink-0" hidden={!isTitles} />
       </>
     </CharacterToolbarContext.Provider>
