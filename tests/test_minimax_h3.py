@@ -1098,6 +1098,37 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertIn("VRAM-aware default", duration_slider)
         self.assertIn("manually raise the native pass", duration_slider)
 
+    def test_native_omni_memory_policy_without_gpu_preserves_auto_requests(self):
+        apply_policy = _load_h3_memory_helpers()[
+            "apply_h3_native_omni_memory_policy"
+        ]
+        model_def = {
+            "architecture": "minimax_h3_ref2va",
+            "omni_reference": True,
+        }
+        request = {
+            "resolution": "704x1280",
+            "video_length": 345,
+            "sliding_window_size": 158,
+        }
+        before = dict(request)
+
+        self.assertIsNone(
+            apply_policy(request, model_def, {"gpu_vram_gb": 0})
+        )
+        self.assertEqual(request, before)
+
+        pika_request = {
+            **request,
+            "minimax_h3_reference_sequence": False,
+        }
+        pika_before = dict(pika_request)
+        pika_model_def = {**model_def, "minimax_h3_pika_flex": True}
+        self.assertIsNone(
+            apply_policy(pika_request, pika_model_def, {"gpu_vram_gb": 0})
+        )
+        self.assertEqual(pika_request, pika_before)
+
     def test_full_h3_preflight_recommends_pruned_turbo_without_blocking(self):
         preflight = _load_h3_memory_helpers()["h3_runtime_preflight"]
         full_first_last = {

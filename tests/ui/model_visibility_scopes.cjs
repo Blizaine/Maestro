@@ -6,11 +6,13 @@ const {chromium}=require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
 const make=(model_type,name,extra={})=>({model_type,name,family:'minimax_h3',architecture:model_type,is_t2v:true,is_i2v:true,is_downloaded:true,guidance_max_phases:1,fps:24,...extra});
 const models=[make('minimax_h3','H3 Pruned 20B — Frames'), make('minimax_h3_full','H3 Full 33B — First/Last'),
  make('minimax_h3_fused_turbo','H3 Fused 4-Step — Frames'),
+ make('minimax_h3_pika_flex','Pika H3 Flex — Frames',{minimax_h3_pika_flex:true}),
  make('ltx2_25','LTX-2.5 — Distilled',{family:'ltx2'}),
  make('longcat_avatar','LongCat Avatar Single',{family:'longcat',supports_audio_input:true}),
  make('longcat_avatar_multi','LongCat Avatar Multi',{family:'longcat',supports_audio_input:true}),
  make('minimax_h3_ref2va','H3 Omni Pruned 20B — References',{omni_reference:true}),
  make('minimax_h3_ref2va_fused_turbo','H3 Fused 4-Step — References',{omni_reference:true}),
+ make('minimax_h3_ref2va_pika_flex','Pika H3 Flex — References',{omni_reference:true,minimax_h3_pika_flex:true}),
  make('minimax_h3_ref2va_imported','H3 Custom INT8 — References',{omni_reference:true}),
  make('minimax_h3_ref2va_mature','H3 Mature — References',{omni_reference:true,nsfw_only:true}),
  make('flux_dev','Flux Dev',{family:'flux',architecture:'flux',is_downloaded:true,is_t2v:false,is_i2v:false}),
@@ -137,7 +139,8 @@ const families=[{id:'minimax_h3',label:'MiniMax H3'},{id:'ltx2',label:'LTX-2'},{
   await page.evaluate(()=>window.store.getState().setAllModelsEnabled(false));
   assert.deepEqual(await page.evaluate(()=>window.store.getState().modelVisibilityOverrides),{});
   await page.evaluate(()=>window.store.getState().resetEnabledModels());
-  assert.deepEqual(await page.evaluate(()=>window.visibleIds('video:frames')),['ltx2_25','minimax_h3','minimax_h3_fused_turbo'],'Global reset restores the new Frames defaults');
+  assert.deepEqual(await page.evaluate(()=>window.visibleIds('video:frames')),['ltx2_25','minimax_h3','minimax_h3_fused_turbo','minimax_h3_pika_flex'],'Global reset restores the new Frames defaults');
+  assert.deepEqual(await page.evaluate(()=>window.visibleIds('video:references')),['minimax_h3_ref2va','minimax_h3_ref2va_fused_turbo','minimax_h3_ref2va_pika_flex'],'Global reset restores the new References defaults');
   await context.close();
 
   // A fresh install receives scoped defaults; existing preferences above were preserved.
@@ -145,8 +148,8 @@ const families=[{id:'minimax_h3',label:'MiniMax H3'},{id:'ltx2',label:'LTX-2'},{
   prefs={configured:false};
   ({page,context}=await open());
   const expected={
-   'video:frames':['ltx2_25','minimax_h3','minimax_h3_fused_turbo'],
-   'video:references':['minimax_h3_ref2va','minimax_h3_ref2va_fused_turbo'],
+   'video:frames':['ltx2_25','minimax_h3','minimax_h3_fused_turbo','minimax_h3_pika_flex'],
+   'video:references':['minimax_h3_ref2va','minimax_h3_ref2va_fused_turbo','minimax_h3_ref2va_pika_flex'],
    'video:avatar':['longcat_avatar','longcat_avatar_multi'],
    'video:extend':['ltx2_25','minimax_h3','minimax_h3_fused_turbo','minimax_h3_ref2va','minimax_h3_ref2va_fused_turbo'],
    'video:blend':['ltx2_25','minimax_h3','minimax_h3_fused_turbo','minimax_h3_ref2va','minimax_h3_ref2va_fused_turbo'],
@@ -173,7 +176,32 @@ const families=[{id:'minimax_h3',label:'MiniMax H3'},{id:'ltx2',label:'LTX-2'},{
   assert.deepEqual(await page.evaluate(()=>window.visibleIds('video:avatar')),expected['video:avatar'],'Scoped reset works after None');
   assert.deepEqual(await page.evaluate(()=>window.visibleIds('video:frames')),[],'Reset after None does not enable other workflows');
   assert.deepEqual(destructiveRequests,[],'Reset never deletes or downloads model files');
+  await context.close();
+
+  // A versioned upgrade fills missing scoped choices but keeps a stored opt-out.
+  visibility={configured:true,enabled_models:['minimax_h3','minimax_h3_fused_turbo','ltx2_25','minimax_h3_ref2va','minimax_h3_ref2va_fused_turbo'],
+   mode_overrides:{'video:references':{minimax_h3_ref2va_pika_flex:false}},defaults_version:25,initialized_mature_models:[]};
+  prefs={configured:false};
+  ({page,context}=await open());
+  for(let attempt=0;attempt<100&&visibility.defaults_version!==26;attempt++)await new Promise(resolve=>setTimeout(resolve,25));
+  assert.equal(visibility.defaults_version,26,'Migration persists the new defaults version');
+  await page.waitForFunction(()=>window.store.getState().modelVisibilityOverrides['video:frames']?.minimax_h3_pika_flex===true);
+  assert.deepEqual(await page.evaluate(()=>window.visibleIds('video:frames')),expected['video:frames'],'Upgrade adds a missing Frames default');
+  assert.equal(await page.evaluate(()=>window.store.getState().enabledModels.has('minimax_h3_pika_flex')),false,'Upgrade does not broaden the global whitelist');
+  assert.deepEqual(await page.evaluate(()=>window.visibleIds('video:references')),['minimax_h3_ref2va','minimax_h3_ref2va_fused_turbo'],'Upgrade preserves an explicit References opt-out');
+  for(const scope of ['video:extend','video:blend'])assert.equal((await page.evaluate(scope=>window.visibleIds(scope),scope)).some(id=>id.includes('pika_flex')),false,`Upgrade does not enable Pika in ${scope}`);
+  assert.equal(visibility.mode_overrides['video:references'].minimax_h3_ref2va_pika_flex,false,'Migration persists the References opt-out');
+  assert.equal(visibility.mode_overrides['video:frames'].minimax_h3_pika_flex,true,'Migration persists the new Frames default');
+  await context.close();
+
+  // An empty saved whitelist and no scoped choices represents deliberate All None.
+  visibility={configured:true,enabled_models:[],mode_overrides:{},defaults_version:25,initialized_mature_models:[]};
+  ({page,context}=await open());
+  for(let attempt=0;attempt<100&&visibility.defaults_version!==26;attempt++)await new Promise(resolve=>setTimeout(resolve,25));
+  assert.equal(visibility.defaults_version,26,'All None also records the migration version');
+  assert.deepEqual(await page.evaluate(()=>window.visibleIds('video:frames')),[],'Migration preserves global All None');
+  assert.deepEqual(await page.evaluate(()=>window.visibleIds('video:references')),[],'Migration preserves All None in every workflow');
   await context.close();assert.deepEqual(errors,[]);
-  console.log('Workflow visibility: real settings, isolated overrides, management focus, mature gate, selection reconciliation, submission guard, server persistence, fresh curated defaults, scoped reset, selection reconciliation and no model deletion passed');
+  console.log('Workflow visibility: real settings, isolated overrides, management focus, mature gate, selection reconciliation, submission guard, server persistence, fresh curated defaults, scoped reset, opt-out-preserving upgrade, All None preservation and no model deletion passed');
  }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1});

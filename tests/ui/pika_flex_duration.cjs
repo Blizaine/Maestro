@@ -4,8 +4,16 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const root = path.resolve(__dirname, '../..');
 const esbuild = require(path.join(root, 'ui/node_modules/esbuild'));
-const playwright = require(process.env.MAESTRO_PLAYWRIGHT
-  || 'C:/Users/bliza/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const playwrightPath = process.env.MAESTRO_PLAYWRIGHT
+  || (() => {
+    try {
+      return require.resolve('playwright', {paths: [path.join(root, 'ui')]});
+    } catch (error) {
+      if (error.code !== 'MODULE_NOT_FOUND') throw error;
+      return require.resolve('playwright');
+    }
+  })();
+const playwright = require(playwrightPath);
 
 const modelOptionsFor = (modelType, reference = false, rolling = false) => ({
   model_type: modelType,

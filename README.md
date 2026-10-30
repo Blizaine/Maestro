@@ -35,16 +35,25 @@ Runtime upgrades are explicit menu actions. A missing performance-runtime marker
 does not automatically run Update when you open the launcher. If offered,
 **Start with Compatibility Runtime** keeps the existing runtime available.
 
-### v4.0.0 (2026-10-29) — Dev preview
+### v4.0.0 (2026-10-29–30) — Dev release candidate
 
 The next major Main release is being prepared on **Dev** as v4.0.0.
 
 - **A fresh appearance:** first opening v4 switches to Graphite Studio in Dark
   mode, including browsers with a saved theme. This happens once; choose another
   theme or appearance in Settings afterward and that choice stays saved.
+- **An upgraded Editor and animated titles:** a fuller editing workspace,
+  reviewable Auto-edit plans, chroma key and transparent MOV export; titles can
+  also be generated directly in Studio.
+- **New creative models and tools:** MOSS reference editors, Fibo 2.0, H3
+  accelerators/PTD/two-pass options, FlashVSR+ Turbo and experimental Pika H3
+  Flex with motion/audio sliding windows. Flex is enabled in the default Frames
+  and References lists. Worlds and Profile 0 remain optional experimental tools.
+- **Smoother daily use:** compact pinned Studio controls, clearer startup and
+  mobile loading, resizable thumbnails, image-workflow fixes and quieter logs.
 
 The existing Dev updates are included. See the
-[v4.0.0 preview notes](docs/RELEASE_NOTES_V4.0.0.md).
+[v4.0.0 candidate notes and testing limits](docs/RELEASE_NOTES_V4.0.0.md).
 
 ### v3.3.0 (2026-10-26) — Dev testing
 

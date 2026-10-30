@@ -1682,30 +1682,7 @@ def apply_h3_native_omni_memory_policy(
     except (TypeError, ValueError):
         return None
     if total_vram_gb <= 0:
-        if not pika_flex:
-            return None
-        minimum_window = max(
-            1,
-            int((model_def or {}).get("frames_minimum") or _H3_MIN_FRAMES),
-        )
-        if requested_window <= minimum_window:
-            return None
-        inputs["sliding_window_size"] = minimum_window
-        return {
-            "gpu_vram_gb": 0.0,
-            "resolution": _normalize_h3_resolution(
-                inputs.get("resolution", "864x480")
-            ),
-            "requested_window_frames": requested_window,
-            "effective_window_frames": minimum_window,
-            "output_frames": total_frames,
-            "checkpoint": "pika_flex_estimated",
-            "recommendation_basis": "estimated",
-            "recommendation_note": (
-                "Conservative 124-frame Auto window; Pika Flex adapter runs "
-                "have not been measured."
-            ),
-        }
+        return None
 
     minimum_frames = max(
         1,

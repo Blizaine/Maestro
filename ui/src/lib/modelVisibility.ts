@@ -28,9 +28,11 @@ export type ModelVisibilityOverrides = Partial<Record<ModelVisibilityScope, Reco
 // also supplies the unchanged image, audio and video editing workflows.
 const H3_AND_LTX_DEFAULTS = ['minimax_h3', 'minimax_h3_fused_turbo', 'ltx2_25'] as const
 const H3_REFERENCE_DEFAULTS = ['minimax_h3_ref2va', 'minimax_h3_ref2va_fused_turbo'] as const
+const H3_FRAMES_DEFAULTS = [...H3_AND_LTX_DEFAULTS, 'minimax_h3_pika_flex'] as const
+const H3_REFERENCES_DEFAULTS = [...H3_REFERENCE_DEFAULTS, 'minimax_h3_ref2va_pika_flex'] as const
 export const DEFAULT_MODELS_BY_SCOPE: Partial<Record<ModelVisibilityScope, readonly string[]>> = {
-  'video:frames': H3_AND_LTX_DEFAULTS,
-  'video:references': H3_REFERENCE_DEFAULTS,
+  'video:frames': H3_FRAMES_DEFAULTS,
+  'video:references': H3_REFERENCES_DEFAULTS,
   'video:avatar': ['longcat_avatar', 'longcat_avatar_multi'],
   'video:extend': [...H3_AND_LTX_DEFAULTS, ...H3_REFERENCE_DEFAULTS],
   'video:blend': [...H3_AND_LTX_DEFAULTS, ...H3_REFERENCE_DEFAULTS],

@@ -9,8 +9,15 @@ const ui = path.join(root, 'ui');
 const requireFromUi = createRequire(path.join(ui, 'package.json'));
 const esbuild = requireFromUi('esbuild');
 const uiNodeModules = fs.realpathSync(path.join(ui, 'node_modules'));
-const playwrightPath = process.env.MAESTRO_PLAYWRIGHT ||
-  'C:/Users/bliza/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright-core';
+const playwrightPath = process.env.MAESTRO_PLAYWRIGHT
+  || (() => {
+    try {
+      return require.resolve('playwright', {paths: [path.join(root, 'ui')]});
+    } catch (error) {
+      if (error.code !== 'MODULE_NOT_FOUND') throw error;
+      return require.resolve('playwright');
+    }
+  })();
 const {chromium} = require(playwrightPath);
 
 const project = {

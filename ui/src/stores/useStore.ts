@@ -1266,7 +1266,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 25
+const DEFAULTS_VERSION = 26
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -1312,6 +1312,14 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   24: ['moss_image_edit', 'moss_image_edit_hq'],
   // Fibo Dev and its separate four-step reference/masked editor.
   25: ['fibo2_dev', 'fibo2_edit_turbo'],
+  // Pika H3 Flex gets workflow defaults through scoped visibility only.
+  26: [],
+}
+const SCOPED_DEFAULTS_ADDED_IN: Record<number, Partial<Record<ModelVisibilityScope, readonly string[]>>> = {
+  26: {
+    'video:frames': ['minimax_h3_pika_flex'],
+    'video:references': ['minimax_h3_ref2va_pika_flex'],
+  },
 }
 const DEFAULTS_VERSION_KEY = 'maestro_defaults_version'
 
@@ -6368,21 +6376,54 @@ export const useStore = create<AppState>((set, get) => ({
             )
         if (storedVer < DEFAULTS_VERSION) {
           const additions: string[] = []
+          const scopedAdditions: Partial<Record<ModelVisibilityScope, string[]>> = {}
           for (let v = storedVer + 1; v <= DEFAULTS_VERSION; v++) {
             additions.push(...(DEFAULTS_ADDED_IN[v] || []))
+            for (const scope of Object.keys(SCOPED_DEFAULTS_ADDED_IN[v] || {}) as ModelVisibilityScope[]) {
+              scopedAdditions[scope] = [
+                ...new Set([
+                  ...(scopedAdditions[scope] || []),
+                  ...(SCOPED_DEFAULTS_ADDED_IN[v]?.[scope] || []),
+                ]),
+              ]
+            }
           }
           const present = additions.filter(id => models.some(m => m.model_type === id))
-          if (present.length > 0) {
-            set(s => {
-              const next = new Set(s.enabledModels)
-              present.forEach(id => next.add(id))
-              _saveEnabledModels(next)
-              return { enabledModels: next }
-            })
+          const state = get()
+          const nextEnabledModels = new Set(state.enabledModels)
+          present.forEach(id => nextEnabledModels.add(id))
+
+          let nextOverrides = state.modelVisibilityOverrides
+          let scopedDefaultsChanged = false
+          // An empty global whitelist with no scoped choices is the saved
+          // representation of All None. Keep it for these new scoped defaults.
+          const preserveAllNone = state.enabledModels.size === 0
+            && Object.keys(state.modelVisibilityOverrides).length === 0
+          if (!preserveAllNone) {
+            for (const [scope, ids] of Object.entries(scopedAdditions) as [ModelVisibilityScope, string[]][]) {
+              const choices = { ...nextOverrides[scope] }
+              let scopeChanged = false
+              for (const id of ids) {
+                // Only fill missing entries. Existing false values may be
+                // deliberate opt-outs, so leave them unchanged on upgrade.
+                if (!Object.prototype.hasOwnProperty.call(choices, id)) {
+                  choices[id] = true
+                  scopeChanged = true
+                }
+              }
+              if (scopeChanged) {
+                nextOverrides = { ...nextOverrides, [scope]: choices }
+                scopedDefaultsChanged = true
+              }
+            }
+          }
+          const modelsChanged = present.some(id => !state.enabledModels.has(id))
+          if (modelsChanged || scopedDefaultsChanged) {
+            set({ enabledModels: nextEnabledModels, modelVisibilityOverrides: nextOverrides })
           }
           _modelVisibilityDefaultsVersion = DEFAULTS_VERSION
           localStorage.setItem(DEFAULTS_VERSION_KEY, String(DEFAULTS_VERSION))
-          _saveEnabledModels(get().enabledModels)
+          _saveEnabledModels(nextEnabledModels, nextOverrides)
         }
       } catch { /* localStorage blocked — defaults only apply this session */ }
 

@@ -3,7 +3,7 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## [4.0.0] - 2026-10-29 — Dev preview
+## [4.0.0] - 2026-10-29–30 — Dev release candidate
 
 Label public Dev v4.0.0 in preparation for the next public Main release.
 The first visit to v4 switches existing and new browser profiles to Graphite
@@ -11,7 +11,25 @@ Studio in Dark mode. Apply that one-time change before the UI mounts, then
 retain any theme or appearance the user chooses afterward, including across
 reloads and v4 patch updates. Other preferences stay unchanged.
 
-See the [v4.0.0 Dev preview notes](docs/RELEASE_NOTES_V4.0.0.md).
+Include the upgraded Editor, reviewable Auto-edit, animated titles in Studio
+and Editor, chroma key and transparent MOV export; compact pinned Studio
+controls, mobile/startup recovery and a resizable gallery thumbnail panel.
+Near-widescreen gallery videos retain native proportions without edge gaps.
+
+Add experimental Pika H3 Flex Frames/References to their default enabled
+lists, retaining explicit workflow visibility choices. Enable native H3
+sliding windows with generated motion/boundary/stereo-audio history and
+canonical References inputs, fixed six-evaluation sampling and exact joined
+frame totals. Preserve saved sequence geometry and native single-pass durations.
+
+The candidate also includes the post-Main v3.3 ports and fixes: MOSS reference
+editors/caches/HQ vision, Fibo 2.0, Qwen reference caches, H3 accelerators/PTD/
+two-pass generation, FlashVSR+ Turbo, optional kernels, Worlds and Profile 0.
+Image prompt guides preserve requested media/styles, model-switch validation
+is repaired, and successful HTTP access lines are quiet by default.
+
+Main promotion awaits separate review of the three-workstation qualification.
+See the [v4.0.0 candidate notes and limits](docs/RELEASE_NOTES_V4.0.0.md).
 
 ## [3.3.0] - 2026-10-26
 
