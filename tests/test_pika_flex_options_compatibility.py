@@ -49,12 +49,35 @@ def test_first_block_rejection_is_actionable_and_attention_remains_valid(attenti
     validate_pika_flex_request(request)
 
 
-@pytest.mark.parametrize("payload", [
-    {"activated_loras": ["extra.safetensors"]},
-    {"loras_selected": ["extra.safetensors"]},
-    {"minimax_h3_turbo_mode": True},
-    {"minimax_h3_pdd": True},
-])
-def test_real_extra_loras_and_accelerators_still_rejected(payload):
+@pytest.mark.parametrize("selection_key", ["activated_loras", "loras_selected"])
+def test_extra_loras_require_experimental_opt_in(selection_key):
+    with pytest.raises(ValueError, match="Enable minimax_h3_experimental_loras"):
+        validate_pika_flex_request({selection_key: ["extra.safetensors"]})
+
+
+@pytest.mark.parametrize("selection_key", ["activated_loras", "loras_selected"])
+@pytest.mark.parametrize("enabled", [False, None, 1, "true"])
+def test_extra_loras_require_literal_true(selection_key, enabled):
+    with pytest.raises(ValueError, match="Enable minimax_h3_experimental_loras"):
+        validate_pika_flex_request({
+            selection_key: ["extra.safetensors"],
+            "minimax_h3_experimental_loras": enabled,
+        })
+
+
+@pytest.mark.parametrize("selection_key", ["activated_loras", "loras_selected"])
+def test_ordinary_loras_allowed_with_explicit_opt_in(selection_key):
+    validate_pika_flex_request({
+        selection_key: ["extra.safetensors"],
+        "minimax_h3_experimental_loras": True,
+    })
+
+
+@pytest.mark.parametrize("accelerator", ["minimax_h3_turbo_mode", "minimax_h3_pdd"])
+@pytest.mark.parametrize("experimental_loras", [False, True])
+def test_accelerators_rejected_even_with_lora_opt_in(accelerator, experimental_loras):
     with pytest.raises(ValueError, match="additional LoRAs or accelerators"):
-        validate_pika_flex_request(payload)
+        validate_pika_flex_request({
+            accelerator: True,
+            "minimax_h3_experimental_loras": experimental_loras,
+        })
