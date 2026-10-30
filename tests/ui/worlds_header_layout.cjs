@@ -173,7 +173,7 @@ async function main() {
         assert.equal(await page.getByRole('switch', {name:'Worlds mode (Experimental)'}).getAttribute('aria-checked'), 'true');
       } else {
         if (width === 320) await capture(page, 'mobile-320-header');
-        await workflow.click();
+        await dialog.getByRole('button', {name:'Close Choose a workflow', exact:true}).click();
         await header.getByRole('button', {name:'Close sidecar', exact:true}).click();
         await page.waitForFunction(() => window.store.getState().sidebarOpen === false);
         assert.equal(await page.getByTestId('sidebar').getAttribute('aria-hidden'), 'true');

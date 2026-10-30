@@ -276,7 +276,6 @@ let browser;
     console.log(`Screenshot: ${path.join(screenshotDir,'near-832x480.png')}`);
   } finally {
     if(browser) await browser.close();
-    for(const item of cases) fs.rmSync(path.join(tempDir,item.name),{force:true});
-    fs.rmdirSync(tempDir);
+    fs.rmSync(tempDir,{recursive:true,force:true});
   }
 })().catch(error=>{console.error(error);process.exitCode=1;});

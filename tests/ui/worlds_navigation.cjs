@@ -116,7 +116,7 @@ async function main() {
         beforeTransform: Boolean(worldsOption.compareDocumentPosition(transformTitle) & Node.DOCUMENT_POSITION_FOLLOWING),
       };
     });
-    assert.deepEqual(placement.labels.slice(-2), ['Blend', 'Worlds'], 'Worlds is immediately after Blend in Create');
+    assert.deepEqual(placement.labels.slice(-2), ['Titles', 'Worlds'], 'Worlds is immediately after Titles at the end of Create');
     assert.equal(placement.inCreate, true);
     assert.equal(placement.beforeTransform, true, 'Create appears before Transform');
     const beforeOpen = await page.evaluate(() => {
