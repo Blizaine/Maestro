@@ -116,6 +116,12 @@ app/wgp_config.json.bak
 # Optional, separately licensed native DLSS runtime installed by the user.
 app/dlss5/
 
+# UI build safety metadata and local staging/backups.
+ui/.maestro-source-baseline.json
+ui/.maestro-build-receipt.json
+ui/.maestro-staging-*/
+ui/.maestro-build-backups-*/
+
 # Keep this reviewed feature-port plan alongside the source changes.
 !docs/development/
 docs/development/*
@@ -124,3 +130,4 @@ docs/development/*
 !docs/development/memory-benchmark.md
 !docs/development/test-bench.md
 !docs/development/h3-veda-port.md
+!docs/development/ui-build-safety.md

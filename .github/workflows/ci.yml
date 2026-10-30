@@ -151,6 +151,10 @@ jobs:
           node tests/ui/h3_autotune_advice_unit.cjs
       - name: v4 theme introduction and preference recovery
         run: node tests/ui/theme_migration.cjs
-      - name: Type-check + build (tsc -b && vite build)
+      - name: UI source and deployment safety regressions
+        run: node tests/ui/ui_build_safety.cjs
+      - name: Type-check and staged UI build
         working-directory: ui
         run: npm run build
+      - name: Verify built UI matches source and receipt
+        run: node ui/scripts/ui-build.mjs verify

@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "node scripts/ui-build.mjs build",
+    "build:verify": "node scripts/ui-build.mjs verify",
     "lint": "eslint .",
     "preview": "vite preview"
   },
