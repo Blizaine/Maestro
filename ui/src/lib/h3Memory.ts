@@ -9,6 +9,34 @@ export function isPikaFlexSinglePass(options?: ModelOptions | null): boolean {
     && !(options.sliding_window === true && options.video_continuation === true)
 }
 
+/** Resolve Pika Flex identity from the selected model before async options load. */
+export function isPikaFlexModelType(
+  modelType: unknown,
+  options?: ModelOptions | null,
+): boolean {
+  return modelType === 'minimax_h3_pika_flex'
+    || modelType === 'minimax_h3_ref2va_pika_flex'
+    || (!!modelType && options?.model_type === modelType
+      && options.minimax_h3_pika_flex === true)
+}
+
+/** Clear only the unsupported First Block cache fields for the effective Pika request. */
+export function clearPikaFlexCacheSettings<T extends {
+  skip_steps_cache_type?: unknown
+  skip_steps_multiplier?: unknown
+  skip_steps_start_step_perc?: unknown
+}>(
+  modelType: unknown,
+  params: T,
+  options?: ModelOptions | null,
+): T {
+  if (!isPikaFlexModelType(modelType, options)) return params
+  params.skip_steps_cache_type = ''
+  delete params.skip_steps_multiplier
+  delete params.skip_steps_start_step_perc
+  return params
+}
+
 export function supportsH3ExtendedDuration(options?: ModelOptions | null): boolean {
   return !!options && !options.audio_only && options.model_type !== 'viggle_animate'
     && !options.minimax_h3_fasth3

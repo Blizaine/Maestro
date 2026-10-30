@@ -458,7 +458,7 @@ class PikaFlexRequestTests(unittest.TestCase):
             ({"activated_loras": ["character.safetensors"]}, "LoRAs"),
             ({"loras_selected": ["character.safetensors"]}, "LoRAs"),
             ({"minimax_h3_turbo_mode": True}, "accelerators"),
-            ({"skip_steps_cache_type": "classic"}, "accelerators"),
+            ({"skip_steps_cache_type": "classic"}, "step-skipping caches"),
             ({"minimax_h3_multi_window": True}, "continuation"),
             ({"prefix_frames_count": 17}, "continuation"),
             ({"window_start_frame_no": 1}, "continuation"),

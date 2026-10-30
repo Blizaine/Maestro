@@ -56,7 +56,7 @@ def test_api_defaults_and_native_capabilities_align_on_sla(reference):
 def test_unsupported_attention_and_first_block_cache_stay_rejected():
     with pytest.raises(ValueError, match="supports Sage2"):
         validate_pika_flex_request({"override_attention": "veda"})
-    with pytest.raises(ValueError, match="accelerators"):
+    with pytest.raises(ValueError, match="First Block.*step-skipping caches"):
         validate_pika_flex_request({"override_attention": "sla", "skip_steps_cache_type": "first_block"})
 
 

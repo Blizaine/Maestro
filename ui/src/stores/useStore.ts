@@ -30,8 +30,10 @@ import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPr
 import * as api from '../api/client'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 import {
+  clearPikaFlexCacheSettings,
   effectiveH3OmniSequenceFrames,
   h3MaximumFrames,
+  isPikaFlexModelType,
   isPikaFlexSinglePass,
   h3TimelineFrames,
   supportsH3ExtendedDuration,
@@ -4980,7 +4982,9 @@ export const useStore = create<AppState>((set, get) => ({
         // Sol / First Block are durable Video preferences, not project
         // inputs. Reapply them when returning from Audio/Image after a
         // restart even though general Advanced state starts clean.
-        ...(mode === 'video' ? get().h3OptimizationPreferences : {}),
+        ...(mode === 'video'
+          ? clearPikaFlexCacheSettings(newModelType, { ...get().h3OptimizationPreferences })
+          : {}),
         model_type: newModelType,
         prompt: restoredPrompt,
         image_mode: mode === 'image'
@@ -5879,7 +5883,7 @@ export const useStore = create<AppState>((set, get) => ({
       // LoRAs you don't have — so it can show the download prompt. Closing
       // here made that prompt dead code (recipe applied, LoRA missing, user
       // generated → cryptic "Loras missing" failure with no guidance).
-      params: {
+      params: clearPikaFlexCacheSettings(recipe.model_type, {
         ...s.params,
         ...(recipe.params as Partial<GenerateParams>),
         model_type: recipe.model_type,
@@ -5891,7 +5895,7 @@ export const useStore = create<AppState>((set, get) => ({
         // Recipes are look presets — land in the base Studio sub-mode
         // (Frames for video, image-output for image), not Extend/Blend.
         image_mode: mode === 'image' ? 1 : 0,
-      },
+      }),
       loraWeights,
       availableLoras: [],
       selectedModelPerMode: { ...s.selectedModelPerMode, [mode]: recipe.model_type },
@@ -6600,7 +6604,10 @@ export const useStore = create<AppState>((set, get) => ({
               image_mode: restoredVideoWorkflow === 'extend' ? 3 : restoredVideoWorkflow === 'blend' ? 4 : 0,
               _studio_video_workflow: restoredVideoWorkflow,
             } : {}),
-            ...restoredH3OptimizationPreferences,
+            ...clearPikaFlexCacheSettings(
+              initialModelType,
+              { ...restoredH3OptimizationPreferences },
+            ),
           },
         }))
       } else {
@@ -8874,7 +8881,11 @@ export const useStore = create<AppState>((set, get) => ({
     } else {
       delete params.override_attention
     }
-    if (state.modelOptions?.first_block_cache) {
+    if (isPikaFlexModelType(params.model_type, state.modelOptions)) {
+      // Resolve capability from the selected Pika model while model options
+      // may still belong to the checkpoint switched away from.
+      clearPikaFlexCacheSettings(params.model_type, params, state.modelOptions)
+    } else if (state.modelOptions?.first_block_cache) {
       const allowedThresholds = (
         state.modelOptions.skip_steps_multiplier_choices || []
       ).map(choice => choice[1])
@@ -10544,7 +10555,10 @@ export const useStore = create<AppState>((set, get) => ({
     const seq = ++_modelOptionsSeq
     set({ modelOptionsLoading: true })
     try {
-      const options = await api.fetchModelOptions(modelType)
+      const fetchedOptions = await api.fetchModelOptions(modelType)
+      const options = isPikaFlexModelType(modelType, fetchedOptions)
+        ? { ...fetchedOptions, minimax_h3_turbo: undefined }
+        : fetchedOptions
       // Staleness guard: a newer loadModelOptions call was issued while this
       // fetch was in flight (rapid model switching, or a settings restore
       // that jumped models). Applying a superseded response would clobber
@@ -10809,6 +10823,23 @@ export const useStore = create<AppState>((set, get) => ({
       paramUpdates.override_attention = normalizeH3Attention(
         options, inheritedFusedAttention ? '' : requestedAttention,
       ) ?? ''
+      if (isPikaFlexModelType(modelType, options)) {
+        paramUpdates.skip_steps_cache_type = ''
+        paramUpdates.skip_steps_multiplier = undefined
+        paramUpdates.skip_steps_start_step_perc = undefined
+      } else if (
+        options.first_block_cache
+        && activeState.params.skip_steps_cache_type !== 'first_block'
+        && activeState.h3OptimizationPreferences.skip_steps_cache_type === 'first_block'
+      ) {
+        // Restore the durable preference when switching back to a checkpoint
+        // that supports First Block Cache after a Pika model cleared runtime state.
+        paramUpdates.skip_steps_cache_type = 'first_block'
+        paramUpdates.skip_steps_multiplier = activeState.h3OptimizationPreferences.skip_steps_multiplier
+          ?? options.default_skip_steps_multiplier ?? 0.08
+        paramUpdates.skip_steps_start_step_perc = activeState.h3OptimizationPreferences.skip_steps_start_step_perc
+          ?? options.default_skip_steps_start_step_perc ?? 25
+      }
       if (options.minimax_h3_fused_turbo) {
         // This checkpoint's acceleration adapters are already fused into
         // its transformer. Never inherit an independent cache recipe across
@@ -13338,7 +13369,7 @@ export const useStore = create<AppState>((set, get) => ({
       ...(avatarModel ? {
         studioVideoModelPerCreateRoute: { ...s.studioVideoModelPerCreateRoute, avatar: modelType },
       } : {}),
-      params: {
+      params: clearPikaFlexCacheSettings(modelType, {
         ...s.params,
         model_type: modelType,
         ...((avatarModel || leaveAvatar) ? {
@@ -13353,9 +13384,13 @@ export const useStore = create<AppState>((set, get) => ({
         custom_settings: _kreaCustomSettingsForModel(s.params.custom_settings, modelType, s.kreaIdentitySettingsPerModel),
         activated_loras: [],
         loras_multipliers: '',
-        minimax_h3_turbo_mode: switchesWithinH3SingularityPair ? s.params.minimax_h3_turbo_mode : undefined,
-        minimax_h3_turbo_preset: switchesWithinH3SingularityPair ? s.params.minimax_h3_turbo_preset : undefined,
-      },
+        minimax_h3_turbo_mode: isPikaFlexModelType(modelType)
+          ? false
+          : switchesWithinH3SingularityPair ? s.params.minimax_h3_turbo_mode : undefined,
+        minimax_h3_turbo_preset: isPikaFlexModelType(modelType)
+          ? undefined
+          : switchesWithinH3SingularityPair ? s.params.minimax_h3_turbo_preset : undefined,
+      }),
       selectedModelPerMode: { ...s.selectedModelPerMode, [currentMode]: modelType },
       ...(currentMode === 'audio' ? {
         selectedModelPerAudioSubMode: {
@@ -14464,8 +14499,10 @@ export const useStore = create<AppState>((set, get) => ({
     )
       ? Math.max(0, Math.min(100, Number(p.skip_steps_start_step_perc)))
       : restoredModelOptions?.default_skip_steps_start_step_perc
+    clearPikaFlexCacheSettings(modelType, newParams, restoredModelOptions)
     newParams.minimax_h3_turbo_mode = (
-      p.minimax_h3_turbo_mode === true || legacyTurboEnabled
+      !isPikaFlexModelType(modelType, restoredModelOptions)
+      && (p.minimax_h3_turbo_mode === true || legacyTurboEnabled)
     )
     newParams.minimax_h3_turbo_preset = restoredTurboPreset?.id
     newParams.minimax_h3_text_encoder = restoredTextEncoder

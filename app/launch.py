@@ -2400,6 +2400,7 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
         or (model_def or {}).get("minimax_h3_fused_turbo", False)
         or (model_def or {}).get("minimax_h3_baked_turbo", False)
         or (model_def or {}).get("minimax_h3_fasth3", False)
+        or (model_def or {}).get("minimax_h3_pika_flex", False)
         or (model_def or {}).get("audio_only", False)
         or (model_def or {}).get("vdn", False)
     ):

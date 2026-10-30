@@ -4,6 +4,7 @@ import { useStore } from '../../stores/useStore'
 import type { ModelOptions } from '../../types'
 import { InfoTooltip } from './InfoTooltip'
 import { readPersistentDisclosure, writePersistentDisclosure } from '../../lib/persistentDisclosure'
+import { isPikaFlexModelType } from '../../lib/h3Memory'
 
 const H3_OPTIMIZATIONS_EXPANDED_KEY = 'maestro-h3-optimizations-expanded'
 
@@ -13,9 +14,10 @@ export function MiniMaxH3Optimizations() {
     readPersistentDisclosure(H3_OPTIMIZATIONS_EXPANDED_KEY, true)
   ))
   const modelOptions = useStore(s => s.modelOptions)
-  const option = useStore(s => s.modelOptions?.minimax_h3_turbo)
-  const advisory = useStore(s => s.modelOptions?.minimax_h3_runtime_advisory)
   const params = useStore(s => s.params)
+  const pikaFlex = isPikaFlexModelType(params.model_type, modelOptions)
+  const option = pikaFlex ? undefined : modelOptions?.minimax_h3_turbo
+  const advisory = useStore(s => s.modelOptions?.minimax_h3_runtime_advisory)
   const currentSteps = useStore(s => s.params.num_inference_steps)
   const defaultSteps = useStore(s => s.modelOptions?.minimax_h3_turbo?.unaccelerated_steps
     ?? s.modelOptions?.default_num_inference_steps)
@@ -45,7 +47,7 @@ export function MiniMaxH3Optimizations() {
           revision: '',
         }]
       : []
-  const turboEnabled = params.minimax_h3_turbo_mode === true
+  const turboEnabled = !pikaFlex && params.minimax_h3_turbo_mode === true
   const defaultTurboPreset = (
     turboPresets.find(preset => preset.id === option?.preset_id)
     || turboPresets[0]
@@ -63,11 +65,10 @@ export function MiniMaxH3Optimizations() {
   const architecture = String(modelOptions?.architecture || '')
   const isH3 = architecture.startsWith('minimax_h3')
   const fusedTurbo = modelOptions?.minimax_h3_fused_turbo === true
-  const pikaFlex = modelOptions?.minimax_h3_pika_flex === true
   const solEnabled = params.override_attention === 'sol'
   const slaEnabled = params.override_attention === 'sla'
   const vedaEnabled = params.override_attention === 'veda'
-  const cacheEnabled = params.skip_steps_cache_type === 'first_block'
+  const cacheEnabled = !pikaFlex && params.skip_steps_cache_type === 'first_block'
   const solSupported = modelOptions?.sol_attention_status?.supported === true
   const slaSupported = modelOptions?.sla_attention_status?.supported === true
   const slaFallbackActive = pikaFlex && slaEnabled && !slaSupported
@@ -430,7 +431,7 @@ export function MiniMaxH3Optimizations() {
               </div>
             )}
 
-            {modelOptions?.first_block_cache && (
+            {!pikaFlex && modelOptions?.model_type === params.model_type && modelOptions.first_block_cache && (
               <div className={`flex items-center gap-2 px-3 py-2 transition-colors ${
                 cacheEnabled ? 'bg-accent-blue/10' : ''
               }`}>

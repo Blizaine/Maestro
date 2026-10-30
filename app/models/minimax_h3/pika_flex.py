@@ -420,10 +420,15 @@ def validate_pika_flex_request(
         "minimax_h3_singularity",
         "minimax_h3_pdd",
         "pdd",
-        "skip_steps_cache_type",
     ):
         if _is_enabled(inputs.get(key)):
             raise ValueError("Pika H3 Flex does not support additional LoRAs or accelerators.")
+
+    if _is_enabled(inputs.get("skip_steps_cache_type")):
+        raise ValueError(
+            "Pika H3 Flex does not support First Block or other step-skipping caches. "
+            "Disable First Block for this model; SOL and SLA attention can still be used."
+        )
 
     one_frame_start_prefix = (
         allow_frames
