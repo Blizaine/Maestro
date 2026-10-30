@@ -44,6 +44,70 @@ class DirectorSourceContractTests(unittest.TestCase):
         self.assertEqual(len(contract["events"]), 2)
         self.assertIn("E2", format_source_contract(contract))
 
+    def test_standalone_nominal_presentation_notes_are_not_action_events(self):
+        source = (
+            "A short flat 2D illustrated story in one room. "
+            "One continuous simple action with visible movement. "
+            "The robot notices the cup."
+        )
+        contract = build_source_contract(source)
+        self.assertEqual(
+            contract["events"],
+            [{"event_id": "E1", "text": "The robot notices the cup"}],
+        )
+
+    def test_frozen_director_brief_keeps_the_complete_robot_action(self):
+        source = (
+            "A short flat 2D illustrated story in one room. "
+            "The single blue toy robot from Picture 1 notices the red cup from "
+            "Picture 2, walks over to it and waves beside it. Preserve their "
+            "identities, blue and yellow robot colors and red cup. No people, "
+            "speech, singing or music. One continuous simple action with "
+            "visible movement."
+        )
+        contract = build_source_contract(source)
+        self.assertEqual(
+            contract["events"],
+            [{
+                "event_id": "E1",
+                "text": (
+                    "The single blue toy robot from Picture 1 notices the red "
+                    "cup from Picture 2, walks over to it and waves beside it"
+                ),
+            }],
+        )
+        self.assertFalse(contract["audio_policy"]["generated_speech_allowed"])
+        self.assertFalse(contract["audio_policy"]["generated_music_allowed"])
+
+    def test_location_like_tails_do_not_swallow_nominal_subject_predicates(self):
+        for source, predicate in (
+            ("A short story in town begins.", "begins"),
+            ("A short film in one room explodes.", "explodes"),
+        ):
+            with self.subTest(source=source):
+                events = build_source_contract(source)["events"]
+                self.assertEqual(len(events), 1)
+                self.assertIn(predicate, events[0]["text"])
+
+    def test_mixed_presentation_clause_keeps_its_physical_action(self):
+        source = (
+            "One continuous simple action with visible movement "
+            "as the robot walks through the hall."
+        )
+        events = build_source_contract(source)["events"]
+        self.assertEqual(len(events), 1)
+        self.assertIn("robot walks through the hall", events[0]["text"])
+
+    def test_subjectless_actions_and_story_or_action_named_actors_survive(self):
+        events = build_source_contract(
+            "Run through the hall. Story opens the cabinet. "
+            "Action waits by the doorway."
+        )["events"]
+        self.assertEqual([event["event_id"] for event in events], ["E1", "E2", "E3"])
+        self.assertEqual(events[0]["text"], "Run through the hall")
+        self.assertIn("Story opens the cabinet", events[1]["text"])
+        self.assertIn("Action waits by the doorway", events[2]["text"])
+
     def test_silent_source_keeps_visual_action_without_dangling_speech(self):
         contract = build_source_contract('A silent short film. A courier opens the hatch and says, "We made it." No speech or background music.')
         self.assertFalse(contract["audio_policy"]["generated_music_allowed"])

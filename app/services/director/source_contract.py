@@ -33,6 +33,19 @@ _DIALOGUE_FINAL_MOUNTED_RE = re.compile(
     r"\b(?:astride|aboard|riding|mounted|mount(?:s|ed|ing)?)\b",
     re.IGNORECASE,
 )
+_STANDALONE_NOMINAL_PRESENTATION_RE = re.compile(
+    r"(?:a|an|one|single)\s+"
+    r"(?:(?:short|brief|flat|2d|3d|illustrated|animated|live[- ]action|"
+    r"stylized|cinematic|silent|continuous|simple|uninterrupted|"
+    r"single[- ]shot|one[- ]take)\s+)+"
+    r"(?:story|scene|film|video|clip|sequence|action)"
+    r"(?:\s+(?:in|inside|within|set\s+in)\s+"
+    r"(?:(?:one|a\s+single|the\s+same)\s+)?"
+    r"(?:room|location|setting|studio|space))?"
+    r"(?:\s+with\s+(?:(?:visible|clear|simple|continuous)\s+)*"
+    r"(?:movement|motion|action))?",
+    re.IGNORECASE,
+)
 _DIALOGUE_FINAL_AIRBORNE_RE = re.compile(
     r"\b(?:airborne|in\s+flight|taking\s+flight|takes?\s+flight|"
     r"lifts?\s+off)\b",
@@ -348,6 +361,20 @@ def director_audio_policy(source: str) -> dict[str, bool]:
     }
 
 
+def _is_standalone_nominal_presentation_direction(text: str) -> bool:
+    """Exclude standalone format/continuity labels from performed-action IDs.
+
+    The full match is intentionally a small nominal grammar: once a subject
+    and a narrative predicate are present, the text remains a source event.
+    The original prompt is not changed, so its style and setting constraints
+    remain available to the rest of the Director pipeline.
+    """
+
+    return bool(_STANDALONE_NOMINAL_PRESENTATION_RE.fullmatch(
+        str(text or "").strip(" \t\r\n-.,;:!?")
+    ))
+
+
 def build_source_contract(source: str) -> dict:
     from services.h3_story_ledger import extract_source_events
 
@@ -367,12 +394,14 @@ def build_source_contract(source: str) -> dict:
             ):
                 continue
         # Keep reference-role and preservation instructions in the source brief,
-        # rather than treating them as things an actor must perform once.
+        # rather than treating them as things an actor must perform once. A
+        # standalone nominal production descriptor (for example, "one
+        # continuous simple action with visible movement") is context too.
         if not text or re.match(
             r"(?:preserve|maintain|keep|avoid|never|do not|no\b|"
             r"(?:picture|image|reference)\s*\d*\s+(?:supplies|provides|defines|is for))\b",
             text, re.IGNORECASE,
-        ):
+        ) or _is_standalone_nominal_presentation_direction(text):
             continue
         events.append({"event_id": f"E{len(events) + 1}", "text": text})
     return {"revision": 1, "events": events, "audio_policy": policy}

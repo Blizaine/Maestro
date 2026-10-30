@@ -49,6 +49,11 @@ candidate combines the changes below with the fixes already tested on Dev.
   clearly. Native H3 start-image bookkeeping keeps its audio and video on the
   same output timeline. These changes are being checked in the live matrix;
   they are not a universal low-memory or speed guarantee.
+- **Director planning:** standalone style and continuity labels stay in the
+  creative brief instead of becoming mandatory performed story actions.
+  Actual character actions retain their ordered source obligations and physical
+  state validation. This reduces unnecessary planning conflicts without
+  accepting invented contact or missing physical state.
 
 See the [October port scope](WanGP-October-2026-Ports.md),
 [MOSS guide](MOSS-Image.md), [Fibo guide](Fibo-2.md),
