@@ -995,6 +995,19 @@ def _shot_list_schema(
     }
 
 
+def _requires_h3_source_contract(source_contract: dict[str, Any]) -> bool:
+    """Use the constrained silent H3 path whenever immutable events exist."""
+
+    audio_policy = source_contract.get("audio_policy")
+    events = source_contract.get("events")
+    return bool(
+        isinstance(audio_policy, dict)
+        and audio_policy.get("generated_speech_allowed") is False
+        and isinstance(events, list)
+        and len(events) >= 1
+    )
+
+
 def _discard_unused_image_fields(shot_dicts: list[dict]) -> list[dict]:
     """Defensively remove still-image planning data from video-only output."""
 
@@ -8260,10 +8273,7 @@ SCREENPLAY TO REPAIR:
                 screenplay_dialogue_manifest=screenplay_dialogue_manifest,
                 character_voice_bible=h3_voice_bible,
                 story_continuity_blueprint=story_continuity_blueprint,
-                require_source_contract=(
-                    source_contract["audio_policy"].get("generated_speech_allowed") is False
-                    and len(source_contract.get("events") or []) >= 2
-                ),
+                require_source_contract=_requires_h3_source_contract(source_contract),
                 reference_image_path=reference_image_path,
                 char_profiles=char_profiles,
                 has_reference=has_reference,

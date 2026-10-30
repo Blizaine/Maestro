@@ -55,6 +55,9 @@ candidate combines the changes below with the fixes already tested on Dev.
   state validation. This reduces unnecessary planning conflicts without
   accepting invented contact or missing physical state. Repair instructions
   distinguish proximity from actual touch and avoid placeholder support facts.
+  Silent H3 stories with a single action now use the same constrained JSON
+  planning path as longer action sequences, so physical typing is applied
+  before a draft is returned.
 - **Reliable startup:** the API reserves its actual bind interface through
   server startup and announces the Maestro URL only after its listener is
   ready. Busy ports fall back without taking over a shared Pinokio service.
