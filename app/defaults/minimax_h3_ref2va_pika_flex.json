@@ -28,7 +28,8 @@
     "lock_guidance_scale": true,
     "lock_guidance_phases": true,
     "guidance_max_phases": 1,
-    "loras_disabled": true,
+    "loras_disabled": false,
+    "experimental_loras_available": true,
     "t2v_class": true,
     "i2v_class": false,
     "image_prompt_types_allowed": "",
@@ -161,7 +162,7 @@
     "pika_flex_adapter_sha256": "e4d058fbd027377b925a0ee607b514ddd9037873fee3afa05d73b302e6f7f8e1",
     "license_name": "MiniMax H3 Community License",
     "license_url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
-    "selector_help": "PIKA H3 FLEX — REFERENCES (EXPERIMENTAL)\nUse ordered image, video, and audio references; at least one image or video is required. Six fixed model evaluations; CFG 1, adapter strength 1, video/audio shifts 12/3. Begin at 480p / 5.17 seconds. Up to 9 images, 3 videos, and 3 audio references (12 total). Continuation, control video, extra adapters, cache, and refinement are unavailable. Maestro does not include Pika's 4K upsampler or stem extraction. Consumer-GPU real-time performance is unverified."
+    "selector_help": "PIKA H3 FLEX — REFERENCES (EXPERIMENTAL)\nUse ordered image, video, and audio references; at least one image or video is required. Six fixed model evaluations; CFG 1, pinned adapter strength 1, video/audio shifts 12/3. Begin at 480p / 5.17 seconds. Up to 9 images, 3 videos, and 3 audio references (12 total). Ordinary H3 style/content LoRAs are experimental and off by default. Turbo, PDD, VDN, PTD, other special-head accelerators, and DoRA remain unavailable, as do control video, cache, and refinement. Maestro does not include Pika's 4K upsampler or stem extraction. Consumer-GPU real-time performance is unverified."
   },
   "prompt": "Use the ordered references to create a coherent cinematic scene with faithful identities, appearance, motion, and sound.",
   "num_inference_steps": 6,
@@ -187,5 +188,6 @@
   "skip_steps_cache_type": "",
   "minimax_h3_turbo_mode": false,
   "minimax_h3_turbo_preset": "",
-  "minimax_h3_extended_duration": false
+  "minimax_h3_extended_duration": false,
+  "minimax_h3_experimental_loras": false
 }

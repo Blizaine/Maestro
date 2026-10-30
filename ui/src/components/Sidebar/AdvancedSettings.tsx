@@ -382,7 +382,10 @@ function useAdvancedActiveSections(): Record<AdvancedSectionKey, string[]> {
   ) items.generation.push('Negative prompt')
   if (params.model_type === 'yue2') items.loras.push(...(instrumental
     ? ['YuE2 instrumental LoRA'] : selectedMusicStyles(params.custom_settings).map(() => 'YuE2 music LoRA')))
-  if (params.model_type !== 'yue2' && !modelOptions?.loras_disabled && !(generationMode === 'avatar' && editSubMode === 'outpaint')) {
+  if (params.model_type !== 'yue2' && !modelOptions?.loras_disabled
+    && (!modelOptions?.experimental_loras_available || params.minimax_h3_experimental_loras === true)
+    && !(generationMode === 'avatar' && editSubMode === 'outpaint')) {
+    if (modelOptions?.experimental_loras_available) items.loras.push('Experimental LoRAs')
     for (const l of params.activated_loras) items.loras.push(`LoRA: ${l.replace(/\.(safetensors|sft)$/i, '')}`)
   }
   if (!isScailEdit && generationMode !== 'audio' && spatialUpsampling) items.finishing.push(`Upscaling (${spatialUpsampling})`)
@@ -526,7 +529,10 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
     model_type: params.model_type,
     architecture: modelOptions?.architecture,
   })
+  const experimentalLorasAvailable = modelOptions?.experimental_loras_available === true
+  const experimentalLorasEnabled = params.minimax_h3_experimental_loras === true
   const canUseLoras = !isYue2 && !isOutpaint && !modelOptions?.loras_disabled
+    && (!experimentalLorasAvailable || experimentalLorasEnabled)
   const showH3LongSequenceExperiments = (
     H3_LONG_SEQUENCE_TESTS_VISIBLE
     && isVideo
@@ -637,8 +643,25 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
 
               {/* Presets belong with the creative adapter controls so users can
                   save or restore a setup before adjusting its LoRAs. */}
-              <AdvancedSection section="loras" title={canUseLoras || isYue2 ? 'LoRAs & presets' : 'Presets'} activeItems={activeSections.loras} open={sections.loras} onToggle={expanded => toggleSection('loras', expanded)}>
+              <AdvancedSection section="loras" title={canUseLoras || isYue2 || experimentalLorasAvailable ? 'LoRAs & presets' : 'Presets'} activeItems={activeSections.loras} open={sections.loras} onToggle={expanded => toggleSection('loras', expanded)}>
               <PresetManager />
+
+              {experimentalLorasAvailable && <div className="mb-3 rounded-lg border border-border bg-bg-tertiary px-2.5 py-2">
+                <label className="flex items-center gap-2 text-xs text-text-secondary">
+                  <input type="checkbox" checked={experimentalLorasEnabled}
+                    onChange={event => setParam('minimax_h3_experimental_loras', event.target.checked)}
+                    className="accent-accent-blue" />
+                  Enable LoRAs (experimental)
+                </label>
+                <p className="mt-1 text-[10px] leading-relaxed text-text-muted">
+                  {modelOptions?.minimax_h3_pika_flex
+                    ? 'Try ordinary H3 style/character LoRAs alongside the required Pika adapter. Quality and individual adapter compatibility are unverified. Pika keeps its six steps; extra Turbo/PDD/VDN/PTD and DoRA adapters are unavailable.'
+                    : 'Try ordinary H3 style/character LoRAs with FastH3. Output quality is unverified. Additional Turbo/PDD adapters remain unavailable.'}
+                </p>
+                {!experimentalLorasEnabled && params.activated_loras.length > 0 && <p className="mt-1 text-[10px] text-text-muted">
+                  Saved LoRA selections are inactive while this is off.
+                </p>}
+              </div>}
 
               {/* Keep creative adapters near the top so users can choose them
                   before working through the lower-level tuning controls.

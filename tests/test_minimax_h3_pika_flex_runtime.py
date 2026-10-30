@@ -160,12 +160,12 @@ class PikaFlexRuntimeTests(unittest.TestCase):
                 self.assertEqual(model._pdd_lora_strength, 1.0)
                 self.assertEqual(model._ptd_lora_paths, ())
 
-    def test_extra_adapter_fails_before_any_checkpoint_hash_read(self):
+    def test_extra_adapter_is_default_off_before_any_checkpoint_hash_read(self):
         model = self._flex_model(reference=False)
         with patch(
             "models.minimax_h3.fasth3.verify_checkpoint_pin"
         ) as verify_pin:
-            with self.assertRaisesRegex(ValueError, "exactly its one pinned adapter"):
+            with self.assertRaisesRegex(ValueError, "experimental and off by default"):
                 model.validate_loras(
                     ["pika_h3_flex_fl2va_comfy_bf16.safetensors", "character.safetensors"]
                 )

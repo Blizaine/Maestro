@@ -8137,6 +8137,9 @@ def generate_video(
     minimax_h3_sequence_clip_frames=None,
     minimax_h3_sequence_memory_override=False,
     minimax_h3_extended_duration=False,
+    # Per-generation, default-off opt-in for ordinary H3 style/content LoRAs
+    # on Pika H3 Flex. Special accelerators remain blocked by its validator.
+    minimax_h3_experimental_loras=False,
     minimax_h3_text_encoder="nvfp4_awq",
     minimax_h3_video_vae="auto",
     # LTX-2.5 defaults to the conventional fast ConvVAE. The optional NAD
@@ -8788,7 +8791,13 @@ def generate_video(
         print(f"[LoRA] No LoRAs activated for this generation (model_type={model_type})")
 
     if hasattr(wan_model, "validate_loras"):
-        wan_model.validate_loras(loras_selected)
+        if model_def.get("minimax_h3_pika_flex"):
+            wan_model.validate_loras(
+                loras_selected,
+                minimax_h3_experimental_loras=minimax_h3_experimental_loras,
+            )
+        else:
+            wan_model.validate_loras(loras_selected)
     if hasattr(wan_model, "configure_special_loras"):
         wan_model.configure_special_loras(
             loras_selected,
@@ -10196,6 +10205,7 @@ def generate_video(
                     **({
                         "minimax_h3_multi_window": minimax_h3_multi_window,
                         "minimax_h3_reference_sequence": minimax_h3_reference_sequence,
+                        "minimax_h3_experimental_loras": minimax_h3_experimental_loras,
                     } if model_def.get("minimax_h3_pika_flex") else {}),
                     save_masks=args.save_masks,
                     temperature=temperature,

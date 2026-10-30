@@ -18,6 +18,8 @@ export function DirectorH3Optimizations() {
   const videoStepsByModel = useStore(s => s.directorVideoInferenceStepsByModel)
   const setVideoSteps = useStore(s => s.setDirectorVideoInferenceSteps)
   const turboModeByModel = useStore(s => s.directorH3TurboModeByModel)
+  const experimentalLorasByModel = useStore(s => s.directorH3ExperimentalLorasByModel)
+  const setExperimentalLoras = useStore(s => s.setDirectorH3ExperimentalLoras)
   const setTurboMode = useStore(s => s.setDirectorH3TurboMode)
   const turboPresetByModel = useStore(s => s.directorH3TurboPresetByModel)
   const setTurboPreset = useStore(s => s.setDirectorH3TurboPreset)
@@ -201,6 +203,22 @@ export function DirectorH3Optimizations() {
 
   return (
     <section className="space-y-2">
+      {modelOptions?.experimental_loras_available === true && (
+        <div className="rounded-lg border border-border bg-bg-tertiary/50 px-3 py-2.5">
+          <label className="flex cursor-pointer items-center gap-2 text-xs text-text-secondary">
+            <input type="checkbox" checked={experimentalLorasByModel[videoModel] === true}
+              onChange={event => setExperimentalLoras(videoModel, event.target.checked)}
+              className="accent-accent-blue" />
+            Enable LoRAs (experimental)
+          </label>
+          <p className="mt-1 text-[10px] leading-relaxed text-text-muted">
+            Choose ordinary H3 style/character adapters in Video LoRAs. Saved selections are inactive while this is off.
+            {modelOptions.minimax_h3_pika_flex
+              ? ' The required Pika adapter stays at strength 1 and six steps. Extra Turbo/PDD/VDN/PTD and DoRA adapters remain unavailable; output quality is unverified.'
+              : ' Additional Turbo/PDD adapters remain unavailable; output quality is unverified.'}
+          </p>
+        </div>
+      )}
       <div className="flex items-center justify-between gap-2">
         <div>
           <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">

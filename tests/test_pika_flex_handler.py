@@ -57,6 +57,23 @@ def test_recipe_and_conditioning_survive_settings_migration(reference):
 
 
 @pytest.mark.parametrize("reference", [False, True])
+def test_handler_preserves_per_generation_experimental_lora_opt_in(reference):
+    data, base, model = definition(reference)
+    settings = {key: value for key, value in data.items() if key != "model"}
+    settings["activated_loras"] = ["character_style.safetensors"]
+    settings["minimax_h3_experimental_loras"] = True
+
+    family_handler.fix_settings(base, 3, model, settings)
+
+    assert settings["minimax_h3_experimental_loras"] is True
+    assert validate_pika_flex_single_pass_request(settings, model) is None
+
+    settings["minimax_h3_experimental_loras"] = False
+    with pytest.raises(ValueError, match="experimental and off by default"):
+        validate_pika_flex_single_pass_request(settings, model)
+
+
+@pytest.mark.parametrize("reference", [False, True])
 def test_published_default_canvas_is_not_snapped_to_ordinary_h3(reference):
     data, base, model = definition(reference)
     settings = {key: value for key, value in data.items() if key != "model"}

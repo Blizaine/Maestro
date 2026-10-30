@@ -112,7 +112,9 @@ PIKA_FLEX_HELP = (
     "SLA is the default on supported GPUs and safely falls back to dense attention when unavailable; SOL is optional experimental attention. "
     "Resolution choices include Pika's official 480p/768p buckets plus standard H3-aligned 540p/720p canvases and an experimental 1080p tier. "
     "Native motion and stereo-audio continuation are available only through explicit rolling-window mode. "
-    "Control video, extra adapters, cache, and refinement are unavailable. "
+    "Control video, cache, and refinement are unavailable. Ordinary H3 "
+    "style/content LoRAs are experimental and off by default; Turbo, PDD, "
+    "VDN, PTD, other special-head accelerators, and DoRA remain unavailable. "
     "Maestro has no Pika 4K upsampler or stem extraction, and consumer-GPU real-time "
     "performance has not been verified. The initial experimental stack uses the stock Comfy scaled-FP8 base, BF16 Pika adapter, and INT8 ConvRot video VAE."
 )
@@ -154,6 +156,12 @@ def _pika_resolution_presets() -> dict[str, dict[str, Any]]:
         }
         for tier, resolutions in PIKA_FLEX_RESOLUTION_BUCKETS.items()
     }
+
+
+def pika_flex_managed_lora_filenames() -> frozenset[str]:
+    """Return both variant-owned adapter names for model-specific LoRA lists."""
+
+    return frozenset(str(spec["file"]) for spec in PIKA_FLEX_LORA_SPECS.values())
 
 
 def pika_flex_capabilities(reference: bool) -> dict[str, Any]:
@@ -229,7 +237,8 @@ def pika_flex_capabilities(reference: bool) -> dict[str, Any]:
         "veda_attention": False,
         "veda_attention_experimental": False,
         "first_block_cache": False,
-        "loras_disabled": True,
+        "loras_disabled": False,
+        "experimental_loras_available": True,
         "profiles_dir": [],
         "compatible_model_paths": {},
         "compatible_model_qkv_layouts": {},
@@ -389,6 +398,7 @@ __all__ = [
     "PIKA_FLEX_VIDEO_SHIFT",
     "pika_flex_capabilities",
     "pika_flex_defaults",
+    "pika_flex_managed_lora_filenames",
     "verify_pika_flex_checkpoint",
     "verify_pika_flex_loras",
 ]

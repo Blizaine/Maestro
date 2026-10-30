@@ -2453,6 +2453,8 @@ interface AppState {
   directorVideoMaxShotFramesByModel: Record<string, number>
   /** Director-owned H3 Turbo choices, separate from Studio's active mode. */
   directorH3TurboModeByModel: Record<string, boolean>
+  /** Explicit Director-owned adapter opt-in, separate from Studio. */
+  directorH3ExperimentalLorasByModel: Record<string, boolean>
   /** Director-owned managed H3 Turbo checkpoint choice. */
   directorH3TurboPresetByModel: Record<string, string>
   /** Director-owned experimental H3 Sol Engine choices. */
@@ -2474,6 +2476,7 @@ interface AppState {
   setDirectorVideoInferenceSteps: (modelType: string, steps: number | null) => void
   setDirectorVideoMaxShotFrames: (modelType: string, frames: number | null) => void
   setDirectorH3TurboMode: (modelType: string, enabled: boolean) => void
+  setDirectorH3ExperimentalLoras: (modelType: string, enabled: boolean) => void
   setDirectorH3TurboPreset: (modelType: string, presetId: string) => void
   initializeDirectorH3Turbo: (modelType: string, options: ModelOptions) => void
   setDirectorH3SolMode: (modelType: string, enabled: boolean) => void
@@ -2861,6 +2864,12 @@ async function _buildDirectorRestorePatch(
     directorVideoInferenceStepsByModel: _record(ui.directorVideoInferenceStepsByModel) as Record<string, number>,
     directorVideoMaxShotFramesByModel: _record(ui.directorVideoMaxShotFramesByModel) as Record<string, number>,
     directorH3TurboModeByModel: _record(ui.directorH3TurboModeByModel) as Record<string, boolean>,
+    directorH3ExperimentalLorasByModel: {
+      ...(params.video_model ? {
+        [String(params.video_model)]: _record(params.video_params).minimax_h3_experimental_loras === true,
+      } : {}),
+      ..._record(ui.directorH3ExperimentalLorasByModel),
+    } as Record<string, boolean>,
     directorH3TurboPresetByModel: _record(ui.directorH3TurboPresetByModel) as Record<string, string>,
     directorH3SolModeByModel: _record(ui.directorH3SolModeByModel) as Record<string, boolean>,
     directorH3SlaModeByModel: _record(ui.directorH3SlaModeByModel) as Record<string, boolean>,
@@ -9739,6 +9748,15 @@ export const useStore = create<AppState>((set, get) => ({
       delete params._viggle_prepared
     }
     const pendingJobId = `pending-${clientSubmissionId}`
+    if (((state.modelOptions?.model_type === params.model_type
+      && state.modelOptions?.experimental_loras_available === true)
+      || String(params.model_type || '').startsWith('minimax_h3_fasth3')
+      || isPikaFlexModelType(String(params.model_type || ''), state.modelOptions))
+      && params.minimax_h3_experimental_loras !== true) {
+      // Keep saved choices in the form, but never apply them while opt-in is off.
+      params.activated_loras = []
+      params.loras_multipliers = ''
+    }
     delete params._editor_operation_id
     params._client_submission_id = clientSubmissionId
     const newJob: GenerationJob = {
@@ -11832,6 +11850,7 @@ export const useStore = create<AppState>((set, get) => ({
   directorVideoInferenceStepsByModel: {},
   directorVideoMaxShotFramesByModel: {},
   directorH3TurboModeByModel: {},
+  directorH3ExperimentalLorasByModel: {},
   directorH3TurboPresetByModel: {},
   directorH3SolModeByModel: {},
   directorH3SlaModeByModel: {},
@@ -11944,6 +11963,12 @@ export const useStore = create<AppState>((set, get) => ({
     set({ directorVideoMaxShotFramesByModel: next })
     _persistStickyStudioPreferences(get())
   },
+  setDirectorH3ExperimentalLoras: (modelType, enabled) => set(s => ({
+    directorH3ExperimentalLorasByModel: {
+      ...s.directorH3ExperimentalLorasByModel,
+      [modelType]: enabled === true,
+    },
+  })),
   setDirectorH3TurboMode: (modelType, enabled) => set(s => ({
     directorH3TurboModeByModel: {
       ...s.directorH3TurboModeByModel,
@@ -13397,6 +13422,7 @@ export const useStore = create<AppState>((set, get) => ({
         custom_settings: _kreaCustomSettingsForModel(s.params.custom_settings, modelType, s.kreaIdentitySettingsPerModel),
         activated_loras: [],
         loras_multipliers: '',
+        minimax_h3_experimental_loras: false,
         minimax_h3_turbo_mode: isPikaFlexModelType(modelType)
           ? false
           : switchesWithinH3SingularityPair ? s.params.minimax_h3_turbo_mode : undefined,
@@ -14516,6 +14542,10 @@ export const useStore = create<AppState>((set, get) => ({
     newParams.minimax_h3_turbo_mode = (
       !isPikaFlexModelType(modelType, restoredModelOptions)
       && (p.minimax_h3_turbo_mode === true || legacyTurboEnabled)
+    )
+    newParams.minimax_h3_experimental_loras = (
+      restoredModelOptions?.experimental_loras_available === true
+      && p.minimax_h3_experimental_loras === true
     )
     newParams.minimax_h3_turbo_preset = restoredTurboPreset?.id
     newParams.minimax_h3_text_encoder = restoredTextEncoder
@@ -15703,6 +15733,7 @@ export const useStore = create<AppState>((set, get) => ({
             directorAutoMode, directorSeamless, directorShotImageGuidance,
             directorResolution, directorAspectRatio,
             directorVideoMaxShotFramesByModel, directorH3TurboModeByModel,
+            directorH3ExperimentalLorasByModel,
             directorH3TurboPresetByModel, directorH3SolModeByModel, directorH3SlaModeByModel,
             directorH3VedaModeByModel,
             directorH3FirstBlockCacheByModel,
@@ -16063,6 +16094,8 @@ export const useStore = create<AppState>((set, get) => ({
         num_inference_steps: directorVideoSteps,
         resolution: directorVideoResolution,
         minimax_h3_turbo_mode: directorTurboEnabled,
+        minimax_h3_experimental_loras: directorVideoOptions?.experimental_loras_available === true
+          && directorH3ExperimentalLorasByModel[selectedVideoModel] === true,
         minimax_h3_turbo_preset: directorTurboPreset?.id,
         override_attention: directorVedaEnabled
           ? 'veda'
@@ -16078,7 +16111,9 @@ export const useStore = create<AppState>((set, get) => ({
         skip_steps_start_step_perc: directorCacheWarmup,
         ...(directorFixedMediaStrength ? { input_video_strength: 1.0 } : {}),
       },
-      video_loras: directorVideoOptions?.loras_disabled
+      video_loras: (directorVideoOptions?.loras_disabled
+        || (directorVideoOptions?.experimental_loras_available === true
+          && directorH3ExperimentalLorasByModel[selectedVideoModel] !== true))
         ? {
             activated_loras: [],
             loras_multipliers: '',
@@ -16145,6 +16180,7 @@ export const useStore = create<AppState>((set, get) => ({
         directorVideoInferenceStepsByModel: state.directorVideoInferenceStepsByModel,
         directorVideoMaxShotFramesByModel: state.directorVideoMaxShotFramesByModel,
         directorH3TurboModeByModel: state.directorH3TurboModeByModel,
+        directorH3ExperimentalLorasByModel: state.directorH3ExperimentalLorasByModel,
         directorH3TurboPresetByModel: state.directorH3TurboPresetByModel,
         directorH3SolModeByModel: state.directorH3SolModeByModel,
         directorH3SlaModeByModel: state.directorH3SlaModeByModel,

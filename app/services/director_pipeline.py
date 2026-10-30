@@ -505,6 +505,9 @@ def _apply_director_h3_optimizations(
         return
 
     gen_params["_director_video_execution_profile"] = execution_profile
+    gen_params["minimax_h3_experimental_loras"] = (
+        video_params.get("minimax_h3_experimental_loras") is True
+    )
     text_encoder = (
         execution_profile.get("minimax_h3_text_encoder")
         or video_params.get("minimax_h3_text_encoder")

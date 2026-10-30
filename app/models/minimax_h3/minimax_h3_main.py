@@ -1767,18 +1767,24 @@ class MiniMaxH3Model:
             self.latent_upscaler = load_h3_latent_upscaler(upscaler_path)
             self.two_pass_enabled = True
 
-    def validate_loras(self, loras_selected) -> None:
+    def validate_loras(
+        self,
+        loras_selected,
+        *,
+        minimax_h3_experimental_loras=None,
+    ) -> None:
         """Validate special H3 adapter requirements before MMGP loads them."""
 
         # A retained model can be reused across jobs. Always restore its
         # ordinary heads before inspecting the next job's adapter selection.
         self.release_special_loras()
         if getattr(self, "pika_flex", False):
-            from .pika_flex_assets import verify_pika_flex_loras
+            from .pika_flex_lora_compatibility import validate_pika_flex_lora_selection
 
-            verify_pika_flex_loras(
+            validate_pika_flex_lora_selection(
                 loras_selected,
                 reference=self.omni_reference,
+                enabled=minimax_h3_experimental_loras,
             )
             self._turbo_lora_paths = ()
             self._turbo_lora_active = False
@@ -1872,6 +1878,15 @@ class MiniMaxH3Model:
     def configure_special_loras(self, loras_selected, multipliers) -> None:
         """Capture the PDD head strength before MMGP preprocesses its tensors."""
 
+        if getattr(self, "pika_flex", False):
+            from .pika_flex_lora_compatibility import validate_pika_flex_adapter_strengths
+
+            validate_pika_flex_adapter_strengths(
+                loras_selected,
+                multipliers,
+                reference=self.omni_reference,
+            )
+            return
         if not self._pdd_lora_active or self._pdd_lora_path is None:
             return
         selected = [str(path) for path in (loras_selected or [])]

@@ -82,6 +82,7 @@ export interface ModelDef {
   nsfw_only?: boolean
   /** Model does not support user-selectable LoRAs. */
   loras_disabled?: boolean
+  experimental_loras_available?: boolean
 }
 
 export interface Resolution {
@@ -274,6 +275,8 @@ export interface GenerateParams {
   ltx25_video_vae?: 'fast' | 'nad'
   /** One-click managed H3 Turbo recipe for Full or Pruned H3. */
   minimax_h3_turbo_mode?: boolean
+  /** Explicit per-generation opt-in for experimental ordinary H3 LoRAs. */
+  minimax_h3_experimental_loras?: boolean
   /** Immutable validated/candidate Turbo checkpoint selected by its manifest id. */
   minimax_h3_turbo_preset?: string
   /** Automatically expand one long H3 concept into window-local prompts. */
@@ -1147,6 +1150,7 @@ export interface ModelOptions {
   minimax_h3_full_checkpoint?: boolean
   minimax_h3_baked_turbo?: boolean
   loras_disabled?: boolean
+  experimental_loras_available?: boolean
   skip_steps_multiplier_choices?: [string, number][] | null
   skip_steps_multiplier_label?: string
   default_skip_steps_multiplier?: number

@@ -793,6 +793,15 @@ def _is_managed_moss_edit_lora(model_def: dict, filename: str) -> bool:
     )
 
 
+def _managed_pika_flex_lora_names(model_def: dict) -> set[str]:
+    """Keep both model-owned Pika adapters out of the optional H3 LoRA picker."""
+    if not (model_def or {}).get("minimax_h3_pika_flex"):
+        return set()
+    from models.minimax_h3.pika_flex_assets import pika_flex_managed_lora_filenames
+
+    return {name.casefold() for name in pika_flex_managed_lora_filenames()}
+
+
 @api.get("/api/v1/models")
 def list_models():
     """List available model families and model types."""
@@ -2492,6 +2501,7 @@ def list_loras(model_type: str):
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
 
     turbo_option = _minimax_h3_turbo_option(md)
+    managed_pika_loras = _managed_pika_flex_lora_names(md)
     if lora_dir is None:
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
 
@@ -2504,6 +2514,8 @@ def list_loras(model_type: str):
         for search_dir in wgp.get_lora_search_dirs(model_type):
             for f in glob.glob(os.path.join(search_dir, "*.safetensors")) + glob.glob(os.path.join(search_dir, "*.sft")):
                 if _is_managed_moss_edit_lora(md, f):
+                    continue
+                if os.path.basename(f).casefold() in managed_pika_loras:
                     continue
                 if not _lora_is_compatible_with_model(md, f):
                     continue
@@ -2541,6 +2553,7 @@ def list_loras_details(model_type: str):
     except Exception:
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
     turbo_option = _minimax_h3_turbo_option(md)
+    managed_pika_loras = _managed_pika_flex_lora_names(md)
     if lora_dir is None:
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
 
@@ -2555,6 +2568,8 @@ def list_loras_details(model_type: str):
                 + glob.glob(os.path.join(_search_dir, "*.sft"))
             ):
                 if _is_managed_moss_edit_lora(md, f):
+                    continue
+                if os.path.basename(f).casefold() in managed_pika_loras:
                     continue
                 if not _lora_is_compatible_with_model(md, f):
                     continue

@@ -406,8 +406,12 @@ def validate_pika_flex_request(
         _require_value(inputs, key, 1.0)
 
     selected_loras = inputs.get("activated_loras") or inputs.get("loras_selected")
-    if _has_payload(selected_loras):
-        raise ValueError("Pika H3 Flex does not support additional LoRAs or accelerators.")
+    from .pika_flex_lora_compatibility import validate_pika_flex_additional_loras
+
+    validate_pika_flex_additional_loras(
+        selected_loras,
+        enabled=inputs.get("minimax_h3_experimental_loras"),
+    )
     for key in (
         "minimax_h3_turbo_mode",
         "minimax_h3_turbo_preset",

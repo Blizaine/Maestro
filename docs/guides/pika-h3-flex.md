@@ -24,10 +24,27 @@ wrapper advertises its sampler as Euler. Flex transitions use their own fresh
 noise recipe between nonterminal evaluations; this is not an ordinary six-step
 H3 Euler schedule.
 
-Steps, guidance, adapter strength, and shifts are locked. Extra LoRAs,
-accelerators, control video, timed frame injection, First Block
+Steps, guidance, the required Pika adapter's strength, and shifts are locked.
+Extra accelerators, control video, timed frame injection, First Block
 Cache, and Audio Refinement are unavailable. References are ordered; changing
 their order changes the request meaning.
+
+### Experimental H3 LoRAs
+
+Ordinary H3 character, style and concept LoRAs can be tested in both Frames and
+References. In Studio, open **Advanced → LoRAs & presets**, turn on **Enable
+LoRAs (experimental)**, then choose the adapters and their strengths. Director
+has its own opt-in in Advanced and uses its Video LoRAs selection; Studio's
+choice does not enable it automatically. The choice is saved with generated
+clip settings and Director projects. Saved extra LoRAs remain inactive while
+the corresponding toggle is off.
+
+The required Pika adapter stays first, hash-verified, at strength 1. It is hidden
+from the extra-adapter picker. Extra Turbo, PDD, VDN, PTD and other trained
+acceleration/head recipes, and unsupported DoRA adapters, remain blocked.
+Ordinary H3 target-name and tensor-shape checks still apply. This does not
+establish compatibility or output quality for every H3 LoRA: compare one adapter
+at a modest strength against a short same-seed clip before stacking several.
 
 ### Attention choices
 
