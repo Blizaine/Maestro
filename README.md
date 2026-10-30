@@ -49,6 +49,9 @@ The next major Main release is being prepared on **Dev** as v4.0.0.
   accelerators/PTD/two-pass options, FlashVSR+ Turbo and experimental Pika H3
   Flex with motion/audio sliding windows. Flex is enabled in the default Frames
   and References lists. Worlds and Profile 0 remain optional experimental tools.
+- **Pika Flex control fixes:** five resolution tiers from 480p through experimental
+  1080p; clip settings reuse and resolution/aspect changes retain an explicitly
+  chosen window. Incompatible First Block and extra Turbo controls are excluded.
 - **Smoother daily use:** compact pinned Studio controls, clearer startup and
   mobile loading, resizable thumbnails, image-workflow fixes and quieter logs.
 

@@ -37,6 +37,12 @@ candidate combines the changes below with the fixes already tested on Dev.
   References also retains the ordered source references. Additions include
   workflow-matched LightX2V accelerators, PTD RefAsymOPD presets and compatible
   two-pass latent refinement. Existing model-specific recipes remain separate.
+- **Pika Flex controls:** Frames and References offer 480p, 540p, 720p, 768p
+  and experimental 1080p. Reusing a native clip restores its single window;
+  resolution and aspect changes retain explicitly chosen window lengths and
+  rolling-window geometry. Unlocking the window still resumes Auto planning.
+  Incompatible First Block and extra Turbo settings no longer carry into Flex;
+  SOL and SLA attention remain available.
 - **Finishing and experimental tools:** FlashVSR+ Turbo joins the existing
   upscaler, with fixes for its checkpoint layout and legacy v1.1 attention.
   Worlds provides queued camera moves and continuation when enabled in Settings;

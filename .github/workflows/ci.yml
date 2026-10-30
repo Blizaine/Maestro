@@ -117,6 +117,7 @@ jobs:
           tests/test_conv_bands.py
           tests/test_pika_flex_attention.py
           tests/test_pika_flex_handler.py
+          tests/test_pika_flex_options_compatibility.py
 
   ui-build:
     name: UI type-check + build
