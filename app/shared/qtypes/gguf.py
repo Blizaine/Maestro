@@ -1376,6 +1376,57 @@ class QEmbeddingGGUF(BaseQEmbedding):
     def set_default_dtype(self, dtype):
         self._gguf_default_dtype = dtype
 
+    def _dequantize_rows(self, qweight, input, target_dtype):
+        """Dequantize only indexed GGUF embedding rows when row layout is safe."""
+        tensor_type = getattr(qweight, "_tensor_type", None)
+        decoder = _DEQUANTIZE_FUNCTIONS.get(tensor_type)
+        if decoder is None or not torch.is_tensor(input) or input.dtype not in (torch.int32, torch.int64):
+            return None
+
+        shape = tuple(getattr(qweight, "_tensor_shape", ()))
+        if len(shape) != 2 or shape != tuple(qweight.shape):
+            return None
+        num_embeddings, embedding_dim = shape
+        if (
+            num_embeddings != self.num_embeddings
+            or embedding_dim != self.embedding_dim
+            or num_embeddings <= 0
+            or embedding_dim <= 0
+        ):
+            return None
+
+        quant_size = getattr(gguf, "GGML_QUANT_SIZES", {}).get(tensor_type)
+        if quant_size is None:
+            return None
+        block_size, type_size = quant_size
+        if block_size <= 0 or embedding_dim % block_size:
+            return None
+        raw = getattr(qweight, "_data", None)
+        if not torch.is_tensor(raw) or not raw.is_contiguous():
+            return None
+
+        blocks_per_row = embedding_dim // block_size
+        packed_row_bytes = blocks_per_row * type_size
+        raw_bytes = raw.view(torch.uint8)
+        if raw_bytes.numel() != num_embeddings * packed_row_bytes:
+            return None
+
+        row_ids = input.reshape(-1).to(device=raw.device, dtype=torch.long)
+        output = torch.empty(
+            (row_ids.numel(), embedding_dim),
+            dtype=target_dtype,
+            device=input.device,
+        )
+        max_rows_per_chunk = 128
+        packed_rows = raw_bytes.reshape(num_embeddings, packed_row_bytes)
+        for start in range(0, row_ids.numel(), max_rows_per_chunk):
+            stop = min(start + max_rows_per_chunk, row_ids.numel())
+            selected = packed_rows.index_select(0, row_ids[start:stop])
+            blocks = selected.reshape(-1, type_size).to(device=input.device)
+            decoded = decoder(blocks, block_size, type_size, target_dtype)
+            output[start:stop].copy_(decoded.reshape(stop - start, embedding_dim))
+        return output.reshape(*input.shape, embedding_dim)
+
     @property
     def qweight(self):
         if self.weight_qtype == _GGUF_QTYPE:
@@ -1391,6 +1442,9 @@ class QEmbeddingGGUF(BaseQEmbedding):
                     fast_out = _try_llamacpp_cuda_embedding(qweight, input, target_dtype)
                     if fast_out is not None:
                         return fast_out
+                selected_rows = self._dequantize_rows(qweight, input, target_dtype)
+                if selected_rows is not None:
+                    return selected_rows
             weight = qweight.dequantize(dtype=target_dtype, device=input.device)
             return torch.nn.functional.embedding(
                 input,
