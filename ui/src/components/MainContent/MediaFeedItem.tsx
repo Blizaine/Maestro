@@ -16,6 +16,7 @@ import { modelDisplayName } from '../../lib/modelDisplay'
 import { sendToGalleryInput, useGalleryInputs, type GalleryInputTarget } from '../../lib/galleryInputs'
 import { getVideoPosterUrl } from '../../lib/thumbnailCache'
 import { useVideoPosterSize } from '../../lib/useVideoPosterSize'
+import { getGalleryVideoIdentity, useGalleryVideoFrameAspect } from '../../lib/galleryVideoFit'
 import { useMediaDuration } from '../../lib/mediaDuration'
 import { getMediaTimestamp } from '../../lib/mediaTimestamp'
 import { MediaMetadataDetails } from './MediaMetadataDetails'
@@ -126,8 +127,11 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const saveRecipeFromOutput = useStore(s => s.saveRecipeFromOutput)
   const nsfwMode = useStore(s => !!s.servicesConfig?.nsfw_mode)
 
-  const [meta, setMeta] = useState<OutputMetadata | null>(null)
-  const [metaLoaded, setMetaLoaded] = useState(false)
+  const fileIdentity = getGalleryVideoIdentity(file)
+  const [metaEntry, setMetaEntry] = useState<{ identity: string; value: OutputMetadata } | null>(null)
+  const [metaLoadedIdentity, setMetaLoadedIdentity] = useState<string | null>(null)
+  const meta = metaEntry?.identity === fileIdentity ? metaEntry.value : null
+  const metaLoaded = metaLoadedIdentity === fileIdentity
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [deleteError, setDeleteError] = useState('')
   const [deleting, setDeleting] = useState(false)
@@ -156,7 +160,12 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const actionMenuPopupRef = useRef<HTMLDivElement>(null)
   const itemRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
-  const posterSize = useVideoPosterSize(videoRef, file.type === 'video' ? file.url : '')
+  const currentFileIdentityRef = useRef(fileIdentity)
+  useLayoutEffect(() => {
+    currentFileIdentityRef.current = fileIdentity
+  }, [fileIdentity])
+  const videoFit = useGalleryVideoFrameAspect(fileIdentity, meta?.media_info, file.size, videoRef)
+  const posterSize = useVideoPosterSize(videoRef, file.type === 'video' ? fileIdentity : '')
   const measuredMediaInfo = meta?.media_info
   const durationSeed = measuredMediaInfo?.size_bytes === file.size
     ? measuredMediaInfo.duration_seconds
@@ -188,16 +197,23 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     if (!el) return
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0].isIntersecting) {
-          setMetaLoaded(true)
-          fetchOutputMetadata(file.name, file.workspace).then(setMeta).catch(() => {})
+        if (entries[0].isIntersecting && currentFileIdentityRef.current === fileIdentity) {
+          observer.disconnect()
+          setMetaLoadedIdentity(fileIdentity)
+          fetchOutputMetadata(file.name, file.workspace)
+            .then(value => {
+              if (currentFileIdentityRef.current === fileIdentity) {
+                setMetaEntry({ identity: fileIdentity, value })
+              }
+            })
+            .catch(() => {})
         }
       },
       { threshold: 0.1 }
     )
     observer.observe(el)
     return () => observer.disconnect()
-  }, [file.name, file.workspace, metaLoaded])
+  }, [file.name, file.workspace, fileIdentity, metaLoaded])
 
   // Multi-window media becomes gallery-visible before its final sidecar is
   // necessarily written.  The first request can therefore return embedded
@@ -209,11 +225,11 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     let cancelled = false
     fetchOutputMetadata(file.name, file.workspace)
       .then(nextMeta => {
-        if (!cancelled) setMeta(nextMeta)
+        if (!cancelled) setMetaEntry({ identity: fileIdentity, value: nextMeta })
       })
       .catch(() => {})
     return () => { cancelled = true }
-  }, [file.name, file.workspace, file.metadata_ready, file.metadata_updated_at, metaLoaded, meta])
+  }, [file.name, file.workspace, file.metadata_ready, file.metadata_updated_at, fileIdentity, metaLoaded, meta])
 
   // Pause video when scrolled out of view (but don't auto-play when scrolled in)
   useEffect(() => {
@@ -849,11 +865,14 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
       onClick={handleSelect}
     >
       {/* Media player — bg-media-canvas keeps the letterbox dark even on light themes */}
-      <div className="relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-t-[10px] bg-media-canvas">
+      <div
+        className="relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-t-[10px] bg-media-canvas"
+        style={{ aspectRatio: file.type === 'video' ? videoFit.frameAspect : undefined }}
+      >
         {file.type === 'video' ? (
           <video
             ref={videoRef}
-            key={file.url}
+            key={fileIdentity}
             src={file.url}
             poster={posterSize ? getVideoPosterUrl(file.url, posterSize) ?? undefined : undefined}
             preload="none"
@@ -864,6 +883,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
             muted={!isActive}
             data-gallery-media="true"
             onPlay={handlePlaybackStart}
+            onLoadedMetadata={videoFit.onLoadedMetadata}
           />
         ) : file.type === 'audio' ? (
           <div className="flex flex-col items-center gap-4">
