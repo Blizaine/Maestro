@@ -84,7 +84,12 @@ class PikaFlexCatalogueTests(unittest.TestCase):
                 self.assertEqual(model["frames_minimum"], 124)
                 self.assertEqual(model["frames_steps"], 17)
                 self.assertEqual(model["frames_maximum"], 362)
-                self.assertEqual(model["resolution_preset_order"], ["480p", "768p"])
+                self.assertEqual(
+                    model["resolution_preset_order"],
+                    ["480p", "540p", "720p", "768p", "1080p"],
+                )
+                self.assertFalse(model["supports_auto_aspect"])
+                self.assertTrue(model["resolution_presets"]["1080p"]["experimental"])
                 for tier in assets.PIKA_FLEX_RESOLUTION_BUCKETS:
                     self.assertEqual(tuple(model["resolution_presets"][tier]["values"].values()), assets.PIKA_FLEX_RESOLUTION_BUCKETS[tier])
                     self.assertEqual(tuple(model["resolution_presets"][tier]["values"].keys()), tuple(frames_caps["resolution_presets"][tier]["values"].keys()) if not reference else tuple(references_caps["resolution_presets"][tier]["values"].keys()))
@@ -145,6 +150,11 @@ class PikaFlexCatalogueTests(unittest.TestCase):
             self.assertTrue(capabilities["sla_attention_experimental"])
             self.assertTrue(capabilities["sol_attention"])
             self.assertFalse(capabilities["veda_attention"])
+            self.assertEqual(
+                capabilities["resolution_preset_order"],
+                ["480p", "540p", "720p", "768p", "1080p"],
+            )
+            self.assertFalse(capabilities["supports_auto_aspect"])
             self.assertEqual(tuple(capabilities["resolution_presets"]["480p"]["values"].values()), assets.PIKA_FLEX_RESOLUTION_BUCKETS["480p"])
             self.assertEqual(tuple(capabilities["resolution_presets"]["768p"]["values"].values()), assets.PIKA_FLEX_RESOLUTION_BUCKETS["768p"])
             self.assertEqual(capabilities["minimax_h3_pika_flex_knots"], (1000, 750, 500, 250, 100, 40, 0))
@@ -199,6 +209,39 @@ class PikaFlexCatalogueTests(unittest.TestCase):
         self.assertEqual(assets.PIKA_FLEX_KNOTS, (1000, 750, 500, 250, 100, 40, 0))
         with self.assertRaises(TypeError):
             assets.pika_flex_capabilities("references")
+
+    def test_added_resolution_tiers_match_standard_h3_canvases_without_auto(self):
+        # Keep the new tiers aligned with H3's public model metadata, while
+        # retaining Pika's existing official 480p and 768p buckets verbatim.
+        from models.minimax_h3.minimax_h3_handler import _H3_RESOLUTION_PRESETS
+
+        legacy_buckets = {
+            "480p": (
+                "960x416", "832x480", "704x480", "640x480", "608x480",
+                "480x480", "480x608", "480x640", "480x704", "480x832", "416x960",
+            ),
+            "768p": (
+                "1536x672", "1344x768", "1152x768", "1024x768", "960x768",
+                "768x768", "768x960", "768x1024", "768x1152", "768x1344", "672x1536",
+            ),
+        }
+        for reference in (False, True):
+            caps = assets.pika_flex_capabilities(reference)
+            for tier, expected in legacy_buckets.items():
+                self.assertEqual(
+                    tuple(caps["resolution_presets"][tier]["values"].values()),
+                    expected,
+                )
+            for tier in ("540p", "720p", "1080p"):
+                expected = {
+                    aspect: size
+                    for aspect, size in _H3_RESOLUTION_PRESETS[tier]["values"].items()
+                    if aspect != "auto"
+                }
+                self.assertEqual(caps["resolution_presets"][tier]["values"], expected)
+                self.assertNotIn("auto", caps["resolution_presets"][tier]["values"])
+            self.assertTrue(caps["resolution_presets"]["1080p"]["experimental"])
+            self.assertIn("shorter clips on consumer GPUs", caps["resolution_presets"]["1080p"]["hint"])
 
     def test_checkpoint_verification_selects_fp8_pin_and_rejects_aliases_before_hashing(self):
         self.assertEqual(assets.PIKA_FLEX_BASE_SIZE, 20_958_205_608)

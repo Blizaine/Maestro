@@ -3800,7 +3800,11 @@ class family_handler:
                     for value in preset["values"].values()
                 }
                 if inputs.get("resolution") not in allowed:
-                    raise ValueError("Pika H3 Flex requires one of its published 480p or 768p canvas sizes.")
+                    tiers = capabilities["resolution_preset_order"]
+                    tier_list = ", ".join(tiers[:-1]) + f", or {tiers[-1]}"
+                    raise ValueError(
+                        f"Pika H3 Flex requires one of its configured {tier_list} canvas sizes."
+                    )
                 if float(inputs.get("fps", 24)) != 24:
                     raise ValueError("Pika H3 Flex requires 24 fps.")
             except (ValueError, TypeError) as error:

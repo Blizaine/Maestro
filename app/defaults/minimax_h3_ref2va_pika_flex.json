@@ -77,6 +77,29 @@
           "9:21": "416x960"
         }
       },
+      "540p": {
+        "label": "540p",
+        "values": {
+          "21:9": "1280x544",
+          "16:9": "960x544",
+          "9:16": "544x960",
+          "1:1": "736x736",
+          "4:3": "736x544",
+          "3:4": "544x736"
+        }
+      },
+      "720p": {
+        "label": "720p",
+        "hint": "Uses a model-aligned 1280x704 canvas for faster H3 generation.",
+        "values": {
+          "21:9": "1632x704",
+          "16:9": "1280x704",
+          "9:16": "704x1280",
+          "1:1": "704x704",
+          "4:3": "928x704",
+          "3:4": "704x928"
+        }
+      },
       "768p": {
         "label": "768p",
         "values": {
@@ -92,11 +115,27 @@
           "9:16": "768x1344",
           "9:21": "672x1536"
         }
+      },
+      "1080p": {
+        "label": "1080p",
+        "experimental": true,
+        "hint": "Experimental high-resolution generation. It uses more than twice the pixels of 720p and may require shorter clips on consumer GPUs.",
+        "values": {
+          "21:9": "2528x1088",
+          "16:9": "1920x1088",
+          "9:16": "1088x1920",
+          "1:1": "1088x1088",
+          "4:3": "1440x1088",
+          "3:4": "1088x1440"
+        }
       }
     },
     "resolution_preset_order": [
       "480p",
-      "768p"
+      "540p",
+      "720p",
+      "768p",
+      "1080p"
     ],
     "supports_auto_aspect": false,
     "URLs": [

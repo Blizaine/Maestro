@@ -359,3 +359,31 @@ def test_incompatible_requests_fail_before_model_allocation(change):
     settings = {key: value for key, value in data.items() if key != "model"}
     settings.update(change)
     assert family_handler.validate_generative_settings(base, model, settings)
+
+
+@pytest.mark.parametrize("reference", [False, True])
+@pytest.mark.parametrize("resolution", [
+    "1280x544", "960x544", "544x960", "736x736", "736x544", "544x736",
+    "1632x704", "1280x704", "704x1280", "704x704", "928x704", "704x928",
+    "2528x1088", "1920x1088", "1088x1920", "1088x1088", "1440x1088", "1088x1440",
+])
+def test_added_aligned_h3_resolution_tiers_pass_admission(reference, resolution):
+    _, base, model = definition(reference)
+    assert family_handler.validate_generative_settings(
+        base,
+        model,
+        {"video_length": 124, "resolution": resolution, "fps": 24},
+    ) is None
+
+
+@pytest.mark.parametrize("reference", [False, True])
+def test_pika_flex_does_not_admit_h3_auto_aspect_values(reference):
+    _, base, model = definition(reference)
+    error = family_handler.validate_generative_settings(
+        base,
+        model,
+        {"video_length": 124, "resolution": "auto_540p", "fps": 24},
+    )
+    assert error == (
+        "Pika H3 Flex requires one of its configured 480p, 540p, 720p, 768p, or 1080p canvas sizes."
+    )

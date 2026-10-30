@@ -47,15 +47,26 @@ PIKA_FLEX_FPS = 24
 PIKA_FLEX_DEFAULT_RESOLUTION = "832x480"
 PIKA_FLEX_REFERENCE_LIMITS = {"image": 9, "video": 3, "audio": 3, "total": 12}
 
-# Each entry is an official Pika H3 Flex aspect-ratio bucket from Diffusers.
+# Pika's official aspect-ratio buckets remain unchanged at 480p and 768p.
+# The other tiers mirror aligned standard H3 canvases and have not been
+# separately Pika/GPU-qualified.
 PIKA_FLEX_RESOLUTION_BUCKETS = {
     "480p": (
         "960x416", "832x480", "704x480", "640x480", "608x480",
         "480x480", "480x608", "480x640", "480x704", "480x832", "416x960",
     ),
+    "540p": (
+        "1280x544", "960x544", "544x960", "736x736", "736x544", "544x736",
+    ),
+    "720p": (
+        "1632x704", "1280x704", "704x1280", "704x704", "928x704", "704x928",
+    ),
     "768p": (
         "1536x672", "1344x768", "1152x768", "1024x768", "960x768",
         "768x768", "768x960", "768x1024", "768x1152", "768x1344", "672x1536",
+    ),
+    "1080p": (
+        "2528x1088", "1920x1088", "1088x1920", "1088x1088", "1440x1088", "1088x1440",
     ),
 }
 
@@ -99,6 +110,7 @@ PIKA_FLEX_HELP = (
     "and first/last images. References supports ordered image, video, and audio "
     "references and needs at least one image or video. Begin at 480p / 5.17 seconds. "
     "SLA is the default on supported GPUs and safely falls back to dense attention when unavailable; SOL is optional experimental attention. "
+    "Resolution choices include Pika's official 480p/768p buckets plus standard H3-aligned 540p/720p canvases and an experimental 1080p tier. "
     "Native motion and stereo-audio continuation are available only through explicit rolling-window mode. "
     "Control video, extra adapters, cache, and refinement are unavailable. "
     "Maestro has no Pika 4K upsampler or stem extraction, and consumer-GPU real-time "
@@ -114,7 +126,22 @@ def _check_reference_flag(reference: bool) -> bool:
 
 _PIKA_FLEX_ASPECT_KEYS = {
     "480p": ("21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "9:21"),
+    "540p": ("21:9", "16:9", "9:16", "1:1", "4:3", "3:4"),
+    "720p": ("21:9", "16:9", "9:16", "1:1", "4:3", "3:4"),
     "768p": ("21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16", "9:21"),
+    "1080p": ("21:9", "16:9", "9:16", "1:1", "4:3", "3:4"),
+}
+_PIKA_FLEX_RESOLUTION_METADATA = {
+    "720p": {
+        "hint": "Uses a model-aligned 1280x704 canvas for faster H3 generation.",
+    },
+    "1080p": {
+        "experimental": True,
+        "hint": (
+            "Experimental high-resolution generation. It uses more than twice "
+            "the pixels of 720p and may require shorter clips on consumer GPUs."
+        ),
+    },
 }
 
 
@@ -122,6 +149,7 @@ def _pika_resolution_presets() -> dict[str, dict[str, Any]]:
     return {
         tier: {
             "label": tier,
+            **_PIKA_FLEX_RESOLUTION_METADATA.get(tier, {}),
             "values": dict(zip(_PIKA_FLEX_ASPECT_KEYS[tier], resolutions)),
         }
         for tier, resolutions in PIKA_FLEX_RESOLUTION_BUCKETS.items()
@@ -214,7 +242,7 @@ def pika_flex_capabilities(reference: bool) -> dict[str, Any]:
         "guidance_max_phases": 1,
         "lock_guidance_phases": True,
         "resolution_presets": _pika_resolution_presets(),
-        "resolution_preset_order": ["480p", "768p"],
+        "resolution_preset_order": ["480p", "540p", "720p", "768p", "1080p"],
         "resolutions": [
             (f"{tier} {resolution}", resolution)
             for tier, resolutions in PIKA_FLEX_RESOLUTION_BUCKETS.items()

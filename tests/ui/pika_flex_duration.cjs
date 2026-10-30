@@ -45,10 +45,13 @@ const modelOptionsFor = (modelType, reference = false, rolling = false) => ({
   inference_steps_max: 6,
   guidance_max_phases: 1,
   default_num_inference_steps: 6,
-  resolution_preset_order: ['480p', '768p'],
+  resolution_preset_order: ['480p', '540p', '720p', '768p', '1080p'],
   resolution_presets: {
     '480p': {label: '480p', values: {'16:9': '832x480'}},
+    '540p': {label: '540p', values: {'16:9': '960x544'}},
+    '720p': {label: '720p', values: {'16:9': '1280x704'}},
     '768p': {label: '768p', values: {'16:9': '1344x768'}},
+    '1080p': {label: '1080p', experimental: true, values: {'16:9': '1920x1088'}},
   },
 });
 
@@ -71,10 +74,11 @@ const modelDefFor = (modelType, reference = false) => ({
     import {createRoot} from 'react-dom/client';
     import {useStore} from './src/stores/useStore';
     import {DurationSlider} from './src/components/Sidebar/DurationSlider';
+    import {ResolutionPresets} from './src/components/Sidebar/ResolutionPresets';
     window.store = useStore;
     window.mount = () => {
       window.root = createRoot(document.getElementById('root'));
-      window.root.render(<DurationSlider includeWindowSettings/>);
+      window.root.render(<><DurationSlider includeWindowSettings/><ResolutionPresets/></>);
     };
   `, resolveDir: path.join(root, 'ui'), loader: 'tsx'}, bundle: true, write: false,
     jsx: 'automatic', define: {'process.env.NODE_ENV': '"development"'}, logLevel: 'silent'});
@@ -137,7 +141,8 @@ const modelDefFor = (modelType, reference = false) => ({
           modelsLoaded: true,
           enabledModels: new Set([modelType]),
           selectedModelPerMode: {...state.selectedModelPerMode, video: modelType},
-          resolutionPreset: resolution === '1344x768' ? '768p' : '480p',
+          resolutionPreset: ({'960x544': '540p', '1280x704': '720p',
+            '1344x768': '768p', '1920x1088': '1080p'})[resolution] || '480p',
           aspectRatio: '16:9',
           durationSeconds: 362 / 24,
           slidingWindowSeconds: 243 / 24,
@@ -186,9 +191,21 @@ const modelDefFor = (modelType, reference = false) => ({
     for (const scenario of [
       {modelType: 'pika_flex_frames_test', reference: false, resolution: '832x480'},
       {modelType: 'pika_flex_references_test', reference: true, resolution: '1344x768'},
+      ...['960x544', '1280x704', '1920x1088'].flatMap(resolution => [
+        {modelType: `pika_flex_frames_${resolution}_test`, reference: false, resolution},
+        {modelType: `pika_flex_references_${resolution}_test`, reference: true, resolution},
+      ]),
     ]) {
       submissions.length = 0;
       await configure(scenario);
+      for (const tier of ['480p', '540p', '720p', '768p', '1080p']) {
+        assert.equal(await page.getByRole('button', {name: tier, exact: true}).count(), 1,
+          `Both Pika modes expose the ${tier} resolution choice`);
+      }
+      const selectedTier = await page.evaluate(() => window.store.getState().resolutionPreset);
+      await page.getByRole('button', {name: selectedTier, exact: true}).click();
+      assert.equal(await page.evaluate(() => window.store.getState().params.resolution),
+        scenario.resolution, 'Selecting a resolution retains its exact aligned canvas');
       const hydrated = await page.evaluate(() => {
         const state = window.store.getState();
         return {
