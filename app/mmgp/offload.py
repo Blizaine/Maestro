@@ -783,20 +783,41 @@ class _PinnedStager:
             self.helpers = None
         self.slots, self.events = [None, None], [None, None]
 
-    def _acquire(self, nbytes):
+    def _acquire(self, nbytes, destination_device=None):
         slot_no = self.slot_no = self.slot_no ^ 1
         if self.events[slot_no] is not None:
             self.events[slot_no].synchronize()
             self.events[slot_no] = None
         if self.slots[slot_no] is None or self.slots[slot_no].numel() < nbytes:
-            self.slots[slot_no] = None
+            slot_size = max(nbytes, STAGING_CHUNK_SIZE)
+            reserve_floor = max(4 * 2**30, physical_memory // 10)
+            available = psutil.virtual_memory().available
+            if available < reserve_floor + slot_size:
+                self.enabled = False
+                print(
+                    "Skipping Reserved RAM for staged transfers: "
+                    f"{available / 2**30:.2f} GiB available is below the "
+                    f"{reserve_floor / 2**30:.2f} GiB host reserve plus "
+                    f"{slot_size / 2**30:.2f} GiB for a staging slot; "
+                    "pageable weights will be copied with slower transfers"
+                )
+                return None
+            if destination_device is not None:
+                # Host allocation calls can surface errors from earlier asynchronous CUDA work.
+                # Let those errors propagate before the benign pinned-allocation fallback below.
+                torch.cuda.synchronize(destination_device)
             try:
                 with torch.inference_mode(False): # the slots are written by the main thread and the prefetch thread, whatever their inference mode
-                    self.slots[slot_no] = torch.empty(max(nbytes, STAGING_CHUNK_SIZE), dtype=torch.uint8, device="cpu", pin_memory=True)
-            except RuntimeError:
+                    slot = torch.empty(slot_size, dtype=torch.uint8, device="cpu", pin_memory=True)
+            except RuntimeError as exc:
                 self.enabled = False
-                print("Unable to allocate Reserved RAM for staged transfers, pageable weights will be copied with slower transfers")
+                detail = str(exc).replace("\r", " ").replace("\n", " ")
+                print(
+                    "Unable to allocate Reserved RAM for staged transfers "
+                    f"({type(exc).__name__}: {detail}); pageable weights will be copied with slower transfers"
+                )
                 return None
+            self.slots[slot_no] = slot
         return self.slots[slot_no]
 
     def _release(self):
@@ -815,7 +836,7 @@ class _PinnedStager:
             inner[name], offset = self._pinned_copy(getattr(t, name), slot, offset, parallel)
         return type(t).__tensor_unflatten__(inner, meta, t.size(), t.stride()), offset
 
-    def to_gpu(self, p, parallel=lambda: True, read_job=None, read_position=0):
+    def to_gpu(self, p, parallel=lambda: True, read_job=None, read_position=0, destination_device=None):
         t = p.data if type(p) is torch.nn.Parameter else p
         if not self.enabled:
             return p.to("cuda", non_blocking=True)
@@ -827,7 +848,7 @@ class _PinnedStager:
             dst_bytes = dst.reshape(-1).view(torch.uint8)
             for offset in range(0, nbytes, STAGING_CHUNK_SIZE):
                 length = min(STAGING_CHUNK_SIZE, nbytes - offset)
-                slot = self._acquire(length)
+                slot = self._acquire(length, destination_device)
                 if slot is None:
                     return p.to("cuda", non_blocking=True)
                 self._memmove(slot.data_ptr(), t.data_ptr() + offset, length, parallel, read_job, read_position + offset)
@@ -841,7 +862,7 @@ class _PinnedStager:
         nbytes = sum(_staging_nbytes(leaf) for leaf in leaves)
         if nbytes < STAGING_MIN_SIZE or nbytes > STAGING_MAX_SIZE:
             return p.to("cuda", non_blocking=True)
-        slot = self._acquire(nbytes)
+        slot = self._acquire(nbytes, destination_device)
         if slot is None:
             return p.to("cuda", non_blocking=True)
         q = self._pinned_copy(t, slot, 0, parallel)[0].to("cuda", non_blocking=True)
@@ -3798,7 +3819,13 @@ class offload:
                     if moved is not None and i in moved:
                         q = self.stager.checked(p, moved[i])
                     else:
-                        q = self.stager.to_gpu(p, parallel_staging, read_job, read_position) if read_job is not None else self.stager.to_gpu(p, parallel_staging)
+                        q = self.stager.to_gpu(
+                            p,
+                            parallel_staging,
+                            read_job,
+                            read_position,
+                            destination_device=stream_to_use.device,
+                        )
                     if read_job is not None:
                         read_job.complete(read_position, read_size)
                         read_position += read_size

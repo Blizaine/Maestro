@@ -10489,19 +10489,31 @@ def generate_video(
                 if not (audio_only or is_image):                    
                     sample = _video_tensor_to_uint8_chunk_inplace(sample)
 
-                # SCAIL-2's fake start image carries identity only and has
-                # zero output-timeline frames.  Do not let its original
-                # spatial canvas reach final assembly: even ``[:, :-0]`` is
-                # an empty tensor whose height/width must match torch.cat's
-                # generated chunk, which fails when the control video chose
-                # a different canvas.
-                if model_def.get("minimax_h3_pika_flex"):
-                    from models.minimax_h3.pika_flex import normalize_pika_flex_start_prefix
-
-                    prefix_video, source_video_frames_count, source_video_overlap_frames_count = normalize_pika_flex_start_prefix(
-                        prefix_video, source_video_frames_count, source_video_overlap_frames_count,
-                        image_start=image_start, window_no=window_no,
+                # H3 returns its explicit start anchor on the native output
+                # timeline. Remove only WGP's one-frame image carrier so the
+                # generic source-prefix branch does not shift its audio clock.
+                if _h3_model:
+                    from models.minimax_h3.packing import (
+                        normalize_h3_native_start_prefix,
                     )
+
+                    (
+                        prefix_video,
+                        source_video_frames_count,
+                        source_video_overlap_frames_count,
+                    ) = normalize_h3_native_start_prefix(
+                        prefix_video,
+                        source_video_frames_count,
+                        source_video_overlap_frames_count,
+                        image_start=image_start,
+                        window_no=window_no,
+                        architecture=model_def.get("architecture"),
+                        video_source=video_source,
+                    )
+                # SCAIL-2's fake start image carries identity only and has
+                # zero output-timeline frames. Do not let its original spatial
+                # canvas reach final assembly; even ``[:, :-0]`` is an empty
+                # tensor whose dimensions must match the generated chunk.
                 if fake_start_image and window_no == 1:
                     prefix_video = None
                 elif prefix_video != None and window_no == 1 :

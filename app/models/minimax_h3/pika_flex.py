@@ -353,19 +353,16 @@ def normalize_pika_flex_start_prefix(
     at muxing. Genuine video/history prefixes keep their existing handling.
     """
 
-    if (
-        window_no == 1
-        and source_frame_count == 1
-        and is_pika_flex_single_frame_start_anchor(
-            image_start=image_start,
-            input_video=prefix_video,
-            prefix_frames_count=overlap_frame_count,
-            window_start_frame_no=0,
-            allow_frames=True,
-        )
-    ):
-        return None, 0, 0
-    return prefix_video, source_frame_count, overlap_frame_count
+    from .packing import normalize_h3_native_start_prefix
+
+    return normalize_h3_native_start_prefix(
+        prefix_video,
+        source_frame_count,
+        overlap_frame_count,
+        image_start=image_start,
+        window_no=window_no,
+        architecture="minimax_h3_pika_flex",
+    )
 
 
 def validate_pika_flex_request(

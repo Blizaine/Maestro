@@ -109,6 +109,8 @@ jobs:
           tests/test_generation_preview_support.py
           tests/test_generation_preview_wiring.py
           tests/test_h3_scheduler_clean_preview.py
+          tests/test_pika_flex_timeline.py
+          tests/test_minimax_h3_pika_flex.py
           tests/test_h3_source_camera.py
           tests/test_media_flow.py
           tests/test_tinyvae.py

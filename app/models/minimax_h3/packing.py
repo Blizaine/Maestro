@@ -37,6 +37,7 @@ without it: `MiniMaxH3Transformer3DModel` then needs no attention mask, which ke
 backends available.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
@@ -223,6 +224,102 @@ def audio_latent_num_frames(num_frames: int) -> int:
 def h3_keyframe_fit_crop(*, fit_crop: bool, auto_aspect: bool) -> bool:
     """Use cover-cropping for explicit H3 canvases while keeping Auto fit behavior."""
     return bool(fit_crop or not auto_aspect)
+
+
+def _h3_has_payload(value) -> bool:
+    """Test whether a media value carries content without importing a tensor API."""
+    if value is None or value is False:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (Mapping, list, tuple, set, frozenset)):
+        return len(value) > 0
+    numel = getattr(value, "numel", None)
+    if callable(numel):
+        try:
+            return int(numel()) > 0
+        except (TypeError, ValueError, RuntimeError):
+            return True
+    return True
+
+
+def is_h3_single_frame_start_anchor(
+    *,
+    image_start,
+    input_video,
+    prefix_frames_count,
+    window_start_frame_no,
+    allow_frames=True,
+) -> bool:
+    """Recognize WGP's one-frame image carrier for a native H3 first pass."""
+    if not allow_frames or not _h3_has_payload(image_start):
+        return False
+    for value, expected in (
+        (prefix_frames_count, 1.0),
+        (window_start_frame_no, 0.0),
+    ):
+        if isinstance(value, bool):
+            return False
+        try:
+            if float(value) != expected:
+                return False
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    if not _h3_has_payload(input_video):
+        return False
+    shape = getattr(input_video, "shape", None)
+    if shape is None:
+        return False
+    try:
+        dimensions = tuple(int(dimension) for dimension in shape)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if (
+        not dimensions
+        or dimensions[0] != 3
+        or any(dimension <= 0 for dimension in dimensions)
+    ):
+        return False
+    if len(dimensions) == 3:
+        return True  # C,H,W is one frame in H3's native input convention.
+    return len(dimensions) == 4 and dimensions[1] == 1  # C,T,H,W
+
+
+def normalize_h3_native_start_prefix(
+    prefix_video,
+    source_frame_count,
+    overlap_frame_count,
+    *,
+    image_start,
+    window_no,
+    architecture,
+    video_source=None,
+):
+    """Remove only WGP's duplicate single-image carrier from a native H3 pass.
+
+    H3 already conditions and decodes the explicit start image as part of its
+    native output timeline. The generic WGP prefix bookkeeping must therefore
+    not count the same one-frame carrier as source video. Real source videos,
+    continuation history, other architectures, and later windows keep their
+    existing accounting.
+    """
+    unchanged = (prefix_video, source_frame_count, overlap_frame_count)
+    if not str(architecture or "").startswith("minimax_h3"):
+        return unchanged
+    if _h3_has_payload(video_source):
+        return unchanged
+    if window_no != 1 or source_frame_count != 1:
+        return unchanged
+    if not is_h3_single_frame_start_anchor(
+        image_start=image_start,
+        input_video=prefix_video,
+        prefix_frames_count=overlap_frame_count,
+        window_start_frame_no=0,
+        allow_frames=True,
+    ):
+        return unchanged
+    return None, 0, 0
 
 
 def prepare_keyframe_image(image, height: int, width: int):

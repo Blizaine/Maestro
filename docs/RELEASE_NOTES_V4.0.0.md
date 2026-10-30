@@ -43,6 +43,12 @@ candidate combines the changes below with the fixes already tested on Dev.
   it is off by default. Profile 0/VMM is opt-in with compatibility gates.
   Optional kernel updates retain supported fallbacks. Successful HTTP access
   logs no longer bury generation progress; warnings and failures stay visible.
+- **Runtime safeguards:** GGUF prompt embeddings decode only the requested
+  token rows in bounded chunks. Legacy MMGP avoids allocating new pinned
+  staging buffers when host RAM is low and reports allocation failures more
+  clearly. Native H3 start-image bookkeeping keeps its audio and video on the
+  same output timeline. These changes are being checked in the live matrix;
+  they are not a universal low-memory or speed guarantee.
 
 See the [October port scope](WanGP-October-2026-Ports.md),
 [MOSS guide](MOSS-Image.md), [Fibo guide](Fibo-2.md),
