@@ -289,6 +289,29 @@ class MiniMaxH3PDDTests(unittest.TestCase):
         self.assertIs(transformer.final_layer.video_out, original_video)
         self.assertIs(transformer.final_layer.audio_out, original_audio)
 
+    def test_plan_factories_stay_on_cpu_with_non_cpu_default_device(self):
+        sigmas = [1.0, 0.75, 0.5, 0.25, 0.0]
+        with torch.device("cpu"):
+            expected_grid = self.pdd.pdd_time_grid(12.0)
+            expected_plan = self.pdd.pdd_sampling_plan(expected_grid.diff(), 8)
+            expected_fixed = self.pdd._fixed_pdd_plans(12.0, 32, 4)
+            expected_runtime = self.pdd.pdd_sampling_plans_for_sigmas(sigmas, 12.0)
+
+        # MMGP keeps CUDA as PyTorch's default device for H3. The PDD schedule
+        # is CPU metadata and must remain CPU even under another non-CPU default.
+        with torch.device("meta"):
+            actual_grid = self.pdd.pdd_time_grid(12.0)
+            actual_plan = self.pdd.pdd_sampling_plan(actual_grid.diff(), 8)
+            actual_fixed = self.pdd._fixed_pdd_plans(12.0, 32, 4)
+            actual_runtime = self.pdd.pdd_sampling_plans_for_sigmas(sigmas, 12.0)
+
+        for tensor in (actual_grid, actual_plan, actual_fixed, actual_runtime):
+            self.assertEqual(tensor.device.type, "cpu")
+        self.assertTrue(torch.equal(actual_grid, expected_grid))
+        self.assertTrue(torch.equal(actual_plan, expected_plan))
+        self.assertTrue(torch.equal(actual_fixed, expected_fixed))
+        self.assertTrue(torch.equal(actual_runtime, expected_runtime))
+
     def test_runtime_sigma_plans_match_fixed_published_schedule(self):
         for shift in (12.0, 3.0):
             with self.subTest(shift=shift):

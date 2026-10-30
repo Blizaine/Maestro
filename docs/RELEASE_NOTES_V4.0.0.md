@@ -58,6 +58,10 @@ candidate combines the changes below with the fixes already tested on Dev.
   Silent H3 stories with a single action now use the same constrained JSON
   planning path as longer action sequences, so physical typing is applied
   before a draft is returned.
+- **PTD/PDD scheduling:** small schedule and adapter-plan tensors stay on CPU
+  even when the renderer's default tensor device is CUDA. The schedule math
+  and hop selection are unchanged; this avoids unintended GPU allocation
+  while preparing relative heads.
 - **Reliable startup:** the API reserves its actual bind interface through
   server startup and announces the Maestro URL only after its listener is
   ready. Busy ports fall back without taking over a shared Pinokio service.

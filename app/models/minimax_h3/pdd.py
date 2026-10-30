@@ -55,7 +55,13 @@ def shifted_sigma(shift: float, sigma: torch.Tensor) -> torch.Tensor:
 def pdd_time_grid(shift: float, num_steps: int = PDD_NUM_INTERVALS) -> torch.Tensor:
     """Return Alibaba's ascending MiniMax H3 PDD time grid."""
 
-    sigma = torch.linspace(1.0, 0.0, int(num_steps) + 1, dtype=torch.float64)
+    sigma = torch.linspace(
+        1.0,
+        0.0,
+        int(num_steps) + 1,
+        dtype=torch.float64,
+        device="cpu",
+    )
     return 1.0 - shifted_sigma(float(shift), sigma)
 
 
@@ -68,7 +74,11 @@ def pdd_sampling_plan(
 
     start = int(start)
     block_size = int(block_size)
-    plan = torch.zeros(step_sizes.shape[0], dtype=step_sizes.dtype)
+    plan = torch.zeros(
+        step_sizes.shape[0],
+        dtype=step_sizes.dtype,
+        device="cpu",
+    )
     block = step_sizes[start : start + block_size]
     span = block.sum()
     if block.numel() != block_size or float(span) <= 0:
@@ -95,8 +105,7 @@ def pdd_sampling_plans_for_sigmas(
     schedule is customized in the future.
     """
 
-    boundaries = torch.as_tensor(sigmas).flatten().detach().to(
-        device="cpu",
+    boundaries = torch.as_tensor(sigmas, device="cpu").flatten().detach().to(
         dtype=torch.float64,
         non_blocking=False,
     )
