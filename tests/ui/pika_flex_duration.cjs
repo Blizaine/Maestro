@@ -2,7 +2,7 @@
 // Run: node tests/ui/pika_flex_duration.cjs
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const root = path.resolve(__dirname, '../..');
+const root = path.resolve(process.env.MAESTRO_TEST_ROOT || path.resolve(__dirname, '../..'));
 const esbuild = require(path.join(root, 'ui/node_modules/esbuild'));
 const playwrightPath = process.env.MAESTRO_PLAYWRIGHT
   || (() => {
@@ -530,6 +530,92 @@ const modelDefFor = (modelType, reference = false) => ({
           frames: 231, duration: 231 / 24, window: 124, overlap: 18, sequence: true,
         }, 'Reference sidecar restoration preserves a second non-grid total exactly');
       }
+    }
+
+    for (const scenario of rollingScenarios) {
+      for (const sidecarWindow of ['matching', 'missing', 'stale']) {
+        await configure({...scenario, rolling: true, resolution: '1344x768'});
+        // Exercise the actual conflict: hardware Auto recommends only the
+        // short 124-frame window, while the saved native render used 345.
+        const conservativePolicy = {
+          resolution_bands: [{min_pixels: 0, vram_tiers: [{frames: 124}]}],
+        };
+        optionsByType[scenario.modelType] = {...optionsByType[scenario.modelType],
+          sliding_window_memory_policy: conservativePolicy,
+          omni_sequence_memory_policy: conservativePolicy};
+        await page.evaluate(options => window.store.setState({modelOptions: options}),
+          optionsByType[scenario.modelType]);
+        const params = {
+          model_type: scenario.modelType,
+          prompt: 'A traveler crosses a quiet garden at sunrise.',
+          resolution: '1344x768',
+          video_length: 345,
+          duration_seconds: 345 / 24,
+          sliding_window_overlap: sidecarWindow === 'stale' ? 18 : 0,
+          sliding_window_memory_override: false,
+          minimax_h3_multi_window: false,
+          minimax_h3_reference_sequence: false,
+          num_inference_steps: 6,
+          image_mode: 0,
+          _studio_video_workflow: scenario.reference ? 'references' : 'frames',
+          _duration_planning_mode: 'windows',
+          ...(scenario.reference ? {minimax_h3_references: [referenceRecord]} : {}),
+          ...(sidecarWindow === 'matching' ? {sliding_window_size: 345} : {}),
+          ...(sidecarWindow === 'stale' ? {sliding_window_size: 124} : {}),
+        };
+        await restoreFromSidecar({
+          modelType: scenario.modelType,
+          params,
+          name: `${scenario.modelType}-${sidecarWindow}-native-single-window.mp4`,
+        });
+        await page.evaluate(() => new Promise(resolve => {
+          requestAnimationFrame(() => requestAnimationFrame(resolve));
+        }));
+        const restored = await page.evaluate(() => {
+          const state = window.store.getState();
+          return {
+            frames: state.params.video_length,
+            window: state.params.sliding_window_size,
+            overlap: state.params.sliding_window_overlap,
+            duration: state.durationSeconds,
+            windowSeconds: state.slidingWindowSeconds,
+            locked: state.slidingWindowLocked,
+            memoryOverride: state.params.sliding_window_memory_override,
+            framesSequence: state.params.minimax_h3_multi_window === true,
+            referenceSequence: state.params.minimax_h3_reference_sequence === true,
+            planningMode: state.params._duration_planning_mode,
+          };
+        });
+        assert.equal(restored.window, 345,
+          `${scenario.reference ? 'References' : 'Frames'} preserves a native single window despite the short Auto recommendation`);
+        assert.deepEqual(restored, {
+          frames: 345, window: 345, overlap: 0,
+          duration: 345 / 24, windowSeconds: 345 / 24,
+          locked: true, memoryOverride: true,
+          framesSequence: false, referenceSequence: false,
+          planningMode: 'windows',
+        }, `${scenario.reference ? 'References' : 'Frames'} preserves a native single window from a ${sidecarWindow} geometry sidecar`);
+
+        submissions.length = 0;
+        await page.evaluate(async () => window.store.getState().startGeneration());
+        assert.equal(submissions.length, 1,
+          'Restored native single-window geometry reaches mocked generation');
+        assert.equal(submissions[0].video_length, 345);
+        assert.equal(submissions[0].sliding_window_size, 345);
+        assert.equal(submissions[0].sliding_window_overlap, 0);
+        assert.equal(submissions[0].minimax_h3_multi_window ?? false, false);
+        assert.equal(submissions[0].minimax_h3_reference_sequence ?? false, false);
+
+        await page.evaluate(() => {
+          window.store.getState().setDurationSeconds(294 / 24);
+        });
+        await page.waitForFunction(() => window.store.getState().params.video_length === 294);
+        assert.equal(await page.evaluate(() => window.store.getState().durationSeconds), 294 / 24,
+          'A later user duration choice is not forced back to the restored duration');
+        assert.equal(await page.evaluate(() => window.store.getState().params.sliding_window_size), 345,
+          'The restored native window remains available after a duration edit');
+      }
+      optionsByType[scenario.modelType] = modelOptionsFor(scenario.modelType, scenario.reference, true);
     }
 
     const rollingFrames = rollingScenarios[0];

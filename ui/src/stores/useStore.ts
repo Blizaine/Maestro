@@ -14788,7 +14788,9 @@ export const useStore = create<AppState>((set, get) => ({
       newParams.h3_window_plan = undefined
       newParams.multi_prompts_gen_type = 2
       newParams.per_clip_frames = undefined
-      newParams._duration_planning_mode = 'duration'
+      if (isPikaFlexSinglePass(restoredModelOptions)) {
+        newParams._duration_planning_mode = 'duration'
+      }
       restoredPikaDuration = frames / fps
     }
 
@@ -14976,14 +14978,19 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     const fps = restoredModelOptions?.fps ?? model?.fps ?? 16
+    const restorePikaSingleWindow = restoredPikaFlex && !restoredPikaRolling && !isDirectorClip
     const restoredNativePassFrames = isDirectorClip
       ? newParams.sliding_window_size ?? newParams.video_length
-      : newParams.minimax_h3_sequence_clip_frames ?? newParams.sliding_window_size
-    const restoreDirectorWindow = (isDirectorClip || restoredPikaRolling)
+      : restorePikaSingleWindow
+        ? newParams.video_length
+        : newParams.minimax_h3_sequence_clip_frames ?? newParams.sliding_window_size
+    const restoreSavedWindowGeometry = (
+      isDirectorClip || restoredPikaRolling || restorePikaSingleWindow
+    )
       && restoredNativePassFrames != null
       && Number.isFinite(restoredNativePassFrames)
       && restoredNativePassFrames > 0
-    if (restoreDirectorWindow) {
+    if (restoreSavedWindowGeometry) {
       // A pencil load owns its exact native geometry. Hardware Auto remains
       // available when the user unlocks the window or chooses another setup.
       newParams.sliding_window_memory_override = true
@@ -15001,10 +15008,10 @@ export const useStore = create<AppState>((set, get) => ({
 
     set(s => ({
       sidebarMode: 'studio',
-      restoredWindowSelectionKey: restoreDirectorWindow
+      restoredWindowSelectionKey: restoreSavedWindowGeometry
         ? h3WindowOverrideKey(modelType, String(newParams.resolution || ''))
         : null,
-      ...(restoreDirectorWindow ? {
+      ...(restoreSavedWindowGeometry ? {
         slidingWindowSeconds: restoredNativePassFrames / fps,
         slidingWindowLocked: true,
         ...(newParams.sliding_window_overlap != null
@@ -15204,7 +15211,8 @@ export const useStore = create<AppState>((set, get) => ({
     // video sidecars that predate those fields.
     const frames = newParams.video_length || 81
     if (restoredDuration > 0 || restoredFishAutoDuration) {
-      set({ durationSeconds: isDirectorClip || restoredPikaRolling ? restoredDuration : Math.round(restoredDuration * 10) / 10 })
+      set({ durationSeconds: isDirectorClip || restoredPikaFlex
+        ? restoredDuration : Math.round(restoredDuration * 10) / 10 })
     } else if (restoredModelMode === 'video' || restoredModelMode === 'avatar') {
       set({ durationSeconds: Math.round((frames / fps) * 10) / 10 })
     }
