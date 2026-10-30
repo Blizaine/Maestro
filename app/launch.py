@@ -321,7 +321,6 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
 from services.access_log_filter import install_quiet_access_filter
 from services.http_runtime import configure_http_runtime
 from services.ui_delivery import UIStartupGZipMiddleware
@@ -32629,31 +32628,14 @@ if __name__ == "__main__":
     else:
         host = os.environ.get("SERVER_NAME", "127.0.0.1")
 
-    # Port resolution: Pinokio hands us a free port via SERVER_PORT, but a
-    # stale prior instance or another app can still be holding it by the time
-    # we bind — and an uncaught bind failure makes the launcher report a
-    # blank "server failed to start" with no clue. Probe the requested port
-    # and fall forward to the next free one, printing what happened so the
-    # captured URL (below) matches the actual bind.
-    def _first_bindable_port(bind_host: str, preferred: int, span: int = 20):
-        import socket as _socket
-        probe_host = "127.0.0.1" if bind_host == "0.0.0.0" else bind_host
-        for candidate in [preferred] + [preferred + i for i in range(1, span + 1)]:
-            s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-            try:
-                # No SO_REUSEADDR — a plain bind fails iff the port is truly
-                # in use right now, which is exactly the check we want (and
-                # avoids the Windows REUSEADDR hijack-a-live-port behavior).
-                s.bind((probe_host, candidate))
-                return candidate
-            except OSError:
-                continue
-            finally:
-                s.close()
-        return None
+    # Reserve the actual bind interface, not only loopback when serving LAN.
+    # Keep ownership through Uvicorn startup so another service cannot take
+    # the selected port after a temporary availability probe closes.
+    from services.server_socket import reserve_server_socket
+    from services.server_startup import run_reserved_server
 
-    resolved_port = _first_bindable_port(host, port)
-    if resolved_port is None:
+    server_socket = reserve_server_socket(host, port)
+    if server_socket is None:
         print(
             f"\n[Maestro] ERROR: could not find a free port in "
             f"{port}-{port + 20}. Another app (or a stale Maestro instance) "
@@ -32665,6 +32647,7 @@ if __name__ == "__main__":
             flush=True,
         )
         sys.exit(1)
+    resolved_port = int(server_socket.getsockname()[1])
     if resolved_port != port:
         print(
             f"[Maestro] Port {port} was busy — using {resolved_port} instead.",
@@ -32672,12 +32655,9 @@ if __name__ == "__main__":
         )
         port = resolved_port
 
-    # Pinokio may assign a different port on every launch (and the fallback
-    # above can move it again). Recreate the manager with the actual port,
-    # then refresh an already-opted-in private Tailscale route in the
-    # background. Local startup never waits on or requires Tailscale.
+    # Recreate the manager with the reserved port. Refresh an existing opted-in
+    # route only after API startup succeeds; local startup never requires it.
     _tailscale = TailscaleManager(_maestro_settings_dir, port)
-    _tailscale.refresh_if_enabled()
 
     # Browsers can't navigate to 0.0.0.0 (it's a non-routable bind
     # address), so when binding wider we still SURFACE the loopback
@@ -32686,28 +32666,26 @@ if __name__ == "__main__":
     # LAN access works; only the displayed URL is loopback.
     display_host = "127.0.0.1" if host == "0.0.0.0" else host
 
-    print(f"\n{'='*50}")
-    print(f"  Maestro UI:    http://{display_host}:{port}/")
-    # Trailing slash required: the Gradio submount 404s the bare path.
-    print(f"  Classic UI:    http://{display_host}:{port}/classic/")
-    print(f"  API docs:      http://{display_host}:{port}/docs")
-    if host == "0.0.0.0":
-        print(f"  (Bound to {host} — LAN-accessible via this machine's IP)")
-    print(f"{'='*50}\n")
+    def _announce_ready(_server):
+        _tailscale.refresh_if_enabled()
+        print(f"\n{'='*50}")
+        print(f"  Maestro UI:    http://{display_host}:{port}/")
+        # Trailing slash required: the Gradio submount 404s the bare path.
+        print(f"  Classic UI:    http://{display_host}:{port}/classic/")
+        print(f"  API docs:      http://{display_host}:{port}/docs")
+        if host == "0.0.0.0":
+            print(f"  (Bound to {host} — LAN-accessible via this machine's IP)")
+        print(f"{'='*50}\n", flush=True)
 
     # Confirm the polling filter immediately before Uvicorn configures logging.
     install_quiet_access_filter()
 
     try:
-        uvicorn.run(api, host=host, port=port)
+        run_reserved_server(api, host=host, server_socket=server_socket, on_ready=_announce_ready)
     except OSError as e:
-        # The probe above narrows this to a genuine race (port taken in the
-        # window between probe and uvicorn's own bind). Still fail loudly and
-        # actionably rather than dumping a bare traceback into the launcher.
         print(
-            f"\n[Maestro] ERROR: failed to bind {host}:{port} ({e}). "
-            f"The port was taken just after we checked it — Start again to "
-            f"pick a fresh port.\n",
+            f"\n[Maestro] ERROR: could not start the API on {host}:{port} ({e}). "
+            f"Stop this Maestro installation in Pinokio, then Start again.\n",
             flush=True,
         )
         sys.exit(1)

@@ -372,6 +372,15 @@ class DirectorContractRepairTests(unittest.TestCase):
         self.assertIn("response's event_shots allocation are the only action authority", system)
         self.assertIn("PHYSICAL STATE CONTRACT", system)
         self.assertIn("exactly 'grounded' or 'airborne'", system)
+        self.assertIn("contact only for actual touch or grip", system)
+        self.assertIn(
+            "Being beside or next to, approaching, noticing, or waving beside "
+            "another subject does not alone establish contact",
+            system,
+        )
+        self.assertIn("Walking is motion, not a support relation", system)
+        self.assertIn("Never invent placeholder support values such as 'N/A'", system)
+        self.assertIn("already-known location or posture fact", system)
         self.assertIn('{"E1":1,"E2":1,"E3":2}', user)
         self.assertIn("initial_facts is the complete canonical fact set", user)
         self.assertIn("event_transitions must be an object with exactly one key", user)
@@ -526,6 +535,53 @@ class DirectorContractRepairTests(unittest.TestCase):
         ]
         self.assertEqual(source_physical_state_issues(patched, assigned), [])
         self.assertEqual(validate_physical_state_sequence(patched), [])
+
+    def test_compact_patch_does_not_establish_contact_from_proximity(self):
+        source_contract = {
+            "events": [
+                {"event_id": "E1", "text": "The Dragon lowers its shoulder."},
+                {
+                    "event_id": "E2",
+                    "text": (
+                        "The Kitten notices the Dragon, walks beside it, and "
+                        "waves beside it."
+                    ),
+                },
+            ],
+        }
+        rows = _rows()
+        for row in rows:
+            row["_director_source_contract"] = source_contract
+
+        response = _compact_event_response()
+        response["initial_facts"]["char_0"].pop("contact")
+        response["event_transitions"]["E2"] = [{
+            "operation": "establish",
+            "subject_id": "char_0",
+            "predicate": "contact",
+            "to_value": "Dragon",
+            "action": "waves beside the Dragon",
+        }]
+
+        assigned = [
+            [source_contract["events"][0]],
+            [source_contract["events"][1]],
+        ]
+        patched = apply_compact_source_physical_patch(rows, response)
+        issues = source_physical_state_issues(patched, assigned)
+        self.assertTrue(any(
+            "establishment transition" in issue and "not directly supported" in issue
+            and "char_0 contact" in issue
+            for issue in issues
+        ), issues)
+
+        inferred = copy.deepcopy(response)
+        del inferred["event_transitions"]["E2"][0]["operation"]
+        with self.assertRaisesRegex(
+            ValueError,
+            "unknown physical fact key char_0 contact",
+        ):
+            apply_compact_source_physical_patch(rows, inferred)
 
     def test_compact_establish_rejects_overwrite_and_non_event_keyed_input(self):
         response = _compact_event_response()

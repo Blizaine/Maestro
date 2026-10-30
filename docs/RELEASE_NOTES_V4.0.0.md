@@ -53,7 +53,11 @@ candidate combines the changes below with the fixes already tested on Dev.
   creative brief instead of becoming mandatory performed story actions.
   Actual character actions retain their ordered source obligations and physical
   state validation. This reduces unnecessary planning conflicts without
-  accepting invented contact or missing physical state.
+  accepting invented contact or missing physical state. Repair instructions
+  distinguish proximity from actual touch and avoid placeholder support facts.
+- **Reliable startup:** the API reserves its actual bind interface through
+  server startup and announces the Maestro URL only after its listener is
+  ready. Busy ports fall back without taking over a shared Pinokio service.
 
 See the [October port scope](WanGP-October-2026-Ports.md),
 [MOSS guide](MOSS-Image.md), [Fibo guide](Fibo-2.md),
