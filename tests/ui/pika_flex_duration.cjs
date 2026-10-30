@@ -47,11 +47,12 @@ const modelOptionsFor = (modelType, reference = false, rolling = false) => ({
   default_num_inference_steps: 6,
   resolution_preset_order: ['480p', '540p', '720p', '768p', '1080p'],
   resolution_presets: {
-    '480p': {label: '480p', values: {'16:9': '832x480'}},
-    '540p': {label: '540p', values: {'16:9': '960x544'}},
-    '720p': {label: '720p', values: {'16:9': '1280x704'}},
-    '768p': {label: '768p', values: {'16:9': '1344x768'}},
-    '1080p': {label: '1080p', experimental: true, values: {'16:9': '1920x1088'}},
+    '480p': {label: '480p', values: {'16:9': '832x480', '9:16': '480x832'}},
+    '540p': {label: '540p', values: {'16:9': '960x544', '9:16': '544x960'}},
+    '720p': {label: '720p', values: {'16:9': '1280x704', '9:16': '704x1280'}},
+    '768p': {label: '768p', values: {'16:9': '1344x768', '9:16': '768x1344'}},
+    '1080p': {label: '1080p', experimental: true,
+      values: {'16:9': '1920x1088', '9:16': '1088x1920'}},
   },
 });
 
@@ -616,6 +617,185 @@ const modelDefFor = (modelType, reference = false) => ({
           'The restored native window remains available after a duration edit');
       }
       optionsByType[scenario.modelType] = modelOptionsFor(scenario.modelType, scenario.reference, true);
+    }
+
+    const resolutionByTier = {
+      '480p': {landscape: '832x480', portrait: '480x832'},
+      '540p': {landscape: '960x544', portrait: '544x960'},
+      '720p': {landscape: '1280x704', portrait: '704x1280'},
+      '768p': {landscape: '1344x768', portrait: '768x1344'},
+      '1080p': {landscape: '1920x1088', portrait: '1088x1920'},
+    };
+    const resolutionAutoPolicy = {
+      resolution_bands: [{min_pixels: 0, vram_tiers: [{frames: 124}]}],
+    };
+    for (const scenario of rollingScenarios) {
+      for (const origin of ['pencil-restored', 'manual-lock']) {
+        await configure({...scenario, rolling: true, resolution: '1344x768'});
+        const options = {
+          ...optionsByType[scenario.modelType],
+          sliding_window_memory_policy: resolutionAutoPolicy,
+          omni_sequence_memory_policy: resolutionAutoPolicy,
+        };
+        optionsByType[scenario.modelType] = options;
+        await page.evaluate(value => window.store.setState({modelOptions: value}), options);
+
+        if (origin === 'pencil-restored') {
+          await restoreFromSidecar({
+            modelType: scenario.modelType,
+            params: {
+              model_type: scenario.modelType,
+              prompt: 'A traveler crosses a quiet garden at sunrise.',
+              resolution: '1344x768',
+              video_length: 345,
+              duration_seconds: 345 / 24,
+              sliding_window_size: 345,
+              sliding_window_overlap: 0,
+              sliding_window_memory_override: false,
+              minimax_h3_multi_window: false,
+              minimax_h3_reference_sequence: false,
+              num_inference_steps: 6,
+              image_mode: 0,
+              _studio_video_workflow: scenario.reference ? 'references' : 'frames',
+              _duration_planning_mode: 'windows',
+              ...(scenario.reference ? {minimax_h3_references: [referenceRecord]} : {}),
+            },
+            name: `${scenario.modelType}-resolution-preset-restored.mp4`,
+          });
+        } else {
+          await page.evaluate(() => {
+            const state = window.store.getState();
+            window.store.setState({
+              durationSeconds: 345 / 24,
+              slidingWindowSeconds: 345 / 24,
+              slidingWindowLocked: true,
+              restoredWindowSelectionKey: null,
+              params: {...state.params,
+                resolution: '1344x768', video_length: 345, sliding_window_size: 345,
+                sliding_window_overlap: 0, sliding_window_memory_override: true,
+                minimax_h3_multi_window: false, minimax_h3_reference_sequence: false,
+                _duration_planning_mode: 'windows'},
+            });
+          });
+        }
+        await page.evaluate(() => new Promise(resolve => {
+          requestAnimationFrame(() => requestAnimationFrame(resolve));
+        }));
+
+        for (const [tier, expected] of Object.entries(resolutionByTier)) {
+          await page.getByRole('button', {name: tier, exact: true}).click();
+          await page.evaluate(() => new Promise(resolve => {
+            requestAnimationFrame(() => requestAnimationFrame(resolve));
+          }));
+          const afterTier = await page.evaluate(() => {
+            const state = window.store.getState();
+            return {
+              resolution: state.params.resolution,
+              frames: state.params.video_length,
+              window: state.params.sliding_window_size,
+              duration: state.durationSeconds,
+              windowSeconds: state.slidingWindowSeconds,
+              locked: state.slidingWindowLocked,
+              sequence: state.params.minimax_h3_multi_window === true
+                || state.params.minimax_h3_reference_sequence === true,
+            };
+          });
+          assert.deepEqual(afterTier, {
+            resolution: expected.landscape,
+            frames: 345, window: 345,
+            duration: 345 / 24, windowSeconds: 345 / 24,
+            locked: true, sequence: false,
+          }, `${origin} ${scenario.reference ? 'References' : 'Frames'} keeps its explicit one-window geometry at ${tier} despite 124-frame Auto`);
+        }
+
+        await page.evaluate(() => window.store.getState().setAspectRatio('9:16'));
+        await page.evaluate(() => new Promise(resolve => {
+          requestAnimationFrame(() => requestAnimationFrame(resolve));
+        }));
+        assert.deepEqual(await page.evaluate(() => {
+          const state = window.store.getState();
+          return {resolution: state.params.resolution, frames: state.params.video_length,
+            window: state.params.sliding_window_size, duration: state.durationSeconds,
+            locked: state.slidingWindowLocked};
+        }), {
+          resolution: resolutionByTier['1080p'].portrait,
+          frames: 345, window: 345, duration: 345 / 24, locked: true,
+        }, `${origin} ${scenario.reference ? 'References' : 'Frames'} keeps the window through portrait aspect change`);
+
+        await page.evaluate(() => window.store.getState().setAspectRatio('16:9'));
+        await page.evaluate(() => new Promise(resolve => {
+          requestAnimationFrame(() => requestAnimationFrame(resolve));
+        }));
+        assert.equal(await page.evaluate(() => window.store.getState().params.sliding_window_size), 345,
+          'Returning to landscape keeps the explicit native window');
+
+        await page.locator('button[title$="click to resume Auto"]').click();
+        await page.getByRole('button', {name: '540p', exact: true}).click();
+        await page.evaluate(() => new Promise(resolve => {
+          requestAnimationFrame(() => requestAnimationFrame(resolve));
+        }));
+        const autoAfterUnlock = await page.evaluate(() => {
+          const state = window.store.getState();
+          return {locked: state.slidingWindowLocked, frames: state.params.video_length,
+            window: state.params.sliding_window_size,
+            duration: state.durationSeconds,
+            sequence: state.params.minimax_h3_multi_window === true
+              || state.params.minimax_h3_reference_sequence === true};
+        });
+        assert.deepEqual(autoAfterUnlock, {
+          locked: false, frames: 345, window: 124,
+          duration: 345 / 24, sequence: true,
+        }, 'Deliberately unlocking still lets Pika Auto select its 124-frame pass');
+      }
+    }
+
+    for (const scenario of rollingScenarios) {
+      await configure({...scenario, rolling: true, resolution: '1344x768'});
+      const options = {
+        ...optionsByType[scenario.modelType],
+        sliding_window_memory_policy: resolutionAutoPolicy,
+        omni_sequence_memory_policy: resolutionAutoPolicy,
+      };
+      optionsByType[scenario.modelType] = options;
+      await page.evaluate(value => window.store.setState({modelOptions: value}), options);
+      await page.evaluate(({reference}) => {
+        const state = window.store.getState();
+        window.store.setState({
+          durationSeconds: 345 / 24,
+          slidingWindowSeconds: 243 / 24,
+          slidingWindowLocked: true,
+          slidingWindowOverlap: 18,
+          restoredWindowSelectionKey: null,
+          params: {...state.params,
+            resolution: '1344x768', video_length: 345, sliding_window_size: 243,
+            sliding_window_overlap: 18, sliding_window_memory_override: true,
+            minimax_h3_multi_window: !reference,
+            minimax_h3_reference_sequence: reference,
+            minimax_h3_sequence_clip_frames: reference ? 243 : undefined,
+            minimax_h3_sequence_continuity: true,
+            minimax_h3_sequence_memory_override: reference,
+            _duration_planning_mode: 'windows'},
+        });
+      }, {reference: scenario.reference});
+      await page.getByRole('button', {name: '720p', exact: true}).click();
+      await page.evaluate(() => new Promise(resolve => {
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+      }));
+      const rollingAfterResolution = await page.evaluate(() => {
+        const state = window.store.getState();
+        return {resolution: state.params.resolution, frames: state.params.video_length,
+          window: state.params.sliding_window_size, overlap: state.params.sliding_window_overlap,
+          duration: state.durationSeconds, windowSeconds: state.slidingWindowSeconds,
+          locked: state.slidingWindowLocked,
+          sequence: state.params.minimax_h3_multi_window === true
+            || state.params.minimax_h3_reference_sequence === true,
+          sequenceClipFrames: state.params.minimax_h3_sequence_clip_frames};
+      });
+      assert.deepEqual(rollingAfterResolution, {
+        resolution: '1280x704', frames: 345, window: 243, overlap: 18,
+        duration: 345 / 24, windowSeconds: 243 / 24, locked: true,
+        sequence: true, sequenceClipFrames: scenario.reference ? 243 : undefined,
+      }, `${scenario.reference ? 'References' : 'Frames'} retains locked rolling geometry and overlap after a resolution change`);
     }
 
     const rollingFrames = rollingScenarios[0];

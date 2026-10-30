@@ -6727,7 +6727,14 @@ export const useStore = create<AppState>((set, get) => ({
       resolutionPreset: preset,
       aspectRatio: ratio,
       params: { ...s.params, resolution },
-      ...(resolution !== s.params.resolution ? { restoredWindowSelectionKey: null } : {}),
+      ...(resolution !== s.params.resolution ? {
+        // A locked Pika window is an explicit native-pass choice. Keep it
+        // pinned to the newly selected canvas so Auto does not replace it.
+        restoredWindowSelectionKey: s.slidingWindowLocked
+          && isPikaFlexModelType(s.params.model_type, s.modelOptions)
+          ? h3WindowOverrideKey(s.params.model_type, resolution)
+          : null,
+      } : {}),
       h3WindowPlan: null,
     }))
   },
@@ -6746,7 +6753,13 @@ export const useStore = create<AppState>((set, get) => ({
       resolutionPreset: preset,
       aspectRatio: ratio,
       params: { ...s.params, resolution },
-      ...(resolution !== s.params.resolution ? { restoredWindowSelectionKey: null } : {}),
+      ...(resolution !== s.params.resolution ? {
+        // Aspect changes use the same model/resolution key transition.
+        restoredWindowSelectionKey: s.slidingWindowLocked
+          && isPikaFlexModelType(s.params.model_type, s.modelOptions)
+          ? h3WindowOverrideKey(s.params.model_type, resolution)
+          : null,
+      } : {}),
       h3WindowPlan: null,
     }))
   },
