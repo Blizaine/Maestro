@@ -82,13 +82,20 @@ Memory advice for this experimental adapter is conservative and must not be
 read as a measured Pika performance guarantee. Motion, voices, music and object
 positions can still drift across windows; inspect joins for the actual project.
 
-The resolution menus use the two native tiers and fixed aspect-ratio buckets
-from the pinned [Pika H3 Flex repository](https://huggingface.co/Pika-Labs/Pika-H3-Flex/tree/0ddf55ad7067ca1e76812253bd7b4600df87f759):
+Both resolution menus offer **480p, 540p, 720p, 768p and 1080p**. The 480p and
+768p aspect-ratio buckets come from the pinned
+[Pika H3 Flex repository](https://huggingface.co/Pika-Labs/Pika-H3-Flex/tree/0ddf55ad7067ca1e76812253bd7b4600df87f759).
+The added tiers use Maestro's standard aligned H3 canvases. **1080p is
+experimental** and may need shorter clips; the added tiers have not received
+separate GPU render qualification. The 480p default is unchanged.
 
 | Tier | Width × height buckets |
 | --- | --- |
 | 480p | `960x416`, `832x480`, `704x480`, `640x480`, `608x480`, `480x480`, `480x608`, `480x640`, `480x704`, `480x832`, `416x960` |
+| 540p | `1280x544`, `960x544`, `544x960`, `736x736`, `736x544`, `544x736` |
+| 720p | `1632x704`, `1280x704`, `704x1280`, `704x704`, `928x704`, `704x928` |
 | 768p | `1536x672`, `1344x768`, `1152x768`, `1024x768`, `960x768`, `768x768`, `768x960`, `768x1024`, `768x1152`, `768x1344`, `672x1536` |
+| 1080p | `2528x1088`, `1920x1088`, `1088x1920`, `1088x1088`, `1440x1088`, `1088x1440` |
 
 ## Local limits and claims
 
