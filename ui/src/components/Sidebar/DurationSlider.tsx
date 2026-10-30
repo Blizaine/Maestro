@@ -11,6 +11,7 @@ import {
   effectiveH3OmniSequenceFrames,
   h3RecommendationLabel,
   h3MaximumFrames,
+  isPikaFlexSinglePass,
   supportsH3ExtendedDuration,
   h3OmniSequenceWindowCount,
   h3TimelineFrames,
@@ -78,7 +79,7 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
   const minimumFrames = modelOptions?.frames_minimum ?? Math.round(fps)
   const maximumFrames = h3MaximumFrames(modelOptions, extendedDuration) ?? Math.round(300 * fps)
   const frameStep = modelOptions?.frames_steps ?? Math.round(fps)
-  const isPikaFlex = modelOptions?.minimax_h3_pika_flex === true
+  const pikaSinglePass = isPikaFlexSinglePass(modelOptions)
   const isOmniReference = modelOptions?.omni_reference === true
   const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
   const isLtx = modelOptions?.multi_window_sequence_controls === true
@@ -143,7 +144,7 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
       ? continuationFirstWindowSeconds(nativeMinSeconds, overlap, fps)
       : nativeMinSeconds,
   )
-  const maxDuration = isPikaFlex
+  const maxDuration = pikaSinglePass
     ? maximumFrames / fps
     : isH3 || isLtx || supportsSlidingWindows
     ? LONG_FORM_MAX_SECONDS
@@ -266,8 +267,8 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
         firstWindowSeconds={firstWindowSeconds}
         overlapSeconds={overlapSeconds}
         discardSeconds={discardSeconds}
-        showSingleWindow={!isPikaFlex && (isH3 || isLtx || supportsSlidingWindows)}
-        enablePlanningModes={!isPikaFlex && (isH3 || isLtx || supportsSlidingWindows)}
+        showSingleWindow={!pikaSinglePass && (isH3 || isLtx || supportsSlidingWindows)}
+        enablePlanningModes={!pikaSinglePass && (isH3 || isLtx || supportsSlidingWindows)}
         planningMode={durationPlanningMode}
         onPlanningModeChange={mode => {
           setParam('_duration_planning_mode', mode)
@@ -374,7 +375,7 @@ export function WindowSettings() {
   const swDefaults = (modelOptions as Record<string, unknown> | null)?.sliding_window_defaults as Record<string, number> | undefined
   const supportsSlidingWindows = modelOptions?.sliding_window === true
   const isH3 = String(modelOptions?.architecture || '').startsWith('minimax_h3')
-  const isPikaFlex = modelOptions?.minimax_h3_pika_flex === true
+  const pikaSinglePass = isPikaFlexSinglePass(modelOptions)
   const isLtx = modelOptions?.multi_window_sequence_controls === true
   const isOmniReference = modelOptions?.omni_reference === true
   const h3MultiWindowEnabled = isOmniReference
@@ -473,7 +474,7 @@ export function WindowSettings() {
 
   if (
     modelType === 'viggle_animate'
-    || isPikaFlex
+    || pikaSinglePass
     || (!isH3 && !supportsSlidingWindows && !omniReferenceSequence)
   ) return null
 

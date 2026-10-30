@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from . import fasth3
-from .pika_flex import normalize_pika_flex_attention
+from .pika_flex import (
+    PIKA_FLEX_FRAME_MAXIMUM,
+    PIKA_FLEX_FRAME_MINIMUM,
+    PIKA_FLEX_FRAME_STEP,
+    normalize_pika_flex_attention,
+)
 
 PIKA_FLEX_REPO = "Pika-Labs/Pika-H3-Flex"
 PIKA_FLEX_REVISION = "0ddf55ad7067ca1e76812253bd7b4600df87f759"
@@ -94,7 +99,8 @@ PIKA_FLEX_HELP = (
     "and first/last images. References supports ordered image, video, and audio "
     "references and needs at least one image or video. Begin at 480p / 5.17 seconds. "
     "SLA is the default on supported GPUs and safely falls back to dense attention when unavailable; SOL is optional experimental attention. "
-    "Continuation, control video, extra adapters, cache, and refinement are unavailable. "
+    "Native motion and stereo-audio continuation are available only through explicit rolling-window mode. "
+    "Control video, extra adapters, cache, and refinement are unavailable. "
     "Maestro has no Pika 4K upsampler or stem extraction, and consumer-GPU real-time "
     "performance has not been verified. The initial experimental stack uses the stock Comfy scaled-FP8 base, BF16 Pika adapter, and INT8 ConvRot video VAE."
 )
@@ -155,23 +161,34 @@ def pika_flex_capabilities(reference: bool) -> dict[str, Any]:
         "audio_prompt_type_sources": {},
         "infer_audio_prompt_from_guide": False,
         "returns_audio": True,
-        "sliding_window": False,
-        "video_continuation": False,
-        "minimax_h3_multi_window": False,
-        "minimax_h3_reference_sequence": False,
-        "sliding_window_end_image_at_final": False,
+        "sliding_window": True,
+        "video_continuation": True,
+        "sliding_window_exact_total_frames": True,
+        "sliding_window_trim_to_requested": True,
+        "minimax_h3_multi_window": not reference,
+        "minimax_h3_reference_sequence": reference,
+        "sliding_window_defaults": {
+            "window_min": PIKA_FLEX_FRAME_MINIMUM,
+            "window_max": PIKA_FLEX_FRAME_MAXIMUM,
+            "window_step": PIKA_FLEX_FRAME_STEP,
+            "window_default": PIKA_FLEX_FRAME_MINIMUM,
+            "overlap_min": 1,
+            "overlap_max": 103,
+            "overlap_step": PIKA_FLEX_FRAME_STEP,
+            "overlap_offset": 1,
+            "overlap_default": 18,
+            "discard_last_frames": 0,
+        },
+        "sliding_window_end_image_at_final": not reference,
         "sliding_window_auto_prompt_pacing": False,
-        "sliding_window_memory_policy": None,
-        "sliding_window_audio_history": False,
-        "audio_guide_window_slicing": False,
+        "sliding_window_audio_history": True,
+        "audio_guide_window_slicing": True,
         "video_to_video_inpaint": False,
         "guide_custom_choices": {},
         "video_guide_outpainting": [],
         "mask_preprocessing": {},
         "director_video_strategy": "",
         "director_reference_mode": "none",
-        "director_memory_policy": None,
-        "omni_sequence_memory_policy": None,
         "director_audio_input_mode": "none",
         "director_shot_image_support": "none",
         "director_endpoint_continuity": False,

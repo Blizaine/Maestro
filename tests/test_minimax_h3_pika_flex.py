@@ -19,6 +19,7 @@ from models.minimax_h3.pika_flex import (
     PIKA_FLEX_KNOTS,
     PIKA_FLEX_STEPS,
     is_pika_flex_single_frame_start_anchor,
+    pika_flex_sequence_enabled,
     pika_flex_sigmas,
     pika_flex_step,
     validate_pika_flex_request,
@@ -219,6 +220,15 @@ class PikaFlexStepTests(unittest.TestCase):
 
 
 class PikaFlexRequestTests(unittest.TestCase):
+    class TensorStub:
+        def __init__(self, shape):
+            self.shape = shape
+
+        def numel(self):
+            import math
+
+            return math.prod(self.shape)
+
     def test_valid_recipe_and_each_conditioning_surface(self):
         references_request = {
             "num_inference_steps": 6,
@@ -329,6 +339,104 @@ class PikaFlexRequestTests(unittest.TestCase):
             ):
                 validate_pika_flex_request(request, allow_frames=True)
 
+    def test_explicit_sequences_validate_native_prefix_and_retain_reference_inputs(self):
+        video_prefix = self.TensorStub((3, 18, 480, 832))
+        # One-frame of PCM rounding shortfall is tolerated by the native H3
+        # audio-tail contract; WGP slices the requested duration from output.
+        audio_prefix = self.TensorStub((24_000 - 400, 2))
+        frames_request = {
+            "minimax_h3_multi_window": True,
+            "window_start_frame_no": 106,
+            "frame_num": 124,
+            "prefix_frames_count": 18,
+            "input_video": video_prefix,
+            "input_waveform": audio_prefix,
+            "input_waveform_sample_rate": 32_000,
+        }
+        validate_pika_flex_request(
+            frames_request,
+            allow_frames=True,
+            allow_continuation=True,
+        )
+        self.assertEqual(124 - (18 - 1), 107)
+        self.assertEqual((107 - 5) % 17, 0)
+
+        references = [{"type": "image", "path": "identity.png"}]
+        references_request = {
+            "minimax_h3_reference_sequence": True,
+            "window_start_frame_no": 106,
+            "frame_num": 124,
+            "prefix_frames_count": 18,
+            "input_video": video_prefix,
+            "input_waveform": audio_prefix,
+            "input_waveform_sample_rate": 32_000,
+            "minimax_h3_references": references,
+        }
+        validate_pika_flex_request(
+            references_request,
+            allow_references=True,
+            allow_continuation=True,
+        )
+        self.assertIs(references_request["minimax_h3_references"], references)
+
+    def test_sequence_prefix_rejects_bad_video_audio_and_role_flags(self):
+        base = {
+            "minimax_h3_multi_window": True,
+            "window_start_frame_no": 106,
+            "frame_num": 124,
+            "prefix_frames_count": 18,
+            "input_video": self.TensorStub((3, 18, 480, 832)),
+            "input_waveform": self.TensorStub((24_000, 2)),
+            "input_waveform_sample_rate": 32_000,
+        }
+        invalid = (
+            ({**base, "input_video": self.TensorStub((3, 17, 480, 832))}, "frame count"),
+            ({**base, "input_waveform": self.TensorStub((24_000, 1))}, "stereo channels"),
+            ({**base, "input_waveform_sample_rate": 0}, "positive sample rate"),
+            ({
+                **base,
+                "prefix_frames_count": 19,
+                "input_video": self.TensorStub((3, 19, 480, 832)),
+                "input_waveform": self.TensorStub((25_333, 2)),
+            }, "17\\*n\\+1"),
+            ({**base, "input_waveform": self.TensorStub((20_000, 2))}, "length"),
+            ({**base, "frame_num": 242}, "17\\*n\\+5"),
+        )
+        for request, message in invalid:
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                validate_pika_flex_request(
+                    request,
+                    allow_frames=True,
+                    allow_continuation=True,
+                )
+
+        with self.assertRaisesRegex(ValueError, "References uses"):
+            pika_flex_sequence_enabled(base, reference=True)
+
+    def test_sequence_requires_first_window_without_prefix_and_explicit_opt_in(self):
+        with self.assertRaisesRegex(ValueError, "explicit sequence"):
+            validate_pika_flex_request(
+                {
+                    "window_start_frame_no": 106,
+                    "frame_num": 124,
+                    "prefix_frames_count": 18,
+                    "input_video": self.TensorStub((3, 18, 480, 832)),
+                    "input_waveform": self.TensorStub((24_000, 2)),
+                    "input_waveform_sample_rate": 32_000,
+                },
+                allow_frames=True,
+            )
+        validate_pika_flex_request(
+            {
+                "minimax_h3_multi_window": True,
+                "window_start_frame_no": 0,
+                "frame_num": 124,
+                "prefix_frames_count": 0,
+            },
+            allow_frames=True,
+            allow_continuation=True,
+        )
+
     def test_rejects_wrong_recipe_values(self):
         cases = (
             ({"num_inference_steps": 5}, "num_inference_steps=6"),
@@ -361,7 +469,7 @@ class PikaFlexRequestTests(unittest.TestCase):
             ({"video_prompt_type": "GV"}, "control video"),
             ({"frames_to_inject": ["frame.png"]}, "control video"),
             ({"input_masks": ["mask.png"]}, "control video"),
-            ({"input_video": "source.mp4"}, "control video"),
+            ({"input_video": "source.mp4"}, "source video/audio|control video"),
             ({"audio_guide": "source.wav"}, "control video"),
             ({"face_refinement": {"strength": 0.5}}, "face refinement"),
         )

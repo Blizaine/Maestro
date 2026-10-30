@@ -11837,6 +11837,7 @@ async def _prepare_generation_submission(
                 f"{h3_window_adjustment['resolution']}, "
                 f"{h3_window_adjustment['requested_window_frames']} -> "
                 f"{h3_window_adjustment['effective_window_frames']} frames. "
+                f"{h3_window_adjustment.get('recommendation_note', '')} "
                 "Requested output duration is unchanged."
             )
 
@@ -11937,6 +11938,7 @@ async def _prepare_generation_submission(
         h3_sequence_max_frames = int(
             _generation_model_def.get("frames_maximum") or 345
         )
+        h3_pika_flex = bool(_generation_model_def.get("minimax_h3_pika_flex"))
         if h3_sequence_enabled:
             from models.minimax_h3.minimax_h3_handler import (
                 apply_h3_omni_sequence_memory_policy,
@@ -11958,14 +11960,23 @@ async def _prepare_generation_submission(
                 )
             h3_sequence_max_frames = int(
                 body.get("minimax_h3_sequence_clip_frames")
+                or (
+                    body.get("sliding_window_size")
+                    if h3_pika_flex
+                    else None
+                )
                 or h3_sequence_max_frames
             )
             # The job-level VRAM estimator runs before multi-clip dispatch.
             # Give it the actual native pass ceiling so it budgets one Omni
             # clip rather than the entire joined sequence timeline.
-            body["sliding_window_size"] = min(
-                h3_sequence_total_frames or h3_sequence_max_frames,
-                h3_sequence_max_frames,
+            body["sliding_window_size"] = (
+                h3_sequence_max_frames
+                if h3_pika_flex
+                else min(
+                    h3_sequence_total_frames or h3_sequence_max_frames,
+                    h3_sequence_max_frames,
+                )
             )
             if h3_native_sequence:
                 body["sliding_window_overlap"] = normalize_h3_overlap_frames(
@@ -11985,12 +11996,14 @@ async def _prepare_generation_submission(
                     else "Auto"
                 )
                 print(
-                    f"[MiniMax H3 Omni] {override_label} native window: "
+                    f"[{'Pika H3 Flex References' if h3_pika_flex else 'MiniMax H3 Omni'}] "
+                    f"{override_label} native window: "
                     f"{h3_sequence_adjustment['checkpoint'].title()} "
                     f"checkpoint, "
                     f"{h3_sequence_adjustment['gpu_vram_gb']:.1f} GB, "
                     f"{h3_sequence_adjustment['resolution']}, "
                     f"{h3_sequence_max_frames} frames maximum. "
+                    f"{h3_sequence_adjustment.get('recommendation_note', '')} "
                     "Requested sequence duration is unchanged."
                 )
         if h3_sequence_enabled and (
@@ -12242,9 +12255,13 @@ async def _prepare_generation_submission(
             body["h3_window_plan"] = h3_window_plan_response
             if len(cached_prompts) == 1:
                 body["multi_prompts_gen_type"] = 0
-                body["sliding_window_size"] = min(
-                    h3_sequence_total_frames,
-                    h3_sequence_max_frames,
+                body["sliding_window_size"] = (
+                    h3_sequence_max_frames
+                    if h3_pika_flex
+                    else min(
+                        h3_sequence_total_frames,
+                        h3_sequence_max_frames,
+                    )
                 )
                 body.pop("per_clip_frames", None)
                 body.pop("per_clip_minimax_h3_references", None)

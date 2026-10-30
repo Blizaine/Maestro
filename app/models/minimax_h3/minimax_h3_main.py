@@ -2602,11 +2602,24 @@ class MiniMaxH3Model:
                     "minimax_h3_references": minimax_h3_references,
                     "prefix_frames_count": prefix_frames_count,
                     "window_start_frame_no": window_start_frame_no,
+                    "frame_num": frame_num,
+                    "input_waveform_sample_rate": input_waveform_sample_rate,
                     "frames_to_inject": frames_to_inject,
                     "video_prompt_type": video_prompt_type,
                     "custom_settings": custom_settings,
                     "face_refinement": _face_refinement,
+                    "minimax_h3_multi_window": _kwargs.get(
+                        "minimax_h3_multi_window", False
+                    ),
+                    "minimax_h3_reference_sequence": _kwargs.get(
+                        "minimax_h3_reference_sequence", False
+                    ),
                 }
+            )
+            sequence_enabled = bool(
+                pika_request["minimax_h3_reference_sequence"]
+                if self.omni_reference
+                else pika_request["minimax_h3_multi_window"]
             )
             if is_pika_flex_single_frame_start_anchor(
                 image_start=image_start,
@@ -2619,6 +2632,7 @@ class MiniMaxH3Model:
                 # Frames requests. Explicit image_start makes H3 discard this
                 # single-frame carrier before continuation preparation.
                 pika_request["input_video"] = None
+                pika_request["prefix_frames_count"] = 0
             if audio_prompt_type:
                 raise ValueError(
                     "Pika H3 Flex does not support source-audio prompt modes; "
@@ -2642,6 +2656,7 @@ class MiniMaxH3Model:
                 pika_request,
                 allow_frames=not self.omni_reference,
                 allow_references=self.omni_reference,
+                allow_continuation=sequence_enabled,
             )
         from .two_pass import (
             H3_TWO_PASS_ENABLED,

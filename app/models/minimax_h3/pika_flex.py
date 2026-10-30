@@ -15,6 +15,9 @@ from typing import Any
 PIKA_FLEX_KNOTS = (1000, 750, 500, 250, 100, 40, 0)
 PIKA_FLEX_STEPS = len(PIKA_FLEX_KNOTS) - 1
 PIKA_FLEX_ATTENTION_MODES = ("sage2", "sdpa", "sol", "sla")
+PIKA_FLEX_FRAME_MINIMUM = 124
+PIKA_FLEX_FRAME_STEP = 17
+PIKA_FLEX_FRAME_MAXIMUM = 362
 
 
 def normalize_pika_flex_attention(value: Any) -> str:
@@ -145,6 +148,144 @@ def _is_enabled(value: Any) -> bool:
     return bool(value)
 
 
+def pika_flex_sequence_enabled(
+    inputs: Mapping[str, Any],
+    *,
+    reference: bool,
+) -> bool:
+    """Read the sequence opt-in that belongs to this Flex workflow."""
+
+    if not isinstance(inputs, Mapping):
+        raise TypeError("Pika H3 Flex request settings must be a mapping.")
+    active_key = (
+        "minimax_h3_reference_sequence"
+        if reference
+        else "minimax_h3_multi_window"
+    )
+    inactive_key = (
+        "minimax_h3_multi_window"
+        if reference
+        else "minimax_h3_reference_sequence"
+    )
+    for key in (active_key, inactive_key):
+        value = inputs.get(key)
+        if value is not None and not isinstance(value, bool):
+            raise ValueError(f"Pika H3 Flex requires {key} to be a boolean.")
+    if inputs.get(inactive_key) is True:
+        workflow = "References" if reference else "Frames"
+        raise ValueError(
+            f"Pika H3 Flex {workflow} uses {active_key} for native continuation."
+        )
+    return inputs.get(active_key) is True
+
+
+def _strict_int(value: Any, *, name: str, default: int | None = None) -> int:
+    if value is None and default is not None:
+        return default
+    number = _finite_float(value, name=name)
+    if not number.is_integer():
+        raise ValueError(f"{name} must be a whole number.")
+    return int(number)
+
+
+def _shape(value: Any, *, name: str) -> tuple[int, ...]:
+    shape = getattr(value, "shape", None)
+    if shape is None:
+        raise ValueError(f"Pika H3 Flex continuation {name} must be a tensor.")
+    try:
+        return tuple(int(dimension) for dimension in shape)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(
+            f"Pika H3 Flex continuation {name} has an invalid shape."
+        ) from error
+
+
+def _validate_runtime_continuation(inputs: Mapping[str, Any]) -> None:
+    """Require a legal generated visual and stereo-audio overlap on later passes."""
+
+    window_start = _strict_int(
+        inputs.get("window_start_frame_no", 0),
+        name="window_start_frame_no",
+        default=0,
+    )
+    prefix_count = _strict_int(
+        inputs.get("prefix_frames_count", 0),
+        name="prefix_frames_count",
+        default=0,
+    )
+    input_video = inputs.get("input_video")
+    input_waveform = inputs.get("input_waveform")
+    if window_start <= 0:
+        if prefix_count or _has_payload(input_video) or _has_payload(input_waveform):
+            raise ValueError(
+                "Pika H3 Flex continuation prefixes are valid only after the first window."
+            )
+        return
+
+    if prefix_count <= 0 or not _has_payload(input_video):
+        raise ValueError(
+            "Pika H3 Flex continuation needs the complete generated video overlap."
+        )
+    video_shape = _shape(input_video, name="video prefix")
+    if len(video_shape) != 4 or video_shape[0] != 3 or video_shape[1] != prefix_count:
+        raise ValueError(
+            "Pika H3 Flex continuation video must be a C,T,H,W RGB tensor whose "
+            "frame count matches prefix_frames_count."
+        )
+    if prefix_count < 1 or (prefix_count - 1) % PIKA_FLEX_FRAME_STEP:
+        raise ValueError(
+            "Pika H3 Flex continuation overlap must use the 17*n+1 frame grid."
+        )
+
+    frame_count = _strict_int(inputs.get("frame_num"), name="frame_num")
+    if (
+        frame_count < PIKA_FLEX_FRAME_MINIMUM
+        or frame_count > PIKA_FLEX_FRAME_MAXIMUM
+        or (frame_count - 5) % PIKA_FLEX_FRAME_STEP
+    ):
+        raise ValueError(
+            "Pika H3 Flex continuation windows must use 124–362 frames on the "
+            "17*n+5 grid."
+        )
+    # The pass cap includes the overlap context. The newly generated portion
+    # can therefore be shorter than the 124-frame standalone minimum while
+    # still occupying a legal H3 target lattice (124 with an 18-frame overlap
+    # generates 107 frames: 17*n+5). WGP owns the prefix extraction and its
+    # audio-tail rounding, so this checks only the shared latent/frame grid.
+    target_frames = frame_count - (prefix_count - 1)
+    if target_frames < 5 or (target_frames - 5) % PIKA_FLEX_FRAME_STEP:
+        raise ValueError(
+            "Pika H3 Flex overlap must leave a legal 17*n+5 target for the next window."
+        )
+
+    if not _has_payload(input_waveform):
+        raise ValueError(
+            "Pika H3 Flex continuation needs the matching generated stereo-audio overlap."
+        )
+    audio_shape = _shape(input_waveform, name="audio prefix")
+    if len(audio_shape) != 2 or 2 not in audio_shape:
+        raise ValueError(
+            "Pika H3 Flex continuation audio must contain both generated stereo channels."
+        )
+    sample_rate = _strict_int(
+        inputs.get("input_waveform_sample_rate"),
+        name="input_waveform_sample_rate",
+    )
+    if sample_rate <= 0:
+        raise ValueError("Pika H3 Flex continuation audio needs a positive sample rate.")
+    audio_samples = audio_shape[0] if audio_shape[1] == 2 else audio_shape[1]
+    expected_samples = int(round(prefix_count / 24.0 * sample_rate))
+    # WGP slices this many samples from the decoded tail. Audio VAE/codec
+    # rounding can leave a small shortfall at the end of a decoded window.
+    # Allow up to one video-frame of PCM rounding while still rejecting a
+    # mismatched or empty history segment.
+    rounding_tolerance = max(1, int(math.ceil(sample_rate / 24.0)))
+    if audio_samples <= 0 or abs(audio_samples - expected_samples) > rounding_tolerance:
+        raise ValueError(
+            "Pika H3 Flex continuation audio length must align with its video overlap."
+        )
+
+
 def is_pika_flex_single_frame_start_anchor(
     *,
     image_start: Any,
@@ -232,12 +373,15 @@ def validate_pika_flex_request(
     *,
     allow_frames: bool = False,
     allow_references: bool = False,
+    allow_continuation: bool = False,
 ) -> None:
     """Reject request options that change Pika Flex's model-owned recipe.
 
     Standard first/last frame conditioning can be opted into with
     ``allow_frames=True``. H3 image-reference payloads can be enabled separately
-    with ``allow_references=True``. This function validates but does not rewrite
+    with ``allow_references=True``. Native rolling continuation is enabled only
+    by the workflow's explicit sequence flag and is validated against its real
+    generated video and stereo-audio prefixes. This function does not rewrite
     request data.
     """
 
@@ -306,18 +450,31 @@ def validate_pika_flex_request(
         except (TypeError, ValueError):
             one_frame_start_prefix = False
 
-    for key in (
-        "prefix_frames_count",
-        "window_start_frame_no",
-        "minimax_h3_multi_window",
-        "minimax_h3_reference_sequence",
-        "continuation",
-        "continue_video",
-    ):
-        if key == "prefix_frames_count" and one_frame_start_prefix:
-            continue
+    sequence_enabled = pika_flex_sequence_enabled(
+        inputs,
+        reference=allow_references,
+    )
+    if sequence_enabled and not allow_continuation:
+        raise ValueError(
+            "Pika H3 Flex native continuation requires the explicit sequence workflow."
+        )
+    if allow_continuation and not sequence_enabled:
+        raise ValueError(
+            "Pika H3 Flex continuation requires its explicit sequence flag."
+        )
+    if not allow_continuation:
+        for key in ("prefix_frames_count", "window_start_frame_no"):
+            if key == "prefix_frames_count" and one_frame_start_prefix:
+                continue
+            if _is_enabled(inputs.get(key)):
+                raise ValueError(
+                    "Pika H3 Flex does not support continuation without an explicit sequence."
+                )
+    for key in ("continuation", "continue_video"):
         if _is_enabled(inputs.get(key)):
-            raise ValueError("Pika H3 Flex does not support continuation or multi-window generation.")
+            raise ValueError(
+                "Pika H3 Flex uses its model-specific sequence flag for continuation."
+            )
 
     for key in ("minimax_h3_two_pass", "minimax_h3_two_pass_enabled"):
         if _is_enabled(inputs.get(key)):
@@ -344,14 +501,12 @@ def validate_pika_flex_request(
 
     unsupported_media = (
         "input_frames",
-        "input_video",
         "video_guide",
         "video_source",
         "input_masks",
         "mask",
         "video_mask",
         "frames_to_inject",
-        "input_waveform",
         "audio_guide",
         "audio_guide2",
     )
@@ -359,6 +514,19 @@ def validate_pika_flex_request(
         raise ValueError(
             "Pika H3 Flex does not support control video, masks, timed frame injection, or source audio."
         )
+    has_runtime_prefix = any(
+        _has_payload(inputs.get(key))
+        for key in ("input_video", "input_waveform")
+    )
+    if has_runtime_prefix:
+        if not allow_continuation:
+            raise ValueError(
+                "Pika H3 Flex does not support source video/audio; native generated "
+                "prefixes require an explicit sequence."
+            )
+        _validate_runtime_continuation(inputs)
+    elif allow_continuation and _is_enabled(inputs.get("window_start_frame_no")):
+        _validate_runtime_continuation(inputs)
     if _has_payload(inputs.get("video_prompt_type")):
         raise ValueError(
             "Pika H3 Flex does not support control video or timed frame injection."

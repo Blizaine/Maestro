@@ -1140,7 +1140,7 @@ export interface ModelOptions {
     protect_audio: boolean
   } | null
   minimax_h3_fused_turbo?: boolean
-  /** Fixed single-pass Pika H3 Flex recipe; duration never follows a window. */
+  /** Fixed six-evaluation Pika H3 Flex recipe; continuation follows capability flags. */
   minimax_h3_pika_flex?: boolean
   minimax_h3_fasth3?: boolean
   minimax_h3_fasth3_omniref?: boolean

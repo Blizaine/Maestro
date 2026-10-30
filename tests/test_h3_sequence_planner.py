@@ -1349,7 +1349,13 @@ class H3ReferenceSequencePlannerTests(unittest.TestCase):
         self.assertIn('h3ReferenceSequence', store)
         self.assertIn('minimax_h3_sequence_clip_frames', store)
         self.assertIn('apply_h3_omni_sequence_memory_policy', launch)
-        self.assertIn('body["sliding_window_size"] = min(', launch)
+        self.assertIn(
+            'body["sliding_window_size"] = (\n'
+            '                h3_sequence_max_frames\n'
+            '                if h3_pika_flex\n'
+            '                else min(',
+            launch,
+        )
         self.assertIn('omniReferenceSequence', duration)
         self.assertIn(
             "{isH3 || isLtx ? 'Window Length' : 'Window Size'}",

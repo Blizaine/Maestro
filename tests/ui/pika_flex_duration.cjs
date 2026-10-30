@@ -7,15 +7,21 @@ const esbuild = require(path.join(root, 'ui/node_modules/esbuild'));
 const playwright = require(process.env.MAESTRO_PLAYWRIGHT
   || 'C:/Users/bliza/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
 
-const modelOptionsFor = (modelType, reference = false) => ({
+const modelOptionsFor = (modelType, reference = false, rolling = false) => ({
   model_type: modelType,
   architecture: 'minimax_h3',
   fps: 24,
   frames_minimum: 124,
   frames_maximum: 362,
   frames_steps: 17,
-  sliding_window: false,
-  sliding_window_defaults: null,
+  sliding_window: rolling,
+  video_continuation: rolling,
+  sliding_window_audio_history: rolling,
+  sliding_window_defaults: rolling ? {
+    window_min: 124, window_max: 362, window_step: 17,
+    window_default: 243, overlap_min: 1, overlap_max: 103,
+    overlap_step: 17, overlap_default: 18, discard_last_frames: 0,
+  } : null,
   sliding_window_memory_policy: null,
   omni_sequence_memory_policy: null,
   minimax_h3_pika_flex: true,
@@ -56,11 +62,11 @@ const modelDefFor = (modelType, reference = false) => ({
     import React from 'react';
     import {createRoot} from 'react-dom/client';
     import {useStore} from './src/stores/useStore';
-    import {DurationSlider, WindowSettings} from './src/components/Sidebar/DurationSlider';
+    import {DurationSlider} from './src/components/Sidebar/DurationSlider';
     window.store = useStore;
     window.mount = () => {
       window.root = createRoot(document.getElementById('root'));
-      window.root.render(<><DurationSlider includeWindowSettings/><WindowSettings/></>);
+      window.root.render(<DurationSlider includeWindowSettings/>);
     };
   `, resolveDir: path.join(root, 'ui'), loader: 'tsx'}, bundle: true, write: false,
     jsx: 'automatic', define: {'process.env.NODE_ENV': '"development"'}, logLevel: 'silent'});
@@ -89,7 +95,7 @@ const modelDefFor = (modelType, reference = false) => ({
     await page.goto('http://pika-flex-duration.test');
     await page.addScriptTag({content: bundle.outputFiles[0].text});
 
-    const configure = async ({modelType, reference = false, resolution, ordinary = false}) => {
+    const configure = async ({modelType, reference = false, resolution, ordinary = false, rolling = false}) => {
       const options = ordinary ? {
         ...modelOptionsFor(modelType, false),
         minimax_h3_pika_flex: false,
@@ -99,9 +105,9 @@ const modelDefFor = (modelType, reference = false) => ({
           window_min: 124, window_max: 345, window_step: 17,
           window_default: 243, overlap_default: 18, discard_last_frames: 0,
         },
-      } : modelOptionsFor(modelType, reference);
+      } : modelOptionsFor(modelType, reference, rolling);
       optionsByType[modelType] = options;
-      await page.evaluate(({modelType, reference, resolution, options}) => {
+      await page.evaluate(({modelType, reference, resolution, options, ordinary, rolling}) => {
         const state = window.store.getState();
         const references = reference
           ? [{type: 'image', path: '/uploads/ref.png', filename: 'ref.png', role: 'Traveler'}]
@@ -146,11 +152,15 @@ const modelDefFor = (modelType, reference = false) => ({
             sliding_window_size: 243,
             sliding_window_overlap: 18,
             sliding_window_discard_last_frames: 0,
-            sliding_window_memory_override: true,
-            minimax_h3_extended_duration: true,
-            minimax_h3_multi_window: true,
-            minimax_h3_reference_sequence: true,
-            minimax_h3_sequence_memory_override: true,
+            sliding_window_memory_override: !rolling && !ordinary,
+            minimax_h3_multi_window: !rolling && !ordinary,
+            minimax_h3_reference_sequence: !rolling && !ordinary,
+            minimax_h3_sequence_continuity: true,
+            minimax_h3_sequence_prompt_mode: 'auto',
+            minimax_h3_window_storyboard: true,
+            num_inference_steps: 6,
+            minimax_h3_extended_duration: !rolling && !ordinary,
+            minimax_h3_sequence_memory_override: !rolling && !ordinary,
             minimax_h3_references: references,
             image_start: '', image_end: '', image_prompt_type: '',
             video_guide: '', audio_guide: '',
@@ -158,7 +168,7 @@ const modelDefFor = (modelType, reference = false) => ({
           },
         });
         return window.store.getState().loadModelOptions(modelType);
-      }, {modelType, reference, resolution, options});
+      }, {modelType, reference, resolution, options, ordinary, rolling});
       await page.waitForFunction(modelType => !window.store.getState().modelOptionsLoading
         && window.store.getState().modelOptions?.model_type === modelType, modelType);
     };
@@ -326,8 +336,228 @@ const modelDefFor = (modelType, reference = false) => ({
     assert.equal(ordinary.model_type, ordinaryModel);
     assert.equal(ordinary.video_length, 243, 'Ordinary H3 keeps its legacy one-window clamp');
 
+    await page.evaluate(() => window.mount());
+    const referenceRecord = {type: 'image', path: '/uploads/ref.png', filename: 'ref.png', role: 'Traveler'};
+    const rollingScenarios = [
+      {modelType: 'pika_flex_frames_rolling_test', reference: false, resolution: '832x480'},
+      {modelType: 'pika_flex_references_rolling_test', reference: true, resolution: '1344x768'},
+    ];
+    const setRollingTimeline = async ({reference, frames}) => {
+      const windowSlider = page.getByRole('slider', {name: 'Window length', exact: true});
+      assert.equal(await windowSlider.count(), 1, 'The rolling backend exposes Window Settings');
+      assert.equal(await windowSlider.isVisible(), true, 'Window Length is visible for rolling Pika Flex');
+      assert.ok(Number(await page.getByRole('slider', {name: 'Duration model duration'}).getAttribute('max')) > 14,
+        'The duration slider exposes long-form durations');
+      await windowSlider.focus();
+      await windowSlider.press('Home');
+      await page.getByRole('button', {name: 'Time', exact: true}).click();
+      const timecode = page.getByRole('textbox', {name: 'Duration timecode', exact: true});
+      await timecode.fill(String(frames / 24));
+      await timecode.press('Enter');
+      await page.waitForFunction(({frames: expectedFrames, reference: isReference}) => {
+        const state = window.store.getState();
+        return state.params.video_length === expectedFrames
+          && state.params.sliding_window_size === 124
+          && state.durationSeconds === expectedFrames / 24
+          && state.slidingWindowSeconds === 124 / 24
+          && state.slidingWindowLocked === true
+          && state.params[isReference ? 'minimax_h3_reference_sequence' : 'minimax_h3_multi_window'] === true;
+      }, {frames, reference});
+      const state = await page.evaluate(() => {
+        const current = window.store.getState();
+        return {
+          frames: current.params.video_length,
+          window: current.params.sliding_window_size,
+          duration: current.durationSeconds,
+          windowSeconds: current.slidingWindowSeconds,
+          locked: current.slidingWindowLocked,
+          overlap: current.params.sliding_window_overlap,
+          sequence: current.params.minimax_h3_reference_sequence === true
+            || current.params.minimax_h3_multi_window === true,
+          steps: current.params.num_inference_steps,
+        };
+      });
+      assert.deepEqual(state, {
+        frames, window: 124, duration: frames / 24, windowSeconds: 124 / 24,
+        locked: true, overlap: 18, sequence: true, steps: 6,
+      }, 'The locked native window preserves the exact non-grid total duration');
+      assert.ok(await page.getByText('18f (0.8s)', {exact: true}).isVisible(),
+        'Window overlap settings remain visible at the 18-frame default');
+      assert.match(await page.locator('#root').innerText(), reference
+        ? /2 native Omni windows/
+        : /2 windows of 5\.2s/,
+      'The duration controls report two rolling windows');
+    };
+    const restoreFromSidecar = async ({modelType, params, name}) => {
+      await page.evaluate(async ({modelType, params, name}) => {
+        const state = window.store.getState();
+        window.store.setState({
+          selectedOutputMeta: {source: 'sidecar', params},
+          selectedOutput: 0,
+          outputs: [{name, workspace: state.activeWorkspace, path: '/outputs/' + name,
+            url: '/' + name, type: 'video', mode: 'video', size: 1, created_at: 1}],
+        });
+        await window.store.getState().loadSettingsFromOutput();
+      }, {modelType, params, name});
+      await page.waitForFunction(expectedModel => window.store.getState().params.model_type === expectedModel,
+        modelType);
+    };
+
+    for (const scenario of rollingScenarios) {
+      submissions.length = 0;
+      await configure({...scenario, rolling: true});
+      await page.evaluate(() => {
+        const state = window.store.getState();
+        window.store.setState({params: {...state.params,
+          prompt: 'A traveler crosses a quiet garden at sunrise.\nThe traveler reaches the far garden gate.'}});
+      });
+      const capabilities = await page.evaluate(() => ({
+        slidingWindow: window.store.getState().modelOptions?.sliding_window,
+        continuation: window.store.getState().modelOptions?.video_continuation,
+        audioHistory: window.store.getState().modelOptions?.sliding_window_audio_history,
+        maximum: window.store.getState().modelOptions?.frames_maximum,
+        minimum: window.store.getState().modelOptions?.frames_minimum,
+        step: window.store.getState().modelOptions?.frames_steps,
+      }));
+      assert.deepEqual(capabilities, {
+        slidingWindow: true, continuation: true, audioHistory: true,
+        maximum: 362, minimum: 124, step: 17,
+      }, 'The mock advertises the new native H3 motion and audio continuation backend');
+      await setRollingTimeline({reference: scenario.reference, frames: 230});
+      submissions.length = 0;
+      await page.evaluate(async () => window.store.getState().startGeneration());
+      const generationState = await page.evaluate(() => {
+        const state = window.store.getState();
+        return {modelType: state.params.model_type, route: state.studioVideoEffectiveCreateRoute,
+          error: state.promptEnhanceError, sequence: state.params.minimax_h3_multi_window,
+          referenceSequence: state.params.minimax_h3_reference_sequence,
+          workflow: state.studioVideoWorkflow, frames: state.params.video_length,
+          window: state.params.sliding_window_size};
+      });
+      assert.equal(submissions.length, 1,
+        'The rolling Pika request reaches the mocked generation endpoint: ' + JSON.stringify(generationState));
+      const submitted = submissions[0];
+      assert.equal(submitted.video_length, 230, 'Rolling generation retains the requested total frames');
+      assert.equal(submitted.sliding_window_size, 124, 'Rolling generation uses the locked native window');
+      assert.equal(submitted.sliding_window_overlap, 18, 'Rolling generation carries the configured overlap');
+      assert.equal(submitted.num_inference_steps, 6, 'Fixed six-step Pika settings remain unchanged');
+      assert.equal(submitted.minimax_h3_multi_window ?? false, !scenario.reference,
+        'Frames uses the H3 multi-window sequence flag');
+      assert.equal(submitted.minimax_h3_reference_sequence ?? false, scenario.reference,
+        'References uses the H3 Omni sequence flag');
+      if (scenario.reference) {
+        assert.equal(submitted.minimax_h3_sequence_continuity, true,
+          'Reference windows use native motion and audio continuation');
+        assert.equal(submitted.minimax_h3_sequence_clip_frames, 124,
+          'References retain the selected native clip size');
+        assert.deepEqual(submitted.minimax_h3_references, [referenceRecord],
+          'The canonical reference manifest survives sequence generation');
+      }
+
+      await restoreFromSidecar({
+        modelType: scenario.modelType,
+        params: submitted,
+        name: scenario.modelType + '-sequence.mp4',
+      });
+      const restored = await page.evaluate(() => {
+        const state = window.store.getState();
+        return {
+          frames: state.params.video_length,
+          window: state.params.sliding_window_size,
+          overlap: state.params.sliding_window_overlap,
+          duration: state.durationSeconds,
+          windowSeconds: state.slidingWindowSeconds,
+          locked: state.slidingWindowLocked,
+          framesSequence: state.params.minimax_h3_multi_window === true,
+          referenceSequence: state.params.minimax_h3_reference_sequence === true,
+          steps: state.params.num_inference_steps,
+          references: state.params.minimax_h3_references,
+        };
+      });
+      assert.equal(restored.frames, 230, 'A sequence sidecar restores its exact total frame count');
+      assert.equal(restored.window, 124, 'A sequence sidecar restores its native window');
+      assert.equal(restored.overlap, 18, 'A sequence sidecar restores its overlap');
+      assert.equal(restored.duration, 230 / 24, 'Restored duration does not round onto the native grid');
+      assert.equal(restored.windowSeconds, 124 / 24);
+      assert.equal(restored.locked, true);
+      assert.equal(restored.framesSequence, !scenario.reference);
+      assert.equal(restored.referenceSequence, scenario.reference);
+      assert.equal(restored.steps, 6);
+      if (scenario.reference) {
+        assert.deepEqual(restored.references, [referenceRecord],
+          'The canonical reference manifest survives sidecar restoration');
+
+        // 231 frames is also off the 17-frame native grid and catches rounding
+        // loss that happens to leave 230 unchanged.
+        await restoreFromSidecar({
+          modelType: scenario.modelType,
+          params: {...submitted, video_length: 231, duration_seconds: 231 / 24},
+          name: scenario.modelType + '-sequence-231.mp4',
+        });
+        const restored231 = await page.evaluate(() => ({
+          frames: window.store.getState().params.video_length,
+          duration: window.store.getState().durationSeconds,
+          window: window.store.getState().params.sliding_window_size,
+          overlap: window.store.getState().params.sliding_window_overlap,
+          sequence: window.store.getState().params.minimax_h3_reference_sequence,
+        }));
+        assert.deepEqual(restored231, {
+          frames: 231, duration: 231 / 24, window: 124, overlap: 18, sequence: true,
+        }, 'Reference sidecar restoration preserves a second non-grid total exactly');
+      }
+    }
+
+    const rollingFrames = rollingScenarios[0];
+    await configure({...rollingFrames, rolling: true});
+    submissions.length = 0;
+    await page.evaluate(async () => {
+      const state = window.store.getState();
+      window.store.setState({
+        durationSeconds: 362 / 24,
+        slidingWindowSeconds: 243 / 24,
+        slidingWindowLocked: true,
+        params: {...state.params,
+          video_length: 362, sliding_window_size: 243, sliding_window_overlap: 18,
+          minimax_h3_multi_window: false, minimax_h3_reference_sequence: false,
+          minimax_h3_extended_duration: false, num_inference_steps: 6},
+      });
+      await window.store.getState().startGeneration();
+    });
+    assert.equal(submissions.length, 1, 'A native one-window Flex request is captured');
+    assert.equal(submissions[0].video_length, 362,
+      'Explicitly disabled sequence flags keep the full native duration');
+    assert.equal(submissions[0].sliding_window_size, 362,
+      'A stale locked 243-frame window cannot shorten the native one-window request');
+    assert.equal(submissions[0].sliding_window_overlap, 0);
+    assert.equal(submissions[0].minimax_h3_multi_window, false);
+    assert.equal(submissions[0].minimax_h3_reference_sequence ?? false, false);
+    assert.equal(submissions[0].num_inference_steps, 6);
+
+    const legacyReferenceModel = rollingScenarios[1].modelType.replace('_rolling_test', '_test');
+    await configure({modelType: legacyReferenceModel, reference: true, resolution: '1344x768'});
+    await restoreFromSidecar({
+      modelType: legacyReferenceModel,
+      params: {
+        model_type: legacyReferenceModel, prompt: 'A traveler crosses a quiet garden at sunrise.',
+        video_length: 362, duration_seconds: 362 / 24, sliding_window_size: 243,
+        sliding_window_overlap: 18, minimax_h3_multi_window: false,
+        minimax_h3_reference_sequence: false, minimax_h3_references: [referenceRecord],
+        num_inference_steps: 6, image_mode: 0, _studio_video_workflow: 'references',
+      },
+      name: legacyReferenceModel + '-single-pass.mp4',
+    });
+    const legacyRestored = await page.evaluate(() => {
+      const state = window.store.getState();
+      return {frames: state.params.video_length, window: state.params.sliding_window_size,
+        overlap: state.params.sliding_window_overlap, duration: state.durationSeconds,
+        sequence: state.params.minimax_h3_reference_sequence};
+    });
+    assert.deepEqual(legacyRestored, {
+      frames: 362, window: 362, overlap: 0, duration: 362 / 24, sequence: false,
+    }, 'The legacy single-pass sidecar still restores its full 362-frame native clip');
+
     assert.deepEqual(errors, [], 'The duration controls render without UI errors');
-    console.log('Pika Flex Frames/References keep 362 frames through hydration and generation; ordinary H3 remains window-capped');
+    console.log('Pika Flex: legacy single-pass, new Frames/References sequences, exact sidecar restores, fixed steps, and ordinary H3 compatibility passed');
   } finally {
     await browser.close();
   }

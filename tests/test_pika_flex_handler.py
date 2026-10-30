@@ -11,9 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app"))
 from models.minimax_h3.minimax_h3_handler import (
     apply_h3_native_omni_memory_policy,
+    apply_h3_omni_sequence_memory_policy,
     apply_h3_window_memory_policy,
     family_handler,
     normalize_h3_window_geometry,
+    recommended_h3_window_profile,
     validate_pika_flex_single_pass_request,
 )
 from models.minimax_h3.duration import h3_duration_model_def
@@ -79,16 +81,16 @@ def test_pika_flex_duration_restore_preserves_exact_resolution_bucket(reference,
 
 
 @pytest.mark.parametrize("reference", [False, True])
-def test_pika_flex_362_frame_duration_ignores_legacy_243_window(reference):
+def test_pika_flex_direct_362_frame_duration_ignores_legacy_243_window(reference):
     data, base, model = definition(reference)
     settings = {key: value for key, value in data.items() if key != "model"}
     settings.update(
         video_length=362,
         sliding_window_size=243,
         sliding_window_overlap=18,
-        minimax_h3_multi_window=True,
-        minimax_h3_reference_sequence=True,
-        minimax_h3_extended_duration=True,
+        minimax_h3_multi_window=False,
+        minimax_h3_reference_sequence=False,
+        minimax_h3_extended_duration=False,
     )
 
     family_handler.fix_settings(base, 3, model, settings)
@@ -100,6 +102,37 @@ def test_pika_flex_362_frame_duration_ignores_legacy_243_window(reference):
     assert settings["minimax_h3_multi_window"] is False
     assert settings["minimax_h3_reference_sequence"] is False
     assert settings["minimax_h3_extended_duration"] is False
+    assert family_handler.validate_generative_settings(base, model, settings) is None
+
+
+@pytest.mark.parametrize(
+    ("reference", "total_frames", "window_frames", "sequence_flag"),
+    [
+        (False, 468, 243, "minimax_h3_multi_window"),
+        (True, 230, 124, "minimax_h3_reference_sequence"),
+    ],
+)
+def test_pika_fix_settings_preserves_explicit_rolling_geometry(
+    reference, total_frames, window_frames, sequence_flag,
+):
+    data, base, model = definition(reference)
+    settings = {key: value for key, value in data.items() if key != "model"}
+    settings.update(
+        video_length=total_frames,
+        sliding_window_size=window_frames,
+        sliding_window_overlap=18,
+        minimax_h3_sequence_memory_override=True,
+        minimax_h3_multi_window=not reference,
+        minimax_h3_reference_sequence=reference,
+    )
+
+    family_handler.fix_settings(base, 3, model, settings)
+
+    assert settings["video_length"] == total_frames
+    assert settings["sliding_window_size"] == window_frames
+    assert settings["sliding_window_overlap"] == 18
+    assert settings[sequence_flag] is True
+    assert settings["sliding_window_discard_last_frames"] == 0
     assert family_handler.validate_generative_settings(base, model, settings) is None
 
 
@@ -131,16 +164,48 @@ def test_pika_flex_api_geometry_and_memory_policy_preserve_one_pass_duration(ref
 
 
 @pytest.mark.parametrize("payload", [
-    {"video_length": 362, "minimax_h3_multi_window": True},
     {"video_length": 362, "minimax_h3_reference_sequence": True},
     {"video_length": 362, "multi_prompts_gen_type": 3},
     {"video_length": 362, "per_clip_frames": [243, 243]},
 ])
-def test_pika_api_rejects_explicit_continuation_requests(payload):
+def test_pika_api_rejects_wrong_role_or_independent_clip_requests(payload):
     _, _, model = definition()
 
-    with pytest.raises(ValueError, match="one native pass"):
+    with pytest.raises(ValueError, match="Frames uses|independent multi-clip"):
         validate_pika_flex_single_pass_request(payload, model)
+
+
+@pytest.mark.parametrize("reference", [False, True])
+@pytest.mark.parametrize(
+    ("total_frames", "window_frames", "expected_target"),
+    [(468, 243, 226), (230, 124, 107)],
+)
+def test_pika_api_accepts_explicit_native_sequences_with_exact_joined_totals(
+    reference, total_frames, window_frames, expected_target,
+):
+    _, _, model = definition(reference)
+    flag = (
+        "minimax_h3_reference_sequence"
+        if reference
+        else "minimax_h3_multi_window"
+    )
+    request = {
+        "video_length": total_frames,
+        "sliding_window_size": window_frames,
+        "sliding_window_overlap": 18,
+        flag: True,
+        "minimax_h3_sequence_continuity": True,
+    }
+
+    validate_pika_flex_single_pass_request(request, model)
+    normalize_h3_window_geometry(request, model)
+
+    assert request["video_length"] == total_frames
+    assert request["sliding_window_size"] == window_frames
+    assert request["sliding_window_overlap"] == 18
+    assert window_frames - (18 - 1) == expected_target
+    assert (expected_target - 5) % 17 == 0
+    assert request[flag] is True
 
 
 def test_pika_api_rejects_duration_above_native_limit_instead_of_shortening():
@@ -211,8 +276,77 @@ def test_flex_has_no_borrowed_duration_evidence_or_extended_override(reference):
     assert not h3_duration_recommendations_enabled(model)
     assert h3_duration_model_def(model, {"minimax_h3_extended_duration": True}) is model
     assert model["inference_steps_min"] == model["inference_steps_max"] == 6
-    assert not model["sliding_window"]
+    assert model["sliding_window"]
+    assert model["video_continuation"]
+    assert model["sliding_window_defaults"]["window_default"] == 124
     assert not model["minimax_h3_two_pass_compatible"]
+
+
+@pytest.mark.parametrize("reference", [False, True])
+def test_flex_auto_memory_profile_is_conservative_estimated_and_manual_can_raise(reference):
+    _, _, model = definition(reference)
+    profile = recommended_h3_window_profile(
+        24,
+        "832x480",
+        model,
+        total_ram_gb=64,
+    )
+    assert profile["supported"]
+    assert profile["frames"] == 124
+    assert profile["checkpoint"] == "pika_flex_estimated"
+    assert profile["recommendation_basis"] == "estimated"
+    assert "not been measured" in profile["recommendation_note"]
+    policy_key = (
+        "omni_sequence_memory_policy"
+        if reference
+        else "sliding_window_memory_policy"
+    )
+    policy = model[policy_key]
+    assert policy["recommendation_basis"] == "estimated"
+    assert all(
+        tier.get("frames") in (None, 124)
+        for band in policy["resolution_bands"]
+        for tier in band["vram_tiers"]
+    )
+    if reference:
+        request = {
+            "video_length": 230,
+            "sliding_window_size": 243,
+            "sliding_window_overlap": 18,
+            "minimax_h3_reference_sequence": True,
+        }
+        advice = apply_h3_omni_sequence_memory_policy(
+            request,
+            model,
+            {"gpu_vram_gb": 24, "ram_gb": 64},
+        )
+        assert advice["effective_clip_frames"] == 124
+        request["minimax_h3_sequence_memory_override"] = True
+        advice = apply_h3_omni_sequence_memory_policy(
+            request,
+            model,
+            {"gpu_vram_gb": 24, "ram_gb": 64},
+        )
+        assert advice["effective_clip_frames"] == 243
+    else:
+        request = {
+            "video_length": 468,
+            "sliding_window_size": 243,
+            "minimax_h3_multi_window": True,
+        }
+        advice = apply_h3_window_memory_policy(
+            request,
+            model,
+            {"gpu_vram_gb": 24, "ram_gb": 64},
+        )
+        assert advice["effective_window_frames"] == 124
+        request["sliding_window_size"] = 243
+        request["minimax_h3_sequence_memory_override"] = True
+        assert apply_h3_window_memory_policy(
+            request,
+            model,
+            {"gpu_vram_gb": 24, "ram_gb": 64},
+        ) is None
 
 
 @pytest.mark.parametrize("change", [

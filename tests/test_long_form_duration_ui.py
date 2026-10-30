@@ -69,7 +69,7 @@ class LongFormDurationUiTests(unittest.TestCase):
             "Timed media, explicit durations, manual prompt lines, and explicit screenplay dialogue",
             control,
         )
-        self.assertIn("enablePlanningModes={!isPikaFlex && (isH3 || isLtx || supportsSlidingWindows)}", studio)
+        self.assertIn("enablePlanningModes={!pikaSinglePass && (isH3 || isLtx || supportsSlidingWindows)}", studio)
         self.assertIn("studioVideoWorkflow === 'extend'", studio)
         self.assertIn("firstWindowSeconds={firstWindowSeconds}", studio)
         self.assertIn("autoSourceLabel={autoSourceLabel}", studio)

@@ -10193,6 +10193,10 @@ def generate_video(
                     **world_generate_kwargs,
                     **({"minimax_h3_extended_duration": minimax_h3_extended_duration}
                        if str(model_def.get("architecture") or "").startswith("minimax_h3") else {}),
+                    **({
+                        "minimax_h3_multi_window": minimax_h3_multi_window,
+                        "minimax_h3_reference_sequence": minimax_h3_reference_sequence,
+                    } if model_def.get("minimax_h3_pika_flex") else {}),
                     save_masks=args.save_masks,
                     temperature=temperature,
                     window_start_frame_no = (

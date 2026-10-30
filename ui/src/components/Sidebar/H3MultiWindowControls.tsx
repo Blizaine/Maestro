@@ -21,6 +21,7 @@ export function H3MultiWindowControls({ section = 'all', compact = false }: { se
   if (generationMode !== 'video' || (!isH3 && !isLtx)) return null
 
   const isOmni = isH3 && modelOptions?.omni_reference === true
+  const requiresContinuity = modelOptions?.minimax_h3_pika_flex === true
   const enabled = isLtx
     ? params.ltx_multi_window === true
     : isOmni
@@ -125,14 +126,17 @@ export function H3MultiWindowControls({ section = 'all', compact = false }: { se
         <label className="flex items-start gap-2 text-[9px] text-text-muted cursor-pointer">
           <input
             type="checkbox"
-            checked={params.minimax_h3_sequence_continuity !== false}
+            checked={requiresContinuity || params.minimax_h3_sequence_continuity !== false}
+            disabled={requiresContinuity}
             onChange={event => setParam('minimax_h3_sequence_continuity', event.target.checked)}
             className="accent-accent-blue mt-0.5"
           />
           <span>
             Carry motion and sound between windows
             <span className="block text-[8px] mt-0.5">
-              Uses native Ref2VA overlap for smooth continuation. Turn off for independent hard-cut clips.
+              {requiresContinuity
+                ? 'Experimental Pika sequences keep motion and audio continuity enabled.'
+                : 'Uses native Ref2VA overlap for smooth continuation. Turn off for independent hard-cut clips.'}
             </span>
           </span>
         </label>

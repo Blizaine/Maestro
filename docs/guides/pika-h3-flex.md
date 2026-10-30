@@ -25,7 +25,7 @@ noise recipe between nonterminal evaluations; this is not an ordinary six-step
 H3 Euler schedule.
 
 Steps, guidance, adapter strength, and shifts are locked. Extra LoRAs,
-accelerators, continuation, control video, timed frame injection, First Block
+accelerators, control video, timed frame injection, First Block
 Cache, and Audio Refinement are unavailable. References are ordered; changing
 their order changes the request meaning.
 
@@ -40,8 +40,9 @@ audio, so compare outputs before relying on it for a project. Hardware/runtime
 availability and fallback status are reported beside each option.
 
 First Block Cache remains disabled for this freshly re-noised six-step recipe.
-The selected output duration is authoritative for this single-pass model;
-older saved sliding-window lengths must not shorten a Flex request.
+A single native pass retains its selected output duration; older saved window
+lengths must not shorten it. Longer timelines use the experimental continuation
+workflow described below, with the same six evaluations in every pass.
 
 ## Inputs and output sizes
 
@@ -53,7 +54,33 @@ seconds combined for each media type.
 
 The native video VAE requires `17*n + 5` frames at 24 fps. Maestro defaults to
 124 frames (about 5.17 seconds) and permits 124–362 frames (up to about 15.1
-seconds). There is no continuation across longer windows.
+seconds) per native pass.
+
+## Experimental sliding windows
+
+Frames and References can use Maestro's shared H3 continuation workflow for
+longer timelines. Set the total Duration and the per-pass Window Length using
+the same controls as other H3 models. Each pass keeps the fixed Pika sampler;
+only the amount of new timeline generated per pass changes.
+
+Continuation carries multiple recent video frames, a boundary frame and the
+matching generated stereo audio into the next pass. References retains the
+original ordered reference manifest as well. This preserves motion context
+instead of starting each pass with an isolated still image. Experimental Pika
+References sequences keep motion/audio continuity enabled; the independent
+hard-cut sequence option is not exposed for this adapter.
+
+The overlap follows H3's `17*n+1` grid. For example, two 124-frame passes with
+18-frame overlap produce 230 joined frames (about 9.58 seconds). Native passes
+are aligned separately; the joined total stays on the requested integer-frame
+timeline and only its final excess tail is trimmed. Saved sequence settings
+retain their total, window length and overlap when loaded again.
+
+Start with short windows, especially on smaller GPUs. Longer total durations
+increase the number of passes rather than requiring all frames in one pass.
+Memory advice for this experimental adapter is conservative and must not be
+read as a measured Pika performance guarantee. Motion, voices, music and object
+positions can still drift across windows; inspect joins for the actual project.
 
 The resolution menus use the two native tiers and fixed aspect-ratio buckets
 from the pinned [Pika H3 Flex repository](https://huggingface.co/Pika-Labs/Pika-H3-Flex/tree/0ddf55ad7067ca1e76812253bd7b4600df87f759):
