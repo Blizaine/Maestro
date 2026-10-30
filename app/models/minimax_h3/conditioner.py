@@ -279,7 +279,15 @@ class MiniMaxH3Conditioner(nn.Module):
         image_token_counts: list[int] = []
         images = [reference.image for reference in references if reference.kind == "image"]
         if images:
-            vision = self.processor.image_processor(images=images, return_tensors="pt")
+            # Qwen's fast processor groups images with torch operations that
+            # can inherit the active default device. MMGP may leave CUDA as
+            # that default, but preprocessing is CPU work; the encoder below
+            # performs the intentional transfer to `device`.
+            with torch.device("cpu"):
+                vision = self.processor.image_processor(
+                    images=images,
+                    return_tensors="pt",
+                )
             pixel_values = vision["pixel_values"]
             image_grid_thw = vision["image_grid_thw"]
             image_token_counts = [int(grid.prod()) // merge_size for grid in image_grid_thw]
@@ -291,11 +299,12 @@ class MiniMaxH3Conditioner(nn.Module):
             sampled = [sample_reference_video_frames(reference.frames) for reference in videos]
             for reference, (_, timestamps) in zip(videos, sampled):
                 reference.block_timestamps = timestamps
-            vision = self.processor.video_processor(
-                videos=[np.stack(frames) for frames, _ in sampled],
-                do_sample_frames=False,
-                return_tensors="pt",
-            )
+            with torch.device("cpu"):
+                vision = self.processor.video_processor(
+                    videos=[np.stack(frames) for frames, _ in sampled],
+                    do_sample_frames=False,
+                    return_tensors="pt",
+                )
             pixel_values_videos = vision["pixel_values_videos"]
             video_grid_thw = vision["video_grid_thw"]
             video_block_token_counts = [int(grid[1]) * int(grid[2]) // merge_size for grid in video_grid_thw]

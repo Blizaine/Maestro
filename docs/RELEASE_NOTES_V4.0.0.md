@@ -62,6 +62,10 @@ candidate combines the changes below with the fixes already tested on Dev.
   even when the renderer's default tensor device is CUDA. The schedule math
   and hop selection are unchanged; this avoids unintended GPU allocation
   while preparing relative heads.
+- **H3 reference preprocessing:** image and video preprocessing stays on CPU
+  even under a CUDA default tensor device. The vision encoder still receives
+  the explicitly selected device and precision. This avoids unintended
+  preprocessing allocations; it is not a general low-memory guarantee.
 - **Reliable startup:** the API reserves its actual bind interface through
   server startup and announces the Maestro URL only after its listener is
   ready. Busy ports fall back without taking over a shared Pinokio service.
