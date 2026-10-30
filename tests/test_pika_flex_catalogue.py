@@ -101,6 +101,23 @@ class PikaFlexCatalogueTests(unittest.TestCase):
                 ):
                     self.assertFalse(model.get(key, False), key)
 
+    def test_catalog_overrides_preserve_continuation_capabilities(self):
+        for filename, reference in (
+            ("minimax_h3_pika_flex.json", False),
+            ("minimax_h3_ref2va_pika_flex.json", True),
+        ):
+            with self.subTest(filename=filename):
+                definition = self._definition(filename)
+                # Model metadata overrides family capabilities in the runtime
+                # catalogue, so these two layers must agree.
+                effective = {**assets.pika_flex_capabilities(reference), **definition["model"]}
+                self.assertTrue(effective["sliding_window"])
+                self.assertTrue(effective["video_continuation"])
+                self.assertTrue(effective["sliding_window_audio_history"])
+                self.assertEqual(definition["sliding_window_overlap"], 18)
+                self.assertFalse(definition["minimax_h3_multi_window"])
+                self.assertFalse(definition["minimax_h3_reference_sequence"])
+
     def test_capabilities_and_defaults_keep_frames_and_references_narrow(self):
         frames = assets.pika_flex_capabilities(False)
         references = assets.pika_flex_capabilities(True)
