@@ -22,9 +22,10 @@ access, and some clients may not show discovered servers automatically.
    using `127.0.0.1` or `localhost` and select **Approve on this PC**. This
    approves local management without showing or copying a code. First approval
    happens only after you press the button. It does not enable agent connections.
-3. Choose **Copy setup prompt for my agent** and paste it into your agent's chat,
-   or follow the client-specific instructions. Complete the client's OAuth
-   approval in Maestro. Copying setup text does not connect or approve the agent.
+3. Follow the instructions for your client. **Copy setup prompt for my agent**
+   can guide an assistant that has configuration tools; otherwise it should give
+   you the manual steps. Complete the client's OAuth approval in Maestro.
+   Copying setup text does not install, connect or approve the agent.
 
 Normal use on the Maestro PC does not require Agent Access setup or a browser
 sign-in. Once this installation is approved, local management remains available
@@ -74,6 +75,31 @@ settings, and client grants. Set up and approve each installation separately.
 Copy the MCP URL from **Settings → Agent Access**. It looks like
 `https://maestro-<installation-id>.local:<port>/mcp`; use the exact value shown
 by Maestro.
+
+### ChatGPT desktop
+
+Use **Copy ChatGPT desktop setup** for the server URL, certificate fingerprint
+and registration steps. Register a Streamable HTTP server in the app's MCP
+settings, restart the client, then use its OAuth sign-in control. See the
+[official desktop MCP instructions](https://learn.chatgpt.com/docs/extend/mcp).
+You can do this yourself even when a chat has no tools to edit MCP configuration.
+
+Certificate trust is a separate prerequisite. Compare the downloaded public
+certificate with the fingerprint in Maestro and use a trust mechanism supported
+by the actual MCP client. A fingerprint pasted into chat does not configure
+trust, and browser trust alone does not prove that the MCP client will accept
+the certificate. If that client has no suitable trust mechanism, report that
+specific limitation rather than claiming registration succeeded. Keep TLS
+verification enabled.
+
+The chat must actually have access to the configured server's tools. Local
+client configuration and cloud-hosted plugin connections use different paths;
+being on the same Wi-Fi does not by itself give cloud tools access to Maestro.
+These instructions do not establish successful Mac connectivity. Confirm it
+after authentication with a read-only status or help request, without starting
+media generation.
+
+### Codex CLI and Claude Code
 
 For Codex CLI, add the remote server and complete its OAuth login:
 

@@ -34,7 +34,7 @@ import {
   type AgentAccessStatus,
 } from '../../api/agentAccess'
 
-type CopyTarget = 'agent' | 'codex' | 'claude' | 'url' | null
+type CopyTarget = 'agent' | 'chatgpt' | 'codex' | 'claude' | 'url' | null
 
 export function AgentAccessSettingsPanel() {
   const [status, setStatus] = useState<AgentAccessStatus | null>(null)
@@ -386,18 +386,20 @@ export function AgentAccessSettingsPanel() {
           <JourneyStep number={3} title="Add an MCP client" state={canAddClient ? 'current' : 'locked'}>
             {canAddClient ? (
               <div className="space-y-3">
-                <p className="text-xs leading-relaxed text-text-secondary">Let your agent handle setup with a copied prompt, or choose manual client instructions. Copying text does not connect or approve the client.</p>
-                <div className="rounded-lg border border-border bg-bg-primary p-3 text-[11px] leading-relaxed text-text-secondary">On first connection, a client may ask you to trust Maestro’s TLS certificate. Verify its SHA-256 fingerprint in Connection details before accepting.</div>
+                <p className="text-xs leading-relaxed text-text-secondary">Automatic setup depends on your agent’s available tools. Use the client-specific steps when the chat cannot manage connections. Copying text does not register, connect or approve the client.</p>
+                <div className="rounded-lg border border-border bg-bg-primary p-3 text-[11px] leading-relaxed text-text-secondary">Certificate trust is a separate first-time step. Verify Maestro’s TLS certificate against the SHA-256 fingerprint in Connection details and use a trust method supported by your MCP client.</div>
                 {!mcpUrl && <p className="text-[10px] text-amber-300">The connection URL is not available yet. Refresh this panel after the service is ready.</p>}
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <CopySetupButton target="agent" copied={copyTarget === 'agent'} disabled={!mcpUrl || !status.certificate_sha256} onClick={() => void handleCopy('agent')} />
+                  <CopySetupButton target="chatgpt" copied={copyTarget === 'chatgpt'} disabled={!mcpUrl || !status.certificate_sha256} onClick={() => void handleCopy('chatgpt')} />
                   <CopySetupButton target="codex" copied={copyTarget === 'codex'} disabled={!mcpUrl} onClick={() => void handleCopy('codex')} />
                   <CopySetupButton target="claude" copied={copyTarget === 'claude'} disabled={!mcpUrl} onClick={() => void handleCopy('claude')} />
                   <CopySetupButton target="url" copied={copyTarget === 'url'} disabled={!mcpUrl} onClick={() => void handleCopy('url')} />
                 </div>
-                {copyTarget === 'agent' && <p className="text-[10px] text-emerald-400" role="status">Setup prompt copied. Paste it into chat with your agent. It will guide setup; client OAuth approval still happens in Maestro.</p>}
+                {copyTarget === 'agent' && <p className="text-[10px] text-emerald-400" role="status">Setup prompt copied. Paste it into chat with your agent for setup guidance. If it cannot manage connections, follow the manual client steps; OAuth approval still happens in Maestro.</p>}
+                {copyTarget === 'chatgpt' && <p className="text-[10px] text-emerald-400" role="status">ChatGPT desktop steps copied. Follow them in the desktop app; this does not configure, connect, or approve the server.</p>}
                 {copyTarget === 'url' && <p className="text-[10px] text-emerald-400" role="status">Server URL copied. Add it in the client’s MCP settings. This does not connect or approve the client; complete its OAuth approval in Maestro.</p>}
-                {copyTarget && copyTarget !== 'agent' && copyTarget !== 'url' && <p className="text-[10px] text-emerald-400" role="status">Setup instructions copied. Follow them in the client. This does not connect or approve the client; complete its OAuth approval in Maestro.</p>}
+                {copyTarget && copyTarget !== 'agent' && copyTarget !== 'chatgpt' && copyTarget !== 'url' && <p className="text-[10px] text-emerald-400" role="status">Setup instructions copied. Follow them in the client. This does not connect or approve the client; complete its OAuth approval in Maestro.</p>}
               </div>
             ) : (
               <p className="text-xs leading-relaxed text-text-muted">{!ownerSession ? 'Sign in first to continue.' : !status.enabled ? 'Allow agent connections in step 2 to continue.' : 'Agent Access is unavailable. Refresh the panel when the service is ready.'}</p>
@@ -537,18 +539,15 @@ function CopySetupButton({ target, copied, disabled, onClick }: {
   disabled: boolean
   onClick: () => void
 }) {
-  const label = target === 'codex'
-    ? 'Codex'
-    : target === 'claude'
-      ? 'Claude'
-      : target === 'url'
-        ? 'server URL for another MCP client'
-        : 'setup prompt for my agent'
-  const buttonText = target === 'agent'
-    ? copied ? 'Setup prompt copied' : 'Copy setup prompt for my agent'
-    : target === 'url'
-      ? copied ? 'Server URL copied' : 'Copy server URL for another MCP client'
-      : copied ? label + ' setup copied' : 'Copy ' + label + ' setup'
+  const label = target === 'codex' ? 'Codex'
+    : target === 'claude' ? 'Claude'
+      : target === 'chatgpt' ? 'ChatGPT desktop'
+        : target === 'url' ? 'server URL for another MCP client'
+          : 'setup prompt for my agent'
+  const buttonText = target === 'agent' ? (copied ? 'Setup prompt copied' : 'Copy setup prompt for my agent')
+    : target === 'chatgpt' ? (copied ? 'ChatGPT desktop setup copied' : 'Copy ChatGPT desktop setup')
+      : target === 'url' ? (copied ? 'Server URL copied' : 'Copy server URL for another MCP client')
+        : copied ? label + ' setup copied' : 'Copy ' + label + ' setup'
 
   return (
     <button type="button" onClick={onClick} disabled={disabled} className={'inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border px-3 text-[10px] font-medium hover:bg-bg-hover disabled:opacity-40 ' + (target === 'agent' ? 'border-accent-blue/30 bg-accent-blue/10 text-accent-blue sm:col-span-2' : 'border-border text-text-secondary')}>
@@ -763,15 +762,32 @@ function clientSetupText(target: Exclude<CopyTarget, null>, url: string, fingerp
   const certificate = fingerprint ? `\nTLS certificate SHA-256: ${fingerprint}` : ''
   if (target === 'agent') {
     return [
-      'Configure Maestro as an MCP server in this client.',
+      'Help me set up Maestro as an MCP server in this client.',
       `MCP server URL: ${url}`,
       `Expected public TLS certificate SHA-256 fingerprint: ${fingerprint || 'NOT REPORTED — stop and ask me to verify it before trusting any certificate.'}`,
+      'First inspect which MCP setup tools and client capabilities are actually available in this session. Do not claim you can register a server or change settings unless an available tool supports that action.',
+      'If you do not have a server-registration tool, do not stop at a refusal: give me concrete manual steps for the client I named. For ChatGPT desktop, use Settings > MCP servers > Add server > enter a server name > select Streamable HTTP > enter the URL above > Save > restart ChatGPT > Authenticate. If that section or a step is missing, name the exact missing UI and continue with safe manual guidance.',
+      'Perform setup in the client that will connect. Do not assume a cloud agent can reach a private LAN URL because my desktop computer is on the same Wi-Fi as Maestro; first confirm the client itself can reach this URL.',
       'Preserve the client’s existing configuration. Add only a Maestro server entry; do not remove or rewrite unrelated settings.',
       'If another Maestro installation is already configured, keep it and add this installation under a distinct server name.',
-      'Use the client’s normal certificate trust flow. Verify that the presented certificate exactly matches this fingerprint before trusting it. Never disable TLS verification or use an insecure bypass.',
+      'Before connecting, obtain the exact public TLS certificate from Maestro Settings > Agent Access > Connection details > Download public TLS certificate on the Maestro PC, transfer that public file to the client computer, and verify that its SHA-256 exactly matches the fingerprint above. Trust it only through a certificate trust mechanism supported by the client. If the client cannot verify and safely trust that certificate, stop and tell me the specific blocker. Never disable TLS verification or use an insecure bypass.',
       'Use the normal OAuth approval flow. When Maestro requests approval, show me the requested scopes and wait for my approval there. Keep codes and tokens out of chat and setup instructions; let the client manage OAuth credentials in its normal protected credential store.',
       'After setup, verify with a read-only server status or help request only. Do not render or create images, video, audio, or other media during setup.',
-      'If this client cannot configure HTTP MCP or verify the certificate safely, stop and explain the limitation. Do not try an unsupported install command.',
+      'Do not invent deep links, commands, certificate screens, or capabilities. If this client cannot configure HTTP MCP or verify the certificate safely, explain the exact limitation and leave its configuration unchanged.',
+    ].join('\n')
+  }
+  if (target === 'chatgpt') {
+    return [
+      'ChatGPT desktop MCP setup for Maestro (manual steps)',
+      'Official desktop setup guide: https://learn.chatgpt.com/docs/extend/mcp',
+      `Server URL: ${url}`,
+      `Expected public TLS certificate SHA-256 fingerprint: ${fingerprint || 'NOT REPORTED — stop before connecting and ask me to verify it.'}`,
+      'In the ChatGPT desktop app, open Settings > MCP servers > Add server. Enter a distinct server name of your choice, select Streamable HTTP, enter the URL above, and select Save. Restart ChatGPT, then select Authenticate and complete the OAuth flow.',
+      'Before connecting, use Maestro Settings > Agent Access > Connection details > Download public TLS certificate on the Maestro PC. Transfer that public file to the Mac or other client computer and verify that its SHA-256 exactly matches the fingerprint above. Configure trust through a mechanism supported by the MCP client; browser trust alone does not prove the MCP client will accept it. If no supported trust method is available, explain that specific blocker. Never disable TLS verification or use an insecure bypass.',
+      'Complete setup in ChatGPT desktop and confirm that the desktop client itself can reach this URL. Being on the same Wi-Fi does not mean a cloud-hosted agent can reach a private LAN URL.',
+      'When Maestro shows the OAuth request, review the requested scopes and approve only the access you intend. Keep OAuth codes and tokens out of chat; let ChatGPT manage credentials in its protected store.',
+      'After authentication, verify with a read-only server status or help request only. Do not render or create images, video, audio, or other media during setup.',
+      'These are instructions only. Do not claim the server has been added, connected, authenticated, or approved until the desktop app confirms each step.',
     ].join('\n')
   }
   if (target === 'codex') {

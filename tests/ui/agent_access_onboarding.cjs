@@ -201,6 +201,7 @@ async function main() {
     assert.match(visibleText(tree), /Add an MCP client/);
     assert.match(visibleText(tree), /Agent connections stay off until you allow them/);
     assert.match(visibleText(tree), /remote browsers and agents still need their own authorization/);
+    assert.equal(buttonByText(tree, 'Copy ChatGPT desktop setup'), undefined, 'client setup waits for sign-in and explicit enablement');
     assert.equal(calls.settings.length, 0, 'fresh setup does not enable agent connections');
     assert.equal(buttonByText(tree, 'Copy Codex setup'), undefined, 'client setup waits for sign-in and explicit enablement');
 
@@ -266,9 +267,11 @@ async function main() {
     assert.deepEqual(calls.settings, [{ enabled: true }], 'only the explicit switch enables agent connections');
     assert.ok(buttonByText(tree, 'Copy Codex setup'), 'enabled access reveals client setup choices');
     assert.ok(buttonByText(tree, 'Copy Claude setup'));
+    assert.ok(buttonByText(tree, 'Copy ChatGPT desktop setup'));
     assert.ok(buttonByText(tree, 'Copy server URL for another MCP client'));
     assert.ok(buttonByText(tree, 'Copy setup prompt for my agent'));
-    assert.match(visibleText(tree), /trust Maestro’s TLS certificate/);
+    assert.match(visibleText(tree), /Automatic setup depends on your agent’s available tools/);
+    assert.match(visibleText(tree), /Certificate trust is a separate first-time step/);
     assert.match(visibleText(tree), /SHA-256 fingerprint in Connection details/);
 
     const connectionDetails = allNodes(tree).find(node =>
@@ -286,35 +289,67 @@ async function main() {
     assert.ok(calls.copied[0].includes('MCP server URL: https://maestro.test/mcp'));
     assert.ok(calls.copied[0].includes('Expected public TLS certificate SHA-256 fingerprint: ab12cd34'));
     assert.ok(calls.copied[0].includes('Preserve the client’s existing configuration'));
+    assert.ok(calls.copied[0].includes('First inspect which MCP setup tools and client capabilities are actually available'));
+    assert.ok(calls.copied[0].includes('If you do not have a server-registration tool, do not stop at a refusal'));
+    assert.ok(calls.copied[0].includes('Settings > MCP servers > Add server > enter a server name > select Streamable HTTP'));
+    assert.ok(calls.copied[0].includes('Do not assume a cloud agent can reach a private LAN URL'));
+    assert.ok(calls.copied[0].includes('obtain the exact public TLS certificate'));
+    assert.ok(calls.copied[0].includes('tell me the specific blocker'));
     assert.ok(calls.copied[0].includes('Never disable TLS verification'));
     assert.ok(calls.copied[0].includes('normal OAuth approval flow'));
     assert.ok(calls.copied[0].includes('wait for my approval there'));
     assert.ok(calls.copied[0].includes('read-only server status or help request'));
     assert.ok(calls.copied[0].includes('Do not render or create images, video, audio'));
-    assert.ok(calls.copied[0].includes('Do not try an unsupported install command'));
+    assert.ok(calls.copied[0].includes('Do not invent deep links, commands, certificate screens, or capabilities'));
     assert.ok(!calls.copied[0].includes('already-issued-code'));
     assert.ok(!calls.copied[0].includes('current-code'));
     assert.match(visibleText(tree), /Setup prompt copied/);
     assert.match(visibleText(tree), /Paste it into chat with your agent/);
-    assert.match(visibleText(tree), /does not connect or approve the client/);
+    assert.match(visibleText(tree), /does not (register, )?connect or approve the client/);
+
+    const settingsBeforeChatGPTCopy = calls.settings.length;
+    buttonByText(tree, 'Copy ChatGPT desktop setup').props.onClick();
+    await flush();
+    tree = render();
+    assert.equal(calls.copied.length, 2);
+    assert.ok(calls.copied[1].includes('ChatGPT desktop MCP setup for Maestro (manual steps)'));
+    assert.ok(calls.copied[1].includes('Server URL: https://maestro.test/mcp'));
+    assert.ok(calls.copied[1].includes('Expected public TLS certificate SHA-256 fingerprint: ab12cd34'));
+    assert.ok(calls.copied[1].includes('Settings > MCP servers > Add server'));
+    assert.ok(calls.copied[1].includes('Enter a distinct server name of your choice'));
+    assert.ok(calls.copied[1].includes('select Streamable HTTP'));
+    assert.ok(calls.copied[1].includes('select Save'));
+    assert.ok(calls.copied[1].includes('Restart ChatGPT, then select Authenticate'));
+    assert.ok(calls.copied[1].includes('verify that its SHA-256 exactly matches the fingerprint above'));
+    assert.ok(calls.copied[1].includes('Connection details > Download public TLS certificate'));
+    assert.ok(calls.copied[1].includes('browser trust alone does not prove the MCP client will accept it'));
+    assert.ok(calls.copied[1].includes('Being on the same Wi-Fi does not mean a cloud-hosted agent can reach a private LAN URL'));
+    assert.ok(calls.copied[1].includes('review the requested scopes and approve only the access you intend'));
+    assert.ok(calls.copied[1].includes('read-only server status or help request only'));
+    assert.ok(calls.copied[1].includes('Do not render or create images, video, audio'));
+    assert.ok(!calls.copied[1].includes('Authorization:'));
+    assert.ok(!calls.copied[1].includes('already-issued-code'));
+    assert.match(visibleText(tree), /does not configure, connect, or approve the server/);
+    assert.equal(calls.settings.length, settingsBeforeChatGPTCopy, 'copying ChatGPT instructions never changes server settings or enables connections');
 
     buttonByText(tree, 'Copy Codex setup').props.onClick();
     await flush();
     tree = render();
-    assert.equal(calls.copied.length, 2);
-    assert.ok(calls.copied[1].includes('https://maestro.test/mcp'));
-    assert.ok(calls.copied[1].includes('TLS certificate SHA-256: ab12cd34'));
-    assert.ok(!calls.copied[1].includes('untrusted.example'));
+    assert.equal(calls.copied.length, 3);
+    assert.ok(calls.copied[2].includes('https://maestro.test/mcp'));
+    assert.ok(calls.copied[2].includes('TLS certificate SHA-256: ab12cd34'));
+    assert.ok(!calls.copied[2].includes('untrusted.example'));
 
     buttonByText(tree, 'Copy server URL for another MCP client').props.onClick();
     await flush();
-    assert.equal(calls.copied[2], 'https://maestro.test/mcp', 'other-client copy stays a plain validated URL');
+    assert.equal(calls.copied[3], 'https://maestro.test/mcp', 'other-client copy stays a plain validated URL');
 
     buttonByText(tree, 'Sign out').props.onClick();
     await flush();
     tree = render();
     assert.match(visibleText(tree), /Agent connections are allowed. Sign in to manage this setting/);
     assert.doesNotMatch(visibleText(tree), /Agent connections remain off until an owner explicitly allows them/);
+    assert.equal(buttonByText(tree, 'Copy ChatGPT desktop setup'), undefined, 'signing out gates client setup instructions');
     assert.equal(buttonByText(tree, 'Approve on this PC'), undefined, 'remote status never offers local approval');
     status.local_approval_available = true;
     global.window.dispatchEvent(new Event(api.AGENT_ACCESS_SESSION_RESTORED_EVENT));
@@ -332,6 +367,15 @@ async function main() {
     assert.equal(calls.settings.length, beforeLocalSettings, 'local approval does not alter agent settings');
     assert.match(visibleText(tree), /This PC is approved for local management/);
     assert.equal(buttonByText(tree, 'Sign out'), undefined, 'local device authority is not presented as a cookie session');
+
+    const originalFingerprint = status.certificate_sha256;
+    status.certificate_sha256 = '';
+    global.window.dispatchEvent(new Event(api.AGENT_ACCESS_SESSION_RESTORED_EVENT));
+    await flush();
+    tree = render();
+    assert.equal(buttonByText(tree, 'Copy ChatGPT desktop setup').props.disabled, true, 'ChatGPT setup requires a reported certificate fingerprint');
+    assert.equal(buttonByText(tree, 'Copy setup prompt for my agent').props.disabled, true, 'generic setup prompt also requires a reported certificate fingerprint');
+    status.certificate_sha256 = originalFingerprint;
     console.log('Agent Access onboarding: guided states, one-time code recovery, explicit enablement, disclosures, URL validation, and client copy passed');
   } finally {
     for (const slot of hooks) if (slot?.kind === 'effect' && typeof slot.cleanup === 'function') slot.cleanup();
