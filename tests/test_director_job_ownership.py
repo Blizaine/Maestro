@@ -1,9 +1,21 @@
 """Exercise Director child ownership through both public job response paths."""
 import ast
+import atexit
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
+import tempfile
+import threading
 import unittest
+from fastapi import HTTPException
+
+import sys
+
+APP = Path(__file__).resolve().parents[1] / "app"
+sys.path.insert(0, str(APP))
+from services.agent_access.auth import Principal
+from services.agent_access.backend import AgentAccessBackend, is_restricted_agent
+from services.agent_access.context import principal_context
 
 
 LAUNCH = Path(__file__).resolve().parents[1] / "app" / "launch.py"
@@ -11,16 +23,40 @@ LAUNCH = Path(__file__).resolve().parents[1] / "app" / "launch.py"
 
 def load_routes(jobs):
     tree = ast.parse(LAUNCH.read_text(encoding="utf-8"))
-    names = {"_director_job_response_fields", "get_status", "list_jobs"}
-    functions = [
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name in names
-    ]
-    assert len(functions) == len(names)
-    for node in functions:
-        node.decorator_list = []
+    names = {
+        "_agent_filter_director_queue", "_agent_require_job_access",
+        "_agent_require_queue_collection", "_director_job_response_fields",
+        "get_status", "list_jobs",
+    }
+    constant_names = {"_AGENT_QUEUE_PENDING_STATUSES", "_AGENT_QUEUE_TERMINAL_STATUSES"}
+    selected = []
+    found_functions = set()
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in names:
+            node.decorator_list = []
+            selected.append(node)
+            found_functions.add(node.name)
+        elif isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id in constant_names
+            for target in node.targets
+        ):
+            selected.append(node)
+    assert found_functions == names
+    scratch = tempfile.TemporaryDirectory()
+    atexit.register(scratch.cleanup)
+    root = Path(scratch.name)
+    app_root = root / "app"
+    app_root.mkdir()
+    runtime = SimpleNamespace(directory=root / "settings", backend=lambda: {})
+    backend = AgentAccessBackend(runtime, app_root, recover_previous=False)
     namespace = {
         "_jobs": jobs,
+        "_gen_lock": threading.Lock(),
+        "_active_gen_states": {},
+        "_agent_access_backend": backend,
+        "_is_restricted_agent": is_restricted_agent,
+        "principal_context": principal_context,
+        "HTTPException": HTTPException,
         "snapshot_job": deepcopy,
         "public_enhancement": lambda value, **kwargs: value,
         "_generation_previews": SimpleNamespace(
@@ -30,9 +66,10 @@ def load_routes(jobs):
             "current_clip": job.get("current_clip"),
             "total_clips": job.get("total_clips"),
         },
+        "_test_scratch": scratch,
     }
     module = ast.fix_missing_locations(
-        ast.Module(body=functions, type_ignores=[])
+        ast.Module(body=selected, type_ignores=[])
     )
     exec(compile(module, str(LAUNCH), "exec"), namespace)
     return namespace
@@ -134,6 +171,68 @@ class DirectorJobOwnershipTests(unittest.TestCase):
         listed = routes["list_jobs"]()["jobs"]
         self.assertEqual([item["job_id"] for item in listed], ["queued"])
         self.assertEqual(listed[0]["director_pipeline_id"], "pipeline")
+
+    def test_authenticated_job_routes_use_real_principal_scoped_backend_helpers(self):
+        routes = load_routes({})
+        backend = routes["_agent_access_backend"]
+        jobs = backend.registry()
+        backend.jobs = jobs
+        routes["_jobs"] = jobs
+        actor_a = Principal("actor-a", "client-a", ("observe", "generate"))
+        actor_b = Principal("actor-b", "client-b", ("observe", "generate"))
+
+        token = principal_context.set(actor_a)
+        try:
+            jobs["owned-a"] = job("owned-a", {"prompt": "private actor A prompt"})
+        finally:
+            principal_context.reset(token)
+        token = principal_context.set(actor_b)
+        try:
+            jobs["owned-b"] = job("owned-b", {"prompt": "private actor B prompt"})
+        finally:
+            principal_context.reset(token)
+
+        token = principal_context.set(actor_a)
+        try:
+            self.assertEqual(routes["get_status"]("owned-a")["job_id"], "owned-a")
+            with self.assertRaises(HTTPException) as denied:
+                routes["get_status"]("owned-b")
+            self.assertEqual(denied.exception.status_code, 404)
+            result = routes["list_jobs"]()
+        finally:
+            principal_context.reset(token)
+        self.assertEqual([item["job_id"] for item in result["jobs"]], ["owned-a"])
+        self.assertTrue(result["busy"])
+        self.assertNotIn("private actor B prompt", str(result))
+
+    def test_director_queue_helpers_filter_other_owners_and_block_global_mutations(self):
+        routes = load_routes({})
+        backend = routes["_agent_access_backend"]
+        actor_a = Principal("actor-a", "client-a", ("observe", "generate"))
+        backend.journal.register_resource_owner("queue", "queue-a", actor_a.id, backend.session_id)
+        backend.journal.register_resource_owner("queue", "queue-b", "actor-b", backend.session_id)
+        queue_state = {
+            "running": True,
+            "entries": [
+                {"id": "queue-a", "status": "held", "scene_description": "my project"},
+                {"id": "queue-b", "status": "running", "scene_description": "other project prompt"},
+            ],
+        }
+
+        token = principal_context.set(actor_a)
+        try:
+            routes["_agent_require_queue_collection"](queue_state, {"held"})
+            with self.assertRaises(HTTPException) as denied:
+                routes["_agent_require_queue_collection"](queue_state)
+            self.assertEqual(denied.exception.status_code, 403)
+            filtered = routes["_agent_filter_director_queue"](queue_state)
+        finally:
+            principal_context.reset(token)
+
+        self.assertEqual([entry["id"] for entry in filtered["entries"]], ["queue-a"])
+        self.assertTrue(filtered["other_work_pending"])
+        self.assertTrue(filtered["running"])
+        self.assertNotIn("other project prompt", str(filtered))
 
 
 if __name__ == "__main__":

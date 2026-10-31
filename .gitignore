@@ -76,6 +76,7 @@ app/presets.json
 
 # SAM service runtime
 app/services/sam/env/
+app/env-agent/
 app/services/sam/sam3/
 app/services/sam/checkpoints/
 .masks/

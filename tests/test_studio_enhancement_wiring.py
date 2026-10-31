@@ -19,6 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'app'))
 from services import llm_service, studio_enhancement as enhancement
 from services.job_lifecycle import finish_job, generation_slot, is_cancel_requested, request_cancel, snapshot_job, try_start, update_job
+from services.agent_access.backend import AgentAccessBackend, is_restricted_agent
+from services.agent_access.context import principal_context
 
 TREE = ast.parse((ROOT / 'app/launch.py').read_text(encoding='utf-8'))
 
@@ -51,6 +53,13 @@ class EnhancedJobWiringTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.archive = enhancement.StudioJobArchive(self.temp.name)
+        access_root = Path(self.temp.name) / 'agent-access-root'
+        access_root.mkdir()
+        self.agent_backend = AgentAccessBackend(
+            SimpleNamespace(directory=Path(self.temp.name) / 'agent-access-settings', backend=lambda: {}),
+            access_root,
+            recover_previous=False,
+        )
         self.engine = SimpleNamespace(wan_model=None, offloadobj=None, release_model=Mock(),
             get_model_def=lambda _: {'architecture': 'minimax_h3', 'fps': 24, 'frames_maximum': 345})
         self.params = {'model_type': 'minimax_h3_fused_turbo', 'prompt': 'A mountain duel.',
@@ -68,12 +77,16 @@ class EnhancedJobWiringTests(unittest.TestCase):
             uuid=uuid, time=time, threading=threading, wgp=self.engine, update_job=update_job,
             is_cancel_requested=is_cancel_requested, snapshot_job=snapshot_job,
             _studio_job_archive=self.archive, _jobs=self.jobs, _studio_submission_lock=threading.RLock(),
+            _agent_access_backend=self.agent_backend,
+            _is_restricted_agent=is_restricted_agent,
+            principal_context=principal_context,
             _gen_lock=threading.Lock(), enhancement_context=enhancement.enhancement_context,
             prepare_enhanced_job=enhancement.prepare_enhanced_job, public_enhancement=enhancement.public_enhancement,
             new_enhancement=enhancement.new_enhancement, _enhancement_settings_snapshot=lambda: {'llm_model_id': 'writer-a'},
             _llm_enhance_prompt_payload=self.writer, _prepare_generation_submission=self.prepare,
             _get_active_workspace=lambda: 'captured', _workspace_dir=lambda name: 'captured-output',
             _run_generation=Mock())
+        load('_agent_require_job_access', self.ns)
         self.run_enhancement = load('_prepare_job_enhancement', self.ns)
         load('_pop_editor_submission', self.ns)
         load('_existing_editor_operation_job', self.ns)

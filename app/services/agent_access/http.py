@@ -1,0 +1,207 @@
+"""Owner onboarding and management routes shared by Maestro and its controller."""
+from __future__ import annotations
+
+import inspect
+import time
+import html
+from urllib.parse import parse_qs
+from collections import deque
+from dataclasses import asdict
+
+from fastapi import APIRouter, HTTPException, Request
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+
+from .auth import AuthError
+from .boundary import browser_login_origin, cookie_name, login_document, same_origin, secure_transport
+from .context import credential_context, principal_context
+
+
+def owner_required():
+    principal = principal_context.get()
+    if principal is None or not principal.owner:
+        raise HTTPException(403, "Only a signed-in Maestro owner can manage Agent Access")
+    return principal
+
+
+def scope_required(scope: str):
+    principal = principal_context.get()
+    if principal is None:
+        raise HTTPException(401, "Pair this agent before using Maestro")
+    if not principal.owner and scope not in principal.scopes:
+        raise HTTPException(403, f"This operation requires {scope} permission")
+    return principal
+
+
+async def json_body(request: Request) -> dict:
+    body = await request.body()
+    if len(body) > 1024 * 1024:
+        raise HTTPException(413, "Request is too large")
+    import json
+    try:
+        value = json.loads(body or b"{}")
+    except (ValueError, UnicodeError) as error:
+        raise HTTPException(400, "Use a JSON object") from error
+    if not isinstance(value, dict):
+        raise HTTPException(400, "Use a JSON object")
+    return value
+
+
+class RateLimiter:
+    """Bound unauthenticated work without persisting caller-supplied addresses."""
+    def __init__(self, maximum: int = 30, seconds: float = 60):
+        self.maximum, self.seconds = maximum, seconds
+        self._events = deque()
+
+    def check(self):
+        now = time.monotonic()
+        while self._events and self._events[0] <= now - self.seconds:
+            self._events.popleft()
+        if len(self._events) >= self.maximum:
+            raise HTTPException(429, "Too many attempts; wait a moment and try again")
+        self._events.append(now)
+
+
+def login_return(value):
+    if isinstance(value, str) and value.startswith("/oauth/authorize?") and len(value) <= 8192 and not any(c in value for c in ("\\", "\r", "\n", "\x00")):
+        return value
+    return "/"
+
+
+def require_updated_backend(runtime):
+    # An already-running pre-update model process cannot acquire middleware
+    # retroactively. Never offer pairing while its legacy API remains open.
+    backend = runtime.backend()
+    if backend.get("auth_boundary_version") != 1:
+        raise HTTPException(409, "Start the updated Maestro once before setting up Agent Access. An older running instance must be restarted when idle.")
+
+
+def management_router(runtime, *, request_console_code, status_extra=None) -> APIRouter:
+    router = APIRouter()
+    login_limit, code_limit = RateLimiter(30), RateLimiter(3)
+
+    @router.get("/api/v1/agent-access/certificate")
+    async def public_certificate():
+        path = runtime.directory / "tls" / "server-cert.pem"
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 65536:
+            raise HTTPException(503, "Start Agent Access in Pinokio to create its public certificate")
+        content = path.read_bytes()
+        if not content.startswith(b"-----BEGIN CERTIFICATE-----") or b"PRIVATE KEY" in content:
+            raise HTTPException(503, "The public certificate is unavailable")
+        return Response(content, media_type="application/x-pem-file", headers={"Content-Disposition": 'attachment; filename="maestro-agent-access.pem"', "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+    @router.get("/api/v1/agent-access/status")
+    async def status():
+        principal = principal_context.get()
+        result = runtime.public_status()
+        if status_extra:
+            extra = status_extra()
+            if inspect.isawaitable(extra):
+                extra = await extra
+            result.update(extra)
+        result.update(authenticated=principal is not None, owner=bool(principal and principal.owner))
+        if principal:
+            result["principal"] = asdict(principal)
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+    @router.get("/agent-access/login")
+    async def login_page(request: Request):
+        status = runtime.public_status()
+        document = login_document({**status, "controller_url": browser_login_origin(status, request.scope)}, secure=secure_transport(request.scope))
+        target = html.escape(login_return(request.query_params.get("next")), quote=True)
+        document = document.replace("</form>", f'<input type="hidden" name="next" value="{target}"></form>', 1)
+        return HTMLResponse(document, headers={"Cache-Control": "no-store"})
+
+    @router.post("/api/v1/agent-access/request-console-code")
+    async def console_code(request: Request):
+        # This endpoint discloses no credential. The controller prints to its
+        # own Pinokio terminal, outside any model worker's captured stdout.
+        if request.headers.get("origin") and not same_origin(request.scope):
+            raise HTTPException(403, "This request origin is not allowed")
+        code_limit.check()
+        try:
+            result = request_console_code()
+            if inspect.isawaitable(result):
+                result = await result
+        except (OSError, RuntimeError) as error:
+            raise HTTPException(503, "Open Agent Access in Pinokio, then request a browser code") from error
+        return {"message": "A one-time browser code is shown in Pinokio's Agent Access terminal.", "expires_in": 600}
+
+    @router.post("/api/v1/agent-access/owner-login")
+    async def owner_login(request: Request):
+        if not secure_transport(request.scope):
+            raise HTTPException(426, {"message": "Open the secure Maestro address before entering a browser code", "login_url": browser_login_origin(runtime.public_status(), request.scope)})
+        if not same_origin(request.scope):
+            raise HTTPException(403, "A same-origin sign-in is required")
+        require_updated_backend(runtime)
+        login_limit.check()
+        is_form = "application/x-www-form-urlencoded" in request.headers.get("content-type", "")
+        if is_form:
+            raw = await request.body()
+            if len(raw) > 16384:
+                raise HTTPException(413, "Sign-in request is too large")
+            try:
+                body = {k: v[-1] for k, v in parse_qs(raw.decode("utf-8"), max_num_fields=8).items()}
+            except (ValueError, UnicodeError) as error:
+                raise HTTPException(400, "Invalid sign-in form") from error
+        else:
+            body = await json_body(request)
+        try:
+            session = runtime.auth.redeem_owner_code(str(body.get("code", "")).strip())
+            runtime.mark_security_configured()
+        except AuthError as error:
+            raise HTTPException(error.status, str(error)) from error
+        response = RedirectResponse(login_return(body.get("next")), status_code=303) if is_form else JSONResponse({"ok": True})
+        response.set_cookie(cookie_name(runtime), session["access_token"], max_age=session["expires_in"], httponly=True, secure=request.url.scheme == "https", samesite="lax", path="/")
+        response.headers["Cache-Control"] = "no-store"
+        runtime.audit("owner", "browser_login", "success")
+        return response
+
+    @router.post("/api/v1/agent-access/logout")
+    async def logout():
+        owner_required()
+        runtime.auth.logout(credential_context.get() or "")
+        response = JSONResponse({"ok": True})
+        response.delete_cookie(cookie_name(runtime), path="/")
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @router.post("/api/v1/agent-access/browser-code")
+    async def browser_code():
+        owner_required()
+        return JSONResponse({"code": runtime.auth.issue_owner_code(), "expires_in": 600}, headers={"Cache-Control": "no-store"})
+
+    @router.post("/api/v1/agent-access/settings")
+    async def settings(request: Request):
+        owner = owner_required()
+        body = await json_body(request)
+        if set(body) - {"enabled", "label", "discovery_enabled"}:
+            raise HTTPException(400, "Unsupported Agent Access setting")
+        try:
+            runtime.validate_settings(**body)
+            if body.get("enabled") is True:
+                require_updated_backend(runtime)
+            if "enabled" in body:
+                runtime.auth.set_enabled(body["enabled"], owner)
+            runtime.update(label=body.get("label"), discovery_enabled=body.get("discovery_enabled"))
+        except (ValueError, AuthError) as error:
+            raise HTTPException(getattr(error, "status", 400), str(error)) from error
+        runtime.audit(owner.id, "agent_access_settings", "updated")
+        return runtime.public_status()
+
+    @router.get("/api/v1/agent-access/grants")
+    async def grants():
+        return {"grants": runtime.auth.list_grants(owner_required())}
+
+    @router.delete("/api/v1/agent-access/grants/{grant_id}")
+    async def revoke(grant_id: str):
+        owner = owner_required()
+        result = runtime.auth.revoke_grant(grant_id, owner)
+        runtime.audit(owner.id, "revoke_agent", "revoked")
+        return {"revoked": result}
+
+    @router.get("/api/v1/agent-access/audit")
+    async def audit(limit: int = 50):
+        owner_required()
+        return {"events": runtime.events(limit)}
+
+    return router

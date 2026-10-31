@@ -55,6 +55,7 @@ Start with the [README](../README.md) for installation and the feature overview.
 - [Local language models](LLM-runtime.md) — built-in writers, vision and runtime setup.
 - [LM Studio memory](LM-Studio-memory.md) — releasing external writer memory before generation.
 - [Private remote access and notifications](TAILSCALE_REMOTE_ACCESS.md) — Tailscale HTTPS and device notification setup.
+- [Agent Access](Agent-Access.md) — secure MCP setup, installation-scoped grants, named operations, media uploads and lifecycle limits.
 
 ## Updates and development
 

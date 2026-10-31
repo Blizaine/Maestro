@@ -174,7 +174,7 @@ FORBIDDEN_TRACKED_PATTERNS = [
     ),
      "local runtime, upload, or archive data (must stay gitignored)"),
     (re.compile(
-        r"^app/(?:env|env-rtx50|env-sol|env-ltx25(?:-[^/]+)?|temp|ckpts|loras|"
+        r"^app/(?:env|env-agent|env-rtx50|env-sol|env-ltx25(?:-[^/]+)?|temp|ckpts|loras|"
         r"loras_i2v|loras_metadata|outputs|outputs2|gradio_outputs|storage|"
         r"samples|settings|uploads|recipes_user|icons/lora_previews)(?:/|$)"
     ),

@@ -3,6 +3,7 @@ import { useStore } from '../../stores/useStore'
 import { SystemSettingsPanel } from './SystemSettingsPanel'
 import { ServicesSettingsPanel } from './ServicesSettingsPanel'
 import { NotificationSettingsPanel } from './NotificationSettingsPanel'
+import { AgentAccessSettingsPanel } from './AgentAccessSettingsPanel'
 
 /**
  * Settings drawer — global panel for hardware/perf, external-service, and
@@ -36,6 +37,7 @@ export function SettingsDrawer() {
     { id: 'performance' as const, label: 'Performance' },
     { id: 'integrations' as const, label: 'Integrations' },
     { id: 'notifications' as const, label: 'Notifications' },
+    { id: 'agent-access' as const, label: 'Agent Access' },
   ]
 
   return (
@@ -65,12 +67,12 @@ export function SettingsDrawer() {
 
         {/* Tab Bar */}
         <div className="px-5 pt-3">
-          <div className="flex bg-bg-tertiary rounded-lg p-0.5 border border-border">
+          <div className="grid grid-cols-4 bg-bg-tertiary rounded-lg p-0.5 border border-border">
             {tabs.map(tab => (
               <button
                 key={tab.id}
                 onClick={() => setSettingsTab(tab.id)}
-                className={`flex-1 text-xs py-1.5 rounded-md transition-all ${
+                className={`text-[10px] sm:text-xs py-1.5 rounded-md transition-all ${
                   settingsTab === tab.id
                     ? 'bg-bg-active text-text-primary'
                     : 'text-text-secondary hover:text-text-primary'
@@ -94,6 +96,10 @@ export function SettingsDrawer() {
 
           {settingsTab === 'notifications' && (
             <NotificationSettingsPanel />
+          )}
+
+          {settingsTab === 'agent-access' && (
+            <AgentAccessSettingsPanel />
           )}
         </div>
       </div>

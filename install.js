@@ -39,6 +39,17 @@ module.exports = async (kernel) => {
         ]
       }
     },
+    // Agent Access has its own CPU-only Python 3.11 environment. Keeping it
+    // separate prevents the MCP/ASGI stack from changing CUDA model wheels.
+    {
+      method: "shell.run",
+      params: {
+        venv: "env-agent",
+        venv_python: "3.11",
+        path: "app",
+        message: ["uv pip install -r requirements-agent-access.txt"]
+      }
+    },
     {
       method: "script.start",
       params: {

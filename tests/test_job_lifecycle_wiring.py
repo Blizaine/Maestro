@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import ast
 import os
+from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -55,6 +57,21 @@ class TestJobLifecycleWiring(unittest.TestCase):
 
     def test_optional_finishing_warnings_survive_status_and_browser_reconnection(self):
         from app.services.job_lifecycle import snapshot_job
+        from services.agent_access.backend import AgentAccessBackend, is_restricted_agent
+        from services.agent_access.context import principal_context
+
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        access_root = os.path.join(scratch.name, "app")
+        os.makedirs(access_root)
+        backend = AgentAccessBackend(
+            SimpleNamespace(
+                directory=Path(scratch.name) / "settings",
+                backend=lambda: {},
+            ),
+            access_root,
+            recover_previous=False,
+        )
         warning = "DLSS finishing failed; the generated original was kept."
         base = {"status": "completed", "progress": 100, "message": "Done",
                 "output_files": ["clip.mp4"], "error": None, "params": {}, "created_at": 1}
@@ -64,10 +81,18 @@ class TestJobLifecycleWiring(unittest.TestCase):
             "dismissed": {**base, "id": "dismissed", "finishing_warnings": [warning], "dismissed": True},
         }
         namespace = {"_jobs": jobs, "snapshot_job": snapshot_job,
+                     "_agent_access_backend": backend,
+                     "_is_restricted_agent": is_restricted_agent,
+                     "principal_context": principal_context,
+                     "_gen_lock": threading.Lock(),
+                     "_active_gen_states": {},
                      "public_enhancement": lambda record, **_kwargs: record,
                      "_director_job_response_fields": lambda _job: {},
                      "_job_eta_response_fields": lambda _job: {},
                      "_generation_previews": SimpleNamespace(fields=lambda _job: {})}
+        helper = _function(_parse("app/launch.py"), "_agent_require_job_access")
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[helper], type_ignores=[])),
+                     "launch.py", "exec"), namespace)
         for name in ("get_status", "list_jobs"):
             function = _function(_parse("app/launch.py"), name)
             function.decorator_list = []

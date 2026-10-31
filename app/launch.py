@@ -425,11 +425,162 @@ def _consume_generation_preview(job_id: str, payload: dict, model_type: str) -> 
             job_id, "Live previews are unavailable for this render. Generation will continue.",
         )
 
+from services.agent_access.backend import (
+    AgentAccessBackend,
+    create_router as _create_agent_access_router,
+    is_restricted_agent as _is_restricted_agent,
+    strip_private_director_fields as _strip_private_director_fields,
+)
+from services.agent_access.boundary import AccessBoundary
+from services.agent_access.context import principal_context
+from services.agent_access.state import RuntimeState
+
+_AGENT_QUEUE_PENDING_STATUSES = frozenset({"held", "queued", "running"})
+_AGENT_QUEUE_TERMINAL_STATUSES = frozenset({"cancelled", "canceled", "complete", "completed", "done", "error", "failed", "finished", "interrupted", "stopped", "success", "succeeded"})
+
+_agent_access_runtime = RuntimeState(
+    Path(_app_dir) / "settings" / "agent-access",
+    app_root=Path(_app_dir),
+)
+
+
+def _agent_configured_media_roots():
+    configured = Path(str(wgp.server_config.get("save_path") or "outputs")).expanduser()
+    return [(configured if configured.is_absolute() else Path(_app_dir) / configured).resolve()]
+
+
+_agent_access_backend = AgentAccessBackend(
+    _agent_access_runtime,
+    _app_dir,
+    additional_media_roots=_agent_configured_media_roots,
+)
+
 _studio_job_archive = StudioJobArchive(Path(_app_dir) / "settings" / "studio_queue")
-_jobs: dict = _studio_job_archive.recover()
+_jobs: dict = _agent_access_backend.registry(_studio_job_archive.recover())
+
+
+def _agent_require_job_access(job_id: str) -> None:
+    _agent_access_backend.require_job_access(job_id)
+
+
+def _agent_access_idle_probe() -> dict:
+    try:
+        _init_pipeline()
+        import services.director_pipeline as _director_state
+
+        with _director_state._pipeline_lock:
+            pipeline_snapshot = [
+                {"status": record.get("status")} if isinstance(record, dict) else record
+                for record in _director_state._pipelines.values()
+            ]
+        if _director_state.any_pipeline_active():
+            pipeline_snapshot.append({"status": "running"})
+        queue_snapshot = _director_state.list_director_queue(
+            wgp.server_config.get("save_path", "outputs")
+        )
+        return AgentAccessBackend.idle_evidence(
+            jobs=_jobs,
+            engine_lock=_gen_lock,
+            active_states=_active_gen_states,
+            director_pipelines=pipeline_snapshot,
+            director_queue=queue_snapshot,
+            active_pipeline_statuses=tuple(_director_state._ACTIVE_PIPELINE_STATUSES),
+        )
+    except Exception:
+        return {"idle": False, "certain": False, "reason": "Backend busy state could not be verified"}
+
+
+def _agent_require_director_pipeline(pid: str, record: dict | None = None) -> None:
+    principal = principal_context.get()
+    if not _is_restricted_agent(principal):
+        return
+    if _agent_access_backend.can_access_resource("pipeline", pid, principal):
+        return
+    _init_pipeline()
+    import services.director_pipeline as _director_state
+
+    source = record
+    if source is not None:
+        params = source.get("params") if isinstance(source.get("params"), dict) else {}
+        if not params and not source.get("queue_entry_id"):
+            source = None
+    if source is None:
+        source = _director_state.get_pipeline(pid)
+    if source is None:
+        source = _director_state.load_pipeline_state(
+            wgp.server_config.get("save_path", "outputs"), pid,
+        )
+    source = source if isinstance(source, dict) else {}
+    params = source.get("params") if isinstance(source.get("params"), dict) else {}
+    queue_id = params.get("_director_queue_entry_id") or source.get("queue_entry_id")
+    _agent_access_backend.inherit_pipeline_queue_owner(pid, queue_id)
+    _agent_access_backend.require_resource_access("pipeline", pid, principal)
+
+
+def _agent_require_queue_collection(queue_state: dict, statuses=None) -> None:
+    principal = principal_context.get()
+    if not _is_restricted_agent(principal):
+        return
+    entries = queue_state.get("entries") if isinstance(queue_state, dict) else None
+    if not isinstance(entries, list):
+        raise HTTPException(503, "Director queue ownership could not be verified")
+    status_set = set(statuses or ())
+    ids = []
+    known_statuses = _AGENT_QUEUE_PENDING_STATUSES | _AGENT_QUEUE_TERMINAL_STATUSES
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise HTTPException(503, "Director queue ownership could not be verified")
+        entry_id = entry.get("id")
+        status = str(entry.get("status") or "").casefold()
+        if not isinstance(entry_id, str) or not entry_id or status not in known_statuses:
+            raise HTTPException(503, "Director queue ownership could not be verified")
+        if not status_set or status in status_set:
+            ids.append(entry_id)
+    _agent_access_backend.require_collection_access("queue", ids, principal)
+
+
+def _agent_filter_director_queue(queue_state: dict) -> dict:
+    result = dict(queue_state)
+    entries = result.get("entries")
+    principal = principal_context.get()
+    if _is_restricted_agent(principal) and isinstance(entries, list):
+        visible = []
+        hidden_busy = False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = entry.get("id")
+            if isinstance(entry_id, str) and _agent_access_backend.can_access_resource("queue", entry_id, principal):
+                visible.append(entry)
+            elif str(entry.get("status") or "").casefold() in {"held", "queued", "running"}:
+                hidden_busy = True
+        result["entries"] = visible
+        result["other_work_pending"] = hidden_busy
+    return result
+
+
+api.include_router(_create_agent_access_router(
+    _agent_access_backend,
+    prepare_generation=lambda body, **kwargs: _prepare_generation_submission(body, **kwargs),
+    native_upload=lambda request, file, **kwargs: upload_image(request, file, **kwargs),
+    idle_probe=lambda: _agent_access_idle_probe(),
+))
+
+
 register_terminal_listener(_studio_job_archive.save)
 register_terminal_listener(lambda job, status: _generation_previews.clear(str(job.get("id") or "")))
+
+
+def _persist_agent_terminal_job(job: dict, _status: str) -> None:
+    try:
+        _agent_access_backend.snapshot_job(str(job.get("id") or ""))
+    except Exception:
+        pass
+
+
+register_terminal_listener(_persist_agent_terminal_job)
 _studio_submission_lock = threading.RLock()
+_agent_queue_submission_lock = asyncio.Lock()
 _gen_lock = threading.Lock()
 configure_generation_probe_lock(_gen_lock)
 
@@ -610,7 +761,8 @@ _pipeline_initialized = False
 def _init_pipeline():
     global _pipeline_initialized
     if not _pipeline_initialized:
-        from services.director_pipeline import init as pipeline_init
+        import services.director_pipeline as _director_state
+        pipeline_init = _director_state.init
         pipeline_init(
             _jobs,
             _run_generation,
@@ -620,6 +772,73 @@ def _init_pipeline():
             terminal_callback=_on_director_pipeline_terminal,
             queue_terminal_callback=_on_director_queue_terminal,
         )
+        original_start_worker = _director_state._start_pipeline_worker
+        if not getattr(original_start_worker, "_agent_access_owner_hook", False):
+            def _start_pipeline_worker_with_agent_owner(pid, *args, **kwargs):
+                principal_id = None
+                session_id = None
+                queue_id = None
+                changed = False
+                with _director_state._pipeline_lock:
+                    pipeline = _director_state._pipelines.get(pid)
+                    params = pipeline.get("params") if isinstance(pipeline, dict) else None
+                    if isinstance(params, dict):
+                        principal_id = params.pop("_agent_access_owner_id", None)
+                        session_id = params.pop("_agent_access_session_id", None)
+                        queue_id = params.get("_director_queue_entry_id")
+                        changed = principal_id is not None or session_id is not None
+                owner = None
+                try:
+                    if isinstance(principal_id, str) and principal_id:
+                        queue_session_id = session_id or _agent_access_backend.session_id
+                        if isinstance(queue_id, str) and queue_id:
+                            _agent_access_backend.journal.register_resource_owner(
+                                "queue", queue_id, principal_id, queue_session_id,
+                            )
+                        owner = {
+                            "principal_id": principal_id,
+                            "session_id": _agent_access_backend.session_id,
+                        }
+                    elif isinstance(queue_id, str) and queue_id:
+                        existing_pipeline_owner = _agent_access_backend.journal.resource_owner("pipeline", pid)
+                        if existing_pipeline_owner is not None:
+                            # Resuming a durable pipeline keeps its original immutable
+                            # owner/session; child jobs still belong to this process run.
+                            owner = existing_pipeline_owner
+                        else:
+                            queue_owner = _agent_access_backend.journal.resource_owner("queue", queue_id)
+                            if queue_owner is not None:
+                                owner = {
+                                    "principal_id": queue_owner["principal_id"],
+                                    "session_id": _agent_access_backend.session_id,
+                                }
+                    if owner is not None:
+                        _agent_access_backend.journal.register_resource_owner(
+                            "pipeline", pid, owner["principal_id"], owner.get("session_id"),
+                        )
+                except Exception:
+                    if (
+                        owner is not None
+                        or (isinstance(principal_id, str) and principal_id)
+                        or (isinstance(queue_id, str) and queue_id)
+                    ):
+                        with _director_state._pipeline_lock:
+                            pipeline = _director_state._pipelines.get(pid)
+                            if isinstance(pipeline, dict):
+                                pipeline.update(
+                                    status="failed",
+                                    phase="failed",
+                                    error="Could not persist Director ownership",
+                                    _completed_at=time.time(),
+                                )
+                        _director_state._save_pipeline_state(pid)
+                    raise
+                if changed:
+                    _director_state._save_pipeline_state(pid)
+                return original_start_worker(pid, *args, **kwargs)
+
+            _start_pipeline_worker_with_agent_owner._agent_access_owner_hook = True
+            _director_state._start_pipeline_worker = _start_pipeline_worker_with_agent_owner
         _pipeline_initialized = True
 
 
@@ -10679,24 +10898,47 @@ def director_queue_list():
     _init_pipeline()
     from services.director_pipeline import list_director_queue
     base = wgp.server_config.get("save_path", "outputs")
-    return list_director_queue(base)
+    return _agent_filter_director_queue(list_director_queue(base))
 
 
 @api.post("/api/v1/director/queue")
 async def director_queue_add(request: Request):
     """Freeze a Director project revision in the held queue."""
     _init_pipeline()
-    from services.director_pipeline import enqueue_director_pipeline
+    from services.director_pipeline import enqueue_director_pipeline, list_director_queue
     body = await request.json()
     params = body.get("params") if isinstance(body, dict) else None
     if not isinstance(params, dict):
         raise HTTPException(status_code=400, detail="Director queue params are required")
+    params = _strip_private_director_fields(params)
+    principal = principal_context.get()
+    if isinstance(getattr(principal, "id", None), str):
+        params["_agent_access_owner_id"] = principal.id
+        params["_agent_access_session_id"] = _agent_access_backend.session_id
     base = wgp.server_config.get("save_path", "outputs")
     try:
         # Freezing a project can copy a full music track and many references.
         # Keep that durable snapshot work off FastAPI's event loop so status,
         # cancel, and system-stat requests remain responsive.
-        return await asyncio.to_thread(enqueue_director_pipeline, base, params)
+        async with _agent_queue_submission_lock:
+            before = list_director_queue(base)
+            previous_ids = {
+                str(entry.get("id")) for entry in before.get("entries", [])
+                if isinstance(entry, dict) and entry.get("id")
+            }
+            result = await asyncio.to_thread(enqueue_director_pipeline, base, params)
+            new_ids = [
+                str(entry.get("id")) for entry in result.get("entries", [])
+                if isinstance(entry, dict) and entry.get("id") and str(entry.get("id")) not in previous_ids
+            ]
+            principal = principal_context.get()
+            if len(new_ids) == 1:
+                _agent_access_backend.bind_queue_owner(
+                    new_ids[0], getattr(principal, "id", None),
+                )
+            elif _is_restricted_agent(principal):
+                raise HTTPException(503, "Director queue ownership could not be recorded")
+            return _agent_filter_director_queue(result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -10704,39 +10946,48 @@ async def director_queue_add(request: Request):
 @api.post("/api/v1/director/queue/start")
 def director_queue_start():
     _init_pipeline()
-    from services.director_pipeline import start_director_queue
+    from services.director_pipeline import list_director_queue, start_director_queue
     base = wgp.server_config.get("save_path", "outputs")
-    return start_director_queue(base)
+    current = list_director_queue(base)
+    _agent_require_queue_collection(current, {"held", "queued", "running"})
+    return _agent_filter_director_queue(start_director_queue(base))
 
 
 @api.post("/api/v1/director/queue/pause")
 def director_queue_pause():
     _init_pipeline()
-    from services.director_pipeline import pause_director_queue
+    from services.director_pipeline import list_director_queue, pause_director_queue
     base = wgp.server_config.get("save_path", "outputs")
-    return pause_director_queue(base)
+    current = list_director_queue(base)
+    _agent_require_queue_collection(current, {"queued", "running"})
+    return _agent_filter_director_queue(pause_director_queue(base))
 
 
 @api.post("/api/v1/director/queue/reorder")
 async def director_queue_reorder(request: Request):
     _init_pipeline()
-    from services.director_pipeline import reorder_director_queue
+    from services.director_pipeline import list_director_queue, reorder_director_queue
     body = await request.json()
     entry_ids = body.get("entry_ids") if isinstance(body, dict) else None
     if not isinstance(entry_ids, list) or not all(isinstance(item, str) for item in entry_ids):
         raise HTTPException(status_code=400, detail="entry_ids must be a list of queue IDs")
     base = wgp.server_config.get("save_path", "outputs")
-    return reorder_director_queue(base, entry_ids)
+    current = list_director_queue(base)
+    _agent_require_queue_collection(current)
+    return _agent_filter_director_queue(reorder_director_queue(base, entry_ids))
 
 
 @api.get("/api/v1/director/queue/{entry_id}")
 def director_queue_get(entry_id: str):
     _init_pipeline()
     from services.director_pipeline import get_director_queue_entry
+    _agent_access_backend.require_resource_access("queue", entry_id)
     base = wgp.server_config.get("save_path", "outputs")
     entry = get_director_queue_entry(base, entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Director queue entry not found")
+    if isinstance(entry.get("params"), dict):
+        entry["params"] = _strip_private_director_fields(entry["params"])
     return entry
 
 
@@ -10752,11 +11003,18 @@ async def director_queue_update(entry_id: str, request: Request):
     params = body.get("params") if isinstance(body, dict) else None
     if not isinstance(params, dict):
         raise HTTPException(status_code=400, detail="Director queue params are required")
+    params = _strip_private_director_fields(params)
+    _agent_access_backend.require_resource_access("queue", entry_id)
+    old_owner = _agent_access_backend.resource_owner("queue", entry_id)
+    if old_owner is not None:
+        params["_agent_access_owner_id"] = old_owner["principal_id"]
+        params["_agent_access_session_id"] = old_owner.get("session_id")
     base = wgp.server_config.get("save_path", "outputs")
     try:
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             update_director_queue_entry, base, entry_id, params,
         )
+        return _agent_filter_director_queue(result)
     except PipelineBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -10770,6 +11028,7 @@ def director_queue_delete(entry_id: str, completed_only: bool = False):
         PipelineBusyError,
         remove_director_queue_entry,
     )
+    _agent_access_backend.require_resource_access("queue", entry_id)
     base = wgp.server_config.get("save_path", "outputs")
     try:
         removed = remove_director_queue_entry(base, entry_id, completed_only=completed_only)
@@ -10787,17 +11046,23 @@ async def director_pipeline_start(request: Request):
     """
     _init_pipeline()
     from services.director_pipeline import start_pipeline
-    body = await request.json()
+    body = _strip_private_director_fields(await request.json())
+    principal = principal_context.get()
+    if isinstance(getattr(principal, "id", None), str):
+        body["_agent_access_owner_id"] = principal.id
+        body["_agent_access_session_id"] = _agent_access_backend.session_id
     try:
         pid = await asyncio.to_thread(start_pipeline, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _agent_access_backend.bind_pipeline_owner(pid, getattr(principal, "id", None))
     return {"pipeline_id": pid}
 
 
 @api.get("/api/v1/director/pipeline/{pid}")
 def director_pipeline_status(pid: str):
     """Get current pipeline status with rich progress info."""
+    _agent_require_director_pipeline(pid)
     from services.director_pipeline import get_pipeline_status
     base = wgp.server_config.get("save_path", "outputs")
     p = get_pipeline_status(pid, base)
@@ -10818,6 +11083,7 @@ def director_pipeline_status(pid: str):
 @api.get("/api/v1/director/pipeline/{pid}/llm-drafts")
 def director_pipeline_drafts(pid: str):
     """Load full writer evidence only when requested, not on each status poll."""
+    _agent_require_director_pipeline(pid)
     from services.director_pipeline import get_pipeline_drafts
     drafts = get_pipeline_drafts(pid, wgp.server_config.get("save_path", "outputs"))
     if drafts is None:
@@ -10828,6 +11094,7 @@ def director_pipeline_drafts(pid: str):
 @api.post("/api/v1/director/pipeline/{pid}/continue")
 async def director_pipeline_continue(pid: str, request: Request):
     """Resume a paused pipeline, optionally with updated clip plans."""
+    _agent_require_director_pipeline(pid)
     _init_pipeline()
     from services.director_pipeline import continue_pipeline
     body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
@@ -10840,6 +11107,7 @@ async def director_pipeline_continue(pid: str, request: Request):
 @api.post("/api/v1/director/pipeline/{pid}/stop")
 def director_pipeline_stop(pid: str):
     """Cancel a running pipeline."""
+    _agent_require_director_pipeline(pid)
     from services.director_pipeline import get_pipeline, stop_pipeline
     if stop_pipeline(pid):
         current = get_pipeline(pid) or {}
@@ -10862,6 +11130,7 @@ def director_pipeline_resume(pid: str):
     before the crash, then re-runs video generation — so a mid-run backend
     crash doesn't throw away completed LLM work.
     """
+    _agent_require_director_pipeline(pid)
     _init_pipeline()
     from services.director_pipeline import resume_pipeline
     base = wgp.server_config.get("save_path", "outputs")
@@ -10879,6 +11148,20 @@ def list_saved_pipelines():
     from services.director_pipeline import list_pipeline_states
     base = wgp.server_config.get("save_path", "outputs")
     pipelines = list_pipeline_states(base)
+    principal = principal_context.get()
+    if _is_restricted_agent(principal):
+        visible = []
+        for pipeline in pipelines:
+            pipeline_id = str(pipeline.get("id") or "")
+            try:
+                _agent_require_director_pipeline(pipeline_id)
+            except HTTPException as error:
+                if error.status_code == 404:
+                    continue
+                raise
+            if _agent_access_backend.can_access_resource("pipeline", pipeline_id, principal):
+                visible.append(pipeline)
+        pipelines = visible
     for pipeline in pipelines:
         if pipeline.get("output_count") or pipeline.get("clip_count"):
             pipeline["thumbnail_url"] = (
@@ -10890,6 +11173,7 @@ def list_saved_pipelines():
 @api.get("/api/v1/director/pipelines/{pid}/thumbnail")
 def get_saved_pipeline_thumbnail(pid: str):
     """Serve a cached first frame for the Editor's Director-run gallery."""
+    _agent_require_director_pipeline(pid)
     from services.director_pipeline import build_pipeline_first_frame_thumbnail
     base = wgp.server_config.get("save_path", "outputs")
     thumbnail = build_pipeline_first_frame_thumbnail(base, pid)
@@ -10906,12 +11190,14 @@ def get_saved_pipeline(pid: str):
     state = load_pipeline_state(base, pid)
     if not state:
         return JSONResponse({"error": "Pipeline not found"}, status_code=404)
+    _agent_require_director_pipeline(pid, state)
     return state
 
 
 @api.put("/api/v1/director/pipelines/{pid}/clips/{clip_index}/tag")
 async def tag_pipeline_clip(pid: str, clip_index: int, request: Request):
     """Tag a clip as 'good', 'needs_work', or null."""
+    _agent_require_director_pipeline(pid)
     from services.director_pipeline import PipelineBusyError, update_clip_tag
     body = await request.json()
     tag = body.get("tag")
@@ -10928,6 +11214,7 @@ async def tag_pipeline_clip(pid: str, clip_index: int, request: Request):
 @api.put("/api/v1/director/pipelines/{pid}/clips/{clip_index}/prompt")
 async def save_pipeline_clip_prompt(pid: str, clip_index: int, request: Request):
     """Persist reviewed clip prompts without starting generation."""
+    _agent_require_director_pipeline(pid)
     from services.director_pipeline import PipelineBusyError, update_clip_prompt
     try:
         body = await request.json()
@@ -10952,6 +11239,7 @@ async def save_pipeline_clip_prompt(pid: str, clip_index: int, request: Request)
 @api.post("/api/v1/director/pipelines/{pid}/repair")
 def repair_saved_pipeline(pid: str):
     """Start a browser-independent missing-media repair and final rejoin."""
+    _agent_require_director_pipeline(pid)
     _init_pipeline()
     from services.director_pipeline import (
         PipelineBusyError,
@@ -10973,6 +11261,7 @@ def repair_saved_pipeline(pid: str):
 @api.post("/api/v1/director/pipelines/{pid}/repair/cancel")
 def cancel_saved_pipeline_repair(pid: str):
     """Cancel a server-owned repair and its current generation child."""
+    _agent_require_director_pipeline(pid)
     _init_pipeline()
     from services.director_pipeline import cancel_pipeline_repair
     base = wgp.server_config.get("save_path", "outputs")
@@ -10987,6 +11276,7 @@ def cancel_saved_pipeline_repair(pid: str):
 @api.post("/api/v1/director/pipelines/{pid}/clips/{clip_index}/rerun-image")
 async def rerun_pipeline_clip_image(pid: str, clip_index: int, request: Request):
     """Re-generate the start image for a specific clip in a saved pipeline."""
+    _agent_require_director_pipeline(pid)
     _init_pipeline()
     from services.director_pipeline import (
         GenerationCancelledError,
@@ -11026,6 +11316,7 @@ async def rerun_pipeline_clip_image(pid: str, clip_index: int, request: Request)
 @api.post("/api/v1/director/pipelines/{pid}/clips/{clip_index}/rerun-video")
 async def rerun_pipeline_clip_video(pid: str, clip_index: int, request: Request):
     """Re-generate the video for a specific clip in a saved pipeline."""
+    _agent_require_director_pipeline(pid)
     _init_pipeline()
     from services.director_pipeline import (
         GenerationCancelledError,
@@ -11061,6 +11352,7 @@ async def rerun_pipeline_clip_video(pid: str, clip_index: int, request: Request)
 @api.post("/api/v1/director/pipelines/{pid}/rejoin")
 async def rejoin_pipeline_clips(pid: str):
     """Re-join all clips from a saved pipeline using current best versions."""
+    _agent_require_director_pipeline(pid)
     _init_pipeline()
     from services.director_pipeline import PipelineBusyError, rejoin_clips
     base = wgp.server_config.get("save_path", "outputs")
@@ -11078,6 +11370,7 @@ async def rejoin_pipeline_clips(pid: str):
 @api.delete("/api/v1/director/pipelines/{pid}")
 def delete_pipeline_endpoint(pid: str):
     """Delete a saved pipeline and all media it produced (any workspace)."""
+    _agent_require_director_pipeline(pid)
     _init_pipeline()
     from services.director_pipeline import delete_pipeline
     base = wgp.server_config.get("save_path", "outputs")
@@ -11552,6 +11845,11 @@ async def _prepare_generation_submission(
     """Normalize/plan a request, then submit it or return prepared params."""
 
     body = dict(body)
+    principal = principal_context.get()
+    if principal is not None and not getattr(principal, "owner", False):
+        # These IDs are written only by trusted Director route code. A grant
+        # must not claim an existing pipeline or queue entry through JSON.
+        body = _strip_private_director_fields(body)
     correlation = _pop_editor_submission(body)
     editor_operation_id = (correlation or {}).get("editor_operation_id")
     if prepare_only and editor_operation_id:
@@ -30314,6 +30612,7 @@ def _director_job_response_fields(job_snapshot: dict) -> dict:
 @api.get("/api/v1/status/{job_id}")
 def get_status(job_id: str):
     """Get generation job status."""
+    _agent_require_job_access(job_id)
     if job_id not in _jobs:
         raise HTTPException(status_code=404, detail="Job not found")
     j = snapshot_job(_jobs[job_id])
@@ -30354,6 +30653,7 @@ def get_status(job_id: str):
 
 @api.get("/api/v1/jobs/{job_id}/preview/{revision}")
 def get_generation_preview(job_id: str, revision: int, request: Request):
+    _agent_require_job_access(job_id)
     job = _jobs.get(job_id)
     if not job or job.get("status") != "running" or is_cancel_requested(job):
         raise HTTPException(status_code=404, detail="Preview is no longer available")
@@ -30365,6 +30665,7 @@ def get_generation_preview(job_id: str, revision: int, request: Request):
 
 @api.get("/api/v1/jobs/{job_id}/enhancement")
 def get_job_enhancement(job_id: str):
+    _agent_require_job_access(job_id)
     job = _jobs.get(job_id)
     if not job or not job.get("enhancement"):
         raise HTTPException(404, "Enhanced job not found")
@@ -30376,6 +30677,7 @@ def get_job_enhancement(job_id: str):
 
 @api.post("/api/v1/jobs/{job_id}/retry")
 async def retry_enhanced_job(job_id: str, request: Request):
+    _agent_require_job_access(job_id)
     body = await request.json()
     action = body.get("action", "retry")
     if action not in {"retry", "refresh", "as_written", "accept_draft"}:
@@ -30439,6 +30741,7 @@ async def retry_enhanced_job(job_id: str, request: Request):
 @api.post("/api/v1/cancel/{job_id}")
 def cancel_job(job_id: str):
     """Cancel a held, queued, or running generation job."""
+    _agent_require_job_access(job_id)
     if job_id not in _jobs:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -30530,6 +30833,7 @@ api.include_router(create_worlds_router(
 
 @api.delete("/api/v1/jobs/{job_id}")
 def dismiss_studio_job(job_id: str):
+    _agent_require_job_access(job_id)
     job = _jobs.get(job_id)
     if not job:
         return {"dismissed": True}
@@ -30600,6 +30904,16 @@ def _start_held_studio_queue() -> list[str]:
 @api.post("/api/v1/jobs/queue/start")
 def start_studio_queue():
     """Release held Studio jobs without disturbing an active generation."""
+    principal = principal_context.get()
+    if _is_restricted_agent(principal):
+        foreign_held = [
+            job_id for job_id, job in list(_jobs.items())
+            if isinstance(job, dict)
+            and str(job.get("status") or "").casefold() == "held"
+            and not _agent_access_backend.can_access_job(job_id, principal)
+        ]
+        if foreign_held:
+            raise HTTPException(403, "The Studio queue also contains work owned by another client")
     released = _start_held_studio_queue()
     return {
         "status": "started" if released else "idle",
@@ -30613,7 +30927,12 @@ def job_by_submission(client_submission_id: str):
     """Recover an exact receipt even after a job left the active queue."""
     if not client_submission_id or len(client_submission_id) > 160:
         raise HTTPException(400, "Invalid client submission identity")
-    matches = [job for job in list(_jobs.values()) if job.get("client_submission_id") == client_submission_id]
+    principal = principal_context.get()
+    matches = [
+        job for job_id, job in list(_jobs.items())
+        if job.get("client_submission_id") == client_submission_id
+        and _agent_access_backend.can_access_job(job_id, principal)
+    ]
     if not matches:
         raise HTTPException(404, "Submission receipt not found")
     if len(matches) != 1:
@@ -30624,8 +30943,12 @@ def job_by_submission(client_submission_id: str):
 @api.get("/api/v1/jobs")
 def list_jobs():
     """List all active/recent jobs for reconnection after browser refresh."""
+    principal = principal_context.get()
+    restricted = _is_restricted_agent(principal)
     active = []
-    for job in list(_jobs.values()):
+    for job_id, job in list(_jobs.items()):
+        if restricted and not _agent_access_backend.can_access_job(job_id, principal):
+            continue
         j = snapshot_job(job)
         if j.get("dismissed"):
             continue
@@ -30666,7 +30989,12 @@ def list_jobs():
                 "ltx_window_plan": j.get("ltx_window_plan"),
             })
     active.sort(key=lambda x: x["created_at"])
-    return {"jobs": active}
+    global_busy = bool(
+        _gen_lock.locked()
+        or _active_gen_states
+        or any(str(job.get("status", "")).casefold() in {"held", "queued", "running"} for job in _jobs.values())
+    )
+    return {"jobs": active, "busy": global_busy}
 
 
 # ============================================================================
@@ -32683,6 +33011,20 @@ if __name__ == "__main__":
         )
         port = resolved_port
 
+    _agent_backend_url = f"http://127.0.0.1:{port}"
+    _agent_launcher_script = os.environ.get("MAESTRO_LAUNCHER_SCRIPT", "").strip()
+    if _agent_launcher_script not in {"start.js", "start_sol.js", "start_classic.js"}:
+        _agent_launcher_script = (
+            "start_sol.js" if os.environ.get("MAESTRO_SOL_RUNTIME") == "1" else "start.js"
+        )
+    _agent_access_runtime.register_backend(
+        _agent_backend_url,
+        ready=False,
+        session_id=_agent_access_backend.session_id,
+        launcher_script=_agent_launcher_script,
+    )
+    _agent_access_backend.start_snapshotter()
+
     # Recreate the manager with the reserved port. Refresh an existing opted-in
     # route only after API startup succeeds; local startup never requires it.
     _tailscale = TailscaleManager(_maestro_settings_dir, port)
@@ -32696,6 +33038,12 @@ if __name__ == "__main__":
 
     def _announce_ready(_server):
         _tailscale.refresh_if_enabled()
+        _agent_access_runtime.register_backend(
+            _agent_backend_url,
+            ready=True,
+            session_id=_agent_access_backend.session_id,
+            launcher_script=_agent_launcher_script,
+        )
         print(f"\n{'='*50}")
         print(f"  Maestro UI:    http://{display_host}:{port}/")
         # Trailing slash required: the Gradio submount 404s the bare path.
@@ -32708,8 +33056,19 @@ if __name__ == "__main__":
     # Confirm the polling filter immediately before Uvicorn configures logging.
     install_quiet_access_filter()
 
+    # The same authenticated boundary wraps API routes, static media, the
+    # React app, classic UI mounts, and every WebSocket before the server starts.
+    _authenticated_app = AccessBoundary(
+        api,
+        runtime=_agent_access_runtime,
+        journal=_agent_access_backend.journal,
+        app_root=Path(_app_dir),
+        asset_resolver=_agent_access_backend.asset_store.resolve_tree,
+        additional_media_roots=_agent_configured_media_roots,
+    )
+
     try:
-        run_reserved_server(api, host=host, server_socket=server_socket, on_ready=_announce_ready)
+        run_reserved_server(_authenticated_app, host=host, server_socket=server_socket, on_ready=_announce_ready)
     except OSError as e:
         print(
             f"\n[Maestro] ERROR: could not start the API on {host}:{port} ({e}). "
@@ -32717,3 +33076,8 @@ if __name__ == "__main__":
             flush=True,
         )
         sys.exit(1)
+    finally:
+        _agent_access_backend.shutdown(
+            _agent_backend_url,
+            launcher_script=_agent_launcher_script,
+        )

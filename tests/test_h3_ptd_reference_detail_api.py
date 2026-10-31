@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "app"
 if str(APP) not in sys.path:
     sys.path.insert(0, str(APP))
+from services.agent_access.context import principal_context
 
 
 class HTTPError(Exception):
@@ -68,6 +69,7 @@ def _load_prepare_route():
     namespace = {
         "HTTPException": HTTPError,
         "asyncio": asyncio,
+        "principal_context": principal_context,
         "_stamp_live_generation_settings_version": lambda _body: None,
         "_is_minimax_h3_identity": lambda *_args: False,
         "_recommended_minimax_h3_encoder": (

@@ -1,0 +1,11 @@
+# CPU-only control plane, installed in app/env-agent by Pinokio.
+# Keep this separate from the pinned Pydantic/model environment.
+mcp==2.3.0
+fastapi==0.141.1
+starlette==0.52.1
+pydantic==2.14.2
+httpx==0.28.1
+uvicorn==0.52.1
+cryptography==50.0.0
+zeroconf==0.152.0
+websockets==17.4

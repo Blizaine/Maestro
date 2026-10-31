@@ -24,6 +24,14 @@ module.exports = async (kernel) => {
         method: "local.rm",
         params: ["url", "port"],
     }, {
+      // Keep the CPU-only control plane in its own Pinokio daemon. This is
+      // best-effort so Agent Access startup never blocks the model engine.
+      method: "shell.run",
+      params: {
+        path: ".",
+        message: ["node scripts/pinokio/agent_access_rpc.js autostart"],
+      },
+    }, {
       when: `{{!exists('${runtime.marker}')}}`,
       method: "input",
       params: {
@@ -75,6 +83,7 @@ module.exports = async (kernel) => {
         env: {
           SERVER_PORT: port,
           MAESTRO_SOL_RUNTIME: "1",
+          MAESTRO_LAUNCHER_SCRIPT: "start_sol.js",
         },
         path: "app",
         message: [
