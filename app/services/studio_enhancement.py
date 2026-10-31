@@ -204,6 +204,31 @@ def public_enhancement(record: dict | None, *, summary: bool = False, include_dr
     return {key: deepcopy(record.get(key)) for key in keys}
 
 
+def canonical_h3_enhancement_inputs(prompt: str, references) -> dict:
+    """Build writer inputs from the same reference bindings used by generation.
+
+    Browser prose is useful for older clients, but it must not override the
+    selected media's identity, scene, composition or voice associations.
+    """
+    from models.minimax_h3.ref2va import align_ref2va_voice_reference_order
+    from models.minimax_h3.reference_manifest import validate_reference_manifest
+    from services.h3_reference_audio import measure_video_audio_metadata
+    from services.h3_sequence_planner import _reference_context
+
+    validated = validate_reference_manifest(
+        references, require_files=False, require_visual=False, allow_empty=True,
+    )
+    measured = measure_video_audio_metadata(validated)
+    aligned_prompt, ordered, _remap = align_ref2va_voice_reference_order(prompt, measured)
+    relationships, retention, _task_types = _reference_context(ordered)
+    return {
+        "prompt": aligned_prompt,
+        "minimax_h3_references": ordered,
+        "image_paths": [item["path"] for item in ordered if item.get("type") == "image" and item.get("path")],
+        "reference_context": "\n".join(part for part in (relationships, retention) if part),
+    }
+
+
 def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
     """Construct the same native writer inputs used by interactive Enhance."""
     mode = params.get("generation_mode") or ("image" if model.get("image_outputs") else "video")
@@ -220,15 +245,13 @@ def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
         params.get("ltx_multi_window") and total > window)
     images: list[str] = []
     context: list[str] = []
+    native_reference_inputs: dict = {}
     if omni:
-        from services.h3_sequence_planner import _reference_context
-        from models.minimax_h3.ref2va import canonicalize_ref2va_reference_order
-        from services.h3_reference_audio import measure_video_audio_metadata
-        references = measure_video_audio_metadata(params.get("minimax_h3_references") or [])
-        _, references, _ = canonicalize_ref2va_reference_order("", references)
-        relationships, retention, _ = _reference_context(references)
-        context.extend([relationships, retention])
-        images.extend(ref["path"] for ref in references if ref.get("type") == "image" and ref.get("path"))
+        native_reference_inputs = canonical_h3_enhancement_inputs(
+            str(params.get("prompt") or ""), params.get("minimax_h3_references") or [],
+        )
+        context.append(native_reference_inputs["reference_context"])
+        images.extend(native_reference_inputs["image_paths"])
     elif mode == "image":
         if params.get("image_guide") and "V" in str(params.get("video_prompt_type") or ""):
             images.append(params["image_guide"])
@@ -264,6 +287,7 @@ def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
         "image_paths": images, "reference_context": "\n".join(context),
         "activated_loras": deepcopy(params.get("activated_loras") or []),
     }
+    payload.update(native_reference_inputs)
     return payload, sequence
 
 

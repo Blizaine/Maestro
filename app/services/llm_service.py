@@ -5614,6 +5614,17 @@ def _build_h3_dialogue_requirement(
     return ""
 
 
+def _h3_dialogue_comparison_text(value: str) -> str:
+    """Ignore layout whitespace without changing spoken words or punctuation."""
+    return " ".join(str(value or "").split())
+
+
+def _h3_dialogue_words_pattern(value: str) -> str:
+    """Match incidental line wrapping or spacing inside an exact speech span."""
+    import re
+    return r"\s+".join(re.escape(word) for word in str(value or "").split())
+
+
 def _h3_dialogue_contract_satisfied(prompt: str, result: str) -> bool:
     import re
     from services.dialogue_writing import dialogue_forbidden
@@ -5624,7 +5635,11 @@ def _h3_dialogue_contract_satisfied(prompt: str, result: str) -> bool:
     has_speaker_id = bool(re.search(r"\(S\d+\)", str(result or "")))
     if quotes:
         return has_speaker_id and all(
-            any(entry_language == language and words == line for entry_language, words in entries)
+            any(
+                entry_language == language
+                and _h3_dialogue_comparison_text(words) == _h3_dialogue_comparison_text(line)
+                for entry_language, words in entries
+            )
             for line in quotes
         )
     if dialogue_forbidden(prompt):
@@ -6109,7 +6124,9 @@ def _h3_context_speaker_binding_plan(
         return plan
     if len(result_entries) != len(source_entries):
         return None
-    if [str(entry["words"]).strip() for entry in result_entries] != expected_words:
+    if [_h3_dialogue_comparison_text(entry["words"]) for entry in result_entries] != [
+        _h3_dialogue_comparison_text(words) for words in expected_words
+    ]:
         return None
     matches = list(re.finditer(
         r"<d>\s*\[([^\]\r\n]+)\]\s*((?:(?!<d>).)*?)\s*</d>",
@@ -6179,7 +6196,7 @@ def _h3_context_speaker_binding_plan(
         language = _canonical_h3_language_tag(match.group(1) or "")
         if language != _canonical_h3_language_tag(expected.get("language") or ""):
             return None
-        if (match.group(2) or "").strip() != str(expected["words"]).strip():
+        if _h3_dialogue_comparison_text(match.group(2)) != _h3_dialogue_comparison_text(expected["words"]):
             return None
         expected_id = int(expected.get("speaker_id") or 0)
         if expected_id <= 0:
@@ -7525,7 +7542,7 @@ def _canonicalize_h3_ref2va_dialogue_speakers(
         speaker_id = entry.get("speaker_id")
         if not speaker_id:
             continue
-        words_pattern = re.escape(str(entry["words"])).replace(r"\ ", r"\s+")
+        words_pattern = _h3_dialogue_words_pattern(entry["words"])
         match = re.compile(
             rf"<d>\s*\[[^\]]+\]\s*{words_pattern}\s*</d>",
             flags=re.DOTALL | re.IGNORECASE,
@@ -7793,8 +7810,8 @@ def _h3_ref2va_dialogue_binding_contract_satisfied(
         # the full ordered tag sequence; the owner loop below alone would allow
         # extra, duplicated, or reordered guest lines after the required turns.
         if only_supplied_dialogue_requested(prompt) and [
-            str(entry["words"]) for entry in result_entries
-        ] != [str(entry["words"]) for entry in source_entries]:
+            _h3_dialogue_comparison_text(entry["words"]) for entry in result_entries
+        ] != [_h3_dialogue_comparison_text(entry["words"]) for entry in source_entries]:
             return False
     definitions_match = re.search(
         r"(?ms)^\s*subject_definitions\s*:(.*?)(?=^\s*summary\s*:)", text
@@ -7805,7 +7822,7 @@ def _h3_ref2va_dialogue_binding_contract_satisfied(
         speaker_id = entry.get("speaker_id")
         if not speaker_id:
             continue
-        words_pattern = re.escape(str(entry["words"])).replace(r"\ ", r"\s+")
+        words_pattern = _h3_dialogue_words_pattern(entry["words"])
         match = re.compile(
             rf"<d>\s*\[[^\]]+\]\s*{words_pattern}\s*</d>",
             flags=re.DOTALL | re.IGNORECASE,

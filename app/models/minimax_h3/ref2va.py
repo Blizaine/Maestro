@@ -19,10 +19,13 @@ import numpy as np
 import torch
 from PIL import Image, ImageOps
 from .speakers import (
+    H3SpeakerBindingError,
     is_h3_spoken_quote,
+    is_h3_production_label,
     _REF2VA_CLIP_HEADING_RE,
     _REF2VA_SUBJECT_DEFINITIONS_RE,
     _ref2va_alias_values,
+    _resolve_ref2va_dialogue_owner_name,
     _resolve_ref2va_dialogue_owners,
     resolve_ref2va_dialogue_owners,
 )
@@ -565,7 +568,7 @@ def select_ref2va_window_voice_references(
     current prompt and their Audio ordinals are rebuilt atomically.
     """
 
-    source_prompt, items, _order_remap = canonicalize_ref2va_reference_order(
+    source_prompt, items, _order_remap = align_ref2va_voice_reference_order(
         prompt,
         references,
     )
@@ -702,21 +705,350 @@ def _remap_ref2va_reference_labels(
     return _remap_ref2va_audio_labels(source, ordinal_maps.get("Audio", {}))
 
 
+def _ref2va_reference_subject_layout(items: list[dict]):
+    """Return runtime Subject IDs, media ordinals, and identity aliases.
+
+    Character visuals are allocated by the runtime allocator first. Scene and
+    style images follow those subjects; composition and object images never
+    receive a Subject. Keeping this layout next to the runtime compiler lets
+    legacy prompts be reconciled using the same numbering contract.
+    """
+
+    (
+        character_reference_subjects,
+        character_subjects,
+        role_subjects,
+        speaker_aliases,
+        character_subject_count,
+    ) = _build_ref2va_character_bindings(items)
+
+    reference_subjects: dict[int, int | None] = {
+        index: character_reference_subjects.get(index)
+        for index in range(len(items))
+    }
+    subject_index = character_subject_count
+    picture_targets: dict[int, int | None] = {}
+    video_targets: dict[int, int | None] = {}
+    picture = video = 0
+    for index, item in enumerate(items):
+        kind = item.get("type")
+        target = reference_subjects.get(index)
+        if kind == "image":
+            picture += 1
+            intent = item.get("image_intent", "identity")
+            if intent in {"scene", "style"}:
+                subject_index += 1
+                target = subject_index
+                reference_subjects[index] = target
+            picture_targets[picture] = target
+        elif kind == "video":
+            video += 1
+            video_targets[video] = target
+
+    aliases: dict[str, set[int | None]] = {}
+    for index, item in enumerate(items):
+        target = reference_subjects.get(index)
+        if item.get("type") == "audio" and item.get("audio_intent", "voice") == "voice":
+            target = _ref2va_audio_item_subject(
+                item, character_subjects, role_subjects,
+            )
+        for alias in _ref2va_alias_values(item):
+            if not is_h3_production_label(alias):
+                aliases.setdefault(alias, set()).add(target)
+
+    return (
+        reference_subjects,
+        picture_targets,
+        video_targets,
+        aliases,
+        speaker_aliases,
+        character_subject_count,
+        character_subjects,
+        role_subjects,
+    )
+
+
+def _ref2va_identity_alias_targets(source: str, aliases: dict[str, set[int | None]]):
+    """Find exact known reference names mentioned in one declaration clause."""
+
+    targets: set[int | None] = set()
+    for alias, candidates in aliases.items():
+        if not alias or is_h3_production_label(alias):
+            continue
+        alias_pattern = r"[\s_-]*".join(re.escape(char) for char in alias)
+        if re.search(rf"(?<!\w){alias_pattern}(?!\w)", source, re.IGNORECASE):
+            targets.update(candidates)
+    return targets
+
+
+def _ref2va_subject_definition_end(source: str, start: int, limit: int) -> int:
+    """Find a declaration boundary without splitting common name titles."""
+
+    for match in re.finditer(r"[.;\r\n]", source[start:limit]):
+        if match.group(0) == ".":
+            prefix = source[start:start + match.end()]
+            if re.search(r"(?i)\b(?:dr|mr|mrs|ms|prof|sr|jr|st)\.$", prefix):
+                continue
+        return start + match.start()
+    return limit
+
+
+def _ref2va_subject_definition_bindings(
+    prompt: str,
+    picture_targets: dict[int, int | None],
+    video_targets: dict[int, int | None],
+    aliases: dict[str, set[int | None]],
+) -> dict[int, int | None]:
+    """Resolve explicit legacy Subject definitions against selected media.
+
+    ``(Sx)`` markers are deliberately ignored. A definition is useful only
+    when its known name or Picture/Video label identifies a selected
+    reference. If both forms of evidence are present they must agree.
+    """
+
+    field = _REF2VA_SUBJECT_DEFINITIONS_RE.search(str(prompt or ""))
+    if not field:
+        return {}
+    body = field.group(1)
+    declarations = list(re.finditer(r"<Subject\s+(\d+)>", body, re.IGNORECASE))
+    bindings: dict[int, int | None] = {}
+
+    for index, declaration in enumerate(declarations):
+        subject = int(declaration.group(1))
+        limit = declarations[index + 1].start() if index + 1 < len(declarations) else len(body)
+        end = _ref2va_subject_definition_end(body, declaration.end(), limit)
+        clause = body[declaration.start():end]
+
+        media_targets: set[int | None] = set()
+        for kind, targets in (("Picture", picture_targets), ("Video", video_targets)):
+            for media_match in re.finditer(
+                rf"(?:<{kind}\s+(\d+)>|\b{kind}\s+(\d+)\b)",
+                clause,
+                re.IGNORECASE,
+            ):
+                ordinal = int(media_match.group(1) or media_match.group(2))
+                if ordinal not in targets:
+                    raise H3SpeakerBindingError(
+                        "MiniMax H3 reference binding conflict: "
+                        f"<Subject {subject}> names missing <{kind} {ordinal}> media."
+                    )
+                media_targets.add(targets[ordinal])
+
+        name_targets = _ref2va_identity_alias_targets(clause, aliases)
+        if len(media_targets) > 1:
+            raise H3SpeakerBindingError(
+                "MiniMax H3 reference binding conflict: "
+                f"<Subject {subject}> points to multiple selected visual references."
+            )
+        if media_targets:
+            target = next(iter(media_targets))
+            if name_targets and target not in name_targets:
+                raise H3SpeakerBindingError(
+                    "MiniMax H3 reference binding conflict: "
+                    f"<Subject {subject}> name and Picture/Video evidence identify different references."
+                )
+        elif len(name_targets) > 1:
+            raise H3SpeakerBindingError(
+                "MiniMax H3 reference binding is ambiguous: "
+                f"<Subject {subject}> names more than one selected reference."
+            )
+        elif name_targets:
+            target = next(iter(name_targets))
+        else:
+            # An S marker, an unexplained integer, or generic prose is not
+            # enough identity evidence to rewrite a Subject number.
+            continue
+
+        if subject in bindings and bindings[subject] != target:
+            raise H3SpeakerBindingError(
+                "MiniMax H3 reference binding conflict: "
+                f"subject_definitions give <Subject {subject}> different identities."
+            )
+        bindings[subject] = target
+
+    return bindings
+
+
+def _remap_ref2va_subject_bindings(
+    prompt: str,
+    bindings: dict[int, int | None],
+) -> tuple[str, dict[int, int]]:
+    """Atomically reconcile explicit legacy Subjects and return changed IDs."""
+
+    changed = {
+        old: target
+        for old, target in bindings.items()
+        if target is not None and old != target
+    }
+
+    def replace(match: re.Match) -> str:
+        old = int(match.group(1))
+        if old not in bindings:
+            return match.group(0)
+        target = bindings[old]
+        return f"<Subject {target}>" if target is not None else ""
+
+    source = re.sub(r"<Subject\s+(\d+)>", replace, str(prompt or ""), flags=re.IGNORECASE)
+    return source, changed
+
+
+def _ref2va_reconcile_voice_audio_labels(
+    prompt: str,
+    items: list[dict],
+    aliases: dict[str, set[int | None]],
+    character_subjects: dict[str, int],
+    role_subjects: dict[str, int],
+) -> tuple[str, dict[int, int]]:
+    """Pair legacy voice Audio labels with the runtime's selected voice rows."""
+
+    field = _REF2VA_SUBJECT_DEFINITIONS_RE.search(str(prompt or ""))
+    if not field:
+        return prompt, {}
+    audio_by_subject = _ref2va_voice_audio_by_subject(
+        items, character_subjects, role_subjects,
+    )
+    audio_map: dict[int, int] = {}
+    clauses = re.split(r"(?<=[.;])\s+|\r?\n+", field.group(1))
+    for clause in clauses:
+        if not re.search(r"\bvoice(?:-timbre)?\s+reference\b", clause, re.IGNORECASE):
+            continue
+        audio_labels = [
+            int(match.group("tag_index") or match.group("plain_index"))
+            for match in _AUDIO_LABEL_RE.finditer(clause)
+        ]
+        if not audio_labels:
+            continue
+        subject_labels = {
+            int(value) for value in re.findall(r"<Subject\s+(\d+)>", clause, re.IGNORECASE)
+        }
+        subject_targets: set[int | None] = set(subject_labels)
+        if not subject_targets:
+            subject_targets = _ref2va_identity_alias_targets(clause, aliases)
+        if len(audio_labels) != 1 or len(subject_targets) != 1:
+            raise H3SpeakerBindingError(
+                "MiniMax H3 reference binding is ambiguous: "
+                "a legacy voice reference does not identify one Audio and one character."
+            )
+        subject = next(iter(subject_targets))
+        if subject is None or subject not in audio_by_subject:
+            # Generic voice references without a runtime character pairing
+            # retain their manifest ordinal and existing guest compatibility.
+            continue
+        old_audio = audio_labels[0]
+        target_audio = audio_by_subject[subject]
+        if old_audio in audio_map and audio_map[old_audio] != target_audio:
+            raise H3SpeakerBindingError(
+                "MiniMax H3 reference binding conflict: one legacy Audio label "
+                "is assigned to multiple character voices."
+            )
+        audio_map[old_audio] = target_audio
+
+    changed = {old: new for old, new in audio_map.items() if old != new}
+    return _remap_ref2va_audio_labels(prompt, changed), changed
+
+
+def _validate_ref2va_named_subject_cues(
+    prompt: str,
+    speaker_aliases: dict[str, int],
+    character_subject_count: int,
+) -> None:
+    """Reject a dialogue name that conflicts with its explicit Subject cue."""
+
+    valid_subjects = set(range(1, character_subject_count + 1))
+    previous_end = 0
+    definitions = _REF2VA_SUBJECT_DEFINITIONS_RE.search(str(prompt or ""))
+    definitions_span = (
+        (definitions.start(1), definitions.end(1)) if definitions else None
+    )
+    for dialogue in _DIALOGUE_TAG_RE.finditer(str(prompt or "")):
+        before_start = max(previous_end, dialogue.start() - 420)
+        before = prompt[before_start:dialogue.start()]
+        headings = list(_REF2VA_CLIP_HEADING_RE.finditer(before))
+        if headings:
+            heading_end = headings[-1].end()
+            before_start += heading_end
+            before = before[heading_end:]
+        clause_start = max(
+            before.rfind("."), before.rfind("!"), before.rfind("?"),
+            before.rfind(";"), before.rfind("\n"),
+        ) + 1
+        clause = before[clause_start:]
+        subject_matches = list(re.finditer(r"<Subject\s+(\d+)>", clause, re.IGNORECASE))
+        if subject_matches:
+            absolute_start = before_start + clause_start + subject_matches[-1].start()
+            if definitions_span is None or not (
+                definitions_span[0] <= absolute_start < definitions_span[1]
+            ):
+                explicit_subject = int(subject_matches[-1].group(1))
+                owner = _resolve_ref2va_dialogue_owner_name(
+                    prompt, dialogue.start(), dialogue.end(),
+                )
+                owner_subjects = {
+                    speaker_aliases[alias]
+                    for alias in _ref2va_alias_values({"character_name": owner})
+                    if alias in speaker_aliases
+                }
+                if len(owner_subjects) == 1:
+                    owner_subject = next(iter(owner_subjects))
+                    if explicit_subject != owner_subject:
+                        raise H3SpeakerBindingError(
+                            "MiniMax H3 reference binding conflict: "
+                            f"<Subject {explicit_subject}> conflicts with named speaker "
+                            f"{owner!r}, whose selected reference is <Subject {owner_subject}>. "
+                            "Use a matching subject_definitions identity or correct the cue."
+                        )
+                elif explicit_subject not in valid_subjects and owner:
+                    raise H3SpeakerBindingError(
+                        "MiniMax H3 reference binding conflict: "
+                        f"dialogue cue uses missing character <Subject {explicit_subject}>."
+                    )
+        previous_end = dialogue.end()
+
+
 def align_ref2va_voice_reference_order(
     prompt: str,
     references,
 ) -> tuple[str, list[dict], dict[str, dict[int, int]]]:
-    """Keep immutable Subject identities while normalizing media presentation.
+    """Align explicit legacy Subject/voice bindings to selected references.
 
-    ``<Subject N>`` identifies reusable reference content; ``(Sx)`` identifies
-    first-vocal-event order inside one target clip.  Reordering complete
-    character groups to make those two namespaces numerically match was not
-    part of MiniMax's contract and made identity labels depend on dialogue
-    order.  Keep Subject/Picture labels stable and only normalize the physical
-    presentation to visual references followed by standalone audio.
+    Explicit subject definitions may have been authored against an older
+    reference list. Resolve their known names or Picture/Video labels against
+    the current runtime allocator before voice pruning. Speaker markers alone
+    never establish a Subject mapping.
     """
 
-    return canonicalize_ref2va_reference_order(prompt, references)
+    source, items, ordinal_maps = canonicalize_ref2va_reference_order(
+        prompt, references,
+    )
+    (
+        reference_subjects,
+        picture_targets,
+        video_targets,
+        aliases,
+        speaker_aliases,
+        character_subject_count,
+        character_subjects,
+        role_subjects,
+    ) = _ref2va_reference_subject_layout(items)
+    subject_bindings = _ref2va_subject_definition_bindings(
+        source, picture_targets, video_targets, aliases,
+    )
+    source, subject_map = _remap_ref2va_subject_bindings(source, subject_bindings)
+    source, audio_map = _ref2va_reconcile_voice_audio_labels(
+        source, items, aliases, character_subjects, role_subjects,
+    )
+
+    # Prove direct name/Subject agreement after any definition-backed remap.
+    _validate_ref2va_named_subject_cues(
+        source, speaker_aliases, character_subject_count,
+    )
+    if subject_map:
+        ordinal_maps = {**ordinal_maps, "Subject": subject_map}
+    if audio_map:
+        existing_audio = dict(ordinal_maps.get("Audio", {}))
+        existing_audio.update(audio_map)
+        ordinal_maps = {**ordinal_maps, "Audio": existing_audio}
+    return source, items, ordinal_maps
 
 
 
@@ -1026,7 +1358,7 @@ def ensure_ref2va_prompt_relationships(
     the same immutable character manifest used for raw prompts.
     """
 
-    ordered_prompt, items, _order_remap = canonicalize_ref2va_reference_order(
+    ordered_prompt, items, _order_remap = align_ref2va_voice_reference_order(
         prompt,
         references,
     )

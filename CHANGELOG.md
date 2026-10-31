@@ -31,6 +31,16 @@ is repaired, and successful HTTP access lines are quiet by default.
 Main promotion awaits separate review of the three-workstation qualification.
 See the [v4.0.0 candidate notes and limits](docs/RELEASE_NOTES_V4.0.0.md).
 
+**31 October — Reference enhancement fixes:** use the selected media's character
+and voice bindings consistently in Enhance Now, Enhance on generation, and H3
+generation. Scene and style references no longer shift character IDs; composition
+and object references remain separate from character identity. Reconcile older
+tagged prompts from explicit identity evidence, and reject conflicting speaker
+cues before voice selection. Accept harmless dialogue spacing and line wrapping
+without weakening checks for changed words, language, speaker ownership, turn
+order, or duplicated dialogue. Verified prompt attribution with Qwen and Gemma
+for both Scene and Composition; these checks do not certify rendered quality.
+
 ## [3.3.0] - 2026-10-26
 
 **Gallery:** resize the thumbnail panel with a draggable, keyboard-accessible

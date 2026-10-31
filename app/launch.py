@@ -9567,6 +9567,18 @@ async def _llm_enhance_prompt_payload(body: dict):
         model_type.lower().startswith("minimax_h3")
         and generation_mode in ("video", "avatar")
     )
+    if needs_h3_context_ir and "minimax_h3_references" in body:
+        model = wgp.get_model_def(model_type) or {}
+        if model.get("omni_reference"):
+            from services.studio_enhancement import canonical_h3_enhancement_inputs
+            try:
+                native_inputs = canonical_h3_enhancement_inputs(
+                    prompt, body.get("minimax_h3_references"),
+                )
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+            body = {**body, **native_inputs}
+            prompt = body["prompt"]
     needs_flux3_image_guide = (
         model_type.lower().startswith("flux3") and generation_mode == "image"
     )

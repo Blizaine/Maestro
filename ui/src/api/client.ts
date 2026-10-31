@@ -2435,6 +2435,7 @@ export async function llmEnhancePrompt(params: {
   tts_voice_count?: number
   max_new_tokens?: number
   reference_context?: string
+  minimax_h3_references?: MiniMaxH3Reference[]
   planning_style?: 'faithful' | 'creative' | 'adaptive'
 }): Promise<{
   original: string

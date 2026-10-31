@@ -153,6 +153,8 @@ jobs:
         run: node tests/ui/theme_migration.cjs
       - name: UI source and deployment safety regressions
         run: node tests/ui/ui_build_safety.cjs
+      - name: Reference enhancement request manifest regressions
+        run: node tests/ui/reference_enhancement_manifest.cjs
       - name: Type-check and staged UI build
         working-directory: ui
         run: npm run build

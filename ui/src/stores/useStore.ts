@@ -11651,6 +11651,9 @@ export const useStore = create<AppState>((set, get) => ({
         } : {}),
         tts_voice_count: ttsSpeakingVoiceCount(state.ttsVoiceCount, state.modelOptions, String(params.audio_prompt_type || '')) || undefined,
         reference_context: referenceContext,
+        // The server derives authoritative Subject/media/voice bindings from
+        // these references; the textual inventory remains a compatibility hint.
+        minimax_h3_references: isOmniReference ? (params.minimax_h3_references ?? []) : undefined,
         planning_style: planningStyle,
       })
       const preserveH3Source = (
