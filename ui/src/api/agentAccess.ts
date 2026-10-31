@@ -163,12 +163,17 @@ export function requestAgentAccessConsoleCode(): Promise<{ message?: string; exp
   return requestJson('/api/v1/agent-access/request-console-code', { method: 'POST' })
 }
 
-export function loginAgentAccessOwner(code: string): Promise<{ ok: boolean }> {
-  return requestJson('/api/v1/agent-access/owner-login', {
+export async function loginAgentAccessOwner(code: string): Promise<{ ok: boolean }> {
+  const result = await requestJson<{ ok: boolean }>('/api/v1/agent-access/owner-login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ code }),
   }, true)
+  const session = await requestJson<AgentAccessStatus>('/api/v1/agent-access/status', {}, true)
+  if (!result.ok || !session.authenticated || !session.owner) {
+    throw new AgentAccessApiError(401, 'The code was accepted, but this browser did not keep the sign-in session. Request a fresh code on this page and sign in again; each code can be used only once.', 'maestro_owner_session_missing')
+  }
+  return result
 }
 
 export function updateAgentAccessSettings(settings: { enabled?: boolean; label?: string }): Promise<Record<string, unknown>> {

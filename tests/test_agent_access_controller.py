@@ -116,7 +116,7 @@ def _login_owner(client: TestClient, app, runtime: RuntimeState, console: list[s
     assert code not in response.text
     cookie = response.headers["set-cookie"]
     assert "HttpOnly" in cookie and "Secure" in cookie and "SameSite=lax" in cookie
-    assert client.cookies.get(cookie_name(runtime))
+    assert client.cookies.get(cookie_name(runtime, "https"))
     return code
 
 
@@ -185,7 +185,7 @@ def test_secure_owner_onboarding_and_off_on_preserve_owner_and_grants(tmp_path):
         assert code not in wrong_origin.text
         assert _login_owner(secure, app, runtime, console, code=code) == code
 
-        owner = runtime.auth.authenticate(secure.cookies.get(cookie_name(runtime)))
+        owner = runtime.auth.authenticate(secure.cookies.get(cookie_name(runtime, "https")))
         settings = secure.post(
             "/api/v1/agent-access/settings", json={"enabled": True}, headers={"Origin": runtime.origin},
         )

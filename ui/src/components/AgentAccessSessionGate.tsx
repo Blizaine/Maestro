@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { ExternalLink, LockKeyhole, X } from 'lucide-react'
 import {
   AGENT_ACCESS_AUTH_REQUIRED_CODE,
@@ -7,6 +7,7 @@ import {
   AgentAccessApiError,
   fetchAgentAccessStatus,
   loginAgentAccessOwner,
+  requestAgentAccessConsoleCode,
   type AgentAccessStatus,
 } from '../api/agentAccess'
 
@@ -20,37 +21,49 @@ export function AgentAccessSessionGate() {
   const [error, setError] = useState<string | null>(null)
   const [backendMissing, setBackendMissing] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const [requestingCode, setRequestingCode] = useState(false)
+  const [codeMessage, setCodeMessage] = useState<string | null>(null)
+  const [dismissed, setDismissed] = useState(false)
+  const dismissedRef = useRef(false)
+  const visibleRef = useRef(false)
   const requestInFlight = useRef(false)
+
+  const openSignIn = useCallback(() => {
+    if (requestInFlight.current || visibleRef.current || dismissedRef.current) return
+    requestInFlight.current = true
+    void fetchAgentAccessStatus().then(next => {
+      if (dismissedRef.current) return
+      setStatus(next)
+      const secureUrl = secureControllerUrl(next.controller_url)
+      if (secureUrl) setControllerUrl(secureUrl)
+      setBackendMissing(false)
+      if (next.authenticated && next.owner) return
+      visibleRef.current = true
+      setVisible(true)
+      setError(null)
+    }).catch(requestError => {
+      if (dismissedRef.current) return
+      visibleRef.current = true
+      setVisible(true)
+      setStatus(null)
+      setBackendMissing(requestError instanceof AgentAccessApiError && requestError.status === 404)
+      setError(requestError instanceof Error ? requestError.message : 'Could not check sign-in status.')
+    }).finally(() => { requestInFlight.current = false })
+  }, [])
 
   useEffect(() => {
     const onAuthRequired = (rawEvent: Event) => {
       const event = rawEvent as AuthRequiredEvent
       if (event.detail?.code !== AGENT_ACCESS_AUTH_REQUIRED_CODE) return
-      setVisible(true)
-      setError(null)
+      if (visibleRef.current || dismissedRef.current) return
       const eventUrl = secureControllerUrl(event.detail.login_url)
       setControllerUrl(eventUrl)
-      if (requestInFlight.current) return
-      requestInFlight.current = true
-      void fetchAgentAccessStatus().then(next => {
-        setStatus(next)
-        const secureUrl = secureControllerUrl(next.controller_url)
-        if (secureUrl) setControllerUrl(secureUrl)
-        setBackendMissing(false)
-      }).catch(requestError => {
-        setStatus(null)
-        setBackendMissing(requestError instanceof AgentAccessApiError && requestError.status === 404)
-        if (!(requestError instanceof AgentAccessApiError && requestError.status === 404)) {
-          setError(requestError instanceof Error ? requestError.message : 'Could not check Agent Access status.')
-        }
-      }).finally(() => {
-        requestInFlight.current = false
-      })
+      openSignIn()
     }
 
     window.addEventListener(AGENT_ACCESS_AUTH_REQUIRED_EVENT, onAuthRequired)
     return () => window.removeEventListener(AGENT_ACCESS_AUTH_REQUIRED_EVENT, onAuthRequired)
-  }, [])
+  }, [openSignIn])
 
   const loginAllowed = isSecureOrigin()
 
@@ -62,7 +75,10 @@ export function AgentAccessSessionGate() {
     try {
       await loginAgentAccessOwner(loginCode.trim())
       setLoginCode('')
+      visibleRef.current = false
       setVisible(false)
+      dismissedRef.current = false
+      setDismissed(false)
       setBackendMissing(false)
       window.dispatchEvent(new Event(AGENT_ACCESS_SESSION_RESTORED_EVENT))
     } catch (loginError) {
@@ -77,12 +93,36 @@ export function AgentAccessSessionGate() {
     }
   }
 
-  if (!visible) return null
+  const dismiss = () => {
+    dismissedRef.current = true
+    visibleRef.current = false
+    setDismissed(true)
+    setVisible(false)
+  }
+
+  const requestFreshCode = async () => {
+    if (requestingCode) return
+    setRequestingCode(true)
+    setError(null)
+    try {
+      await requestAgentAccessConsoleCode()
+      setLoginCode('')
+      setCodeMessage('A fresh code is in Pinokio → Agent Access Terminal. Use the latest “Browser code:” once, within 10 minutes, on this page.')
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Could not request a fresh code.')
+    } finally { setRequestingCode(false) }
+  }
+
+  if (!visible) return dismissed ? (
+    <button type="button" onClick={() => { dismissedRef.current = false; setDismissed(false); openSignIn() }} className="fixed bottom-4 right-4 z-[149] inline-flex items-center gap-2 rounded-lg border border-border bg-bg-secondary px-4 py-3 text-xs text-text-primary shadow-lg">
+      <LockKeyhole size={14} /> Sign in to Maestro
+    </button>
+  ) : null
 
   return (
     <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/65 p-3 sm:p-6" role="presentation">
       <section
-        className="w-full max-w-md overflow-hidden rounded-2xl border border-border bg-bg-secondary shadow-2xl"
+        className="max-h-[calc(100dvh-1.5rem)] w-full max-w-md overflow-y-auto rounded-2xl border border-border bg-bg-secondary shadow-2xl"
         role="dialog"
         aria-modal="true"
         aria-labelledby="agent-access-session-title"
@@ -92,14 +132,14 @@ export function AgentAccessSessionGate() {
             <LockKeyhole size={17} />
           </div>
           <div className="min-w-0 flex-1">
-            <h2 id="agent-access-session-title" className="text-sm font-semibold text-text-primary">Owner session expired</h2>
+            <h2 id="agent-access-session-title" className="text-sm font-semibold text-text-primary">Sign in to Maestro</h2>
             <p className="mt-1 text-xs leading-relaxed text-text-secondary">
-              Sign in again to manage Maestro Agent Access. Your current work stays open behind this panel.
+              This browser needs its own owner session. Request a fresh code if a previous code was already used. Your current work stays open behind this panel.
             </p>
           </div>
           <button
             type="button"
-            onClick={() => setVisible(false)}
+            onClick={dismiss}
             className="rounded-md p-1.5 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
             aria-label="Dismiss sign-in"
           >
@@ -120,7 +160,7 @@ export function AgentAccessSessionGate() {
             <>
               {status?.owner_configured === false && (
                 <p className="text-xs leading-relaxed text-text-secondary">
-                  First, request a one-time code from the Agent Access tab. Maestro prints it only in the Pinokio terminal.
+                  Request a fresh code below. Maestro prints it in Pinokio’s Agent Access Terminal.
                 </p>
               )}
               <form onSubmit={handleLogin} className="space-y-3">
@@ -146,6 +186,10 @@ export function AgentAccessSessionGate() {
                   {submitting ? 'Signing in…' : 'Sign in to Agent Access'}
                 </button>
               </form>
+              <button type="button" onClick={() => void requestFreshCode()} disabled={requestingCode || submitting} className="w-full rounded-lg border border-border px-4 py-2.5 text-xs text-text-primary disabled:opacity-50">
+                {requestingCode ? 'Requesting code…' : 'Request a fresh code'}
+              </button>
+              {codeMessage && <p className="text-xs leading-relaxed text-text-secondary" role="status">{codeMessage}</p>}
             </>
           )}
 

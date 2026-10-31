@@ -72,10 +72,27 @@ _MEDIA_KEYS = frozenset({
 })
 
 
-def cookie_name(runtime) -> str:
-    # Cookies are not port-scoped. Main and Dev on 127.0.0.1 must not replace
-    # each other's owner sessions.
-    return COOKIE_NAME + "_" + runtime.installation_id.replace("-", "")[:12]
+def cookie_name(runtime, scheme: str | None = None) -> str:
+    """Return an installation cookie isolated by transport scheme.
+
+    Browser cookies are host-scoped but not port-scoped, and browsers prevent
+    an insecure HTTP response from replacing a Secure cookie with the same
+    name. Pinokio's localhost HTTP UI and its HTTPS controller can share a
+    hostname, so they need distinct names. The unsuffixed name remains the
+    legacy name and is accepted during upgrade.
+    """
+    base = COOKIE_NAME + "_" + runtime.installation_id.replace("-", "")[:12]
+    if scheme in {"https", "wss"}:
+        return base + "_https"
+    if scheme in {"http", "ws"}:
+        return base + "_http"
+    return base
+
+
+def cookie_names(runtime, scheme: str | None = None) -> tuple[str, ...]:
+    """Current cookie followed by the previous unsuffixed cookie name."""
+    names = (cookie_name(runtime, scheme), cookie_name(runtime))
+    return tuple(dict.fromkeys(names))
 
 
 def redact(value):
@@ -333,14 +350,18 @@ def browser_login_origin(status: dict, scope: dict) -> str:
     return status.get("controller_url") or ""
 
 
-def login_document(status: dict, *, secure: bool = True) -> str:
+def login_document(status: dict, *, secure: bool = True, notice: str | None = None) -> str:
     # The form sends only a short-lived owner code. Long-lived credentials are
     # delivered as HttpOnly cookies, never exposed to page scripts or URLs.
     import html
     setup_url = html.escape(str(status.get("local_setup_url") or ""), quote=True)
+    notice_markup = (
+        f'<p role="alert" style="color:#ffb2a9">{html.escape(notice)}</p>'
+        if notice else ""
+    )
     if not secure:
         address = html.escape(str(status.get("controller_url") or ""), quote=True)
-        return f'<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Maestro secure connection</title><main><h1>Open Maestro securely</h1><p>Browser codes are entered over HTTPS. Open the secure address and verify the certificate fingerprint shown in Pinokio.</p><p><a href="{address}">Open secure Maestro</a></p></main>'
+        return f'<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Maestro secure connection</title><main><h1>Open Maestro securely</h1>{notice_markup}<p>Browser codes are entered over HTTPS. Open the secure address and verify the certificate fingerprint shown in Pinokio.</p><p><a href="{address}">Open secure Maestro</a></p></main>'
     parts = [
         """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,interactive-widget=resizes-content"><title>Connect to Maestro</title>
 <style>body{margin:0;background:#171b1e;color:#edf0f2;font:16px system-ui;display:grid;min-height:100svh;place-items:center}main{box-sizing:border-box;width:min(92vw,440px);padding:28px;background:#20262b;border:1px solid #3b444c;border-radius:20px}input,button{box-sizing:border-box;width:100%;font:inherit;padding:13px;border-radius:10px;margin-top:12px}input{background:#171b1e;color:#fff;border:1px solid #56616b}button{background:#ff9d61;color:#1a1a1a;border:0;cursor:pointer}p{color:#b6bfc8;line-height:1.5}a{color:#ffad7b}#message{white-space:pre-wrap}</style></head><body><main><h1>Connect to Maestro</h1><p>Enter the one-time browser code from Pinokio's Agent Access terminal, or from another signed-in Maestro browser.</p><form method="post" action="/api/v1/agent-access/owner-login"><label for="code">Browser code</label><input id="code" name="code" autocomplete="off" required autofocus><button>Sign in</button></form><button id="request">Show a code in Pinokio</button><p id="message" role="status"></p>""",
@@ -349,7 +370,10 @@ def login_document(status: dict, *, secure: bool = True) -> str:
 document.getElementById('request').onclick=async()=>{let e=document.getElementById('message');try{let r=await fetch('/api/v1/agent-access/request-console-code',{method:'POST'});let j=await r.json();e.textContent=j.message||j.detail?.message||j.detail||'Check the Pinokio terminal.'}catch{e.textContent='Could not request a code. Open Agent Access in Pinokio.'}};
 </script></body></html>""",
     ]
-    return "".join(parts)
+    document = "".join(parts)
+    if notice_markup:
+        document = document.replace("<form method=", notice_markup + "<form method=", 1)
+    return document
 
 class AccessBoundary:
     def __init__(
@@ -428,7 +452,8 @@ class AccessBoundary:
                 token = bearer[7:]
             else:
                 request = Request({**scope, "type": "http"})
-                token = request.cookies.get(cookie_name(self.runtime))
+                cookies = request.cookies
+                token = next((cookies[name] for name in cookie_names(self.runtime, scope.get("scheme")) if name in cookies), None)
             if token:
                 try:
                     principal = self.runtime.auth.authenticate(token)

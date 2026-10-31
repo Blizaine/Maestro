@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from .auth import AuthError
-from .boundary import browser_login_origin, cookie_name, login_document, same_origin, secure_transport
+from .boundary import browser_login_origin, cookie_name, cookie_names, login_document, same_origin, secure_transport
 from .context import credential_context, principal_context
 
 
@@ -65,6 +65,42 @@ def login_return(value):
     if isinstance(value, str) and value.startswith("/oauth/authorize?") and len(value) <= 8192 and not any(c in value for c in ("\\", "\r", "\n", "\x00")):
         return value
     return "/"
+
+
+def _login_failure(runtime, request: Request, message: str, status: int, *, next_path=None):
+    public_status = runtime.public_status()
+    origin = browser_login_origin(public_status, request.scope)
+    document = login_document(
+        {**public_status, "controller_url": origin},
+        secure=secure_transport(request.scope),
+        notice=message,
+    )
+    if "</form>" in document:
+        target = html.escape(login_return(next_path), quote=True)
+        document = document.replace(
+            "</form>", f'<input type="hidden" name="next" value="{target}"></form>', 1,
+        )
+    return HTMLResponse(document, status_code=status, headers={"Cache-Control": "no-store"})
+
+
+def _http_error_message(error: HTTPException) -> str:
+    detail = error.detail
+    if isinstance(detail, dict):
+        return str(detail.get("message") or "Sign-in is temporarily unavailable")
+    return str(detail)
+
+
+def _normalize_owner_code(value) -> str:
+    """Accept a raw console code or its exact printed label/line wrapping."""
+    if not isinstance(value, str) or len(value) > 512:
+        return ""
+    candidate = value.strip()
+    prefix = "[Maestro Agent Access] Browser code:"
+    if candidate[:len(prefix)].casefold() == prefix.casefold():
+        candidate = candidate[len(prefix):]
+    # Owner codes use URL-safe Base64 and contain no whitespace. Removing only
+    # whitespace tolerates terminal line wrapping without weakening matching.
+    return "".join(candidate.split())
 
 
 def require_updated_backend(runtime):
@@ -128,40 +164,64 @@ def management_router(runtime, *, request_console_code, status_extra=None) -> AP
 
     @router.post("/api/v1/agent-access/owner-login")
     async def owner_login(request: Request):
+        is_form = "application/x-www-form-urlencoded" in request.headers.get("content-type", "")
         if not secure_transport(request.scope):
+            if is_form:
+                return _login_failure(
+                    runtime,
+                    request,
+                    "Open the secure Maestro address before entering a browser code.",
+                    426,
+                )
             raise HTTPException(426, {"message": "Open the secure Maestro address before entering a browser code", "login_url": browser_login_origin(runtime.public_status(), request.scope)})
         if not same_origin(request.scope):
+            if is_form:
+                return _login_failure(runtime, request, "Sign-in must come from this same Maestro address.", 403)
             raise HTTPException(403, "A same-origin sign-in is required")
-        require_updated_backend(runtime)
-        login_limit.check()
-        is_form = "application/x-www-form-urlencoded" in request.headers.get("content-type", "")
+        try:
+            require_updated_backend(runtime)
+            login_limit.check()
+        except HTTPException as error:
+            if is_form:
+                return _login_failure(runtime, request, _http_error_message(error), error.status_code)
+            raise
         if is_form:
             raw = await request.body()
             if len(raw) > 16384:
-                raise HTTPException(413, "Sign-in request is too large")
+                return _login_failure(runtime, request, "Sign-in request is too large.", 413)
             try:
                 body = {k: v[-1] for k, v in parse_qs(raw.decode("utf-8"), max_num_fields=8).items()}
-            except (ValueError, UnicodeError) as error:
-                raise HTTPException(400, "Invalid sign-in form") from error
+            except (ValueError, UnicodeError):
+                return _login_failure(runtime, request, "Invalid sign-in form. Request a fresh code and try again.", 400)
         else:
             body = await json_body(request)
+        next_path = body.get("next")
         try:
-            session = runtime.auth.redeem_owner_code(str(body.get("code", "")).strip())
+            session = runtime.auth.redeem_owner_code(_normalize_owner_code(body.get("code", "")))
             runtime.mark_security_configured()
         except AuthError as error:
+            if is_form:
+                return _login_failure(
+                    runtime,
+                    request,
+                    "This browser code is invalid, expired, or already used. Request a fresh code in Pinokio and try again.",
+                    error.status,
+                    next_path=next_path,
+                )
             raise HTTPException(error.status, str(error)) from error
-        response = RedirectResponse(login_return(body.get("next")), status_code=303) if is_form else JSONResponse({"ok": True})
-        response.set_cookie(cookie_name(runtime), session["access_token"], max_age=session["expires_in"], httponly=True, secure=request.url.scheme == "https", samesite="lax", path="/")
+        response = RedirectResponse(login_return(next_path), status_code=303) if is_form else JSONResponse({"ok": True})
+        response.set_cookie(cookie_name(runtime, request.url.scheme), session["access_token"], max_age=session["expires_in"], httponly=True, secure=request.url.scheme == "https", samesite="lax", path="/")
         response.headers["Cache-Control"] = "no-store"
         runtime.audit("owner", "browser_login", "success")
         return response
 
     @router.post("/api/v1/agent-access/logout")
-    async def logout():
+    async def logout(request: Request):
         owner_required()
         runtime.auth.logout(credential_context.get() or "")
         response = JSONResponse({"ok": True})
-        response.delete_cookie(cookie_name(runtime), path="/")
+        for name in cookie_names(runtime, request.url.scheme):
+            response.delete_cookie(name, path="/", secure=request.url.scheme == "https", httponly=True, samesite="lax")
         response.headers["Cache-Control"] = "no-store"
         return response
 
