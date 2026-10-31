@@ -111,7 +111,7 @@ async function main() {
     scopes: ['read'],
     created_at: '2026-10-31T12:00:00Z',
   }];
-  const calls = { consoleCode: 0, login: [], settings: [], copied: [], grants: 0, audit: 0 };
+  const calls = { consoleCode: 0, localApproval: 0, login: [], settings: [], copied: [], grants: 0, audit: 0 };
   const api = {
     AGENT_ACCESS_AUTH_REQUIRED_EVENT: 'maestro-agent-access-auth-required',
     AGENT_ACCESS_SESSION_RESTORED_EVENT: 'maestro-agent-access-session-restored',
@@ -122,6 +122,11 @@ async function main() {
     fetchAgentAccessGrants: async () => { calls.grants += 1; return grants; },
     fetchAgentAccessAudit: async () => { calls.audit += 1; return []; },
     requestAgentAccessConsoleCode: async () => { calls.consoleCode += 1; return { expires_in: 120 }; },
+    approveAgentAccessLocal: async () => {
+      calls.localApproval += 1;
+      Object.assign(status, { owner_configured: true, authenticated: true, owner: true });
+      return { ok: true };
+    },
     loginAgentAccessOwner: async code => {
       calls.login.push(code);
       Object.assign(status, { owner_configured: true, authenticated: true, owner: true });
@@ -160,6 +165,7 @@ async function main() {
       listeners.set(type, set);
     },
     removeEventListener(type, listener) { listeners.get(type)?.delete(listener); },
+    dispatchEvent(event) { for (const listener of listeners.get(event.type) || []) listener(event); return true; },
     setInterval: () => 1,
     clearInterval: () => {},
     setTimeout: () => 1,
@@ -310,6 +316,22 @@ async function main() {
     tree = render();
     assert.match(visibleText(tree), /Agent connections are allowed. Sign in to manage this setting/);
     assert.doesNotMatch(visibleText(tree), /Agent connections remain off until an owner explicitly allows them/);
+    assert.equal(buttonByText(tree, 'Approve on this PC'), undefined, 'remote status never offers local approval');
+    status.local_approval_available = true;
+    global.window.dispatchEvent(new Event(api.AGENT_ACCESS_SESSION_RESTORED_EVENT));
+    await flush();
+    tree = render();
+    assert.ok(buttonByText(tree, 'Approve on this PC'), 'server-confirmed local browser has a direct approval action');
+    assert.equal(calls.localApproval, 0, 'rendering does not approve the browser');
+    const beforeLocalCodeRequests = calls.consoleCode;
+    const beforeLocalSettings = calls.settings.length;
+    buttonByText(tree, 'Approve on this PC').props.onClick();
+    await flush();
+    tree = render();
+    assert.equal(calls.localApproval, 1);
+    assert.equal(calls.consoleCode, beforeLocalCodeRequests, 'local approval never requests a terminal code');
+    assert.equal(calls.settings.length, beforeLocalSettings, 'local approval does not alter agent settings');
+    assert.match(visibleText(tree), /This browser is signed in/);
     console.log('Agent Access onboarding: guided states, one-time code recovery, explicit enablement, disclosures, URL validation, and client copy passed');
   } finally {
     for (const slot of hooks) if (slot?.kind === 'effect' && typeof slot.cleanup === 'function') slot.cleanup();

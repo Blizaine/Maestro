@@ -5,6 +5,7 @@ import {
   AGENT_ACCESS_AUTH_REQUIRED_EVENT,
   AGENT_ACCESS_SESSION_RESTORED_EVENT,
   AgentAccessApiError,
+  approveAgentAccessLocal,
   fetchAgentAccessStatus,
   loginAgentAccessOwner,
   requestAgentAccessConsoleCode,
@@ -53,6 +54,14 @@ export function AgentAccessSessionGate() {
   }, [])
 
   useEffect(() => {
+    const onSessionRestored = () => {
+      dismissedRef.current = false
+      visibleRef.current = false
+      setDismissed(false)
+      setVisible(false)
+      setLoginCode('')
+      setError(null)
+    }
     const onAuthRequired = (rawEvent: Event) => {
       const event = rawEvent as AuthRequiredEvent
       if (event.detail?.code !== AGENT_ACCESS_AUTH_REQUIRED_CODE) return
@@ -63,10 +72,27 @@ export function AgentAccessSessionGate() {
     }
 
     window.addEventListener(AGENT_ACCESS_AUTH_REQUIRED_EVENT, onAuthRequired)
-    return () => window.removeEventListener(AGENT_ACCESS_AUTH_REQUIRED_EVENT, onAuthRequired)
+    window.addEventListener(AGENT_ACCESS_SESSION_RESTORED_EVENT, onSessionRestored)
+    return () => {
+      window.removeEventListener(AGENT_ACCESS_AUTH_REQUIRED_EVENT, onAuthRequired)
+      window.removeEventListener(AGENT_ACCESS_SESSION_RESTORED_EVENT, onSessionRestored)
+    }
   }, [openSignIn])
 
   const loginAllowed = isSecureOrigin()
+  const localApproval = status?.local_approval_available === true
+
+  const handleLocalApproval = async () => {
+    if (!localApproval || submitting || requestingCode) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      await approveAgentAccessLocal()
+      window.dispatchEvent(new Event(AGENT_ACCESS_SESSION_RESTORED_EVENT))
+    } catch (approvalError) {
+      setError(approvalError instanceof Error ? approvalError.message : 'Could not approve this browser.')
+    } finally { setSubmitting(false) }
+  }
 
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -168,6 +194,16 @@ export function AgentAccessSessionGate() {
                   Signing in also protects this Maestro installation. Other browsers will need to sign in once, even while agent connections are off.
                 </p>
               )}
+              {localApproval && (
+                <div className="space-y-2">
+                  <p className="text-xs leading-relaxed text-text-secondary">You are on this PC directly. Approve this browser without copying a code.</p>
+                  <button type="button" onClick={() => void handleLocalApproval()} disabled={submitting || requestingCode} className="min-h-11 w-full rounded-lg bg-accent-blue px-4 py-2.5 text-xs font-semibold text-bg-primary disabled:opacity-50">
+                    {submitting ? 'Approving…' : 'Approve on this PC'}
+                  </button>
+                </div>
+              )}
+              <details open={!localApproval ? true : undefined}>
+              <summary className="mb-3 cursor-pointer text-xs text-text-secondary">Use a browser sign-in code</summary>
               <div className="space-y-2 rounded-lg border border-border bg-bg-primary p-3 text-xs text-text-secondary">
                 <button type="button" onClick={() => void requestFreshCode()} disabled={requestingCode || submitting} className="min-h-10 w-full rounded-lg border border-border px-3 py-2 font-medium text-text-primary hover:bg-bg-hover disabled:opacity-50">
                   {requestingCode ? 'Requesting code…' : 'Request a fresh code'}
@@ -205,6 +241,7 @@ export function AgentAccessSessionGate() {
                   {submitting ? 'Signing in…' : 'Sign in to Maestro'}
                 </button>
               </form>
+              </details>
             </>
           )}
 

@@ -181,17 +181,34 @@ class AuthStore:
             if row is None or float(row[0]) <= now:
                 raise AuthError(401, "Invalid or expired owner code")
             conn.execute("DELETE FROM owner_codes WHERE code_hash = ?", (_digest(code),))
-            self._insert_access_token(
-                conn,
-                token=access_token,
-                kind="owner",
-                principal_id=principal.id,
-                client_id=principal.client_id,
-                scopes=principal.scopes,
-                expires_at=now + OWNER_SESSION_TTL,
-                family_id=None,
-            )
-            conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('owner_configured', '1')")
+            return self._issue_owner_session(conn, now, access_token, principal)
+
+    def issue_owner_session(self) -> dict[str, Any]:
+        """Create an owner session for an already-validated server-side flow.
+
+        Unlike :meth:`issue_owner_code`, this does not create a redeemable
+        credential that can be copied or exchanged through another route.
+        Callers must validate the authorization decision before using it.
+        """
+        now = self._now()
+        access_token = secrets.token_urlsafe(32)
+        principal = _owner_principal()
+        with self._transaction() as conn:
+            self._cleanup(conn, now)
+            return self._issue_owner_session(conn, now, access_token, principal)
+
+    def _issue_owner_session(self, conn, now: float, access_token: str, principal: Principal) -> dict[str, Any]:
+        self._insert_access_token(
+            conn,
+            token=access_token,
+            kind="owner",
+            principal_id=principal.id,
+            client_id=principal.client_id,
+            scopes=principal.scopes,
+            expires_at=now + OWNER_SESSION_TTL,
+            family_id=None,
+        )
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('owner_configured', '1')")
         return {
             "access_token": access_token,
             "expires_in": OWNER_SESSION_TTL,

@@ -40,6 +40,7 @@ MAX_CONCURRENT_MULTIPART = 2
 PUBLIC = frozenset({
     "/api/v1/agent-access/status", "/api/v1/agent-access/request-console-code",
     "/api/v1/agent-access/certificate",
+    "/api/v1/agent-access/local-challenge", "/api/v1/agent-access/local-approve",
     "/api/v1/agent-access/owner-login", "/agent-access/login",
     "/agent-access/certificate.pem", "/.well-known/maestro",
     "/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp",
@@ -249,6 +250,137 @@ def same_origin(scope: dict) -> bool:
     )
 
 
+def _local_request_details(scope: dict):
+    """Return strict request origin details for local browser approval only."""
+    scheme = str(scope.get("scheme", "")).lower()
+    if scope.get("type", "http") != "http" or scheme not in {"http", "https"}:
+        return None
+    peer = scope.get("client")
+    if not isinstance(peer, (tuple, list)) or not peer or not isinstance(peer[0], str):
+        return None
+    try:
+        if not ipaddress.ip_address(peer[0]).is_loopback:
+            return None
+    except ValueError:
+        return None
+
+    raw_headers = scope.get("headers")
+    if not isinstance(raw_headers, (tuple, list)):
+        return None
+    headers = {}
+    for item in raw_headers:
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            return None
+        name, value = item
+        if not isinstance(name, bytes) or not isinstance(value, bytes):
+            return None
+        name = name.lower()
+        if not name or name in headers:
+            return None
+        try:
+            text = value.decode("latin1")
+        except UnicodeDecodeError:
+            return None
+        headers[name] = text
+    if b"authorization" in headers or any(
+        name == b"forwarded" or name == b"x-real-ip" or name.startswith(b"x-forwarded-")
+        for name in headers
+    ):
+        return None
+
+    host = headers.get(b"host")
+    if not isinstance(host, str) or not host or host != host.strip() or any(ord(char) < 33 or ord(char) > 126 for char in host):
+        return None
+    if any(char in host for char in ("\\", ",", "%")):
+        return None
+    try:
+        parsed_host = urlsplit("//" + host)
+        host_name = parsed_host.hostname
+        host_port = parsed_host.port
+    except ValueError:
+        return None
+    if (
+        not host_name
+        or parsed_host.netloc != host
+        or parsed_host.username is not None
+        or parsed_host.password is not None
+        or parsed_host.path
+        or parsed_host.query
+        or parsed_host.fragment
+        or (host_port is not None and not 1 <= host_port <= 65535)
+    ):
+        return None
+    host_name = host_name.casefold()
+    # Match secure_transport's accepted loopback authorities. The peer check
+    # still accepts any loopback source address, but Host must be a canonical
+    # localhost authority understood by the rest of the browser boundary.
+    if host_name not in {"127.0.0.1", "localhost", "::1"}:
+        return None
+    effective_port = host_port or (443 if scheme == "https" else 80)
+    return scheme, headers, host_name, effective_port
+
+
+def _local_request_origin(details) -> str:
+    scheme, _headers, host_name, port = details
+    authority = f"[{host_name}]" if ":" in host_name else host_name
+    return f"{scheme}://{authority}:{port}"
+
+
+def _local_request_same_origin(details) -> bool:
+    scheme, headers, host_name, port = details
+    origin = headers.get(b"origin")
+    fetch_site = headers.get(b"sec-fetch-site")
+    if fetch_site is not None and fetch_site.casefold() != "same-origin":
+        return False
+    if origin is None:
+        return fetch_site is not None and fetch_site.casefold() == "same-origin"
+    if not origin or origin != origin.strip():
+        return False
+    try:
+        parsed = urlsplit(origin)
+        origin_port = parsed.port
+    except ValueError:
+        return False
+    if (
+        parsed.scheme.lower() != scheme
+        or parsed.username is not None
+        or parsed.password is not None
+        or not parsed.hostname
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    return (
+        parsed.hostname.casefold() == host_name
+        and (origin_port or (443 if scheme == "https" else 80)) == port
+    )
+
+
+def local_browser_approval_eligible(scope: dict, *, require_same_origin: bool = False) -> bool:
+    """Whether this unforwarded native request may use local owner approval."""
+    details = _local_request_details(scope)
+    if details is None:
+        return False
+    return not require_same_origin or _local_request_same_origin(details)
+
+
+def local_approval_origin(scope: dict) -> str | None:
+    """Canonical scheme/host/port binding for a verified local request."""
+    details = _local_request_details(scope)
+    return _local_request_origin(details) if details is not None else None
+
+
+def local_approval_cookie_name(runtime, scope: dict) -> str:
+    """Challenge cookie isolated by install, scheme, and effective host port."""
+    details = _local_request_details(scope)
+    if details is None:
+        raise ValueError("A verified local request is required")
+    scheme, _headers, _host, port = details
+    base = COOKIE_NAME + "_" + runtime.installation_id.replace("-", "")[:12]
+    return f"{base}_local_{scheme}_{port}"
+
+
 def _canonical_additional_roots(additional_roots) -> tuple[Path, ...]:
     if additional_roots is None:
         return ()
@@ -355,6 +487,29 @@ def login_document(status: dict, *, secure: bool = True, notice: str | None = No
     # delivered as HttpOnly cookies, never exposed to page scripts or URLs.
     import html
     setup_url = html.escape(str(status.get("local_setup_url") or ""), quote=True)
+    local_approval_available = secure and status.get("local_approval_available") is True
+    local_approval_markup = (
+        '<button id="local-approve" type="button">Approve on this PC</button>'
+        '<p id="local-approval-message" role="status"></p>'
+        if local_approval_available else ""
+    )
+    intro_markup = (
+        "<p>No code or terminal needed. Approve this browser to sign in on this computer.</p>"
+        if local_approval_available else
+        "<p>Enter the one-time browser code from Pinokio's Agent Access terminal, or from another signed-in Maestro browser.</p>"
+    )
+    autofocus = "" if local_approval_available else " autofocus"
+    manual_form = (
+        '<form method="post" action="/api/v1/agent-access/owner-login"><label for="code">Browser code</label>'
+        f'<input id="code" name="code" autocomplete="off" required{autofocus}><button type="submit">Sign in</button></form>'
+    )
+    manual_recovery = (
+        '<details><summary>Use a browser sign-in code</summary><p>Enter a one-time code from Pinokio or another signed-in Maestro browser.</p>'
+        + manual_form
+        + '<button id="request" type="button">Show a code in Pinokio</button><p id="message" role="status"></p></details>'
+        if local_approval_available else
+        manual_form + '<button id="request" type="button">Show a code in Pinokio</button><p id="message" role="status"></p>'
+    )
     notice_markup = (
         f'<p role="alert" style="color:#ffb2a9">{html.escape(notice)}</p>'
         if notice else ""
@@ -364,10 +519,14 @@ def login_document(status: dict, *, secure: bool = True, notice: str | None = No
         return f'<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Maestro secure connection</title><main><h1>Open Maestro securely</h1>{notice_markup}<p>Browser codes are entered over HTTPS. Open the secure address and verify the certificate fingerprint shown in Pinokio.</p><p><a href="{address}">Open secure Maestro</a></p></main>'
     parts = [
         """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,interactive-widget=resizes-content"><title>Connect to Maestro</title>
-<style>body{margin:0;background:#171b1e;color:#edf0f2;font:16px system-ui;display:grid;min-height:100svh;place-items:center}main{box-sizing:border-box;width:min(92vw,440px);padding:28px;background:#20262b;border:1px solid #3b444c;border-radius:20px}input,button{box-sizing:border-box;width:100%;font:inherit;padding:13px;border-radius:10px;margin-top:12px}input{background:#171b1e;color:#fff;border:1px solid #56616b}button{background:#ff9d61;color:#1a1a1a;border:0;cursor:pointer}p{color:#b6bfc8;line-height:1.5}a{color:#ffad7b}#message{white-space:pre-wrap}</style></head><body><main><h1>Connect to Maestro</h1><p>Enter the one-time browser code from Pinokio's Agent Access terminal, or from another signed-in Maestro browser.</p><form method="post" action="/api/v1/agent-access/owner-login"><label for="code">Browser code</label><input id="code" name="code" autocomplete="off" required autofocus><button>Sign in</button></form><button id="request">Show a code in Pinokio</button><p id="message" role="status"></p>""",
+<style>body{margin:0;background:#171b1e;color:#edf0f2;font:16px system-ui;display:grid;min-height:100svh;place-items:center}main{box-sizing:border-box;width:min(92vw,440px);padding:28px;background:#20262b;border:1px solid #3b444c;border-radius:20px}input,button{box-sizing:border-box;width:100%;font:inherit;padding:13px;border-radius:10px;margin-top:12px}input{background:#171b1e;color:#fff;border:1px solid #56616b}button{background:#ff9d61;color:#1a1a1a;border:0;cursor:pointer}p{color:#b6bfc8;line-height:1.5}a{color:#ffad7b}details{margin-top:18px}summary{cursor:pointer;color:#ffad7b}#message,#local-approval-message{white-space:pre-wrap}</style></head><body><main><h1>Connect to Maestro</h1>""",
+        intro_markup,
+        local_approval_markup,
+        manual_recovery,
         f'<p><a href="{setup_url}">Open this computer\'s secure setup</a></p>',
         """</main><script>
 document.getElementById('request').onclick=async()=>{let e=document.getElementById('message');try{let r=await fetch('/api/v1/agent-access/request-console-code',{method:'POST'});let j=await r.json();e.textContent=j.message||j.detail?.message||j.detail||'Check the Pinokio terminal.'}catch{e.textContent='Could not request a code. Open Agent Access in Pinokio.'}};
+document.getElementById('local-approve')?.addEventListener('click',async()=>{let b=document.getElementById('local-approve'),e=document.getElementById('local-approval-message');b.disabled=true;try{let c=await fetch('/api/v1/agent-access/local-challenge',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json'}}),cj=await c.json();if(!c.ok||typeof cj.nonce!=='string')throw Error();let a=await fetch('/api/v1/agent-access/local-approve',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify({nonce:cj.nonce,approve:true})}),aj=await a.json();if(!a.ok||aj.ok!==true)throw Error();let s=await fetch('/api/v1/agent-access/status',{credentials:'same-origin',cache:'no-store'}),sj=await s.json();if(!s.ok||sj.authenticated!==true||sj.owner!==true)throw Error();let n=document.querySelector('input[name="next"]')?.value||'/';location.assign(n.startsWith('/oauth/authorize?')?n:'/')}catch{e.textContent='Local approval could not be completed. Try again or use a browser code.';b.disabled=false}});
 </script></body></html>""",
     ]
     document = "".join(parts)
@@ -502,7 +661,11 @@ class AccessBoundary:
             origin = request_origin or browser_login_origin(login_status, scope) or self.runtime.origin
             detail = {"code": "maestro_auth_required" if status == 401 else "maestro_access_denied", "message": str(error), "login_url": origin}
             if status == 401 and method == "GET" and "text/html" in headers.get(b"accept", "") and not path.startswith("/api/"):
-                response = HTMLResponse(login_document({**login_status, "controller_url": origin}, secure=secure_transport(scope)), status_code=401, headers={"Cache-Control": "no-store"})
+                response = HTMLResponse(login_document({
+                    **login_status,
+                    "controller_url": origin,
+                    "local_approval_available": local_browser_approval_eligible(scope),
+                }, secure=secure_transport(scope)), status_code=401, headers={"Cache-Control": "no-store"})
             else:
                 metadata_path = "/.well-known/oauth-protected-resource/mcp" if path == "/mcp" else "/.well-known/oauth-protected-resource"
                 challenge = f'Bearer resource_metadata="{origin}{metadata_path}"'

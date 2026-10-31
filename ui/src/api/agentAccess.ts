@@ -8,6 +8,7 @@ export interface AgentAccessStatus {
   owner_configured: boolean
   authenticated: boolean
   owner?: boolean
+  local_approval_available?: boolean
   installation_id?: string | null
   workstation_id?: string | null
   label?: string | null
@@ -172,6 +173,27 @@ export async function loginAgentAccessOwner(code: string): Promise<{ ok: boolean
   const session = await requestJson<AgentAccessStatus>('/api/v1/agent-access/status', {}, true)
   if (!result.ok || !session.authenticated || !session.owner) {
     throw new AgentAccessApiError(401, 'The code was accepted, but this browser did not keep the sign-in session. Request a fresh code on this page and sign in again; each code can be used only once.', 'maestro_owner_session_missing')
+  }
+  return result
+}
+
+export async function approveAgentAccessLocal(): Promise<{ ok: boolean }> {
+  const challenge = await requestJson<{ nonce?: string }>('/api/v1/agent-access/local-challenge', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  }, true)
+  if (typeof challenge.nonce !== 'string' || !challenge.nonce || challenge.nonce.length > 256) {
+    throw new AgentAccessApiError(502, 'Local approval is not ready. Try Approve on this PC again.')
+  }
+  const result = await requestJson<{ ok: boolean }>('/api/v1/agent-access/local-approve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nonce: challenge.nonce, approve: true }),
+  }, true)
+  const session = await requestJson<AgentAccessStatus>('/api/v1/agent-access/status', {}, true)
+  if (!result.ok || !session.authenticated || !session.owner) {
+    throw new AgentAccessApiError(401, 'Local approval completed, but this browser did not keep its sign-in session. Allow cookies for this Maestro address, then try Approve on this PC again.', 'maestro_owner_session_missing')
   }
   return result
 }

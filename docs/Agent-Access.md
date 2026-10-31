@@ -16,13 +16,12 @@ access, and some clients may not show discovered servers automatically.
 
 1. Start Maestro from Pinokio and open **Settings → Agent Access**. If the
    model engine is stopped, open **Agent Access** from the Pinokio app menu;
-   its separate terminal can run the controller and print the setup code.
+   its separate controller can run without loading a generation model.
 2. Follow the three steps in the panel: **sign in**, **allow agent connections**,
-   then **choose your agent**. For the initial sign-in, request a code and open
-   **Pinokio → this Maestro app → Agent Access Terminal**. Copy the newest line
-   labeled **Browser code:** into **Browser sign-in code**. Each code works
-   once; the panel shows how long it remains valid. Request a fresh code if it
-   expires or has already been used.
+   then **choose your agent**. On the Maestro PC, open its Web UI from Pinokio
+   using `127.0.0.1` or `localhost` and select **Approve on this PC**. This
+   completes sign-in without showing or copying a code. Approval happens only
+   after you press the button; opening the page does not grant access.
 3. Choose **Copy setup prompt for my agent** and paste it into your agent's chat,
    or follow the client-specific instructions. Complete the client's OAuth
    approval in Maestro. Copying setup text does not connect or approve the agent.
@@ -33,6 +32,17 @@ valid. The initial owner sign-in protects this installation's existing API and
 other browsers also need their own sign-in. Pausing agent connections does not
 remove that browser protection. An already signed-in owner can create a
 short-lived code for another browser from the additional-browser controls.
+
+Local approval requires both a direct loopback connection and a localhost
+address. It rejects LAN and Tailscale requests, forwarded connections, agent
+bearer requests and cross-origin requests. A short-lived, single-use browser
+challenge is checked before the owner session is issued. This treats local
+access to the Maestro PC as trusted; it is not an operating-system user login.
+Remote agents still need their own scoped credentials and approval.
+
+**Use a browser sign-in code** remains available for recovery or another browser.
+Request a code, then open **Pinokio → this Maestro app → Agent Access Terminal**
+and copy the newest **Browser code:** line. Codes expire and work once.
 
 ## Connection details and certificate trust
 

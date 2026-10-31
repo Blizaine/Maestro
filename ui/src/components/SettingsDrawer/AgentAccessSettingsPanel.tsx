@@ -19,6 +19,7 @@ import {
   AGENT_ACCESS_AUTH_REQUIRED_EVENT,
   AGENT_ACCESS_SESSION_RESTORED_EVENT,
   AgentAccessApiError,
+  approveAgentAccessLocal,
   createAgentAccessBrowserCode,
   fetchAgentAccessAudit,
   fetchAgentAccessGrants,
@@ -56,6 +57,7 @@ export function AgentAccessSettingsPanel() {
 
   const ownerSession = status?.authenticated === true && status.owner === true
   const secureOrigin = isSecureOrigin()
+  const localApproval = status?.local_approval_available === true
   const mcpUrls = useMemo(() => [...new Set([status?.mcp_url, ...(status?.lan_mcp_urls || [])]
     .filter((value): value is string => typeof value === 'string' && value.endsWith('/mcp') && safeControllerUrl(value) !== null))], [status])
   const mcpUrl = mcpUrls.includes(selectedMcpUrl) ? selectedMcpUrl : mcpUrls[0] || ''
@@ -166,6 +168,23 @@ export function AgentAccessSettingsPanel() {
     } finally {
       setBusyAction(null)
     }
+  }
+
+  const handleLocalApproval = async () => {
+    if (!localApproval || busyAction !== null) return
+    setBusyAction('local-approval')
+    setError(null)
+    setMessage(null)
+    try {
+      await approveAgentAccessLocal()
+      setOwnerCode('')
+      setConsoleCodeRequested(false)
+      setMessage('This browser is approved. You can now manage agent access.')
+      await refresh()
+      window.dispatchEvent(new Event(AGENT_ACCESS_SESSION_RESTORED_EVENT))
+    } catch (approvalError) {
+      setError(approvalError instanceof Error ? approvalError.message : 'Could not approve this browser. Try again or use a browser sign-in code.')
+    } finally { setBusyAction(null) }
   }
 
   const handleToggle = async (enabled: boolean) => {
@@ -316,7 +335,17 @@ export function AgentAccessSettingsPanel() {
                     Before first setup: signing in here also protects Maestro in other browsers, which will need their own sign-in. Agent connections stay off until you allow them; turning agents off later keeps browser sign-in protection in place.
                   </div>
                 )}
-                {status.owner_configured && <p className="text-xs leading-relaxed text-text-secondary">Owner access is already set up. Sign in to manage this installation from this browser.</p>}
+                {localApproval ? (
+                  <div className="space-y-2">
+                    <p className="text-xs leading-relaxed text-text-secondary">You are connected directly on this PC. Approve this browser with one click; no code or terminal is needed.</p>
+                    <button type="button" onClick={() => void handleLocalApproval()} disabled={busyAction !== null || !status.available} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-4 py-2 text-xs font-semibold text-bg-primary disabled:opacity-50">
+                      {busyAction === 'local-approval' ? <LoaderCircle size={14} className="animate-spin" /> : <ShieldCheck size={14} />}
+                      {busyAction === 'local-approval' ? 'Approving…' : 'Approve on this PC'}
+                    </button>
+                  </div>
+                ) : status.owner_configured ? <p className="text-xs leading-relaxed text-text-secondary">Open Maestro on its PC through Pinokio to approve locally, or use a Browser sign-in code from an existing owner.</p> : null}
+                <details open={!localApproval || consoleCodeRequested ? true : undefined} className={localApproval ? 'rounded-lg border border-border p-3' : ''}>
+                  <summary className="mb-3 cursor-pointer text-xs text-text-secondary">Use a browser sign-in code</summary>
                 {!secureOrigin && <SecureOriginNote href={controllerUrl} />}
                 {consoleCodeRequested && secureOrigin && (
                   <div className="space-y-1.5 rounded-lg bg-bg-primary p-3 text-[11px] leading-relaxed text-text-secondary" role="status">
@@ -339,6 +368,7 @@ export function AgentAccessSettingsPanel() {
                     </div>
                   </form>
                 )}
+                </details>
               </div>
             )}
           </JourneyStep>

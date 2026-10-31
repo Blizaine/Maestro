@@ -226,6 +226,7 @@ function response(body, status = 200, contentType = 'application/json') {
   const requests = [];
   const events = [];
   let ownerLoginMode = 'reject';
+  let localChallengeAllowed = true;
   let statusHttpStatus = 200;
   let statusPayload = { available: true, enabled: false };
   const nativeFetch = async (input, init = {}) => {
@@ -233,6 +234,13 @@ function response(body, status = 200, contentType = 'application/json') {
     calls.push(url.href);
     const method = String(init.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
     requests.push({ url: url.href, method });
+    if (url.pathname === '/api/v1/agent-access/local-challenge') {
+      return localChallengeAllowed ? response({ nonce: 'local-nonce-fixture', expires_in: 120 }) : response({ detail: 'Local browser required' }, 403);
+    }
+    if (url.pathname === '/api/v1/agent-access/local-approve') {
+      assert.deepEqual(JSON.parse(init.body), { nonce: 'local-nonce-fixture', approve: true });
+      return response({ ok: true });
+    }
     if (url.pathname === '/api/v1/agent-access/status') {
       if (statusHttpStatus === 401) {
         return response({ code: 'maestro_auth_required', message: 'Owner session expired.' }, 401);
@@ -339,6 +347,22 @@ function response(body, status = 200, contentType = 'application/json') {
     assert.equal(events.length, 2, 'status verification 401 does not generate recursive login events');
 
     statusHttpStatus = 200;
+    const beforeLocal = requests.length;
+    await api.approveAgentAccessLocal();
+    assert.deepEqual(requests.slice(beforeLocal).map(({ url, method }) => [new URL(url).pathname, method]), [
+      ['/api/v1/agent-access/local-challenge', 'POST'],
+      ['/api/v1/agent-access/local-approve', 'POST'],
+      ['/api/v1/agent-access/status', 'GET'],
+    ], 'explicit local approval obtains a challenge, consumes it, and verifies the browser session');
+    assert.equal(events.length, 2);
+    localChallengeAllowed = false;
+    const beforeRemoteDenied = requests.length;
+    await assert.rejects(api.approveAgentAccessLocal(), error => error.status === 403);
+    assert.equal(requests.length, beforeRemoteDenied + 1, 'a rejected challenge never attempts owner approval');
+    localChallengeAllowed = true;
+    statusPayload = { ...statusPayload, authenticated: false, owner: false };
+    await assert.rejects(api.approveAgentAccessLocal(), error => error.code === 'maestro_owner_session_missing' && /cookies/.test(error.message));
+    assert.equal(events.length, 2, 'a missing local session cannot recursively open sign-in dialogs');
     const status = await api.fetchAgentAccessStatus();
     assert.equal(status.available, true, 'same-origin Agent Access API calls remain readable');
     await exerciseSessionGate(esbuild);
