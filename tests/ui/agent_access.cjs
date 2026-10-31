@@ -227,6 +227,7 @@ function response(body, status = 200, contentType = 'application/json') {
   const events = [];
   let ownerLoginMode = 'reject';
   let localChallengeAllowed = true;
+  let localProof = '';
   let statusHttpStatus = 200;
   let statusPayload = { available: true, enabled: false };
   const nativeFetch = async (input, init = {}) => {
@@ -235,10 +236,12 @@ function response(body, status = 200, contentType = 'application/json') {
     const method = String(init.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
     requests.push({ url: url.href, method });
     if (url.pathname === '/api/v1/agent-access/local-challenge') {
+      localProof = JSON.parse(init.body).proof;
+      assert.match(localProof, /^[0-9a-f]{64}$/, 'approval supplies a cryptographically generated request proof');
       return localChallengeAllowed ? response({ nonce: 'local-nonce-fixture', expires_in: 120 }) : response({ detail: 'Local browser required' }, 403);
     }
     if (url.pathname === '/api/v1/agent-access/local-approve') {
-      assert.deepEqual(JSON.parse(init.body), { nonce: 'local-nonce-fixture', approve: true });
+      assert.deepEqual(JSON.parse(init.body), { nonce: 'local-nonce-fixture', proof: localProof, approve: true });
       return response({ ok: true });
     }
     if (url.pathname === '/api/v1/agent-access/status') {
@@ -353,7 +356,7 @@ function response(body, status = 200, contentType = 'application/json') {
       ['/api/v1/agent-access/local-challenge', 'POST'],
       ['/api/v1/agent-access/local-approve', 'POST'],
       ['/api/v1/agent-access/status', 'GET'],
-    ], 'explicit local approval obtains a challenge, consumes it, and verifies the browser session');
+    ], 'explicit local approval obtains a challenge, consumes its matching proof, and verifies local access');
     assert.equal(events.length, 2);
     localChallengeAllowed = false;
     const beforeRemoteDenied = requests.length;
@@ -361,7 +364,7 @@ function response(body, status = 200, contentType = 'application/json') {
     assert.equal(requests.length, beforeRemoteDenied + 1, 'a rejected challenge never attempts owner approval');
     localChallengeAllowed = true;
     statusPayload = { ...statusPayload, authenticated: false, owner: false };
-    await assert.rejects(api.approveAgentAccessLocal(), error => error.code === 'maestro_owner_session_missing' && /cookies/.test(error.message));
+    await assert.rejects(api.approveAgentAccessLocal(), error => error.code === 'maestro_owner_session_missing' && /could not be verified/.test(error.message));
     assert.equal(events.length, 2, 'a missing local session cannot recursively open sign-in dialogs');
     const status = await api.fetchAgentAccessStatus();
     assert.equal(status.available, true, 'same-origin Agent Access API calls remain readable');

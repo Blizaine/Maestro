@@ -17,28 +17,32 @@ access, and some clients may not show discovered servers automatically.
 1. Start Maestro from Pinokio and open **Settings → Agent Access**. If the
    model engine is stopped, open **Agent Access** from the Pinokio app menu;
    its separate controller can run without loading a generation model.
-2. Follow the three steps in the panel: **sign in**, **allow agent connections**,
+2. Follow the three steps in the panel: **approve this PC**, **allow agent connections**,
    then **choose your agent**. On the Maestro PC, open its Web UI from Pinokio
    using `127.0.0.1` or `localhost` and select **Approve on this PC**. This
-   completes sign-in without showing or copying a code. Approval happens only
-   after you press the button; opening the page does not grant access.
+   approves local management without showing or copying a code. First approval
+   happens only after you press the button. It does not enable agent connections.
 3. Choose **Copy setup prompt for my agent** and paste it into your agent's chat,
    or follow the client-specific instructions. Complete the client's OAuth
    approval in Maestro. Copying setup text does not connect or approve the agent.
 
-Maestro remembers the signed-in browser until its session expires or you sign
-out. Refreshing the page does not require a new code while the session remains
-valid. The initial owner sign-in protects this installation's existing API and
-other browsers also need their own sign-in. Pausing agent connections does not
-remove that browser protection. An already signed-in owner can create a
-short-lived code for another browser from the additional-browser controls.
+Normal use on the Maestro PC does not require Agent Access setup or a browser
+sign-in. Once this installation is approved, local management remains available
+after restarting Maestro or Pinokio, including inside Pinokio's embedded browser.
+Local access does not depend on browser cookies and has no misleading sign-out
+button. This trusts access to the PC, rather than identifying an operating-system
+user. Separate remote browsers still need their own owner sign-in; those browser
+sessions can expire or be signed out. An owner can create a short-lived code for
+another browser from the additional-browser controls. Pausing agent connections
+does not remove remote browser protection or revoke client grants.
 
 Local approval requires both a direct loopback connection and a localhost
 address. It rejects LAN and Tailscale requests, forwarded connections, agent
 bearer requests and cross-origin requests. A short-lived, single-use browser
-challenge is checked before the owner session is issued. This treats local
-access to the Maestro PC as trusted; it is not an operating-system user login.
-Remote agents still need their own scoped credentials and approval.
+challenge and matching client-generated proof are checked before first local
+approval. Only hashes are stored, and approval does not issue a reusable bearer
+token. Remote agents still need their own scoped credentials and approval;
+localhost never grants anonymous MCP access.
 
 **Use a browser sign-in code** remains available for recovery or another browser.
 Request a code, then open **Pinokio → this Maestro app → Agent Access Terminal**

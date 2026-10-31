@@ -6,6 +6,7 @@ import time
 import html
 import hashlib
 import hmac
+import re
 import secrets
 import threading
 import json
@@ -16,7 +17,7 @@ from dataclasses import asdict
 from fastapi import APIRouter, HTTPException, Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from .auth import AuthError
+from .auth import AuthError, LOCAL_DEVICE_PRINCIPAL
 from .boundary import (
     browser_login_origin,
     cookie_name,
@@ -61,6 +62,30 @@ async def json_body(request: Request) -> dict:
     return value
 
 
+def _unique_json_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON member")
+        value[key] = item
+    return value
+
+
+async def local_approval_json_body(request: Request) -> dict:
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        raise HTTPException(415, "Use a JSON approval request")
+    raw = await request.body()
+    if len(raw) > 4096:
+        raise HTTPException(413, "Approval request is too large")
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique_json_object)
+    except (ValueError, UnicodeError):
+        raise HTTPException(400, "Use a JSON approval object") from None
+    if not isinstance(value, dict):
+        raise HTTPException(400, "Use a JSON approval object")
+    return value
+
+
 class RateLimiter:
     """Bound unauthenticated work without persisting caller-supplied addresses."""
     def __init__(self, maximum: int = 30, seconds: float = 60):
@@ -82,7 +107,15 @@ def login_return(value):
     return "/"
 
 
-def _login_failure(runtime, request: Request, message: str, status: int, *, next_path=None):
+def _login_failure(
+    runtime,
+    request: Request,
+    message: str,
+    status: int,
+    *,
+    next_path=None,
+    local_device_access: bool = False,
+):
     public_status = runtime.public_status()
     origin = browser_login_origin(public_status, request.scope)
     document = login_document(
@@ -95,6 +128,7 @@ def _login_failure(runtime, request: Request, message: str, status: int, *, next
         },
         secure=secure_transport(request.scope),
         notice=message,
+        local_device_access=local_device_access,
     )
     if "</form>" in document:
         target = html.escape(login_return(next_path), quote=True)
@@ -124,16 +158,19 @@ def _normalize_owner_code(value) -> str:
     return "".join(candidate.split())
 
 
-def require_updated_backend(runtime):
+def require_updated_backend(runtime, *, min_auth_boundary_version: int = 1):
     # An already-running pre-update model process cannot acquire middleware
     # retroactively. Never offer pairing while its legacy API remains open.
     backend = runtime.backend()
-    if backend.get("auth_boundary_version") != 1:
+    version = backend.get("auth_boundary_version")
+    if type(version) is not int or version < min_auth_boundary_version:
         raise HTTPException(409, "Start the updated Maestro once before setting up Agent Access. An older running instance must be restarted when idle.")
+    return backend
 
 
 LOCAL_APPROVAL_TTL = 120
 _MAX_LOCAL_APPROVAL_CHALLENGES = 128
+_LOCAL_DEVICE_PROOF = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def _challenge_digest(value: str) -> bytes:
@@ -141,14 +178,14 @@ def _challenge_digest(value: str) -> bytes:
 
 
 class LocalApprovalChallenges:
-    """Small, in-memory registry for origin- and cookie-bound local approvals."""
+    """Small, in-memory registry for origin- and proof-bound local approvals."""
 
     def __init__(self, *, clock=time.monotonic, ttl: int = LOCAL_APPROVAL_TTL):
         self.clock, self.ttl = clock, int(ttl)
         self._entries = {}
         self._lock = threading.Lock()
 
-    def issue(self, origin: str, cookie: str) -> str:
+    def issue(self, origin: str, proof: str) -> str:
         now = self.clock()
         nonce = secrets.token_urlsafe(32)
         key = _challenge_digest(nonce)
@@ -156,15 +193,15 @@ class LocalApprovalChallenges:
             self._purge(now)
             if len(self._entries) >= _MAX_LOCAL_APPROVAL_CHALLENGES:
                 raise HTTPException(429, "Too many local approval attempts; wait a moment and try again")
-            self._entries[key] = (origin, _challenge_digest(cookie), now + self.ttl)
+            self._entries[key] = (origin, _challenge_digest(proof), now + self.ttl)
         return nonce
 
-    def consume(self, nonce: str, cookie: str, origin: str) -> bool:
+    def consume(self, nonce: str, proof: str, origin: str) -> bool:
         if not isinstance(nonce, str) or not nonce or len(nonce) > 128:
             return False
         try:
             key = _challenge_digest(nonce)
-            cookie_hash = _challenge_digest(cookie)
+            proof_hash = _challenge_digest(proof)
         except (UnicodeEncodeError, AttributeError):
             return False
         now = self.clock()
@@ -173,8 +210,8 @@ class LocalApprovalChallenges:
             saved = self._entries.get(key)
             if saved is None:
                 return False
-            saved_origin, saved_cookie_hash, _expires = saved
-            if not hmac.compare_digest(saved_origin, origin) or not hmac.compare_digest(saved_cookie_hash, cookie_hash):
+            saved_origin, saved_proof_hash, _expires = saved
+            if not hmac.compare_digest(saved_origin, origin) or not hmac.compare_digest(saved_proof_hash, proof_hash):
                 return False
             del self._entries[key]
             return True
@@ -201,7 +238,14 @@ def _local_approval_cookie(request: Request, name: str) -> str | None:
     return found[0] if len(found) == 1 and found[0] else None
 
 
-def management_router(runtime, *, request_console_code, status_extra=None, local_approval_clock=time.monotonic) -> APIRouter:
+def management_router(
+    runtime,
+    *,
+    request_console_code,
+    status_extra=None,
+    local_approval_clock=time.monotonic,
+    local_device_access: bool = False,
+) -> APIRouter:
     router = APIRouter()
     login_limit, code_limit = RateLimiter(30), RateLimiter(3)
     local_challenge_limit, local_approve_limit = RateLimiter(10), RateLimiter(10)
@@ -231,6 +275,8 @@ def management_router(runtime, *, request_console_code, status_extra=None, local
             owner=bool(principal and principal.owner),
             local_approval_available=local_browser_approval_eligible(request.scope),
         )
+        if principal is not None and principal.id == LOCAL_DEVICE_PRINCIPAL.id:
+            result["auth_method"] = "local_device"
         if principal:
             result["principal"] = asdict(principal)
         return JSONResponse(result, headers={"Cache-Control": "no-store"})
@@ -242,7 +288,7 @@ def management_router(runtime, *, request_console_code, status_extra=None, local
             **status,
             "controller_url": browser_login_origin(status, request.scope),
             "local_approval_available": local_browser_approval_eligible(request.scope),
-        }, secure=secure_transport(request.scope))
+        }, secure=secure_transport(request.scope), local_device_access=local_device_access)
         target = html.escape(login_return(request.query_params.get("next")), quote=True)
         document = document.replace("</form>", f'<input type="hidden" name="next" value="{target}"></form>', 1)
         return HTMLResponse(document, headers={"Cache-Control": "no-store"})
@@ -253,6 +299,13 @@ def management_router(runtime, *, request_console_code, status_extra=None, local
             raise HTTPException(403, "Local approval requires this browser on this computer")
         local_challenge_limit.check()
         origin = local_approval_origin(request.scope)
+        if local_device_access:
+            body = await local_approval_json_body(request)
+            proof = body.get("proof")
+            if set(body) != {"proof"} or not isinstance(proof, str) or not _LOCAL_DEVICE_PROOF.fullmatch(proof):
+                raise HTTPException(400, "Use a fresh local approval proof")
+            nonce = local_challenges.issue(origin, proof)
+            return JSONResponse({"nonce": nonce, "expires_in": LOCAL_APPROVAL_TTL}, headers={"Cache-Control": "no-store"})
         cookie_name_for_challenge = local_approval_cookie_name(runtime, request.scope)
         cookie = secrets.token_urlsafe(32)
         nonce = local_challenges.issue(origin, cookie)
@@ -273,42 +326,48 @@ def management_router(runtime, *, request_console_code, status_extra=None, local
         if not local_browser_approval_eligible(request.scope, require_same_origin=True):
             raise HTTPException(403, "Local approval requires this browser on this computer")
         local_approve_limit.check()
-        if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
-            raise HTTPException(415, "Use a JSON approval request")
-        raw = await request.body()
-        if len(raw) > 4096:
-            raise HTTPException(413, "Approval request is too large")
-        try:
-            body = json.loads(raw)
-        except (ValueError, UnicodeError):
-            raise HTTPException(400, "Use a JSON approval object") from None
-        if not isinstance(body, dict) or set(body) != {"nonce", "approve"} or body.get("approve") is not True:
+        body = await local_approval_json_body(request)
+        expected_keys = {"nonce", "proof", "approve"} if local_device_access else {"nonce", "approve"}
+        if set(body) != expected_keys or body.get("approve") is not True:
             raise HTTPException(400, "Explicit approval is required")
-        require_updated_backend(runtime)
+        if local_device_access and (
+            not isinstance(body.get("proof"), str)
+            or not _LOCAL_DEVICE_PROOF.fullmatch(body["proof"])
+        ):
+            raise HTTPException(400, "Use a fresh local approval proof")
+        require_updated_backend(runtime, min_auth_boundary_version=2 if local_device_access else 1)
         origin = local_approval_origin(request.scope)
-        challenge_cookie_name = local_approval_cookie_name(runtime, request.scope)
-        challenge_cookie = _local_approval_cookie(request, challenge_cookie_name)
-        if challenge_cookie is None or not local_challenges.consume(body.get("nonce"), challenge_cookie, origin):
-            raise HTTPException(401, "Local approval challenge is invalid, expired, or already used")
-        session = runtime.auth.issue_owner_session()
-        runtime.mark_security_configured()
+        if local_device_access:
+            proof = body["proof"]
+            if not local_challenges.consume(body.get("nonce"), proof, origin):
+                raise HTTPException(401, "Local approval challenge is invalid, expired, or already used")
+            runtime.mark_security_configured()
+            runtime.auth.mark_owner_configured()
+        else:
+            challenge_cookie_name = local_approval_cookie_name(runtime, request.scope)
+            challenge_cookie = _local_approval_cookie(request, challenge_cookie_name)
+            if challenge_cookie is None or not local_challenges.consume(body.get("nonce"), challenge_cookie, origin):
+                raise HTTPException(401, "Local approval challenge is invalid, expired, or already used")
+            session = runtime.auth.issue_owner_session()
+            runtime.mark_security_configured()
         response = JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
-        response.delete_cookie(
-            challenge_cookie_name,
-            path="/api/v1/agent-access/local-approve",
-            secure=request.url.scheme == "https",
-            httponly=True,
-            samesite="strict",
-        )
-        response.set_cookie(
-            cookie_name(runtime, request.url.scheme),
-            session["access_token"],
-            max_age=session["expires_in"],
-            httponly=True,
-            secure=request.url.scheme == "https",
-            samesite="lax",
-            path="/",
-        )
+        if not local_device_access:
+            response.delete_cookie(
+                challenge_cookie_name,
+                path="/api/v1/agent-access/local-approve",
+                secure=request.url.scheme == "https",
+                httponly=True,
+                samesite="strict",
+            )
+            response.set_cookie(
+                cookie_name(runtime, request.url.scheme),
+                session["access_token"],
+                max_age=session["expires_in"],
+                httponly=True,
+                secure=request.url.scheme == "https",
+                samesite="lax",
+                path="/",
+            )
         runtime.audit("owner", "browser_login_local_approval", "success")
         return response
 
@@ -337,27 +396,28 @@ def management_router(runtime, *, request_console_code, status_extra=None, local
                     request,
                     "Open the secure Maestro address before entering a browser code.",
                     426,
+                    local_device_access=local_device_access,
                 )
             raise HTTPException(426, {"message": "Open the secure Maestro address before entering a browser code", "login_url": browser_login_origin(runtime.public_status(), request.scope)})
         if not same_origin(request.scope):
             if is_form:
-                return _login_failure(runtime, request, "Sign-in must come from this same Maestro address.", 403)
+                return _login_failure(runtime, request, "Sign-in must come from this same Maestro address.", 403, local_device_access=local_device_access)
             raise HTTPException(403, "A same-origin sign-in is required")
         try:
             require_updated_backend(runtime)
             login_limit.check()
         except HTTPException as error:
             if is_form:
-                return _login_failure(runtime, request, _http_error_message(error), error.status_code)
+                return _login_failure(runtime, request, _http_error_message(error), error.status_code, local_device_access=local_device_access)
             raise
         if is_form:
             raw = await request.body()
             if len(raw) > 16384:
-                return _login_failure(runtime, request, "Sign-in request is too large.", 413)
+                return _login_failure(runtime, request, "Sign-in request is too large.", 413, local_device_access=local_device_access)
             try:
                 body = {k: v[-1] for k, v in parse_qs(raw.decode("utf-8"), max_num_fields=8).items()}
             except (ValueError, UnicodeError):
-                return _login_failure(runtime, request, "Invalid sign-in form. Request a fresh code and try again.", 400)
+                return _login_failure(runtime, request, "Invalid sign-in form. Request a fresh code and try again.", 400, local_device_access=local_device_access)
         else:
             body = await json_body(request)
         next_path = body.get("next")
@@ -372,6 +432,7 @@ def management_router(runtime, *, request_console_code, status_extra=None, local
                     "This browser code is invalid, expired, or already used. Request a fresh code in Pinokio and try again.",
                     error.status,
                     next_path=next_path,
+                    local_device_access=local_device_access,
                 )
             raise HTTPException(error.status, str(error)) from error
         response = RedirectResponse(login_return(next_path), status_code=303) if is_form else JSONResponse({"ok": True})

@@ -90,7 +90,7 @@ export function AgentAccessSessionGate() {
       await approveAgentAccessLocal()
       window.dispatchEvent(new Event(AGENT_ACCESS_SESSION_RESTORED_EVENT))
     } catch (approvalError) {
-      setError(approvalError instanceof Error ? approvalError.message : 'Could not approve this browser.')
+      setError(approvalError instanceof Error ? approvalError.message : 'Could not approve local access on this PC.')
     } finally { setSubmitting(false) }
   }
 
@@ -165,7 +165,7 @@ export function AgentAccessSessionGate() {
           <div className="min-w-0 flex-1">
             <h2 id="agent-access-session-title" className="text-sm font-semibold text-text-primary">Sign in to Maestro</h2>
             <p className="mt-1 text-xs leading-relaxed text-text-secondary">
-              Sign in once in this browser. Your current work stays open behind this panel.
+              {localApproval ? 'Approve local management on this PC. Your current work stays open behind this panel.' : 'Sign in once in this browser. Your current work stays open behind this panel.'}
             </p>
           </div>
           <button
@@ -196,7 +196,7 @@ export function AgentAccessSessionGate() {
               )}
               {localApproval && (
                 <div className="space-y-2">
-                  <p className="text-xs leading-relaxed text-text-secondary">You are on this PC directly. Approve this browser without copying a code.</p>
+                  <p className="text-xs leading-relaxed text-text-secondary">You are on this PC directly. Approve local management without copying a code.</p>
                   <button type="button" onClick={() => void handleLocalApproval()} disabled={submitting || requestingCode} className="min-h-11 w-full rounded-lg bg-accent-blue px-4 py-2.5 text-xs font-semibold text-bg-primary disabled:opacity-50">
                     {submitting ? 'Approving…' : 'Approve on this PC'}
                   </button>
@@ -259,7 +259,7 @@ export function AgentAccessSessionGate() {
           )}
 
           <p className="text-[10px] leading-relaxed text-text-muted">
-            Maestro remembers this browser until you sign out or the session expires. You approve each agent separately.
+            {localApproval ? 'Local access stays available on this PC after a restart. You approve each agent separately.' : 'Maestro remembers this browser until you sign out or the session expires. You approve each agent separately.'}
           </p>
         </div>
       </section>

@@ -663,7 +663,11 @@ def create_router(
         except (OSError, httpx.HTTPError) as error:
             raise RuntimeError("Open Agent Access in Pinokio before requesting a code") from error
 
-    router.include_router(management_router(backend.runtime, request_console_code=request_console_code))
+    router.include_router(management_router(
+        backend.runtime,
+        request_console_code=request_console_code,
+        local_device_access=True,
+    ))
 
     def principal_required():
         principal = principal_context.get()

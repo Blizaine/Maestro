@@ -2,7 +2,7 @@
 
 This module imports no MCP SDK or model code. The model backend and the bundled
 CPU controller use the same identity store and policy. Proxy headers never grant
-authority; only an owner session or an authenticated, scoped grant can do so.
+authority; local-device authority is limited to direct same-PC UI requests.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from starlette.datastructures import UploadFile
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 
-from .auth import AuthError
+from .auth import AuthError, LOCAL_DEVICE_PRINCIPAL
 from .catalog import required_scope
 from .context import credential_context, principal_context, public_origin_context, submission_context
 from .jobs import JournalError
@@ -365,6 +365,129 @@ def local_browser_approval_eligible(scope: dict, *, require_same_origin: bool = 
     return not require_same_origin or _local_request_same_origin(details)
 
 
+def _direct_loopback_ui_request(scope: dict) -> bool:
+    """Whether an unauthenticated request came directly from this PC."""
+    scope_type = scope.get("type", "http")
+    scheme = str(scope.get("scheme", "")).lower()
+    if scope_type == "http":
+        if scheme not in {"http", "https"}:
+            return False
+        return _local_request_details(scope) is not None
+    if scope_type == "websocket":
+        if scheme not in {"ws", "wss"}:
+            return False
+        normalized = dict(scope)
+        normalized["type"] = "http"
+        normalized["scheme"] = "https" if scheme == "wss" else "http"
+        return _local_request_details(normalized) is not None
+    return False
+
+
+def local_device_request_allowed(scope: dict) -> bool:
+    """Enforce browser-origin checks for direct local-device authority.
+
+    Top-level site metadata is intentionally not used for safe GET navigation:
+    Pinokio embeds the loopback UI from a different private-IP origin. API
+    mutations and WebSocket upgrades still require the app's own origin.
+    """
+    if not _direct_loopback_ui_request(scope):
+        return False
+    headers = {key.lower(): value for key, value in scope.get("headers", [])}
+    if b"origin" in headers and not same_origin(scope):
+        return False
+    method = str(scope.get("method", "GET")).upper()
+    if scope.get("type") == "websocket" or method in MUTATIONS:
+        return same_origin(scope)
+    return True
+
+
+def pinokio_access_origin(config_path: Path | None = None) -> str | None:
+    """Read only the trusted private-IP access origin from Pinokio config."""
+    path = Path(config_path) if config_path is not None else Path.home() / ".pinokio" / "config.json"
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+        access = config.get("access") if isinstance(config, dict) else None
+        if not isinstance(access, dict):
+            return None
+        scheme = access.get("protocol")
+        host = access.get("host")
+        port = access.get("port")
+        if (
+            not isinstance(scheme, str)
+            or scheme.lower() not in {"http", "https"}
+            or not isinstance(host, str)
+            or not host
+            or host != host.strip()
+            or type(port) is not int
+            or not 1 <= port <= 65535
+        ):
+            return None
+        address = ipaddress.ip_address(host)
+        if (
+            not address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_multicast
+            or address.is_unspecified
+            or address.is_reserved
+        ):
+            return None
+        authority = f"[{address.compressed}]" if address.version == 6 else address.compressed
+        return f"{scheme.lower()}://{authority}:{port}"
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+_LOOPBACK_FRAME_ANCESTORS = (
+    "http://localhost:*", "https://localhost:*",
+    "http://127.0.0.1:*", "https://127.0.0.1:*",
+    "http://[::1]:*", "https://[::1]:*",
+)
+
+
+def _exact_frame_origin(value: str) -> str | None:
+    if not isinstance(value, str) or not value or value != value.strip():
+        return None
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or not parsed.port
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    host = parsed.hostname.casefold()
+    authority = f"[{host}]" if ":" in host else host
+    return f"{parsed.scheme.lower()}://{authority}:{port}"
+
+
+def frame_ancestor_sources(origins: tuple[str, ...] | list[str] | None = None) -> tuple[str, ...]:
+    """Return a narrow CSP allow-list for the local UI and trusted Pinokio shell."""
+    configured = (pinokio_access_origin(),) if origins is None else tuple(origins)
+    values = ["'self'", *_LOOPBACK_FRAME_ANCESTORS]
+    for origin in configured:
+        canonical = _exact_frame_origin(origin)
+        if canonical and canonical not in values:
+            values.append(canonical)
+    return tuple(values)
+
+
+def _apply_frame_ancestors(headers: list[tuple[bytes, bytes]], sources: tuple[str, ...]) -> list[tuple[bytes, bytes]]:
+    directive = "frame-ancestors " + " ".join(sources)
+    # A second CSP policy is intersected with any existing policy. Keeping
+    # existing headers intact preserves stricter frame rules and upload
+    # sandbox policies set by the application.
+    return [*headers, (b"content-security-policy", directive.encode("latin1"))]
+
+
 def local_approval_origin(scope: dict) -> str | None:
     """Canonical scheme/host/port binding for a verified local request."""
     details = _local_request_details(scope)
@@ -482,9 +605,15 @@ def browser_login_origin(status: dict, scope: dict) -> str:
     return status.get("controller_url") or ""
 
 
-def login_document(status: dict, *, secure: bool = True, notice: str | None = None) -> str:
-    # The form sends only a short-lived owner code. Long-lived credentials are
-    # delivered as HttpOnly cookies, never exposed to page scripts or URLs.
+def login_document(
+    status: dict,
+    *,
+    secure: bool = True,
+    notice: str | None = None,
+    local_device_access: bool = False,
+) -> str:
+    # The legacy form sends only a short-lived owner code; local-device approval
+    # uses an ephemeral proof and never exposes a long-lived credential.
     import html
     setup_url = html.escape(str(status.get("local_setup_url") or ""), quote=True)
     local_approval_available = secure and status.get("local_approval_available") is True
@@ -493,11 +622,12 @@ def login_document(status: dict, *, secure: bool = True, notice: str | None = No
         '<p id="local-approval-message" role="status"></p>'
         if local_approval_available else ""
     )
-    intro_markup = (
-        "<p>No code or terminal needed. Approve this browser to sign in on this computer.</p>"
-        if local_approval_available else
-        "<p>Enter the one-time browser code from Pinokio's Agent Access terminal, or from another signed-in Maestro browser.</p>"
-    )
+    if local_approval_available and local_device_access:
+        intro_markup = "<p>No code or terminal needed. Approve local management on this PC.</p>"
+    elif local_approval_available:
+        intro_markup = "<p>No code or terminal needed. Approve this browser to sign in on this computer.</p>"
+    else:
+        intro_markup = "<p>Enter the one-time browser code from Pinokio's Agent Access terminal, or from another signed-in Maestro browser.</p>"
     autofocus = "" if local_approval_available else " autofocus"
     manual_form = (
         '<form method="post" action="/api/v1/agent-access/owner-login"><label for="code">Browser code</label>'
@@ -514,6 +644,10 @@ def login_document(status: dict, *, secure: bool = True, notice: str | None = No
         f'<p role="alert" style="color:#ffb2a9">{html.escape(notice)}</p>'
         if notice else ""
     )
+    if local_device_access:
+        local_approval_script = """document.getElementById('local-approve')?.addEventListener('click',async()=>{let b=document.getElementById('local-approve'),e=document.getElementById('local-approval-message');b.disabled=true;try{let proof=Array.from(crypto.getRandomValues(new Uint8Array(32)),x=>x.toString(16).padStart(2,'0')).join('');let c=await fetch('/api/v1/agent-access/local-challenge',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify({proof})}),cj=await c.json();if(!c.ok||typeof cj.nonce!=='string')throw Error();let a=await fetch('/api/v1/agent-access/local-approve',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify({nonce:cj.nonce,proof,approve:true})}),aj=await a.json();if(!a.ok||aj.ok!==true)throw Error();let s=await fetch('/api/v1/agent-access/status',{credentials:'same-origin',cache:'no-store'}),sj=await s.json();if(!s.ok||sj.authenticated!==true||sj.owner!==true||sj.auth_method!=='local_device')throw Error();let n=document.querySelector('input[name="next"]')?.value||'/';location.assign(n.startsWith('/oauth/authorize?')?n:'/')}catch{e.textContent='Local approval could not be completed. Try again or use a browser code.';b.disabled=false}});"""
+    else:
+        local_approval_script = """document.getElementById('local-approve')?.addEventListener('click',async()=>{let b=document.getElementById('local-approve'),e=document.getElementById('local-approval-message');b.disabled=true;try{let c=await fetch('/api/v1/agent-access/local-challenge',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json'}}),cj=await c.json();if(!c.ok||typeof cj.nonce!=='string')throw Error();let a=await fetch('/api/v1/agent-access/local-approve',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify({nonce:cj.nonce,approve:true})}),aj=await a.json();if(!a.ok||aj.ok!==true)throw Error();let s=await fetch('/api/v1/agent-access/status',{credentials:'same-origin',cache:'no-store'}),sj=await s.json();if(!s.ok||sj.authenticated!==true||sj.owner!==true)throw Error();let n=document.querySelector('input[name="next"]')?.value||'/';location.assign(n.startsWith('/oauth/authorize?')?n:'/')}catch{e.textContent='Local approval could not be completed. Try again or use a browser code.';b.disabled=false}});"""
     if not secure:
         address = html.escape(str(status.get("controller_url") or ""), quote=True)
         return f'<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Maestro secure connection</title><main><h1>Open Maestro securely</h1>{notice_markup}<p>Browser codes are entered over HTTPS. Open the secure address and verify the certificate fingerprint shown in Pinokio.</p><p><a href="{address}">Open secure Maestro</a></p></main>'
@@ -526,8 +660,9 @@ def login_document(status: dict, *, secure: bool = True, notice: str | None = No
         f'<p><a href="{setup_url}">Open this computer\'s secure setup</a></p>',
         """</main><script>
 document.getElementById('request').onclick=async()=>{let e=document.getElementById('message');try{let r=await fetch('/api/v1/agent-access/request-console-code',{method:'POST'});let j=await r.json();e.textContent=j.message||j.detail?.message||j.detail||'Check the Pinokio terminal.'}catch{e.textContent='Could not request a code. Open Agent Access in Pinokio.'}};
-document.getElementById('local-approve')?.addEventListener('click',async()=>{let b=document.getElementById('local-approve'),e=document.getElementById('local-approval-message');b.disabled=true;try{let c=await fetch('/api/v1/agent-access/local-challenge',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json'}}),cj=await c.json();if(!c.ok||typeof cj.nonce!=='string')throw Error();let a=await fetch('/api/v1/agent-access/local-approve',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify({nonce:cj.nonce,approve:true})}),aj=await a.json();if(!a.ok||aj.ok!==true)throw Error();let s=await fetch('/api/v1/agent-access/status',{credentials:'same-origin',cache:'no-store'}),sj=await s.json();if(!s.ok||sj.authenticated!==true||sj.owner!==true)throw Error();let n=document.querySelector('input[name="next"]')?.value||'/';location.assign(n.startsWith('/oauth/authorize?')?n:'/')}catch{e.textContent='Local approval could not be completed. Try again or use a browser code.';b.disabled=false}});
-</script></body></html>""",
+""",
+        local_approval_script,
+        """</script></body></html>""",
     ]
     document = "".join(parts)
     if notice_markup:
@@ -547,6 +682,8 @@ class AccessBoundary:
         additional_media_roots=None,
         dynamic_scope_resolver=None,
         validate_controller_origin: bool = False,
+        allow_local_ui: bool = False,
+        frame_ancestor_origins: tuple[str, ...] | list[str] | None = None,
     ):
         self.app, self.runtime, self.journal = app, runtime, journal
         self.app_root = Path(app_root).resolve() if app_root else None
@@ -555,6 +692,10 @@ class AccessBoundary:
         self.additional_media_roots = additional_media_roots
         self.dynamic_scope_resolver = dynamic_scope_resolver
         self.validate_controller_origin = bool(validate_controller_origin)
+        self.allow_local_ui = bool(allow_local_ui)
+        self.frame_ancestor_sources = (
+            frame_ancestor_sources(frame_ancestor_origins) if self.allow_local_ui else ()
+        )
         self._multipart_slots = threading.BoundedSemaphore(MAX_CONCURRENT_MULTIPART)
 
     async def __call__(self, scope, receive, send):
@@ -563,6 +704,26 @@ class AccessBoundary:
         path = scope.get("path", "/")
         method = scope.get("method", "GET").upper()
         headers = {k.lower(): v.decode("latin1") for k, v in scope.get("headers", [])}
+        if (
+            self.frame_ancestor_sources
+            and not path.startswith(("/uploads/", "/api/v1/uploads/"))
+        ):
+            original_send = send
+
+            async def protect_local_ui_framing(message):
+                if message["type"] == "http.response.start":
+                    response_headers = list(message.get("headers", []))
+                    content_type = {
+                        key.lower(): value for key, value in response_headers
+                    }.get(b"content-type", b"").split(b";", 1)[0].lower()
+                    if content_type in {b"text/html", b"application/xhtml+xml"}:
+                        response_headers = _apply_frame_ancestors(
+                            response_headers, self.frame_ancestor_sources,
+                        )
+                        message = {**message, "headers": response_headers}
+                await original_send(message)
+
+            send = protect_local_ui_framing
         allow_insecure_login_transport = (
             scope.get("scheme") == "http"
             and (
@@ -581,7 +742,8 @@ class AccessBoundary:
                 headers={"Cache-Control": "no-store"},
             )
             return await response(scope, receive, send)
-        if path == "/mcp" and not self.runtime.auth.enabled:
+        is_mcp_path = path == "/mcp" or path.startswith("/mcp/")
+        if is_mcp_path and not self.runtime.auth.enabled:
             if scope["type"] == "websocket":
                 return await send({"type": "websocket.close", "code": 4404})
             response = JSONResponse({"detail": "Not Found"}, status_code=404, headers={"Cache-Control": "no-store"})
@@ -604,8 +766,23 @@ class AccessBoundary:
             send = protect_uploaded_content
         principal = token = None
         try:
+            local_device_transport = self.allow_local_ui and _direct_loopback_ui_request(scope)
+            local_device = (
+                local_device_transport
+                and b"authorization" not in headers
+                and not is_mcp_path
+                and self.runtime.security_required
+                and self.runtime.auth.owner_configured
+            )
+            if local_device and not local_device_request_allowed(scope):
+                raise AuthError(403, "A same-origin local browser request is required")
+            authorization_present = b"authorization" in headers
             bearer = headers.get(b"authorization", "")
-            if bearer:
+            if local_device:
+                # Direct same-PC UI authority is installation-scoped and never
+                # becomes an MCP credential or a browser bearer session.
+                principal = LOCAL_DEVICE_PRINCIPAL
+            elif authorization_present:
                 if not bearer.startswith("Bearer "):
                     raise AuthError(401, "Use a Bearer access token")
                 token = bearer[7:]
@@ -639,7 +816,7 @@ class AccessBoundary:
                         raise AuthError(403, "Use the documented Maestro API for this operation")
             # An off server never becomes an unpaired MCP endpoint. Once an
             # owner exists, disabling MCP retains the browser/API auth boundary.
-            if path == "/mcp" and (not self.runtime.auth.enabled or principal is None):
+            if is_mcp_path and (not self.runtime.auth.enabled or principal is None):
                 raise AuthError(401 if self.runtime.auth.enabled else 404, "Agent Access is disabled or this client is not paired")
             if not principal or path in PUBLIC or not path.startswith("/api/v1/"):
                 ptoken = principal_context.set(principal)

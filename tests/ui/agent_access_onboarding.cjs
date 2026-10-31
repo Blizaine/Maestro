@@ -124,7 +124,7 @@ async function main() {
     requestAgentAccessConsoleCode: async () => { calls.consoleCode += 1; return { expires_in: 120 }; },
     approveAgentAccessLocal: async () => {
       calls.localApproval += 1;
-      Object.assign(status, { owner_configured: true, authenticated: true, owner: true });
+      Object.assign(status, { owner_configured: true, authenticated: true, owner: true, auth_method: 'local_device' });
       return { ok: true };
     },
     loginAgentAccessOwner: async code => {
@@ -196,12 +196,11 @@ async function main() {
     tree = render();
     const steps = allNodes(tree).filter(node => node.props?.['aria-current'] === 'step');
     assert.equal(steps.length, 1, 'one step is clearly marked as current');
-    assert.match(visibleText(steps[0]), /Sign in to this browser once/);
+    assert.match(visibleText(steps[0]), /Sign in to manage access/);
     assert.match(visibleText(tree), /Allow agent connections/);
     assert.match(visibleText(tree), /Add an MCP client/);
-    assert.match(visibleText(tree), /Before first setup/);
-    assert.match(visibleText(tree), /other browsers/);
-    assert.match(visibleText(tree), /turning agents off later keeps browser sign-in protection in place/);
+    assert.match(visibleText(tree), /Agent connections stay off until you allow them/);
+    assert.match(visibleText(tree), /remote browsers and agents still need their own authorization/);
     assert.equal(calls.settings.length, 0, 'fresh setup does not enable agent connections');
     assert.equal(buttonByText(tree, 'Copy Codex setup'), undefined, 'client setup waits for sign-in and explicit enablement');
 
@@ -253,7 +252,7 @@ async function main() {
     assert.match(visibleText(tree), /Example client/);
     assert.match(visibleText(tree), /Revoke/);
     assert.match(visibleText(tree), /Agent connections are paused/);
-    assert.match(visibleText(tree), /Sign in to this browser once/);
+    assert.match(visibleText(tree), /Sign in to manage access/);
     assert.match(visibleText(tree), /Complete/);
     assert.match(visibleText(tree), /Current step/);
     assert.equal(buttonByText(tree, 'Copy Codex setup'), undefined, 'paused access keeps client setup as the next step');
@@ -331,7 +330,8 @@ async function main() {
     assert.equal(calls.localApproval, 1);
     assert.equal(calls.consoleCode, beforeLocalCodeRequests, 'local approval never requests a terminal code');
     assert.equal(calls.settings.length, beforeLocalSettings, 'local approval does not alter agent settings');
-    assert.match(visibleText(tree), /This browser is signed in/);
+    assert.match(visibleText(tree), /This PC is approved for local management/);
+    assert.equal(buttonByText(tree, 'Sign out'), undefined, 'local device authority is not presented as a cookie session');
     console.log('Agent Access onboarding: guided states, one-time code recovery, explicit enablement, disclosures, URL validation, and client copy passed');
   } finally {
     for (const slot of hooks) if (slot?.kind === 'effect' && typeof slot.cleanup === 'function') slot.cleanup();

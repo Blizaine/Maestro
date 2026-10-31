@@ -108,6 +108,16 @@ class AuthStore:
         with self._connection() as conn:
             return self._meta_bool(conn, "enabled", default=False)
 
+    @property
+    def owner_configured(self) -> bool:
+        with self._connection() as conn:
+            return self._meta_bool(conn, "owner_configured", default=False)
+
+    def mark_owner_configured(self) -> None:
+        """Persist explicit owner enrollment without creating a browser session."""
+        with self._transaction() as conn:
+            conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('owner_configured', '1')")
+
     def set_resource(self, resource: str) -> None:
         """Set the trusted canonical resource audience for this installation."""
         canonical = self._validate_resource(resource)
@@ -918,6 +928,11 @@ class AuthStore:
 
 def _owner_principal() -> Principal:
     return Principal("owner", "owner-console", tuple(_ordered_scopes(_ALL_SCOPES)), True)
+
+
+LOCAL_DEVICE_PRINCIPAL = Principal(
+    "local-device", "local-device", tuple(_SCOPE_ORDER), True,
+)
 
 
 def _digest(value: str) -> str:

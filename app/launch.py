@@ -33043,6 +33043,7 @@ if __name__ == "__main__":
             ready=True,
             session_id=_agent_access_backend.session_id,
             launcher_script=_agent_launcher_script,
+            auth_boundary_version=2,
         )
         print(f"\n{'='*50}")
         print(f"  Maestro UI:    http://{display_host}:{port}/")
@@ -33065,6 +33066,7 @@ if __name__ == "__main__":
         app_root=Path(_app_dir),
         asset_resolver=_agent_access_backend.asset_store.resolve_tree,
         additional_media_roots=_agent_configured_media_roots,
+        allow_local_ui=True,
     )
 
     try:

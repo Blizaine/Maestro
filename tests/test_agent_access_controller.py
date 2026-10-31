@@ -83,6 +83,7 @@ def _app(runtime: RuntimeState, handler=None, console=None, tls_material=None):
         bridge=bridge,
         console_printer=(console if console is not None else []).append,
         tls_material=tls_material,
+        frame_ancestor_origins=(),
     )
     return app, backend_calls
 

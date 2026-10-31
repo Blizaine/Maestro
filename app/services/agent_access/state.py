@@ -411,7 +411,7 @@ class RuntimeState:
             if value is not None and not isinstance(value, bool):
                 raise ValueError(f"{name} must be a boolean")
 
-    def register_backend(self, url: str, *, ready: bool, session_id: str, launcher_script: str = "start.js") -> None:
+    def register_backend(self, url: str, *, ready: bool, session_id: str, launcher_script: str = "start.js", auth_boundary_version: int = 1) -> None:
         parsed = urlsplit(url)
         if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "::1"} or not parsed.port or parsed.username or parsed.query or parsed.fragment:
             raise ValueError("The backend must be this installation's loopback HTTP listener")
@@ -419,7 +419,7 @@ class RuntimeState:
             raise ValueError("Invalid Maestro launcher")
         atomic_json(self.directory / "backend.json", {
             "schema": 1, "installation_id": self.installation_id,
-            "auth_boundary_version": 1,
+            "auth_boundary_version": auth_boundary_version,
             "url": url.rstrip("/"), "pid": os.getpid(), "ready": bool(ready),
             "session_id": session_id, "launcher_script": launcher_script, "updated_at": time.time(),
         })

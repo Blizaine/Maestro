@@ -9,6 +9,7 @@ export interface AgentAccessStatus {
   authenticated: boolean
   owner?: boolean
   local_approval_available?: boolean
+  auth_method?: string | null
   installation_id?: string | null
   workstation_id?: string | null
   label?: string | null
@@ -178,10 +179,15 @@ export async function loginAgentAccessOwner(code: string): Promise<{ ok: boolean
 }
 
 export async function approveAgentAccessLocal(): Promise<{ ok: boolean }> {
+  if (!globalThis.crypto?.getRandomValues) {
+    throw new AgentAccessApiError(503, 'This browser cannot create a local approval proof. Open Maestro in a current browser on this PC.')
+  }
+  const randomness = globalThis.crypto.getRandomValues(new Uint8Array(32))
+  const proof = Array.from(randomness, value => value.toString(16).padStart(2, '0')).join('')
   const challenge = await requestJson<{ nonce?: string }>('/api/v1/agent-access/local-challenge', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: '{}',
+    body: JSON.stringify({ proof }),
   }, true)
   if (typeof challenge.nonce !== 'string' || !challenge.nonce || challenge.nonce.length > 256) {
     throw new AgentAccessApiError(502, 'Local approval is not ready. Try Approve on this PC again.')
@@ -189,11 +195,11 @@ export async function approveAgentAccessLocal(): Promise<{ ok: boolean }> {
   const result = await requestJson<{ ok: boolean }>('/api/v1/agent-access/local-approve', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ nonce: challenge.nonce, approve: true }),
+    body: JSON.stringify({ nonce: challenge.nonce, proof, approve: true }),
   }, true)
   const session = await requestJson<AgentAccessStatus>('/api/v1/agent-access/status', {}, true)
   if (!result.ok || !session.authenticated || !session.owner) {
-    throw new AgentAccessApiError(401, 'Local approval completed, but this browser did not keep its sign-in session. Allow cookies for this Maestro address, then try Approve on this PC again.', 'maestro_owner_session_missing')
+    throw new AgentAccessApiError(401, 'Local approval could not be verified. Try Approve on this PC again, or refresh after Maestro has finished starting.', 'maestro_owner_session_missing')
   }
   return result
 }

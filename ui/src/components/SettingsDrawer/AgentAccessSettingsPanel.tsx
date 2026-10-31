@@ -58,6 +58,7 @@ export function AgentAccessSettingsPanel() {
   const ownerSession = status?.authenticated === true && status.owner === true
   const secureOrigin = isSecureOrigin()
   const localApproval = status?.local_approval_available === true
+  const localDeviceAccess = status?.auth_method === 'local_device'
   const mcpUrls = useMemo(() => [...new Set([status?.mcp_url, ...(status?.lan_mcp_urls || [])]
     .filter((value): value is string => typeof value === 'string' && value.endsWith('/mcp') && safeControllerUrl(value) !== null))], [status])
   const mcpUrl = mcpUrls.includes(selectedMcpUrl) ? selectedMcpUrl : mcpUrls[0] || ''
@@ -179,7 +180,7 @@ export function AgentAccessSettingsPanel() {
       await approveAgentAccessLocal()
       setOwnerCode('')
       setConsoleCodeRequested(false)
-      setMessage('This browser is approved. You can now manage agent access.')
+      setMessage('This PC is approved for local management. You can now enable agent connections.')
       await refresh()
       window.dispatchEvent(new Event(AGENT_ACCESS_SESSION_RESTORED_EVENT))
     } catch (approvalError) {
@@ -320,24 +321,24 @@ export function AgentAccessSettingsPanel() {
 
       {!backendMissing && status && (
         <>
-          <JourneyStep number={1} title="Sign in to this browser once" state={step1State}>
+          <JourneyStep number={1} title={localApproval || localDeviceAccess ? 'Access from this PC' : 'Sign in to manage access'} state={step1State}>
             {ownerSession ? (
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <p className="text-xs leading-relaxed text-text-secondary">This browser is signed in and can manage Agent Access.</p>
-                <button type="button" onClick={() => void handleLogout()} disabled={busyAction !== null} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-border px-2.5 text-[10px] text-text-secondary hover:bg-bg-hover disabled:opacity-50">
+                <p className="text-xs leading-relaxed text-text-secondary">{localDeviceAccess ? 'This PC is approved for local management. Normal Maestro use does not need a browser sign-in.' : 'This browser is signed in and can manage Agent Access.'}</p>
+                {!localDeviceAccess && <button type="button" onClick={() => void handleLogout()} disabled={busyAction !== null} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-border px-2.5 text-[10px] text-text-secondary hover:bg-bg-hover disabled:opacity-50">
                   {busyAction === 'logout' ? <LoaderCircle size={13} className="animate-spin" /> : <LogOut size={13} />}Sign out
-                </button>
+                </button>}
               </div>
             ) : (
               <div className="space-y-3">
                 {!status.owner_configured && (
                   <div className="rounded-lg border border-accent-blue/20 bg-accent-blue/5 p-3 text-[11px] leading-relaxed text-text-secondary">
-                    Before first setup: signing in here also protects Maestro in other browsers, which will need their own sign-in. Agent connections stay off until you allow them; turning agents off later keeps browser sign-in protection in place.
+                    Agent connections stay off until you allow them. Approving this PC sets up local management; remote browsers and agents still need their own authorization.
                   </div>
                 )}
                 {localApproval ? (
                   <div className="space-y-2">
-                    <p className="text-xs leading-relaxed text-text-secondary">You are connected directly on this PC. Approve this browser with one click; no code or terminal is needed.</p>
+                    <p className="text-xs leading-relaxed text-text-secondary">You are connected directly on this PC. Approve local management with one click; no code or terminal is needed.</p>
                     <button type="button" onClick={() => void handleLocalApproval()} disabled={busyAction !== null || !status.available} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-4 py-2 text-xs font-semibold text-bg-primary disabled:opacity-50">
                       {busyAction === 'local-approval' ? <LoaderCircle size={14} className="animate-spin" /> : <ShieldCheck size={14} />}
                       {busyAction === 'local-approval' ? 'Approving…' : 'Approve on this PC'}

@@ -86,7 +86,15 @@ class _MCPRoute:
         await self.app(scope, receive, send)
 
 
-def create_app(runtime, *, bridge=None, version="4.0.0", console_printer=print, tls_material=None):
+def create_app(
+    runtime,
+    *,
+    bridge=None,
+    version="4.0.0",
+    console_printer=print,
+    tls_material=None,
+    frame_ancestor_origins: tuple[str, ...] | list[str] | None = None,
+):
     from mcp.server.transport_security import TransportSecuritySettings
 
     from .http import management_router
@@ -132,6 +140,8 @@ def create_app(runtime, *, bridge=None, version="4.0.0", console_printer=print, 
         asset_resolver=bridge.assets.resolve_tree,
         dynamic_scope_resolver=transfer_scope,
         validate_controller_origin=True,
+        allow_local_ui=True,
+        frame_ancestor_origins=frame_ancestor_origins,
     )
     # /mcp is mounted without a trailing-slash redirect or scope rewriting.
     app.router.routes.append(Route("/mcp", _MCPRoute(transport), methods=["GET", "POST", "DELETE"]))
@@ -149,7 +159,12 @@ def create_app(runtime, *, bridge=None, version="4.0.0", console_printer=print, 
         console_printer("This code expires in 10 minutes. Enter it only in the verified secure Maestro browser.")
 
     app.state.show_code = show_code
-    app.include_router(management_router(runtime, request_console_code=show_code, status_extra=lambda: {"backend_online": bridge.online()}))
+    app.include_router(management_router(
+        runtime,
+        request_console_code=show_code,
+        status_extra=lambda: {"backend_online": bridge.online()},
+        local_device_access=True,
+    ))
 
     def request_origin(request):
         origin = runtime.origin_for_scope(request.scope)
