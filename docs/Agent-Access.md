@@ -12,20 +12,39 @@ from your LAN and advertises its address with mDNS as `_maestro._tcp.local.`
 Discovery only announces the endpoint. It does not approve a client or grant
 access, and some clients may not show discovered servers automatically.
 
-## Set up the owner account
+## Quick setup
 
 1. Start Maestro from Pinokio and open **Settings → Agent Access**. If the
    model engine is stopped, open **Agent Access** from the Pinokio app menu;
    its separate terminal can run the controller and print the setup code.
-2. In Settings, choose **Request code**. Pinokio prints a one-time owner code
-   in the Agent Access terminal. It expires in about ten minutes. Enter it in
-   Settings to sign in as the owner for this installation.
-3. Use **Download public TLS certificate**, then check the secure setup URL and TLS certificate SHA-256 fingerprint shown
+2. Follow the three steps in the panel: **sign in**, **allow agent connections**,
+   then **choose your agent**. For the initial sign-in, request a code and open
+   **Pinokio → this Maestro app → Agent Access Terminal**. Copy the newest line
+   labeled **Browser code:** into **Browser sign-in code**. Each code works
+   once; the panel shows how long it remains valid. Request a fresh code if it
+   expires or has already been used.
+3. Choose **Copy setup prompt for my agent** and paste it into your agent's chat,
+   or follow the client-specific instructions. Complete the client's OAuth
+   approval in Maestro. Copying setup text does not connect or approve the agent.
+
+Maestro remembers the signed-in browser until its session expires or you sign
+out. Refreshing the page does not require a new code while the session remains
+valid. The initial owner sign-in protects this installation's existing API and
+other browsers also need their own sign-in. Pausing agent connections does not
+remove that browser protection. An already signed-in owner can create a
+short-lived code for another browser from the additional-browser controls.
+
+## Connection details and certificate trust
+
+Expand **Connection details** in the panel when configuring a client or
+troubleshooting. For the first connection from each device or client:
+
+1. Use **Download public TLS certificate**, then check the secure setup URL and TLS certificate SHA-256 fingerprint shown
    in Settings. Trust that exact certificate on each device and in each client
    that needs to connect. Follow the device or client instructions for adding
    a certificate; Maestro does not change system trust settings or firewall
    rules. Never turn off TLS verification.
-4. Enable **Allow agent connections** when you are ready to connect an agent.
+2. Enable **Allow agent connections** when you are ready to connect an agent.
    This moves the listener from loopback to the LAN and enables local service
    discovery. Use the MCP URL shown in Settings, which uses this installation's
    `.local` hostname when mDNS is available. The controller also reports

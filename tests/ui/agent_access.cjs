@@ -201,6 +201,7 @@ async function exerciseSessionGate(esbuild) {
     assert.equal(freshCodeRequests, 1, 'the fresh-code control uses the Agent Access code request');
     assert.equal(allNodes(tree).find(node => node.type === 'input')?.props.value, '', 'requesting a new code clears a stale input');
     assert.match(allNodes(tree).find(node => node.props?.role === 'status')?.props.children || '', /Pinokio/i);
+    assert.match(allNodes(tree).find(node => node.props?.role === 'status')?.props.children || '', /1 minute\b/, 'code instructions use the server expiry instead of assuming ten minutes');
     console.log('Agent Access SessionGate: repeated 401 state, dismissal, manual sign-in, and fresh-code request passed');
   } finally {
     for (const slot of hooks) if (slot?.kind === 'effect' && slot.cleanup) slot.cleanup();

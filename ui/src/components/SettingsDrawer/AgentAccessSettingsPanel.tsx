@@ -33,7 +33,7 @@ import {
   type AgentAccessStatus,
 } from '../../api/agentAccess'
 
-type CopyTarget = 'codex' | 'claude' | 'url' | null
+type CopyTarget = 'agent' | 'codex' | 'claude' | 'url' | null
 
 export function AgentAccessSettingsPanel() {
   const [status, setStatus] = useState<AgentAccessStatus | null>(null)
@@ -45,20 +45,20 @@ export function AgentAccessSettingsPanel() {
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [consoleCodeRequested, setConsoleCodeRequested] = useState(false)
+  const [consoleCodeExpiresInMinutes, setConsoleCodeExpiresInMinutes] = useState<number | null>(null)
   const [ownerCode, setOwnerCode] = useState('')
   const [labelDraft, setLabelDraft] = useState('')
   const [copyTarget, setCopyTarget] = useState<CopyTarget>(null)
   const [pairingCode, setPairingCode] = useState<string | null>(null)
   const [pairingExpiresAt, setPairingExpiresAt] = useState<number | null>(null)
   const [pairingSecondsLeft, setPairingSecondsLeft] = useState(0)
-  const [showAudit, setShowAudit] = useState(false)
   const [selectedMcpUrl, setSelectedMcpUrl] = useState('')
 
   const ownerSession = status?.authenticated === true && status.owner === true
   const secureOrigin = isSecureOrigin()
   const mcpUrls = useMemo(() => [...new Set([status?.mcp_url, ...(status?.lan_mcp_urls || [])]
     .filter((value): value is string => typeof value === 'string' && value.endsWith('/mcp') && safeControllerUrl(value) !== null))], [status])
-  const mcpUrl = mcpUrls.includes(selectedMcpUrl) ? selectedMcpUrl : status?.mcp_url || ''
+  const mcpUrl = mcpUrls.includes(selectedMcpUrl) ? selectedMcpUrl : mcpUrls[0] || ''
   const controllerUrl = safeControllerUrl(mcpUrl.endsWith('/mcp') ? mcpUrl.slice(0, -4) : status?.controller_url)
 
   const refresh = useCallback(async () => {
@@ -126,6 +126,9 @@ export function AgentAccessSettingsPanel() {
   }, [pairingExpiresAt])
 
   const handleRequestConsoleCode = async () => {
+    setOwnerCode('')
+    setConsoleCodeRequested(false)
+    setConsoleCodeExpiresInMinutes(null)
     setBusyAction('console-code')
     setError(null)
     setMessage(null)
@@ -133,10 +136,9 @@ export function AgentAccessSettingsPanel() {
       const result = await requestAgentAccessConsoleCode()
       setConsoleCodeRequested(true)
       const ttl = Number.isFinite(result.expires_in) ? Math.max(1, result.expires_in) : 600
-      const minutes = Math.max(1, Math.ceil(ttl / 60))
-      setMessage(`A one-time owner code was printed in Pinokio’s Agent Access Terminal (agent_access.js). Open that entry in this Maestro app’s Pinokio menu. The code expires in about ${minutes} minutes.`)
+      setConsoleCodeExpiresInMinutes(Math.max(1, Math.ceil(ttl / 60)))
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Could not request an owner code.')
+      setError(requestError instanceof Error ? requestError.message : 'Could not request a Browser sign-in code.')
     } finally {
       setBusyAction(null)
     }
@@ -152,6 +154,7 @@ export function AgentAccessSettingsPanel() {
       await loginAgentAccessOwner(ownerCode.trim())
       setOwnerCode('')
       setConsoleCodeRequested(false)
+      setConsoleCodeExpiresInMinutes(null)
       setMessage('Owner session is active in this browser.')
       await refresh()
     } catch (loginError) {
@@ -219,9 +222,9 @@ export function AgentAccessSettingsPanel() {
       setPairingCode(result.code)
       const ttl = Number.isFinite(result.expires_in) ? Math.max(1, result.expires_in) : 300
       setPairingExpiresAt(Date.now() + ttl * 1000)
-      setMessage('Use this short-lived code in the Maestro browser flow. It is kept only in this page until it expires.')
+      setMessage('A separate Browser sign-in code is ready for the additional-browser pairing flow. It expires automatically.')
     } catch (pairError) {
-      setError(pairError instanceof Error ? pairError.message : 'Could not create a browser pairing code.')
+      setError(pairError instanceof Error ? pairError.message : 'Could not create a Browser sign-in code.')
     } finally {
       setBusyAction(null)
     }
@@ -253,7 +256,7 @@ export function AgentAccessSettingsPanel() {
       setCopyTarget(target)
       window.setTimeout(() => setCopyTarget(current => current === target ? null : current), 1800)
     } catch {
-      setError('Clipboard access is unavailable in this browser. Select the connection URL and copy it manually.')
+      setError('Clipboard access is unavailable. Expand Connection details to select the connection URL and copy it manually.')
     }
   }
 
@@ -262,8 +265,12 @@ export function AgentAccessSettingsPanel() {
     [grants],
   )
 
+  const step1State = ownerSession ? 'done' : 'current'
+  const step2State = status?.enabled ? 'done' : ownerSession ? 'current' : 'locked'
+  const canAddClient = ownerSession && status?.enabled === true && status.available
+
   return (
-    <div className="space-y-5 pb-5">
+    <div className="space-y-4 pb-5">
       <section className="rounded-xl border border-border bg-bg-secondary p-4">
         <div className="flex items-start gap-3">
           <div className="mt-0.5 rounded-lg bg-accent-blue/10 p-2 text-accent-blue"><Shield size={17} /></div>
@@ -272,32 +279,21 @@ export function AgentAccessSettingsPanel() {
               <h3 className="text-sm font-semibold text-text-primary">Maestro Agent Access</h3>
               <StatusPill label={status ? (status.enabled ? 'Enabled' : 'Off') : backendMissing ? 'Restart needed' : 'Checking'} good={status?.enabled === true} />
             </div>
-            <p className="mt-1.5 text-xs leading-relaxed text-text-secondary">
-              Connect Codex, Claude, and other MCP clients with scoped grants you can review and revoke. MCP and discovery start off. Owner setup also protects Maestro's existing API; turning MCP off later keeps that protection.
-            </p>
+            <p className="mt-1.5 text-xs leading-relaxed text-text-secondary">Follow these three steps to connect an MCP client. Each client completes a separate OAuth approval in Maestro; review or revoke its grant here.</p>
           </div>
           <button type="button" onClick={() => void refresh()} disabled={loading} className="rounded-lg p-2 text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-40" aria-label="Refresh Agent Access status">
             <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
           </button>
         </div>
-
         {backendMissing ? (
           <div className="mt-4 flex gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-text-secondary" role="status">
-            <CircleAlert size={15} className="mt-0.5 shrink-0 text-amber-400" />
-            <span>This Maestro backend does not have Agent Access yet. Restart Maestro after installing the update, then refresh this panel.</span>
+            <CircleAlert size={15} className="mt-0.5 shrink-0 text-amber-400" /><span>This Maestro backend does not have Agent Access yet. Restart Maestro after installing the update, then refresh this panel.</span>
           </div>
         ) : status && !status.available ? (
           <div className="mt-4 flex gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-relaxed text-text-secondary" role="status">
-            <CircleAlert size={15} className="mt-0.5 shrink-0 text-amber-400" />
-            <span>Agent Access is unavailable on this installation.</span>
+            <CircleAlert size={15} className="mt-0.5 shrink-0 text-amber-400" /><span>Agent Access is unavailable on this installation.</span>
           </div>
         ) : null}
-
-        <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
-          <InfoChip label="Controller" value={status?.controller_status || 'Checking'} good={isHealthyStatus(status?.controller_status)} />
-          <InfoChip label="Backend" value={status?.backend_online === undefined ? 'Checking' : status.backend_online ? 'Online' : 'Offline'} good={status?.backend_online === true} />
-          <InfoChip label="Discovery" value={status?.discovery_status || 'Not reported'} good={isHealthyStatus(status?.discovery_status)} />
-        </div>
       </section>
 
       {error && <Notice kind="error">{error}</Notice>}
@@ -305,202 +301,229 @@ export function AgentAccessSettingsPanel() {
 
       {!backendMissing && status && (
         <>
-          <section className="space-y-3 rounded-xl border border-border bg-bg-secondary p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <h4 className="text-xs font-semibold text-text-primary">Owner setup</h4>
-                <p className="mt-1 text-[10px] leading-relaxed text-text-muted">
-                  {ownerSession
-                    ? 'This browser has an owner session.'
-                    : status.owner_configured
-                      ? 'Owner access is configured. Sign in to manage this installation.'
-                      : 'Request a one-time code from the local Pinokio console to set up owner access.'}
-                </p>
-              </div>
-              {ownerSession && (
+          <JourneyStep number={1} title="Sign in to this browser once" state={step1State}>
+            {ownerSession ? (
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs leading-relaxed text-text-secondary">This browser is signed in and can manage Agent Access.</p>
                 <button type="button" onClick={() => void handleLogout()} disabled={busyAction !== null} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-border px-2.5 text-[10px] text-text-secondary hover:bg-bg-hover disabled:opacity-50">
-                  {busyAction === 'logout' ? <LoaderCircle size={13} className="animate-spin" /> : <LogOut size={13} />}
-                  Sign out
+                  {busyAction === 'logout' ? <LoaderCircle size={13} className="animate-spin" /> : <LogOut size={13} />}Sign out
                 </button>
-              )}
-            </div>
-
-            {!ownerSession && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => void handleRequestConsoleCode()}
-                  disabled={!secureOrigin || busyAction !== null || !status.available}
-                  className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg border border-border px-3 py-2 text-xs font-medium text-text-primary transition-colors hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {busyAction === 'console-code' ? <LoaderCircle size={14} className="animate-spin" /> : <LogIn size={14} />}
-                  Show code in Agent Access terminal
-                </button>
-                {!secureOrigin && <SecureOriginNote href={controllerUrl} />}
-                {consoleCodeRequested && (
-                  <p className="rounded-lg bg-bg-primary p-3 text-[10px] leading-relaxed text-text-secondary">
-                    In this Maestro app’s Pinokio menu, open Agent Access Terminal (agent_access.js). Copy the latest line labeled “Browser code:” and paste the code below. The code is never shown on this page.
-                  </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {!status.owner_configured && (
+                  <div className="rounded-lg border border-accent-blue/20 bg-accent-blue/5 p-3 text-[11px] leading-relaxed text-text-secondary">
+                    Before first setup: signing in here also protects Maestro in other browsers, which will need their own sign-in. Agent connections stay off until you allow them; turning agents off later keeps browser sign-in protection in place.
+                  </div>
                 )}
+                {status.owner_configured && <p className="text-xs leading-relaxed text-text-secondary">Owner access is already set up. Sign in to manage this installation from this browser.</p>}
+                {!secureOrigin && <SecureOriginNote href={controllerUrl} />}
+                {consoleCodeRequested && secureOrigin && (
+                  <div className="space-y-1.5 rounded-lg bg-bg-primary p-3 text-[11px] leading-relaxed text-text-secondary" role="status">
+                    <p>Open <strong className="font-semibold text-text-primary">Pinokio &gt; this Maestro app &gt; Agent Access Terminal</strong>.</p>
+                    <p>Copy only the newest line labeled <code className="font-mono text-text-primary">Browser code:</code>. It expires in about {consoleCodeExpiresInMinutes || 10} minutes and is single-use. If you request another, use only the newest code.</p>
+                    <p>Paste it below, then select <strong className="font-semibold text-text-primary">Sign in</strong>.</p>
+                  </div>
+                )}
+                <button type="button" onClick={() => void handleRequestConsoleCode()} disabled={!secureOrigin || busyAction !== null || !status.available} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-border px-3 py-2 text-xs font-medium text-text-primary transition-colors hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40">
+                  {busyAction === 'console-code' ? <LoaderCircle size={14} className="animate-spin" /> : <LogIn size={14} />}
+                  {consoleCodeRequested ? 'Request a new Browser sign-in code' : 'Request Browser sign-in code'}
+                </button>
                 {secureOrigin && (
                   <form className="space-y-2" onSubmit={event => void handleOwnerLogin(event)}>
-                    <label htmlFor="agent-access-owner-code" className="block text-[10px] text-text-secondary">One-time owner code</label>
-                    <div className="flex gap-2">
-                      <input
-                        id="agent-access-owner-code"
-                        value={ownerCode}
-                        onChange={event => setOwnerCode(event.target.value)}
-                        autoComplete="one-time-code"
-                        spellCheck={false}
-                        placeholder="Paste code from Agent Access terminal"
-                        className="min-w-0 flex-1 rounded-lg border border-border bg-bg-primary px-3 py-2 font-mono text-xs text-text-primary outline-none focus:border-accent-blue"
-                        disabled={busyAction !== null}
-                      />
-                      <button type="submit" disabled={!ownerCode.trim() || busyAction !== null} className="min-h-9 rounded-lg bg-accent-blue px-3 text-[10px] font-medium text-white hover:opacity-90 disabled:opacity-40">
-                        {busyAction === 'owner-login' ? 'Signing in…' : 'Sign in'}
-                      </button>
+                    {!consoleCodeRequested && <p className="text-[10px] leading-relaxed text-text-muted">Already have a Browser sign-in code? Paste it below.</p>}
+                    <label htmlFor="agent-access-owner-code" className="block text-[11px] font-medium text-text-secondary">Browser sign-in code</label>
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <input id="agent-access-owner-code" value={ownerCode} onChange={event => setOwnerCode(event.target.value)} autoComplete="one-time-code" autoCapitalize="none" spellCheck={false} placeholder="Paste your Browser sign-in code here" className="min-h-10 min-w-0 flex-1 rounded-lg border border-border bg-bg-primary px-3 py-2 font-mono text-xs text-text-primary outline-none focus:border-accent-blue" disabled={busyAction !== null} />
+                      <button type="submit" disabled={!ownerCode.trim() || busyAction !== null} className="min-h-10 rounded-lg bg-accent-blue px-4 text-xs font-medium text-white hover:opacity-90 disabled:opacity-40">{busyAction === 'owner-login' ? 'Signing in…' : 'Sign in'}</button>
                     </div>
                   </form>
                 )}
-              </>
-            )}
-
-            {ownerSession && (
-              <div className="space-y-3 border-t border-border pt-3">
-                <ToggleRow
-                  checked={status.enabled}
-                  disabled={busyAction !== null || !status.available}
-                  label="Allow agent connections"
-                  description="Turning this off pauses agent requests without revoking grants or tokens. Owner sign-in stays available for settings and revocation."
-                  onChange={value => void handleToggle(value)}
-                />
-                <div className="rounded-lg bg-bg-primary p-3 text-[10px] leading-relaxed text-text-muted">
-                  Existing agent grants and tokens remain in place while paused. Revoke a grant below to remove that client’s access; browser owner sign-in remains protected.
-                </div>
               </div>
             )}
-          </section>
+          </JourneyStep>
 
-          <section className="space-y-3 rounded-xl border border-border bg-bg-secondary p-4">
-            <div className="flex items-center gap-2">
-              <Fingerprint size={15} className="text-text-muted" />
-              <h4 className="text-xs font-semibold text-text-primary">Connection details</h4>
-            </div>
-            {status.label !== undefined && (
-              <div className="space-y-1.5">
-                <label htmlFor="agent-access-label" className="text-[10px] text-text-secondary">Installation name</label>
-                <div className="flex gap-2">
-                  <input
-                    id="agent-access-label"
-                    value={labelDraft}
-                    maxLength={64}
-                    onChange={event => setLabelDraft(event.target.value)}
-                    disabled={!ownerSession || busyAction !== null}
-                    className="min-w-0 flex-1 rounded-lg border border-border bg-bg-primary px-3 py-2 text-xs text-text-primary outline-none focus:border-accent-blue disabled:opacity-50"
-                    placeholder="My Maestro"
-                  />
-                  <button type="button" onClick={() => void handleSaveLabel()} disabled={!ownerSession || busyAction !== null || labelDraft.trim() === (status.label || '')} className="rounded-lg border border-border px-3 text-[10px] text-text-secondary hover:bg-bg-hover disabled:opacity-40">Save</button>
-                </div>
+          <JourneyStep number={2} title="Allow agent connections" state={step2State}>
+            {ownerSession ? (
+              <div className="space-y-3">
+                <ToggleRow checked={status.enabled} disabled={busyAction !== null || !status.available} label={status.enabled ? 'Agent connections are allowed' : 'Allow agent connections'} description={status.enabled ? 'Clients can request access. Each client completes a separate OAuth approval in Maestro; review or revoke its grant here.' : 'Agent connections are paused. Turning them on allows clients to request access; each client still needs separate OAuth approval in Maestro.'} onChange={value => void handleToggle(value)} />
+                {!status.enabled && <p className="rounded-lg bg-bg-primary p-3 text-[10px] leading-relaxed text-text-muted">Existing grants stay in place while paused. Browser sign-in protection remains active.</p>}
               </div>
+            ) : <p className="text-xs leading-relaxed text-text-muted">{status.enabled ? 'Agent connections are allowed. Sign in to manage this setting and review grants.' : 'Sign in to manage whether agent connections are allowed.'}</p>}
+          </JourneyStep>
+
+          <JourneyStep number={3} title="Add an MCP client" state={canAddClient ? 'current' : 'locked'}>
+            {canAddClient ? (
+              <div className="space-y-3">
+                <p className="text-xs leading-relaxed text-text-secondary">Let your agent handle setup with a copied prompt, or choose manual client instructions. Copying text does not connect or approve the client.</p>
+                <div className="rounded-lg border border-border bg-bg-primary p-3 text-[11px] leading-relaxed text-text-secondary">On first connection, a client may ask you to trust Maestro’s TLS certificate. Verify its SHA-256 fingerprint in Connection details before accepting.</div>
+                {!mcpUrl && <p className="text-[10px] text-amber-300">The connection URL is not available yet. Refresh this panel after the service is ready.</p>}
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <CopySetupButton target="agent" copied={copyTarget === 'agent'} disabled={!mcpUrl || !status.certificate_sha256} onClick={() => void handleCopy('agent')} />
+                  <CopySetupButton target="codex" copied={copyTarget === 'codex'} disabled={!mcpUrl} onClick={() => void handleCopy('codex')} />
+                  <CopySetupButton target="claude" copied={copyTarget === 'claude'} disabled={!mcpUrl} onClick={() => void handleCopy('claude')} />
+                  <CopySetupButton target="url" copied={copyTarget === 'url'} disabled={!mcpUrl} onClick={() => void handleCopy('url')} />
+                </div>
+                {copyTarget === 'agent' && <p className="text-[10px] text-emerald-400" role="status">Setup prompt copied. Paste it into chat with your agent. It will guide setup; client OAuth approval still happens in Maestro.</p>}
+                {copyTarget === 'url' && <p className="text-[10px] text-emerald-400" role="status">Server URL copied. Add it in the client’s MCP settings. This does not connect or approve the client; complete its OAuth approval in Maestro.</p>}
+                {copyTarget && copyTarget !== 'agent' && copyTarget !== 'url' && <p className="text-[10px] text-emerald-400" role="status">Setup instructions copied. Follow them in the client. This does not connect or approve the client; complete its OAuth approval in Maestro.</p>}
+              </div>
+            ) : (
+              <p className="text-xs leading-relaxed text-text-muted">{!ownerSession ? 'Sign in first to continue.' : !status.enabled ? 'Allow agent connections in step 2 to continue.' : 'Agent Access is unavailable. Refresh the panel when the service is ready.'}</p>
             )}
-            <InfoLine label="Installation ID" value={status.installation_id || 'Not reported'} mono />
-            <InfoLine label="Secure controller" value={controllerUrl || 'Not available'} href={controllerUrl || undefined} />
-            <InfoLine label="Setup URL (on this workstation)" value={status.local_setup_url || 'Not available'} href={safeLocalUrl(status.local_setup_url) || undefined} />
-            {mcpUrls.length > 1 && (
-              <label className="block space-y-1 text-[10px] text-text-secondary">
-                <span>Connection address</span>
-                <select aria-label="MCP connection address" value={mcpUrl} onChange={event => { setSelectedMcpUrl(event.target.value); setCopyTarget(null) }} className="w-full rounded-lg border border-border bg-bg-primary px-2 py-2 text-[10px]">
-                  {mcpUrls.map(url => <option key={url} value={url}>{url === status.mcp_url ? 'Discoverable hostname' : 'Direct LAN address'} — {url}</option>)}
-                </select>
-                <span className="block text-text-muted">Use a direct LAN address if your network blocks discovery. Trust the same verified certificate.</span>
-              </label>
-            )}
-            <InfoLine label="MCP connection URL" value={mcpUrl || 'Not available'} mono copyable={!!mcpUrl} onCopy={() => void handleCopy('url')} copied={copyTarget === 'url'} />
-            <InfoLine label="TLS certificate SHA-256" value={status.certificate_sha256 || 'Not reported'} mono />
-            {status.certificate_sha256 && (
-              <a href="/api/v1/agent-access/certificate" download="maestro-agent-access.pem" className="inline-flex min-h-9 items-center gap-2 text-[10px] text-accent-blue hover:underline">Download public TLS certificate</a>
-            )}
-            <div className="grid grid-cols-1 gap-2 pt-1 sm:grid-cols-2">
-              <button type="button" onClick={() => void handleCopy('codex')} disabled={!mcpUrl} className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-border px-3 text-[10px] text-text-secondary hover:bg-bg-hover disabled:opacity-40">
-                {copyTarget === 'codex' ? <Check size={13} /> : <Copy size={13} />}
-                {copyTarget === 'codex' ? 'Codex setup copied' : 'Copy Codex MCP setup'}
-              </button>
-              <button type="button" onClick={() => void handleCopy('claude')} disabled={!mcpUrl} className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-border px-3 text-[10px] text-text-secondary hover:bg-bg-hover disabled:opacity-40">
-                {copyTarget === 'claude' ? <Check size={13} /> : <Copy size={13} />}
-                {copyTarget === 'claude' ? 'Claude setup copied' : 'Copy Claude MCP setup'}
-              </button>
-            </div>
-            <p className="text-[10px] leading-relaxed text-text-muted">
-              Add the URL once in each client’s MCP settings. These instructions contain the endpoint and fingerprint only; they never contain an access token. Approve the client from Maestro when it requests access.
-            </p>
-          </section>
+          </JourneyStep>
 
           {ownerSession && (
-            <>
-              <section className="space-y-3 rounded-xl border border-border bg-bg-secondary p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <h4 className="text-xs font-semibold text-text-primary">Browser pairing</h4>
-                    <p className="mt-1 text-[10px] leading-relaxed text-text-muted">Create a short-lived code for the Maestro browser pairing flow.</p>
-                  </div>
-                  <button type="button" onClick={() => void handlePairingCode()} disabled={busyAction !== null} className="inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg border border-border px-2.5 text-[10px] text-text-secondary hover:bg-bg-hover disabled:opacity-50">
-                    {busyAction === 'browser-code' ? <LoaderCircle size={13} className="animate-spin" /> : <Link2 size={13} />}
-                    New code
-                  </button>
+            <section className="space-y-3 rounded-xl border border-border bg-bg-secondary p-4" aria-labelledby="agent-access-grants-heading">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2"><ShieldCheck size={15} className="text-text-muted" /><h4 id="agent-access-grants-heading" className="text-xs font-semibold text-text-primary">Agent grants</h4></div>
+                <span className="rounded-full bg-bg-primary px-2 py-1 text-[10px] text-text-muted">{grants.filter(grant => !grant.revoked).length} active</span>
+              </div>
+              <p className="text-[10px] leading-relaxed text-text-muted">Review or revoke a client’s access here. Grants remain visible while agent connections are paused.</p>
+              {grants.length === 0 ? <p className="rounded-lg bg-bg-primary p-3 text-[10px] text-text-muted">No agents have been approved yet.</p> : (
+                <div className="space-y-2">
+                  {sortedGrants.map(grant => <GrantRow key={grant.grant_id} grant={grant} busy={busyAction === 'revoke:' + grant.grant_id} disabled={busyAction !== null} onRevoke={() => void handleRevoke(grant)} />)}
                 </div>
-                {pairingCode && (
-                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-bg-primary p-3">
-                    <code className="break-all font-mono text-sm tracking-wider text-text-primary">{pairingCode}</code>
-                    <span className="shrink-0 text-[10px] text-text-muted">{pairingSecondsLeft}s</span>
-                  </div>
-                )}
-              </section>
-
-              <section className="space-y-3 rounded-xl border border-border bg-bg-secondary p-4">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <ShieldCheck size={15} className="text-text-muted" />
-                    <h4 className="text-xs font-semibold text-text-primary">Agent grants</h4>
-                  </div>
-                  <span className="rounded-full bg-bg-primary px-2 py-1 text-[10px] text-text-muted">{grants.filter(grant => !grant.revoked).length} active</span>
-                </div>
-                {grants.length === 0 ? (
-                  <p className="rounded-lg bg-bg-primary p-3 text-[10px] text-text-muted">No agents have been approved yet.</p>
-                ) : (
-                  <div className="space-y-2">
-                    {sortedGrants.map(grant => (
-                      <GrantRow
-                        key={grant.grant_id}
-                        grant={grant}
-                        busy={busyAction === `revoke:${grant.grant_id}`}
-                        disabled={busyAction !== null}
-                        onRevoke={() => void handleRevoke(grant)}
-                      />
-                    ))}
-                  </div>
-                )}
-              </section>
-
-              <section className="rounded-xl border border-border bg-bg-secondary">
-                <button type="button" aria-expanded={showAudit} onClick={() => setShowAudit(value => !value)} className="flex min-h-12 w-full items-center justify-between gap-3 px-4 text-left">
-                  <span className="flex items-center gap-2 text-xs font-semibold text-text-primary"><Activity size={15} className="text-text-muted" />Recent access activity</span>
-                  <span className="text-[10px] text-text-muted">{showAudit ? 'Hide' : `${auditEvents.length} events`}</span>
-                </button>
-                {showAudit && (
-                  <div className="space-y-2 border-t border-border p-3">
-                    {auditEvents.length === 0 ? (
-                      <p className="text-[10px] text-text-muted">No recent access events.</p>
-                    ) : auditEvents.slice(0, 12).map((event, index) => <AuditRow key={event.id || `${event.timestamp || event.created_at || index}`} event={event} />)}
-                  </div>
-                )}
-              </section>
-            </>
+              )}
+            </section>
           )}
+
+          <details className="rounded-xl border border-border bg-bg-secondary">
+            <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between gap-3 px-4 text-left">
+              <span className="flex min-w-0 items-center gap-2"><Fingerprint size={15} className="shrink-0 text-text-muted" /><span className="min-w-0"><span className="block text-xs font-semibold text-text-primary">Connection details</span><span className="mt-0.5 block text-[10px] text-text-muted">Advanced URLs, certificate fingerprint, health, browser pairing, and access activity</span></span></span>
+              <span className="shrink-0 text-[10px] text-text-muted">Expand</span>
+            </summary>
+            <div className="space-y-4 border-t border-border p-3 sm:p-4">
+              <section className="space-y-3">
+                <h4 className="text-xs font-semibold text-text-primary">Connection details</h4>
+                {status.label !== undefined && (
+                  <div className="space-y-1.5">
+                    <label htmlFor="agent-access-label" className="text-[10px] text-text-secondary">Installation name</label>
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <input id="agent-access-label" value={labelDraft} maxLength={64} onChange={event => setLabelDraft(event.target.value)} disabled={!ownerSession || busyAction !== null} className="min-h-10 min-w-0 flex-1 rounded-lg border border-border bg-bg-primary px-3 py-2 text-xs text-text-primary outline-none focus:border-accent-blue disabled:opacity-50" placeholder="My Maestro" />
+                      <button type="button" onClick={() => void handleSaveLabel()} disabled={!ownerSession || busyAction !== null || labelDraft.trim() === (status.label || '')} className="min-h-10 rounded-lg border border-border px-3 text-[10px] text-text-secondary hover:bg-bg-hover disabled:opacity-40">Save</button>
+                    </div>
+                  </div>
+                )}
+                <InfoLine label="Installation ID" value={status.installation_id || 'Not reported'} mono />
+                <InfoLine label="Secure controller" value={controllerUrl || 'Not available'} href={controllerUrl || undefined} />
+                <InfoLine label="Setup URL (on this workstation)" value={status.local_setup_url || 'Not available'} href={safeLocalUrl(status.local_setup_url) || undefined} />
+                {mcpUrls.length > 1 && (
+                  <label className="block space-y-1 text-[10px] text-text-secondary">
+                    <span>Connection address</span>
+                    <select aria-label="MCP connection address" value={mcpUrl} onChange={event => { setSelectedMcpUrl(event.target.value); setCopyTarget(null) }} className="w-full rounded-lg border border-border bg-bg-primary px-2 py-2 text-[10px]">
+                      {mcpUrls.map(url => <option key={url} value={url}>{url === status.mcp_url ? 'Discoverable hostname' : 'Direct LAN address'} — {url}</option>)}
+                    </select>
+                    <span className="block text-text-muted">Use a direct LAN address if your network blocks discovery. Trust the same verified certificate.</span>
+                  </label>
+                )}
+                <InfoLine label="MCP connection URL" value={mcpUrl || 'Not available'} mono copyable={!!mcpUrl} onCopy={() => void handleCopy('url')} copied={copyTarget === 'url'} />
+                <InfoLine label="TLS certificate SHA-256" value={status.certificate_sha256 || 'Not reported'} mono />
+                {status.certificate_sha256 && <a href="/api/v1/agent-access/certificate" download="maestro-agent-access.pem" className="inline-flex min-h-9 items-center gap-2 text-[10px] text-accent-blue hover:underline">Download public TLS certificate</a>}
+              </section>
+              <section className="space-y-2 rounded-lg bg-bg-primary p-3">
+                <h4 className="text-xs font-semibold text-text-primary">Service status</h4>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <InfoChip label="Controller" value={status.controller_status || 'Checking'} good={isHealthyStatus(status.controller_status)} />
+                  <InfoChip label="Backend" value={status.backend_online === undefined ? 'Checking' : status.backend_online ? 'Online' : 'Offline'} good={status.backend_online === true} />
+                  <InfoChip label="Discovery" value={status.discovery_status || 'Not reported'} good={isHealthyStatus(status.discovery_status)} />
+                </div>
+              </section>
+              {ownerSession && (
+                <>
+                  <section className="space-y-3 rounded-lg border border-border p-3">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div><h4 className="text-xs font-semibold text-text-primary">Additional browser access</h4><p className="mt-1 text-[10px] leading-relaxed text-text-muted">Create a separate Browser sign-in code for the Maestro browser pairing flow. It expires automatically.</p></div>
+                      <button type="button" onClick={() => void handlePairingCode()} disabled={busyAction !== null} className="inline-flex min-h-10 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-border px-3 text-[10px] text-text-secondary hover:bg-bg-hover disabled:opacity-50">
+                        {busyAction === 'browser-code' ? <LoaderCircle size={13} className="animate-spin" /> : <Link2 size={13} />}Create Browser sign-in code
+                      </button>
+                    </div>
+                    {pairingCode && <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-bg-primary p-3"><code className="break-all font-mono text-sm tracking-wider text-text-primary">{pairingCode}</code><span className="shrink-0 text-[10px] text-text-muted">{pairingSecondsLeft}s</span></div>}
+                  </section>
+                  <section className="rounded-lg border border-border">
+                    <details>
+                      <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 text-left">
+                        <span className="flex items-center gap-2 text-xs font-semibold text-text-primary"><Activity size={15} className="text-text-muted" />Recent access activity</span><span className="text-[10px] text-text-muted">{auditEvents.length} events</span>
+                      </summary>
+                      <div className="space-y-2 border-t border-border p-3">
+                        {auditEvents.length === 0 ? <p className="text-[10px] text-text-muted">No recent access events.</p> : auditEvents.slice(0, 12).map((event, index) => <AuditRow key={event.id || String(event.timestamp || event.created_at || index)} event={event} />)}
+                      </div>
+                    </details>
+                  </section>
+                </>
+              )}
+            </div>
+          </details>
         </>
       )}
 
       {loading && !status && !backendMissing && <p className="text-center text-[10px] text-text-muted">Loading Agent Access status…</p>}
     </div>
+  )
+}
+
+type JourneyStepState = 'done' | 'current' | 'locked'
+
+function JourneyStep({ number, title, state, children }: {
+  number: number
+  title: string
+  state: JourneyStepState
+  children: ReactNode
+}) {
+  const stateLabel = state === 'done' ? 'Complete' : state === 'current' ? 'Current step' : 'Next'
+  const stateTone = state === 'done'
+    ? 'border-emerald-500/30'
+    : state === 'current'
+      ? 'border-accent-blue/40'
+      : 'border-border'
+  const markerTone = state === 'done'
+    ? 'bg-emerald-500/10 text-emerald-400'
+    : state === 'current'
+      ? 'bg-accent-blue/10 text-accent-blue'
+      : 'bg-bg-primary text-text-muted'
+
+  return (
+    <section aria-current={state === 'current' ? 'step' : undefined} className={'rounded-xl border bg-bg-secondary p-4 ' + stateTone}>
+      <div className="flex items-start gap-3">
+        <span className={'flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold ' + markerTone}>
+          {state === 'done' ? <Check size={14} /> : number}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h4 className="text-sm font-semibold text-text-primary">{title}</h4>
+            <span className="rounded-full bg-bg-primary px-2 py-0.5 text-[9px] text-text-muted">{stateLabel}</span>
+          </div>
+          <div className="mt-3 space-y-3">{children}</div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function CopySetupButton({ target, copied, disabled, onClick }: {
+  target: Exclude<CopyTarget, null>
+  copied: boolean
+  disabled: boolean
+  onClick: () => void
+}) {
+  const label = target === 'codex'
+    ? 'Codex'
+    : target === 'claude'
+      ? 'Claude'
+      : target === 'url'
+        ? 'server URL for another MCP client'
+        : 'setup prompt for my agent'
+  const buttonText = target === 'agent'
+    ? copied ? 'Setup prompt copied' : 'Copy setup prompt for my agent'
+    : target === 'url'
+      ? copied ? 'Server URL copied' : 'Copy server URL for another MCP client'
+      : copied ? label + ' setup copied' : 'Copy ' + label + ' setup'
+
+  return (
+    <button type="button" onClick={onClick} disabled={disabled} className={'inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border px-3 text-[10px] font-medium hover:bg-bg-hover disabled:opacity-40 ' + (target === 'agent' ? 'border-accent-blue/30 bg-accent-blue/10 text-accent-blue sm:col-span-2' : 'border-border text-text-secondary')}>
+      {copied ? <Check size={13} /> : <Copy size={13} />}
+      {buttonText}
+    </button>
   )
 }
 
@@ -587,7 +610,10 @@ function GrantRow({ grant, busy, disabled, onRevoke }: { grant: AgentAccessGrant
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="truncate text-xs font-medium text-text-primary">{grant.client_name || 'Unnamed agent'}</div>
-          <div className="mt-0.5 break-all font-mono text-[9px] text-text-muted">{grant.client_id}</div>
+          <details className="mt-1">
+            <summary className="cursor-pointer text-[9px] text-text-muted">Client ID</summary>
+            <code className="mt-1 block break-all font-mono text-[9px] text-text-muted">{grant.client_id}</code>
+          </details>
         </div>
         {grant.revoked ? (
           <span className="rounded-full bg-red-500/10 px-2 py-1 text-[9px] text-red-300">Revoked</span>
@@ -704,6 +730,19 @@ function formatDate(value: number | string | null | undefined): string | null {
 
 function clientSetupText(target: Exclude<CopyTarget, null>, url: string, fingerprint: string): string {
   const certificate = fingerprint ? `\nTLS certificate SHA-256: ${fingerprint}` : ''
+  if (target === 'agent') {
+    return [
+      'Configure Maestro as an MCP server in this client.',
+      `MCP server URL: ${url}`,
+      `Expected public TLS certificate SHA-256 fingerprint: ${fingerprint || 'NOT REPORTED — stop and ask me to verify it before trusting any certificate.'}`,
+      'Preserve the client’s existing configuration. Add only a Maestro server entry; do not remove or rewrite unrelated settings.',
+      'If another Maestro installation is already configured, keep it and add this installation under a distinct server name.',
+      'Use the client’s normal certificate trust flow. Verify that the presented certificate exactly matches this fingerprint before trusting it. Never disable TLS verification or use an insecure bypass.',
+      'Use the normal OAuth approval flow. When Maestro requests approval, show me the requested scopes and wait for my approval there. Keep codes and tokens out of chat and setup instructions; let the client manage OAuth credentials in its normal protected credential store.',
+      'After setup, verify with a read-only server status or help request only. Do not render or create images, video, audio, or other media during setup.',
+      'If this client cannot configure HTTP MCP or verify the certificate safely, stop and explain the limitation. Do not try an unsupported install command.',
+    ].join('\n')
+  }
   if (target === 'codex') {
     return [
       'Codex MCP setup for Maestro',
@@ -721,7 +760,7 @@ function clientSetupText(target: Exclude<CopyTarget, null>, url: string, fingerp
       'Claude MCP setup for Maestro',
       'Claude Desktop: Settings → Connectors → Add custom connector, then paste this server URL:',
       url,
-      'Claude Desktop remote connectors need a URL reachable from Claude. For a local URL, use Claude Code on the same computer:',
+      'Claude Desktop remote connectors need a URL reachable from Claude. For a local URL, use Claude Code on a computer that can reach this Maestro:',
       'claude mcp add --transport http maestro ' + JSON.stringify(url),
       certificate,
       '',

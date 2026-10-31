@@ -27,6 +27,7 @@ export function AgentAccessSessionGate() {
   const dismissedRef = useRef(false)
   const visibleRef = useRef(false)
   const requestInFlight = useRef(false)
+  const codeInput = useRef<HTMLInputElement>(null)
 
   const openSignIn = useCallback(() => {
     if (requestInFlight.current || visibleRef.current || dismissedRef.current) return
@@ -69,7 +70,7 @@ export function AgentAccessSessionGate() {
 
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!loginAllowed || !loginCode.trim() || submitting) return
+    if (!loginAllowed || !loginCode.trim() || submitting || requestingCode) return
     setSubmitting(true)
     setError(null)
     try {
@@ -101,13 +102,17 @@ export function AgentAccessSessionGate() {
   }
 
   const requestFreshCode = async () => {
-    if (requestingCode) return
+    if (requestingCode || submitting) return
     setRequestingCode(true)
     setError(null)
+    setCodeMessage(null)
     try {
-      await requestAgentAccessConsoleCode()
+      const result = await requestAgentAccessConsoleCode()
       setLoginCode('')
-      setCodeMessage('A fresh code is in Pinokio → Agent Access Terminal. Use the latest “Browser code:” once, within 10 minutes, on this page.')
+      const seconds = Number.isFinite(result.expires_in) ? Math.max(1, result.expires_in) : 600
+      const expiry = seconds < 60 ? `${Math.ceil(seconds)} seconds` : `${Math.ceil(seconds / 60)} minute${seconds > 60 ? 's' : ''}`
+      setCodeMessage(`Ready in Pinokio → this Maestro app → Agent Access Terminal. Copy the latest “Browser code:” and paste it here. It works once and expires in about ${expiry}.`)
+      codeInput.current?.focus()
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Could not request a fresh code.')
     } finally { setRequestingCode(false) }
@@ -134,7 +139,7 @@ export function AgentAccessSessionGate() {
           <div className="min-w-0 flex-1">
             <h2 id="agent-access-session-title" className="text-sm font-semibold text-text-primary">Sign in to Maestro</h2>
             <p className="mt-1 text-xs leading-relaxed text-text-secondary">
-              This browser needs its own owner session. Request a fresh code if a previous code was already used. Your current work stays open behind this panel.
+              Sign in once in this browser. Your current work stays open behind this panel.
             </p>
           </div>
           <button
@@ -160,36 +165,46 @@ export function AgentAccessSessionGate() {
             <>
               {status?.owner_configured === false && (
                 <p className="text-xs leading-relaxed text-text-secondary">
-                  Request a fresh code below. Maestro prints it in Pinokio’s Agent Access Terminal.
+                  Signing in also protects this Maestro installation. Other browsers will need to sign in once, even while agent connections are off.
                 </p>
               )}
+              <div className="space-y-2 rounded-lg border border-border bg-bg-primary p-3 text-xs text-text-secondary">
+                <button type="button" onClick={() => void requestFreshCode()} disabled={requestingCode || submitting} className="min-h-10 w-full rounded-lg border border-border px-3 py-2 font-medium text-text-primary hover:bg-bg-hover disabled:opacity-50">
+                  {requestingCode ? 'Requesting code…' : 'Request a fresh code'}
+                </button>
+                <ol className="list-decimal space-y-1 pl-4 leading-relaxed" id="agent-access-sign-in-steps">
+                  <li>Open this Maestro app in Pinokio, then <strong>Agent Access Terminal</strong>.</li>
+                  <li>Copy the newest line labeled <strong>Browser code:</strong> and paste it below.</li>
+                </ol>
+                {codeMessage && <p className="text-accent-blue" role="status">{codeMessage}</p>}
+              </div>
               <form onSubmit={handleLogin} className="space-y-3">
                 <label className="block text-xs text-text-secondary" htmlFor="agent-access-session-code">
-                  One-time owner code
+                  Browser sign-in code
                 </label>
                 <input
                   id="agent-access-session-code"
+                  ref={codeInput}
                   autoFocus
                   autoComplete="one-time-code"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  aria-describedby="agent-access-sign-in-steps"
                   inputMode="text"
                   value={loginCode}
                   onChange={event => setLoginCode(event.target.value)}
                   className="w-full rounded-lg border border-border bg-bg-primary px-3 py-2.5 font-mono text-sm text-text-primary outline-none focus:border-accent-blue"
                   placeholder="Paste the code from Pinokio"
-                  disabled={submitting}
+                  disabled={submitting || requestingCode}
                 />
                 <button
                   type="submit"
-                  disabled={submitting || !loginCode.trim()}
+                  disabled={submitting || requestingCode || !loginCode.trim()}
                   className="w-full rounded-lg bg-accent-blue px-4 py-2.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-45"
                 >
-                  {submitting ? 'Signing in…' : 'Sign in to Agent Access'}
+                  {submitting ? 'Signing in…' : 'Sign in to Maestro'}
                 </button>
               </form>
-              <button type="button" onClick={() => void requestFreshCode()} disabled={requestingCode || submitting} className="w-full rounded-lg border border-border px-4 py-2.5 text-xs text-text-primary disabled:opacity-50">
-                {requestingCode ? 'Requesting code…' : 'Request a fresh code'}
-              </button>
-              {codeMessage && <p className="text-xs leading-relaxed text-text-secondary" role="status">{codeMessage}</p>}
             </>
           )}
 
@@ -207,7 +222,7 @@ export function AgentAccessSessionGate() {
           )}
 
           <p className="text-[10px] leading-relaxed text-text-muted">
-            This sign-in only restores the local owner session. Agent connections keep their separate grants and scopes.
+            Maestro remembers this browser until you sign out or the session expires. You approve each agent separately.
           </p>
         </div>
       </section>

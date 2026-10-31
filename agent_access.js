@@ -1,4 +1,6 @@
-const readyEvent = "/^MAESTRO_AGENT_ACCESS_READY (https:\\/\\/127\\.0\\.0\\.1:\\d+)\\r?$/"
+// Pinokio can match a terminal chunk containing other lines or ANSI controls.
+// Capture the marked local URL without anchoring the entire output chunk.
+const readyEvent = "/MAESTRO_AGENT_ACCESS_READY (https:\\/\\/127\\.0\\.0\\.1:\\d+)/"
 
 module.exports = async () => ({
   daemon: true,

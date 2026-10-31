@@ -102,3 +102,31 @@ def test_launcher_files_parse_with_node_when_available():
             check=False,
         )
         assert result.returncode == 0, f"{relative}: {result.stderr}"
+
+
+def test_agent_readiness_captures_url_inside_terminal_chunk():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is not on PATH in this test environment")
+    result = subprocess.run(
+        [node, "-e", r'''
+const assert = require("node:assert/strict");
+(async () => {
+  const script = await require(process.argv[1])();
+  const shell = script.run.find(step => step.method === "shell.run" && step.params.on);
+  const pattern = shell.params.on[0].event;
+  const re = new RegExp(pattern.slice(1, pattern.lastIndexOf("/")));
+  for (const output of [
+    "MAESTRO_AGENT_ACCESS_READY https://127.0.0.1:55468\r\n",
+    "Starting controller...\r\n\x1b[?25lMAESTRO_AGENT_ACCESS_READY https://127.0.0.1:55468\r\n\x1b[?25h",
+  ]) {
+    assert.equal(output.match(re)?.[1], "https://127.0.0.1:55468");
+  }
+  assert.equal(re.test("MAESTRO_AGENT_ACCESS_READY https://remote.invalid:55468"), false);
+  assert.equal(re.test("Listening on https://127.0.0.1:55468"), false);
+  assert.equal(shell.params.on[0].done, true);
+})().catch(error => { console.error(error); process.exit(1); });
+''', str(_ROOT / "agent_access.js")],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert result.returncode == 0, result.stderr
