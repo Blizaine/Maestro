@@ -338,6 +338,8 @@ def _load_llm_enhance_helpers():
         "_h3_dialogue_schedule",
         "_build_h3_timed_silence_clause",
         "_build_h3_dialogue_requirement",
+        "_h3_dialogue_comparison_text",
+        "_h3_dialogue_words_pattern",
         "_h3_dialogue_contract_satisfied",
         "_h3_timed_silence_contract_satisfied",
         "_h3_ref2va_reference_rows",
