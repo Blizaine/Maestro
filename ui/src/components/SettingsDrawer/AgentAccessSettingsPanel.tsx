@@ -134,7 +134,7 @@ export function AgentAccessSettingsPanel() {
       setConsoleCodeRequested(true)
       const ttl = Number.isFinite(result.expires_in) ? Math.max(1, result.expires_in) : 600
       const minutes = Math.max(1, Math.ceil(ttl / 60))
-      setMessage(`A one-time owner code was printed to the Pinokio terminal. It expires in about ${minutes} minutes.`)
+      setMessage(`A one-time owner code was printed in Pinokio’s Agent Access Terminal (agent_access.js). Open that entry in this Maestro app’s Pinokio menu. The code expires in about ${minutes} minutes.`)
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Could not request an owner code.')
     } finally {
@@ -334,12 +334,12 @@ export function AgentAccessSettingsPanel() {
                   className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg border border-border px-3 py-2 text-xs font-medium text-text-primary transition-colors hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {busyAction === 'console-code' ? <LoaderCircle size={14} className="animate-spin" /> : <LogIn size={14} />}
-                  Request one-time console code
+                  Show code in Agent Access terminal
                 </button>
                 {!secureOrigin && <SecureOriginNote href={controllerUrl} />}
                 {consoleCodeRequested && (
                   <p className="rounded-lg bg-bg-primary p-3 text-[10px] leading-relaxed text-text-secondary">
-                    Check the Pinokio terminal for the code, then paste it below. The code is never shown in this page.
+                    In this Maestro app’s Pinokio menu, open Agent Access Terminal (agent_access.js). Copy the latest line labeled “Browser code:” and paste the code below. The code is never shown on this page.
                   </p>
                 )}
                 {secureOrigin && (
@@ -352,7 +352,7 @@ export function AgentAccessSettingsPanel() {
                         onChange={event => setOwnerCode(event.target.value)}
                         autoComplete="one-time-code"
                         spellCheck={false}
-                        placeholder="Paste code from Pinokio"
+                        placeholder="Paste code from Agent Access terminal"
                         className="min-w-0 flex-1 rounded-lg border border-border bg-bg-primary px-3 py-2 font-mono text-xs text-text-primary outline-none focus:border-accent-blue"
                         disabled={busyAction !== null}
                       />
