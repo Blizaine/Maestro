@@ -57,6 +57,98 @@ def _subject_definition_lines(prompt):
 
 
 class H3FinalSubjectBindingTests(unittest.TestCase):
+    def test_generic_image_roles_use_canonical_labels_for_authored_picture_bindings(self):
+        subjects = [
+            {
+                "character_id": "thor",
+                "speaker_name": "Thor",
+                "visual_description": "Thor in armor",
+            },
+            {
+                "character_id": "doctor_doom",
+                "speaker_name": "Doctor Doom",
+                "visual_description": "Doctor Doom in a mask and green armor",
+            },
+        ]
+        references = [
+            {
+                "id": "thor",
+                "type": "image",
+                "role": "character",
+                "label": "Thor",
+                "image_intent": "identity",
+            },
+            {
+                "id": "doom",
+                "type": "image",
+                "role": "character",
+                "label": "Doctor Doom",
+                "image_intent": "identity",
+            },
+        ]
+        prompt = (
+            "subject_definitions: <Subject 1> is Thor, whose identity and armor "
+            "come from <Picture 1>.\n"
+            "<Subject 2> is Doctor Doom, whose identity, mask and green armor "
+            "come from <Picture 2>. Each is one physical person.\n\n"
+            "summary: [reference generation] Thor performs the supplied rap "
+            "while Doctor Doom dances silently.\n\n"
+            "retention_analysis: Preserve both image identities.\n\n"
+            "detailed_description: A graphite warehouse. [Shot 1] Thor performs "
+            "while Doctor Doom dances.\n\n"
+            "overall_soundscape: Use only the supplied source song.\n\n"
+            "non_diegetic_music: Preserve the original supplied soundtrack."
+        )
+        plan = _plan(subjects, [], prompt)
+
+        # Mirror the early preflight, then the final preflight after the native
+        # image manifests have supplied their generic roles and canonical labels.
+        compile_h3_clip_plans(
+            [plan], prompt_modes=["ref2va"], reference_manifests=[[]]
+        )
+        compile_h3_clip_plans(
+            [plan], prompt_modes=["ref2va"], reference_manifests=[references]
+        )
+
+        final_prompt = plan["video_prompt"]
+        definitions = _subject_definition_lines(final_prompt)
+        self.assertEqual(set(definitions), {1, 2})
+        self.assertIn("<Picture 1>", definitions[1])
+        self.assertNotIn("<Picture 2>", definitions[1])
+        self.assertIn("<Picture 2>", definitions[2])
+        self.assertNotIn("<Picture 1>", definitions[2])
+        self.assertEqual(
+            validate_final_h3_subject_bindings(final_prompt, {1: 1, 2: 2}),
+            [],
+        )
+
+    def test_identity_reference_role_and_canonical_name_conflict_fails_closed(self):
+        subjects = [
+            {"character_id": "thor", "speaker_name": "Thor"},
+            {"character_id": "doctor_doom", "speaker_name": "Doctor Doom"},
+        ]
+        plan = _plan(
+            subjects,
+            [],
+            "[Shot 1] Thor stands beside Doctor Doom.",
+        )
+        conflicting_reference = {
+            "type": "image",
+            "image_intent": "identity",
+            "role": "Thor",
+            "label": "Doctor Doom",
+        }
+
+        with self.assertRaisesRegex(
+            H3DialogueContractError,
+            "role 'Thor' and canonical name 'Doctor Doom' map to different visible subjects",
+        ):
+            compile_h3_clip_plans(
+                [plan],
+                prompt_modes=["ref2va"],
+                reference_manifests=[[conflicting_reference]],
+            )
+
     def test_qualified_identity_names_bind_without_appending_another_subject(self):
         references = [{"type": "image", "role": "Kitten"}, {"type": "image", "role": "Dragon"}]
         for name in ("Northern Kingdom Dragon", "northernkingdom_dragon", "nk_realm_dragon"):
