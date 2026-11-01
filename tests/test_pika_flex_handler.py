@@ -73,6 +73,31 @@ def test_handler_preserves_per_generation_experimental_lora_opt_in(reference):
         validate_pika_flex_single_pass_request(settings, model)
 
 
+def test_reference_exact_soundtrack_survives_settings_migration(tmp_path):
+    data, base, model = definition(reference=True)
+    soundtrack = tmp_path / "performance.wav"
+    soundtrack.write_bytes(b"owned exact-audio fixture")
+    settings = {key: value for key, value in data.items() if key != "model"}
+    settings.update(
+        audio_prompt_type="AD",
+        audio_guide=str(soundtrack),
+        minimax_h3_references=[{"type": "image", "path": "identity.png"}],
+    )
+    family_handler.fix_settings(base, 3, model, settings)
+
+    assert settings["audio_prompt_type"] == "AD"
+    assert settings["audio_guide"] == str(soundtrack)
+    assert settings["num_inference_steps"] == 6
+    assert family_handler.validate_generative_settings(base, model, settings) is None
+    validate_pika_flex_single_pass_request(settings, model)
+
+    _, _, frames = definition(reference=False)
+    frames_settings = dict(settings)
+    frames_settings.pop("minimax_h3_references")
+    with pytest.raises(ValueError, match="audio"):
+        validate_pika_flex_single_pass_request(frames_settings, frames)
+
+
 @pytest.mark.parametrize("reference", [False, True])
 def test_published_default_canvas_is_not_snapped_to_ordinary_h3(reference):
     data, base, model = definition(reference)

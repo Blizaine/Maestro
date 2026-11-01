@@ -1162,17 +1162,24 @@ class TestDirectorModelAssessment(unittest.TestCase):
                 self.assertEqual(result["video_strategy"], strategy)
                 self.assertEqual(result["reference_mode"], reference_mode)
                 self.assertEqual(result["shot_image_support"], shot_images)
-                self.assertEqual(result["audio_input_mode"], "none")
-                self.assertFalse(result["supports_audio_input"])
+                reference = strategy == "omni_reference"
+                self.assertEqual(
+                    result["audio_input_mode"],
+                    "reference_manifest" if reference else "none",
+                )
+                self.assertEqual(result["supports_audio_input"], reference)
                 self.assertTrue(result["generates_audio"])
-                self.assertFalse(result["video"]["music_video"]["compatible"])
-                self.assertFalse(
-                    result["video"]["short_film_audio"]["compatible"]
+                self.assertEqual(
+                    result["video"]["music_video"]["compatible"], reference
                 )
-                self.assertIn(
-                    "cannot use the uploaded soundtrack",
-                    result["video"]["music_video"]["reason"],
+                self.assertEqual(
+                    result["video"]["short_film_audio"]["compatible"], reference
                 )
+                if not reference:
+                    self.assertIn(
+                        "cannot use the uploaded soundtrack",
+                        result["video"]["music_video"]["reason"],
+                    )
                 self.assertTrue(
                     result["video"]["short_film_story"]["compatible"]
                 )
@@ -1206,10 +1213,10 @@ class TestDirectorModelAssessment(unittest.TestCase):
         self.assertEqual(result["video_strategy"], "omni_reference")
         self.assertEqual(result["reference_mode"], "omni_manifest")
         self.assertEqual(result["shot_image_support"], "direct_references")
-        self.assertFalse(result["supports_audio_input"])
+        self.assertTrue(result["supports_audio_input"])
         self.assertTrue(result["generates_audio"])
-        self.assertFalse(result["video"]["music_video"]["compatible"])
-        self.assertFalse(result["video"]["short_film_audio"]["compatible"])
+        self.assertTrue(result["video"]["music_video"]["compatible"])
+        self.assertTrue(result["video"]["short_film_audio"]["compatible"])
         self.assertTrue(result["video"]["short_film_story"]["compatible"])
         self.assertFalse(result["video"]["seamless"]["compatible"])
         self.assertTrue(result["supports_voice_reference"])
@@ -2052,13 +2059,13 @@ class TestDirectorBackendValidation(unittest.TestCase):
                 pipeline._validate_director_models(audio_only)
 
             for pipeline_type in ("music_video", "short_film_audio"):
-                audio_driven = {**params, "pipeline_type": pipeline_type}
+                audio_driven = {
+                    **params,
+                    "pipeline_type": pipeline_type,
+                    "audio_path": voice_path,
+                }
                 with self.subTest(pipeline_type=pipeline_type):
-                    with self.assertRaisesRegex(
-                        pipeline.DirectorModelCompatibilityError,
-                        "cannot use the uploaded soundtrack",
-                    ):
-                        pipeline._validate_director_models(audio_driven)
+                    pipeline._validate_director_models(audio_driven)
 
             pipeline._validate_director_models(params)
             manifest = pipeline._director_h3_reference_manifest(

@@ -508,6 +508,7 @@ def validate_pika_flex_single_pass_request(inputs: dict, model_def: dict) -> Non
         allow_frames=not reference,
         allow_references=reference,
         allow_continuation=sequence_enabled,
+        allow_exact_drive_audio=reference,
     )
 
     try:

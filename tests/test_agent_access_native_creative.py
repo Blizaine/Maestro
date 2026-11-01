@@ -24,7 +24,7 @@ def test_tts_compatibility_module_preserves_every_shared_constant():
     assert all(getattr(module, name) == getattr(tts_prompt_guidance, name) for name in names)
 
 
-@pytest.mark.parametrize("model", ["minimax_h3_fused_turbo", "minimax_h3_ref2va_fused_turbo", "flux2_klein_9b", "flux3_klein", "qwen_image_21", "krea2_raw", "moss_image_sft", "moss_image_edit", "fibo2_dev", "yue2", "fish_drama3_int4"])
+@pytest.mark.parametrize("model", ["minimax_h3_fused_turbo", "minimax_h3_ref2va_fused_turbo", "minimax_h3_ref2va_pika_flex", "flux2_klein_9b", "flux3_klein", "qwen_image_21", "krea2_raw", "moss_image_sft", "moss_image_edit", "fibo2_dev", "yue2", "fish_drama3_int4"])
 def test_model_guides_are_available_without_importing_a_model_runtime(monkeypatch, model):
     # Supplying registry data must never fall back to a runtime import.
     monkeypatch.setitem(sys.modules, "wgp", SimpleNamespace())
@@ -33,6 +33,7 @@ def test_model_guides_are_available_without_importing_a_model_runtime(monkeypatc
     assert len(result["format_guide"]) > 100
     assert result["writer_instructions"].startswith("Keep my anime")
     assert "Preserve the user's requested medium, style" in result["authoring_contract"]
+    assert "do not silently replace it with independently voiced Story scenes" in result["authoring_contract"]
     assert len(result["guide_revision"]) == 64
 
 

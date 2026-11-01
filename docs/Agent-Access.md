@@ -352,6 +352,12 @@ submission sends the reviewed plan directly to Director without local LLM
 screenplay writing or prompt polishing. The agent monitors the resulting
 pipeline through assembly against the original song.
 
+Pika H3 Flex References supports this exact-audio route experimentally. Supply
+the completed song to `director.music_video`; a `director.story` request with
+lyrics in its prompt generates its own performance instead. Agents must not
+silently substitute independent Story scenes and add the song only in the final
+edit when the user requested a soundtrack-driven performance.
+
 Analysis is cached by soundtrack content, and submission checks that the track
 has not changed after planning. Timeline bounds remain exact to the selected
 frame grid; native render padding and output trims are explicit. An analysis

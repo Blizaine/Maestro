@@ -30,6 +30,7 @@ class PikaFlexRuntimeTests(unittest.TestCase):
         tree = ast.parse(main_path.read_text(encoding="utf-8"))
         names = {
             "_h3_video_scheduler_step",
+            "_pika_flex_generated_audio_local_indices",
             "_pika_flex_update_generated_audio_rows",
             "_set_pika_flex_schedules",
             "_verify_pika_flex_base_checkpoint",
@@ -52,6 +53,7 @@ class PikaFlexRuntimeTests(unittest.TestCase):
             "__package__": "models.minimax_h3",
             "torch": torch,
             "MINIMAX_H3_FPS": 24,
+            "MINIMAX_H3_AUDIO_CHANNELS": 2,
         }
         cls.generate_ast = model_methods["generate"]
         for name, node in {**selected, **model_methods}.items():
@@ -88,6 +90,9 @@ class PikaFlexRuntimeTests(unittest.TestCase):
         )
         cls.pika_update_audio = staticmethod(
             runtime_namespace["_pika_flex_update_generated_audio_rows"]
+        )
+        cls.pika_generated_audio_indices = staticmethod(
+            runtime_namespace["_pika_flex_generated_audio_local_indices"]
         )
         cls.set_schedules = staticmethod(runtime_namespace["_set_pika_flex_schedules"])
         cls.verify_base_checkpoint = staticmethod(
@@ -291,7 +296,7 @@ class PikaFlexRuntimeTests(unittest.TestCase):
             [[0.8, 0.7], [0.1, -0.2], [-0.1, 0.3], [0.4, 0.5]],
             dtype=torch.float32,
         )
-        generated_indices = torch.tensor([1, 3], dtype=torch.long)
+        generated_indices = self.pika_generated_audio_indices(2, 1, "cpu")
         generator = torch.Generator(device="cpu").manual_seed(201)
         expected_generator = torch.Generator(device="cpu").manual_seed(201)
         sigma = float(audio.sigmas[index].item())
@@ -322,6 +327,115 @@ class PikaFlexRuntimeTests(unittest.TestCase):
         self.assertTrue(torch.equal(packed_audio[5], expected_generated[1]))
         self.assertTrue(torch.equal(generator.get_state(), expected_generator.get_state()))
 
+    def test_exact_drive_audio_stays_clean_for_all_six_steps_while_video_updates(self):
+        from models.minimax_h3.packing import build_packed_sequence, build_row_timesteps
+
+        torch = self.torch
+        video_scheduler = self.Scheduler()
+        audio_scheduler = self.Scheduler()
+        self.set_schedules(video_scheduler, audio_scheduler, "cpu")
+
+        # Reference audio occupies the packed prefix. The exact source song
+        # covers every target audio latent in both channels.
+        layout = build_packed_sequence(
+            torch.tensor([1, 1]),
+            num_latent_frames=2,
+            latent_height=2,
+            latent_width=2,
+            num_audio_latents=4,
+            patch_size=(1, 1, 1),
+            audio_condition_anchors=(("history", 2),),
+            target_condition_audio_latents=4,
+        )
+        reference_audio_rows = torch.full(
+            (layout.num_condition_audio_rows, 2), 300.0, dtype=torch.float32
+        )
+        source_audio_rows = torch.arange(16, dtype=torch.float32).reshape(8, 2) + 10
+        packed_audio = torch.cat((reference_audio_rows, source_audio_rows), dim=0)
+        target_audio_rows = packed_audio[layout.num_condition_audio_rows :]
+        source_audio_before = target_audio_rows.clone()
+        reference_audio_before = packed_audio[: layout.num_condition_audio_rows].clone()
+        generated_indices = self.pika_generated_audio_indices(
+            4, layout.num_target_condition_audio_latents, "cpu"
+        )
+        self.assertEqual(generated_indices.numel(), 0)
+
+        video_rows = torch.tensor(
+            [[0.2, -0.1], [0.4, 0.3], [-0.2, 0.5], [0.1, 0.6]],
+            dtype=torch.float32,
+        )
+        initial_video = video_rows.clone()
+        video_prediction = torch.full_like(video_rows, 0.125)
+        audio_prediction = torch.full_like(target_audio_rows, 999.0)
+        generator = torch.Generator(device="cpu").manual_seed(384)
+        expected_generator = torch.Generator(device="cpu").manual_seed(384)
+
+        target_audio_indices = layout.audio_indices[
+            layout.num_condition_audio_rows :
+        ]
+        reference_audio_indices = layout.audio_indices[
+            : layout.num_condition_audio_rows
+        ]
+        for index in range(6):
+            unique, inverse = build_row_timesteps(
+                layout,
+                video_timestep=float(video_scheduler.timesteps[index]),
+                audio_timestep=float(audio_scheduler.timesteps[index]),
+                condition_video_timestep=0.999,
+                condition_audio_timestep=1.0,
+            )
+            packed_timesteps = unique[inverse]
+            self.assertTrue(
+                torch.equal(
+                    packed_timesteps[target_audio_indices],
+                    torch.ones(target_audio_indices.numel()),
+                )
+            )
+            self.assertTrue(
+                torch.equal(
+                    packed_timesteps[reference_audio_indices],
+                    torch.ones(reference_audio_indices.numel()),
+                )
+            )
+
+            video_rows, _ = self.h3_video_scheduler_step(
+                video_scheduler,
+                video_prediction,
+                video_scheduler.timesteps[index],
+                video_rows,
+                callback=None,
+                index=index,
+                audio_only=False,
+                frozen_target_video=None,
+                generated_video_row_count=video_rows.shape[0],
+                pika_noise_generator=generator,
+            )
+            self.pika_update_audio(
+                target_audio_rows,
+                audio_prediction,
+                generated_indices,
+                audio_scheduler,
+                index,
+                generator,
+            )
+            if index < 5:
+                torch.randn(
+                    video_rows.shape,
+                    dtype=torch.float32,
+                    generator=expected_generator,
+                )
+
+            self.assertTrue(torch.equal(target_audio_rows, source_audio_before))
+            self.assertTrue(
+                torch.equal(
+                    packed_audio[: layout.num_condition_audio_rows],
+                    reference_audio_before,
+                )
+            )
+
+        self.assertFalse(torch.equal(video_rows, initial_video))
+        self.assertTrue(torch.equal(generator.get_state(), expected_generator.get_state()))
+
     def test_request_validation_runs_before_the_two_pass_branch(self):
         model = self._flex_model(reference=False)
         with self.assertRaisesRegex(ValueError, "does not support H3 Two-Pass"):
@@ -348,6 +462,138 @@ class PikaFlexRuntimeTests(unittest.TestCase):
                 sampling_steps=6,
                 audio_prompt_type="A",
             )
+
+    def test_generate_passes_exact_drive_allowlist_only_to_references_validation(self):
+        from models.minimax_h3 import pika_flex
+
+        original_validate = pika_flex.validate_pika_flex_request
+        captured = []
+
+        class ValidationReached(Exception):
+            pass
+
+        def validate_then_stop(inputs, **options):
+            captured.append((inputs, options))
+            original_validate(inputs, **options)
+            raise ValidationReached()
+
+        model = self._flex_model(reference=True)
+        with patch(
+            "models.minimax_h3.pika_flex.validate_pika_flex_request",
+            side_effect=validate_then_stop,
+        ):
+            with self.assertRaises(ValidationReached):
+                model.generate(
+                    "a test prompt",
+                    sampling_steps=6,
+                    audio_prompt_type="AD",
+                    audio_guide="song.wav",
+                )
+
+        self.assertEqual(len(captured), 1)
+        request, options = captured[0]
+        self.assertEqual(request["audio_prompt_type"], "AD")
+        self.assertEqual(request["audio_guide"], "song.wav")
+        self.assertTrue(options["allow_references"])
+        self.assertTrue(options["allow_exact_drive_audio"])
+
+        model = self._flex_model(reference=False)
+        with patch(
+            "models.minimax_h3.pika_flex.validate_pika_flex_request",
+            wraps=original_validate,
+        ) as validate:
+            with self.assertRaisesRegex(ValueError, "exact-drive AD audio in References"):
+                model.generate(
+                    "a test prompt",
+                    sampling_steps=6,
+                    audio_prompt_type="AD",
+                    audio_guide="song.wav",
+                )
+        self.assertTrue(validate.call_args.kwargs["allow_exact_drive_audio"] is False)
+
+    def test_director_global_audio_offset_is_separate_from_pika_sequence_cursor(self):
+        from models.minimax_h3 import pika_flex
+
+        original_validate = pika_flex.validate_pika_flex_request
+        captured = []
+
+        class ValidationReached(Exception):
+            pass
+
+        def validate_then_stop(inputs, **options):
+            captured.append((inputs, options))
+            original_validate(inputs, **options)
+            raise ValidationReached()
+
+        model = self._flex_model(reference=True)
+        with patch(
+            "models.minimax_h3.pika_flex.validate_pika_flex_request",
+            side_effect=validate_then_stop,
+        ):
+            with self.assertRaises(ValidationReached):
+                model.generate(
+                    "independent scene two",
+                    sampling_steps=6,
+                    audio_prompt_type="AD",
+                    audio_guide="full-song.wav",
+                    prefix_frames_count=0,
+                    window_start_frame_no=124,
+                    pika_local_window_start_frame_no=0,
+                )
+
+        # The source origin is retained for Ref2VA preparation by the method
+        # argument; only the strict Pika continuation check sees local zero.
+        request, options = captured[0]
+        self.assertEqual(request["window_start_frame_no"], 0)
+        self.assertEqual(request["prefix_frames_count"], 0)
+        self.assertIsNone(request["input_video"])
+        self.assertEqual(request["audio_prompt_type"], "AD")
+        self.assertEqual(request["audio_guide"], "full-song.wav")
+        self.assertFalse(options["allow_continuation"])
+
+    def test_real_pika_sequence_keeps_positive_local_origin_and_prefix(self):
+        from models.minimax_h3 import pika_flex
+
+        original_validate = pika_flex.validate_pika_flex_request
+        captured = []
+
+        class ValidationReached(Exception):
+            pass
+
+        def validate_then_stop(inputs, **options):
+            captured.append((inputs, options))
+            original_validate(inputs, **options)
+            raise ValidationReached()
+
+        model = self._flex_model(reference=True)
+        video_prefix = self.torch.zeros((3, 18, 8, 8), dtype=self.torch.float32)
+        audio_prefix = self.torch.zeros((24_000, 2), dtype=self.torch.float32)
+        with patch(
+            "models.minimax_h3.pika_flex.validate_pika_flex_request",
+            side_effect=validate_then_stop,
+        ):
+            with self.assertRaises(ValidationReached):
+                model.generate(
+                    "continue the same reference sequence",
+                    sampling_steps=6,
+                    audio_prompt_type="AD",
+                    audio_guide="full-song.wav",
+                    input_video=video_prefix,
+                    prefix_frames_count=18,
+                    input_waveform=audio_prefix,
+                    input_waveform_sample_rate=32_000,
+                    window_start_frame_no=230,
+                    pika_local_window_start_frame_no=106,
+                    minimax_h3_reference_sequence=True,
+                )
+
+        request, options = captured[0]
+        self.assertEqual(request["window_start_frame_no"], 106)
+        self.assertEqual(request["prefix_frames_count"], 18)
+        self.assertIs(request["input_video"], video_prefix)
+        self.assertIs(request["input_waveform"], audio_prefix)
+        self.assertEqual(request["audio_prompt_type"], "AD")
+        self.assertTrue(options["allow_continuation"])
 
     def test_wgp_one_frame_start_carrier_does_not_become_a_continuation(self):
         model = self._flex_model(reference=False)

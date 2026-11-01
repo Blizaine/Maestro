@@ -371,6 +371,7 @@ def validate_pika_flex_request(
     allow_frames: bool = False,
     allow_references: bool = False,
     allow_continuation: bool = False,
+    allow_exact_drive_audio: bool = False,
 ) -> None:
     """Reject request options that change Pika Flex's model-owned recipe.
 
@@ -378,8 +379,9 @@ def validate_pika_flex_request(
     ``allow_frames=True``. H3 image-reference payloads can be enabled separately
     with ``allow_references=True``. Native rolling continuation is enabled only
     by the workflow's explicit sequence flag and is validated against its real
-    generated video and stereo-audio prefixes. This function does not rewrite
-    request data.
+    generated video and stereo-audio prefixes. Exact-drive ``AD`` conditioning
+    can be enabled separately for the References model; generic audio-prompt
+    modes remain unsupported. This function does not rewrite request data.
     """
 
     if not isinstance(inputs, Mapping):
@@ -505,6 +507,28 @@ def validate_pika_flex_request(
     if not allow_frames and any(_has_payload(inputs.get(key)) for key in frame_keys):
         raise ValueError("This Pika H3 Flex model does not accept first/last frame conditioning.")
 
+    audio_prompt_type = str(inputs.get("audio_prompt_type") or "").strip()
+    has_audio_guide = _has_payload(inputs.get("audio_guide"))
+    has_input_waveform = _has_payload(inputs.get("input_waveform"))
+    exact_drive_audio = audio_prompt_type == "AD"
+    if audio_prompt_type and (
+        not exact_drive_audio
+        or not allow_exact_drive_audio
+        or not allow_references
+    ):
+        raise ValueError(
+            "Pika H3 Flex does not support generic source-audio prompt modes; "
+            "only exact-drive AD audio in References is supported."
+        )
+    if exact_drive_audio and not (has_audio_guide or has_input_waveform):
+        raise ValueError(
+            "Pika H3 Flex exact-drive AD requires a readable source soundtrack."
+        )
+    if has_audio_guide and not exact_drive_audio:
+        raise ValueError(
+            "Pika H3 Flex source audio requires exact-drive AD in References."
+        )
+
     unsupported_media = (
         "input_frames",
         "video_guide",
@@ -513,16 +537,14 @@ def validate_pika_flex_request(
         "mask",
         "video_mask",
         "frames_to_inject",
-        "audio_guide",
         "audio_guide2",
     )
     if any(_has_payload(inputs.get(key)) for key in unsupported_media):
         raise ValueError(
             "Pika H3 Flex does not support control video, masks, timed frame injection, or source audio."
         )
-    has_runtime_prefix = any(
-        _has_payload(inputs.get(key))
-        for key in ("input_video", "input_waveform")
+    has_runtime_prefix = _has_payload(inputs.get("input_video")) or (
+        has_input_waveform and not exact_drive_audio
     )
     if has_runtime_prefix:
         if not allow_continuation:

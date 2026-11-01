@@ -50,6 +50,97 @@ SHOT_IMAGE_POLICIES = {
 }
 
 
+def _nonnegative_whole_frame(value: Any, *, name: str) -> int:
+    """Validate frame indices and counts at model-routing boundaries."""
+
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a nonnegative whole frame value.")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{name} must be a nonnegative whole frame value.") from error
+    if not math.isfinite(number) or number < 0 or not number.is_integer():
+        raise ValueError(f"{name} must be a nonnegative whole frame value.")
+    return int(number)
+
+
+def pika_flex_local_window_start_frame(aligned_window_start_frame: Any) -> int:
+    """Return the local sequence cursor supplied to Pika's strict gate.
+
+    Ref2VA also receives an absolute reference timeline origin through
+    ``window_start_frame_no``. That value can be nonzero for an independent
+    shot solely because its soundtrack starts later in the source. Pika's
+    continuation gate must instead see the current task's local window start.
+    """
+
+    return _nonnegative_whole_frame(
+        aligned_window_start_frame,
+        name="Pika H3 Flex local window start",
+    )
+
+
+def should_continue_multi_clip_task(
+    *,
+    clip_index: Any,
+    has_start: bool,
+    bounded_director: bool,
+    per_clip_continuations: Sequence[Any] | None,
+) -> bool:
+    """Match multi-clip continuation to the model's explicit contract."""
+
+    try:
+        index = int(clip_index)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if index <= 0 or has_start:
+        return False
+    bounded_continuation = bool(
+        per_clip_continuations
+        and index < len(per_clip_continuations)
+        and per_clip_continuations[index]
+    )
+    return bounded_continuation if bounded_director else True
+
+
+def apply_h3_clip_drive_audio(
+    clip_params: dict[str, Any],
+    drive_audio_path: Any,
+    drive_audio_ordinal: Any,
+) -> bool:
+    """Preserve exact-drive mode when a clip manifest supplies its target."""
+
+    if not drive_audio_path:
+        return False
+    clip_params["audio_prompt_type"] = "AD"
+    clip_params["audio_guide"] = drive_audio_path
+    clip_params["minimax_h3_exact_drive_audio_ordinal"] = drive_audio_ordinal
+    return True
+
+
+def advance_director_multiclip_audio_offset(
+    current_offset: Any,
+    clip_frames: Any,
+    trim_tail_frames: Any,
+) -> int:
+    """Advance source audio time by a clip's committed, post-trim frames."""
+
+    offset = _nonnegative_whole_frame(
+        current_offset,
+        name="Director audio frame offset",
+    )
+    frames = _nonnegative_whole_frame(
+        clip_frames,
+        name="Director clip frame count",
+    )
+    trim = _nonnegative_whole_frame(
+        trim_tail_frames,
+        name="Director clip trim frame count",
+    )
+    if trim > frames:
+        raise ValueError("Director clip trim cannot exceed its frame count.")
+    return offset + frames - trim
+
+
 def _normalize_director_h3_resolution(
     value: Any,
     model_def: Mapping[str, Any],

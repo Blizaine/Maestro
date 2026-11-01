@@ -37,10 +37,21 @@ directly and needs at least one image or video reference. References does not
 require a generated start image for each shot. Saved character references can
 include their separate native voice reference.
 
-**Music Video** and audio-driven Director remain unavailable for Pika. Those
-workflows require exact source-audio conditioning, which this adapter's current
-runtime rejects. Creative audio/voice references do not replace that contract.
-Director's **Seamless** option also remains unavailable; Studio's explicit Pika
+**References** also supports **Music Video** and audio-driven Director. Maestro
+slices the selected soundtrack to each shot, encodes it as clean target audio,
+and holds those audio latents fixed while the six-step sampler generates video.
+The final assembly uses the original continuous soundtrack. This follows the
+audio-to-video branch in Pika's [official wrapper](https://github.com/Pika-Labs/Pika-H3-Flex/blob/main/src/pika_h3/core/wrapper.py),
+rather than generating unrelated speech and replacing it afterward.
+
+In Studio References, choose **Music / Performance** for the audio reference
+to use that exact performance. **Voice**, **Style**, and **Sound** remain
+creative reference roles; they do not lock the new video to that recording.
+At least one image or video reference is still required. The exact-drive path
+is experimental: preserving the source audio does not guarantee perfect lip sync
+or motion for every performance. Frames remains Story-only in Director.
+
+Director's **Seamless** option remains unavailable; Studio's explicit Pika
 sliding-window workflow below is a separate supported path.
 
 ### Experimental H3 LoRAs

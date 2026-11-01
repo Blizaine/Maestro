@@ -106,6 +106,8 @@ PIKA_FLEX_HELP = (
     "adapter strength 1, and video/audio shifts 12/3. Frames supports text-to-video "
     "and first/last images. References supports ordered image, video, and audio "
     "references and needs at least one image or video. Begin at 480p / 5.17 seconds. "
+    "References can also generate visuals against an exact supplied soundtrack: "
+    "choose Music / Performance audio in Studio or an audio-driven Director workflow. "
     "SLA is the default on supported GPUs and safely falls back to dense attention when unavailable; SOL is optional experimental attention. "
     "Resolution choices include Pika's official 480p/768p buckets plus standard H3-aligned 540p/720p canvases and an experimental 1080p tier. "
     "Native motion and stereo-audio continuation are available only through explicit rolling-window mode. "
@@ -226,10 +228,9 @@ def pika_flex_capabilities(reference: bool) -> dict[str, Any]:
         "director_reference_mode": (
             "omni_manifest" if reference else "start_end"
         ),
-        # Pika accepts creative voice/audio references in its Omni manifest,
-        # but its native runtime rejects Director's exact-source audio_guide
-        # route. Keep audio-driven Director workflows unavailable.
-        "director_audio_input_mode": "none",
+        # Ref2VA can freeze the supplied target audio while the six-step
+        # sampler generates video, matching the upstream a2v contract.
+        "director_audio_input_mode": "reference_manifest" if reference else "none",
         "director_shot_image_support": (
             "direct_references" if reference else "optional"
         ),

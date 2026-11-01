@@ -470,12 +470,83 @@ class PikaFlexRequestTests(unittest.TestCase):
             ({"frames_to_inject": ["frame.png"]}, "control video"),
             ({"input_masks": ["mask.png"]}, "control video"),
             ({"input_video": "source.mp4"}, "source video/audio|control video"),
-            ({"audio_guide": "source.wav"}, "control video"),
+            ({"audio_guide": "source.wav"}, "requires exact-drive AD"),
             ({"face_refinement": {"strength": 0.5}}, "face refinement"),
         )
         for request, message in cases:
             with self.subTest(request=request), self.assertRaisesRegex(ValueError, message):
                 validate_pika_flex_request(request)
+
+    def test_exact_drive_audio_requires_ad_source_and_reference_model_opt_in(self):
+        exact_drive = {"audio_prompt_type": "AD", "audio_guide": "song.wav"}
+        validate_pika_flex_request(
+            exact_drive,
+            allow_references=True,
+            allow_exact_drive_audio=True,
+        )
+        # WGP can provide the already-decoded source waveform without a path.
+        validate_pika_flex_request(
+            {
+                "audio_prompt_type": "AD",
+                "input_waveform": self.TensorStub((48_000, 2)),
+            },
+            allow_references=True,
+            allow_exact_drive_audio=True,
+        )
+
+        rejected = (
+            (exact_drive, {}, "exact-drive AD audio in References"),
+            (
+                exact_drive,
+                {"allow_references": True},
+                "exact-drive AD audio in References",
+            ),
+            (
+                {"audio_prompt_type": "AD"},
+                {"allow_references": True, "allow_exact_drive_audio": True},
+                "requires a readable source soundtrack",
+            ),
+            (
+                {"audio_prompt_type": "A", "audio_guide": "voice.wav"},
+                {"allow_references": True, "allow_exact_drive_audio": True},
+                "exact-drive AD audio in References",
+            ),
+            (
+                {"audio_prompt_type": "ad", "audio_guide": "song.wav"},
+                {"allow_references": True, "allow_exact_drive_audio": True},
+                "exact-drive AD audio in References",
+            ),
+            (
+                {"audio_guide": "song.wav"},
+                {"allow_references": True, "allow_exact_drive_audio": True},
+                "requires exact-drive AD",
+            ),
+            (
+                {
+                    "audio_prompt_type": "AD",
+                    "audio_guide": "song.wav",
+                    "audio_guide2": "voice.wav",
+                },
+                {"allow_references": True, "allow_exact_drive_audio": True},
+                "source audio",
+            ),
+        )
+        for request, options, message in rejected:
+            with self.subTest(request=request), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                validate_pika_flex_request(request, **options)
+
+    def test_exact_drive_waveform_is_not_mistaken_for_a_continuation_prefix(self):
+        validate_pika_flex_request(
+            {
+                "audio_prompt_type": "AD",
+                "input_waveform": self.TensorStub((48_000, 2)),
+                "window_start_frame_no": 0,
+            },
+            allow_references=True,
+            allow_exact_drive_audio=True,
+        )
 
     def test_first_last_frames_are_opt_in_and_references_are_separately_gated(self):
         with self.assertRaisesRegex(ValueError, "first/last frame"):

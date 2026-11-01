@@ -654,6 +654,34 @@ def _pika_flex_update_generated_audio_rows(
     audio_target_rows[generated_audio_local_indices] = updated
 
 
+def _pika_flex_generated_audio_local_indices(
+    num_audio_latents: int,
+    target_condition_audio_latents: int,
+    device,
+) -> torch.Tensor:
+    """Return generated target-audio rows, excluding clean exact-drive rows.
+
+    The indices are local to the generated target audio after packed reference
+    rows have been sliced away. H3 audio is channel-major, so the frozen prefix
+    must be omitted independently from each stereo channel.
+    """
+
+    conditioned = min(
+        int(num_audio_latents),
+        max(0, int(target_condition_audio_latents)),
+    )
+    return torch.cat(
+        [
+            torch.arange(conditioned, num_audio_latents, device=device),
+            torch.arange(
+                num_audio_latents + conditioned,
+                num_audio_latents * MINIMAX_H3_AUDIO_CHANNELS,
+                device=device,
+            ),
+        ]
+    )
+
+
 def _prepare_h3_clean_preview(
     callback,
     denoised_rows: torch.Tensor | None,
@@ -2571,7 +2599,10 @@ class MiniMaxH3Model:
             pika_request = {
                 key: value
                 for key, value in _kwargs.items()
-                if key != "loras_selected"
+                if key not in {
+                    "loras_selected",
+                    "pika_local_window_start_frame_no",
+                }
             }
             def has_requested_shift(value) -> bool:
                 return value is not None and not (
@@ -2614,9 +2645,13 @@ class MiniMaxH3Model:
                     "input_waveform": input_waveform,
                     "audio_guide": audio_guide,
                     "audio_guide2": audio_guide2,
+                    "audio_prompt_type": audio_prompt_type,
                     "minimax_h3_references": minimax_h3_references,
                     "prefix_frames_count": prefix_frames_count,
-                    "window_start_frame_no": window_start_frame_no,
+                    "window_start_frame_no": _kwargs.get(
+                        "pika_local_window_start_frame_no",
+                        window_start_frame_no,
+                    ),
                     "frame_num": frame_num,
                     "input_waveform_sample_rate": input_waveform_sample_rate,
                     "frames_to_inject": frames_to_inject,
@@ -2648,11 +2683,6 @@ class MiniMaxH3Model:
                 # single-frame carrier before continuation preparation.
                 pika_request["input_video"] = None
                 pika_request["prefix_frames_count"] = 0
-            if audio_prompt_type:
-                raise ValueError(
-                    "Pika H3 Flex does not support source-audio prompt modes; "
-                    "use ordered audio references in References."
-                )
             if outpainting_dims is not None:
                 raise ValueError("Pika H3 Flex does not support masks or outpainting.")
             if (
@@ -2672,6 +2702,7 @@ class MiniMaxH3Model:
                 allow_frames=not self.omni_reference,
                 allow_references=self.omni_reference,
                 allow_continuation=sequence_enabled,
+                allow_exact_drive_audio=self.omni_reference,
             )
         from .two_pass import (
             H3_TWO_PASS_ENABLED,
@@ -3845,20 +3876,36 @@ class MiniMaxH3Model:
             num_audio_latents,
             layout.num_target_condition_audio_latents,
         )
-        generated_audio_local_indices = torch.cat(
-            [
-                torch.arange(
-                    conditioned_audio_latents,
+        if self.pika_flex:
+            generated_audio_local_indices = (
+                _pika_flex_generated_audio_local_indices(
                     num_audio_latents,
-                    device=self.device,
-                ),
-                torch.arange(
-                    num_audio_latents + conditioned_audio_latents,
-                    num_audio_latents * MINIMAX_H3_AUDIO_CHANNELS,
-                    device=self.device,
-                ),
-            ]
-        )
+                    conditioned_audio_latents,
+                    self.device,
+                )
+            )
+            if source_audio_mode:
+                print(
+                    "[Pika H3 Flex] Exact source audio locked: "
+                    f"{conditioned_audio_latents}/{num_audio_latents} target "
+                    "latents per channel; clean rows excluded from all six "
+                    "sampler updates."
+                )
+        else:
+            generated_audio_local_indices = torch.cat(
+                [
+                    torch.arange(
+                        conditioned_audio_latents,
+                        num_audio_latents,
+                        device=self.device,
+                    ),
+                    torch.arange(
+                        num_audio_latents + conditioned_audio_latents,
+                        num_audio_latents * MINIMAX_H3_AUDIO_CHANNELS,
+                        device=self.device,
+                    ),
+                ]
+            )
 
         cache_config = getattr(self.transformer, "cache", None)
         first_block_cache = (

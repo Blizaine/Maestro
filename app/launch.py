@@ -27499,6 +27499,12 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
 
             # Multi-clip mode: split single request into per-clip tasks
             elif raw_params.get("multi_prompts_gen_type") == 3:
+                from services.director_video_strategy import (
+                    apply_h3_clip_drive_audio,
+                    advance_director_multiclip_audio_offset,
+                    should_continue_multi_clip_task,
+                )
+
                 prompt_text = raw_params.get("prompt", "")
                 prompt_lines = _split_multi_clip_prompt_text(
                     prompt_text,
@@ -27652,10 +27658,11 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                             per_clip_h3_references[i]
                         )
                         clip_params["minimax_h3_runtime_references"] = clip_runtime_refs
-                        if clip_drive_audio:
-                            clip_params["audio_prompt_type"] = "AD"
-                            clip_params["audio_guide"] = clip_drive_audio
-                            clip_params["minimax_h3_exact_drive_audio_ordinal"] = clip_drive_ordinal
+                        apply_h3_clip_drive_audio(
+                            clip_params,
+                            clip_drive_audio,
+                            clip_drive_ordinal,
+                        )
                     # Set per-clip image_prompt_type based on which images are present
                     has_start = bool(clip_params.get("image_start"))
                     has_end = bool(clip_end)
@@ -27670,16 +27677,20 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     # uses this for duration-split FL2VA segments or an
                     # explicitly planned literal continuation, never across
                     # an ordinary editorial cut.
-                    if not has_start and i > 0:
-                        bounded_continuation = bool(
-                            per_clip_continuations
-                            and i < len(per_clip_continuations)
-                            and per_clip_continuations[i]
-                        )
-                        if not _mc_bounded_director or bounded_continuation:
-                            clip_params["_continuation"] = True
-                            if bounded_continuation:
-                                clip_params["_continuation_tail_skip"] = 0
+                    bounded_continuation = bool(
+                        per_clip_continuations
+                        and i < len(per_clip_continuations)
+                        and per_clip_continuations[i]
+                    )
+                    if should_continue_multi_clip_task(
+                        clip_index=i,
+                        has_start=has_start,
+                        bounded_director=_mc_bounded_director,
+                        per_clip_continuations=per_clip_continuations,
+                    ):
+                        clip_params["_continuation"] = True
+                        if bounded_continuation:
+                            clip_params["_continuation_tail_skip"] = 0
                     clip_frames = per_clip_frames[i] if per_clip_frames and i < len(per_clip_frames) else sw_size
                     if _mc_bounded_director:
                         clip_frames = int(clip_frames)
@@ -27710,13 +27721,18 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         trim_tail = music_output_trim(clip_frames, per_clip_output_frames[i])
                     clip_params["video_length"] = clip_frames
                     clip_params["trim_tail_frames"] = trim_tail
-                    clip_params["audio_frame_offset"] = cumulative_offset
+                    clip_audio_frame_offset = cumulative_offset
+                    clip_params["audio_frame_offset"] = clip_audio_frame_offset
                     if clip_params.get("video_guide"):
                         clip_params["video_frame_offset"] = (
                             multi_clip_video_origin_frame
                             + cumulative_offset - multi_clip_audio_origin_frame
                         )
-                    cumulative_offset += clip_frames - trim_tail  # advance by post-trim frames for audio sync
+                    cumulative_offset = advance_director_multiclip_audio_offset(
+                        clip_audio_frame_offset,
+                        clip_frames,
+                        trim_tail,
+                    )  # advance by post-trim frames for source-audio sync
                     total_trimmed_frames += trim_tail
                     clip_params["multi_clip_info"] = {
                         "group_id": group_id,

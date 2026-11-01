@@ -10097,6 +10097,17 @@ def generate_video(
                     custom_settings_for_model[
                         "scail2_recast_warmup_frames"
                     ] = recast_warmup_frames
+                pika_local_window_start_frame_no = None
+                if model_def.get("minimax_h3_pika_flex"):
+                    from services.director_video_strategy import (
+                        pika_flex_local_window_start_frame,
+                    )
+
+                    pika_local_window_start_frame_no = (
+                        pika_flex_local_window_start_frame(
+                            aligned_window_start_frame
+                        )
+                    )
                 overridden_inputs = None
                 artifact_metadata = None
                 speech_generation = None
@@ -10207,6 +10218,12 @@ def generate_video(
                         "minimax_h3_multi_window": minimax_h3_multi_window,
                         "minimax_h3_reference_sequence": minimax_h3_reference_sequence,
                         "minimax_h3_experimental_loras": minimax_h3_experimental_loras,
+                        # Keep Pika's continuation cursor task-local. The
+                        # existing window_start_frame_no below remains the
+                        # absolute source timeline used to slice references.
+                        "pika_local_window_start_frame_no": (
+                            pika_local_window_start_frame_no
+                        ),
                     } if model_def.get("minimax_h3_pika_flex") else {}),
                     save_masks=args.save_masks,
                     temperature=temperature,
