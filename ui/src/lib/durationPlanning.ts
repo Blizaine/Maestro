@@ -405,7 +405,7 @@ function explicitDurationFromPrompt(prompt: string): number | null {
     /(?:\bfor\s+|\b(?:duration|length|runtime)\s*(?:of|is|:)?\s*|\bmake\s+(?:it|this)\s+)(\d+(?:\.\d+)?)\s*(hours?|hrs?|hr|h|minutes?|mins?|min|m|seconds?|secs?|sec|s)\b/i,
   )
   const adjectival = unit ? null : text.match(
-    /\b(\d+(?:\.\d+)?)\s*[- ]\s*(hour|hr|minute|min|second|sec)s?\s+(?:video|clip|scene|sequence|film|movie|song|speech|conversation)\b/i,
+    /\b(\d+(?:\.\d+)?)\s*[- ]\s*(hour|hr|minute|min|second|sec)s?\s+(?:video|clip|scene|sequence|film|movie|song|speech|conversation|commercial|advertisement|ad|promo)\b/i,
   )
   const match = unit || adjectival
   if (!match) return null

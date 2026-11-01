@@ -33,6 +33,25 @@ MUSIC_VARIANTS = (
 
 
 class DirectorAudioPermissionTests(unittest.TestCase):
+    def test_phone_preparation_preserves_source_action_without_generated_speech(self):
+        action = "He checks the silent unit and lifts his smartphone to call for help."
+        compiled, _ = compile_h3_official_prompt(
+            action, [], [], audio_policy=SILENT_POLICY, strict_audio_policy=True,
+        )
+        self.assertIn("lifts his smartphone to call for help", compiled)
+        self.assertEqual(validate_h3_prompt_contract(compiled, [], audio_policy=SILENT_POLICY), [])
+
+    def test_actual_calls_for_help_remain_forbidden_speech(self):
+        for action in (
+            "He calls for help.",
+            'He lifts his smartphone to call: "Please help me!"',
+            "He lifts his smartphone. He calls for help.",
+        ):
+            with self.subTest(action=action), self.assertRaises(H3DialogueContractError):
+                compile_h3_official_prompt(
+                    action, [], [], audio_policy=SILENT_POLICY, strict_audio_policy=True,
+                )
+
     def test_five_planner_music_styles_and_implied_tags_are_removed_idempotently(self):
         for index, music in enumerate(MUSIC_VARIANTS, start=1):
             with self.subTest(clip=index):

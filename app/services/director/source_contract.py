@@ -374,7 +374,7 @@ def build_source_contract(source: str) -> dict:
             text, re.IGNORECASE,
         ):
             continue
-        events.append({"event_id": f"E{len(events) + 1}", "text": text})
+        events.append({**event, "event_id": f"E{len(events) + 1}", "text": text})
     return {"revision": 1, "events": events, "audio_policy": policy}
 
 

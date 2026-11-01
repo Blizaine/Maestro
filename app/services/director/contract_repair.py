@@ -254,12 +254,12 @@ def _compact_fact_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "properties": {
-            "subject_id": {"type": "string", "maxLength": 80},
+            "subject_id": {"type": "string", "minLength": 1, "maxLength": 80},
             "predicate": {
                 "type": "string",
                 "enum": list(PHYSICAL_STATE_PREDICATES),
             },
-            "value": {"type": "string", "maxLength": MAX_PHYSICAL_VALUE_CHARS},
+            "value": {"type": "string", "minLength": 1, "maxLength": MAX_PHYSICAL_VALUE_CHARS},
         },
         "required": ["subject_id", "predicate", "value"],
         "additionalProperties": False,
@@ -314,13 +314,13 @@ def _compact_transition_schema(
     include_event_id: bool = True,
 ) -> dict[str, Any]:
     properties = {
-        "subject_id": {"type": "string", "maxLength": 80},
+        "subject_id": {"type": "string", "minLength": 1, "maxLength": 80},
         "predicate": {
             "type": "string",
             "enum": list(PHYSICAL_STATE_PREDICATES),
         },
-        "to_value": {"type": "string", "maxLength": MAX_PHYSICAL_VALUE_CHARS},
-        "action": {"type": "string", "maxLength": MAX_PHYSICAL_TEXT_CHARS},
+        "to_value": {"type": "string", "minLength": 1, "maxLength": MAX_PHYSICAL_VALUE_CHARS},
+        "action": {"type": "string", "minLength": 1, "maxLength": MAX_PHYSICAL_TEXT_CHARS},
     }
     required = ["subject_id", "predicate", "to_value", "action"]
     if not include_event_id:
@@ -589,6 +589,7 @@ def build_compact_source_physical_repair_request(
     event_ids = _contract_event_ids(contract)
     row_count = len(rows)
     known_cast_ids = sorted(_known_cast_ids(rows))
+    anchors = ordered_source_assignments(rows, contract)
     initial_facts_schema = _compact_initial_facts_schema(
         known_cast_ids,
         use_object=bool(event_ids),
@@ -618,8 +619,10 @@ def build_compact_source_physical_repair_request(
                 "properties": {
                     event_id: {
                         "type": "integer",
-                        "minimum": 1,
-                        "maximum": row_count,
+                        "minimum": max([1] + [shot for key, shot in anchors.items()
+                                               if event_ids.index(key) <= event_ids.index(event_id)]),
+                        "maximum": min([row_count] + [shot for key, shot in anchors.items()
+                                                     if event_ids.index(key) >= event_ids.index(event_id)]),
                     }
                     for event_id in event_ids
                 },
@@ -670,6 +673,8 @@ def build_compact_source_physical_repair_request(
     )
     context = {
         "immutable_source_contract": contract,
+        "preserve_ordered_assignments": anchors,
+        "missing_event_ids": [event_id for event_id in event_ids if event_id not in anchors],
         "original_shots": [
             _compact_row_context(row, index) for index, row in enumerate(rows)
         ],
@@ -688,6 +693,10 @@ def build_compact_source_physical_repair_request(
         "exactly one row; consecutive events may share a row. Example only: "
         "{\"E1\":1,\"E2\":1,\"E3\":2}. Use the actual event IDs from the "
         "contract. Do not create rows.\n"
+        "Keep preserve_ordered_assignments unchanged. Correct missing_event_ids "
+        "within the schema's shot bounds; those bounds preserve the existing "
+        "unique chronological assignments. If no supported allocation fits, "
+        "do not invent actions or change the accepted shots.\n"
         "event_transitions must be an object with exactly one key for every "
         "immutable event_id, including events with no state changes (use an empty "
         "array for those events). The list under an event_id contains only ordered "
@@ -728,6 +737,45 @@ def build_compact_source_physical_repair_request(
         + json.dumps(context, ensure_ascii=False, separators=(",", ":"), default=str)
     )
     return system_prompt, user_prompt, schema
+
+
+def ordered_source_assignments(rows: list[dict], contract: dict) -> dict[str, int]:
+    """Pin only a unique, chronological partial allocation; never sort a bad one."""
+    expected = _contract_event_ids(contract)
+    found = [(event_id, index + 1) for index, row in enumerate(rows)
+             for event_id in (row.get("source_event_ids") or [])]
+    ids = [event_id for event_id, _ in found]
+    if (any(not isinstance(event_id, str) for event_id in ids)
+            or len(ids) != len(set(ids)) or any(event_id not in expected for event_id in ids)
+            or ids != sorted(ids, key=expected.index)):
+        return {}
+    return dict(found)
+
+
+def apply_validated_compact_patch(rows: list[dict], response: dict, contract: dict) -> list[dict]:
+    """Commit a working copy only after complete source and physical validation."""
+    from .source_contract import source_contract_issues
+    from .physical_continuity import validate_physical_state_sequence
+
+    working = copy.deepcopy(rows)
+    for row in working:
+        row["_director_source_contract"] = copy.deepcopy(contract)
+    candidate = apply_compact_source_physical_patch(working, response)
+    anchors = ordered_source_assignments(rows, contract)
+    assigned = {event_id: index + 1 for index, row in enumerate(candidate)
+                for event_id in row.get("source_event_ids", [])}
+    if any(assigned.get(event_id) != shot for event_id, shot in anchors.items()):
+        raise ValueError("repair moved an existing unique chronological source assignment")
+    issues = source_contract_issues(candidate, contract, require_ids=True)
+    issues.extend(validate_physical_state_sequence(candidate))
+    if issues:
+        raise ValueError("; ".join(issues))
+    for original, repaired in zip(rows, candidate):
+        if "_director_source_contract" not in original:
+            # The replay needs the authoritative contract as temporary
+            # context; do not add unrelated fields to the accepted shots.
+            repaired.pop("_director_source_contract", None)
+    return candidate
 
 
 def apply_compact_source_physical_patch(

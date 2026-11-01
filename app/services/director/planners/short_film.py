@@ -11,6 +11,7 @@ Outputs: ProductionPlan with ShotPlan objects (NOT final prompts).
 from __future__ import annotations
 import copy
 import difflib
+import hashlib
 import json
 import math
 import os
@@ -2159,6 +2160,7 @@ def _h3_dialogue_density_targets(
     concept = _normalize_h3_text(story_description).strip()
     if (
         not concept
+        or director_audio_policy(concept)["generated_speech_allowed"] is False
         or _H3_SILENT_STORY_RE.search(concept)
         or not _H3_DIALOGUE_FORWARD_RE.search(concept)
     ):
@@ -4865,6 +4867,46 @@ def _video_character_name_rules(preserve_names: bool) -> str:
 class ShortFilmPlanner(BasePlanner):
     skill_type = "short_film"
 
+    def _publish_planning_checkpoint(self, checkpoint: dict) -> None:
+        # Long-form callers also publish their chapter checkpoints. Merge the
+        # bounded stage cache so that publication cannot erase a saved screenplay.
+        stages = getattr(self, "_short_film_stages", None)
+        if stages is not None:
+            checkpoint["short_film_stages"] = copy.deepcopy(stages)
+        super()._publish_planning_checkpoint(checkpoint)
+
+    def _cached_story_stage(self, field: str):
+        key = getattr(self, "_active_story_stage_key", None)
+        return copy.deepcopy(getattr(self, "_short_film_stages", {}).get(key, {}).get(field))
+
+    def _save_story_stage(self, field: str, value) -> None:
+        key = getattr(self, "_active_story_stage_key", None)
+        if key is None:
+            return
+        self._short_film_stages.setdefault(key, {})[field] = copy.deepcopy(value)
+        self._publish_planning_checkpoint(copy.deepcopy(self._planning_resume_checkpoint))
+
+    def _plan_story_driven(self, **kwargs):
+        # Scope includes exact source, duration, model, cast, and sequence
+        # ownership. A draft from another request is never silently reused.
+        payload = {"revision": 1, "request": kwargs,
+                   "model": getattr(self, "_video_model", ""),
+                   "source_contract": getattr(self, "_long_form_source_contract_override", None)}
+        key = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+        self._short_film_stages = copy.deepcopy(
+            self._planning_resume_checkpoint.get("short_film_stages", {})
+        )
+        self._active_story_stage_key = key
+        try:
+            result = self._plan_story_driven_impl(**kwargs)
+            self._save_story_stage("error", None)
+            return result
+        except Exception as exc:
+            self._save_story_stage("error", str(exc))
+            raise
+        finally:
+            self._active_story_stage_key = None
+
     def plan(
         self,
         story_description: str = "",
@@ -4956,7 +4998,7 @@ class ShortFilmPlanner(BasePlanner):
                 "MiniMax H3."
             )
 
-        if not is_audio_mode and target_duration > _DIRECTOR_LONG_FORM_CHAPTER_SECONDS:
+        if not is_audio_mode:
             self._configure_planning_runtime(
                 kwargs,
                 kind="short_film_story",
@@ -5044,6 +5086,14 @@ class ShortFilmPlanner(BasePlanner):
             )
 
         total_duration = sum(s.duration_sec for s in shots) if shots else target_duration
+        duration_notes = []
+        if not is_audio_mode and abs(total_duration - target_duration) > 1:
+            warning = (f"Requested {target_duration:g}s; legal shot durations total {total_duration:.2f}s. "
+                       "Model frame limits and preserved shot/dialogue boundaries prevent an exact fit.")
+            duration_notes.append(warning)
+            print("[ShortFilmPlanner] Timing warning: " + warning)
+            if shots:
+                shots[0].metadata["_director_timing_warning"] = warning
 
         return ProductionPlan(
             skill_type="short_film",
@@ -5054,6 +5104,7 @@ class ShortFilmPlanner(BasePlanner):
             characters=char_profiles if char_profiles else None,
             shots=shots,
             continuity_notes=[
+                *duration_notes,
                 "Short film — preserve the causal story blueprint across shots and locations",
                 "Match camera complexity to emotional content",
                 "Dialogue must appear in video prompts with speaker cues",
@@ -5994,6 +6045,24 @@ class ShortFilmPlanner(BasePlanner):
                 ):
                     completed_key = f"{chapter_index}:{sequence_index}"
                     cached = completed_sequences.get(completed_key)
+                    owned_ids = [str(value or "").upper()
+                                 for value in sequence.get("source_event_ids") or []]
+                    if (isinstance(cached, dict) and cached.get("shots") and owned_ids
+                            and str(getattr(self, "_video_model", "")).startswith("minimax_h3")):
+                        scoped_contract = {"revision": 1,
+                            "events": [copy.deepcopy(source_event_by_id[event_id]) for event_id in owned_ids],
+                            "audio_policy": build_source_contract(story_description)["audio_policy"]}
+                        cached_rows = [{**item, **(item.get("metadata") or {}),
+                                        "_director_source_contract": scoped_contract}
+                                       for item in cached["shots"]]
+                        cached_issues = source_contract_issues(cached_rows, scoped_contract, require_ids=True)
+                        cached_issues.extend(validate_physical_state_sequence(cached_rows))
+                        if cached_issues:
+                            # Keep the old checkpoint intact until a replacement
+                            # validates; never reuse global-event duplicates.
+                            print("[ShortFilmPlanner] Saved sequence needs scoped revalidation: "
+                                  + "; ".join(cached_issues))
+                            cached = None
                     if isinstance(cached, dict) and cached.get("shots"):
                         sequence_shots = [
                             ShotPlan.from_dict(item)
@@ -6138,6 +6207,15 @@ class ShortFilmPlanner(BasePlanner):
                                 or "Preserve every established identity, prop, relationship, and physical state"
                             ),
                         }]
+                        # The global brief is context, not the action contract
+                        # for this bounded sequence. Never re-extract its events
+                        # from the concatenated global/chapter/sequence prompt.
+                        self._long_form_source_contract_override = {
+                            "revision": 1,
+                            "events": [copy.deepcopy(source_event_by_id[event_id])
+                                       for event_id in sequence_event_ids],
+                            "audio_policy": build_source_contract(story_description)["audio_policy"],
+                        }
                         sequence_shots, sequence_title = self._plan_story_driven(
                             story_description=sequence_story,
                             reference_image_path=reference_image_path,
@@ -6236,6 +6314,7 @@ class ShortFilmPlanner(BasePlanner):
         finally:
             for attribute in (
                 "_long_form_story_blueprint_override",
+                "_long_form_source_contract_override",
                 "_long_form_story_bible_override",
                 "_long_form_screenplay_thinking_budget_override",
                 "_long_form_h3_voice_bible_override",
@@ -7316,7 +7395,7 @@ Shots to plan:
 
     # ── Story-Driven Planning ────────────────────────────────────────
 
-    def _plan_story_driven(
+    def _plan_story_driven_impl(
         self,
         story_description: str,
         reference_image_path: Optional[str],
@@ -7366,7 +7445,10 @@ Shots to plan:
         is_h3_native = str(
             getattr(self, "_video_model", "") or ""
         ).lower().startswith("minimax_h3")
-        source_contract = build_source_contract(story_description) if is_h3_native else {}
+        source_contract = (
+            copy.deepcopy(getattr(self, "_long_form_source_contract_override", None))
+            or build_source_contract(story_description)
+        ) if is_h3_native else {}
         source_contract_block = format_source_contract(source_contract) if is_h3_native else ""
         h3_maximum_line_words = max(
             1,
@@ -7505,6 +7587,8 @@ WHY THIS MATTERS:
             story_continuity_blueprint = copy.deepcopy(
                 getattr(self, "_long_form_story_blueprint_override") or []
             )
+        elif self._cached_story_stage("story_blueprint") is not None:
+            story_continuity_blueprint = self._cached_story_stage("story_blueprint")
         elif scene_count_high >= 4:
             print(
                 "[ShortFilmPlanner] Pass 0A: Building causal story "
@@ -7523,6 +7607,7 @@ WHY THIS MATTERS:
         self._last_story_continuity_blueprint = copy.deepcopy(
             story_continuity_blueprint
         )
+        self._save_story_stage("story_blueprint", story_continuity_blueprint)
         story_blueprint_text = _format_story_continuity_blueprint(
             story_continuity_blueprint
         )
@@ -7558,12 +7643,15 @@ BINDING STORY-ARCHITECT BLUEPRINT:
                     "[ShortFilmPlanner] Reusing long-form H3 character "
                     "voice bible."
                 )
+            elif self._cached_story_stage("voice_bible") is not None:
+                h3_voice_bible = self._cached_story_stage("voice_bible")
             else:
                 print("[ShortFilmPlanner] Pass 0: Building H3 character voice bible...")
                 h3_voice_bible = self._build_h3_character_voice_bible(
                     story_description=story_description,
                     char_profiles=char_profiles,
                 )
+            self._save_story_stage("voice_bible", h3_voice_bible)
             voice_bible_text = _format_h3_voice_bible(h3_voice_bible)
             h3_character_block = f"""
 H3 CHARACTER-AUTHENTICITY RULES:
@@ -7626,6 +7714,15 @@ H3 SILENT-SEQUENCE CONTRACT — REQUIRED BY THE SEQUENCE ARCHITECT:
                         story_description
                     ),
                     target_duration=target_duration,
+                )
+            if source_contract["audio_policy"].get("generated_speech_allowed") is False:
+                # Audio permissions are authoritative even when an outline or
+                # dialogue-intent heuristic proposes conversational pacing.
+                h3_dialogue_density = None
+                h3_character_block += (
+                    "\nSOURCE AUDIO CONTRACT: Generate no dialogue or voiceover. "
+                    "Stage the source actions visually with permitted nonverbal effects; "
+                    "separately recorded editorial speech is not performed here.\n"
                 )
             if h3_dialogue_density:
                 h3_character_block += f"""
@@ -7730,7 +7827,7 @@ LONG-FORM SILENT-SEQUENCE CONTRACT:
         # retries once without thinking rather than trusting an empty or
         # prematurely stopped answer.
         _output_token_cap = max(2000, max_total_words * 3)
-        screenplay = repair_text(
+        screenplay = self._cached_story_stage("screenplay") or repair_text(
             self._generate_streaming(
                 prompt=pass1_user,
                 system_prompt=pass1_system,
@@ -8223,6 +8320,7 @@ SCREENPLAY TO REPAIR:
         # in director_pipeline.py converts to a clean user-visible
         # message in chat.
         assert_no_minor_content(screenplay, source="screenplay (Pass 1)")
+        self._save_story_stage("screenplay", screenplay)
 
         # H3 renders independent bounded shots rather than 20-second rolling
         # windows. Plan directly on its native duration lattice so legacy
@@ -8237,7 +8335,7 @@ SCREENPLAY TO REPAIR:
                     "[ShortFilmPlanner] Pass 1.5: Running H3 character "
                     "table read before dialogue lock..."
                 )
-                screenplay_dialogue_manifest = (
+                screenplay_dialogue_manifest = self._cached_story_stage("dialogue_manifest") or (
                     self._run_h3_character_table_read(
                         story_description=story_description,
                         screenplay=screenplay,
@@ -8254,15 +8352,17 @@ SCREENPLAY TO REPAIR:
                     ),
                     source="H3 character table read",
                 )
+            self._save_story_stage("dialogue_manifest", screenplay_dialogue_manifest)
             return self._plan_story_h3_native(
                 story_description=story_description,
+                source_contract_override=source_contract,
                 screenplay=screenplay or story_description,
                 screenplay_dialogue_manifest=screenplay_dialogue_manifest,
                 character_voice_bible=h3_voice_bible,
                 story_continuity_blueprint=story_continuity_blueprint,
                 require_source_contract=(
                     source_contract["audio_policy"].get("generated_speech_allowed") is False
-                    and len(source_contract.get("events") or []) >= 2
+                    and len(source_contract.get("events") or []) >= 1
                 ),
                 reference_image_path=reference_image_path,
                 char_profiles=char_profiles,
@@ -9863,7 +9963,7 @@ SCREENPLAY:
         """
         from ..contract_repair import (
             build_compact_source_physical_repair_request,
-            apply_compact_source_physical_patch,
+            apply_validated_compact_patch,
         )
 
         request_budget = max(0, min(2, int(request_budget)))
@@ -9889,8 +9989,8 @@ SCREENPLAY:
             )
             try:
                 proposal = patches[0] if isinstance(patches, list) and len(patches) == 1 else patches
-                repaired_rows = apply_compact_source_physical_patch(rows, proposal)
-            except ValueError as error:
+                repaired_rows = apply_validated_compact_patch(rows, proposal, source_contract)
+            except (TypeError, ValueError) as error:
                 # The patch is atomic. Feedback stays tied to the original rows
                 # and never treats a rejected proposal as the new baseline.
                 patch_issues = [
@@ -9934,6 +10034,7 @@ SCREENPLAY:
         character_voice_bible: Optional[list[dict[str, str]]] = None,
         story_continuity_blueprint: Optional[list[dict[str, Any]]] = None,
         require_source_contract: bool = False,
+        source_contract_override: Optional[dict] = None,
         nsfw: bool = False,
         polish_block: str = "",
     ) -> tuple[list[ShotPlan], Optional[str]]:
@@ -9944,7 +10045,7 @@ SCREENPLAY:
             assert_no_minor_content_in_pass2,
         )
 
-        source_contract = build_source_contract(story_description)
+        source_contract = copy.deepcopy(source_contract_override) if source_contract_override is not None else build_source_contract(story_description)
         uses_generated_images = bool(
             getattr(self, "_uses_generated_shot_images", True)
         )
@@ -9981,6 +10082,17 @@ SCREENPLAY:
             shot_count_low,
             min(maximum_by_runtime, math.ceil(target_duration / 7.5)),
         )
+        authored_events = source_contract.get("events") or []
+        authored_shot_count = len(authored_events) if authored_events and all(
+            event.get("source_start_seconds") is not None
+            and event.get("source_end_seconds") is not None
+            for event in authored_events
+        ) else None
+        if authored_shot_count:
+            # Explicit timed storyboard cuts outrank the generic 7.5s pacing
+            # preference. Twelve five-second scenes must not become eight.
+            shot_count_low = shot_count_high = authored_shot_count
+            maximum_by_runtime = max(maximum_by_runtime, authored_shot_count)
         preferred_durations = _h3_preferred_native_durations(
             fps=fps,
             frames_minimum=frames_minimum,
@@ -10238,6 +10350,11 @@ SCREENPLAY:
         ]
 
         def _strengthen_native_schema(configured: dict) -> dict:
+            if source_contract.get("events"):
+                configured["items"]["properties"]["source_event_ids"] = {
+                    "type": "array", "uniqueItems": True,
+                    "items": {"type": "string", "enum": [e["event_id"] for e in source_contract["events"]]},
+                }
             configured["items"]["properties"]["window_prompts"] = {
                 "type": "array",
                 "items": {"type": "string"},
@@ -10586,7 +10703,7 @@ SCREENPLAY:
             f"{shot_count_low}-{shot_count_high} shots)..."
         )
         planner_token_budget = _h3_planner_token_budget(target_duration)
-        raw_shot_dicts = self._call_llm_json(
+        raw_shot_dicts = self._cached_story_stage("native_shots") or self._call_llm_json(
             user_prompt=pass2_user,
             system_prompt=pass2_system,
             max_tokens=planner_token_budget,
@@ -10604,6 +10721,7 @@ SCREENPLAY:
             minimum_items=shot_count_low,
             maximum_items=shot_count_high,
         )
+        self._save_story_stage("native_shots", raw_shot_dicts)
         shot_dicts = _normalize_native_shots(raw_shot_dicts)
         schedule = _apply_native_schedule(shot_dicts)
         # Presence of source_event_ids opts a plan into source ownership even

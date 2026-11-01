@@ -283,6 +283,13 @@ def _timed_brief(source: str) -> tuple[str, tuple[tuple[float, float, str, int, 
             starts = [start for start, _end in production_note_spans(body)]
             if note:
                 starts.append(note.start())
+            editorial = re.search(
+                r"(?im)^\s*(?:VOICEOVER\s*[-–—:]\s*RECORD\s+SEPARATELY\s+IN\s+EDITOR\b|"
+                r"END\s+CARD\s*\(EDITOR\s+GRAPHICS\b|IMPORTANT\s+PRODUCTION\s+REQUIREMENTS\s*:)",
+                body,
+            )
+            if editorial:
+                starts.append(editorial.start())
             if starts:
                 note_start = min(starts)
                 context.append(body[note_start:].strip())

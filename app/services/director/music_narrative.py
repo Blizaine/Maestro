@@ -6,12 +6,13 @@ style, and static identity descriptions do not become story milestones.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any
 
 
-_REVISION = 4
+_REVISION = 6
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _SENTENCE_RE = re.compile(r"[^.!?;\n]+(?:[.!?;]+|$)")
 _SUBJECT_TAG_RE = re.compile(r"<\s*subject\s+\d+\s*>", re.IGNORECASE)
@@ -58,6 +59,14 @@ _STRUCTURAL_HEADING_RE = re.compile(
     r"^\s*(?:#{1,6}\s*)?(?:opening|beginning|introduction|middle|"
     r"climax|ending|closing|conclusion|finale)\s*:",
     re.IGNORECASE,
+)
+_BRIEF_SECTION_RE = re.compile(
+    r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?P<name>story\s+arc|story|narrative(?:\s+arc)?|"
+    r"character(?:s)?(?:\s*\([^\n]*?\))?|setting|location|performance|"
+    r"audio\s+direction|style|camera|negative\s+prompt)[ \t]*:[ \t]*"
+)
+_MARKDOWN_HEADING_RE = re.compile(
+    r"(?m)^[ \t]*(?P<level>#{1,6})[ \t]+(?P<name>[^\n]+?)[ \t]*$"
 )
 _NATIVE_SECTION_RE = re.compile(
     r"(?im)^\s*(subject_definitions|summary|retention_analysis|"
@@ -156,6 +165,9 @@ _ACTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"paddle|paddles|paddled|paddling|sail|sails|sailed|sailing|"
             r"drive|drives|drove|driven|driving|transform|transforms|"
             r"transformed|transforming|turns\s+around|turned\s+around|"
+            r"cut|cuts|cutting|sever|severs|severed|severing|"
+            r"grow|grows|grew|grown|growing|shrink|shrinks|shrank|shrunk|shrinking|"
+            r"boo|boos|booed|booing|"
             r"spins|spun|spinning|waves|waved|waving)\b",
             re.IGNORECASE,
         ),
@@ -285,6 +297,7 @@ def _is_filmmaking_action(
         "shot", "shoot", "shoots", "shooting", "fire", "fires", "fired",
         "firing", "open", "opens", "opened", "opening", "close", "closes",
         "closed", "closing", "stop", "stops", "stopped", "stopping",
+        "cut", "cuts", "cutting",
     }
     if not camera_action:
         return False
@@ -297,6 +310,9 @@ def _is_filmmaking_action(
     cue = bool(_FILMMAKING_CUE_RE.search(context))
     if not cue:
         return False
+
+    if normalized in {"cut", "cuts", "cutting"}:
+        return bool(re.match(r"\s*(?:[- ]away\b|to\b|back\s+to\b|between\b)", value[end:], re.I))
 
     if normalized in {"stop", "stops", "stopped", "stopping"}:
         return bool(re.search(
@@ -326,6 +342,8 @@ def _is_filmmaking_action(
     # the leg`` is covered by the physical cue above.
     if normalized == "shot":
         return bool(
+            re.search(r"\b(?:every|each|same)\s+$", value[:start], re.I)
+            or
             re.search(
                 r"\b(?:wide|medium|close[- ]?up|establishing|tracking|pov|locked|static|fixed)\s+shot\b|"
                 r"\bshot\s+(?:throughout|of\s+(?:the\s+)?(?:scene|singer|performer)|from\s+)",
@@ -388,6 +406,10 @@ _GENERIC_SEMANTIC_VERB_FAMILIES: tuple[re.Pattern[str], ...] = tuple(
         r"\bpunch(?:es|ed|ing)?\b", r"\bkick(?:s|ed|ing)?\b",
         r"\bsmash(?:es|ed|ing)?\b", r"\bdestroy(?:s|ed|ing)?\b",
         r"\bburn(?:s|ed|ing)?\b",
+        r"\bcut(?:s|ting)?\b|\bsever(?:s|ed|ing)?\b",
+        r"\bgrow(?:s|ing)?\b|\bgrew\b|\bgrown\b",
+        r"\bshrink(?:s|ing)?\b|\bshrank\b|\bshrunk\b",
+        r"\bboo(?:s|ed|ing)?\b",
     )
 )
 _ACTION_CLAUSE_BREAK_RE = re.compile(
@@ -441,7 +463,7 @@ _ACTION_DESCRIPTION_WORDS = {
     "thoughtfully", "unhurried",
 }
 _PRONOUNS = {"he", "she", "it", "they", "them", "him", "her"}
-_CONNECTOR_RE = re.compile(r"\b(?:and\s+then|then|and|but|while|as|after|before|when)\b", re.I)
+_CONNECTOR_RE = re.compile(r"[,;]|\b(?:and\s+then|then|and|but|while|as|after|before|when)\b", re.I)
 _NEGATION_RE = re.compile(
     r"\b(?:not|never|without|avoid|avoids|avoided|cannot|can['’]t|"
     r"don['’]t|doesn['’]t|didn['’]t|won['’]t|shouldn['’]t|no\s+longer|"
@@ -656,12 +678,42 @@ def _native_music_source_fields(value: str) -> list[tuple[str, str]] | None:
     return fields
 
 
+def _brief_sections(value: str) -> list[tuple[str, int, int, int]]:
+    """Recognize both colon labels and Markdown section hierarchy."""
+    markdown = list(_MARKDOWN_HEADING_RE.finditer(value))
+    sections = [(_normal_text(match.group('name').rstrip(' #:')), match.start(),
+                 match.end(), len(match.group('level'))) for match in markdown]
+    sections.extend((_normal_text(match.group('name')), match.start(), match.end(), 0)
+                    for match in _BRIEF_SECTION_RE.finditer(value)
+                    if not any(heading.start() <= match.start() < heading.end()
+                               for heading in markdown))
+    return sorted(sections, key=lambda section: section[1])
+
+
+def _brief_section_body(value: str, sections: list, index: int) -> str:
+    _name, _start, end, level = sections[index]
+    stop = next((start for _name, start, _end, other_level in sections[index + 1:]
+                 if other_level <= (level or 2)), len(value))
+    # Nested act/chapter headings organize the story; they are not actions.
+    return _MARKDOWN_HEADING_RE.sub('', value[end:stop])
+
+
 def _music_narrative_source(value: str) -> str:
     """Select narrative-bearing native fields and extract actual beat text."""
 
     fields = _native_music_source_fields(value)
     if fields is None:
         narrative = value
+        sections = _brief_sections(value)
+        story_sections = [index for index, section in enumerate(sections)
+                          if section[0]
+                          in {"story arc", "story", "narrative", "narrative arc"}]
+        if story_sections:
+            # Explicit chronological story beats own the milestones. Identity,
+            # setting, style and ongoing performance remain in contract.source
+            # and in the creative prompt, not as one-time ordered actions.
+            narrative = "\n".join(_brief_section_body(value, sections, index)
+                for index in story_sections)
     else:
         narrative = "\n".join(
             text for name, text in fields
@@ -675,7 +727,10 @@ def _music_participant_context(value: str) -> str:
 
     fields = _native_music_source_fields(value)
     if fields is None:
-        return ""
+        sections = _brief_sections(value)
+        return "\n".join(_brief_section_body(value, sections, index)
+            for index, section in enumerate(sections)
+            if section[0].startswith(('character', 'main character')))
     return "\n".join(
         text for name, text in fields if name == "subject_definitions"
     )
@@ -818,7 +873,11 @@ def _is_static_modifier_match(value: str, start: int, end: int, verb: str) -> bo
     normalized_verb = _normal_text(verb)
     prefix = value[max(0, start - 64):start]
     tail = value[end:min(len(value), end + 72)]
+    if normalized_verb == "dive" and re.match(r"\s+bar\b", tail, re.I):
+        return True
     if normalized_verb in {"hand", "hands", "handed", "handing"}:
+        if re.search(r"\b(?:deformed|distorted|extra|malformed|human|bare)\s+$", prefix, re.I):
+            return True
         if _BODY_PART_NOUN_PREFIX_RE.search(prefix) or re.search(
             r"\b[A-Za-z][\w’'-]*['’]s\s+"
             r"(?:(?:left|right|front|back|upper|lower)\s+)?$",
@@ -930,6 +989,21 @@ def _actor_aliases(
     action_number: int,
 ) -> list[str]:
     prefix = sentence[:action_start]
+    screen_actor = re.search(
+        r"(?:^|[,;])\s*(?P<actor>(?:[A-Za-z][\w’'-]*\s+){0,3}[A-Za-z][\w’'-]*)"
+        r"\s+on\s+(?:the\s+)?screens?\s*$", prefix, re.I,
+    )
+    if screen_actor:
+        return _aliases_from_words(screen_actor.group("actor").split())
+    bare_subject = re.search(r"\b(nose|crowd|audience)\s*$", prefix, re.I)
+    if bare_subject:
+        return [bare_subject.group(1).casefold()]
+    if action_number == 0 and re.match(r'\s*end\s+with\b', prefix, re.I):
+        # "End with an image of the Rebel walking" names a subject inside
+        # framing direction; the imperative End is not an actor's name.
+        directed = _entity_candidates(prefix[re.match(r'\s*end\s+with\b', prefix, re.I).end():])
+        if directed:
+            return _select_entity(directed)
     pronoun = re.search(r"\b(?:as|while|when|after|before|and\s+then|then)?\s*(it|he|she|they|them)\s*$", prefix, re.I)
     if pronoun:
         antecedents = _entity_candidates(prefix[:pronoun.start()])
@@ -965,10 +1039,10 @@ def _actor_aliases(
                 and candidate[1] <= requester_intent.end()
             )
         ]
-    if action_number > 0 and prior_actor:
+    if action_number > 0:
         connectors = list(_CONNECTOR_RE.finditer(prefix))
         if connectors:
-            after_connector = [item for item in candidates if item[0] >= connectors[-1].end()]
+            after_connector = _entity_candidates(prefix[connectors[-1].end():])
             if after_connector:
                 return _select_entity(after_connector)
         return prior_actor
@@ -1268,6 +1342,10 @@ def build_music_narrative_contract(
     for sentence_start, sentence_end in _sentence_ranges(extraction_source):
         sentence = extraction_source[sentence_start:sentence_end]
         visible_sentence = visible_source[sentence_start:sentence_end]
+        heading = _STRUCTURAL_HEADING_RE.match(sentence)
+        if heading:
+            sentence = sentence[heading.end():]
+            visible_sentence = visible_sentence[heading.end():]
         matches = [
             match for match in _action_matches(visible_sentence)
             if not _is_static_modifier_match(
@@ -1369,6 +1447,27 @@ def build_music_narrative_contract(
             events.append(event)
 
     return {"revision": _REVISION, "source": original, "events": events}
+
+
+def reconcile_music_narrative_checkpoint(checkpoint: dict, contract: dict) -> dict:
+    """Do not replay cached event IDs when their source meanings have changed."""
+    prior = checkpoint.get("music_narrative_contract")
+    if not isinstance(prior, dict):
+        pending = checkpoint.get('music_arc_allocation_repair')
+        if isinstance(pending, dict):
+            prior = pending.get('contract')
+    if not isinstance(prior, dict) or prior.get("events") == contract.get("events"):
+        return checkpoint
+    updated = copy.deepcopy(checkpoint)
+    for key in ("music_creative_arc", "music_arc_assignment_notes", "music_arc_quality_notes",
+                "music_narrative_allocation", "music_video_batches", "music_arc_allocation_repair"):
+        updated.pop(key, None)
+    updated["music_narrative_contract"] = copy.deepcopy(contract)
+    updated["music_narrative_contract_migration"] = {
+        "previous_revision": prior.get("revision"), "revision": contract.get("revision"),
+        "reason": "Source action meanings changed; replan dependent ownership and shots.",
+    }
+    return updated
 
 
 def _contract_events(contract: Any) -> list[dict[str, Any]]:
@@ -2092,7 +2191,12 @@ def _generic_semantic_action_positions(prompt: str, event: dict[str, Any]) -> li
     source_match = source_pattern.match(source_text)
     if source_match is None:
         return []
-    anchors = _target_aliases(source_text[source_match.end():])
+    # Keep punctuation: normalizing first erases comma boundaries and makes
+    # another actor's later clause part of this action's required object.
+    raw_source = str(event.get("text") or "").strip()
+    raw_match = source_pattern.match(raw_source)
+    source_tail = raw_source[raw_match.end():] if raw_match else source_text[source_match.end():]
+    anchors = _target_aliases(source_tail)
 
     analysis_prompt = _mask_quoted_text(prompt)
     ranges = _sentence_ranges(analysis_prompt)
@@ -2110,7 +2214,7 @@ def _generic_semantic_action_positions(prompt: str, event: dict[str, Any]) -> li
             tail = sentence[match.end():]
             action_tail = _semantic_action_clause_tail(tail)
             source_relation = _relation_before_action_anchor(
-                source_text[source_match.end():], anchors,
+                source_tail, anchors,
             )
             if anchors:
                 if _contains_alias(action_tail, anchors):

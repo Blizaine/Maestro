@@ -152,7 +152,7 @@ class MusicNarrativeTests(unittest.TestCase):
             "moves, then finishes in the same pose so the clip loops smoothly."
         )
         contract = contract_for(source)
-        self.assertEqual(contract["revision"], 4)
+        self.assertEqual(contract["revision"], 6)
         self.assertEqual(contract["source"], source)
         self.assertIn("spins, footwork and floor moves", contract["source"])
         self.assertEqual(contract["events"], [])
@@ -174,7 +174,7 @@ class MusicNarrativeTests(unittest.TestCase):
         contract = contract_for(source)
         events = contract["events"]
 
-        self.assertEqual(contract["revision"], 4)
+        self.assertEqual(contract["revision"], 6)
         self.assertEqual([event["text"] for event in events], [
             "boards a small boat", "sails across the bay",
         ])
