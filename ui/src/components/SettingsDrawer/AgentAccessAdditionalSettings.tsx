@@ -22,6 +22,20 @@ const SCOPE_CHOICES: Array<{ id: AgentAccessScope; label: string; description: s
   { id: 'admin', label: 'Admin', description: 'Use administrative Agent Access actions.' },
 ]
 
+type LocalMcpTarget = 'chatgpt' | 'codex' | 'claude-desktop' | 'claude-code' | 'other'
+
+const LOCAL_MCP_TARGETS: Array<{ id: LocalMcpTarget; label: string; suggestedName: string }> = [
+  { id: 'chatgpt', label: 'ChatGPT desktop', suggestedName: 'ChatGPT on this PC' },
+  { id: 'codex', label: 'Codex CLI or IDE', suggestedName: 'Codex on this PC' },
+  { id: 'claude-desktop', label: 'Claude Desktop', suggestedName: 'Claude Desktop on this PC' },
+  { id: 'claude-code', label: 'Claude Code', suggestedName: 'Claude Code on this PC' },
+  { id: 'other', label: 'Other MCP app', suggestedName: 'Other MCP app on this PC' },
+]
+
+function localMcpTargetLabel(target: LocalMcpTarget): string {
+  return LOCAL_MCP_TARGETS.find(option => option.id === target)?.label || 'MCP app'
+}
+
 export function LocalMcpSettings({ ownerSession, enabled, available, refreshKey }: {
   ownerSession: boolean
   enabled: boolean
@@ -33,6 +47,9 @@ export function LocalMcpSettings({ ownerSession, enabled, available, refreshKey 
   const [loadError, setLoadError] = useState(false)
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
+  const [createTarget, setCreateTarget] = useState<LocalMcpTarget | ''>('')
+  const [clientTargets, setClientTargets] = useState<Record<string, LocalMcpTarget>>({})
+  const [openClientId, setOpenClientId] = useState<string | null>(null)
   const [scopes, setScopes] = useState<AgentAccessScope[]>(['observe'])
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
@@ -69,6 +86,8 @@ export function LocalMcpSettings({ ownerSession, enabled, available, refreshKey 
   const invalidateSetup = useCallback(() => {
     setupGeneration.current += 1
     setClients([])
+    setClientTargets({})
+    setOpenClientId(null)
     setCopied(null)
     setDownloadingClientId(null)
     setLoadError(false)
@@ -81,17 +100,31 @@ export function LocalMcpSettings({ ownerSession, enabled, available, refreshKey 
     void refresh()
   }, [invalidateSetup, refresh, refreshKey])
 
+  const selectCreateTarget = (value: string) => {
+    const target = LOCAL_MCP_TARGETS.find(option => option.id === value)
+    if (!target) {
+      setCreateTarget('')
+      return
+    }
+    const previousSuggestion = LOCAL_MCP_TARGETS.find(option => option.id === createTarget)?.suggestedName
+    setCreateTarget(target.id)
+    setName(current => !current.trim() || current === previousSuggestion ? target.suggestedName : current)
+  }
+
   const handleCreate = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!ownerSession || !enabled || !available || !name.trim() || scopes.length === 0) return
+    const target = createTarget
+    if (!ownerSession || !enabled || !available || !target || !name.trim() || scopes.length === 0) return
     setCreating(true)
     setError(null)
     setMessage(null)
     try {
       const client = await createAgentAccessLocalClient({ name: name.trim(), scopes })
+      setClientTargets(current => ({ ...current, [client.id]: target }))
+      setOpenClientId(client.id)
       setClients(current => [client, ...current.filter(item => item.id !== client.id)])
       setName('')
-      setMessage(`Local client “${client.name}” was created with the selected scopes.`)
+      setMessage(`“${client.name}” was created with the selected scopes. Complete the setup below in ${localMcpTargetLabel(target)}; creation does not connect it.`)
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Could not create the local MCP client.')
     } finally {
@@ -99,17 +132,24 @@ export function LocalMcpSettings({ ownerSession, enabled, available, refreshKey 
     }
   }
 
-  const handleCopy = async (client: AgentAccessLocalClient, target: 'codex' | 'json' | 'claude') => {
+  const handleCopy = async (client: AgentAccessLocalClient, target: LocalMcpTarget) => {
     if (!enabled) return
     const generation = setupGeneration.current
     try {
-      const value = target === 'json' ? formatLocalAgentClientJson(client) : target === 'codex' ? formatLocalAgentClientCodexConfig(client) : formatLocalAgentClientClaudeCommand(client)
+      const value = target === 'chatgpt'
+        ? formatLocalAgentClientLaunchDetails(client)
+        : target === 'codex'
+          ? formatLocalAgentClientCodexConfig(client)
+          : target === 'claude-code'
+            ? formatLocalAgentClientClaudeCommand(client)
+            : formatLocalAgentClientJson(client)
       await navigator.clipboard.writeText(value)
       if (generation !== setupGeneration.current) return
       setCopied(`${client.id}:${target}`)
       window.setTimeout(() => setCopied(current => current === `${client.id}:${target}` ? null : current), 1800)
+      setMessage(`${localMcpTargetLabel(target)} setup details copied. Finish the steps in that app; copying does not connect it.`)
     } catch {
-      if (generation === setupGeneration.current) setError('Clipboard access is unavailable. Select and copy the configuration shown for this client.')
+      if (generation === setupGeneration.current) setError('Clipboard access is unavailable. Expand Manual setup details and select the relevant value.')
     }
   }
 
@@ -131,7 +171,7 @@ export function LocalMcpSettings({ ownerSession, enabled, available, refreshKey 
       anchor.click()
       anchor.remove()
       window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-      setMessage(`Claude Desktop extension downloaded for “${client.name}”. Install it in Claude Desktop on this same computer.`)
+      setMessage(`Extension downloaded for “${client.name}”. Install it in Claude Desktop on this same computer; downloading does not install or connect it.`)
     } catch (requestError) {
       if (generation === setupGeneration.current) setError(requestError instanceof Error ? requestError.message : 'Could not download the Claude Desktop extension.')
     } finally {
@@ -161,29 +201,72 @@ export function LocalMcpSettings({ ownerSession, enabled, available, refreshKey 
       {!ownerSession ? (
         <p className="rounded-lg bg-bg-primary p-3 text-[10px] leading-relaxed text-text-muted">Sign in as the owner to create or review local client identities.</p>
       ) : !enabled ? (
-        <p className="rounded-lg bg-bg-primary p-3 text-[10px] leading-relaxed text-text-muted">Enable Local MCP above to create a client. Remote MCP can stay off; local setup does not require Tailscale or a certificate.</p>
+        <p className="rounded-lg bg-bg-primary p-3 text-[10px] leading-relaxed text-text-muted">Enable Local MCP above to create or use a local client. Remote MCP can stay off; local setup does not require Tailscale or a certificate.</p>
       ) : !available ? (
         <p className="rounded-lg bg-bg-primary p-3 text-[10px] leading-relaxed text-text-muted">Local MCP is unavailable on this installation.</p>
-      ) : (
-        <form className="space-y-3 rounded-lg border border-border bg-bg-primary p-3" onSubmit={event => void handleCreate(event)}>
-          <div className="space-y-1.5">
-            <label htmlFor="agent-access-local-client-name" className="text-[10px] font-medium text-text-secondary">Local client name</label>
-            <input id="agent-access-local-client-name" value={name} maxLength={64} onChange={event => setName(event.target.value)} placeholder="e.g. Codex on this PC" disabled={creating} className="min-h-10 w-full min-w-0 rounded-lg border border-border bg-bg-secondary px-3 py-2 text-xs text-text-primary outline-none focus:border-accent-blue disabled:opacity-50" />
+      ) : null}
+
+      {ownerSession && (
+        <div className="space-y-2" aria-label="Existing local clients">
+          <div className="flex items-center justify-between gap-2">
+            <h5 className="text-[10px] font-semibold text-text-primary">Existing local clients</h5>
+            <span className="rounded-full bg-bg-primary px-2 py-1 text-[9px] text-text-muted">{activeClients.length} active</span>
           </div>
-          <fieldset className="space-y-2">
-            <legend className="text-[10px] font-medium text-text-secondary">Choose this client’s access scopes</legend>
-            <div className="grid grid-cols-1 gap-2">
-              {SCOPE_CHOICES.map(scope => (
-                <label key={scope.id} className="flex min-w-0 items-start gap-2 rounded-lg border border-border bg-bg-secondary px-2.5 py-2">
-                  <input type="checkbox" checked={scopes.includes(scope.id)} disabled={creating} onChange={event => setScopes(current => event.target.checked ? [...current, scope.id] : current.filter(value => value !== scope.id))} className="mt-0.5 accent-blue-500" />
-                  <span className="min-w-0"><span className="block text-[10px] font-semibold text-text-primary">{scope.label}</span><span className="block text-[9px] leading-relaxed text-text-muted">{scope.description}</span></span>
-                </label>
-              ))}
+          {loading && clients.length === 0 ? <p className="text-[10px] text-text-muted" role="status">Loading local clients…</p> : loadError && clients.length === 0 ? <p className="rounded-lg bg-bg-primary p-3 text-[10px] text-text-muted">Could not load local clients. Refresh to try again.</p> : activeClients.length === 0 ? <p className="rounded-lg bg-bg-primary p-3 text-[10px] text-text-muted">{revokedClients.length > 0 ? 'No active local clients.' : 'No local clients have been created.'}</p> : (
+            <div className="space-y-2">
+              {activeClients.map(client => <LocalClientSetup key={client.id} client={client} target={clientTargets[client.id] || ''} open={openClientId === client.id} enabled={enabled && available} copied={copied} downloading={downloadingClientId === client.id} onTargetChange={target => {
+                if (!target) setClientTargets(current => {
+                  const next = { ...current }
+                  delete next[client.id]
+                  return next
+                })
+                else setClientTargets(current => ({ ...current, [client.id]: target }))
+              }} onCopy={target => void handleCopy(client, target)} onDownload={() => void handleDownload(client)} />)}
             </div>
-          </fieldset>
+          )}
+          {revokedClients.length > 0 && <p className="text-[9px] text-text-muted">{revokedClients.length} revoked local {revokedClients.length === 1 ? 'client is' : 'clients are'} hidden from setup.</p>}
+        </div>
+      )}
+
+      {ownerSession && enabled && available && (
+        <form className="space-y-3 rounded-lg border border-border bg-bg-primary p-3" onSubmit={event => void handleCreate(event)}>
+          <div>
+            <p className="text-[9px] font-semibold uppercase tracking-wide text-accent-blue">Create a new local client</p>
+            <h5 className="mt-1 text-[10px] font-semibold text-text-primary">Step 1 · Choose the app</h5>
+            <label htmlFor="agent-access-local-target" className="sr-only">App you are connecting</label>
+            <select id="agent-access-local-target" value={createTarget} disabled={creating} onChange={event => selectCreateTarget(event.target.value)} className="mt-1.5 min-h-10 w-full rounded-lg border border-border bg-bg-secondary px-3 text-xs text-text-primary disabled:opacity-50">
+              <option value="">Choose an app…</option>
+              {LOCAL_MCP_TARGETS.map(target => <option key={target.id} value={target.id}>{target.label}</option>)}
+            </select>
+          </div>
+
+          <div className="space-y-2">
+            <h5 className="text-[10px] font-semibold text-text-primary">Step 2 · Name the client and choose access</h5>
+            {!createTarget ? <p className="text-[9px] leading-relaxed text-text-muted">Choose an app first. Maestro will suggest a matching client name and show the scopes you can grant.</p> : (
+              <>
+                <div className="space-y-1.5">
+                  <label htmlFor="agent-access-local-client-name" className="text-[10px] font-medium text-text-secondary">Suggested local client name · editable</label>
+                  <input id="agent-access-local-client-name" value={name} maxLength={64} onChange={event => setName(event.target.value)} placeholder={LOCAL_MCP_TARGETS.find(target => target.id === createTarget)?.suggestedName} disabled={creating} className="min-h-10 w-full min-w-0 rounded-lg border border-border bg-bg-secondary px-3 py-2 text-xs text-text-primary outline-none focus:border-accent-blue disabled:opacity-50" />
+                </div>
+                <fieldset className="space-y-2">
+                  <legend className="text-[10px] font-medium text-text-secondary">Choose this client’s access scopes</legend>
+                  <div className="grid grid-cols-1 gap-2">
+                    {SCOPE_CHOICES.map(scope => (
+                      <label key={scope.id} className="flex min-w-0 items-start gap-2 rounded-lg border border-border bg-bg-secondary px-2.5 py-2">
+                        <input type="checkbox" checked={scopes.includes(scope.id)} disabled={creating} onChange={event => setScopes(current => event.target.checked ? [...current, scope.id] : current.filter(value => value !== scope.id))} className="mt-0.5 accent-blue-500" />
+                        <span className="min-w-0"><span className="block text-[10px] font-semibold text-text-primary">{scope.label}</span><span className="block text-[9px] leading-relaxed text-text-muted">{scope.description}</span></span>
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-[9px] leading-relaxed text-text-muted">Only checked scopes are granted. Observe is the only scope checked by default. You can revoke this client later in Agent grants.</p>
+                </fieldset>
+              </>
+            )}
+          </div>
+
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-[9px] leading-relaxed text-text-muted">Only the scopes you check are granted. You can revoke later in Agent grants.</p>
-            <button type="submit" disabled={creating || !name.trim() || scopes.length === 0} className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">
+            <p className="text-[10px] font-semibold text-text-primary">Step 3 · Create the client</p>
+            <button type="submit" disabled={creating || !createTarget || !name.trim() || scopes.length === 0} className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">
               {creating ? <LoaderCircle size={13} className="animate-spin" /> : null}{creating ? 'Creating…' : 'Create local client'}
             </button>
           </div>
@@ -192,71 +275,114 @@ export function LocalMcpSettings({ ownerSession, enabled, available, refreshKey 
 
       {error && <p className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 text-[10px] leading-relaxed text-amber-100" role="alert">{error}</p>}
       {message && <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2.5 text-[10px] leading-relaxed text-emerald-100" role="status">{message}</p>}
-
-      {ownerSession && (
-        <div className="space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <h5 className="text-[10px] font-semibold text-text-primary">Local clients</h5>
-            <span className="rounded-full bg-bg-primary px-2 py-1 text-[9px] text-text-muted">{activeClients.length} active</span>
-          </div>
-          {loading && clients.length === 0 ? <p className="text-[10px] text-text-muted" role="status">Loading local clients…</p> : loadError && clients.length === 0 ? <p className="rounded-lg bg-bg-primary p-3 text-[10px] text-text-muted">Could not load local clients. Refresh to try again.</p> : activeClients.length === 0 ? <p className="rounded-lg bg-bg-primary p-3 text-[10px] text-text-muted">{revokedClients.length > 0 ? 'No active local clients.' : 'No local clients have been created.'}</p> : (
-            <div className="space-y-2">
-              {activeClients.map(client => <LocalClientSetup key={client.id} client={client} enabled={enabled} copied={copied} downloading={downloadingClientId === client.id} onCopy={target => void handleCopy(client, target)} onDownload={() => void handleDownload(client)} />)}
-            </div>
-          )}
-          {revokedClients.length > 0 && <p className="text-[9px] text-text-muted">{revokedClients.length} revoked local {revokedClients.length === 1 ? 'client is' : 'clients are'} hidden from setup.</p>}
-        </div>
-      )}
-
-      <p className="rounded-lg border border-border bg-bg-primary p-2.5 text-[9px] leading-relaxed text-text-muted">For Claude Desktop, download the .mcpb package for the local client above, then open Claude Desktop → Settings → Extensions → Install Extension and select the downloaded file. Install it on the same computer where this Maestro instance runs. Claude Desktop supplies Node.js for the extension; it starts a local STDIO relay and does not use a private HTTP connector URL.</p>
     </section>
   )
 }
 
-function LocalClientSetup({ client, enabled, copied, downloading, onCopy, onDownload }: {
+function LocalClientSetup({ client, target, open, enabled, copied, downloading, onTargetChange, onCopy, onDownload }: {
   client: AgentAccessLocalClient
+  target: LocalMcpTarget | ''
+  open: boolean
   enabled: boolean
   copied: string | null
   downloading: boolean
-  onCopy: (target: 'codex' | 'json' | 'claude') => void
+  onTargetChange: (target: LocalMcpTarget | '') => void
+  onCopy: (target: LocalMcpTarget) => void
   onDownload: () => void
 }) {
   const codexConfig = formatLocalAgentClientCodexConfig(client)
   const config = formatLocalAgentClientJson(client)
   const command = formatLocalAgentClientClaudeCommand(client)
   const validCommand = Boolean(client.command && client.args && !client.revoked)
+  const copyTarget = target && target !== 'claude-desktop' ? `${client.id}:${target}` : null
   return (
-    <details className="rounded-lg border border-border bg-bg-primary">
+    <details open={open} className="rounded-lg border border-border bg-bg-primary">
       <summary className="flex min-h-11 cursor-pointer list-none flex-wrap items-center justify-between gap-2 px-3 py-2">
-        <span className="min-w-0"><span className="block truncate text-[10px] font-semibold text-text-primary">{client.name}</span><span className="mt-0.5 block text-[9px] text-text-muted">Scopes: {client.scopes.join(', ') || 'none'}</span></span>
-        <span className="shrink-0 text-[9px] text-text-muted">Setup</span>
+        <span className="min-w-0"><span className="block truncate text-[10px] font-semibold text-text-primary">{client.name}</span><span className="mt-0.5 block text-[9px] text-text-muted">Scopes: {client.scopes.join(', ') || 'none'} · existing grant</span></span>
+        <span className="shrink-0 text-[9px] text-text-muted">Set up this client</span>
       </summary>
       <div className="space-y-2 border-t border-border p-3">
-        {!validCommand ? <p className="text-[9px] leading-relaxed text-text-muted">Maestro has not returned a safe launch command for this client. Refresh the client list before copying setup.</p> : (
+        <div className="space-y-1.5">
+          <label htmlFor={`agent-access-local-target-${client.id}`} className="text-[10px] font-semibold text-text-primary">Step 1 · Choose the app for this client</label>
+          <select id={`agent-access-local-target-${client.id}`} aria-label={`${client.name} app setup target`} autoFocus={open} value={target} onChange={event => onTargetChange(LOCAL_MCP_TARGETS.some(option => option.id === event.target.value) ? event.target.value as LocalMcpTarget : '')} className="min-h-10 w-full rounded-lg border border-border bg-bg-secondary px-3 text-xs text-text-primary">
+            <option value="">Choose an app…</option>
+            {LOCAL_MCP_TARGETS.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
+          </select>
+        </div>
+
+        {!enabled && <p className="rounded-lg bg-bg-secondary p-2 text-[9px] leading-relaxed text-text-muted">Enable Local MCP above to use this client. Its existing grant is still here; you do not need to create another one.</p>}
+        {target && (
           <>
-            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-secondary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} Codex config`}>{codexConfig}</pre>
-            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-secondary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} ChatGPT STDIO JSON config`}>{config}</pre>
-            <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-secondary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} Claude Code command`}>{command}</pre>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <button type="button" onClick={onDownload} disabled={!enabled || !validCommand || downloading} className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg bg-accent-blue px-2.5 text-[9px] font-semibold text-bg-primary disabled:opacity-40">
-                {downloading ? <LoaderCircle size={12} className="animate-spin" /> : null}{downloading ? 'Preparing extension…' : 'Download Claude Desktop extension'}
-              </button>
-              <button type="button" onClick={() => onCopy('codex')} disabled={!enabled || !validCommand} className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg border border-border px-2.5 text-[9px] font-medium text-text-secondary hover:bg-bg-hover disabled:opacity-40">
-                {copied === `${client.id}:codex` ? <Check size={12} /> : <Copy size={12} />}{copied === `${client.id}:codex` ? 'Codex config copied' : 'Copy Codex config.toml'}
-              </button>
-              <button type="button" onClick={() => onCopy('json')} disabled={!enabled || !validCommand} className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg border border-border px-2.5 text-[9px] font-medium text-text-secondary hover:bg-bg-hover disabled:opacity-40">
-                {copied === `${client.id}:json` ? <Check size={12} /> : <Copy size={12} />}{copied === `${client.id}:json` ? 'ChatGPT config copied' : 'Copy ChatGPT STDIO JSON'}
-              </button>
-              <button type="button" onClick={() => onCopy('claude')} disabled={!enabled || !validCommand} className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg border border-border px-2.5 text-[9px] font-medium text-text-secondary hover:bg-bg-hover disabled:opacity-40">
-                {copied === `${client.id}:claude` ? <Check size={12} /> : <Copy size={12} />}{copied === `${client.id}:claude` ? 'Claude Code command copied' : 'Copy Claude Code command'}
-              </button>
+            <h6 className="pt-1 text-[10px] font-semibold text-text-primary">Step 2 · Add this client to {localMcpTargetLabel(target)}</h6>
+            {!validCommand && <p className="text-[9px] leading-relaxed text-text-muted">Maestro has not returned a safe launch command for this client. Refresh the client list before copying setup.</p>}
+
+            {target === 'chatgpt' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>On the computer running Maestro, open ChatGPT desktop → Settings → MCP servers → Add server.</li><li>Choose STDIO, name the server <strong>Maestro</strong>, enter the copied launch command, then save the server.</li><li>Restart ChatGPT and check that the server appears in MCP servers. Copying the command does not add or connect it.</li></ol>}
+            {target === 'codex' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>Copy the Codex section below and add it to your Codex user config: <code>~/.codex/config.toml</code> (on Windows: <code>%USERPROFILE%\.codex\config.toml</code>).</li><li>Save the file, then restart or reload Codex CLI or IDE.</li><li>Check Codex’s MCP server list before using the tools. Copying the section does not configure Codex.</li></ol>}
+            {target === 'claude-desktop' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>Download the extension package below.</li><li>On the same computer where Maestro runs, open Claude Desktop → Settings → Extensions → Install Extension and select the downloaded <code>.mcpb</code> file.</li><li>Open the installed extension in Claude Desktop and confirm its tools are available. Downloading does not install or connect it.</li></ol>}
+            {target === 'claude-code' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>On the computer running Maestro, open PowerShell on Windows or a terminal on macOS/Linux.</li><li>Copy and run the command below to register this local STDIO server in Claude Code.</li><li>In Claude Code, run <code>/mcp</code> and confirm the Maestro server is listed.</li></ol>}
+            {target === 'other' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>Copy the JSON under Manual setup details.</li><li>Add it to the other app’s local STDIO MCP configuration under <code>mcpServers</code>. Use this on the computer running Maestro.</li><li>Save or restart that app, then check its MCP server list. Copying JSON does not configure or connect it.</li></ol>}
+
+            {validCommand && target === 'chatgpt' && <button type="button" onClick={() => onCopy(target)} disabled={!enabled} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{copied === copyTarget ? <Check size={13} /> : <Copy size={13} />}{copied === copyTarget ? 'Launch command copied' : 'Copy launch command'}</button>}
+            {validCommand && target === 'codex' && <button type="button" onClick={() => onCopy(target)} disabled={!enabled} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{copied === copyTarget ? <Check size={13} /> : <Copy size={13} />}{copied === copyTarget ? 'Codex config copied' : 'Copy Codex config section'}</button>}
+            {validCommand && target === 'claude-desktop' && <button type="button" onClick={onDownload} disabled={!enabled || downloading} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{downloading ? <LoaderCircle size={13} className="animate-spin" /> : <Copy size={13} />}{downloading ? 'Preparing extension…' : 'Download Claude Desktop extension'}</button>}
+            {validCommand && target === 'claude-code' && <button type="button" onClick={() => onCopy(target)} disabled={!enabled} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{copied === copyTarget ? <Check size={13} /> : <Copy size={13} />}{copied === copyTarget ? 'Claude Code command copied' : 'Copy Claude Code command'}</button>}
+            {validCommand && target === 'other' && <button type="button" onClick={() => onCopy(target)} disabled={!enabled} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{copied === copyTarget ? <Check size={13} /> : <Copy size={13} />}{copied === copyTarget ? 'MCP JSON copied' : 'Copy MCP JSON'}</button>}
+
+            <div className="space-y-1 border-t border-border pt-2">
+              <h6 className="text-[10px] font-semibold text-text-primary">Step 3 · Verify in the app</h6>
+              <p className="text-[9px] leading-relaxed text-text-muted">Maestro confirms client creation or a file download only. The app must show the server as available before setup is complete. These local settings contain no token or credential path and work only on this computer.</p>
             </div>
-            <p className="text-[9px] leading-relaxed text-text-muted">The copied configs and extension contain only the executable, arguments, and this client’s ID. Maestro keeps local credentials in its protected settings; no token or credential path is packaged.</p>
           </>
         )}
+        {!target && <p className="text-[9px] leading-relaxed text-text-muted">Choose a target app to see its setup steps. Existing local clients can be reused; creating another grant is optional.</p>}
+
+        <details className="rounded-lg border border-border bg-bg-secondary">
+          <summary className="min-h-10 cursor-pointer list-none px-3 py-2 text-[9px] font-semibold text-text-secondary">Manual setup details</summary>
+          <div className="space-y-2 border-t border-border p-3">
+            {!validCommand ? <p className="text-[9px] leading-relaxed text-text-muted">Maestro has not returned a safe launch command for this client. Refresh the client list before copying setup.</p> : <>
+              {target === 'chatgpt' && <section className="space-y-1"><h6 className="text-[9px] font-semibold text-text-secondary">ChatGPT desktop command and arguments</h6><p className="text-[9px] text-text-muted">Use these separate values if the STDIO form has distinct command and arguments fields.</p><h6 className="text-[9px] font-semibold text-text-secondary">Command</h6><pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} ChatGPT desktop command`}>{client.command}</pre><h6 className="text-[9px] font-semibold text-text-secondary">Arguments</h6><pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} ChatGPT desktop arguments`}>{(client.args || []).join('\n')}</pre></section>}
+              {target === 'codex' && <section className="space-y-1"><h6 className="text-[9px] font-semibold text-text-secondary">Codex config.toml</h6><pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} Codex config`}>{codexConfig}</pre></section>}
+              {(target === 'other' || !target) && <section className="space-y-1"><h6 className="text-[9px] font-semibold text-text-secondary">Generic MCP JSON</h6><pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} generic MCP JSON`}>{config}</pre></section>}
+              {target === 'claude-code' && <section className="space-y-1"><h6 className="text-[9px] font-semibold text-text-secondary">Claude Code command</h6><pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} Claude Code command`}>{command}</pre></section>}
+              {target === 'claude-desktop' && <p className="text-[9px] leading-relaxed text-text-muted">Claude Desktop supplies the Node.js runtime for this extension. The package starts a local STDIO relay; it does not use a private HTTP connector URL.</p>}
+            </>}
+          </div>
+        </details>
       </div>
     </details>
   )
+}
+
+function formatLocalAgentClientLaunchDetails(client: AgentAccessLocalClient): string {
+  const command = typeof client.command === 'string' ? client.command : ''
+  const args = Array.isArray(client.args) ? client.args.filter((value): value is string => typeof value === 'string') : []
+  const isWindows = /^[a-zA-Z]:[\\/]/.test(command) || command.startsWith('\\\\')
+  const quote = isWindows ? quoteWindowsCommandLineArgument : quotePosixCommandLineArgument
+  return [command, ...args].map(quote).join(' ')
+}
+
+function quoteWindowsCommandLineArgument(value: string): string {
+  if (!value || /[\s"]/.test(value)) {
+    let quoted = '"'
+    let backslashes = 0
+    for (const character of value) {
+      if (character === '\\') {
+        backslashes += 1
+      } else if (character === '"') {
+        quoted += '\\'.repeat(backslashes * 2 + 1) + '"'
+        backslashes = 0
+      } else {
+        quoted += '\\'.repeat(backslashes) + character
+        backslashes = 0
+      }
+    }
+    return quoted + '\\'.repeat(backslashes * 2) + '"'
+  }
+  return value
+}
+
+function quotePosixCommandLineArgument(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`
 }
 
 export function AgentGenerationDefaults({ ownerSession }: { ownerSession: boolean }) {

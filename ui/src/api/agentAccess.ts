@@ -386,9 +386,10 @@ export function formatLocalAgentClientClaudeCommand(client: AgentAccessLocalClie
   const command = typeof client.command === 'string' ? client.command : ''
   const args = Array.isArray(client.args) ? client.args.filter((value): value is string => typeof value === 'string') : []
   const quote = isWindowsCommand(command) ? quotePowerShellArgument : quotePosixArgument
-  return ['claude', 'mcp', 'add', '--transport', 'stdio', localClientServerName(client.id), '--', command, ...args]
+  const invocation = ['claude', 'mcp', 'add', '--transport', 'stdio', localClientServerName(client.id), '--', command, ...args]
     .map(quote)
     .join(' ')
+  return isWindowsCommand(command) ? `& ${invocation}` : invocation
 }
 
 function isWindowsCommand(command: string): boolean {

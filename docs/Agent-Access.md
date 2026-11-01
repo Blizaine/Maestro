@@ -87,12 +87,26 @@ local client configuration to another computer or another Maestro installation.
 Review and revoke local clients in the same **Agent grants** list as remote
 clients; the list labels each grant **Local MCP** or **Remote MCP**.
 
-For Codex, copy the client-specific TOML section into Codex's local
-`config.toml`. For ChatGPT's local MCP configuration, copy the client-specific
-STDIO JSON under `mcpServers`. These are local-process configurations; do not
-paste them into a remote HTTP connector. For Claude Code, run the generated
-`claude mcp add --transport stdio ...` command on the Maestro computer. The
-Settings panel provides each host's escaped command or config snippet.
+Choose the app you want to connect in the Local MCP setup. Maestro shows the
+steps and action for that app; it does not ask you to choose a configuration
+format. Existing local clients can be reused. Raw configuration is available
+under **Manual setup** when needed.
+
+For **ChatGPT desktop**, open **Settings → MCP servers → Add server**, name
+the server Maestro, choose **STDIO**, and paste the copied launch command.
+Save and restart the client. If a host provides separate executable and
+argument fields, use the corresponding values under Manual setup.
+For **Codex CLI or IDE**, copy the displayed configuration section into
+`~/.codex/config.toml`. ChatGPT's local Codex host, Codex CLI and the IDE
+extension share this configuration. See
+the [official MCP setup instructions](https://learn.chatgpt.com/docs/extend/mcp).
+Do not paste a local process command into a remote HTTP connector. A browser
+or phone cannot launch this PC's STDIO process; use Remote MCP for those hosts.
+
+For **Claude Code**, copy the generated command and run it on the Maestro
+computer in PowerShell on Windows, or Terminal on Linux/macOS. Then reconnect
+the client and inspect its MCP server list. Other MCP apps can use the generic
+JSON configuration under Manual setup if their host supports that format.
 
 For Claude Desktop, download the `.mcpb` extension shown under that local
 client, then open **Claude Desktop → Settings → Extensions → Install Extension**
@@ -100,7 +114,9 @@ and select the downloaded file. Install it on the same computer as Maestro.
 Claude Desktop supplies Node.js for the extension, which relays STDIO to this
 installation's local MCP process. The package does not contain a token,
 credential path, Maestro runtime, or model files. Revoking the client's grant
-stops its local authorization.
+stops its local authorization. Copying settings or downloading an extension
+does not prove the app is connected: complete the steps in that app and check
+that Maestro's tools appear there.
 
 Local STDIO is tied to this one installation; it does not discover remote
 workstations. `list_workstations` reports the local installation identity but
