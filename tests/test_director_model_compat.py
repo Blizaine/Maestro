@@ -90,6 +90,24 @@ def _ltx_video(**updates):
     return model_def
 
 
+def _effective_h3_model(model_def):
+    """Resolve a model through the H3 family handler as the runtime does."""
+    from models.minimax_h3.minimax_h3_handler import family_handler
+
+    capabilities = family_handler.query_model_def(
+        model_def["architecture"],
+        model_def,
+    )
+    return {**capabilities, **model_def}
+
+
+def _pika_h3_default_model(filename):
+    path = os.path.join(_ROOT_DIR, "app", "defaults", filename)
+    with open(path, "r", encoding="utf-8") as handle:
+        definition = json.load(handle)
+    return _effective_h3_model(definition["model"])
+
+
 class TestDirectorModelAssessment(unittest.TestCase):
     def test_music_planner_compacts_pathological_repeated_transcription(self):
         compact = _compact_lyrics_for_context("beep " * 2000)
@@ -1115,6 +1133,88 @@ class TestDirectorModelAssessment(unittest.TestCase):
             "direct_references",
         )
 
+    def test_effective_pika_flex_models_use_the_supported_director_contract(self):
+        cases = (
+            (
+                "minimax_h3_pika_flex.json",
+                "minimax_h3_pika_flex",
+                "bounded_start_end",
+                "start_end",
+                "optional",
+            ),
+            (
+                "minimax_h3_ref2va_pika_flex.json",
+                "minimax_h3_ref2va_pika_flex",
+                "omni_reference",
+                "omni_manifest",
+                "direct_references",
+            ),
+        )
+        for filename, model_type, strategy, reference_mode, shot_images in cases:
+            with self.subTest(filename=filename):
+                effective = _pika_h3_default_model(filename)
+                result = assess_director_model(
+                    model_type,
+                    effective,
+                    architecture=effective["architecture"],
+                )
+
+                self.assertEqual(result["video_strategy"], strategy)
+                self.assertEqual(result["reference_mode"], reference_mode)
+                self.assertEqual(result["shot_image_support"], shot_images)
+                self.assertEqual(result["audio_input_mode"], "none")
+                self.assertFalse(result["supports_audio_input"])
+                self.assertTrue(result["generates_audio"])
+                self.assertFalse(result["video"]["music_video"]["compatible"])
+                self.assertFalse(
+                    result["video"]["short_film_audio"]["compatible"]
+                )
+                self.assertIn(
+                    "cannot use the uploaded soundtrack",
+                    result["video"]["music_video"]["reason"],
+                )
+                self.assertTrue(
+                    result["video"]["short_film_story"]["compatible"]
+                )
+                self.assertFalse(result["video"]["seamless"]["compatible"])
+
+        references = _pika_h3_default_model(
+            "minimax_h3_ref2va_pika_flex.json"
+        )
+        result = assess_director_model(
+            "minimax_h3_ref2va_pika_flex",
+            references,
+            architecture=references["architecture"],
+        )
+        self.assertTrue(result["supports_voice_reference"])
+        self.assertEqual(result["voice_reference_mode"], "native_reference")
+
+    def test_pika_reference_capabilities_inherit_to_custom_descendants(self):
+        descendant = {
+            "name": "Custom Pika H3 Flex References",
+            "architecture": "minimax_h3_ref2va",
+            "minimax_h3_pika_flex": True,
+            "minimax_h3_pika_flex_reference": True,
+        }
+        effective = _effective_h3_model(descendant)
+        result = assess_director_model(
+            "custom_pika_ref2va",
+            effective,
+            architecture=descendant["architecture"],
+        )
+
+        self.assertEqual(result["video_strategy"], "omni_reference")
+        self.assertEqual(result["reference_mode"], "omni_manifest")
+        self.assertEqual(result["shot_image_support"], "direct_references")
+        self.assertFalse(result["supports_audio_input"])
+        self.assertTrue(result["generates_audio"])
+        self.assertFalse(result["video"]["music_video"]["compatible"])
+        self.assertFalse(result["video"]["short_film_audio"]["compatible"])
+        self.assertTrue(result["video"]["short_film_story"]["compatible"])
+        self.assertFalse(result["video"]["seamless"]["compatible"])
+        self.assertTrue(result["supports_voice_reference"])
+        self.assertEqual(result["voice_reference_mode"], "native_reference")
+
     def test_h3_first_last_native_continuation_enables_seamless(self):
         result = assess_director_model(
             "minimax_h3",
@@ -1786,6 +1886,9 @@ class TestDirectorBackendValidation(unittest.TestCase):
                 "director_shot_image_support": "optional",
             },
         }
+        definitions["minimax_h3_ref2va_pika_flex"] = _pika_h3_default_model(
+            "minimax_h3_ref2va_pika_flex.json"
+        )
         pipeline._wgp = SimpleNamespace(
             get_model_def=lambda model_type: definitions.get(model_type),
             get_model_family=lambda model_type, for_ui=False: "test",
@@ -1899,6 +2002,76 @@ class TestDirectorBackendValidation(unittest.TestCase):
                 "seamless": False,
                 "voice_reference": "voice.wav",
             })
+
+    def test_pika_references_validate_story_visual_and_voice_inputs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = os.path.join(temp_dir, "identity.png")
+            video_path = os.path.join(temp_dir, "motion.mp4")
+            voice_path = os.path.join(temp_dir, "voice.wav")
+            for path in (image_path, video_path, voice_path):
+                with open(path, "wb") as handle:
+                    handle.write(b"director-reference-fixture")
+
+            references = [
+                {
+                    "type": "image",
+                    "path": image_path,
+                    "role": "the lead character",
+                    "image_intent": "identity",
+                },
+                {
+                    "type": "video",
+                    "path": video_path,
+                    "role": "the subject's motion",
+                    "video_intent": "motion",
+                },
+                {
+                    "type": "audio",
+                    "path": voice_path,
+                    "role": "the lead character's voice",
+                    "audio_intent": "voice",
+                },
+            ]
+            params = {
+                "pipeline_type": "short_film_story",
+                "image_model": "__none__",
+                "video_model": "minimax_h3_ref2va_pika_flex",
+                "seamless": False,
+                "_director_shot_image_policy": SHOT_IMAGES_DIRECT_REFERENCES,
+                "minimax_h3_references": references,
+                "voice_reference": voice_path,
+                "voice_reference_role": "the lead character",
+            }
+
+            audio_only = dict(params)
+            audio_only["minimax_h3_references"] = [references[-1]]
+            with self.assertRaisesRegex(
+                pipeline.DirectorModelCompatibilityError,
+                "needs at least one valid image or video reference",
+            ):
+                pipeline._validate_director_models(audio_only)
+
+            for pipeline_type in ("music_video", "short_film_audio"):
+                audio_driven = {**params, "pipeline_type": pipeline_type}
+                with self.subTest(pipeline_type=pipeline_type):
+                    with self.assertRaisesRegex(
+                        pipeline.DirectorModelCompatibilityError,
+                        "cannot use the uploaded soundtrack",
+                    ):
+                        pipeline._validate_director_models(audio_driven)
+
+            pipeline._validate_director_models(params)
+            manifest = pipeline._director_h3_reference_manifest(
+                params,
+                None,
+                out_dir=temp_dir,
+            )
+            self.assertEqual(
+                [reference["type"] for reference in manifest],
+                ["image", "video", "audio"],
+            )
+            self.assertEqual(manifest[-1]["audio_intent"], "voice")
+            self.assertEqual(manifest[-1]["path"], voice_path)
 
 
 class TestDirectorH3GenerationContract(unittest.TestCase):

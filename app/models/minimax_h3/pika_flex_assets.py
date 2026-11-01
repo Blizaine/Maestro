@@ -40,9 +40,6 @@ PIKA_FLEX_VIDEO_SHIFT = 12.0
 PIKA_FLEX_AUDIO_SHIFT = 3.0
 PIKA_FLEX_GUIDANCE_SCALE = 1.0
 PIKA_FLEX_LORA_STRENGTH = 1.0
-PIKA_FLEX_FRAME_MINIMUM = 124
-PIKA_FLEX_FRAME_STEP = 17
-PIKA_FLEX_FRAME_MAXIMUM = 362
 PIKA_FLEX_FPS = 24
 PIKA_FLEX_DEFAULT_RESOLUTION = "832x480"
 PIKA_FLEX_REFERENCE_LIMITS = {"image": 9, "video": 3, "audio": 3, "total": 12}
@@ -223,10 +220,19 @@ def pika_flex_capabilities(reference: bool) -> dict[str, Any]:
         "guide_custom_choices": {},
         "video_guide_outpainting": [],
         "mask_preprocessing": {},
-        "director_video_strategy": "",
-        "director_reference_mode": "none",
+        "director_video_strategy": (
+            "omni_reference" if reference else "bounded_start_end"
+        ),
+        "director_reference_mode": (
+            "omni_manifest" if reference else "start_end"
+        ),
+        # Pika accepts creative voice/audio references in its Omni manifest,
+        # but its native runtime rejects Director's exact-source audio_guide
+        # route. Keep audio-driven Director workflows unavailable.
         "director_audio_input_mode": "none",
-        "director_shot_image_support": "none",
+        "director_shot_image_support": (
+            "direct_references" if reference else "optional"
+        ),
         "director_endpoint_continuity": False,
         "custom_settings": [],
         "runtime_custom_settings": [],
