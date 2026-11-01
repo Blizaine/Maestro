@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import copy
+import importlib.util
+from pathlib import Path
 import sys
 from types import SimpleNamespace
 
@@ -9,6 +11,17 @@ import pytest
 
 from services.agent_access.native_creative import make_native_creative_service
 from services.authoring_guides import authoring_guide_bundle
+
+
+def test_tts_compatibility_module_preserves_every_shared_constant():
+    from services import tts_prompt_guidance
+    source = Path(__file__).resolve().parents[1] / "app/models/TTS/prompt_enhancers.py"
+    spec = importlib.util.spec_from_file_location("tts_compatibility_check", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    names = {name for name in vars(tts_prompt_guidance) if name.isupper()}
+    assert names == set(module.__all__)
+    assert all(getattr(module, name) == getattr(tts_prompt_guidance, name) for name in names)
 
 
 @pytest.mark.parametrize("model", ["minimax_h3_fused_turbo", "minimax_h3_ref2va_fused_turbo", "flux2_klein_9b", "flux3_klein", "qwen_image_21", "krea2_raw", "moss_image_sft", "moss_image_edit", "fibo2_dev", "yue2", "fish_drama3_int4"])
