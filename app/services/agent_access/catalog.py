@@ -12,7 +12,7 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import quote, urlsplit
 
 
 HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete"})
@@ -95,6 +95,12 @@ def required_scope(method: str, path: str) -> str:
     # dedicated MCP tools have narrow scopes; auth/owner routes always require
     # admin and remain excluded from generic operation dispatch.
     if len(segments) >= 3 and segments[:2] == ("api", "v1") and segments[2] == "agent-access":
+        if len(segments) == 4 and segments[3] in {"creative-context", "creative-defaults"} and (read or segments[3] == "creative-context" and verb == "POST"):
+            return "observe"
+        if len(segments) == 4 and segments[3] in {"prepare-authored", "submit-authored"} and verb == "POST":
+            return "generate"
+        if len(segments) == 5 and segments[3] == "authoring-drafts" and read:
+            return "observe"
         if len(segments) == 4 and segments[3] == "prepare" and verb == "POST":
             return "generate"
         if len(segments) == 5 and segments[3] == "jobs" and read:
@@ -1093,7 +1099,7 @@ def validate_operation_inputs(
                 candidates = value if isinstance(value, list) else [value]
                 if any(isinstance(item, str) and item.startswith(("asset:", "maestro-asset:")) for item in candidates):
                     raise SchemaValidationError(
-                        f"Multipart asset references are only accepted in documented file fields"
+                        "Multipart asset references are only accepted in documented file fields"
                     )
     return route, provided_query or None, body
 

@@ -7,6 +7,7 @@ import hmac
 import html
 import inspect
 import json
+from pathlib import Path
 import re
 import secrets
 import threading
@@ -516,17 +517,21 @@ def management_router(
         return JSONResponse({"code": runtime.auth.issue_owner_code(), "expires_in": 600}, headers={"Cache-Control": "no-store"})
 
     @router.post("/api/v1/agent-access/settings")
+    @router.put("/api/v1/agent-access/settings")
     async def settings(request: Request):
         owner = owner_required()
         body = await json_body(request)
-        if set(body) - {"enabled", "label", "discovery_enabled"}:
+        if set(body) - {"enabled", "remote_enabled", "local_enabled", "label", "discovery_enabled"}:
             raise HTTPException(400, "Unsupported Agent Access setting")
         try:
             runtime.validate_settings(**body)
-            if body.get("enabled") is True:
+            remote_enabled = body.get("remote_enabled", body.get("enabled"))
+            if remote_enabled is True:
                 require_updated_backend(runtime)
-            if "enabled" in body:
-                runtime.auth.set_enabled(body["enabled"], owner)
+            if remote_enabled is not None:
+                runtime.auth.set_enabled(remote_enabled, owner)
+            if "local_enabled" in body:
+                runtime.auth.set_local_enabled(body["local_enabled"], owner)
             runtime.update(label=body.get("label"), discovery_enabled=body.get("discovery_enabled"))
         except (ValueError, AuthError) as error:
             raise HTTPException(getattr(error, "status", 400), str(error)) from error
@@ -537,10 +542,107 @@ def management_router(
     async def grants():
         return {"grants": runtime.auth.list_grants(owner_required())}
 
+    @router.get("/api/v1/agent-access/local-clients")
+    async def local_clients():
+        from .local_connector import local_launch_configuration
+
+        owner = owner_required()
+        app_root = runtime.app_root or Path(__file__).resolve().parents[2]
+        clients = runtime.auth.list_local_clients(owner)
+        for client in clients:
+            if not client["revoked"]:
+                client.update(local_launch_configuration(app_root, client["id"]))
+        return {"clients": clients}
+
+    @router.post("/api/v1/agent-access/local-clients")
+    async def create_local_client(request: Request):
+        from .local_connector import (
+            LocalCredentialError,
+            local_launch_configuration,
+            write_local_credential,
+        )
+
+        owner = owner_required()
+        body = await json_body(request)
+        if set(body) != {"name", "scopes"}:
+            raise HTTPException(400, "Use only name and scopes for a local client")
+        item = None
+        try:
+            item, credential = runtime.auth.create_local_client(body["name"], body["scopes"], owner)
+            write_local_credential(runtime.directory, item["id"], credential)
+        except (AuthError, LocalCredentialError) as error:
+            if item is not None:
+                runtime.auth.revoke_grant(item["grant_id"], owner)
+            raise HTTPException(getattr(error, "status", 400), str(error)) from error
+        except OSError as error:
+            if item is not None:
+                runtime.auth.revoke_grant(item["grant_id"], owner)
+            raise HTTPException(500, "Could not create a private local client credential") from error
+        app_root = runtime.app_root or Path(__file__).resolve().parents[2]
+        item.update(local_launch_configuration(app_root, item["id"]))
+        runtime.audit(owner.id, "create_local_agent", "created")
+        return JSONResponse(item, headers={"Cache-Control": "no-store"})
+
+    @router.get("/api/v1/agent-access/local-clients/{client_id}/extension")
+    async def local_client_extension(client_id: str):
+        from .desktop_bundle import build_desktop_bundle
+        from .local_connector import LocalCredentialError, local_launch_configuration, validate_client_id
+
+        owner = owner_required()
+        if not runtime.auth.local_enabled:
+            raise HTTPException(409, "Enable Local MCP before downloading a client extension")
+        try:
+            identifier = validate_client_id(client_id)
+        except LocalCredentialError:
+            raise HTTPException(404, "Local client not found") from None
+        record = next(
+            (item for item in runtime.auth.list_local_clients(owner) if item["id"] == identifier),
+            None,
+        )
+        if record is None or record["revoked"]:
+            raise HTTPException(404, "Active local client not found")
+        app_root = runtime.app_root or Path(__file__).resolve().parents[2]
+        launch = local_launch_configuration(app_root, identifier)
+        try:
+            bundle = build_desktop_bundle(
+                {
+                    "id": identifier,
+                    "name": record["name"],
+                    "command": launch["command"],
+                    "args": launch["args"],
+                },
+            )
+        except Exception as error:
+            raise HTTPException(500, "Could not build the local client extension") from error
+        if not isinstance(bundle, bytes) or not bundle or len(bundle) > 2 * 1024 * 1024:
+            raise HTTPException(500, "The local client extension is invalid")
+        runtime.audit(owner.id, "download_local_agent_extension", "created")
+        return Response(
+            bundle,
+            media_type="application/octet-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": f'attachment; filename="maestro-local-{identifier}.mcpb"',
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     @router.delete("/api/v1/agent-access/grants/{grant_id}")
     async def revoke(grant_id: str):
         owner = owner_required()
+        local_client = next(
+            (item for item in runtime.auth.list_local_clients(owner) if item["grant_id"] == grant_id),
+            None,
+        )
         result = runtime.auth.revoke_grant(grant_id, owner)
+        if result and local_client is not None:
+            from .local_connector import LocalCredentialError, delete_local_credential
+            try:
+                delete_local_credential(runtime.directory, local_client["id"])
+            except LocalCredentialError:
+                # Grant revocation is already durable and immediately blocks
+                # every loaded credential. A substituted link is never followed.
+                runtime.audit(owner.id, "revoke_local_credential_cleanup", "deferred")
         runtime.audit(owner.id, "revoke_agent", "revoked")
         return {"revoked": result}
 

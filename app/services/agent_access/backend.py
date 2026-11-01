@@ -7,7 +7,6 @@ callbacks; the controller remains responsible for its own network listener.
 
 from __future__ import annotations
 
-import asyncio
 import errno
 import inspect
 import json
@@ -638,10 +637,17 @@ def create_router(
     prepare_generation: Callable[..., Any],
     native_upload: Callable[..., Any],
     idle_probe: Callable[[], Mapping[str, Any]],
+    creative=None,
+    native_director=None,
 ) -> APIRouter:
     """Create the model backend's narrow Agent Access API surface."""
     router = APIRouter()
     from .http import management_router
+    if creative is not None:
+        from .creative_routes import create_creative_router
+        router.include_router(create_creative_router(
+            backend, creative, native_prepare=prepare_generation, native_director=native_director,
+        ))
 
     async def request_console_code():
         # Print only in the independent controller terminal, outside model-job

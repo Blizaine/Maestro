@@ -462,7 +462,10 @@ class RuntimeState:
             return value
 
     @staticmethod
-    def validate_settings(*, label=None, discovery_enabled=None, enabled=None) -> None:
+    def validate_settings(
+        *, label=None, discovery_enabled=None, enabled=None,
+        remote_enabled=None, local_enabled=None,
+    ) -> None:
         if isinstance(label, str):
             try:
                 label.encode("utf-8")
@@ -470,7 +473,14 @@ class RuntimeState:
                 raise ValueError("Use a valid Unicode display name") from error
         if label is not None and (not isinstance(label, str) or not label.strip() or len(label) > 64 or any(ord(c) < 32 for c in label)):
             raise ValueError("Use a display name between 1 and 64 characters")
-        for name, value in (("discovery_enabled", discovery_enabled), ("enabled", enabled)):
+        if enabled is not None and remote_enabled is not None and enabled != remote_enabled:
+            raise ValueError("enabled and remote_enabled must match when both are provided")
+        for name, value in (
+            ("discovery_enabled", discovery_enabled),
+            ("enabled", enabled),
+            ("remote_enabled", remote_enabled),
+            ("local_enabled", local_enabled),
+        ):
             if value is not None and not isinstance(value, bool):
                 raise ValueError(f"{name} must be a boolean")
 

@@ -5941,6 +5941,7 @@ def _run_pipeline(pid: str, resume: bool = False):
         _style_ref = params.get("reference_image_path") or ""
         if (
             requires_shot_images
+            and params.get("creative_author") != "connected_agent"
             and "_reference_style" not in params
             and _style_ref
             and os.path.isfile(_style_ref)

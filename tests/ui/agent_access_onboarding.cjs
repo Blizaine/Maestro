@@ -91,6 +91,8 @@ async function main() {
   const status = {
     available: true,
     enabled: false,
+    local_enabled: false,
+    remote_enabled: false,
     owner_configured: false,
     authenticated: false,
     owner: false,
@@ -164,6 +166,7 @@ async function main() {
     updateAgentAccessSettings: async settings => {
       calls.settings.push(settings);
       Object.assign(status, settings);
+      if (Object.hasOwn(settings, 'remote_enabled')) status.enabled = settings.remote_enabled;
       return { ok: true };
     },
     updateAgentAccessTailscaleSettings: async settings => {
@@ -208,6 +211,7 @@ async function main() {
     if (name === 'react') return react;
     if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: Symbol('Fragment') };
     if (name === 'lucide-react') return icons;
+    if (name.endsWith('AgentAccessAdditionalSettings')) return { AgentGenerationDefaults: () => null, LocalMcpSettings: () => null };
     if (name.includes('agentAccess')) return api;
     throw new Error('Unexpected panel import: ' + name);
   };
@@ -257,8 +261,10 @@ async function main() {
     const steps = allNodes(tree).filter(node => node.props?.['aria-current'] === 'step');
     assert.equal(steps.length, 1, 'one step is clearly marked as current');
     assert.match(visibleText(steps[0]), /Sign in to manage access/);
-    assert.match(visibleText(tree), /Allow agent connections/);
-    assert.match(visibleText(tree), /Add an MCP client/);
+    assert.match(visibleText(tree), /Choose MCP access/);
+    assert.match(visibleText(tree), /Local MCP · recommended on this computer/);
+    assert.match(visibleText(tree), /Remote MCP · other computers/);
+    assert.match(visibleText(tree), /Set up MCP clients/);
     assert.match(visibleText(tree), /Agent connections stay off until you allow them/);
     assert.match(visibleText(tree), /remote browsers and agents still need their own authorization/);
     assert.equal(buttonByText(tree, 'Copy ChatGPT desktop setup'), undefined, 'client setup waits for sign-in and explicit enablement');
@@ -278,7 +284,7 @@ async function main() {
     assert.deepEqual(calls.login, ['already-issued-code'], 'an existing code can sign in without a new request');
     assert.equal(calls.tailscaleReads, 1, 'the first owner session performs one fresh Tailscale detection');
     assert.equal(calls.consoleCode, 0);
-    assert.match(visibleText(tree), /Agent connections are paused/);
+    assert.match(visibleText(tree), /Remote MCP is off/);
     buttonByText(tree, 'Sign out').props.onClick();
     await flush();
     tree = render();
@@ -314,19 +320,34 @@ async function main() {
     assert.equal(calls.tailscaleReads, 2, 'a new owner session performs one fresh detection after sign-in');
     assert.match(visibleText(tree), /Example client/);
     assert.match(visibleText(tree), /Revoke/);
-    assert.match(visibleText(tree), /Agent connections are paused/);
+    assert.match(visibleText(tree), /Remote MCP is off/);
     assert.match(visibleText(tree), /Sign in to manage access/);
     assert.match(visibleText(tree), /Complete/);
     assert.match(visibleText(tree), /Current step/);
     assert.equal(buttonByText(tree, 'Copy Codex setup'), undefined, 'paused access keeps client setup as the next step');
 
-    const connectionSwitch = allNodes(tree).find(node => node.props?.role === 'switch');
-    assert.ok(connectionSwitch);
-    assert.equal(connectionSwitch.props['aria-checked'], false);
-    connectionSwitch.props.onClick();
+    const localSwitch = allNodes(tree).find(node => node.props?.role === 'switch' && node.props['aria-label'] === 'Enable Local MCP');
+    assert.ok(localSwitch, 'Local MCP has an independent owner-controlled switch');
+    assert.equal(localSwitch.props['aria-checked'], false);
+    localSwitch.props.onClick();
     await flush();
     tree = render();
-    assert.deepEqual(calls.settings, [{ enabled: true }], 'only the explicit switch enables agent connections');
+    assert.deepEqual(calls.settings, [{ local_enabled: true }], 'enabling Local MCP sends only its own setting');
+    assert.equal(status.local_enabled, true);
+    assert.equal(status.remote_enabled, false);
+    assert.match(visibleText(tree), /Local MCP only/);
+    assert.equal(buttonByText(tree, 'Copy Codex setup'), undefined, 'Local MCP does not reveal remote URL setup');
+    assert.equal(calls.tailscaleUpdates.length, 0, 'enabling Local MCP does not configure Tailscale');
+
+    const remoteSwitch = allNodes(tree).find(node => node.props?.role === 'switch' && node.props['aria-label'] === 'Enable Remote MCP');
+    assert.ok(remoteSwitch, 'Remote MCP has an independent switch');
+    remoteSwitch.props.onClick();
+    await flush();
+    tree = render();
+    assert.deepEqual(calls.settings, [{ local_enabled: true }, { remote_enabled: true }], 'enabling Remote MCP preserves Local MCP and sends only its own setting');
+    assert.equal(status.local_enabled, true);
+    assert.equal(status.remote_enabled, true);
+    assert.match(visibleText(tree), /Local and Remote MCP on/);
     assert.equal(calls.tailscaleReads, 2, 'cached Agent Access refresh does not repeat Tailscale detection');
     assert.ok(buttonByText(tree, 'Copy Codex setup'), 'enabled access reveals client setup choices');
     assert.ok(buttonByText(tree, 'Copy Claude Code setup'));
@@ -336,6 +357,15 @@ async function main() {
     assert.match(visibleText(tree), /Automatic setup depends on your agent’s available tools/);
     assert.match(visibleText(tree), /Certificate trust is a separate first-time step/);
     assert.match(visibleText(tree), /SHA-256 fingerprint in Connection details/);
+
+    const localEnabledSwitch = allNodes(tree).find(node => node.props?.role === 'switch' && node.props['aria-label'] === 'Local MCP is enabled');
+    localEnabledSwitch.props.onClick();
+    await flush();
+    tree = render();
+    assert.deepEqual(calls.settings, [{ local_enabled: true }, { remote_enabled: true }, { local_enabled: false }], 'turning Local MCP off leaves Remote MCP on');
+    assert.equal(status.local_enabled, false);
+    assert.equal(status.remote_enabled, true);
+    assert.match(visibleText(tree), /Remote MCP only/);
 
     const connectionDetails = allNodes(tree).find(node =>
       node.type === 'details'
@@ -410,7 +440,8 @@ async function main() {
     buttonByText(tree, 'Sign out').props.onClick();
     await flush();
     tree = render();
-    assert.match(visibleText(tree), /Agent connections are allowed. Sign in to manage this setting/);
+    assert.match(visibleText(tree), /Remote MCP · other computers:  On/);
+    assert.match(visibleText(tree), /Sign in to manage either transport/);
     assert.doesNotMatch(visibleText(tree), /Agent connections remain off until an owner explicitly allows them/);
     assert.equal(buttonByText(tree, 'Copy ChatGPT desktop setup'), undefined, 'signing out gates client setup instructions');
     assert.equal(buttonByText(tree, 'Approve on this PC'), undefined, 'remote status never offers local approval');
@@ -576,7 +607,17 @@ async function main() {
     assert.match(visibleText(tree), /Tailscale request timed out/);
     assert.match(visibleText(tree), /Current Tailscale status was refreshed after the request failed/);
 
-    console.log('Agent Access onboarding: owner flow, explicit enablement, Tailscale detection/provisioning, URL selection, certificate trust, and client copy passed');
+    const enabledRemoteSwitch = allNodes(tree).find(node => node.props?.role === 'switch' && node.props['aria-label'] === 'Remote MCP is enabled');
+    enabledRemoteSwitch.props.onClick();
+    await flush();
+    tree = render();
+    assert.deepEqual(calls.settings, [{ local_enabled: true }, { remote_enabled: true }, { local_enabled: false }, { remote_enabled: false }], 'turning Remote MCP off preserves the current Local MCP value');
+    assert.equal(status.local_enabled, false);
+    assert.equal(status.remote_enabled, false);
+    assert.match(visibleText(tree), /Off/);
+    assert.equal(calls.tailscaleUpdates.length, 3, 'disabling Remote MCP does not silently change the separate Tailscale setting');
+
+    console.log('Agent Access onboarding: owner recovery, independent local/remote toggles, Tailscale readiness, URL selection, certificate trust, and client copy passed');
   } finally {
     for (const slot of hooks) if (slot?.kind === 'effect' && typeof slot.cleanup === 'function') slot.cleanup();
     global.window = oldWindow;

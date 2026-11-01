@@ -51,6 +51,7 @@ _MAX_OWNER_CODES = 8
 _MAX_GRANTS = 4096
 _MAX_ACCESS_TOKENS = 8192
 _MAX_REFRESH_TOKENS = 8192
+_MAX_LOCAL_CLIENTS = 256
 
 
 class AuthError(Exception):
@@ -105,8 +106,14 @@ class AuthStore:
 
     @property
     def enabled(self) -> bool:
+        """Compatibility alias for the remote HTTP/OAuth permission."""
         with self._connection() as conn:
             return self._meta_bool(conn, "enabled", default=False)
+
+    @property
+    def local_enabled(self) -> bool:
+        with self._connection() as conn:
+            return self._meta_bool(conn, "local_enabled", default=False)
 
     @property
     def owner_configured(self) -> bool:
@@ -141,6 +148,8 @@ class AuthStore:
                 "installation_id": self._meta(conn, "installation_id"),
                 "owner_configured": self._meta_bool(conn, "owner_configured", default=False),
                 "enabled": self._meta_bool(conn, "enabled", default=False),
+                "remote_enabled": self._meta_bool(conn, "enabled", default=False),
+                "local_enabled": self._meta_bool(conn, "local_enabled", default=False),
                 "grants": {
                     "active": int(counts[0] or 0),
                     "revoked": int(counts[1] or 0),
@@ -156,6 +165,116 @@ class AuthStore:
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('enabled', ?)",
                 ("1" if enabled else "0",),
             )
+
+    def set_local_enabled(self, enabled: bool, ownerPrincipal: Principal) -> None:
+        self._require_owner(ownerPrincipal)
+        if not isinstance(enabled, bool):
+            raise AuthError(400, "local_enabled must be a boolean")
+        with self._transaction() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('local_enabled', ?)",
+                ("1" if enabled else "0",),
+            )
+
+    def create_local_client(
+        self,
+        name: str,
+        scopes: str | Sequence[str],
+        owner: Principal,
+    ) -> tuple[dict[str, Any], str]:
+        """Create a scoped stdio grant and return its opaque credential once.
+
+        Callers must immediately persist the credential in the private
+        installation directory. It is never stored in SQLite or exposed by a
+        listing/status method.
+        """
+        self._require_owner(owner)
+        if not isinstance(name, str) or not name.strip() or len(name) > 128 or any(ord(c) < 32 for c in name):
+            raise AuthError(400, "Use a client name between 1 and 128 characters")
+        try:
+            name.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise AuthError(400, "Use a valid Unicode client name") from error
+        selected = _parse_scopes(scopes)
+        client_id = str(uuid.uuid4())
+        grant_id = str(uuid.uuid4())
+        credential = secrets.token_urlsafe(48)
+        now = self._now()
+        with self._transaction() as conn:
+            self._cleanup(conn, now)
+            active = int(conn.execute(
+                "SELECT COUNT(*) FROM grants WHERE transport = 'local' AND revoked_at IS NULL"
+            ).fetchone()[0])
+            if active >= _MAX_LOCAL_CLIENTS:
+                raise AuthError(429, "Too many active local clients")
+            conn.execute(
+                "INSERT INTO clients(client_id, client_name, redirect_uris, created_at, transport) "
+                "VALUES(?, ?, '[]', ?, 'local')",
+                (client_id, name.strip(), now),
+            )
+            conn.execute(
+                "INSERT INTO grants(grant_id, client_id, scopes, resource, created_at, revoked_at, transport) "
+                "VALUES(?, ?, ?, ?, ?, NULL, 'local')",
+                (grant_id, client_id, json.dumps(selected), self._meta(conn, "resource") or "local-stdio", now),
+            )
+            conn.execute(
+                "INSERT INTO local_credentials(client_id, token_hash, created_at) VALUES(?, ?, ?)",
+                (client_id, _digest(credential), now),
+            )
+        return {
+            "id": client_id,
+            "name": name.strip(),
+            "scopes": selected,
+            "grant_id": grant_id,
+            "revoked": False,
+            "created_at": now,
+        }, credential
+
+    def list_local_clients(self, owner: Principal) -> list[dict[str, Any]]:
+        self._require_owner(owner)
+        with self._transaction() as conn:
+            self._cleanup(conn, self._now())
+            rows = conn.execute(
+                "SELECT c.client_id, c.client_name, g.grant_id, g.scopes, g.created_at, g.revoked_at "
+                "FROM clients c JOIN grants g ON g.client_id = c.client_id "
+                "WHERE c.transport = 'local' AND g.transport = 'local' "
+                "ORDER BY g.created_at DESC, c.client_id"
+            ).fetchall()
+            return [
+                {
+                    "id": str(row[0]),
+                    "name": str(row[1]),
+                    "grant_id": str(row[2]),
+                    "scopes": _ordered_scopes(json.loads(row[3])),
+                    "created_at": float(row[4]),
+                    "revoked": row[5] is not None,
+                }
+                for row in rows
+            ]
+
+    def authenticate_local(self, token: str, client_id: str | None = None) -> Principal:
+        """Authenticate a local stdio credential against current grant state."""
+        if not isinstance(token, str) or not token or len(token) > 512:
+            raise AuthError(401, "Invalid local client credential")
+        token_hash = _digest(token)
+        with self._connection() as conn:
+            if not self._meta_bool(conn, "local_enabled", default=False):
+                raise AuthError(401, "Local Agent Access is disabled")
+            row = conn.execute(
+                "SELECT c.client_id, g.grant_id, g.scopes, g.revoked_at, g.transport, lc.token_hash "
+                "FROM local_credentials lc JOIN clients c ON c.client_id = lc.client_id "
+                "JOIN grants g ON g.client_id = c.client_id "
+                "WHERE lc.token_hash = ? AND c.transport = 'local' AND g.transport = 'local'",
+                (token_hash,),
+            ).fetchone()
+            if (
+                row is None
+                or row[3] is not None
+                or (client_id is not None and str(row[0]) != client_id)
+                or not secrets.compare_digest(str(row[5]), token_hash)
+            ):
+                raise AuthError(401, "Invalid, revoked, or disabled local client")
+            return Principal(str(row[1]), str(row[0]), tuple(_ordered_scopes(json.loads(row[2]))), False)
 
     def issue_owner_code(self) -> str:
         """Create a ten minute bootstrap/login code for private console output."""
@@ -242,10 +361,10 @@ class AuthStore:
                 return _owner_principal()
             enabled = self._meta_bool(conn, "enabled", default=False)
             grant = conn.execute(
-                "SELECT scopes, revoked_at FROM grants WHERE grant_id = ?",
+                "SELECT scopes, revoked_at, transport FROM grants WHERE grant_id = ?",
                 (principal_id,),
             ).fetchone()
-            if not enabled or grant is None or grant[1] is not None:
+            if not enabled or grant is None or grant[1] is not None or grant[2] != "remote":
                 raise AuthError(401, "Access grant is revoked or disabled")
             # Read current grant scopes to make any future grant-level reduction
             # take effect for already-issued access tokens.
@@ -259,7 +378,7 @@ class AuthStore:
             self._cleanup(conn, now)
             rows = conn.execute(
                 "SELECT g.grant_id, g.client_id, c.client_name, g.scopes, g.resource, "
-                "g.created_at, g.revoked_at FROM grants g "
+                "g.created_at, g.revoked_at, g.transport FROM grants g "
                 "LEFT JOIN clients c ON c.client_id = g.client_id "
                 "ORDER BY g.created_at DESC, g.grant_id"
             ).fetchall()
@@ -273,6 +392,7 @@ class AuthStore:
                     "created_at": float(row[5]),
                     "revoked": row[6] is not None,
                     "revoked_at": float(row[6]) if row[6] is not None else None,
+                    "transport": str(row[7]),
                 }
                 for row in rows
             ]
@@ -690,7 +810,8 @@ class AuthStore:
                         scopes TEXT NOT NULL,
                         resource TEXT NOT NULL,
                         created_at REAL NOT NULL,
-                        revoked_at REAL
+                        revoked_at REAL,
+                        transport TEXT NOT NULL DEFAULT 'remote'
                     );
                     CREATE TABLE IF NOT EXISTS access_tokens (
                         token_hash TEXT PRIMARY KEY,
@@ -713,6 +834,11 @@ class AuthStore:
                         used_at REAL,
                         revoked_at REAL
                     );
+                    CREATE TABLE IF NOT EXISTS local_credentials (
+                        client_id TEXT PRIMARY KEY REFERENCES clients(client_id) ON DELETE CASCADE,
+                        token_hash TEXT NOT NULL UNIQUE,
+                        created_at REAL NOT NULL
+                    );
                     CREATE INDEX IF NOT EXISTS pending_expiry ON pending_authorizations(expires_at);
                     CREATE INDEX IF NOT EXISTS auth_code_expiry ON authorization_codes(expires_at);
                     CREATE INDEX IF NOT EXISTS access_expiry ON access_tokens(expires_at);
@@ -722,8 +848,17 @@ class AuthStore:
                         ON client_registration_events(created_at);
                     """
                 )
+                # Existing OAuth clients and grants are explicitly remote. The
+                # additive columns preserve all current registrations/tokens.
+                for table in ("clients", "grants"):
+                    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+                    if "transport" not in columns:
+                        conn.execute(
+                            f"ALTER TABLE {table} ADD COLUMN transport TEXT NOT NULL DEFAULT 'remote'"
+                        )
                 conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('installation_id', ?)", (str(uuid.uuid4()),))
                 conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('enabled', '0')")
+                conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('local_enabled', '0')")
                 conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('owner_configured', '0')")
                 conn.commit()
             finally:

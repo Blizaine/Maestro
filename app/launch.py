@@ -559,11 +559,29 @@ def _agent_filter_director_queue(queue_state: dict) -> dict:
     return result
 
 
+from services.agent_access.native_creative import make_native_creative_service
+
+_agent_creative_service = make_native_creative_service(
+    _agent_access_backend,
+    models=lambda: _agent_creation_models(),
+    model_def=lambda model: _agent_creation_model_def(model),
+    defaults=lambda model: _agent_creation_model_defaults(model),
+    options=lambda model: _agent_creation_model_options(model),
+    preferences=lambda: _studio_preferences_response(),
+    hardware=lambda: _get_cached_hardware(),
+    lora_hint=lambda model, loras: _active_lora_hint(model, loras),
+    injected_keyframes=lambda params: _h3_injected_keyframes_from_body(params),
+    mature_mode=lambda: bool(wgp.server_config.get("services", {}).get("nsfw_mode")),
+    probe_audio=lambda path: _probe_audio_duration(path),
+)
+
 api.include_router(_create_agent_access_router(
     _agent_access_backend,
     prepare_generation=lambda body, **kwargs: _prepare_generation_submission(body, **kwargs),
     native_upload=lambda request, file, **kwargs: upload_image(request, file, **kwargs),
     idle_probe=lambda: _agent_access_idle_probe(),
+    creative=_agent_creative_service,
+    native_director=lambda body: _start_director_pipeline_payload(body),
 ))
 
 
@@ -1766,7 +1784,7 @@ def get_defaults(model_type: str):
     """Get default settings for a model type."""
     if wgp.get_model_def(model_type) is None:
         raise HTTPException(status_code=404, detail=f"Unknown model: {model_type}")
-    defaults = wgp.get_default_settings(model_type)
+    defaults = wgp.get_default_settings(model_type, persist_missing=False)
     return defaults
 
 
@@ -1774,6 +1792,40 @@ def get_defaults(model_type: str):
 def get_primary_settings():
     """Get the base primary_settings (all parameter defaults)."""
     return wgp.primary_settings
+
+
+def _agent_creation_models():
+    """Include Studio's virtual SFX model without inventing registry models."""
+    result = list_models()
+    if not wgp.server_config.get("services", {}).get("nsfw_mode"):
+        result["models"] = [model for model in result["models"] if not model.get("nsfw_only")]
+    required = [
+        "mmaudio/" + wgp.MMAUDIO_STANDARD,
+        "mmaudio/synchformer_state_dict.pth", "mmaudio/v1-44.pth",
+        "DFN5B-CLIP-ViT-H-14-378/open_clip_config.json",
+        "DFN5B-CLIP-ViT-H-14-378/open_clip_pytorch_model.bin",
+        "bigvgan_v2_44khz_128band_512x/config.json",
+        "bigvgan_v2_44khz_128band_512x/bigvgan_generator.pt",
+    ]
+    downloaded = all(wgp.fl.locate_file(path, error_if_none=False) for path in required)
+    result["models"].append({"model_type": "mmaudio_v2", "name": "MMAudio v2", "family": "tts", "architecture": "mmaudio", "is_downloaded": bool(downloaded)})
+    return result
+
+
+def _agent_creation_model_def(model):
+    if model == "mmaudio_v2":
+        return {"architecture": "mmaudio", "audio_only": True, "duration_slider": {"min": 1, "max": 20, "default": 10}, "prompt_infos": "Write sound effects, ambience and their audible timing; no lyrics or spoken narration unless explicitly requested."}
+    return wgp.get_model_def(model)
+
+
+def _agent_creation_model_defaults(model):
+    if model == "mmaudio_v2":
+        return {"sfx_mode": True, "duration_seconds": 10, "num_inference_steps": 25, "guidance_scale": 4.5, "batch_size": 1, "repeat_generation": 1}
+    return wgp.get_default_settings(model, persist_missing=False)
+
+
+def _agent_creation_model_options(model):
+    return _agent_creation_model_def(model) if model == "mmaudio_v2" else get_model_options(model)
 
 
 @api.get("/api/v1/loras/scan-status/{scan_id}")
@@ -6771,7 +6823,7 @@ def get_model_options(model_type: str):
 
     # Get ui_defaults for fallback values (model handlers set these for their UIs)
     try:
-        _ui_defaults = wgp.get_default_settings(model_type) or {}
+        _ui_defaults = wgp.get_default_settings(model_type, persist_missing=False) or {}
     except Exception:
         _ui_defaults = {}
 
@@ -11044,9 +11096,14 @@ async def director_pipeline_start(request: Request):
 
     Runs entirely server-side so the browser can be closed.
     """
+    return await _start_director_pipeline_payload(await request.json())
+
+
+async def _start_director_pipeline_payload(body: dict):
+    """Shared submission path for browser and reviewed external authoring."""
     _init_pipeline()
     from services.director_pipeline import start_pipeline
-    body = _strip_private_director_fields(await request.json())
+    body = _strip_private_director_fields(body)
     principal = principal_context.get()
     if isinstance(getattr(principal, "id", None), str):
         body["_agent_access_owner_id"] = principal.id
@@ -33063,6 +33120,7 @@ if __name__ == "__main__":
     _authenticated_app = AccessBoundary(
         api,
         runtime=_agent_access_runtime,
+        allow_local_agent_tokens=True,
         journal=_agent_access_backend.journal,
         app_root=Path(_app_dir),
         asset_resolver=_agent_access_backend.asset_store.resolve_tree,

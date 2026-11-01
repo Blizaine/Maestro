@@ -49,6 +49,7 @@ PUBLIC = frozenset({
 })
 OWNER_PREFIXES = (
     "/api/v1/agent-access/settings", "/api/v1/agent-access/grants",
+    "/api/v1/agent-access/local-clients",
     "/api/v1/agent-access/browser-code", "/api/v1/agent-access/audit",
     "/api/v1/agent-access/authorizations", "/api/v1/testbench", "/api/v1/promptbench",
 )
@@ -381,6 +382,67 @@ def _direct_loopback_ui_request(scope: dict) -> bool:
         normalized["scheme"] = "https" if scheme == "wss" else "http"
         return _local_request_details(normalized) is not None
     return False
+
+
+def _direct_loopback_local_agent_api(scope: dict, path: str) -> bool:
+    """Accept a local client credential only on the native loopback API."""
+    if (
+        scope.get("type") != "http"
+        or str(scope.get("scheme", "")).lower() != "http"
+        or not (path == "/openapi.json" or path.startswith("/api/v1/"))
+    ):
+        return False
+    peer = scope.get("client")
+    if not isinstance(peer, (tuple, list)) or not peer or not isinstance(peer[0], str):
+        return False
+    try:
+        if not ipaddress.ip_address(peer[0]).is_loopback:
+            return False
+    except ValueError:
+        return False
+    raw_headers = scope.get("headers")
+    if not isinstance(raw_headers, (tuple, list)):
+        return False
+    headers = {}
+    for item in raw_headers:
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            return False
+        name, value = item
+        if not isinstance(name, bytes) or not isinstance(value, bytes):
+            return False
+        name = name.lower()
+        if not name or name in headers:
+            return False
+        headers[name] = value
+    if (
+        b"authorization" not in headers
+        or b"origin" in headers
+        or any(
+            name == b"forwarded" or name == b"x-real-ip" or name.startswith(b"x-forwarded-")
+            for name in headers
+        )
+    ):
+        return False
+    host = headers.get(b"host")
+    if not host:
+        return False
+    try:
+        authority = host.decode("latin1")
+        parsed = urlsplit("//" + authority)
+        port = parsed.port
+    except (UnicodeError, ValueError):
+        return False
+    return bool(
+        parsed.netloc == authority
+        and parsed.hostname
+        and parsed.hostname.casefold().rstrip(".") in {"127.0.0.1", "localhost", "::1"}
+        and (port is None or 1 <= port <= 65535)
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.path
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 def local_device_request_allowed(scope: dict) -> bool:
@@ -717,6 +779,7 @@ class AccessBoundary:
         dynamic_scope_resolver=None,
         validate_controller_origin: bool = False,
         allow_local_ui: bool = False,
+        allow_local_agent_tokens: bool = False,
         allow_legacy_browser: bool = False,
         frame_ancestor_origins: tuple[str, ...] | list[str] | None = None,
     ):
@@ -728,6 +791,7 @@ class AccessBoundary:
         self.dynamic_scope_resolver = dynamic_scope_resolver
         self.validate_controller_origin = bool(validate_controller_origin)
         self.allow_local_ui = bool(allow_local_ui)
+        self.allow_local_agent_tokens = bool(allow_local_agent_tokens)
         self.allow_legacy_browser = bool(allow_legacy_browser)
         self.frame_ancestor_sources = (
             frame_ancestor_sources(frame_ancestor_origins) if self.allow_local_ui else ()
@@ -836,6 +900,7 @@ class AccessBoundary:
 
             send = protect_uploaded_content
         principal = token = None
+        local_agent_credential = False
         try:
             local_device_transport = self.allow_local_ui and _direct_loopback_ui_request(scope)
             local_device = (
@@ -870,9 +935,17 @@ class AccessBoundary:
                 try:
                     principal = self.runtime.auth.authenticate(token)
                 except AuthError:
-                    if path not in PUBLIC:
-                        raise
-                    token = None
+                    if (
+                        self.allow_local_agent_tokens
+                        and not is_mcp_path
+                        and _direct_loopback_local_agent_api(scope, path)
+                    ):
+                        principal = self.runtime.auth.authenticate_local(token)
+                        local_agent_credential = True
+                    else:
+                        if path not in PUBLIC:
+                            raise
+                        token = None
             if path not in PUBLIC and configured:
                 if principal is None:
                     raise AuthError(401, "Sign in to Maestro or pair this agent")
@@ -890,6 +963,8 @@ class AccessBoundary:
                         raise AuthError(403, f"This operation requires {needed} permission")
                     if path not in {"/mcp", "/openapi.json"} and not path.startswith(("/api/v1/", "/uploads/")):
                         raise AuthError(403, "Use the documented Maestro API for this operation")
+            if local_agent_credential and path == "/openapi.json" and "observe" not in principal.scopes:
+                raise AuthError(403, "This operation requires observe permission")
             # An off server never becomes an unpaired MCP endpoint. Once an
             # owner exists, disabling MCP retains the browser/API auth boundary.
             if is_mcp_path and (not self.runtime.auth.enabled or principal is None):

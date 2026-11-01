@@ -36,6 +36,7 @@ import {
   type AgentAccessStatus,
   type AgentAccessTailscaleStatus,
 } from '../../api/agentAccess'
+import { AgentGenerationDefaults, LocalMcpSettings } from './AgentAccessAdditionalSettings'
 
 type CopyTarget = 'agent' | 'chatgpt' | 'codex' | 'claude' | 'url' | null
 
@@ -60,8 +61,11 @@ export function AgentAccessSettingsPanel() {
   const [pairingExpiresAt, setPairingExpiresAt] = useState<number | null>(null)
   const [pairingSecondsLeft, setPairingSecondsLeft] = useState(0)
   const [selectedMcpUrl, setSelectedMcpUrl] = useState('')
+  const [localClientRefreshKey, setLocalClientRefreshKey] = useState(0)
 
   const ownerSession = status?.authenticated === true && status.owner === true
+  const localEnabled = status?.local_enabled === true
+  const remoteEnabled = status ? status.remote_enabled ?? status.enabled : false
   const secureOrigin = isSecureOrigin()
   const localApproval = status?.local_approval_available === true
   const localDeviceAccess = status?.auth_method === 'local_device'
@@ -226,13 +230,14 @@ export function AgentAccessSettingsPanel() {
     } finally { setBusyAction(null) }
   }
 
-  const handleToggle = async (enabled: boolean) => {
-    setBusyAction('enabled')
+  const handleToggle = async (transport: 'local' | 'remote', enabled: boolean) => {
+    setBusyAction(`${transport}-enabled`)
     setError(null)
     setMessage(null)
     try {
-      await updateAgentAccessSettings({ enabled })
-      setMessage(enabled ? 'Agent Access is enabled.' : 'Agent Access is disabled.')
+      if (transport === 'local') await updateAgentAccessSettings({ local_enabled: enabled })
+      else await updateAgentAccessSettings({ remote_enabled: enabled })
+      setMessage(`${transport === 'local' ? 'Local' : 'Remote'} MCP was ${enabled ? 'enabled' : 'disabled'}. The other transport setting is unchanged.`)
       await refresh()
     } catch (updateError) {
       setError(updateError instanceof Error ? updateError.message : 'Could not update Agent Access.')
@@ -358,6 +363,7 @@ export function AgentAccessSettingsPanel() {
     setMessage(null)
     try {
       await revokeAgentAccessGrant(grant.grant_id)
+      if (grant.transport === 'local') setLocalClientRefreshKey(value => value + 1)
       setMessage(`${grant.client_name || 'Agent'} access was revoked.`)
       await refresh()
     } catch (revokeError) {
@@ -425,8 +431,9 @@ export function AgentAccessSettingsPanel() {
   )
 
   const step1State = ownerSession ? 'done' : 'current'
-  const step2State = status?.enabled ? 'done' : ownerSession ? 'current' : 'locked'
-  const canAddClient = ownerSession && status?.enabled === true && status.available
+  const step2State = localEnabled || remoteEnabled ? 'done' : ownerSession ? 'current' : 'locked'
+  const canAddClient = ownerSession && remoteEnabled && status?.available === true
+  const accessSummary = localEnabled && remoteEnabled ? 'Local and Remote MCP on' : localEnabled ? 'Local MCP only' : remoteEnabled ? 'Remote MCP only' : 'Off'
 
   return (
     <div className="space-y-4 pb-5">
@@ -436,9 +443,9 @@ export function AgentAccessSettingsPanel() {
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <h3 className="text-sm font-semibold text-text-primary">Maestro Agent Access</h3>
-              <StatusPill label={status ? (status.enabled ? 'Enabled' : 'Off') : backendMissing ? 'Restart needed' : 'Checking'} good={status?.enabled === true} />
+              <StatusPill label={status ? accessSummary : backendMissing ? 'Restart needed' : 'Checking'} good={localEnabled || remoteEnabled} />
             </div>
-            <p className="mt-1.5 text-xs leading-relaxed text-text-secondary">Follow these three steps to connect an MCP client. Each client completes a separate OAuth approval in Maestro; review or revoke its grant here.</p>
+            <p className="mt-1.5 text-xs leading-relaxed text-text-secondary">Choose local access for a client on this computer or remote access for another computer. Each transport can be enabled independently; client scopes and owner approval still apply.</p>
           </div>
           <button type="button" onClick={() => void refresh()} disabled={loading} className="rounded-lg p-2 text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-40" aria-label="Refresh Agent Access status">
             <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
@@ -513,22 +520,44 @@ export function AgentAccessSettingsPanel() {
             )}
           </JourneyStep>
 
-          <JourneyStep number={2} title="Allow agent connections" state={step2State}>
+          <JourneyStep number={2} title="Choose MCP access" state={step2State}>
             {ownerSession ? (
               <div className="space-y-3">
-                <ToggleRow checked={status.enabled} disabled={busyAction !== null || !status.available} label={status.enabled ? 'Agent connections are allowed' : 'Allow agent connections'} description={status.enabled ? 'Clients can request access. Each client completes a separate OAuth approval in Maestro; review or revoke its grant here.' : 'Agent connections are paused. Turning them on allows clients to request access; each client still needs separate OAuth approval in Maestro.'} onChange={value => void handleToggle(value)} />
-                {!status.enabled && <p className="rounded-lg bg-bg-primary p-3 text-[10px] leading-relaxed text-text-muted">Existing grants stay in place while paused. Browser sign-in protection remains active.</p>}
+                <div className="rounded-lg border border-accent-blue/20 bg-accent-blue/5 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0"><h4 className="text-xs font-semibold text-text-primary">Local MCP · recommended on this computer</h4><p className="mt-1 text-[10px] leading-relaxed text-text-secondary">Runs the server directly on this PC for a local AI client. No Tailscale or certificate setup.</p></div>
+                    <StatusPill label={localEnabled ? 'On' : 'Off'} good={localEnabled} />
+                  </div>
+                  <div className="mt-3"><ToggleRow checked={localEnabled} disabled={busyAction !== null || !status.available} label={localEnabled ? 'Local MCP is enabled' : 'Enable Local MCP'} description={localEnabled ? 'Only local clients created by the owner can use this transport.' : 'Local MCP is off. Turn it on to allow owner-created local clients.'} onChange={value => void handleToggle('local', value)} /></div>
+                </div>
+                <div className="rounded-lg border border-border bg-bg-primary p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0"><h4 className="text-xs font-semibold text-text-primary">Remote MCP · other computers</h4><p className="mt-1 text-[10px] leading-relaxed text-text-secondary">Use a network URL from another device. Tailscale HTTPS is optional and remains a separate, manual setup action.</p></div>
+                    <StatusPill label={remoteEnabled ? 'On' : 'Off'} good={remoteEnabled} />
+                  </div>
+                  <div className="mt-3"><ToggleRow checked={remoteEnabled} disabled={busyAction !== null || !status.available} label={remoteEnabled ? 'Remote MCP is enabled' : 'Enable Remote MCP'} description={remoteEnabled ? 'Remote clients still need their own authorization. Tailscale remains a separate setting.' : 'Remote MCP is off. Enabling it does not enable or provision Tailscale.'} onChange={value => void handleToggle('remote', value)} /></div>
+                </div>
+                {!localEnabled && !remoteEnabled && <p className="rounded-lg bg-bg-primary p-3 text-[10px] leading-relaxed text-text-muted">Both transports are off. Existing grants stay in place while paused, and browser sign-in protection remains active.</p>}
               </div>
-            ) : <p className="text-xs leading-relaxed text-text-muted">{status.enabled ? 'Agent connections are allowed. Sign in to manage this setting and review grants.' : 'Sign in to manage whether agent connections are allowed.'}</p>}
+            ) : (
+              <div className="flex flex-wrap gap-2 text-[10px] text-text-muted">
+                <span className="rounded-lg bg-bg-primary p-2">Local MCP · recommended on this computer: {localEnabled ? 'On' : 'Off'}</span>
+                <span className="rounded-lg bg-bg-primary p-2">Remote MCP · other computers: {remoteEnabled ? 'On' : 'Off'}</span>
+                <p>Sign in to manage either transport and review or revoke client grants.</p>
+              </div>
+            )}
           </JourneyStep>
 
-          <JourneyStep number={3} title="Add an MCP client" state={canAddClient ? 'current' : 'locked'}>
-            {canAddClient ? (
+          <JourneyStep number={3} title="Set up MCP clients" state={ownerSession && (localEnabled || remoteEnabled) ? 'current' : 'locked'}>
+            {ownerSession ? (
               <div className="space-y-3">
+                <LocalMcpSettings ownerSession={ownerSession} enabled={localEnabled} available={status.available} refreshKey={localClientRefreshKey} />
+                {canAddClient ? (
+                <div className="space-y-3">
                 <section className="space-y-3 rounded-lg border border-accent-blue/20 bg-accent-blue/5 p-3" aria-labelledby="agent-access-tailscale-heading">
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="min-w-0">
-                      <h4 id="agent-access-tailscale-heading" className="text-xs font-semibold text-text-primary">Recommended: trusted Tailscale HTTPS</h4>
+                      <h4 id="agent-access-tailscale-heading" className="text-xs font-semibold text-text-primary">Remote option: trusted Tailscale HTTPS</h4>
                       <p className="mt-1 text-[10px] leading-relaxed text-text-secondary">Use this URL from an agent computer signed into the same Tailscale network. HTTPS readiness is only the secure transport; each MCP client still needs its own OAuth approval in Maestro.</p>
                     </div>
                     <div className="flex shrink-0 gap-2">
@@ -572,10 +601,10 @@ export function AgentAccessSettingsPanel() {
                 {copyTarget === 'chatgpt' && <p className="text-[10px] text-emerald-400" role="status">ChatGPT desktop steps copied. Follow them in the desktop app; this does not configure, connect, or approve the server.</p>}
                 {copyTarget === 'url' && <p className="text-[10px] text-emerald-400" role="status">Server URL copied. Add it in the client’s MCP settings. This does not connect or approve the client; complete its OAuth approval in Maestro.</p>}
                 {copyTarget && copyTarget !== 'agent' && copyTarget !== 'chatgpt' && copyTarget !== 'url' && <p className="text-[10px] text-emerald-400" role="status">Setup instructions copied. Follow them in the client. This does not connect or approve the client; complete its OAuth approval in Maestro.</p>}
+                </div>
+                ) : remoteEnabled ? <p className="text-xs leading-relaxed text-text-muted">Remote MCP is unavailable on this installation. Refresh the panel when the service is ready.</p> : <p className="rounded-lg bg-bg-primary p-3 text-[10px] leading-relaxed text-text-muted">Remote setup is hidden while Remote MCP is off. Enable it above to show network URLs, certificate details, and Tailscale status.</p>}
               </div>
-            ) : (
-              <p className="text-xs leading-relaxed text-text-muted">{!ownerSession ? 'Sign in first to continue.' : !status.enabled ? 'Allow agent connections in step 2 to continue.' : 'Agent Access is unavailable. Refresh the panel when the service is ready.'}</p>
-            )}
+            ) : <p className="text-xs leading-relaxed text-text-muted">Sign in first to create local clients or configure remote connections.</p>}
           </JourneyStep>
 
           {ownerSession && (
@@ -592,6 +621,8 @@ export function AgentAccessSettingsPanel() {
               )}
             </section>
           )}
+
+          <AgentGenerationDefaults ownerSession={ownerSession} />
 
           <details className="rounded-xl border border-border bg-bg-secondary">
             <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between gap-3 px-4 text-left">
@@ -811,7 +842,7 @@ function GrantRow({ grant, busy, disabled, onRevoke }: { grant: AgentAccessGrant
     <div className="rounded-lg bg-bg-primary p-3">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="truncate text-xs font-medium text-text-primary">{grant.client_name || 'Unnamed agent'}</div>
+          <div className="flex flex-wrap items-center gap-1.5"><span className="min-w-0 truncate text-xs font-medium text-text-primary">{grant.client_name || 'Unnamed agent'}</span><span className="shrink-0 rounded-full bg-bg-secondary px-1.5 py-0.5 text-[8px] text-text-muted">{grant.transport === 'local' ? 'Local MCP' : 'Remote MCP'}</span></div>
           <details className="mt-1">
             <summary className="cursor-pointer text-[9px] text-text-muted">Client ID</summary>
             <code className="mt-1 block break-all font-mono text-[9px] text-text-muted">{grant.client_id}</code>
@@ -1038,8 +1069,8 @@ function clientSetupText(target: Exclude<CopyTarget, null>, url: string, fingerp
         : 'Run this command in a terminal on a computer that can reach this Maestro URL, using Claude Code locally:',
       'claude mcp add --transport http maestro ' + JSON.stringify(url),
       'In Claude Code, run /mcp to complete OAuth authentication, then verify with a read-only status or help request.',
-      'Claude Desktop Settings → Connectors → Add custom connector is cloud-hosted: Anthropic says those requests come from its cloud, so they cannot reach a private LAN or Tailscale URL through your computer’s connection.',
-      'Maestro does not provide a public relay or a local Claude Desktop extension. Either would require separate implementation and is not part of this setup.',
+      'Claude Desktop custom connectors are cloud-hosted: Anthropic says those requests come from its cloud, so they cannot reach a private LAN or Tailscale URL through your computer’s connection. Do not use this private HTTP URL for Claude Desktop.',
+      'For Claude Desktop on this same computer, use the per-client Local MCP .mcpb extension from Maestro Settings → Agent Access → Local MCP. This remote HTTP setup does not provide a public relay for Claude Desktop.',
       trustedTailscale
         ? 'This URL uses trusted Tailscale HTTPS. No LAN certificate import or fingerprint matching is needed.'
         : fingerprintPrompt,

@@ -4,7 +4,10 @@ export const AGENT_ACCESS_SESSION_RESTORED_EVENT = 'maestro-agent-access-session
 
 export interface AgentAccessStatus {
   available: boolean
+  /** Legacy alias for remote_enabled. */
   enabled: boolean
+  local_enabled?: boolean
+  remote_enabled?: boolean
   owner_configured: boolean
   authenticated: boolean
   owner?: boolean
@@ -45,6 +48,48 @@ export interface AgentAccessGrant {
   created_at?: number | string | null
   revoked?: boolean
   revoked_at?: number | string | null
+  transport?: 'local' | 'remote' | string
+}
+
+export type AgentAccessScope = 'observe' | 'generate' | 'manage' | 'admin'
+
+export interface AgentAccessLocalClient {
+  id: string
+  name: string
+  scopes: AgentAccessScope[]
+  grant_id?: string | null
+  revoked?: boolean
+  created_at?: number | string | null
+  /** Safe, non-secret launch information. Never contains credentials. */
+  command?: string | null
+  args?: string[] | null
+}
+
+export interface AgentAccessCreativeWorkflow {
+  id: string
+  label: string
+  model_type?: string | null
+  [key: string]: unknown
+}
+
+export interface AgentAccessCreativeModel {
+  model_type: string
+  name: string
+  workflows: string[]
+  is_downloaded: boolean
+}
+
+export interface AgentAccessCreativeDefault {
+  model_type?: string
+  duration_seconds?: number | null
+  resolution?: string | null
+}
+
+export interface AgentAccessCreativeDefaults {
+  defaults: Record<string, AgentAccessCreativeDefault>
+  workflows: AgentAccessCreativeWorkflow[]
+  models: AgentAccessCreativeModel[]
+  version: 1
 }
 
 export interface AgentAccessAuditEvent {
@@ -230,11 +275,143 @@ export async function approveAgentAccessLocal(): Promise<{ ok: boolean }> {
   return result
 }
 
-export function updateAgentAccessSettings(settings: { enabled?: boolean; label?: string }): Promise<Record<string, unknown>> {
+export function updateAgentAccessSettings(settings: { enabled?: boolean; local_enabled?: boolean; remote_enabled?: boolean; label?: string }): Promise<Record<string, unknown>> {
   return requestJson('/api/v1/agent-access/settings', {
-    method: 'POST',
+    method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(settings),
+  })
+}
+
+const AGENT_ACCESS_SCOPES = new Set<AgentAccessScope>(['observe', 'generate', 'manage', 'admin'])
+
+function safeLocalClient(value: unknown): AgentAccessLocalClient {
+  if (!value || typeof value !== 'object') {
+    throw new AgentAccessApiError(502, 'Maestro returned an invalid local MCP client record.')
+  }
+  const record = value as Record<string, unknown>
+  if (typeof record.id !== 'string' || typeof record.name !== 'string' || !Array.isArray(record.scopes)) {
+    throw new AgentAccessApiError(502, 'Maestro returned an incomplete local MCP client record.')
+  }
+  const scopes = record.scopes.filter((scope): scope is AgentAccessScope => typeof scope === 'string' && AGENT_ACCESS_SCOPES.has(scope as AgentAccessScope))
+  const args = Array.isArray(record.args) && record.args.every(arg => typeof arg === 'string')
+    ? record.args as string[]
+    : null
+  return {
+    id: record.id,
+    name: record.name,
+    scopes,
+    grant_id: typeof record.grant_id === 'string' ? record.grant_id : null,
+    revoked: record.revoked === true,
+    created_at: typeof record.created_at === 'string' || typeof record.created_at === 'number' ? record.created_at : null,
+    command: typeof record.command === 'string' ? record.command : null,
+    args,
+  }
+}
+
+export async function fetchAgentAccessLocalClients(): Promise<AgentAccessLocalClient[]> {
+  const result = await requestJson<{ clients?: unknown }>('/api/v1/agent-access/local-clients')
+  if (!Array.isArray(result.clients)) return []
+  return result.clients.map(safeLocalClient)
+}
+
+export async function createAgentAccessLocalClient(input: { name: string; scopes: AgentAccessScope[] }): Promise<AgentAccessLocalClient> {
+  const name = input.name.trim()
+  const scopes = [...new Set(input.scopes.filter(scope => AGENT_ACCESS_SCOPES.has(scope))) ]
+  if (!name || !scopes.length) {
+    throw new AgentAccessApiError(400, 'Enter a client name and choose at least one access scope.')
+  }
+  const result = await requestJson<unknown>('/api/v1/agent-access/local-clients', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, scopes }),
+  })
+  return safeLocalClient(result)
+}
+
+export async function fetchAgentAccessLocalClientExtension(clientId: string): Promise<Blob> {
+  if (!clientId || clientId.length > 128 || /[\\/]/.test(clientId) || hasControlCharacter(clientId)) {
+    throw new AgentAccessApiError(400, 'The local client ID is invalid.')
+  }
+  const response = await fetch(`/api/v1/agent-access/local-clients/${encodeURIComponent(clientId)}/extension`, {
+    credentials: 'same-origin',
+  })
+  if (!response.ok) {
+    const payload = await response.clone().json().catch(() => null) as Record<string, unknown> | null
+    const code = typeof payload?.code === 'string' ? payload.code : null
+    const message = typeof payload?.message === 'string'
+      ? payload.message
+      : typeof payload?.detail === 'string'
+        ? payload.detail
+        : `Agent Access request failed (${response.status})`
+    throw new AgentAccessApiError(response.status, message, code)
+  }
+  const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase()
+  if (contentType !== 'application/octet-stream') {
+    throw new AgentAccessApiError(502, 'Maestro returned an invalid Claude Desktop extension package.')
+  }
+  return response.blob()
+}
+
+function hasControlCharacter(value: string): boolean {
+  return Array.from(value).some(character => character.charCodeAt(0) < 0x20 || character.charCodeAt(0) === 0x7f)
+}
+
+function localClientServerName(id: string): string {
+  return `maestro-${id.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'local'}`
+}
+
+export function formatLocalAgentClientJson(client: AgentAccessLocalClient): string {
+  const command = typeof client.command === 'string' ? client.command : ''
+  const args = Array.isArray(client.args) ? client.args.filter((value): value is string => typeof value === 'string') : []
+  return JSON.stringify({
+    mcpServers: {
+      [localClientServerName(client.id)]: { command, args },
+    },
+  }, null, 2)
+}
+
+export function formatLocalAgentClientCodexConfig(client: AgentAccessLocalClient): string {
+  const command = typeof client.command === 'string' ? client.command : ''
+  const args = Array.isArray(client.args) ? client.args.filter((value): value is string => typeof value === 'string') : []
+  const name = localClientServerName(client.id)
+  return [
+    `[mcp_servers.${name}]`,
+    `command = ${JSON.stringify(command)}`,
+    `args = [${args.map(value => JSON.stringify(value)).join(', ')}]`,
+  ].join('\n')
+}
+
+export function formatLocalAgentClientClaudeCommand(client: AgentAccessLocalClient): string {
+  const command = typeof client.command === 'string' ? client.command : ''
+  const args = Array.isArray(client.args) ? client.args.filter((value): value is string => typeof value === 'string') : []
+  const quote = isWindowsCommand(command) ? quotePowerShellArgument : quotePosixArgument
+  return ['claude', 'mcp', 'add', '--transport', 'stdio', localClientServerName(client.id), '--', command, ...args]
+    .map(quote)
+    .join(' ')
+}
+
+function isWindowsCommand(command: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(command) || command.startsWith('\\\\')
+}
+
+function quotePowerShellArgument(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
+}
+
+function quotePosixArgument(value: string): string {
+  return "'" + value.replace(/'/g, "'\\''") + "'"
+}
+
+export function fetchAgentAccessCreativeDefaults(): Promise<AgentAccessCreativeDefaults> {
+  return requestJson('/api/v1/agent-access/creative-defaults')
+}
+
+export function updateAgentAccessCreativeDefaults(defaults: AgentAccessCreativeDefaults['defaults']): Promise<AgentAccessCreativeDefaults> {
+  return requestJson('/api/v1/agent-access/creative-defaults', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ defaults }),
   })
 }
 

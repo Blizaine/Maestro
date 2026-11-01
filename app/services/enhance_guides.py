@@ -117,7 +117,9 @@ def _load_guide(filename: str) -> Optional[str]:
     return None
 
 
-def get_enhance_guide(model_type: str, generation_mode: str, has_images: bool = False) -> str:
+def get_enhance_guide(
+    model_type: str, generation_mode: str, has_images: bool = False, *, model_def: dict | None = None,
+) -> str:
     """Get the appropriate enhancement guide for a model + mode combination.
 
     Resolution order (first non-empty wins):
@@ -145,8 +147,11 @@ def get_enhance_guide(model_type: str, generation_mode: str, has_images: bool = 
     inline_delta = ""
     md = None
     try:
-        from wgp import get_model_def
-        md = get_model_def(model_type)
+        if model_def is None:
+            from wgp import get_model_def
+            md = get_model_def(model_type)
+        else:
+            md = model_def
         if md:
             # 1a. Full-guide FILE override — a complete, standalone enhancer
             # guide shipped by a community fine-tune (e.g. 10Eros, Sulphur).

@@ -3476,7 +3476,7 @@ def fix_settings(model_type, ui_defaults, min_settings_version = 0):
     if hasattr(model_handler, "fix_settings"):
             model_handler.fix_settings(base_model_type, settings_version, model_def, ui_defaults)
 
-def get_default_settings(model_type):
+def get_default_settings(model_type, *, persist_missing=True):
     def get_default_prompt(i2v):
         if i2v:
             return "Several giant wooly mammoths approach treading through a snowy meadow, their long wooly fur lightly blows in the wind as they walk, snow covered trees and dramatic snow capped mountains in the distance, mid afternoon light with wispy clouds and a sun high in the distance creates a warm glow, the low camera view is stunning capturing the large furry mammal with beautiful photography, depth of field."
@@ -3504,8 +3504,9 @@ def get_default_settings(model_type):
         if len(ui_defaults.get("prompt","")) == 0:
             ui_defaults["prompt"]= get_default_prompt(i2v)
 
-        with open(defaults_filename, "w", encoding="utf-8") as f:
-            json.dump(ui_defaults, f, indent=4)
+        if persist_missing:
+            with open(defaults_filename, "w", encoding="utf-8") as f:
+                json.dump(ui_defaults, f, indent=4)
     else:
         with open(defaults_filename, "r", encoding="utf-8") as f:
             ui_defaults = json.load(f)

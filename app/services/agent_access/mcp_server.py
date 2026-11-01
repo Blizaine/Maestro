@@ -8,6 +8,7 @@ import binascii
 from collections.abc import Awaitable, Mapping
 from pathlib import Path
 import re
+import uuid
 from typing import Any, Protocol
 from urllib.parse import quote
 
@@ -190,7 +191,9 @@ def _resource(server: MCPServer, uri: str, title: str, text: str) -> None:
     )(read_guide)
 
 
-def create_mcp_server(backend: Backend, app_root: Path, version: str) -> MCPServer:
+def create_mcp_server(
+    backend: Backend, app_root: Path, version: str, *, server_class: type[MCPServer] = MCPServer,
+) -> MCPServer:
     """Create the tool server; the parent owns HTTP auth, middleware and lifespan.
 
     The caller should mount ``server.streamable_http_app(json_response=True,
@@ -200,7 +203,7 @@ def create_mcp_server(backend: Backend, app_root: Path, version: str) -> MCPServ
     bundled and never read private/development files from disk.
     """
 
-    server = MCPServer(
+    server = server_class(
         name="Maestro Agent Access",
         title="Maestro Agent Access",
         description="Scoped control of a paired Maestro workstation.",
@@ -410,17 +413,88 @@ def create_mcp_server(backend: Backend, app_root: Path, version: str) -> MCPServ
         return {"result": result}
 
     @server.tool(
+        name="get_creation_defaults",
+        title="Read workflow creation defaults",
+        description="Read explicit agent defaults and compatible installed models for Frames, References, images, songs, speech and sound effects. Does not write settings or load models.",
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
+    )
+    async def get_creation_defaults() -> dict[str, Any]:
+        return await _safe_backend(backend.request("GET", "/api/v1/agent-access/creative-defaults"))
+
+    @server.tool(
+        name="get_creation_context",
+        title="Get native guides and creation timeline",
+        description=(
+            "Start agent-led creative work here. Body: workflow (video.frames, video.references, image.generate, "
+            "image.edit, audio.music, audio.speech, audio.sfx, director.story, director.music_video), brief, optional "
+            "model_type/duration_seconds/resolution/params/references/writer_instructions/voice_count. References "
+            "use stable IDs plus role/type and an uploaded asset in native params. Resolves compatible installed "
+            "defaults and returns the actual model guides, references and exact native window timeline. No local "
+            "writer, downloads or render. You author the requested native prompt/script/lyrics/Director clips."
+        ),
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=False, openWorldHint=False),
+    )
+    async def get_creation_context(body: dict[str, Any]) -> dict[str, Any]:
+        return await _safe_backend(backend.request(
+            "POST", "/api/v1/agent-access/creative-context", json=body,
+            idempotency_key="context-" + uuid.uuid4().hex,
+        ))
+
+    @server.tool(
+        name="prepare_authored_generation",
+        title="Review an agent-authored creation plan",
+        description=(
+            "Validate your own creative writing against a server context without starting a render or invoking "
+            "Maestro's local writer. Supply context_id and plan with the same context_id: prompt (plus style for "
+            "songs) for single output, exact windows from the context for sliding generation, or clips for Director. "
+            "Preserve reference IDs and continuity. Returns prepared_id, exact prepared settings and reasons for "
+            "any rejected draft. Use submit_authored_generation separately when ready."
+        ),
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False),
+    )
+    async def prepare_authored_generation(context_id: str, plan: dict[str, Any], request_id: str) -> dict[str, Any]:
+        return await _safe_backend(backend.request(
+            "POST", "/api/v1/agent-access/prepare-authored",
+            json={"context_id": context_id, "plan": plan}, idempotency_key=_request_id(request_id),
+        ))
+
+    @server.tool(
+        name="submit_authored_generation",
+        title="Start a reviewed agent-authored render",
+        description=(
+            "Submit a prepared_id returned by prepare_authored_generation. Starts the Studio render or Director "
+            "pipeline using that exact reviewed server revision without local prompt enhancement. Keep the same "
+            "request_id after a timeout and recover with get_submission; never submit a replacement ID blindly."
+        ),
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False),
+    )
+    async def submit_authored_generation(prepared_id: str, request_id: str) -> dict[str, Any]:
+        return await _safe_backend(backend.request(
+            "POST", "/api/v1/agent-access/submit-authored",
+            json={"prepared_id": prepared_id}, idempotency_key=_request_id(request_id),
+        ))
+
+    @server.tool(
+        name="get_authored_draft",
+        title="Read a rejected authored draft",
+        description="Read this agent's saved draft and actionable validation reasons; no writing or rendering.",
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
+    )
+    async def get_authored_draft(draft_id: str) -> dict[str, Any]:
+        return await _safe_backend(backend.request("GET", f"/api/v1/agent-access/authoring-drafts/{_safe_segment(draft_id, 'draft_id')}"))
+
+    @server.tool(
         name="prepare_generation",
         title="Prepare a Studio generation",
         description=(
             "Prepare a Studio request through Maestro's native flow; multi-window planning may use the configured writer. "
-            "Preparation is not a completed render. Use model defaults/options first, supply a stable request_id, "
-            "and inspect the returned plan or poll its job before proceeding."
+            "Preparation does not enqueue a render. Prefer the agent-authored context/prepare/submit flow; "
+            "supply a stable request_id and inspect the returned preparation before proceeding."
         ),
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False),
     )
     async def prepare_generation(body: dict[str, Any], request_id: str) -> dict[str, Any]:
-        """Prepare and enqueue one Studio generation request."""
+        """Prepare native settings; does not enqueue. May invoke the configured local writer."""
         key = _request_id(request_id)
         return await _safe_backend(
             backend.request(
@@ -625,12 +699,13 @@ def create_mcp_server(backend: Backend, app_root: Path, version: str) -> MCPServ
     )
     def plan_studio_generation(request: str, model_type: str | None = None) -> str:
         """Create a model-aware plan without starting generation."""
-        model_hint = f"The requested model is {model_type}." if model_type else "Choose a model only if the user specified one; otherwise ask."
+        model_hint = f"The requested model is {model_type}." if model_type else "Resolve compatible workstation defaults with get_creation_context."
         return (
-            f"The user's request is: {request}\n\n{model_hint} Read `maestro://guide/studio`, call `list_models`, "
-            "then inspect live model options and defaults. Assign each uploaded reference its actual role and verify "
-            "FPS, frames, duration and model limits. Summarize the prepared settings and ask before a substantial "
-            "render. Call `prepare_generation` once with a stable request_id only after the user approves."
+            f"The user's request is: {request}\n\n{model_hint} Read `maestro://guide/studio`, then call "
+            "get_creation_context for the requested workflow. You write the native prompts using its guides, "
+            "timeline and explicit reference roles. Review with prepare_authored_generation, then render the exact "
+            "prepared_id using submit_authored_generation and a stable request_id. Respect existing user "
+            "authorization; ask only for additional downloads or work outside that scope. Do not call a local writer."
         )
 
     @server.prompt(
