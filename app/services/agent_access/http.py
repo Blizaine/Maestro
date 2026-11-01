@@ -1,23 +1,24 @@
 """Owner onboarding and management routes shared by Maestro and its controller."""
 from __future__ import annotations
 
-import inspect
-import time
-import html
+import asyncio
 import hashlib
 import hmac
+import html
+import inspect
+import json
 import re
 import secrets
 import threading
-import json
-from urllib.parse import parse_qs
+import time
 from collections import deque
 from dataclasses import asdict
+from urllib.parse import parse_qs
 
 from fastapi import APIRouter, HTTPException, Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from .auth import AuthError, LOCAL_DEVICE_PRINCIPAL
+from .auth import LOCAL_DEVICE_PRINCIPAL, AuthError
 from .boundary import (
     browser_login_origin,
     cookie_name,
@@ -250,6 +251,63 @@ def management_router(
     login_limit, code_limit = RateLimiter(30), RateLimiter(3)
     local_challenge_limit, local_approve_limit = RateLimiter(10), RateLimiter(10)
     local_challenges = LocalApprovalChallenges(clock=local_approval_clock)
+    tailscale_manager = None
+
+    def certificate_manager():
+        nonlocal tailscale_manager
+        if tailscale_manager is None:
+            from .tailscale import TailscaleCertificateManager
+            tailscale_manager = TailscaleCertificateManager(runtime.directory)
+        return tailscale_manager
+
+    def tailscale_result(manager, current=None):
+        current = current if current is not None else manager.status()
+        result = runtime.tailscale_status()
+        result.update(
+            installed=result["installed"] if current.installed is None else bool(current.installed),
+            connected=result["connected"] if current.connected is None else bool(current.connected),
+            hostname=runtime.tailscale_hostname or current.hostname,
+            error=current.error or result.get("error"),
+        )
+        matching = current.hostname == runtime.tailscale_hostname
+        result["certificate_ready"] = bool(result["certificate_ready"] and matching and current.certificate_ready)
+        result["ready"] = bool(result["ready"] and result["connected"] and result["certificate_ready"])
+        if result["enabled"] and current.connected and not matching:
+            result["error"] = "Tailscale identity changed; disable and enable this connection to verify the new hostname"
+        if not result["ready"]:
+            result["mcp_url"] = None
+        return result
+
+    @router.get("/api/v1/agent-access/tailscale")
+    async def tailscale_status():
+        owner_required()
+        manager = certificate_manager()
+        current = await asyncio.to_thread(manager.detect)
+        return JSONResponse(tailscale_result(manager, current), headers={"Cache-Control": "no-store"})
+
+    @router.post("/api/v1/agent-access/tailscale")
+    async def tailscale_settings(request: Request):
+        owner = owner_required()
+        body = await json_body(request)
+        if set(body) != {"enabled"} or type(body["enabled"]) is not bool:
+            raise HTTPException(400, "Use one boolean enabled setting")
+        if body["enabled"]:
+            require_updated_backend(runtime, min_auth_boundary_version=2)
+            if not runtime.auth.enabled:
+                raise HTTPException(409, "Enable Agent Access before connecting through Tailscale")
+            manager = certificate_manager()
+            try:
+                material = await asyncio.to_thread(manager.ensure_certificate)
+                runtime.configure_tailscale(enabled=True, hostname=material.hostname)
+            except (OSError, RuntimeError, ValueError) as error:
+                # The certificate manager exposes bounded, sanitized messages.
+                raise HTTPException(409, str(error)) from None
+        else:
+            runtime.configure_tailscale(enabled=False)
+            manager = certificate_manager()
+        runtime.audit(owner.id, "agent_access_tailscale", "enabled" if body["enabled"] else "disabled")
+        current = await asyncio.to_thread(manager.detect)
+        return JSONResponse(tailscale_result(manager, current), headers={"Cache-Control": "no-store"})
 
     @router.get("/api/v1/agent-access/certificate")
     async def public_certificate():

@@ -17,10 +17,24 @@ export interface AgentAccessStatus {
   local_setup_url?: string | null
   mcp_url?: string | null
   lan_mcp_urls?: string[]
+  preferred_mcp_url?: string | null
+  tailscale?: AgentAccessTailscaleStatus | null
   certificate_sha256?: string | null
   controller_status?: string | null
   discovery_status?: string | null
   backend_online?: boolean
+}
+
+export interface AgentAccessTailscaleStatus {
+  enabled: boolean
+  installed: boolean
+  connected: boolean
+  hostname: string | null
+  certificate_ready: boolean
+  ready: boolean
+  mcp_url: string | null
+  error: string | null
+  expires_at: string | null
 }
 
 export interface AgentAccessGrant {
@@ -159,6 +173,18 @@ async function requestJson<T>(
 
 export function fetchAgentAccessStatus(): Promise<AgentAccessStatus> {
   return requestJson('/api/v1/agent-access/status')
+}
+
+export function fetchAgentAccessTailscaleStatus(): Promise<AgentAccessTailscaleStatus> {
+  return requestJson('/api/v1/agent-access/tailscale')
+}
+
+export function updateAgentAccessTailscaleSettings(settings: { enabled: boolean }): Promise<AgentAccessTailscaleStatus> {
+  return requestJson('/api/v1/agent-access/tailscale', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  })
 }
 
 export function requestAgentAccessConsoleCode(): Promise<{ message?: string; expires_in: number }> {

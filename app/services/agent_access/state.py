@@ -6,12 +6,14 @@ import ipaddress
 import json
 import os
 import platform
+import re
 import socket
 import sqlite3
 import tempfile
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -266,13 +268,70 @@ class RuntimeState:
     def allowed_origins(self) -> tuple[str, ...]:
         hosts = [self.hostname, "127.0.0.1", "localhost", "::1"]
         hosts.extend(self._certificate_ip_addresses)
+        if self.tailscale_hostname:
+            hosts.append(self.tailscale_hostname)
         return tuple(dict.fromkeys(f"https://{_format_host(host)}:{self.port}" for host in hosts))
 
     @property
     def allowed_authorities(self) -> tuple[str, ...]:
         hosts = [self.hostname, "127.0.0.1", "localhost", "::1"]
         hosts.extend(self._certificate_ip_addresses)
+        if self.tailscale_hostname:
+            hosts.append(self.tailscale_hostname)
         return tuple(dict.fromkeys(f"{_format_host(host)}:{self.port}" for host in hosts))
+
+    @property
+    def tailscale_hostname(self) -> str | None:
+        config = self.config
+        hostname = config.get("tailscale_hostname")
+        if config.get("tailscale_enabled") is not True or not _valid_tailscale_hostname(hostname):
+            return None
+        return hostname
+
+    def configure_tailscale(self, *, enabled: bool, hostname: str | None = None) -> None:
+        """Called only after the owner provisions this device's exact certificate."""
+        if type(enabled) is not bool or (enabled and not _valid_tailscale_hostname(hostname)):
+            raise ValueError("Use this workstation's verified Tailscale hostname")
+        with self._lock:
+            config = self.config
+            config["tailscale_enabled"] = enabled
+            if enabled:
+                config["tailscale_hostname"] = hostname
+            atomic_json(self._config_path, config)
+
+    def tailscale_status(self, controller: dict | None = None) -> dict:
+        """Use controller evidence only; polling never runs a CLI or issues TLS."""
+        controller = controller if controller is not None else read_json(self.directory / "controller.json")
+        evidence = controller.get("tailscale")
+        evidence = evidence if isinstance(evidence, dict) else {}
+        enabled = self.config.get("tailscale_enabled") is True
+        hostname = self.tailscale_hostname
+        expected = f"https://{hostname}:{self.port}/mcp" if hostname else None
+        alive = controller.get("status") == "ready" and process_alive(controller.get("pid"))
+        matching = bool(hostname and evidence.get("hostname") == hostname)
+        try:
+            expiry = datetime.fromisoformat(evidence.get("expires_at") or "")
+            valid = expiry.tzinfo is not None and expiry > datetime.now(timezone.utc)
+        except (ValueError, TypeError):
+            valid = False
+        ready = bool(
+            enabled and self.auth.enabled and alive and matching
+            and evidence.get("connected") is True
+            and evidence.get("certificate_ready") is True
+            and evidence.get("mcp_url") == expected
+            and valid
+        )
+        return {
+            "enabled": enabled,
+            "installed": evidence.get("installed") is True,
+            "connected": evidence.get("connected") is True,
+            "hostname": hostname or evidence.get("hostname"),
+            "certificate_ready": bool(matching and valid and evidence.get("certificate_ready") is True),
+            "ready": ready,
+            "mcp_url": expected if ready else None,
+            "error": evidence.get("error") if isinstance(evidence.get("error"), str) else None,
+            "expires_at": evidence.get("expires_at"),
+        }
 
     def configure_certificate_ips(self, ip_addresses) -> None:
         """Install only IPs present in the TLS certificate used by this server."""
@@ -313,6 +372,8 @@ class RuntimeState:
         host = parsed.hostname.casefold().rstrip(".")
         loopback_hosts = {"127.0.0.1", "localhost", "::1"}
         allowed_hosts = {self.hostname.casefold(), *loopback_hosts, *self._certificate_ip_addresses}
+        if self.tailscale_hostname:
+            allowed_hosts.add(self.tailscale_hostname)
         if host not in allowed_hosts:
             return None
         if scheme == "http":
@@ -357,6 +418,8 @@ class RuntimeState:
             self.hostname.casefold(), "127.0.0.1", "localhost", "::1",
             *self._certificate_ip_addresses,
         }
+        if self.tailscale_hostname:
+            allowed_hosts.add(self.tailscale_hostname)
         if host not in allowed_hosts:
             raise ValueError("resource must be an approved Maestro MCP URL")
         return self.mcp_url
@@ -454,11 +517,14 @@ class RuntimeState:
             controller_status = "stopped"
         backend = self.backend()
         lan_mcp_urls = controller.get("lan_mcp_urls", []) if auth.get("enabled") else []
+        tailscale = self.tailscale_status(controller)
         return {
             **auth, "available": True, "label": config["label"],
             "workstation_id": config["workstation_id"], "controller_url": self.origin,
             "local_setup_url": self.local_url, "mcp_url": self.mcp_url,
             "lan_mcp_urls": lan_mcp_urls,
+            "tailscale": tailscale,
+            "preferred_mcp_url": tailscale["mcp_url"] or self.mcp_url,
             "controller_status": controller_status,
             "certificate_sha256": controller.get("certificate_sha256", ""),
             "discovery_status": controller.get("discovery_status", "disabled"),
@@ -472,3 +538,13 @@ def _format_host(host: str) -> str:
     except ValueError:
         return host
     return f"[{address.compressed}]" if isinstance(address, ipaddress.IPv6Address) else address.compressed
+
+
+def _valid_tailscale_hostname(value) -> bool:
+    if not isinstance(value, str) or len(value) > 253 or value != value.lower():
+        return False
+    labels = value.split(".")
+    return len(labels) >= 4 and labels[-2:] == ["ts", "net"] and all(
+        re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+        for label in labels
+    )

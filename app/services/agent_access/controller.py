@@ -8,6 +8,7 @@ import html
 import json
 import os
 import re
+import ssl
 import time
 from pathlib import Path
 from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit, urlunsplit
@@ -434,8 +435,11 @@ async def serve(args):
 async def _serve_runtime(args, runtime):
     import uvicorn
 
+    from services.remote_access import find_tailscale
+
     from .discovery import DiscoveryService
     from .lifecycle import LifecycleManager
+    from .tailscale import TailscaleCertificateError, TailscaleCertificateManager
     from .tls import ensure_tls
 
     lan_addresses = private_lan_ipv4_addresses()
@@ -446,15 +450,53 @@ async def _serve_runtime(args, runtime):
     print(f"[Maestro Agent Access] Certificate SHA-256: {material.fingerprint_sha256}", flush=True)
     print("Agent Access is opt-in. Trust this exact certificate on connecting devices; never disable TLS verification.", flush=True)
     setup_pending = args.setup
+    tailscale_manager = TailscaleCertificateManager(runtime.directory)
     while True:
         enabled = runtime.auth.enabled
+        config = runtime.config
+        tailscale_material = None
+        tailscale_evidence = {
+            "installed": bool(find_tailscale()), "connected": False,
+            "identity_current": False,
+            "hostname": runtime.tailscale_hostname, "certificate_ready": False,
+            "expires_at": None, "mcp_url": None, "error": None,
+        }
+        if enabled and runtime.tailscale_hostname:
+            detection = await asyncio.to_thread(tailscale_manager.detect)
+            tailscale_evidence.update(
+                installed=bool(detection.installed), connected=bool(detection.connected),
+                identity_current=bool(detection.connected and detection.hostname == runtime.tailscale_hostname),
+                error=detection.error, expires_at=detection.expires_at,
+            )
+            if detection.hostname == runtime.tailscale_hostname:
+                try:
+                    tailscale_material = tailscale_manager.load_certificate(runtime.tailscale_hostname)
+                    if detection.connected and (tailscale_material is None or detection.needs_renewal):
+                        # Persisted opt-in also authorizes automatic renewal
+                        # after a long offline period; no setup on disabled apps.
+                        tailscale_material = await asyncio.to_thread(tailscale_manager.ensure_certificate)
+                except TailscaleCertificateError:
+                    if tailscale_material is None:
+                        tailscale_evidence["error"] = "Tailscale certificate is unavailable; use Agent Access to prepare it again"
+                    else:
+                        print("[Maestro Agent Access] Tailscale renewal deferred; the current certificate remains valid.", flush=True)
+            else:
+                tailscale_evidence["error"] = "Tailscale identity changed or is offline; refresh the connection in Agent Access"
+            if not detection.connected:
+                tailscale_material = None
+            if tailscale_material is not None and detection.connected:
+                tailscale_evidence.update(
+                    certificate_ready=True,
+                    expires_at=tailscale_material.expires_at.isoformat(),
+                    mcp_url=f"https://{tailscale_material.hostname}:{runtime.port}/mcp",
+                )
         active_network_metadata = {
             **network_metadata,
             "lan_mcp_urls": network_metadata["lan_mcp_urls"] if enabled else [],
+            "tailscale": tailscale_evidence,
         }
         bridge = BackendClient(runtime)
         bridge.lifecycle_manager = LifecycleManager(runtime, idle_probe=bridge.idle_probe)
-        config = runtime.config
         label = config["label"].encode("utf-8")[:180].decode("utf-8", errors="ignore")
         discovery = DiscoveryService(runtime.installation_id, runtime.hostname, runtime.port, label, args.version, material.fingerprint_sha256, addresses=lan_addresses, enabled=enabled and config["discovery_enabled"], workstation_id=config.get("workstation_id"))
         bridge.discovery = discovery
@@ -470,9 +512,15 @@ async def _serve_runtime(args, runtime):
             discovery_status = "unavailable"
             print("[Maestro Agent Access] LAN discovery unavailable; use the verified endpoint directly.", flush=True)
         atomic_json(runtime.directory / "controller.json", {"status": "starting", "pid": os.getpid(), "certificate_sha256": material.fingerprint_sha256, "discovery_status": discovery_status, **active_network_metadata, "updated_at": time.time()})
-        server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0" if enabled else "127.0.0.1", port=runtime.port, ssl_certfile=str(material.cert_path), ssl_keyfile=str(material.key_path), access_log=False, log_level="warning", timeout_graceful_shutdown=10))
-        async def watch():
+        server_config = uvicorn.Config(app, host="0.0.0.0" if enabled else "127.0.0.1", port=runtime.port, ssl_certfile=str(material.cert_path), ssl_keyfile=str(material.key_path), access_log=False, log_level="warning", timeout_graceful_shutdown=10)
+        server_config.load()
+        if tailscale_material is not None:
+            _configure_tailscale_sni(server_config.ssl, runtime, tailscale_material)
+        server = uvicorn.Server(server_config)
+        async def watch(server=server, enabled=enabled, config=config, discovery_status=discovery_status, active_network_metadata=active_network_metadata, tailscale_material=tailscale_material):
             announced = False
+            checked_tailscale_at = time.monotonic()
+            renewed_tailscale_at = checked_tailscale_at
             while not server.should_exit:
                 if server.started and not announced:
                     atomic_json(runtime.directory / "controller.json", {"status": "ready", "pid": os.getpid(), "certificate_sha256": material.fingerprint_sha256, "discovery_status": discovery_status, **active_network_metadata, "updated_at": time.time()})
@@ -482,6 +530,26 @@ async def _serve_runtime(args, runtime):
                 if runtime.auth.enabled != enabled or runtime.config != config:
                     server.should_exit = True
                     return True
+                if enabled and runtime.tailscale_hostname and time.monotonic() - checked_tailscale_at >= 60:
+                    # Identity is checked in the background, never by ordinary
+                    # UI polling. Certificate renewal is bounded to hourly.
+                    checked_tailscale_at = time.monotonic()
+                    detection = await asyncio.to_thread(tailscale_manager.detect)
+                    current_identity = bool(detection.connected and detection.hostname == runtime.tailscale_hostname)
+                    if current_identity != active_network_metadata["tailscale"]["identity_current"]:
+                        # Recreate the SNI context and public readiness evidence
+                        # immediately on disconnect, rename or reconnection.
+                        server.should_exit = True
+                        return True
+                    if current_identity and time.monotonic() - renewed_tailscale_at >= 3600:
+                        renewed_tailscale_at = time.monotonic()
+                        try:
+                            refreshed = await asyncio.to_thread(tailscale_manager.ensure_certificate)
+                            if tailscale_material is None or refreshed.generation != tailscale_material.generation:
+                                server.should_exit = True
+                                return True
+                        except TailscaleCertificateError:
+                            print("[Maestro Agent Access] Tailscale certificate renewal deferred; review connection status.", flush=True)
             return False
         watcher = asyncio.create_task(watch())
         try:
@@ -495,6 +563,20 @@ async def _serve_runtime(args, runtime):
             atomic_json(runtime.directory / "controller.json", {"status": "stopped", "pid": os.getpid(), "certificate_sha256": material.fingerprint_sha256, "discovery_status": "disabled", **active_network_metadata, "updated_at": time.time()})
         if not restart:
             break
+
+
+def _configure_tailscale_sni(default_context, runtime, material):
+    """Keep LAN TLS intact; select public TLS only for the approved exact name."""
+    trusted_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    trusted_context.minimum_version = ssl.TLSVersion.TLSv1_2
+    trusted_context.load_cert_chain(str(material.cert_path), str(material.key_path))
+
+    def choose_certificate(connection, server_name, _context):
+        if server_name == material.hostname and runtime.tailscale_hostname == material.hostname and runtime.auth.enabled:
+            connection.context = trusted_context
+
+    default_context.set_servername_callback(choose_certificate)
+    return trusted_context
 
 
 def main():

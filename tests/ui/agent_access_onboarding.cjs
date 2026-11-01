@@ -96,6 +96,17 @@ async function main() {
     owner: false,
     mcp_url: 'http://untrusted.example/mcp',
     lan_mcp_urls: ['https://maestro.test/mcp'],
+    tailscale: {
+      enabled: false,
+      installed: false,
+      connected: false,
+      hostname: null,
+      certificate_ready: false,
+      ready: false,
+      mcp_url: null,
+      error: null,
+      expires_at: null,
+    },
     controller_url: 'javascript:alert(1)',
     local_setup_url: 'javascript:alert(1)',
     certificate_sha256: 'ab12cd34',
@@ -111,14 +122,28 @@ async function main() {
     scopes: ['read'],
     created_at: '2026-10-31T12:00:00Z',
   }];
-  const calls = { consoleCode: 0, localApproval: 0, login: [], settings: [], copied: [], grants: 0, audit: 0 };
+  let tailscalePollStatus = null;
+  let tailscalePostError = null;
+  const calls = { consoleCode: 0, localApproval: 0, login: [], settings: [], copied: [], grants: 0, audit: 0, statusFetches: 0, tailscaleReads: 0, tailscaleUpdates: [] };
   const api = {
     AGENT_ACCESS_AUTH_REQUIRED_EVENT: 'maestro-agent-access-auth-required',
     AGENT_ACCESS_SESSION_RESTORED_EVENT: 'maestro-agent-access-session-restored',
     AgentAccessApiError: class AgentAccessApiError extends Error {
       constructor(statusCode, message) { super(message); this.status = statusCode; }
     },
-    fetchAgentAccessStatus: async () => ({ ...status }),
+    fetchAgentAccessStatus: async () => {
+      calls.statusFetches += 1;
+      if (tailscalePollStatus) {
+        status.tailscale = { ...tailscalePollStatus };
+        status.preferred_mcp_url = tailscalePollStatus.mcp_url;
+        tailscalePollStatus = null;
+      }
+      return { ...status, tailscale: { ...status.tailscale } };
+    },
+    fetchAgentAccessTailscaleStatus: async () => {
+      calls.tailscaleReads += 1;
+      return { ...status.tailscale };
+    },
     fetchAgentAccessGrants: async () => { calls.grants += 1; return grants; },
     fetchAgentAccessAudit: async () => { calls.audit += 1; return []; },
     requestAgentAccessConsoleCode: async () => { calls.consoleCode += 1; return { expires_in: 120 }; },
@@ -140,6 +165,41 @@ async function main() {
       calls.settings.push(settings);
       Object.assign(status, settings);
       return { ok: true };
+    },
+    updateAgentAccessTailscaleSettings: async settings => {
+      calls.tailscaleUpdates.push(settings);
+      if (tailscalePostError) {
+        const error = tailscalePostError;
+        tailscalePostError = null;
+        throw error;
+      }
+      if (settings.enabled) {
+        status.tailscale = {
+          enabled: true,
+          installed: true,
+          connected: true,
+          hostname: 'desktop-abc.tailnet.ts.net',
+          certificate_ready: false,
+          ready: false,
+          mcp_url: null,
+          error: null,
+          expires_at: null,
+        };
+        tailscalePollStatus = {
+          enabled: true,
+          installed: true,
+          connected: true,
+          hostname: 'desktop-abc.tailnet.ts.net',
+          certificate_ready: true,
+          ready: true,
+          mcp_url: 'https://desktop-abc.tailnet.ts.net:8765/mcp',
+          error: null,
+          expires_at: '2027-10-31T12:00:00Z',
+        };
+      } else {
+        status.tailscale = { ...status.tailscale, enabled: false, ready: false };
+      }
+      return { ...status.tailscale };
     },
     revokeAgentAccessGrant: async () => ({ ok: true }),
     createAgentAccessBrowserCode: async () => ({ code: 'PAIR-1234', expires_in: 60 }),
@@ -216,6 +276,7 @@ async function main() {
     await flush();
     tree = render();
     assert.deepEqual(calls.login, ['already-issued-code'], 'an existing code can sign in without a new request');
+    assert.equal(calls.tailscaleReads, 1, 'the first owner session performs one fresh Tailscale detection');
     assert.equal(calls.consoleCode, 0);
     assert.match(visibleText(tree), /Agent connections are paused/);
     buttonByText(tree, 'Sign out').props.onClick();
@@ -250,6 +311,7 @@ async function main() {
     assert.deepEqual(calls.login, ['already-issued-code', 'current-code'], 'the pasted Browser sign-in code is submitted');
     assert.equal(calls.settings.length, 0, 'sign-in alone does not turn agent connections on');
     assert.ok(calls.grants > 0, 'agent grants load immediately after sign-in');
+    assert.equal(calls.tailscaleReads, 2, 'a new owner session performs one fresh detection after sign-in');
     assert.match(visibleText(tree), /Example client/);
     assert.match(visibleText(tree), /Revoke/);
     assert.match(visibleText(tree), /Agent connections are paused/);
@@ -265,6 +327,7 @@ async function main() {
     await flush();
     tree = render();
     assert.deepEqual(calls.settings, [{ enabled: true }], 'only the explicit switch enables agent connections');
+    assert.equal(calls.tailscaleReads, 2, 'cached Agent Access refresh does not repeat Tailscale detection');
     assert.ok(buttonByText(tree, 'Copy Codex setup'), 'enabled access reveals client setup choices');
     assert.ok(buttonByText(tree, 'Copy Claude setup'));
     assert.ok(buttonByText(tree, 'Copy ChatGPT desktop setup'));
@@ -376,7 +439,119 @@ async function main() {
     assert.equal(buttonByText(tree, 'Copy ChatGPT desktop setup').props.disabled, true, 'ChatGPT setup requires a reported certificate fingerprint');
     assert.equal(buttonByText(tree, 'Copy setup prompt for my agent').props.disabled, true, 'generic setup prompt also requires a reported certificate fingerprint');
     status.certificate_sha256 = originalFingerprint;
-    console.log('Agent Access onboarding: guided states, one-time code recovery, explicit enablement, disclosures, URL validation, and client copy passed');
+    global.window.dispatchEvent(new Event(api.AGENT_ACCESS_SESSION_RESTORED_EVENT));
+    await flush();
+    tree = render();
+
+    assert.match(visibleText(tree), /Tailscale is not installed on this computer/);
+    assert.match(visibleText(tree), /Settings → Notifications → Private phone access/);
+    assert.ok(buttonByText(tree, 'Refresh / detect'), 'owner can refresh or detect Tailscale state without an install action');
+    assert.equal(buttonByText(tree, 'Use Tailscale'), undefined, 'Tailscale cannot be enabled before installation and sign-in are detected');
+
+    const readsBeforeManualDetect = calls.tailscaleReads;
+    status.tailscale = { ...status.tailscale, installed: true, connected: false };
+    buttonByText(tree, 'Refresh / detect').props.onClick();
+    await flush();
+    tree = render();
+    assert.equal(calls.tailscaleReads, readsBeforeManualDetect + 1, 'refresh uses the owner-only fresh Tailscale detection endpoint');
+    assert.match(visibleText(tree), /Open Tailscale, sign this computer into your network/);
+    assert.ok(buttonByText(tree, 'Refresh / detect'));
+    assert.equal(buttonByText(tree, 'Use Tailscale'), undefined, 'an installed but disconnected Tailscale client cannot provision HTTPS');
+
+    status.tailscale = { ...status.tailscale, connected: true };
+    buttonByText(tree, 'Refresh / detect').props.onClick();
+    await flush();
+    tree = render();
+    assert.equal(calls.tailscaleReads, readsBeforeManualDetect + 2);
+    assert.ok(buttonByText(tree, 'Use Tailscale'));
+    assert.match(visibleText(tree), /Select Use Tailscale to provision the trusted HTTPS certificate/);
+
+    buttonByText(tree, 'Use Tailscale').props.onClick();
+    await flush();
+    tree = render();
+    assert.deepEqual(calls.tailscaleUpdates, [{ enabled: true }], 'enabling Tailscale is one explicit provisioning request');
+    assert.match(visibleText(tree), /Tailscale HTTPS is provisioning/);
+    assert.doesNotMatch(visibleText(tree), /Trusted Tailscale HTTPS transport is ready/);
+    assert.ok(visibleText(tree).includes('https://maestro.test/mcp'));
+    assert.ok(!visibleText(tree).includes('https://desktop-abc.tailnet.ts.net:8765/mcp'), 'hostname or enabled state alone does not make a Tailscale URL preferred');
+
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    await flush();
+    tree = render();
+    assert.equal(calls.statusFetches > 0, true, 'provisioning polls the cache-only Agent Access status endpoint');
+    assert.match(visibleText(tree), /Trusted Tailscale HTTPS transport is ready/);
+    const addressSelectReady = allNodes(tree).find(node => node.type === 'select' && node.props['aria-label'] === 'MCP connection address');
+    assert.equal(addressSelectReady?.props.value, 'https://desktop-abc.tailnet.ts.net:8765/mcp', 'ready Tailscale MCP URL is the default choice');
+    assert.match(visibleText(tree), /The agent computer must be signed into the same Tailscale network/);
+
+    const tailscaleCopyStart = calls.copied.length;
+    buttonByText(tree, 'Copy setup prompt for my agent').props.onClick();
+    await flush();
+    tree = render();
+    const tailscaleAgentCopy = calls.copied[tailscaleCopyStart];
+    assert.ok(tailscaleAgentCopy.includes('MCP server URL: https://desktop-abc.tailnet.ts.net:8765/mcp'));
+    assert.ok(tailscaleAgentCopy.includes('same Tailscale network'));
+    assert.ok(tailscaleAgentCopy.includes('trusted Tailscale HTTPS'));
+    assert.ok(!tailscaleAgentCopy.includes('Expected public TLS certificate SHA-256 fingerprint'));
+    assert.ok(!tailscaleAgentCopy.includes('Download public TLS certificate'));
+    assert.ok(!tailscaleAgentCopy.includes('verify that its SHA-256 exactly matches'));
+    assert.ok(!tailscaleAgentCopy.includes('Authorization:'));
+
+    buttonByText(tree, 'Copy ChatGPT desktop setup').props.onClick();
+    await flush();
+    tree = render();
+    const tailscaleChatGptCopy = calls.copied[tailscaleCopyStart + 1];
+    assert.ok(tailscaleChatGptCopy.includes('Server URL: https://desktop-abc.tailnet.ts.net:8765/mcp'));
+    assert.ok(tailscaleChatGptCopy.includes('computer running ChatGPT must be signed into the same Tailscale network'));
+    assert.ok(!tailscaleChatGptCopy.includes('Expected public TLS certificate SHA-256 fingerprint'));
+    assert.ok(!tailscaleChatGptCopy.includes('Download public TLS certificate'));
+    assert.ok(!tailscaleChatGptCopy.includes('fingerprint above'));
+    assert.ok(tailscaleChatGptCopy.includes('Do not claim the server has been added, connected, authenticated, or approved'));
+
+    buttonByText(tree, 'Copy Codex setup').props.onClick();
+    await flush();
+    tree = render();
+    const tailscaleCodexCopy = calls.copied[tailscaleCopyStart + 2];
+    assert.ok(tailscaleCodexCopy.includes('url = "https://desktop-abc.tailnet.ts.net:8765/mcp"'));
+    assert.ok(tailscaleCodexCopy.includes('trusted Tailscale HTTPS'));
+    assert.ok(!tailscaleCodexCopy.includes('TLS certificate SHA-256'));
+    assert.ok(!tailscaleCodexCopy.includes('Download public TLS certificate'));
+
+    const addressSelect = allNodes(tree).find(node => node.type === 'select' && node.props['aria-label'] === 'MCP connection address');
+    addressSelect.props.onChange({ target: { value: 'https://maestro.test/mcp' } });
+    tree = render();
+    assert.equal(allNodes(tree).find(node => node.type === 'select' && node.props['aria-label'] === 'MCP connection address').props.value, 'https://maestro.test/mcp', 'an explicit LAN selection overrides the Tailscale default');
+    const lanCopyIndex = calls.copied.length;
+    buttonByText(tree, 'Copy setup prompt for my agent').props.onClick();
+    await flush();
+    tree = render();
+    const lanAgentCopy = calls.copied[lanCopyIndex];
+    assert.ok(lanAgentCopy.includes('MCP server URL: https://maestro.test/mcp'));
+    assert.ok(lanAgentCopy.includes('Expected public TLS certificate SHA-256 fingerprint: ab12cd34'));
+    assert.ok(lanAgentCopy.includes('Download public TLS certificate'));
+    assert.ok(lanAgentCopy.includes('verify that its SHA-256 exactly matches the fingerprint above'));
+    assert.equal(calls.tailscaleUpdates.length, 1, 'copying setup never toggles Tailscale');
+
+    buttonByText(tree, 'Disable Tailscale').props.onClick();
+    await flush();
+    tree = render();
+    assert.deepEqual(calls.tailscaleUpdates, [{ enabled: true }, { enabled: false }]);
+    assert.match(visibleText(tree), /Tailscale HTTPS transport was disabled/);
+    assert.ok(visibleText(tree).includes('https://maestro.test/mcp'), 'the explicit LAN choice remains selected when Tailscale is disabled');
+    assert.ok(!visibleText(tree).includes('https://desktop-abc.tailnet.ts.net:8765/mcp'));
+
+    const writesBeforeAmbiguousFailure = calls.tailscaleUpdates.length;
+    const statusReadsBeforeAmbiguousFailure = calls.statusFetches;
+    tailscalePostError = new Error('Tailscale request timed out');
+    buttonByText(tree, 'Use Tailscale').props.onClick();
+    await flush();
+    tree = render();
+    assert.equal(calls.tailscaleUpdates.length, writesBeforeAmbiguousFailure + 1, 'an ambiguous POST is not retried automatically');
+    assert.equal(calls.statusFetches, statusReadsBeforeAmbiguousFailure + 1, 'the UI reconciles an ambiguous POST with the cache-only status endpoint');
+    assert.match(visibleText(tree), /Tailscale request timed out/);
+    assert.match(visibleText(tree), /Current Tailscale status was refreshed after the request failed/);
+
+    console.log('Agent Access onboarding: owner flow, explicit enablement, Tailscale detection/provisioning, URL selection, certificate trust, and client copy passed');
   } finally {
     for (const slot of hooks) if (slot?.kind === 'effect' && typeof slot.cleanup === 'function') slot.cleanup();
     global.window = oldWindow;

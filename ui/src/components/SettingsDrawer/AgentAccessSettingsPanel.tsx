@@ -24,14 +24,17 @@ import {
   fetchAgentAccessAudit,
   fetchAgentAccessGrants,
   fetchAgentAccessStatus,
+  fetchAgentAccessTailscaleStatus,
   loginAgentAccessOwner,
   logoutAgentAccessOwner,
   requestAgentAccessConsoleCode,
   revokeAgentAccessGrant,
   updateAgentAccessSettings,
+  updateAgentAccessTailscaleSettings,
   type AgentAccessAuditEvent,
   type AgentAccessGrant,
   type AgentAccessStatus,
+  type AgentAccessTailscaleStatus,
 } from '../../api/agentAccess'
 
 type CopyTarget = 'agent' | 'chatgpt' | 'codex' | 'claude' | 'url' | null
@@ -44,6 +47,9 @@ export function AgentAccessSettingsPanel() {
   const [backendMissing, setBackendMissing] = useState(false)
   const [busyAction, setBusyAction] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [tailscaleChecking, setTailscaleChecking] = useState(false)
+  const [tailscaleChecked, setTailscaleChecked] = useState(false)
+  const [tailscaleDetectionError, setTailscaleDetectionError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [consoleCodeRequested, setConsoleCodeRequested] = useState(false)
   const [consoleCodeExpiresInMinutes, setConsoleCodeExpiresInMinutes] = useState<number | null>(null)
@@ -59,9 +65,16 @@ export function AgentAccessSettingsPanel() {
   const secureOrigin = isSecureOrigin()
   const localApproval = status?.local_approval_available === true
   const localDeviceAccess = status?.auth_method === 'local_device'
-  const mcpUrls = useMemo(() => [...new Set([status?.mcp_url, ...(status?.lan_mcp_urls || [])]
-    .filter((value): value is string => typeof value === 'string' && value.endsWith('/mcp') && safeControllerUrl(value) !== null))], [status])
+  const tailscale = status?.tailscale ?? null
+  const tailscaleMcpUrl = isAgentAccessTailscaleReady(status?.tailscale) ? safeTailscaleMcpUrl(status?.tailscale?.mcp_url) : null
+  const preferredMcpUrl = safeMcpUrl(status?.preferred_mcp_url)
+  const usablePreferredMcpUrl = preferredMcpUrl && (isTailscaleHostname(preferredMcpUrl) ? preferredMcpUrl === tailscaleMcpUrl : true)
+    ? preferredMcpUrl
+    : null
+  const mcpUrls = useMemo(() => [...new Set([tailscaleMcpUrl, usablePreferredMcpUrl, status?.mcp_url, ...(status?.lan_mcp_urls || [])]
+    .filter((value): value is string => safeMcpUrl(value) !== null))], [status, tailscaleMcpUrl, usablePreferredMcpUrl])
   const mcpUrl = mcpUrls.includes(selectedMcpUrl) ? selectedMcpUrl : mcpUrls[0] || ''
+  const trustedTailscaleMcpUrl = Boolean(tailscaleMcpUrl && mcpUrl === tailscaleMcpUrl)
   const controllerUrl = safeControllerUrl(mcpUrl.endsWith('/mcp') ? mcpUrl.slice(0, -4) : status?.controller_url)
 
   const refresh = useCallback(async () => {
@@ -112,6 +125,31 @@ export function AgentAccessSettingsPanel() {
       window.removeEventListener(AGENT_ACCESS_AUTH_REQUIRED_EVENT, onAuthRequired)
     }
   }, [refresh])
+
+  useEffect(() => {
+    if (!ownerSession) {
+      setTailscaleChecking(false)
+      setTailscaleChecked(false)
+      setTailscaleDetectionError(null)
+      return
+    }
+
+    let active = true
+    setTailscaleChecking(true)
+    setTailscaleChecked(false)
+    setTailscaleDetectionError(null)
+    fetchAgentAccessTailscaleStatus().then(next => {
+      if (active) {
+        setStatus(current => current ? { ...current, tailscale: next } : current)
+        setTailscaleChecked(true)
+      }
+    }).catch(requestError => {
+      if (active) setTailscaleDetectionError(requestError instanceof Error ? requestError.message : 'Could not detect Tailscale status.')
+    }).finally(() => {
+      if (active) setTailscaleChecking(false)
+    })
+    return () => { active = false }
+  }, [ownerSession])
 
   useEffect(() => {
     if (!pairingExpiresAt) return
@@ -203,6 +241,102 @@ export function AgentAccessSettingsPanel() {
     }
   }
 
+  const handleRefreshTailscale = async () => {
+    setBusyAction('tailscale-refresh')
+    setError(null)
+    setTailscaleChecking(true)
+    setTailscaleChecked(false)
+    setTailscaleDetectionError(null)
+    setMessage(null)
+    try {
+      const next = await fetchAgentAccessTailscaleStatus()
+      setStatus(current => current ? { ...current, tailscale: next } : current)
+      setTailscaleChecked(true)
+      setMessage(isAgentAccessTailscaleReady(next)
+        ? 'Trusted Tailscale HTTPS transport is ready. Each MCP client still needs to connect and complete its OAuth approval in Maestro.'
+        : 'Tailscale status was refreshed. TLS transport readiness is separate from client connection and OAuth approval.')
+    } catch (requestError) {
+      const detail = requestError instanceof Error ? requestError.message : 'Could not detect Tailscale status.'
+      setTailscaleDetectionError(detail)
+      setError(detail)
+    } finally {
+      setTailscaleChecking(false)
+      setBusyAction(null)
+    }
+  }
+
+  const handleTailscaleToggle = async (enabled: boolean) => {
+    setBusyAction('tailscale-toggle')
+    setError(null)
+    setTailscaleDetectionError(null)
+    setMessage(null)
+    try {
+      let latest = await updateAgentAccessTailscaleSettings({ enabled })
+      setStatus(current => current ? { ...current, tailscale: latest } : current)
+      setTailscaleChecked(true)
+      if (!enabled) {
+        setMessage('Tailscale HTTPS transport was disabled. Agent grants and OAuth approval are unchanged.')
+        return
+      }
+
+      if (latest.error) {
+        setError(formatTailscaleError(latest.error))
+        return
+      }
+      if (isAgentAccessTailscaleReady(latest)) {
+        setMessage('Trusted Tailscale HTTPS transport is ready. Each MCP client still needs to connect and complete its OAuth approval in Maestro.')
+        return
+      }
+
+      setMessage('Tailscale HTTPS is provisioning. Waiting for the trusted certificate and MCP endpoint; this does not connect or approve an agent.')
+      let pollFailed = false
+      for (let attempt = 0; attempt < 30 && !isAgentAccessTailscaleReady(latest) && !latest.error; attempt += 1) {
+        await new Promise<void>(resolve => setTimeout(resolve, 1000))
+        try {
+          const currentStatus = await fetchAgentAccessStatus()
+          if (currentStatus.tailscale) {
+            latest = currentStatus.tailscale
+            setTailscaleChecked(true)
+            setStatus(current => current ? {
+              ...current,
+              tailscale: latest,
+              preferred_mcp_url: currentStatus.preferred_mcp_url ?? current.preferred_mcp_url,
+            } : current)
+          }
+        } catch {
+          pollFailed = true
+          break
+        }
+      }
+
+      if (latest.error) {
+        setError(formatTailscaleError(latest.error))
+      } else if (isAgentAccessTailscaleReady(latest)) {
+        setMessage('Trusted Tailscale HTTPS transport is ready. The agent computer must be signed into the same Tailscale network; each MCP client still needs its own OAuth approval in Maestro.')
+      } else if (pollFailed) {
+        setMessage('Tailscale HTTPS is still provisioning. Refresh or detect status before trying again; the TLS transport is not ready yet.')
+      } else {
+        setMessage('Tailscale HTTPS is still provisioning. If Tailscale requests account or HTTPS certificate approval, complete that in Tailscale, then select Refresh / detect. This does not connect or approve an agent.')
+      }
+    } catch (requestError) {
+      try {
+        const currentStatus = await fetchAgentAccessStatus()
+        if (currentStatus.tailscale) setTailscaleChecked(true)
+        setStatus(current => current ? {
+          ...current,
+          tailscale: currentStatus.tailscale ?? current.tailscale,
+          preferred_mcp_url: currentStatus.preferred_mcp_url ?? current.preferred_mcp_url,
+        } : current)
+        setMessage('Current Tailscale status was refreshed after the request failed. Review it before trying again.')
+      } catch {
+        setMessage('The Tailscale request may have completed. Refresh or detect status before trying again.')
+      }
+      setError(requestError instanceof Error ? requestError.message : 'Could not update Tailscale HTTPS.')
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
   const handleSaveLabel = async () => {
     setBusyAction('label')
     setError(null)
@@ -272,7 +406,12 @@ export function AgentAccessSettingsPanel() {
     if (!mcpUrl) return
     setError(null)
     try {
-      await navigator.clipboard.writeText(clientSetupText(target, mcpUrl, status?.certificate_sha256 || ''))
+      await navigator.clipboard.writeText(clientSetupText(
+        target,
+        mcpUrl,
+        trustedTailscaleMcpUrl ? '' : status?.certificate_sha256 || '',
+        trustedTailscaleMcpUrl,
+      ))
       setCopyTarget(target)
       window.setTimeout(() => setCopyTarget(current => current === target ? null : current), 1800)
     } catch {
@@ -386,12 +525,45 @@ export function AgentAccessSettingsPanel() {
           <JourneyStep number={3} title="Add an MCP client" state={canAddClient ? 'current' : 'locked'}>
             {canAddClient ? (
               <div className="space-y-3">
+                <section className="space-y-3 rounded-lg border border-accent-blue/20 bg-accent-blue/5 p-3" aria-labelledby="agent-access-tailscale-heading">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <h4 id="agent-access-tailscale-heading" className="text-xs font-semibold text-text-primary">Recommended: trusted Tailscale HTTPS</h4>
+                      <p className="mt-1 text-[10px] leading-relaxed text-text-secondary">Use this URL from an agent computer signed into the same Tailscale network. HTTPS readiness is only the secure transport; each MCP client still needs its own OAuth approval in Maestro.</p>
+                    </div>
+                    <div className="flex shrink-0 gap-2">
+                      <button type="button" onClick={() => void handleRefreshTailscale()} disabled={busyAction !== null || tailscaleChecking} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-border px-2.5 text-[10px] text-text-secondary hover:bg-bg-hover disabled:opacity-50" aria-label="Refresh or detect Tailscale status">
+                        {busyAction === 'tailscale-refresh' || tailscaleChecking ? <LoaderCircle size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                        {tailscaleChecking ? 'Checking…' : tailscale ? 'Refresh / detect' : 'Detect Tailscale'}
+                      </button>
+                      {tailscale && (tailscale.enabled || (tailscale.installed && tailscale.connected)) && (
+                        <button type="button" onClick={() => void handleTailscaleToggle(!tailscale.enabled)} disabled={busyAction !== null || tailscaleChecking || !tailscaleChecked} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-accent-blue px-2.5 text-[10px] font-semibold text-bg-primary disabled:opacity-50">
+                          {busyAction === 'tailscale-toggle' ? <LoaderCircle size={12} className="animate-spin" /> : null}
+                          {busyAction === 'tailscale-toggle' ? (tailscale.enabled ? 'Disabling…' : 'Provisioning…') : tailscaleChecking || !tailscaleChecked ? 'Checking…' : tailscale.enabled ? 'Disable Tailscale' : 'Use Tailscale'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {(tailscaleChecking || (!tailscaleChecked && !tailscaleDetectionError)) && <p className="rounded-lg bg-bg-primary p-2.5 text-[10px] leading-relaxed text-text-muted" role="status">Checking Tailscale on this computer…</p>}
+                  {tailscaleDetectionError && <p className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 text-[10px] leading-relaxed text-amber-100" role="alert">Could not detect Tailscale status: {tailscaleDetectionError} Select Refresh / detect to try again.</p>}
+                  {tailscaleChecked && !tailscale && <p className="rounded-lg bg-bg-primary p-2.5 text-[10px] leading-relaxed text-text-muted">Tailscale status was not reported. Refresh or detect status again.</p>}
+                  {tailscaleChecked && tailscale && !tailscale.installed && <p className="rounded-lg bg-bg-primary p-2.5 text-[10px] leading-relaxed text-text-muted">Tailscale is not installed on this computer. Follow the existing Settings → Notifications → Private phone access setup directions to install Tailscale and sign in, then refresh detection here. Maestro does not install or manage your Tailscale account.</p>}
+                  {tailscaleChecked && tailscale?.installed && !tailscale.connected && <p className="rounded-lg bg-bg-primary p-2.5 text-[10px] leading-relaxed text-text-muted">Tailscale is installed but this computer is not connected. Open Tailscale, sign this computer into your network, then refresh detection. Sign the agent computer into the same network too.</p>}
+                  {tailscaleChecked && tailscale?.installed && tailscale.connected && !tailscale.enabled && <p className="rounded-lg bg-bg-primary p-2.5 text-[10px] leading-relaxed text-text-muted">Tailscale is connected. Select Use Tailscale to provision the trusted HTTPS certificate for this MCP endpoint.</p>}
+                  {tailscaleChecked && tailscale?.enabled && !isAgentAccessTailscaleReady(tailscale) && !tailscale.error && <p className="rounded-lg bg-bg-primary p-2.5 text-[10px] leading-relaxed text-text-muted">Tailscale HTTPS is enabled and its certificate or MCP endpoint is still provisioning. The endpoint is not ready until Maestro reports its certificate and URL.</p>}
+                  {tailscaleChecked && tailscale?.error && <p className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 text-[10px] leading-relaxed text-amber-100" role="alert">{formatTailscaleError(tailscale.error)} Resolve any Tailscale account or HTTPS certificate approval request, then refresh detection.</p>}
+                  {tailscaleChecked && tailscale && isAgentAccessTailscaleReady(tailscale) && <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2.5 text-[10px] leading-relaxed text-emerald-100" role="status">Trusted Tailscale HTTPS transport is ready. No manual certificate download, import, or fingerprint matching is needed for this URL. The agent computer must be signed into the same Tailscale network; client connection and OAuth approval remain separate.</div>}
+                  {tailscaleChecked && tailscale?.hostname && <InfoLine label="Tailscale hostname" value={tailscale.hostname} mono />}
+                  {tailscaleChecked && tailscale?.expires_at && <InfoLine label="Trusted certificate expires" value={formatDate(tailscale.expires_at) || tailscale.expires_at} />}
+                </section>
                 <p className="text-xs leading-relaxed text-text-secondary">Automatic setup depends on your agent’s available tools. Use the client-specific steps when the chat cannot manage connections. Copying text does not register, connect or approve the client.</p>
-                <div className="rounded-lg border border-border bg-bg-primary p-3 text-[11px] leading-relaxed text-text-secondary">Certificate trust is a separate first-time step. Verify Maestro’s TLS certificate against the SHA-256 fingerprint in Connection details and use a trust method supported by your MCP client.</div>
+                {trustedTailscaleMcpUrl
+                  ? <div className="rounded-lg border border-border bg-bg-primary p-3 text-[11px] leading-relaxed text-text-secondary">This selected URL uses trusted Tailscale HTTPS. No manual certificate download, import, or fingerprint matching is needed. The client computer must be on the same Tailscale network; Agent Access OAuth approval is still separate.</div>
+                  : <div className="rounded-lg border border-border bg-bg-primary p-3 text-[11px] leading-relaxed text-text-secondary">Certificate trust is a separate first-time step. Verify Maestro’s TLS certificate against the SHA-256 fingerprint in Connection details and use a trust method supported by your MCP client.</div>}
                 {!mcpUrl && <p className="text-[10px] text-amber-300">The connection URL is not available yet. Refresh this panel after the service is ready.</p>}
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  <CopySetupButton target="agent" copied={copyTarget === 'agent'} disabled={!mcpUrl || !status.certificate_sha256} onClick={() => void handleCopy('agent')} />
-                  <CopySetupButton target="chatgpt" copied={copyTarget === 'chatgpt'} disabled={!mcpUrl || !status.certificate_sha256} onClick={() => void handleCopy('chatgpt')} />
+                  <CopySetupButton target="agent" copied={copyTarget === 'agent'} disabled={!mcpUrl || (!trustedTailscaleMcpUrl && !status.certificate_sha256)} onClick={() => void handleCopy('agent')} />
+                  <CopySetupButton target="chatgpt" copied={copyTarget === 'chatgpt'} disabled={!mcpUrl || (!trustedTailscaleMcpUrl && !status.certificate_sha256)} onClick={() => void handleCopy('chatgpt')} />
                   <CopySetupButton target="codex" copied={copyTarget === 'codex'} disabled={!mcpUrl} onClick={() => void handleCopy('codex')} />
                   <CopySetupButton target="claude" copied={copyTarget === 'claude'} disabled={!mcpUrl} onClick={() => void handleCopy('claude')} />
                   <CopySetupButton target="url" copied={copyTarget === 'url'} disabled={!mcpUrl} onClick={() => void handleCopy('url')} />
@@ -445,7 +617,7 @@ export function AgentAccessSettingsPanel() {
                   <label className="block space-y-1 text-[10px] text-text-secondary">
                     <span>Connection address</span>
                     <select aria-label="MCP connection address" value={mcpUrl} onChange={event => { setSelectedMcpUrl(event.target.value); setCopyTarget(null) }} className="w-full rounded-lg border border-border bg-bg-primary px-2 py-2 text-[10px]">
-                      {mcpUrls.map(url => <option key={url} value={url}>{url === status.mcp_url ? 'Discoverable hostname' : 'Direct LAN address'} — {url}</option>)}
+                      {mcpUrls.map(url => <option key={url} value={url}>{url === tailscaleMcpUrl ? 'Trusted Tailscale HTTPS' : url === status.mcp_url ? 'Discoverable hostname' : 'Direct LAN address'} — {url}</option>)}
                     </select>
                     <span className="block text-text-muted">Use a direct LAN address if your network blocks discovery. Trust the same verified certificate.</span>
                   </label>
@@ -715,6 +887,45 @@ function safeControllerUrl(value: unknown): string | null {
   }
 }
 
+function safeMcpUrl(value: unknown): string | null {
+  const safe = safeControllerUrl(value)
+  if (!safe) return null
+  try {
+    return new URL(safe).pathname.endsWith('/mcp') ? safe : null
+  } catch {
+    return null
+  }
+}
+
+function isTailscaleHostname(value: string): boolean {
+  try {
+    return new URL(value).hostname.toLowerCase().endsWith('.ts.net')
+  } catch {
+    return false
+  }
+}
+
+function safeTailscaleMcpUrl(value: unknown): string | null {
+  const safe = safeMcpUrl(value)
+  return safe && isTailscaleHostname(safe) ? safe : null
+}
+
+function isAgentAccessTailscaleReady(value: AgentAccessTailscaleStatus | null | undefined): boolean {
+  return Boolean(
+    value?.enabled
+    && value.installed
+    && value.connected
+    && value.certificate_ready
+    && value.ready
+    && !value.error
+    && safeTailscaleMcpUrl(value.mcp_url),
+  )
+}
+
+function formatTailscaleError(value: string): string {
+  return value.trim() || 'Tailscale HTTPS is not ready yet.'
+}
+
 function safeLocalUrl(value: unknown): string | null {
   if (typeof value !== 'string' || !value) return null
   try {
@@ -758,37 +969,54 @@ function formatDate(value: number | string | null | undefined): string | null {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'short' }).format(date)
 }
 
-function clientSetupText(target: Exclude<CopyTarget, null>, url: string, fingerprint: string): string {
-  const certificate = fingerprint ? `\nTLS certificate SHA-256: ${fingerprint}` : ''
+function clientSetupText(target: Exclude<CopyTarget, null>, url: string, fingerprint: string, trustedTailscale = false): string {
+  const certificate = trustedTailscale
+    ? '\nTLS transport: trusted Tailscale HTTPS; the client computer must be signed into the same Tailscale network. No LAN certificate import or fingerprint matching is needed for this URL.'
+    : fingerprint ? `\nTLS certificate SHA-256: ${fingerprint}` : ''
+  const fingerprintPrompt = trustedTailscale
+    ? null
+    : `Expected public TLS certificate SHA-256 fingerprint: ${fingerprint || 'NOT REPORTED — stop and ask me to verify it before trusting any certificate.'}`
+  const chatGptFingerprintPrompt = trustedTailscale
+    ? null
+    : `Expected public TLS certificate SHA-256 fingerprint: ${fingerprint || 'NOT REPORTED — stop before connecting and ask me to verify it.'}`
+  const trustInstructions = trustedTailscale
+    ? 'This URL uses trusted Tailscale HTTPS. Do not download or import Maestro’s LAN certificate or request fingerprint matching for this URL. The computer running this MCP client must be signed into the same Tailscale network.'
+    : 'Before connecting, obtain the exact public TLS certificate from Maestro Settings > Agent Access > Connection details > Download public TLS certificate on the Maestro PC, transfer that public file to the client computer, and verify that its SHA-256 exactly matches the fingerprint above. Trust it only through a certificate trust mechanism supported by the client. If the client cannot verify and safely trust that certificate, stop and tell me the specific blocker. Never disable TLS verification or use an insecure bypass.'
   if (target === 'agent') {
     return [
       'Help me set up Maestro as an MCP server in this client.',
       `MCP server URL: ${url}`,
-      `Expected public TLS certificate SHA-256 fingerprint: ${fingerprint || 'NOT REPORTED — stop and ask me to verify it before trusting any certificate.'}`,
+      fingerprintPrompt,
       'First inspect which MCP setup tools and client capabilities are actually available in this session. Do not claim you can register a server or change settings unless an available tool supports that action.',
       'If you do not have a server-registration tool, do not stop at a refusal: give me concrete manual steps for the client I named. For ChatGPT desktop, use Settings > MCP servers > Add server > enter a server name > select Streamable HTTP > enter the URL above > Save > restart ChatGPT > Authenticate. If that section or a step is missing, name the exact missing UI and continue with safe manual guidance.',
-      'Perform setup in the client that will connect. Do not assume a cloud agent can reach a private LAN URL because my desktop computer is on the same Wi-Fi as Maestro; first confirm the client itself can reach this URL.',
+      trustedTailscale
+        ? 'Set up the client on a computer signed into the same Tailscale network as Maestro. Claim that it can reach this URL only after the client confirms the connection.'
+        : 'Perform setup in the client that will connect. Do not assume a cloud agent can reach a private LAN URL because my desktop computer is on the same Wi-Fi as Maestro; first confirm the client itself can reach this URL.',
       'Preserve the client’s existing configuration. Add only a Maestro server entry; do not remove or rewrite unrelated settings.',
       'If another Maestro installation is already configured, keep it and add this installation under a distinct server name.',
-      'Before connecting, obtain the exact public TLS certificate from Maestro Settings > Agent Access > Connection details > Download public TLS certificate on the Maestro PC, transfer that public file to the client computer, and verify that its SHA-256 exactly matches the fingerprint above. Trust it only through a certificate trust mechanism supported by the client. If the client cannot verify and safely trust that certificate, stop and tell me the specific blocker. Never disable TLS verification or use an insecure bypass.',
+      trustInstructions,
       'Use the normal OAuth approval flow. When Maestro requests approval, show me the requested scopes and wait for my approval there. Keep codes and tokens out of chat and setup instructions; let the client manage OAuth credentials in its normal protected credential store.',
       'After setup, verify with a read-only server status or help request only. Do not render or create images, video, audio, or other media during setup.',
       'Do not invent deep links, commands, certificate screens, or capabilities. If this client cannot configure HTTP MCP or verify the certificate safely, explain the exact limitation and leave its configuration unchanged.',
-    ].join('\n')
+    ].filter((line): line is string => Boolean(line)).join('\n')
   }
   if (target === 'chatgpt') {
     return [
       'ChatGPT desktop MCP setup for Maestro (manual steps)',
       'Official desktop setup guide: https://learn.chatgpt.com/docs/extend/mcp',
       `Server URL: ${url}`,
-      `Expected public TLS certificate SHA-256 fingerprint: ${fingerprint || 'NOT REPORTED — stop before connecting and ask me to verify it.'}`,
+      chatGptFingerprintPrompt,
       'In the ChatGPT desktop app, open Settings > MCP servers > Add server. Enter a distinct server name of your choice, select Streamable HTTP, enter the URL above, and select Save. Restart ChatGPT, then select Authenticate and complete the OAuth flow.',
-      'Before connecting, use Maestro Settings > Agent Access > Connection details > Download public TLS certificate on the Maestro PC. Transfer that public file to the Mac or other client computer and verify that its SHA-256 exactly matches the fingerprint above. Configure trust through a mechanism supported by the MCP client; browser trust alone does not prove the MCP client will accept it. If no supported trust method is available, explain that specific blocker. Never disable TLS verification or use an insecure bypass.',
-      'Complete setup in ChatGPT desktop and confirm that the desktop client itself can reach this URL. Being on the same Wi-Fi does not mean a cloud-hosted agent can reach a private LAN URL.',
+      trustedTailscale
+        ? 'This URL uses trusted Tailscale HTTPS, so do not download or import Maestro’s LAN certificate or request fingerprint matching. The computer running ChatGPT must be signed into the same Tailscale network as Maestro.'
+        : 'Before connecting, use Maestro Settings > Agent Access > Connection details > Download public TLS certificate on the Maestro PC. Transfer that public file to the Mac or other client computer and verify that its SHA-256 exactly matches the fingerprint above. Configure trust through a mechanism supported by the MCP client; browser trust alone does not prove the MCP client will accept it. If no supported trust method is available, explain that specific blocker. Never disable TLS verification or use an insecure bypass.',
+      trustedTailscale
+        ? 'Complete setup in ChatGPT desktop on a computer signed into the same Tailscale network as Maestro.'
+        : 'Complete setup in ChatGPT desktop and confirm that the desktop client itself can reach this URL. Being on the same Wi-Fi does not mean a cloud-hosted agent can reach a private LAN URL.',
       'When Maestro shows the OAuth request, review the requested scopes and approve only the access you intend. Keep OAuth codes and tokens out of chat; let ChatGPT manage credentials in its protected store.',
       'After authentication, verify with a read-only server status or help request only. Do not render or create images, video, audio, or other media during setup.',
       'These are instructions only. Do not claim the server has been added, connected, authenticated, or approved until the desktop app confirms each step.',
-    ].join('\n')
+    ].filter((line): line is string => Boolean(line)).join('\n')
   }
   if (target === 'codex') {
     return [
@@ -807,9 +1035,11 @@ function clientSetupText(target: Exclude<CopyTarget, null>, url: string, fingerp
       'Claude MCP setup for Maestro',
       'Claude Desktop: Settings → Connectors → Add custom connector, then paste this server URL:',
       url,
-      'Claude Desktop remote connectors need a URL reachable from Claude. For a local URL, use Claude Code on a computer that can reach this Maestro:',
+      trustedTailscale
+        ? 'This URL uses trusted Tailscale HTTPS; sign the client computer into the same Tailscale network. No LAN certificate import or fingerprint matching is needed.'
+        : 'Claude Desktop remote connectors need a URL reachable from Claude. For a local URL, use Claude Code on a computer that can reach this Maestro:',
       'claude mcp add --transport http maestro ' + JSON.stringify(url),
-      certificate,
+      trustedTailscale ? '' : certificate,
       '',
       'No bearer token is included. Approve the requested scopes in Maestro when prompted.',
     ].filter(Boolean).join('\n')

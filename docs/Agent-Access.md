@@ -22,6 +22,8 @@ access, and some clients may not show discovered servers automatically.
    using `127.0.0.1` or `localhost` and select **Approve on this PC**. This
    approves local management without showing or copying a code. First approval
    happens only after you press the button. It does not enable agent connections.
+   After enabling connections, use the recommended Tailscale path below for an
+   agent computer on your Tailscale network.
 3. Follow the instructions for your client. **Copy setup prompt for my agent**
    can guide an assistant that has configuration tools; otherwise it should give
    you the manual steps. Complete the client's OAuth approval in Maestro.
@@ -49,10 +51,42 @@ localhost never grants anonymous MCP access.
 Request a code, then open **Pinokio → this Maestro app → Agent Access Terminal**
 and copy the newest **Browser code:** line. Codes expire and work once.
 
-## Connection details and certificate trust
+## Recommended: trusted Tailscale HTTPS
 
-Expand **Connection details** in the panel when configuring a client or
-troubleshooting. For the first connection from each device or client:
+Agent Access can use a separate trusted `.ts.net` certificate on its existing
+MCP HTTPS port. This is the recommended path when the agent runs on another
+computer. It does not set up Tailscale Serve or Funnel.
+
+1. Install and sign in to Tailscale on the Maestro computer and on the computer
+   that will run the MCP client. Use the same Tailscale network on both. For the
+   install and sign-in steps, follow the existing **Settings → Notifications →
+   Private phone access** directions.
+2. In **Settings → Agent Access**, approve this installation and enable **Allow
+   agent connections**. An owner can select **Detect Tailscale** to refresh the
+   local installation and sign-in status. If Tailscale is missing or this
+   computer is not connected, follow the existing Private phone access
+   directions and detect status again.
+3. Select **Use Tailscale**. Wait until Agent Access reports that trusted
+   Tailscale HTTPS is ready and shows the `.ts.net` MCP URL. An enabled setting
+   or hostname alone does not mean its certificate and endpoint are ready. If
+   Tailscale requests account or HTTPS certificate approval, complete that in
+   Tailscale and refresh detection.
+4. Use the displayed MCP URL in the client. For this trusted Tailscale URL, you
+   do not need to download or import Maestro's LAN certificate or match its
+   fingerprint. The computer running the client must stay signed into the same
+   Tailscale network.
+
+TLS transport readiness does not add the server to a client, connect it, or
+approve access. Each MCP client still completes its own OAuth sign-in and
+approval in Maestro. Copied instructions contain no bearer token; let the MCP
+client store OAuth credentials in its normal protected store.
+
+## Advanced: manual-certificate LAN access
+
+Use the manual-certificate path when you want a LAN connection or the agent
+computer is not on your Tailscale network. Expand **Connection details** in the
+panel when configuring a client or troubleshooting. For the first connection
+from each device or client:
 
 1. Use **Download public TLS certificate**, then check the secure setup URL and TLS certificate SHA-256 fingerprint shown
    in Settings. Trust that exact certificate on each device and in each client
@@ -72,9 +106,9 @@ settings, and client grants. Set up and approve each installation separately.
 
 ## Add an MCP client
 
-Copy the MCP URL from **Settings → Agent Access**. It looks like
-`https://maestro-<installation-id>.local:<port>/mcp`; use the exact value shown
-by Maestro.
+For the advanced LAN path, copy the LAN MCP URL from **Settings → Agent
+Access**. It looks like `https://maestro-<installation-id>.local:<port>/mcp`;
+use the exact value shown by Maestro.
 
 ### ChatGPT desktop
 
