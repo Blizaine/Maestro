@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI
 
 from services.agent_access.context import principal_context
-from services.agent_access.creative_context import CreativeError, CreativeService, normalize_defaults
+from services.agent_access.creative_context import CreativeError, CreativeService, compatible_workflows, normalize_defaults
 from services.agent_access.creative_routes import create_creative_router
 
 
@@ -97,6 +97,14 @@ def test_context_and_prepared_revisions_are_owned_bounded_and_expire(tmp_path):
 def test_invalid_defaults_fail_without_touching_other_settings(value):
     with pytest.raises(CreativeError):
         normalize_defaults(value)
+
+
+def test_image_edit_ability_does_not_hide_text_generation_but_native_overrides_do():
+    model = {"model_type": "fibo2_dev", "family": "fibo2"}
+    definition = {"image_outputs": True, "instruction_image_edit": True, "image_ref_choices": {"choices": [["No image", ""], ["Reference", "I"]]}}
+    assert compatible_workflows(model, definition) == ["image.generate", "image.edit"]
+    assert compatible_workflows(model, {**definition, "capability_overrides": {"text_to_image": False}}) == ["image.edit"]
+    assert compatible_workflows(model, {**definition, "at_least_one_image_ref_needed": True}) == ["image.edit"]
 
 
 def test_prepare_and_submit_are_separate_and_rejections_are_saved_for_the_author(tmp_path):

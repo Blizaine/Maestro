@@ -98,7 +98,10 @@ def compatible_workflows(model: Mapping, definition: Mapping) -> list[str]:
     })
     has_refs = bool(model.get("supports_ref_images") or definition.get("image_ref_choices") or definition.get("omni_reference"))
     if image:
-        edit_only = any(definition.get(key) for key in ("moss_edit", "instruction_image_edit", "requires_image_reference", "inpaint_only", "reference_only"))
+        # instruction_image_edit advertises an ability, not an edit-only
+        # restriction (Fibo Dev supports both). Honor native capability facts.
+        overrides = definition.get("capability_overrides") or {}
+        edit_only = any(definition.get(key) for key in ("moss_edit", "requires_image_reference", "at_least_one_image_ref_needed", "inpaint_only", "reference_only")) or overrides.get("text_to_image") is False
         result = [] if edit_only else ["image.generate"]
         if has_refs:
             result.append("image.edit")
