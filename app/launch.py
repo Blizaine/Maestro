@@ -33057,8 +33057,9 @@ if __name__ == "__main__":
     # Confirm the polling filter immediately before Uvicorn configures logging.
     install_quiet_access_filter()
 
-    # The same authenticated boundary wraps API routes, static media, the
-    # React app, classic UI mounts, and every WebSocket before the server starts.
+    # Preserve the native browser/LAN workflow. Agent Access management and
+    # explicit agent credentials remain protected; MCP uses its strict HTTPS
+    # controller rather than changing how existing users open the web UI.
     _authenticated_app = AccessBoundary(
         api,
         runtime=_agent_access_runtime,
@@ -33067,6 +33068,7 @@ if __name__ == "__main__":
         asset_resolver=_agent_access_backend.asset_store.resolve_tree,
         additional_media_roots=_agent_configured_media_roots,
         allow_local_ui=True,
+        allow_legacy_browser=True,
     )
 
     try:

@@ -160,8 +160,9 @@ def _normalize_owner_code(value) -> str:
 
 
 def require_updated_backend(runtime, *, min_auth_boundary_version: int = 1):
-    # An already-running pre-update model process cannot acquire middleware
-    # retroactively. Never offer pairing while its legacy API remains open.
+    # An older model process cannot acquire agent credential/ownership checks
+    # retroactively. Require that middleware even though ordinary native
+    # browser/API access intentionally retains the existing LAN workflow.
     backend = runtime.backend()
     version = backend.get("auth_boundary_version")
     if type(version) is not int or version < min_auth_boundary_version:

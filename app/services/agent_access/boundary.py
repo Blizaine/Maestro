@@ -683,6 +683,7 @@ class AccessBoundary:
         dynamic_scope_resolver=None,
         validate_controller_origin: bool = False,
         allow_local_ui: bool = False,
+        allow_legacy_browser: bool = False,
         frame_ancestor_origins: tuple[str, ...] | list[str] | None = None,
     ):
         self.app, self.runtime, self.journal = app, runtime, journal
@@ -693,6 +694,7 @@ class AccessBoundary:
         self.dynamic_scope_resolver = dynamic_scope_resolver
         self.validate_controller_origin = bool(validate_controller_origin)
         self.allow_local_ui = bool(allow_local_ui)
+        self.allow_legacy_browser = bool(allow_legacy_browser)
         self.frame_ancestor_sources = (
             frame_ancestor_sources(frame_ancestor_origins) if self.allow_local_ui else ()
         )
@@ -748,8 +750,23 @@ class AccessBoundary:
                 return await send({"type": "websocket.close", "code": 4404})
             response = JSONResponse({"detail": "Not Found"}, status_code=404, headers={"Cache-Control": "no-store"})
             return await response(scope, receive, send)
-        configured = self.always_protect or self.runtime.security_required
-        if configured and path.startswith(("/uploads/", "/api/v1/uploads/")):
+        # The native UI keeps its existing browser/LAN access. This exception
+        # never applies to the HTTPS controller, MCP, Agent Access management,
+        # or an explicitly authenticated agent request. Cookies from an OAuth
+        # browser sign-in must not turn ordinary native UI requests into agent
+        # requests or unexpectedly require HTTPS on an existing LAN URL.
+        legacy_browser_request = (
+            self.allow_legacy_browser
+            and not self.always_protect
+            and not self.validate_controller_origin
+            and not is_mcp_path
+            and b"authorization" not in headers
+            and not path.startswith(("/api/v1/agent-access", "/agent-access", "/oauth/", "/.well-known/"))
+            and not path.startswith(OWNER_PREFIXES)
+        )
+        security_configured = self.always_protect or self.runtime.security_required
+        configured = security_configured and not legacy_browser_request
+        if security_configured and path.startswith(("/uploads/", "/api/v1/uploads/")):
             original_send = send
 
             async def protect_uploaded_content(message):
@@ -769,6 +786,7 @@ class AccessBoundary:
             local_device_transport = self.allow_local_ui and _direct_loopback_ui_request(scope)
             local_device = (
                 local_device_transport
+                and not legacy_browser_request
                 and b"authorization" not in headers
                 and not is_mcp_path
                 # Public OAuth protocol requests also come from native clients
@@ -790,7 +808,7 @@ class AccessBoundary:
                 if not bearer.startswith("Bearer "):
                     raise AuthError(401, "Use a Bearer access token")
                 token = bearer[7:]
-            else:
+            elif not legacy_browser_request:
                 request = Request({**scope, "type": "http"})
                 cookies = request.cookies
                 token = next((cookies[name] for name in cookie_names(self.runtime, scope.get("scheme")) if name in cookies), None)

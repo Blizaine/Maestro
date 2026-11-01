@@ -29,15 +29,22 @@ access, and some clients may not show discovered servers automatically.
    you the manual steps. Complete the client's OAuth approval in Maestro.
    Copying setup text does not install, connect or approve the agent.
 
-Normal use on the Maestro PC does not require Agent Access setup or a browser
-sign-in. Once this installation is approved, local management remains available
-after restarting Maestro or Pinokio, including inside Pinokio's embedded browser.
-Local access does not depend on browser cookies and has no misleading sign-out
-button. This trusts access to the PC, rather than identifying an operating-system
-user. Separate remote browsers still need their own owner sign-in; those browser
-sessions can expire or be signed out. An owner can create a short-lived code for
-another browser from the additional-browser controls. Pausing agent connections
-does not remove remote browser protection or revoke client grants.
+Normal Maestro browser access is unchanged by Agent Access. Keep using Pinokio,
+localhost, an existing LAN HTTP address, or your existing Tailscale web UI link.
+Studio, Director, Editor, gallery media and their native web API do not require
+a new browser code merely because MCP is enabled. As before, this native LAN
+access assumes a trusted network; MCP permissions govern the MCP endpoint and
+explicitly authenticated agent requests, not anonymous access through the
+existing native API.
+
+Agent Access administration is separate. Once this installation is approved,
+local management remains available after restarting Maestro or Pinokio,
+including inside Pinokio's embedded browser. It trusts access to the PC rather
+than identifying an operating-system user. Remote browsers need an owner
+sign-in only to administer Agent Access or approve an agent. Those sessions can
+expire or be signed out. An owner can create a short-lived code for another
+management browser from the additional-browser controls. Pausing agent
+connections retains these management protections and existing client grants.
 
 Local approval requires both a direct loopback connection and a localhost
 address. It rejects LAN and Tailscale requests, forwarded connections, agent
@@ -232,8 +239,9 @@ status and MCP access while the engine is stopped, but generation needs the
 engine to be available. Keep Pinokio running to keep the controller available.
 Turning **Allow agent connections** off pauses agent requests and network
 discovery; it does not revoke existing grants. Revoke clients separately in
-Settings when you want to remove their authorization. Maestro's owner sign-in
-and browser security continue to use the normal owner authentication.
+Settings when you want to remove their authorization. Agent Access
+administration continues to require owner authentication; normal native
+browser access remains unchanged.
 
 Lifecycle actions use the existing Pinokio scripts. An agent cannot run an
 arbitrary command. Stop, restart, or update is refused when Maestro cannot
