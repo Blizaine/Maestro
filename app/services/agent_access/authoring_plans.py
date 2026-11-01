@@ -237,11 +237,220 @@ def _director_profile(
     }
 
 
+def _music_analysis_rows(value: Any, label: str, *, optional: bool = False) -> Sequence[Any]:
+    if value is None and optional:
+        return []
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise AuthoringPlanError(f"context.music_analysis.{label} must be an array.")
+    return value
+
+
+def _music_analysis_number(
+    value: Any,
+    label: str,
+    *,
+    minimum: float = 0.0,
+    inclusive: bool = True,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise AuthoringPlanError(f"context.music_analysis.{label} must be a finite number.")
+    result = float(value)
+    if not math.isfinite(result) or (result < minimum if inclusive else result <= minimum):
+        comparison = "at least" if inclusive else "greater than"
+        raise AuthoringPlanError(
+            f"context.music_analysis.{label} must be {comparison} {minimum:g}."
+        )
+    return result
+
+
+def _music_analysis_status(analysis: Mapping[str, Any], key: str) -> str:
+    value = analysis.get(key)
+    if isinstance(value, Mapping):
+        value = value.get("status")
+    return str(value or "").strip().casefold()
+
+
+def _validated_music_analysis(
+    value: Any,
+    *,
+    target_duration: float,
+) -> Mapping[str, Any]:
+    analysis = _mapping(value, "context.music_analysis")
+    duration = _music_analysis_number(
+        analysis.get("duration"), "duration", minimum=0.0, inclusive=False
+    )
+    # CPU decoding and container probes can differ slightly for compressed
+    # audio. The native source frame count remains the schedule's authority.
+    duration_tolerance = max(0.25, target_duration * 0.001)
+    if abs(duration - target_duration) > duration_tolerance:
+        raise AuthoringPlanError(
+            "context.music_analysis.duration no longer matches the current soundtrack. "
+            "Refresh the creation context and its analysis."
+        )
+    no_reliable_beats = (
+        _music_analysis_status(analysis, "beat_detection") == "no_reliable_beats"
+    )
+    _music_analysis_number(
+        analysis.get("bpm"),
+        "bpm",
+        minimum=0.0,
+        inclusive=no_reliable_beats,
+    )
+
+    beats = _music_analysis_rows(analysis.get("beats"), "beats")
+    if not beats and not no_reliable_beats:
+        raise AuthoringPlanError(
+            "context.music_analysis.beats is empty; refresh the context instead of using duration-only timing."
+        )
+    if beats and no_reliable_beats:
+        raise AuthoringPlanError(
+            "context.music_analysis.beat_detection reports no reliable beats but also supplies beat rows."
+        )
+    for index, raw in enumerate(beats, start=1):
+        row = _mapping(raw, f"context.music_analysis.beats[{index}]")
+        time = _music_analysis_number(row.get("time"), f"beats[{index}].time")
+        if time > duration + duration_tolerance:
+            raise AuthoringPlanError(
+                f"context.music_analysis.beats[{index}].time falls after the analyzed soundtrack."
+            )
+        if row.get("strength") is not None:
+            _music_analysis_number(row["strength"], f"beats[{index}].strength")
+
+    sections = _music_analysis_rows(analysis.get("sections"), "sections")
+    for index, raw in enumerate(sections, start=1):
+        row = _mapping(raw, f"context.music_analysis.sections[{index}]")
+        start = _music_analysis_number(row.get("start"), f"sections[{index}].start")
+        end = _music_analysis_number(row.get("end"), f"sections[{index}].end")
+        if end <= start or end > duration + duration_tolerance:
+            raise AuthoringPlanError(
+                f"context.music_analysis.sections[{index}] has invalid soundtrack bounds."
+            )
+        if row.get("energy") is not None:
+            _music_analysis_number(row["energy"], f"sections[{index}].energy")
+
+    downbeats = _music_analysis_rows(
+        analysis.get("downbeats"), "downbeats", optional=True
+    )
+    for index, raw in enumerate(downbeats, start=1):
+        time = _music_analysis_number(raw, f"downbeats[{index}]")
+        if time > duration + duration_tolerance:
+            raise AuthoringPlanError(
+                f"context.music_analysis.downbeats[{index}] falls after the analyzed soundtrack."
+            )
+
+    lyrics = _music_analysis_rows(analysis.get("lyrics"), "lyrics", optional=True)
+    for index, raw in enumerate(lyrics, start=1):
+        row = _mapping(raw, f"context.music_analysis.lyrics[{index}]")
+        start = _music_analysis_number(row.get("start"), f"lyrics[{index}].start")
+        end = _music_analysis_number(row.get("end"), f"lyrics[{index}].end")
+        if end <= start or end > duration + duration_tolerance:
+            raise AuthoringPlanError(
+                f"context.music_analysis.lyrics[{index}] has invalid soundtrack bounds."
+            )
+
+    cues = _music_analysis_rows(
+        analysis.get("music_cues"), "music_cues", optional=True
+    )
+    for index, raw in enumerate(cues, start=1):
+        row = _mapping(raw, f"context.music_analysis.music_cues[{index}]")
+        time = _music_analysis_number(row.get("time"), f"music_cues[{index}].time")
+        if time > duration + duration_tolerance:
+            raise AuthoringPlanError(
+                f"context.music_analysis.music_cues[{index}] falls after the analyzed soundtrack."
+            )
+
+    percussion = analysis.get("percussion_activity")
+    if percussion is not None:
+        intervals = _music_analysis_rows(percussion, "percussion_activity")
+        for index, raw in enumerate(intervals, start=1):
+            row = _mapping(
+                raw, f"context.music_analysis.percussion_activity[{index}]"
+            )
+            start = _music_analysis_number(
+                row.get("start"), f"percussion_activity[{index}].start"
+            )
+            end = _music_analysis_number(
+                row.get("end"), f"percussion_activity[{index}].end"
+            )
+            if end <= start or end > duration + duration_tolerance:
+                raise AuthoringPlanError(
+                    "context.music_analysis.percussion_activity["
+                    f"{index}] has invalid soundtrack bounds."
+                )
+
+    return analysis
+
+
+def _music_window_context(
+    analysis: Mapping[str, Any],
+    row: Mapping[str, Any],
+    *,
+    start: float,
+    end: float,
+    timing_basis: str,
+) -> dict[str, Any]:
+    """Attach a compact, server-derived music summary to one output window."""
+
+    beat_times = sorted(
+        float(beat["time"])
+        for beat in analysis.get("beats") or []
+        if start <= float(beat["time"]) < end
+    )
+    downbeat_times = sorted(
+        float(time)
+        for time in analysis.get("downbeats") or []
+        if start <= float(time) < end
+    )
+    result: dict[str, Any] = {
+        "timing_basis": timing_basis,
+        "bpm": float(analysis["bpm"]),
+        "beat_count": len(beat_times),
+        "opening_beat_times": beat_times[:3],
+        "ending_beat_times": beat_times[-3:],
+        "downbeat_count": len(downbeat_times),
+        "opening_downbeat_times": downbeat_times[:2],
+        "music_cues": copy.deepcopy(row.get("music_cues") or []),
+        "percussion_activity": row.get("percussion_activity", "unknown"),
+    }
+    for key in (
+        "analysis_method",
+        "method",
+        "transcription_status",
+        "beat_detection",
+        "vocal_timing",
+    ):
+        if analysis.get(key) is not None:
+            result[key] = copy.deepcopy(analysis[key])
+    for key in (
+        "section_label",
+        "energy",
+        "label",
+        "suggested_prompt_hint",
+        "dominant_speaker",
+    ):
+        if row.get(key) is not None:
+            result[key] = copy.deepcopy(row[key])
+    lyrics = [
+        copy.deepcopy(line)
+        for line in analysis.get("lyrics") or []
+        if float(line["start"]) < end and float(line["end"]) > start
+    ]
+    if lyrics:
+        result["lyrics"] = lyrics
+    return result
+
+
 def _music_video_editorial_schedule(
     profile: Mapping[str, Any],
     references: list[str],
+    *,
+    params: Mapping[str, Any] | None = None,
+    model_def: Mapping[str, Any] | None = None,
+    music_analysis: Any = None,
+    analysis_supplied: bool = False,
+    music_analysis_source: Any = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Build exact-source editorial slots with the native pad/trim planner."""
+    """Build exact-source slots from analyzed music or a labeled legacy fallback."""
 
     target = profile.get("target_total_frames")
     if target is None:
@@ -256,21 +465,92 @@ def _music_video_editorial_schedule(
 
     from services.director_music_timing import prepare_music_timeline
 
-    _, scheduled = prepare_music_timeline(
-        [{}],
-        [{
-            "start": 0.0,
-            "end": target / fps,
-            "duration_sec": target / fps,
-            "duration_frames": target,
-            "output_frames": target,
-            "music_timing_version": 1,
-        }],
-        fps=fps,
-        minimum_frames=minimum,
-        maximum_frames=maximum,
-        frame_step=step,
-    )
+    target_duration = target / fps
+    timing_basis = "legacy_duration_only"
+    analysis: Mapping[str, Any] = {}
+    if analysis_supplied:
+        analysis = _validated_music_analysis(
+            music_analysis, target_duration=target_duration
+        )
+        from services.director_music_timing import (
+            plan_capped_music_clips,
+            resolve_clip_limits,
+            resolve_music_pacing_bias,
+        )
+
+        maximum_on_lattice = minimum + ((maximum - minimum) // step) * step
+        if maximum_on_lattice < minimum:
+            raise AuthoringPlanError(
+                "Director execution profile has no valid native shot length. Refresh the context."
+            )
+        resolved_model = dict(model_def or {})
+        resolved_model.update({
+            "fps": fps,
+            "frames_minimum": minimum,
+            "frames_steps": step,
+            "frames_maximum": maximum_on_lattice,
+        })
+        resolved_clip_profile = {
+            "fps": fps,
+            "effective_max_frames": maximum_on_lattice,
+            "manual_max_frames": maximum_on_lattice,
+        }
+        try:
+            limits = resolve_clip_limits(
+                resolved_model,
+                (params or {}).get("director_music_clip_seconds"),
+                resolved_clip_profile,
+            )
+            energy_bias = resolve_music_pacing_bias(
+                (params or {}).get("energy_bias"), resolved_model
+            )
+            maximum_frames = min(maximum_on_lattice, int(limits["max_frames"]))
+            planned = plan_capped_music_clips(
+                analysis,
+                maximum_seconds=maximum_frames / fps,
+                fps=fps,
+                frames_steps=step,
+                frames_minimum=minimum,
+                total_duration=target_duration,
+                energy_bias=energy_bias,
+            )
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise AuthoringPlanError(
+                f"The current music analysis cannot produce a valid native schedule: {error}"
+            ) from error
+        if not planned:
+            raise AuthoringPlanError(
+                "The current music analysis produced no editorial clips; refresh the creation context."
+            )
+        timing_basis = (
+            "section_and_duration_analysis"
+            if not analysis.get("beats")
+            else "beat_and_section_analysis"
+        )
+        _, scheduled = prepare_music_timeline(
+            planned,
+            planned,
+            fps=fps,
+            minimum_frames=minimum,
+            maximum_frames=maximum_frames,
+            frame_step=step,
+        )
+    else:
+        _, scheduled = prepare_music_timeline(
+            [{}],
+            [{
+                "start": 0.0,
+                "end": target_duration,
+                "duration_sec": target_duration,
+                "duration_frames": target,
+                "output_frames": target,
+                "music_timing_version": 1,
+            }],
+            fps=fps,
+            minimum_frames=minimum,
+            maximum_frames=maximum,
+            frame_step=step,
+        )
     windows: list[dict[str, Any]] = []
     previous_id: str | None = None
     editorial_cursor = 0
@@ -299,7 +579,16 @@ def _music_video_editorial_schedule(
             "native_duration_seconds": native_frames / fps,
             "reference_ids": list(references),
             "previous_window_id": previous_id,
+            "timing_basis": timing_basis,
         })
+        if analysis_supplied:
+            windows[-1].update(_music_window_context(
+                analysis,
+                row,
+                start=start / fps,
+                end=end / fps,
+                timing_basis=timing_basis,
+            ))
         previous_id = identifier
         editorial_cursor = end
     if editorial_cursor != target:
@@ -316,8 +605,23 @@ def _music_video_editorial_schedule(
         "final_trim_frames": max(0, native_total - editorial_cursor),
         "trim_semantics": "each native render segment is trimmed to its exact source-audio output_frames",
         "fps": fps,
+        "timing_basis": timing_basis,
         "windows": windows,
     }
+    if analysis_supplied:
+        schedule["analysis_duration_seconds"] = float(analysis["duration"])
+        schedule["bpm"] = float(analysis["bpm"])
+        for key in (
+            "analysis_method",
+            "method",
+            "transcription_status",
+            "beat_detection",
+            "vocal_timing",
+        ):
+            if analysis.get(key) is not None:
+                schedule[key] = copy.deepcopy(analysis[key])
+        if isinstance(music_analysis_source, Mapping):
+            schedule["music_analysis_source"] = copy.deepcopy(dict(music_analysis_source))
     return windows, schedule
 
 
@@ -646,7 +950,15 @@ def compute_studio_timeline(context: Mapping[str, Any]) -> dict[str, Any]:
         architecture = str(model_def.get("architecture") or context.get("model_type") or "").casefold()
         is_h3 = architecture.startswith("minimax_h3") or str(context.get("model_type") or "").casefold().startswith("minimax_h3")
         if pipeline_type == "music_video" and requested_total is not None:
-            _, exact_schedule = _music_video_editorial_schedule(profile, references)
+            _, exact_schedule = _music_video_editorial_schedule(
+                profile,
+                references,
+                params=params,
+                model_def=model_def,
+                music_analysis=context.get("music_analysis"),
+                analysis_supplied="music_analysis" in context,
+                music_analysis_source=context.get("music_analysis_source"),
+            )
             director_timeline.update(exact_schedule)
         elif is_h3 and requested_total is not None:
             from services.h3_sequence_planner import compute_h3_sequence_clips
@@ -1604,7 +1916,7 @@ def _normalize_director_music_timeline(
             if clip.get(key) is not None:
                 plan_row[key] = clip[key]
         raw_plans.append(plan_row)
-        raw_timeline.append({
+        prepared_clip = {
             "start": start / fps,
             "end": end / fps,
             "duration_sec": duration / fps,
@@ -1615,7 +1927,31 @@ def _normalize_director_music_timeline(
             "agent_previous_clip_id": expected_previous,
             "agent_reference_ids": refs,
             "music_timing_version": 1,
-        })
+        }
+        for key in (
+            "timing_basis",
+            "bpm",
+            "beat_count",
+            "opening_beat_times",
+            "ending_beat_times",
+            "downbeat_count",
+            "opening_downbeat_times",
+            "music_cues",
+            "percussion_activity",
+            "section_label",
+            "energy",
+            "suggested_prompt_hint",
+            "dominant_speaker",
+            "lyrics",
+            "analysis_method",
+            "method",
+            "transcription_status",
+            "beat_detection",
+            "vocal_timing",
+        ):
+            if key in geometry:
+                prepared_clip[key] = copy.deepcopy(geometry[key])
+        raw_timeline.append(prepared_clip)
         cursor = end
         previous_source_id = source_id
     if cursor != target:
@@ -1652,6 +1988,7 @@ def _normalize_director_music_timeline(
             "final_trim_frames": max(0, native_total - editorial_total),
             "trim_semantics": "trim each native clip to output_frames, preserving the exact source-audio timeline",
             "fps": fps,
+            "timing_basis": director_timeline.get("timing_basis", "legacy_duration_only"),
             "continuity_mode": continuity,
             "reference_ids": references,
             "source_clip_ids": ordered_source_ids,

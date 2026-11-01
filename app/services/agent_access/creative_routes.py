@@ -8,6 +8,7 @@ import json
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 from .authoring_plans import AuthoringPlanError, compute_studio_timeline, normalize_authored_director_plan, prepare_authored_generation
 from .assets import AssetStoreError
@@ -77,7 +78,9 @@ def create_creative_router(backend, service, *, native_prepare, native_director)
                         row.setdefault("path", row["asset"])
             # Check storage boundaries before CPU inspection opens any media.
             safe(resolved)
-            result = service.create_context(resolved, principal.id)
+            # Native CPU beat/section analysis can take seconds. Preserve
+            # auth context while keeping preview/job polling responsive.
+            result = await run_in_threadpool(service.create_context, resolved, principal.id)
             return safe(result, reverse)
         except (CreativeError, AuthoringPlanError, AssetStoreError, ValueError) as error:
             raise HTTPException(getattr(error, "status", 422), str(error)) from error
@@ -127,7 +130,7 @@ def create_creative_router(backend, service, *, native_prepare, native_director)
             # shot/window plans behind the author's back.
             current = copy.deepcopy(context)
             if service.resolve is not None:
-                service.resolve(current, {"params": current["params"], "references": current["references"]})
+                await run_in_threadpool(service.resolve, current, {"params": current["params"], "references": current["references"]})
                 if (
                     current.get("execution_profile") != context.get("execution_profile")
                     or compute_studio_timeline(current) != context["timeline"]

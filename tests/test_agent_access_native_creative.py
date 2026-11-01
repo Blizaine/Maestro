@@ -67,6 +67,12 @@ def test_context_uses_resolved_params_and_can_recheck_private_reference_inputs(t
 def test_director_context_uses_exact_audio_and_nested_video_profile(tmp_path, monkeypatch):
     from services.agent_access import authoring_plans
     measured = []
+    analyzed = []
+    song = tmp_path / "owned-song.wav"
+    song.write_bytes(b"owned soundtrack fixture")
+    def analyze(path):
+        analyzed.append(path)
+        return {"duration": 63.25, "bpm": 120, "beats": [{"time": 0.5, "strength": 1}], "sections": [{"start": 0, "end": 63.25, "label": "verse", "energy": 0.5}]}
     def resolve(context, request, hardware, **kwargs):
         assert context["params"]["pipeline_type"] == "music_video"
         assert context["params"]["source_duration_seconds"] == 63.25
@@ -80,13 +86,23 @@ def test_director_context_uses_exact_audio_and_nested_video_profile(tmp_path, mo
         defaults=lambda mt: {"resolution": "1280x704", "video_length": 243}, options=lambda mt: {}, preferences=lambda: {}, hardware=lambda: {},
         lora_hint=lambda *args: "", injected_keyframes=lambda params: [], mature_mode=lambda: False,
         probe_audio=lambda path: measured.append(path) or 63.25,
+        analyze_music=analyze,
     )
-    context = creator.create_context({"workflow": "director.music_video", "params": {"audio_path": "owned-song.wav"}}, "a")
-    assert measured == ["owned-song.wav"]
+    context = creator.create_context({"workflow": "director.music_video", "params": {"audio_path": str(song)}}, "a")
+    assert measured == [str(song)]
+    assert analyzed == [str(song)]
     assert context["source_duration_seconds"] == 63.25
     assert context["timeline"]["director_profile"]["target_total_frames"] == 1518
     assert context["params"]["shot_image_guidance"] == "prompt_only"
     assert context["guides"]["director_guidance"]["shot_writing"]
+    assert context["guides"]["director_guidance"]["music_video_workflow"]
+    assert context["music_analysis"]["beat_count"] == 1
+    assert context["music_analysis"]["vocal_timing"] == "not_analyzed"
+    assert "beats" not in context["music_analysis"]
+    stored = creator.lookup(context["context_id"], "a")
+    assert len(stored["music_analysis"]["beats"]) == 1
+    creator.resolve(stored, {})
+    assert analyzed == [str(song)], "submission rechecks must reuse the bound analysis"
 
 
 def test_native_omni_scene_role_survives_and_can_be_rechecked(tmp_path, monkeypatch):

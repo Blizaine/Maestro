@@ -334,6 +334,34 @@ multi-window planning. Use `get_creation_context` →
 `prepare_authored_generation` → `submit_authored_generation` when the agent's
 own writing must be preserved.
 
+### Original songs and character-reference music videos
+
+A connected agent can handle the production as a sequence of native tasks.
+It first gets an `audio.music` context, reads the chosen model's guide (including
+the YuE lyric/style guide when using YuE), writes the song itself, and prepares
+and submits it. It waits for the completed audio before requesting a
+`director.music_video` context with that soundtrack and the character/scene
+references. Maestro chooses a compatible References workflow when visual
+references are supplied.
+
+The music-video context performs native CPU beat, section, energy and
+percussion analysis. It returns an analysis summary and model-safe editorial
+windows with musical cues. The connected agent writes each clip's prompts
+against those exact windows. Preparation preserves its prompts and references;
+submission sends the reviewed plan directly to Director without local LLM
+screenplay writing or prompt polishing. The agent monitors the resulting
+pipeline through assembly against the original song.
+
+Analysis is cached by soundtrack content, and submission checks that the track
+has not changed after planning. Timeline bounds remain exact to the selected
+frame grid; native render padding and output trims are explicit. An analysis
+failure is reported instead of being presented as successful beat timing.
+Unmetered audio with no reliable detected beats uses explicitly labeled
+section/duration timing. Automatic CPU analysis does not transcribe lyrics,
+identify singers or download analysis models: `vocal_timing=not_analyzed` is
+unknown, not an instrumental classification. Known song lyrics can guide the
+agent's story without being presented as measured word timestamps.
+
 ## Choose scopes
 
 Review the scope descriptions on the approval page. The operation catalogue

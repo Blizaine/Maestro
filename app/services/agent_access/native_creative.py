@@ -8,9 +8,12 @@ from .creative_context import CreativeError, CreativeService
 
 def make_native_creative_service(
     backend, *, models, model_def, defaults, options, preferences, hardware,
-    lora_hint, injected_keyframes, mature_mode, probe_audio=None,
+    lora_hint, injected_keyframes, mature_mode, probe_audio=None, analyze_music=None,
 ):
     from services.authoring_guides import authoring_guide_bundle
+    from .music_analysis import MusicAnalysisCache
+
+    music_analysis = MusicAnalysisCache(analyze_music)
 
     def resolve(context, request):
         from .authoring_plans import resolve_native_context
@@ -110,7 +113,7 @@ def make_native_creative_service(
             if params["pipeline_type"] == "music_video":
                 soundtrack = params.get("audio_path") or next((row.get("path") or row.get("asset") for row in refs if str(row.get("type") or row.get("media_type", "")).startswith("audio") and row.get("role") in {"drive", "soundtrack", "music"}), None)
                 if not soundtrack:
-                    raise CreativeError("Director music video requires an uploaded soundtrack in params.audio_path or a drive-audio reference.")
+                    raise CreativeError("Director music video needs a completed soundtrack. First use audio.music with its model guide to write and render the song, poll its job, then select that output in params.audio_path or a drive-audio reference and request a fresh director.music_video context.")
                 params["audio_path"] = soundtrack
                 if probe_audio is None:
                     raise CreativeError("Soundtrack duration inspection is unavailable.", 503)
@@ -121,6 +124,11 @@ def make_native_creative_service(
                 params["duration_seconds"] = float(measured)
                 params["video_params"]["duration_seconds"] = float(measured)
                 context["source_duration_seconds"] = float(measured)
+                analysis, source = music_analysis.read(
+                    soundtrack, float(measured), context.get("music_analysis_source"),
+                )
+                context["music_analysis"] = analysis
+                context["music_analysis_source"] = source
             elif not params.get("duration_seconds"):
                 params["duration_seconds"] = 30
         hint = lora_hint(context["model_type"], params.get("activated_loras"))
@@ -175,6 +183,20 @@ def make_native_creative_service(
                 "camera_style": load_guide("director", "camera_style_guidance"),
                 "contract": "Write actual image_prompt/video_prompt values for the server's editorial schedule. The connected agent performs all writing; native compilation and audio/reference contracts still apply.",
             }
+            if request.get("workflow") == "director.music_video":
+                bundle["director_guidance"]["music_video_workflow"] = (
+                    "If the user needs an original song, first get audio.music context with the requested installed "
+                    "music model (YuE when requested), read its lyric/style guide, write lyrics and style yourself, "
+                    "prepare and render the song, and wait for its verified audio output. Then get director.music_video "
+                    "context with that soundtrack and the user's character/scene references. Maestro analyzes the "
+                    "actual audio on CPU and returns model-safe beat/section-aware editorial windows. Read each "
+                    "window's section, energy and music cues and write every clip's native video_prompt yourself, "
+                    "preserving exact IDs, bounds, reference IDs and source audio. Do not run local Director planning "
+                    "or prompt polish over the authored plan. CPU analysis does not transcribe lyrics or identify "
+                    "singers: vocal_timing=not_analyzed means unknown, not instrumental. Known lyrics remain creative "
+                    "context rather than invented word timestamps. Prepare the complete plan, then submit that "
+                    "reviewed version and monitor its Director pipeline through assembly."
+                )
             image_model = (request.get("params") or {}).get("image_model")
             if image_model:
                 image_definition = model_def(image_model)

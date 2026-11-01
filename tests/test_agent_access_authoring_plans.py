@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 import sys
 import unittest
@@ -48,6 +49,84 @@ def _window_plan(context, prompts):
             for geometry, prompt in zip(context["timeline"]["windows"], prompts)
         ],
     }
+
+
+def _music_analysis(duration=12.02, *, sections=None):
+    beat_times = [
+        0.0, 0.49, 1.03, 1.51, 2.02, 2.48, 3.04, 3.51, 3.66,
+        4.11, 4.62, 5.14, 5.58, 6.09, 6.55, 7.02, 7.49, 7.95,
+        8.44, 8.91, 9.43, 9.88, 10.37, 10.91, 11.39, 11.86,
+    ]
+    return {
+        "duration": duration,
+        "bpm": 120,
+        "beats": [
+            {"time": time, "strength": 0.9 if index % 4 == 0 else 0.25}
+            for index, time in enumerate(beat_times)
+        ],
+        "downbeats": [0.0, 2.02, 3.51, 6.09, 8.44, 10.37],
+        "sections": sections if sections is not None else [
+            {"start": 0.0, "end": 3.57, "label": "intro", "energy": 0.24},
+            {"start": 3.57, "end": 7.83, "label": "chorus", "energy": 0.92},
+            {"start": 7.83, "end": duration, "label": "outro", "energy": 0.32},
+        ],
+        "lyrics": [
+            {
+                "start": 3.6,
+                "end": 4.4,
+                "speaker": "Singer A",
+                "text": "The lights are coming back.",
+            },
+            {
+                "start": 5.2,
+                "end": 5.8,
+                "speaker": "Singer A",
+                "text": "Hold the line.",
+            },
+        ],
+        "music_cues": [
+            {"type": "instrument_change", "time": 3.8, "label": "synth enters"},
+            {"type": "percussion_entry", "time": 8.1, "label": "drums enter"},
+        ],
+        "percussion_activity": [
+            {"start": 3.5, "end": 7.4},
+            {"start": 8.1, "end": duration},
+        ],
+        "beat_detection": {"status": "detected"},
+        "vocal_timing": {"status": "transcribed"},
+    }
+
+
+def _beat_aware_music_context(analysis=None, *, energy_bias=0):
+    return _context(
+        "director.music_video",
+        "minimax_h3_fused_turbo",
+        {
+            "architecture": "minimax_h3",
+            "frames_minimum": 12,
+            "frames_maximum": 204,
+            "frames_steps": 12,
+            "fps": 24,
+            "director_shot_image_support": "optional",
+        },
+        {
+            "source_duration_seconds": 12.02,
+            "pipeline_type": "music_video",
+            "shot_image_guidance": "prompt_only",
+            "director_music_clip_seconds": 6.25,
+            "energy_bias": energy_bias,
+        },
+        execution_profile={
+            "fps": 24,
+            "frames_minimum": 12,
+            "frame_step": 12,
+            "effective_max_frames": 204,
+        },
+        shot_image_policy="prompt_only",
+        source_duration_seconds=12.02,
+        music_analysis=_music_analysis() if analysis is None else analysis,
+        music_analysis_source={"sha256": "a" * 64, "size_bytes": 12020},
+    )
 
 
 class StudioAuthoringPlanTests(unittest.TestCase):
@@ -517,6 +596,185 @@ class DirectorAuthoringPlanTests(unittest.TestCase):
                     [row["agent_timeline_id"] for row in native["prepared_clip_plans"]],
                     [row["timeline_id"] for row in clips],
                 )
+
+    def test_music_video_uses_beats_sections_and_resolved_clip_cap(self):
+        context = _beat_aware_music_context()
+        timeline = context["timeline"]["director_timeline"]
+        windows = context["timeline"]["windows"]
+        target_frames = round(12.02 * 24)
+
+        self.assertEqual(timeline["timing_basis"], "beat_and_section_analysis")
+        self.assertEqual(timeline["analysis_duration_seconds"], 12.02)
+        self.assertEqual(timeline["requested_total_frames"], target_frames)
+        self.assertEqual(
+            [row["end_frame"] for row in windows[:-1]],
+            [86, 188],
+            "section boundaries should define cuts on the source frame grid",
+        )
+        self.assertTrue(all(row["timing_basis"] == "beat_and_section_analysis" for row in windows))
+        self.assertTrue(all(row["native_duration_frames"] <= 144 for row in windows))
+        self.assertEqual(sum(row["output_frames"] for row in windows), target_frames)
+        self.assertTrue(
+            any(row["native_duration_frames"] > row["output_frames"] for row in windows),
+            "fractional section cuts should pad to a native frame lattice and trim back to source frames",
+        )
+        self.assertEqual(windows[0]["section_label"], "intro")
+        self.assertEqual(windows[1]["section_label"], "chorus")
+        self.assertIn("opening_beat_times", windows[0])
+
+        no_sections = _music_analysis(sections=[])
+        no_section_context = _beat_aware_music_context(no_sections)
+        no_section_cuts = [
+            row["end_frame"] for row in no_section_context["timeline"]["windows"][:-1]
+        ]
+        self.assertNotEqual(no_section_cuts, [row["end_frame"] for row in windows[:-1]])
+
+        slower_context = _beat_aware_music_context(energy_bias=-2)
+        slower_cuts = [
+            row["end_frame"] for row in slower_context["timeline"]["windows"][:-1]
+        ]
+        self.assertNotEqual(slower_cuts, [row["end_frame"] for row in windows[:-1]])
+
+        clips = []
+        previous_id = None
+        for index, window in enumerate(windows, start=1):
+            source_id = f"analysis-shot-{index}"
+            clips.append({
+                "id": source_id,
+                "timeline_id": window["id"],
+                "start_frame": window["start_frame"],
+                "end_frame": window["end_frame"],
+                "duration_frames": window["duration_frames"],
+                "previous_clip_id": previous_id,
+                "reference_ids": ["ref-main"],
+                "video_prompt": f"A distinct visual scene for soundtrack section {index}.",
+            })
+            previous_id = source_id
+        authored = {"context_id": context["context_id"], "clips": clips}
+        normalized = normalize_authored_director_plan(context, authored)
+        prepared = normalized["native_params"]["prepared_planned_clips"]
+        self.assertEqual(normalized["plan_metadata"]["timing_basis"], "beat_and_section_analysis")
+        self.assertEqual(sum(row["output_frames"] for row in prepared), target_frames)
+        self.assertEqual(
+            sum(row["duration_frames"] for row in prepared),
+            timeline["native_total_frames"],
+        )
+        self.assertTrue(all(row["duration_frames"] <= 144 for row in prepared))
+        self.assertTrue(all(row["timing_basis"] == "beat_and_section_analysis" for row in prepared))
+        self.assertTrue(
+            any(
+                cue.get("label") == "drums enter"
+                for row in prepared
+                for cue in row.get("music_cues", [])
+            )
+        )
+        self.assertTrue(
+            any(
+                line.get("text") == "The lights are coming back."
+                and row.get("dominant_speaker") == "Singer A"
+                for row in prepared
+                for line in row.get("lyrics", [])
+            )
+        )
+
+        stale_bounds = copy.deepcopy(authored)
+        stale_bounds["clips"][0]["end_frame"] += 1
+        with self.assertRaisesRegex(AuthoringPlanError, "current soundtrack schedule value"):
+            normalize_authored_director_plan(context, stale_bounds)
+        stale_id = copy.deepcopy(authored)
+        stale_id["clips"][0]["timeline_id"] = "old-analysis-window"
+        with self.assertRaisesRegex(AuthoringPlanError, "current soundtrack schedule"):
+            normalize_authored_director_plan(context, stale_id)
+
+    def test_invalid_supplied_music_analysis_does_not_use_legacy_timing(self):
+        invalid = _music_analysis()
+        invalid["beats"] = []
+        with self.assertRaisesRegex(AuthoringPlanError, "beats is empty"):
+            _beat_aware_music_context(invalid)
+
+        context = _beat_aware_music_context()
+        context["music_analysis"] = None
+        with self.assertRaisesRegex(AuthoringPlanError, "context.music_analysis must be an object"):
+            compute_studio_timeline(context)
+
+    def test_music_video_accepts_explicit_no_reliable_beats_without_fabricating_readback(self):
+        analysis = _music_analysis()
+        analysis["beats"] = []
+        analysis["bpm"] = 0
+        analysis["beat_detection"] = "no_reliable_beats"
+        analysis["vocal_timing"] = "not_analyzed"
+        analysis.pop("lyrics")
+        context = _beat_aware_music_context(analysis)
+        timeline = context["timeline"]["director_timeline"]
+        windows = context["timeline"]["windows"]
+
+        self.assertEqual(timeline["timing_basis"], "section_and_duration_analysis")
+        self.assertEqual(timeline["bpm"], 0)
+        self.assertEqual(timeline["beat_detection"], "no_reliable_beats")
+        self.assertEqual(timeline["vocal_timing"], "not_analyzed")
+        self.assertTrue(windows)
+        self.assertTrue(all(row["timing_basis"] == "section_and_duration_analysis" for row in windows))
+        self.assertTrue(all(row["beat_count"] == 0 for row in windows))
+        self.assertTrue(all(row["opening_beat_times"] == [] for row in windows))
+        self.assertTrue(all(row["ending_beat_times"] == [] for row in windows))
+        self.assertTrue(all(row["section_label"] for row in windows))
+        self.assertTrue(all(row["vocal_timing"] == "not_analyzed" for row in windows))
+
+        clips = []
+        previous_id = None
+        for index, window in enumerate(windows, start=1):
+            source_id = f"unmetered-shot-{index}"
+            clips.append({
+                "id": source_id,
+                "timeline_id": window["id"],
+                "start_frame": window["start_frame"],
+                "end_frame": window["end_frame"],
+                "duration_frames": window["duration_frames"],
+                "previous_clip_id": previous_id,
+                "reference_ids": ["ref-main"],
+                "video_prompt": f"A distinct visual scene for section {index}.",
+            })
+            previous_id = source_id
+        normalized = normalize_authored_director_plan(
+            context, {"context_id": context["context_id"], "clips": clips}
+        )
+        prepared = normalized["native_params"]["prepared_planned_clips"]
+        self.assertEqual(normalized["plan_metadata"]["timing_basis"], "section_and_duration_analysis")
+        self.assertTrue(all(row["beat_count"] == 0 for row in prepared))
+        self.assertTrue(all(row["opening_beat_times"] == [] for row in prepared))
+        self.assertTrue(all(row["vocal_timing"] == "not_analyzed" for row in prepared))
+        self.assertTrue(
+            any(
+                cue.get("label") == "synth enters"
+                for row in prepared
+                for cue in row.get("music_cues", [])
+            )
+        )
+
+    def test_missing_music_analysis_fixture_is_explicitly_legacy(self):
+        context = _context(
+            "director.music_video",
+            "minimax_h3_fused_turbo",
+            {
+                "architecture": "minimax_h3",
+                "frames_minimum": 124,
+                "frames_maximum": 243,
+                "frames_steps": 17,
+                "fps": 24,
+            },
+            {"source_duration_seconds": 30, "pipeline_type": "music_video"},
+            execution_profile={
+                "fps": 24,
+                "frames_minimum": 124,
+                "frame_step": 17,
+                "effective_max_frames": 243,
+            },
+            source_duration_seconds=30,
+        )
+        self.assertEqual(
+            context["timeline"]["director_timeline"]["timing_basis"],
+            "legacy_duration_only",
+        )
 
 
 if __name__ == "__main__":

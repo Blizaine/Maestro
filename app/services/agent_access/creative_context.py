@@ -282,6 +282,13 @@ class CreativeService:
         public = copy.deepcopy(context)
         public.pop("model_def", None)
         public.pop("_input_references", None)
+        if isinstance(public.get("music_analysis"), dict):
+            analysis = public["music_analysis"]
+            analysis["beat_count"] = len(analysis.pop("beats", []))
+            analysis["downbeat_count"] = len(analysis.pop("downbeats", []))
+            # Exact beat timing remains attached to each editorial window;
+            # avoid repeating the complete song's beat arrays in the prompt.
+            analysis.pop("percussion_activity", None)
         return public
 
     def lookup(self, context_id: str, principal_id: str) -> dict:
