@@ -110,6 +110,16 @@ function menuInfo(runningScript, local) {
   };
 }
 
+function expectedWebUiUrl(rawUrl) {
+  const url = new URL(rawUrl);
+  url.searchParams.set("maestro_ui_policy", "lan-v2");
+  return url.href;
+}
+
+function isSmokeBench(item) {
+  return typeof item.href === "string" && item.href.endsWith("test_bench.js?mode=smoke");
+}
+
 async function menuFor(runningScript, local) {
   return launcher.menu(kernel, menuInfo(runningScript, local));
 }
@@ -173,9 +183,42 @@ async function checkLauncher(script, runningScript, openLabel) {
   const validMenu = await menuFor(runningScript, validLocal);
   const openItem = validMenu.find((item) => item.text === openLabel);
   assert.ok(openItem, "A valid HTTP endpoint should remain available in the menu");
-  assert.equal(openItem.href, validLocal.url);
+  assert.equal(openItem.href, expectedWebUiUrl(validLocal.url));
+  assert.deepEqual(validLocal, { url: "http://127.0.0.1:7860", port: "7860" });
   const tailscaleItem = validMenu.find((item) => item.href === "tailscale_setup.js");
   assert.equal(tailscaleItem.params.port, "7860");
+  const testBenchItems = validMenu.flatMap((item) => Array.isArray(item.menu) ? item.menu : []);
+  const smokeBench = testBenchItems.find(isSmokeBench);
+  assert.equal(smokeBench.params.base_url, validLocal.url, "Developer tools must keep the raw local endpoint");
+
+  const queryLocal = {
+    url: "http://127.0.0.1:7860/studio?view=timeline&tag=pinokio&tag=local&maestro_ui_policy=old#canvas",
+    port: "7860",
+  };
+  const originalQueryLocal = { ...queryLocal };
+  const queryMenu = await menuFor(runningScript, queryLocal);
+  const queryOpenItem = queryMenu.find((item) => item.text === openLabel);
+  assert.ok(queryOpenItem, "A valid endpoint with path, query and fragment should remain available");
+  const rawEndpoint = new URL(queryLocal.url);
+  const webUi = new URL(queryOpenItem.href);
+  assert.equal(webUi.origin, rawEndpoint.origin);
+  assert.equal(webUi.pathname, rawEndpoint.pathname);
+  assert.equal(webUi.searchParams.get("view"), "timeline");
+  assert.deepEqual(webUi.searchParams.getAll("tag"), ["pinokio", "local"]);
+  assert.deepEqual(webUi.searchParams.getAll("maestro_ui_policy"), ["lan-v2"]);
+  assert.equal(webUi.hash, rawEndpoint.hash);
+  assert.deepEqual(queryLocal, originalQueryLocal, "Menu construction must not mutate info.local");
+  assert.equal(
+    queryMenu.flatMap((item) => Array.isArray(item.menu) ? item.menu : [])
+      .find(isSmokeBench).params.base_url,
+    queryLocal.url,
+    "The raw endpoint must remain unchanged for test bench parameters",
+  );
+  assert.equal(
+    queryMenu.find((item) => item.href === "tailscale_setup.js").params.port,
+    queryLocal.port,
+    "The raw endpoint port must remain unchanged for Tailscale",
+  );
 
   for (const local of [
     { url: "https://127.0.0.1:443", port: "443" },
@@ -185,7 +228,7 @@ async function checkLauncher(script, runningScript, openLabel) {
     const items = await menuFor(runningScript, local);
     const openItem = items.find((item) => item.text === openLabel);
     assert.ok(openItem, `A valid HTTP(S) endpoint should be available: ${JSON.stringify(local)}`);
-    assert.equal(openItem.href, local.url);
+    assert.equal(openItem.href, expectedWebUiUrl(local.url));
     assert.equal(
       items.find((item) => item.href === "tailscale_setup.js").params.port,
       local.port,

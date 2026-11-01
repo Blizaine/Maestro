@@ -25,7 +25,9 @@ const localWebEndpoint = (local) => {
       || urlPort !== port
     ) return null
 
-    return { url: local.url, port }
+    const webUiUrl = new URL(url.href)
+    webUiUrl.searchParams.set("maestro_ui_policy", "lan-v2")
+    return { url: local.url, webUiUrl: webUiUrl.href, port }
   } catch {
     return null
   }
@@ -193,7 +195,7 @@ module.exports = {
             default: true,
             icon: "fa-solid fa-rocket",
             text: "Open Web UI",
-            href: endpoint.url,
+            href: endpoint.webUiUrl,
           }, {
             icon: "fa-solid fa-shield-halved",
             text: running.tailscale_setup
@@ -222,7 +224,7 @@ module.exports = {
             default: true,
             icon: "fa-solid fa-bolt",
             text: "Open Web UI (Sol Runtime)",
-            href: endpoint.url,
+            href: endpoint.webUiUrl,
           }, {
             icon: "fa-solid fa-shield-halved",
             text: running.tailscale_setup

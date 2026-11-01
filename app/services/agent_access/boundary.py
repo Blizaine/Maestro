@@ -445,6 +445,40 @@ _LOOPBACK_FRAME_ANCESTORS = (
 )
 
 
+def pinokio_frame_origins(config_path: Path | None = None) -> tuple[str, ...]:
+    """Allow Pinokio's configured endpoint at this PC's private LAN aliases.
+
+    Pinokio can advertise a bridge IP in its config while a remote browser
+    uses the PC's LAN IP. Keep its exact scheme/port, and derive aliases from
+    this PC rather than request headers or arbitrary private-network hosts.
+    """
+    configured = pinokio_access_origin(config_path)
+    if configured is None:
+        return ()
+    from .state import private_lan_ipv4_addresses
+
+    parsed = urlsplit(configured)
+    origins = [configured]
+    for candidate in private_lan_ipv4_addresses():
+        try:
+            address = ipaddress.IPv4Address(candidate)
+        except (ValueError, TypeError):
+            continue
+        if (
+            not address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_multicast
+            or address.is_unspecified
+            or address.is_reserved
+        ):
+            continue
+        origin = f"{parsed.scheme}://{address.compressed}:{parsed.port}"
+        if origin not in origins:
+            origins.append(origin)
+    return tuple(origins)
+
+
 def _exact_frame_origin(value: str) -> str | None:
     if not isinstance(value, str) or not value or value != value.strip():
         return None
@@ -471,7 +505,7 @@ def _exact_frame_origin(value: str) -> str | None:
 
 def frame_ancestor_sources(origins: tuple[str, ...] | list[str] | None = None) -> tuple[str, ...]:
     """Return a narrow CSP allow-list for the local UI and trusted Pinokio shell."""
-    configured = (pinokio_access_origin(),) if origins is None else tuple(origins)
+    configured = pinokio_frame_origins() if origins is None else tuple(origins)
     values = ["'self'", *_LOOPBACK_FRAME_ANCESTORS]
     for origin in configured:
         canonical = _exact_frame_origin(origin)
@@ -706,6 +740,20 @@ class AccessBoundary:
         path = scope.get("path", "/")
         method = scope.get("method", "GET").upper()
         headers = {k.lower(): v.decode("latin1") for k, v in scope.get("headers", [])}
+        fresh_ui_shell = (
+            bool(self.frame_ancestor_sources)
+            and scope["type"] == "http"
+            and method in {"GET", "HEAD"}
+            and path in {"/", "/index.html"}
+        )
+        if fresh_ui_shell:
+            # A body-only ETag can validate HTML carrying an obsolete framing
+            # policy. Fetch the small UI shell afresh, including its current
+            # security headers; hashed assets keep their normal caching.
+            scope = {**scope, "headers": [
+                (key, value) for key, value in scope.get("headers", [])
+                if key.lower() not in {b"if-none-match", b"if-modified-since"}
+            ]}
         if (
             self.frame_ancestor_sources
             and not path.startswith(("/uploads/", "/api/v1/uploads/"))
@@ -719,6 +767,12 @@ class AccessBoundary:
                         key.lower(): value for key, value in response_headers
                     }.get(b"content-type", b"").split(b";", 1)[0].lower()
                     if content_type in {b"text/html", b"application/xhtml+xml"}:
+                        if fresh_ui_shell:
+                            response_headers = [
+                                (key, value) for key, value in response_headers
+                                if key.lower() not in {b"cache-control", b"etag", b"last-modified"}
+                            ]
+                            response_headers.append((b"cache-control", b"no-store"))
                         response_headers = _apply_frame_ancestors(
                             response_headers, self.frame_ancestor_sources,
                         )
