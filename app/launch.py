@@ -15,6 +15,13 @@ Environment variables:
 
 import gc
 import sys
+
+# Native Pinokio starts this file as __main__. Director's callbacks import
+# launch, so publish that same module before bootstrap creates job/auth state.
+# Importing a second copy would re-register the live Agent Access backend.
+if __name__ == "__main__":
+    sys.modules["launch"] = sys.modules[__name__]
+
 import os
 import glob
 import json
