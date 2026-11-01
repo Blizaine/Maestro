@@ -92,13 +92,23 @@ steps and action for that app; it does not ask you to choose a configuration
 format. Existing local clients can be reused. Raw configuration is available
 under **Manual setup** when needed.
 
-For **ChatGPT desktop**, open **Settings → MCP servers → Add server**, name
-the server Maestro, choose **STDIO**, and paste the copied launch command.
-Save and restart the client. If a host provides separate executable and
-argument fields, use the corresponding values under Manual setup.
-For **Codex CLI or IDE**, copy the displayed configuration section into
+For **ChatGPT desktop**, copy **ChatGPT configuration**, then open
+**Settings → Configuration → Open config.toml**. Add the copied server section
+once, or replace only this same client's existing Maestro entry. If you
+previously pasted a combined launch command into Add MCP, replace that broken
+entry rather than keeping a duplicate. Save and restart ChatGPT.
+
+The configuration keeps the Python executable in `command` and the script,
+`--client`, and client ID in an ordered `args` array. Do not paste both into a
+command-only Add MCP field: the desktop app can save the entire line as the
+executable name, which fails to start. If a host has separate executable and
+argument fields, the individual values are under Manual setup.
+
+For **Codex CLI or IDE**, copy its configuration section into
 `~/.codex/config.toml`. ChatGPT's local Codex host, Codex CLI and the IDE
-extension share this configuration. See
+extension share this configuration. Verify actual tool discovery with `/mcp`
+in a local Codex chat on this computer. Tool availability can differ in other
+chat modes; a hosted chat does not automatically inherit local MCP tools. See
 the [official MCP setup instructions](https://learn.chatgpt.com/docs/extend/mcp).
 Do not paste a local process command into a remote HTTP connector. A browser
 or phone cannot launch this PC's STDIO process; use Remote MCP for those hosts.

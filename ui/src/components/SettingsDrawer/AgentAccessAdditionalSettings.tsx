@@ -136,13 +136,11 @@ export function LocalMcpSettings({ ownerSession, enabled, available, refreshKey 
     if (!enabled) return
     const generation = setupGeneration.current
     try {
-      const value = target === 'chatgpt'
-        ? formatLocalAgentClientLaunchDetails(client)
-        : target === 'codex'
-          ? formatLocalAgentClientCodexConfig(client)
-          : target === 'claude-code'
-            ? formatLocalAgentClientClaudeCommand(client)
-            : formatLocalAgentClientJson(client)
+      const value = target === 'chatgpt' || target === 'codex'
+        ? formatLocalAgentClientCodexConfig(client)
+        : target === 'claude-code'
+          ? formatLocalAgentClientClaudeCommand(client)
+          : formatLocalAgentClientJson(client)
       await navigator.clipboard.writeText(value)
       if (generation !== setupGeneration.current) return
       setCopied(`${client.id}:${target}`)
@@ -316,13 +314,20 @@ function LocalClientSetup({ client, target, open, enabled, copied, downloading, 
             <h6 className="pt-1 text-[10px] font-semibold text-text-primary">Step 2 · Add this client to {localMcpTargetLabel(target)}</h6>
             {!validCommand && <p className="text-[9px] leading-relaxed text-text-muted">Maestro has not returned a safe launch command for this client. Refresh the client list before copying setup.</p>}
 
-            {target === 'chatgpt' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>On the computer running Maestro, open ChatGPT desktop → Settings → MCP servers → Add server.</li><li>Choose STDIO, name the server <strong>Maestro</strong>, enter the copied launch command, then save the server.</li><li>Restart ChatGPT and check that the server appears in MCP servers. Copying the command does not add or connect it.</li></ol>}
+            {target === 'chatgpt' && <>
+              <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary">
+                <li>On the computer running Maestro, open ChatGPT desktop → Settings → Configuration → Open config.toml.</li>
+                <li>Copy the ChatGPT configuration below. Replace this client’s Maestro server section if it already exists, or add it once if it does not. If you previously added this same client with a combined command, replace that broken entry rather than adding another. Do not duplicate this server or change other <code>mcp_servers</code> sections.</li>
+                <li>Save config.toml, then restart ChatGPT desktop.</li>
+              </ol>
+              <p className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-2 text-[9px] leading-relaxed text-amber-100">Do not paste the executable and arguments together into a command-only Add MCP field. It will treat the whole line as the executable. Use config.toml, or use separate executable and argument fields if the app provides them.</p>
+            </>}
             {target === 'codex' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>Copy the Codex section below and add it to your Codex user config: <code>~/.codex/config.toml</code> (on Windows: <code>%USERPROFILE%\.codex\config.toml</code>).</li><li>Save the file, then restart or reload Codex CLI or IDE.</li><li>Check Codex’s MCP server list before using the tools. Copying the section does not configure Codex.</li></ol>}
             {target === 'claude-desktop' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>Download the extension package below.</li><li>On the same computer where Maestro runs, open Claude Desktop → Settings → Extensions → Install Extension and select the downloaded <code>.mcpb</code> file.</li><li>Open the installed extension in Claude Desktop and confirm its tools are available. Downloading does not install or connect it.</li></ol>}
             {target === 'claude-code' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>On the computer running Maestro, open PowerShell on Windows or a terminal on macOS/Linux.</li><li>Copy and run the command below to register this local STDIO server in Claude Code.</li><li>In Claude Code, run <code>/mcp</code> and confirm the Maestro server is listed.</li></ol>}
             {target === 'other' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>Copy the JSON under Manual setup details.</li><li>Add it to the other app’s local STDIO MCP configuration under <code>mcpServers</code>. Use this on the computer running Maestro.</li><li>Save or restart that app, then check its MCP server list. Copying JSON does not configure or connect it.</li></ol>}
 
-            {validCommand && target === 'chatgpt' && <button type="button" onClick={() => onCopy(target)} disabled={!enabled} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{copied === copyTarget ? <Check size={13} /> : <Copy size={13} />}{copied === copyTarget ? 'Launch command copied' : 'Copy launch command'}</button>}
+            {validCommand && target === 'chatgpt' && <button type="button" onClick={() => onCopy(target)} disabled={!enabled} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{copied === copyTarget ? <Check size={13} /> : <Copy size={13} />}{copied === copyTarget ? 'ChatGPT configuration copied' : 'Copy ChatGPT configuration'}</button>}
             {validCommand && target === 'codex' && <button type="button" onClick={() => onCopy(target)} disabled={!enabled} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{copied === copyTarget ? <Check size={13} /> : <Copy size={13} />}{copied === copyTarget ? 'Codex config copied' : 'Copy Codex config section'}</button>}
             {validCommand && target === 'claude-desktop' && <button type="button" onClick={onDownload} disabled={!enabled || downloading} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{downloading ? <LoaderCircle size={13} className="animate-spin" /> : <Copy size={13} />}{downloading ? 'Preparing extension…' : 'Download Claude Desktop extension'}</button>}
             {validCommand && target === 'claude-code' && <button type="button" onClick={() => onCopy(target)} disabled={!enabled} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{copied === copyTarget ? <Check size={13} /> : <Copy size={13} />}{copied === copyTarget ? 'Claude Code command copied' : 'Copy Claude Code command'}</button>}
@@ -330,7 +335,7 @@ function LocalClientSetup({ client, target, open, enabled, copied, downloading, 
 
             <div className="space-y-1 border-t border-border pt-2">
               <h6 className="text-[10px] font-semibold text-text-primary">Step 3 · Verify in the app</h6>
-              <p className="text-[9px] leading-relaxed text-text-muted">Maestro confirms client creation or a file download only. The app must show the server as available before setup is complete. These local settings contain no token or credential path and work only on this computer.</p>
+              {target === 'chatgpt' ? <p className="text-[9px] leading-relaxed text-text-muted">Start a local Codex chat in ChatGPT desktop on this computer, type <code>/mcp</code>, and confirm Maestro is enabled and its tools are listed. Hosted chats or other chat modes can show a different tool set. Copying the config does not prove the app connected. These settings work only on the computer running Maestro.</p> : <p className="text-[9px] leading-relaxed text-text-muted">Maestro confirms client creation or a file download only. The app must show the server as available before setup is complete. These local settings contain no token or credential path and work only on this computer.</p>}
             </div>
           </>
         )}
@@ -340,7 +345,16 @@ function LocalClientSetup({ client, target, open, enabled, copied, downloading, 
           <summary className="min-h-10 cursor-pointer list-none px-3 py-2 text-[9px] font-semibold text-text-secondary">Manual setup details</summary>
           <div className="space-y-2 border-t border-border p-3">
             {!validCommand ? <p className="text-[9px] leading-relaxed text-text-muted">Maestro has not returned a safe launch command for this client. Refresh the client list before copying setup.</p> : <>
-              {target === 'chatgpt' && <section className="space-y-1"><h6 className="text-[9px] font-semibold text-text-secondary">ChatGPT desktop command and arguments</h6><p className="text-[9px] text-text-muted">Use these separate values if the STDIO form has distinct command and arguments fields.</p><h6 className="text-[9px] font-semibold text-text-secondary">Command</h6><pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} ChatGPT desktop command`}>{client.command}</pre><h6 className="text-[9px] font-semibold text-text-secondary">Arguments</h6><pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} ChatGPT desktop arguments`}>{(client.args || []).join('\n')}</pre></section>}
+              {target === 'chatgpt' && <section className="space-y-1">
+                <h6 className="text-[9px] font-semibold text-text-secondary">ChatGPT config.toml</h6>
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} ChatGPT config.toml`}>{codexConfig}</pre>
+                <h6 className="pt-1 text-[9px] font-semibold text-text-secondary">Optional separate STDIO fields</h6>
+                <p className="text-[9px] text-text-muted">Only use these if the app has distinct executable and arguments fields. If it has one command field, use config.toml above.</p>
+                <h6 className="text-[9px] font-semibold text-text-secondary">Executable</h6>
+                <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} ChatGPT executable`}>{client.command}</pre>
+                <h6 className="text-[9px] font-semibold text-text-secondary">Arguments, in order</h6>
+                <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} ChatGPT arguments`}>{(client.args || []).join('\n')}</pre>
+              </section>}
               {target === 'codex' && <section className="space-y-1"><h6 className="text-[9px] font-semibold text-text-secondary">Codex config.toml</h6><pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} Codex config`}>{codexConfig}</pre></section>}
               {(target === 'other' || !target) && <section className="space-y-1"><h6 className="text-[9px] font-semibold text-text-secondary">Generic MCP JSON</h6><pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} generic MCP JSON`}>{config}</pre></section>}
               {target === 'claude-code' && <section className="space-y-1"><h6 className="text-[9px] font-semibold text-text-secondary">Claude Code command</h6><pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} Claude Code command`}>{command}</pre></section>}
@@ -351,38 +365,6 @@ function LocalClientSetup({ client, target, open, enabled, copied, downloading, 
       </div>
     </details>
   )
-}
-
-function formatLocalAgentClientLaunchDetails(client: AgentAccessLocalClient): string {
-  const command = typeof client.command === 'string' ? client.command : ''
-  const args = Array.isArray(client.args) ? client.args.filter((value): value is string => typeof value === 'string') : []
-  const isWindows = /^[a-zA-Z]:[\\/]/.test(command) || command.startsWith('\\\\')
-  const quote = isWindows ? quoteWindowsCommandLineArgument : quotePosixCommandLineArgument
-  return [command, ...args].map(quote).join(' ')
-}
-
-function quoteWindowsCommandLineArgument(value: string): string {
-  if (!value || /[\s"]/.test(value)) {
-    let quoted = '"'
-    let backslashes = 0
-    for (const character of value) {
-      if (character === '\\') {
-        backslashes += 1
-      } else if (character === '"') {
-        quoted += '\\'.repeat(backslashes * 2 + 1) + '"'
-        backslashes = 0
-      } else {
-        quoted += '\\'.repeat(backslashes) + character
-        backslashes = 0
-      }
-    }
-    return quoted + '\\'.repeat(backslashes * 2) + '"'
-  }
-  return value
-}
-
-function quotePosixCommandLineArgument(value: string): string {
-  return `'${value.replace(/'/g, "'\\''")}'`
 }
 
 export function AgentGenerationDefaults({ ownerSession }: { ownerSession: boolean }) {
