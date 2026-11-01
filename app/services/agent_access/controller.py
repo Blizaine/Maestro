@@ -47,7 +47,9 @@ SCOPES = {
 
 
 def _page(title, body):
-    return HTMLResponse('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + html.escape(title) + '</title><style>body{font:16px system-ui;background:#171b1e;color:#eef0f2;margin:0;padding:5vh 6vw}main{max-width:640px;margin:auto;padding:28px;background:#242b30;border-radius:18px;border:1px solid #414a52}p,label{line-height:1.6}label{display:block;margin:16px 0}button,a{color:inherit}button{font:inherit;border:0;border-radius:10px;padding:12px 22px;margin:8px;background:#ff9d61;color:#151a1c}.secondary{background:#47515a;color:white}code{overflow-wrap:anywhere}</style><main><h1>' + html.escape(title) + '</h1>' + body + '</main>', headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY"})
+    # Native form posts need their real Origin for CSRF validation. This
+    # policy still omits referrers on the cross-origin OAuth callback.
+    return HTMLResponse('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + html.escape(title) + '</title><style>body{font:16px system-ui;background:#171b1e;color:#eef0f2;margin:0;padding:5vh 6vw}main{max-width:640px;margin:auto;padding:28px;background:#242b30;border-radius:18px;border:1px solid #414a52}p,label{line-height:1.6}label{display:block;margin:16px 0}button,a{color:inherit}button{font:inherit;border:0;border-radius:10px;padding:12px 22px;margin:8px;background:#ff9d61;color:#151a1c}.secondary{background:#47515a;color:white}code{overflow-wrap:anywhere}</style><main><h1>' + html.escape(title) + '</h1>' + body + '</main>', headers={"Cache-Control": "no-store", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY"})
 
 
 async def _oauth_body(request):
