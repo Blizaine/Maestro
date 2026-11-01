@@ -537,4 +537,3 @@ def test_run_local_stdio_wires_lifecycle_for_owned_backend_and_close_never_stops
     assert injected.lifecycle_manager is sentinel
     assert injected.closed is True
     assert managers[0].actions == []
-

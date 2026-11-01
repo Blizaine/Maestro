@@ -161,4 +161,3 @@ def test_node_relay_preserves_stdio_and_stops_only_its_local_child(tmp_path):
     assert pid_file.exists(), "the fake local MCP child received the Unicode/space-containing launch path"
     child_pid = int(pid_file.read_text(encoding="utf-8"))
     assert _wait_for_pid_to_exit(child_pid), "the relay should clean up only its spawned local client process"
-
