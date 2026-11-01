@@ -771,6 +771,10 @@ class AccessBoundary:
                 local_device_transport
                 and b"authorization" not in headers
                 and not is_mcp_path
+                # Public OAuth protocol requests also come from native clients
+                # on this PC. They must use their own code/PKCE or refresh
+                # credentials, never the local browser's synthetic authority.
+                and path not in {"/oauth/register", "/oauth/token", "/oauth/revoke"}
                 and self.runtime.security_required
                 and self.runtime.auth.owner_configured
             )

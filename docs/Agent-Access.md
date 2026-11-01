@@ -81,6 +81,13 @@ approve access. Each MCP client still completes its own OAuth sign-in and
 approval in Maestro. Copied instructions contain no bearer token; let the MCP
 client store OAuth credentials in its normal protected store.
 
+When testing in ChatGPT desktop, use a **Codex chat on the computer where you
+configured the MCP server**. A hosted chat can expose a different set of tools;
+its report that no Maestro tools are available does not establish that your
+saved authorization was lost. After approval, ask Codex to call `get_status`
+before creating media. See the [official MCP setup guidance](https://learn.chatgpt.com/docs/extend/mcp)
+for client configuration and host-specific availability.
+
 ## Advanced: manual-certificate LAN access
 
 Use the manual-certificate path when you want a LAN connection or the agent
