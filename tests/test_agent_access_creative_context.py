@@ -26,7 +26,7 @@ def service(tmp_path, *, clock=lambda: 0, session=lambda: "session-1"):
         row = next(row for row in rows if row["model_type"] == mt)
         return {"architecture": row.get("architecture", mt), "fps": row.get("fps", 24), "frames_minimum": 124, "frames_steps": 17, "frames_maximum": 362, "image_outputs": row.get("family") == "flux2", "audio_only": row.get("family") == "tts", "image_ref_choices": {"selection": ["identity"]} if "ref2va" in mt else None}
     def defaults(mt):
-        return {"model_type": mt, "video_length": 124, "sliding_window_size": 124, "sliding_window_overlap": 0, "duration_seconds": 120 if mt == "yue2" else 60, "resolution": "832x480", "prompt": "OLD PERSONAL PROMPT", "image_start": "/private/old-picture.png", "seed": 17, "activated_loras": ["old.safetensors"]}
+        return {"model_type": mt, "video_length": 124, "sliding_window_size": 124, "sliding_window_overlap": 0, "duration_seconds": 120 if mt == "yue2" else 60, "resolution": "832x480", "prompt": "OLD PERSONAL PROMPT", "image_start": "/private/old-picture.png", "audio_guide2": "/private/old-voice.wav", "seed": 17, "activated_loras": ["old.safetensors"], "batch_size": 6, "repeat_generation": 3}
     return CreativeService(
         tmp_path, models=lambda: {"models": rows}, model_def=model_def,
         defaults=defaults, options=lambda mt: {"speech_auto_duration": mt.startswith("fish")},
@@ -44,8 +44,9 @@ def test_model_defaults_follow_compatible_workflow_without_old_creative_inputs(t
     assert value["brief"] == "Anime karate in a dojo"
     assert value["local_writer"] is False
     assert "model_def" not in value
-    for key in ("prompt", "image_start", "seed", "activated_loras"):
+    for key in ("prompt", "image_start", "audio_guide2", "seed", "activated_loras"):
         assert key not in value["params"]
+    assert value["params"]["batch_size"] == value["params"]["repeat_generation"] == 1
     assert not (tmp_path / "creative-defaults.json").exists()
 
 

@@ -121,6 +121,8 @@ def _safe_params(value: Mapping) -> dict:
     return {
         key: copy.deepcopy(item) for key, item in value.items()
         if isinstance(key, str) and key not in excluded and not key.startswith("_")
+        and not re.fullmatch(r"audio_guide[2-6]", key)
+        and not key.endswith(("_path", "_file", "_dir", "_directory"))
         and not _PRIVATE.search(key) and not key.startswith(("h3_window_plan", "h3_window_prompts", "ltx_window_plan", "ltx_window_prompts"))
     }
 
