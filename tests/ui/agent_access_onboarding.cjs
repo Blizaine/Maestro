@@ -329,7 +329,7 @@ async function main() {
     assert.deepEqual(calls.settings, [{ enabled: true }], 'only the explicit switch enables agent connections');
     assert.equal(calls.tailscaleReads, 2, 'cached Agent Access refresh does not repeat Tailscale detection');
     assert.ok(buttonByText(tree, 'Copy Codex setup'), 'enabled access reveals client setup choices');
-    assert.ok(buttonByText(tree, 'Copy Claude setup'));
+    assert.ok(buttonByText(tree, 'Copy Claude Code setup'));
     assert.ok(buttonByText(tree, 'Copy ChatGPT desktop setup'));
     assert.ok(buttonByText(tree, 'Copy server URL for another MCP client'));
     assert.ok(buttonByText(tree, 'Copy setup prompt for my agent'));
@@ -517,6 +517,23 @@ async function main() {
     assert.ok(!tailscaleCodexCopy.includes('TLS certificate SHA-256'));
     assert.ok(!tailscaleCodexCopy.includes('Download public TLS certificate'));
 
+    buttonByText(tree, 'Copy Claude Code setup').props.onClick();
+    await flush();
+    tree = render();
+    const tailscaleClaudeCopy = calls.copied[tailscaleCopyStart + 3];
+    assert.ok(tailscaleClaudeCopy.includes('Claude Code MCP setup for Maestro'));
+    assert.ok(tailscaleClaudeCopy.includes('computer running Claude Code, signed into the same Tailscale network as Maestro'));
+    assert.ok(tailscaleClaudeCopy.includes('claude mcp add --transport http maestro "https://desktop-abc.tailnet.ts.net:8765/mcp"'));
+    assert.ok(tailscaleClaudeCopy.includes('In Claude Code, run /mcp to complete OAuth authentication'));
+    assert.ok(tailscaleClaudeCopy.includes('read-only status or help request'));
+    assert.ok(tailscaleClaudeCopy.includes('Anthropic says those requests come from its cloud'));
+    assert.ok(tailscaleClaudeCopy.includes('private LAN or Tailscale URL'));
+    assert.ok(!tailscaleClaudeCopy.includes('then paste this server URL'));
+    assert.ok(!tailscaleClaudeCopy.includes('TLS certificate SHA-256'));
+    assert.ok(!tailscaleClaudeCopy.includes('Download public TLS certificate'));
+    assert.ok(!tailscaleClaudeCopy.includes('Authorization:'));
+    assert.ok(tailscaleClaudeCopy.includes('No bearer token is included'));
+
     const addressSelect = allNodes(tree).find(node => node.type === 'select' && node.props['aria-label'] === 'MCP connection address');
     addressSelect.props.onChange({ target: { value: 'https://maestro.test/mcp' } });
     tree = render();
@@ -530,6 +547,14 @@ async function main() {
     assert.ok(lanAgentCopy.includes('Expected public TLS certificate SHA-256 fingerprint: ab12cd34'));
     assert.ok(lanAgentCopy.includes('Download public TLS certificate'));
     assert.ok(lanAgentCopy.includes('verify that its SHA-256 exactly matches the fingerprint above'));
+    buttonByText(tree, 'Copy Claude Code setup').props.onClick();
+    await flush();
+    tree = render();
+    const lanClaudeCopy = calls.copied[lanCopyIndex + 1];
+    assert.ok(lanClaudeCopy.includes('claude mcp add --transport http maestro "https://maestro.test/mcp"'));
+    assert.ok(lanClaudeCopy.includes('Expected public TLS certificate SHA-256 fingerprint: ab12cd34'));
+    assert.ok(lanClaudeCopy.includes('verify that its SHA-256 exactly matches the fingerprint above'));
+    assert.ok(!lanClaudeCopy.includes('Authorization:'));
     assert.equal(calls.tailscaleUpdates.length, 1, 'copying setup never toggles Tailscale');
 
     buttonByText(tree, 'Disable Tailscale').props.onClick();

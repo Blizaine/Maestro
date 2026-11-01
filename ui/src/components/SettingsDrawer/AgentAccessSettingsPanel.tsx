@@ -712,7 +712,7 @@ function CopySetupButton({ target, copied, disabled, onClick }: {
   onClick: () => void
 }) {
   const label = target === 'codex' ? 'Codex'
-    : target === 'claude' ? 'Claude'
+    : target === 'claude' ? 'Claude Code'
       : target === 'chatgpt' ? 'ChatGPT desktop'
         : target === 'url' ? 'server URL for another MCP client'
           : 'setup prompt for my agent'
@@ -1032,14 +1032,18 @@ function clientSetupText(target: Exclude<CopyTarget, null>, url: string, fingerp
   }
   if (target === 'claude') {
     return [
-      'Claude MCP setup for Maestro',
-      'Claude Desktop: Settings → Connectors → Add custom connector, then paste this server URL:',
-      url,
+      'Claude Code MCP setup for Maestro',
       trustedTailscale
-        ? 'This URL uses trusted Tailscale HTTPS; sign the client computer into the same Tailscale network. No LAN certificate import or fingerprint matching is needed.'
-        : 'Claude Desktop remote connectors need a URL reachable from Claude. For a local URL, use Claude Code on a computer that can reach this Maestro:',
+        ? 'Run this command in a terminal on the computer running Claude Code, signed into the same Tailscale network as Maestro:'
+        : 'Run this command in a terminal on a computer that can reach this Maestro URL, using Claude Code locally:',
       'claude mcp add --transport http maestro ' + JSON.stringify(url),
-      trustedTailscale ? '' : certificate,
+      'In Claude Code, run /mcp to complete OAuth authentication, then verify with a read-only status or help request.',
+      'Claude Desktop Settings → Connectors → Add custom connector is cloud-hosted: Anthropic says those requests come from its cloud, so they cannot reach a private LAN or Tailscale URL through your computer’s connection.',
+      'Maestro does not provide a public relay or a local Claude Desktop extension. Either would require separate implementation and is not part of this setup.',
+      trustedTailscale
+        ? 'This URL uses trusted Tailscale HTTPS. No LAN certificate import or fingerprint matching is needed.'
+        : fingerprintPrompt,
+      trustedTailscale ? '' : trustInstructions,
       '',
       'No bearer token is included. Approve the requested scopes in Maestro when prompted.',
     ].filter(Boolean).join('\n')

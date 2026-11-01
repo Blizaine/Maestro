@@ -162,6 +162,20 @@ For Claude Code, add it as a remote HTTP MCP server:
 claude mcp add --transport http maestro "https://maestro-YOUR-ID.local:PORT/mcp"
 ```
 
+Run that command locally on a computer that can reach the displayed URL. For a
+Tailscale URL, the computer running Claude Code must be signed into the same Tailscale
+network as Maestro. Then run `/mcp` in Claude Code to complete OAuth and verify
+with a read-only status or help request. For a LAN URL, first follow the
+certificate trust steps in this guide.
+
+Claude Desktop's **Settings → Connectors → Add custom connector** is a remote
+connector: [Anthropic says the MCP connection comes from its cloud and requires
+a server reachable over the public internet](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp).
+It cannot reach a Maestro URL that is private to your LAN or Tailscale, even
+when Claude Desktop is open on your computer. Maestro does not provide a public relay
+or a local Claude Desktop MCP extension; either would require separate work and
+is not part of this setup.
+
 Replace the example host and port with the exact MCP URL from Maestro. Read
 [Codex MCP setup](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) and
 [Claude Code MCP setup](https://code.claude.com/docs/en/mcp) for client-specific
