@@ -1004,8 +1004,6 @@ class AccessBoundary:
             else:
                 metadata_path = "/.well-known/oauth-protected-resource/mcp" if path == "/mcp" else "/.well-known/oauth-protected-resource"
                 challenge = f'Bearer resource_metadata="{origin}{metadata_path}"'
-                if path == "/mcp":
-                    challenge += ' scope="observe"'
                 response = JSONResponse({"detail": detail}, status_code=status, headers={
                     "Cache-Control": "no-store",
                     **({"WWW-Authenticate": challenge} if status == 401 else {}),

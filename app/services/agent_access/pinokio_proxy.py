@@ -9,14 +9,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import html
 import ipaddress
+import logging
 import ssl
 import time
 from urllib.parse import urlsplit
 
 import httpx
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 
 from .state import _pinokio_web_origin
 
@@ -29,6 +31,47 @@ _HOP = {b"connection", b"keep-alive", b"proxy-authenticate", b"proxy-authorizati
 _METADATA = {"/.well-known/maestro", "/.well-known/oauth-authorization-server",
              "/.well-known/openid-configuration", "/.well-known/oauth-protected-resource",
              "/.well-known/oauth-protected-resource/mcp"}
+_LOG = logging.getLogger(__name__)
+
+
+def _unavailable(scope, origin):
+    headers = {k.lower(): v.decode("latin1") for k, v in scope.get("headers", [])}
+    method = scope.get("method", "GET")
+    path = scope.get("path", "")
+    if "text/html" not in headers.get(b"accept", "") or path in {"/mcp", "/mcp/"}:
+        return JSONResponse({"detail": "Agent Access is temporarily reconnecting; retry when it is ready"},
+                            503, headers={"Cache-Control": "no-store", "Retry-After": "2"})
+    target = "/agent-access/login"
+    if method in {"GET", "HEAD"}:
+        target = path
+        query = scope.get("query_string", b"").decode("ascii", errors="ignore")
+        if query:
+            target += "?" + query
+    else:
+        # A failed form POST is never repeated. Return to its same-origin login
+        # or authorization page to check whether the first attempt succeeded.
+        try:
+            referer = urlsplit(headers.get(b"referer", ""))
+            if (referer.scheme + "://" + referer.netloc == origin
+                    and referer.path in {"/agent-access/login", "/oauth/authorize"}):
+                target = referer.path + ("?" + referer.query if referer.query else "")
+        except ValueError:
+            pass
+    if len(target) > 8192 or not target.startswith("/") or target.startswith("//"):
+        target = "/agent-access/login"
+    target = html.escape(target, quote=True)
+    refresh = f'<meta http-equiv="refresh" content="2;url={target}">' if method in {"GET", "HEAD"} else ""
+    note = ("This page will check the connection again automatically. Your saved approval is kept."
+            if method in {"GET", "HEAD"} else
+            "This form was not sent again. Continue to check whether sign-in completed. If needed, request a fresh browser code.")
+    return HTMLResponse(
+        '<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">'
+        + refresh + '<title>Reconnecting to Maestro</title>'
+        '<style>body{font:16px system-ui;background:#171b1e;color:#eef0f2;padding:8vh 6vw}main{max-width:520px;margin:auto;padding:28px;background:#242b30;border-radius:18px}p{line-height:1.6}a{display:inline-block;background:#ff9d61;color:#171b1e;padding:12px 20px;border-radius:10px;text-decoration:none}</style>'
+        '<main><h1>Reconnecting to Agent Access</h1><p>Maestro is refreshing this secure connection.</p><p>'
+        + note + f'</p><a href="{target}">Continue</a></main>', status_code=503,
+        headers={"Cache-Control": "no-store", "Retry-After": "2", "Referrer-Policy": "no-referrer"},
+    )
 
 
 def _protocol_path(path):
@@ -86,12 +129,16 @@ class PinokioControllerEnvelope:
             origin, timestamp = envelope[_ORIGIN], envelope[_TIME]
             if (not _loopback(scope) or scope.get("scheme") != "https"
                     or not _protocol_path(scope.get("path", ""))
-                    or origin != self.runtime.pinokio_remote_origin
                     or not timestamp.isdecimal() or abs(self.clock() - int(timestamp)) > 30
                     or not hmac.compare_digest(envelope[_SIGNATURE].encode("ascii"),
                         _signature(self.runtime.auth.pinokio_proxy_key(), scope, origin, timestamp))):
                 raise ValueError()
         except (ValueError, UnicodeError, TypeError):
+            return await JSONResponse({"detail": "Invalid Pinokio Remote connection"}, 421)(scope, receive, send)
+        if origin != self.runtime.pinokio_remote_origin:
+            if (self.runtime.pinokio_remote_origin is None and self.runtime.auth.enabled
+                    and self.runtime.config.get("pinokio_remote_enabled") is True):
+                return await _unavailable(scope, origin)(scope, receive, send)
             return await JSONResponse({"detail": "Invalid Pinokio Remote connection"}, 421)(scope, receive, send)
         parsed = urlsplit(origin)
         # This synthetic peer can never receive direct-local owner authority.
@@ -109,6 +156,7 @@ class PinokioNativeMcpProxy:
     def __init__(self, app, runtime, *, discovery=None, client_factory=None, clock=time.time):
         self.app, self.runtime, self.discovery = app, runtime, discovery
         self.client_factory, self.clock = client_factory, clock
+        self._last_verified_origin = None
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -124,9 +172,17 @@ class PinokioNativeMcpProxy:
         evidence = await asyncio.to_thread(self.discovery.status)
         origin = _pinokio_web_origin(evidence)
         if not origin or hosts[0] != urlsplit(origin).netloc.encode("ascii"):
+            if (origin is None and self._last_verified_origin
+                    and hosts[0] == urlsplit(self._last_verified_origin).netloc.encode("ascii")
+                    and _protocol_path(scope.get("path", "")) and self.runtime.auth.enabled
+                    and self.runtime.config.get("pinokio_remote_enabled") is True):
+                # Remembered addresses are used only to display a reconnect
+                # page, never to forward or authorize a stale route.
+                return await _unavailable(scope, self._last_verified_origin)(scope, receive, send)
             # Other Tailscale routes and ordinary LAN access retain their own
             # existing policy. A stale/unknown route never becomes this proxy.
             return await self.app(scope, receive, send)
+        self._last_verified_origin = origin
         if not _protocol_path(scope.get("path", "")):
             # Pinokio's portal uses :443 and opens apps on their own stable
             # HTTPS ports. Allow only that verified node to embed this UI.
@@ -159,17 +215,28 @@ class PinokioNativeMcpProxy:
                 target = self.runtime.local_url + scope.get("raw_path", scope["path"].encode()).decode("ascii")
                 if scope.get("query_string"):
                     target += "?" + scope["query_string"].decode("ascii")
-                upstream = client.build_request(scope.get("method", "GET"), target, headers=headers, content=body())
-                response = await client.send(upstream, stream=True)
+                method = scope.get("method", "GET")
+                read_only = method in {"GET", "HEAD"}
+                for attempt in range(3 if read_only else 1):
+                    upstream = client.build_request(method, target, headers=headers, content=None if read_only else body())
+                    try:
+                        response = await client.send(upstream, stream=True)
+                        break
+                    except (httpx.ConnectError, httpx.ConnectTimeout):
+                        if not read_only or attempt == 2:
+                            raise
+                        await asyncio.sleep(0.2 * (attempt + 1))
                 await send({"type": "http.response.start", "status": response.status_code,
                             "headers": _clean_headers(response.headers.raw)})
                 async for chunk in response.aiter_raw():
                     await send({"type": "http.response.body", "body": chunk, "more_body": True})
                 await send({"type": "http.response.body", "body": b"", "more_body": False})
-        except (httpx.HTTPError, OSError, ValueError):
+        except (httpx.HTTPError, OSError, ValueError) as error:
             if response is None:
-                await JSONResponse({"detail": "Start or refresh Agent Access in Pinokio to use Remote MCP"}, 503,
-                                   headers={"Cache-Control": "no-store"})(scope, receive, send)
+                # Exception type only: URLs, OAuth codes, cookies, tokens and
+                # raw form bodies must never enter terminal/audit logs.
+                _LOG.warning("Pinokio Remote could not reach Agent Access (%s)", type(error).__name__)
+                await _unavailable(scope, origin)(scope, receive, send)
             else:
                 raise
         finally:

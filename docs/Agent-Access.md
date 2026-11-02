@@ -144,6 +144,11 @@ To use that connection for an agent on your private network, enable Remote MCP,
 then select **Use Pinokio Remote for MCP**. Copy the resulting server URL into
 your MCP client and complete its normal Maestro OAuth approval. Permissions,
 job ownership and grant revocation work exactly as on the other transports.
+Pinokio route refreshes update the connection in place. A temporary interruption
+shows a reconnect page; browser-code submissions are never sent again automatically.
+The consent page offers the permissions requested by the client. An explicit
+Observe-only request remains read-only; reconnect with additional permissions to
+enable generation or management. Existing grants are never expanded silently.
 Keep **both Maestro and Agent Access running**: this URL shares Maestro's web
 route. The separate direct controller endpoint remains available for clients
 that need access while the model backend is stopped.

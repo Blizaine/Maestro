@@ -290,12 +290,15 @@ async function main() {
 
   const agentPanel = fs.readFileSync(path.join(root, 'ui/src/components/SettingsDrawer/AgentAccessSettingsPanel.tsx'), 'utf8');
   const notificationPanel = fs.readFileSync(path.join(root, 'ui/src/components/SettingsDrawer/NotificationSettingsPanel.tsx'), 'utf8');
+  const pinokioPanel = fs.readFileSync(path.join(root, 'ui/src/components/SettingsDrawer/PinokioRemoteAccess.tsx'), 'utf8');
   assert.match(agentPanel, /\[pinokioRemoteMcpUrl, tailscaleMcpUrl, usablePreferredMcpUrl/);
   assert.match(agentPanel, /Trusted Pinokio Remote HTTPS/);
   assert.match(agentPanel, /hosted cloud connectors are not automatically authorized by that network/);
   assert.match(notificationPanel, /Standalone Tailscale setup \(fallback\)/);
   assert.match(notificationPanel, /This PC does not need a second Tailscale install/);
   assert.match(notificationPanel, /fetchPinokioRemoteAccessStatus/);
+  assert.match(pinokioPanel, /Checking the connection… Refresh status when ready/);
+  assert.doesNotMatch(pinokioPanel, /controller restarts|controller restart|controller restarting/i);
   console.log('Pinokio Remote status, trusted MCP opt-in, published browser URL, and notification fallback passed');
 }
 

@@ -172,7 +172,7 @@ def test_disabled_stale_and_other_routes_retain_native_access_and_grants(tmp_pat
             assert runtime.auth.enabled and runtime.auth.authenticate(_session["access_token"]).owner
             runtime.configure_pinokio_remote(True)
             gateway.discovery = type("Offline", (), {"status": lambda _: {"phase": "offline"}})()
-            assert (await client.get("/mcp")).json()["native"] is True
+            assert (await client.get("/mcp")).status_code == 503
             runtime._pinokio_remote_discovery = gateway.discovery
             runtime.refresh_pinokio_remote()
             assert runtime.pinokio_remote_status()["ready"] is False

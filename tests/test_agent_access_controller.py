@@ -268,6 +268,12 @@ def test_oauth_routes_bind_pkce_redirect_resource_and_refresh_family(tmp_path):
 
         resource = client.get("/.well-known/oauth-protected-resource/mcp").json()
         assert resource["resource"] == runtime.mcp_url
+        assert resource["scopes_supported"] == ["observe", "generate", "manage", "admin"]
+        from mcp.client.auth.utils import get_client_metadata_scopes
+        from mcp.shared.auth import ProtectedResourceMetadata
+
+        protected_resource = ProtectedResourceMetadata.model_validate(resource)
+        assert get_client_metadata_scopes(None, protected_resource) == "observe generate manage admin"
         unauthenticated = client.get(
             "/mcp",
             headers={"Authorization": "Bearer invalid-token", "Accept": "application/json, text/event-stream"},
@@ -275,7 +281,7 @@ def test_oauth_routes_bind_pkce_redirect_resource_and_refresh_family(tmp_path):
         assert unauthenticated.status_code == 401
         challenge = unauthenticated.headers["www-authenticate"]
         assert f'resource_metadata="{runtime.origin}/.well-known/oauth-protected-resource/mcp"' in challenge
-        assert 'scope="observe"' in challenge
+        assert "scope=" not in challenge
         assert "invalid-token" not in unauthenticated.text
 
         registered = client.post(
@@ -300,6 +306,45 @@ def test_oauth_routes_bind_pkce_redirect_resource_and_refresh_family(tmp_path):
         consent_url = authorize.headers["location"]
         consent = client.get(consent_url)
         assert consent.status_code == 200
+        assert "This client requested read-only access" not in consent.text
+
+        read_only_verifier, read_only_challenge = _pkce()
+        read_only_authorize = client.get("/oauth/authorize", params={
+            "response_type": "code",
+            "client_id": metadata["client_id"],
+            "redirect_uri": metadata["redirect_uris"][0],
+            "scope": "observe",
+            "resource": runtime.mcp_url,
+            "state": "read-only-state",
+            "code_challenge": read_only_challenge,
+            "code_challenge_method": "S256",
+        }, headers={"Origin": runtime.origin})
+        assert read_only_authorize.status_code == 303
+        read_only_consent_url = read_only_authorize.headers["location"]
+        read_only_consent = client.get(read_only_consent_url)
+        assert read_only_consent.status_code == 200
+        assert "This client requested read-only access. To generate or edit, reconnect the client and request additional permissions." in read_only_consent.text
+        assert 'name="scope" value="observe" checked' in read_only_consent.text
+        assert 'name="scope" value="generate"' not in read_only_consent.text
+        read_only_approved = client.post(
+            read_only_consent_url,
+            data={"decision": "approve", "scope": ["observe"]},
+            headers={"Origin": runtime.origin},
+        )
+        assert read_only_approved.status_code == 303
+        read_only_callback = urlsplit(read_only_approved.headers["location"])
+        read_only_code = parse_qs(read_only_callback.query)["code"][0]
+        read_only_token = client.post("/oauth/token", json={
+            "grant_type": "authorization_code",
+            "client_id": metadata["client_id"],
+            "code": read_only_code,
+            "redirect_uri": metadata["redirect_uris"][0],
+            "code_verifier": read_only_verifier,
+            "resource": runtime.mcp_url,
+        })
+        assert read_only_token.status_code == 200
+        assert read_only_token.json()["scope"] == "observe"
+
         approved = client.post(
             consent_url,
             data={"decision": "approve", "scope": ["observe"]},

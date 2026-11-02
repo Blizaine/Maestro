@@ -107,7 +107,7 @@ export function PinokioRemoteAccess({
 
       setActionMessage(browserReady && isAgentAccessPinokioRemoteReady(next)
         ? 'Pinokio Remote MCP access is ready. Each client still needs its own authorization in Maestro.'
-        : 'Pinokio Remote MCP access is enabled. Maestro is refreshing its Agent Access controller; refresh status in a moment to confirm readiness.')
+        : 'Pinokio Remote MCP access is enabled. Checking the connection… Refresh status when ready to confirm readiness.')
       await new Promise<void>(resolve => window.setTimeout(resolve, 1100))
       const refreshedDetection = await refreshDetection()
       const refreshed = await refreshOwnerStatus()
@@ -120,7 +120,7 @@ export function PinokioRemoteAccess({
       )
       setActionMessage(confirmedReady
         ? 'Pinokio Remote MCP access is ready. Each client still needs its own authorization in Maestro.'
-        : 'Pinokio Remote MCP access was enabled. Maestro has not confirmed readiness yet; refresh after its Agent Access controller restarts before connecting.')
+        : 'Pinokio Remote MCP access was enabled. Readiness is not confirmed yet; refresh status when ready before connecting.')
     } catch (error) {
       if (error instanceof AgentAccessApiError && error.status === 404) {
         setActionError('Pinokio Remote MCP settings are not available on this Maestro version. Refresh after updating Maestro.')
@@ -237,7 +237,7 @@ export function PinokioRemoteAccess({
         )}
         {actionError && <p className="rounded-md border border-rose-500/30 bg-rose-500/5 p-2 text-[10px] leading-relaxed text-rose-200" role="alert">{actionError}</p>}
         {actionMessage && <p className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-2 text-[10px] leading-relaxed text-emerald-100" role="status">{actionMessage}</p>}
-        {enabled && !ready && <p className="text-[10px] leading-relaxed text-text-muted" role="status">MCP is enabled, but the backend has not confirmed readiness yet. Refresh after Maestro refreshes its Agent Access controller; do not connect until it reports Ready.</p>}
+        {enabled && !ready && <p className="text-[10px] leading-relaxed text-text-muted" role="status">MCP is enabled, but the backend has not confirmed readiness yet. Refresh status when ready; do not connect until it reports Ready.</p>}
       </div>
     </section>
   )
@@ -285,7 +285,7 @@ function pinokioStatusReason(reason: string | null, phase: string): string {
     return 'Start Maestro and enable Remote for this app in Pinokio, then refresh.'
   }
   if (['controller_starting', 'starting', 'restarting', 'agent_access_restarting'].includes(code)) {
-    return 'Maestro is refreshing its Agent Access controller. Refresh this status in a moment.'
+    return 'Checking the connection… Refresh status when ready.'
   }
   if (['node_unavailable', 'node_offline', 'remote_unavailable', 'unavailable', 'not_available'].includes(code)) {
     return 'Pinokio Remote is unavailable right now. Check that Maestro is running from Pinokio and refresh.'

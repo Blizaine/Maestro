@@ -185,7 +185,7 @@ def test_controller_can_require_authentication_before_owner_bootstrap():
     headers = dict(messages[0]["headers"])
     assert messages[0]["status"] == 401
     assert headers[b"www-authenticate"] == (
-        b'Bearer resource_metadata="https://maestro.test/.well-known/oauth-protected-resource/mcp" scope="observe"'
+        b'Bearer resource_metadata="https://maestro.test/.well-known/oauth-protected-resource/mcp"'
     )
     assert b"agent-token" not in b"".join(message.get("body", b"") for message in messages)
 

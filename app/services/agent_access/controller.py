@@ -106,13 +106,14 @@ def create_app(
     mcp = create_mcp_server(bridge, runtime.app_root, version)
     if tls_material:
         runtime.configure_certificate_ips(tls_material.ip_addresses)
+    transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=list(runtime.allowed_authorities),
+        allowed_origins=list(runtime.allowed_origins),
+    )
     transport = mcp.streamable_http_app(
         json_response=True, stateless_http=True,
-        transport_security=TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=list(runtime.allowed_authorities),
-            allowed_origins=list(runtime.allowed_origins),
-        ),
+        transport_security=transport_security,
     )
 
     @contextlib.asynccontextmanager
@@ -123,6 +124,7 @@ def create_app(
 
     app = FastAPI(title="Maestro Agent Access", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.bridge, app.state.runtime, app.state.mcp = bridge, runtime, mcp
+    app.state.transport_security = transport_security
     # Native mutations reserve their receipt in the backend, never twice in
     # this same shared journal. Controller-owned mutations have domain-specific
     # receipts (lifecycle, content-hashed uploads and OAuth codes).
@@ -242,7 +244,11 @@ def create_app(
         owner_required()
         pending = runtime.auth.get_authorization(request_id)
         controls = "".join(f'<label><input type="checkbox" name="scope" value="{scope}" checked> <strong>{scope}</strong> — {html.escape(SCOPES[scope])}</label>' for scope in pending["scopes"])
-        return _page("Connect an agent", f'<p><strong>{html.escape(pending["client_name"])}</strong> requests access to <strong>{html.escape(runtime.config["label"])}</strong>.</p><p>This client can read shared workspace media. Generation and management can use GPU time, disk space and network downloads. Administration can change configuration and stop an idle app. It cannot grant itself owner access.</p><form method="post">{controls}<button name="decision" value="approve">Allow selected access</button><button class="secondary" name="decision" value="deny">Deny</button></form><p>Callback: <code>{html.escape(pending["redirect_uri"])}</code></p>')
+        observe_only_hint = (
+            '<p role="note">This client requested read-only access. To generate or edit, reconnect the client and request additional permissions.</p>'
+            if pending["scopes"] == ["observe"] else ""
+        )
+        return _page("Connect an agent", f'<p><strong>{html.escape(pending["client_name"])}</strong> requests access to <strong>{html.escape(runtime.config["label"])}</strong>.</p>{observe_only_hint}<p>This client can read shared workspace media. Generation and management can use GPU time, disk space and network downloads. Administration can change configuration and stop an idle app. It cannot grant itself owner access.</p><form method="post">{controls}<button name="decision" value="approve">Allow selected access</button><button class="secondary" name="decision" value="deny">Deny</button></form><p>Callback: <code>{html.escape(pending["redirect_uri"])}</code></p>')
 
     @app.post("/api/v1/agent-access/authorizations/{request_id}")
     async def consent_post(request_id: str, request: Request):
@@ -461,7 +467,6 @@ async def _serve_runtime(args, runtime):
         pinokio_remote = {}
         if config.get("pinokio_remote_enabled") is True:
             pinokio_remote = await asyncio.to_thread(runtime.refresh_pinokio_remote)
-        active_pinokio_origin = runtime.pinokio_remote_origin
         tailscale_material = None
         tailscale_evidence = {
             "installed": bool(find_tailscale()), "connected": False,
@@ -526,28 +531,31 @@ async def _serve_runtime(args, runtime):
         if tailscale_material is not None:
             _configure_tailscale_sni(server_config.ssl, runtime, tailscale_material)
         server = uvicorn.Server(server_config)
-        async def watch(server=server, enabled=enabled, config=config, discovery_status=discovery_status, active_network_metadata=active_network_metadata, tailscale_material=tailscale_material, active_pinokio_origin=active_pinokio_origin):
+        async def watch(server=server, enabled=enabled, config=config, discovery_status=discovery_status, active_network_metadata=active_network_metadata, tailscale_material=tailscale_material):
             announced = False
             checked_tailscale_at = time.monotonic()
             renewed_tailscale_at = checked_tailscale_at
             checked_pinokio_at = checked_tailscale_at
+            active_pinokio_enabled = config.get("pinokio_remote_enabled") is True
             while not server.should_exit:
                 if server.started and not announced:
                     atomic_json(runtime.directory / "controller.json", {"status": "ready", "pid": os.getpid(), "certificate_sha256": material.fingerprint_sha256, "discovery_status": discovery_status, **active_network_metadata, "updated_at": time.time()})
                     print(f"MAESTRO_AGENT_ACCESS_READY {runtime.local_url}", flush=True)
                     announced = True
                 await asyncio.sleep(1)
-                if runtime.auth.enabled != enabled or runtime.config != config:
+                current_config = runtime.config
+                if runtime.auth.enabled != enabled or _listener_configuration(current_config) != _listener_configuration(config):
                     server.should_exit = True
                     return True
-                if config.get("pinokio_remote_enabled") is True and time.monotonic() - checked_pinokio_at >= 15:
+                current_pinokio_enabled = current_config.get("pinokio_remote_enabled") is True
+                if (current_pinokio_enabled != active_pinokio_enabled
+                        or current_pinokio_enabled and time.monotonic() - checked_pinokio_at >= 15):
                     checked_pinokio_at = time.monotonic()
-                    await asyncio.to_thread(runtime.refresh_pinokio_remote)
-                    if active_pinokio_origin != runtime.pinokio_remote_origin:
-                        # Rebuild the SDK's exact host/origin allowlist after
-                        # reconnect, app-port changes or a Pinokio node rename.
-                        server.should_exit = True
-                        return True
+                    await _refresh_pinokio_transport(runtime, app, active_network_metadata)
+                    active_pinokio_enabled = current_pinokio_enabled
+                    # Pinokio terminates its own TLS. A route refresh never
+                    # needs to close this listener or interrupt OAuth forms.
+                    atomic_json(runtime.directory / "controller.json", {"status": "ready", "pid": os.getpid(), "certificate_sha256": material.fingerprint_sha256, "discovery_status": discovery_status, **active_network_metadata, "updated_at": time.time()})
                 if enabled and runtime.tailscale_hostname and time.monotonic() - checked_tailscale_at >= 60:
                     # Identity is checked in the background, never by ordinary
                     # UI polling. Certificate renewal is bounded to hourly.
@@ -581,6 +589,22 @@ async def _serve_runtime(args, runtime):
             atomic_json(runtime.directory / "controller.json", {"status": "stopped", "pid": os.getpid(), "certificate_sha256": material.fingerprint_sha256, "discovery_status": "disabled", **active_network_metadata, "updated_at": time.time()})
         if not restart:
             break
+
+
+def _listener_configuration(config):
+    return {key: value for key, value in config.items() if key != "pinokio_remote_enabled"}
+
+
+async def _refresh_pinokio_transport(runtime, app, network_metadata):
+    evidence = {}
+    if runtime.config.get("pinokio_remote_enabled") is True:
+        evidence = await asyncio.to_thread(runtime.refresh_pinokio_remote)
+    # The SDK retains this settings object. Update only exact verified aliases;
+    # the signed envelope still validates each request against current evidence.
+    settings = app.state.transport_security
+    settings.allowed_hosts[:] = list(runtime.allowed_authorities)
+    settings.allowed_origins[:] = list(runtime.allowed_origins)
+    network_metadata["pinokio_remote"] = evidence
 
 
 def _configure_tailscale_sni(default_context, runtime, material):
