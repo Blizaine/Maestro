@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'app'))
 from services.director.music_cues import detect_percussion, format_music_cues
 from services.director.planners.music_video import MusicVideoPlanner
+from services.director_video_strategy import advance_director_multiclip_audio_offset
 
 
 class MusicCueTests(unittest.TestCase):
@@ -90,7 +91,8 @@ class MusicCueTests(unittest.TestCase):
                    _mc_min_f=124, _mc_fs=17, has_end=False, _mc_trim_end_frames=False,
                    cumulative_offset=0, total_trimmed_frames=0, group_id='test', clip_count=3,
                    multi_clip_audio_start_sec=0, multi_clip_concat_audio='song.wav',
-                   omni_sequence_continuity=False, omni_sequence_target_frames=0)
+                   omni_sequence_continuity=False, omni_sequence_target_frames=0,
+                   advance_director_multiclip_audio_offset=advance_director_multiclip_audio_offset)
         offsets, trims = [], []
         for i in range(3):
             env.update(i=i, clip_params={})

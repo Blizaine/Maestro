@@ -129,10 +129,12 @@ class SingularityIntegrationTests(unittest.TestCase):
     def test_native_validator_accepts_ref_adapter_for_frames_singularity_only(self):
         import os
         from models.minimax_h3 import turbo
+        from models.minimax_h3.lora_compatibility import validate_minimax_h3_loras
 
         validate = production_function(
             ROOT / "app/models/minimax_h3/minimax_h3_main.py", "validate_loras",
-            {"os": os, **{name: getattr(turbo, name) for name in (
+            {"os": os, "validate_minimax_h3_loras": validate_minimax_h3_loras,
+             **{name: getattr(turbo, name) for name in (
                 "find_minimax_h3_accelerators", "find_minimax_h3_turbo_loras",
                 "find_minimax_h3_pdd_loras", "minimax_h3_turbo_preset_for_path",
                 "minimax_h3_adapter_workflow")}}, class_name="MiniMaxH3Model",
@@ -154,6 +156,7 @@ class SingularityIntegrationTests(unittest.TestCase):
     def test_ptd_hop_files_are_not_reclassified_as_turbo_or_foreign_pdd(self):
         import struct
         from models.minimax_h3 import ptd, turbo
+        from models.minimax_h3.lora_compatibility import validate_minimax_h3_loras
 
         def write_header(path, metadata):
             header = json.dumps({"__metadata__": metadata}, separators=(",", ":")).encode("utf-8")
@@ -175,7 +178,8 @@ class SingularityIntegrationTests(unittest.TestCase):
             self.assertEqual(turbo.find_minimax_h3_accelerators(hop_paths), hop_paths)
             validate = production_function(
                 ROOT / "app/models/minimax_h3/minimax_h3_main.py", "validate_loras",
-                {"os": __import__("os"), **{name: getattr(turbo, name) for name in (
+                {"os": __import__("os"), "validate_minimax_h3_loras": validate_minimax_h3_loras,
+                 **{name: getattr(turbo, name) for name in (
                     "find_minimax_h3_accelerators", "find_minimax_h3_turbo_loras",
                     "find_minimax_h3_pdd_loras", "minimax_h3_turbo_preset_for_path",
                     "minimax_h3_adapter_workflow")}}, class_name="MiniMaxH3Model",

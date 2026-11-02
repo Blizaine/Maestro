@@ -16,6 +16,8 @@ sys.path.insert(0, str(APP))
 from services.agent_access.auth import Principal
 from services.agent_access.backend import AgentAccessBackend, is_restricted_agent
 from services.agent_access.context import principal_context
+from services.generation_details import is_terminal_studio_failure, public_generation_details
+from services.job_lifecycle import snapshot_job
 
 
 LAUNCH = Path(__file__).resolve().parents[1] / "app" / "launch.py"
@@ -57,7 +59,9 @@ def load_routes(jobs):
         "_is_restricted_agent": is_restricted_agent,
         "principal_context": principal_context,
         "HTTPException": HTTPException,
-        "snapshot_job": deepcopy,
+        "snapshot_job": snapshot_job,
+        "public_generation_details": public_generation_details,
+        "is_terminal_studio_failure": is_terminal_studio_failure,
         "public_enhancement": lambda value, **kwargs: value,
         "_generation_previews": SimpleNamespace(
             fields=lambda job: {"preview": job.get("preview")}

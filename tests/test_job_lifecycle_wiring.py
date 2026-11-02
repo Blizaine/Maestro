@@ -59,6 +59,7 @@ class TestJobLifecycleWiring(unittest.TestCase):
         from app.services.job_lifecycle import snapshot_job
         from services.agent_access.backend import AgentAccessBackend, is_restricted_agent
         from services.agent_access.context import principal_context
+        from services.generation_details import is_terminal_studio_failure, public_generation_details
 
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
@@ -84,6 +85,8 @@ class TestJobLifecycleWiring(unittest.TestCase):
                      "_agent_access_backend": backend,
                      "_is_restricted_agent": is_restricted_agent,
                      "principal_context": principal_context,
+                     "is_terminal_studio_failure": is_terminal_studio_failure,
+                     "public_generation_details": public_generation_details,
                      "_gen_lock": threading.Lock(),
                      "_active_gen_states": {},
                      "public_enhancement": lambda record, **_kwargs: record,

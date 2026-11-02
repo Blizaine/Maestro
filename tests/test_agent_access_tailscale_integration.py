@@ -1,4 +1,10 @@
 """Tailscale origin/OAuth gates and real TLS/MCP transport, without live state."""
+import importlib.util
+import unittest
+
+if importlib.util.find_spec("mcp") is None:
+    raise unittest.SkipTest("Remote MCP tests run in the separate Agent Access environment")
+
 import asyncio
 import os
 import socket

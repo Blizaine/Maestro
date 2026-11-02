@@ -1,10 +1,14 @@
 """mDNS discovery validation and lifecycle tests with no real broadcasts."""
 
 from pathlib import Path
+import importlib.util
 import ipaddress
 import sys
 import unittest
 from unittest.mock import Mock, patch
+
+if importlib.util.find_spec("zeroconf") is None:
+    raise unittest.SkipTest("mDNS tests run in the separate Agent Access environment")
 
 _APP = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(_APP))

@@ -37,7 +37,7 @@ const info={exists:name=>name==='app/env',running:name=>name==='start.js',
 launcher.menu({gpu:'nvidia',gpu_target:'sm_89',gpu_driver:'610.88',platform:'win32'},info)
   .then(v=>process.stdout.write(JSON.stringify(v)));
 """)
-        self.assertEqual(menu[0]["href"], "http://127.0.0.1:49999")
+        self.assertEqual(menu[0]["href"], "http://127.0.0.1:49999/?maestro_ui_policy=lan-v2")
         self.assertTrue(menu[0]["default"])
         self.assertFalse(any(item.get("href") == "update.js" for item in menu))
 
@@ -57,12 +57,12 @@ const launcher=require('./pinokio.js');
 const info={exists:()=>true,running:n=>n==='start.js',local:()=>({url:'http://127.0.0.1:49999',port:'49999'})};
 launcher.menu({gpu:'nvidia',gpu_target:'sm_86',platform:'win32'},info).then(v=>process.stdout.write(JSON.stringify(v)));
 """)
-        self.assertEqual(menu[0]["href"], "http://127.0.0.1:49999")
+        self.assertEqual(menu[0]["href"], "http://127.0.0.1:49999/?maestro_ui_policy=lan-v2")
         self.assertTrue(menu[0]["default"])
         actions = next(item for item in menu if item["text"] == "Developer tests")["menu"][:5]
         self.assertEqual(len(actions), 5)
         self.assertEqual(actions[0]["href"], "tests/pinokio/test_bench.js?mode=smoke")
-        self.assertTrue(all(action["params"]["base_url"] == menu[0]["href"] for action in actions))
+        self.assertTrue(all(action["params"]["base_url"] == "http://127.0.0.1:49999" for action in actions))
         self.assertFalse(any(action.get("default") for action in actions))
 
     def test_menu_reports_the_nested_bench_uri_as_running(self):

@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import asyncio
 import json
 import os
 import sqlite3
 import sys
+import unittest
 from pathlib import Path
+
+if importlib.util.find_spec("mcp") is None:
+    raise unittest.SkipTest("Local MCP tests run in the separate Agent Access environment")
 
 import httpx
 import pytest
@@ -16,8 +21,6 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
-
-pytest.importorskip("mcp")
 
 _APP = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(_APP))
