@@ -176,7 +176,8 @@ def test_local_credentials_are_private_scoped_and_never_in_launch_config(tmp_pat
     config = local_launch_configuration(tmp_path / "app", record["id"])
     assert token not in json.dumps(config)
     assert config["args"][-2:] == ["--client", record["id"]]
-    assert config["command"].endswith("env-agent/Scripts/python.exe") or config["command"].endswith("env-agent\\Scripts\\python.exe")
+    interpreter_parts = ("Scripts", "python.exe") if os.name == "nt" else ("bin", "python")
+    assert Path(config["command"]) == tmp_path / "app" / "env-agent" / Path(*interpreter_parts)
     with pytest.raises(LocalCredentialError):
         read_local_credential(directory, "../outside")
     with pytest.raises(AuthError, match="Owner"):
