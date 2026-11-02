@@ -8,6 +8,7 @@ import {
   formatLocalAgentClientClaudeCommand,
   formatLocalAgentClientCodexConfig,
   formatLocalAgentClientJson,
+  formatLocalAgentClientServerName,
   updateAgentAccessCreativeDefaults,
   type AgentAccessCreativeDefault,
   type AgentAccessCreativeDefaults,
@@ -23,6 +24,7 @@ const SCOPE_CHOICES: Array<{ id: AgentAccessScope; label: string; description: s
 ]
 
 type LocalMcpTarget = 'chatgpt' | 'codex' | 'claude-desktop' | 'claude-code' | 'other'
+type LocalMcpCopyAction = LocalMcpTarget | 'chatgpt-server-name' | 'chatgpt-command' | 'chatgpt-toml' | `chatgpt-argument-${number}`
 
 const LOCAL_MCP_TARGETS: Array<{ id: LocalMcpTarget; label: string; suggestedName: string }> = [
   { id: 'chatgpt', label: 'ChatGPT desktop', suggestedName: 'ChatGPT on this PC' },
@@ -132,22 +134,33 @@ export function LocalMcpSettings({ ownerSession, enabled, available, refreshKey 
     }
   }
 
-  const handleCopy = async (client: AgentAccessLocalClient, target: LocalMcpTarget) => {
-    if (!enabled) return
+  const handleCopy = async (client: AgentAccessLocalClient, action: LocalMcpCopyAction) => {
+    if (!enabled || !available || client.revoked || !client.command || !client.args) return
     const generation = setupGeneration.current
     try {
-      const value = target === 'chatgpt' || target === 'codex'
-        ? formatLocalAgentClientCodexConfig(client)
-        : target === 'claude-code'
-          ? formatLocalAgentClientClaudeCommand(client)
-          : formatLocalAgentClientJson(client)
+      const argumentMatch = /^chatgpt-argument-(\d+)$/.exec(action)
+      const value = action === 'chatgpt-server-name'
+        ? formatLocalAgentClientServerName(client)
+        : action === 'chatgpt-command'
+          ? client.command
+          : argumentMatch
+            ? client.args[Number(argumentMatch[1])]
+            : action === 'chatgpt-toml' || action === 'codex'
+              ? formatLocalAgentClientCodexConfig(client)
+              : action === 'claude-code'
+                ? formatLocalAgentClientClaudeCommand(client)
+                : formatLocalAgentClientJson(client)
+      if (value === undefined) return
       await navigator.clipboard.writeText(value)
       if (generation !== setupGeneration.current) return
-      setCopied(`${client.id}:${target}`)
-      window.setTimeout(() => setCopied(current => current === `${client.id}:${target}` ? null : current), 1800)
+      const copiedKey = `${client.id}:${action}`
+      setCopied(copiedKey)
+      window.setTimeout(() => setCopied(current => current === copiedKey ? null : current), 1800)
+      const target: LocalMcpTarget = action === 'chatgpt-server-name' || action === 'chatgpt-command'
+        || action === 'chatgpt-toml' || action.startsWith('chatgpt-argument-') ? 'chatgpt' : action as LocalMcpTarget
       setMessage(`${localMcpTargetLabel(target)} setup details copied. Finish the steps in that app; copying does not connect it.`)
     } catch {
-      if (generation === setupGeneration.current) setError('Clipboard access is unavailable. Expand Manual setup details and select the relevant value.')
+      if (generation === setupGeneration.current) setError('Clipboard access is unavailable. Select the displayed setup value and copy it manually.')
     }
   }
 
@@ -285,12 +298,14 @@ function LocalClientSetup({ client, target, open, enabled, copied, downloading, 
   copied: string | null
   downloading: boolean
   onTargetChange: (target: LocalMcpTarget | '') => void
-  onCopy: (target: LocalMcpTarget) => void
+  onCopy: (action: LocalMcpCopyAction) => void
   onDownload: () => void
 }) {
   const codexConfig = formatLocalAgentClientCodexConfig(client)
   const config = formatLocalAgentClientJson(client)
   const command = formatLocalAgentClientClaudeCommand(client)
+  const chatgptServerName = formatLocalAgentClientServerName(client)
+  const chatgptArguments = client.args || []
   const validCommand = Boolean(client.command && client.args && !client.revoked)
   const copyTarget = target && target !== 'claude-desktop' ? `${client.id}:${target}` : null
   return (
@@ -316,18 +331,28 @@ function LocalClientSetup({ client, target, open, enabled, copied, downloading, 
 
             {target === 'chatgpt' && <>
               <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary">
-                <li>On the computer running Maestro, open ChatGPT desktop → Settings → Configuration → Open config.toml.</li>
-                <li>Copy the ChatGPT configuration below. Replace this client’s Maestro server section if it already exists, or add it once if it does not. If you previously added this same client with a combined command, replace that broken entry rather than adding another. Do not duplicate this server or change other <code>mcp_servers</code> sections.</li>
-                <li>Save config.toml, then restart ChatGPT desktop.</li>
+                <li>On the computer running Maestro, open ChatGPT desktop → Settings → Plugins (or MCP servers) → Add MCP server → STDIO. If this client is already added, edit its existing Maestro entry instead.</li>
+                <li>Enter the Server name and Command to Launch values below. Keep Command in its own field. When repairing an existing entry, remove its old argument rows first.</li>
+                <li>In Arguments, click <strong>Add argument</strong> once for each numbered value, then copy each value into its matching row in order.</li>
+                <li>Save the server, then open a local Codex chat and use <code>/mcp</code> to confirm Maestro is listed.</li>
               </ol>
-              <p className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-2 text-[9px] leading-relaxed text-amber-100">Do not paste the executable and arguments together into a command-only Add MCP field. It will treat the whole line as the executable. Use config.toml, or use separate executable and argument fields if the app provides them.</p>
+              <p className="rounded-lg bg-bg-primary p-2 text-[9px] leading-relaxed text-text-muted">Each argument is copied exactly as Maestro provides it. Do not add quotes or combine the values; a path with spaces stays one argument when you paste it into its own row.</p>
+              <div className="space-y-2 rounded-lg border border-border bg-bg-primary p-2.5">
+                <ChatGPTCopyField label="Server name" value={chatgptServerName} copyAction="chatgpt-server-name" clientId={client.id} copied={copied} disabled={!enabled || !validCommand} onCopy={onCopy} />
+                <ChatGPTCopyField label="Command to Launch" value={client.command || ''} copyAction="chatgpt-command" clientId={client.id} copied={copied} disabled={!enabled || !validCommand} onCopy={onCopy} />
+                <div className="space-y-2">
+                  <h6 className="text-[9px] font-semibold text-text-secondary">Arguments · add each item in order</h6>
+                  {chatgptArguments.length > 0 ? chatgptArguments.map((argument, index) => (
+                    <ChatGPTCopyField key={index} label={chatgptArgumentLabel(chatgptArguments, index)} value={argument} copyAction={`chatgpt-argument-${index}`} clientId={client.id} copied={copied} disabled={!enabled || !validCommand} onCopy={onCopy} />
+                  )) : <p className="text-[9px] text-text-muted">This client has no arguments.</p>}
+                </div>
+              </div>
             </>}
             {target === 'codex' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>Copy the Codex section below and add it to your Codex user config: <code>~/.codex/config.toml</code> (on Windows: <code>%USERPROFILE%\.codex\config.toml</code>).</li><li>Save the file, then restart or reload Codex CLI or IDE.</li><li>Check Codex’s MCP server list before using the tools. Copying the section does not configure Codex.</li></ol>}
             {target === 'claude-desktop' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>Download the extension package below.</li><li>On the same computer where Maestro runs, open Claude Desktop → Settings → Extensions → Install Extension and select the downloaded <code>.mcpb</code> file.</li><li>Open the installed extension in Claude Desktop and confirm its tools are available. Downloading does not install or connect it.</li></ol>}
             {target === 'claude-code' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>On the computer running Maestro, open PowerShell on Windows or a terminal on macOS/Linux.</li><li>Copy and run the command below to register this local STDIO server in Claude Code.</li><li>In Claude Code, run <code>/mcp</code> and confirm the Maestro server is listed.</li></ol>}
-            {target === 'other' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>Copy the JSON under Manual setup details.</li><li>Add it to the other app’s local STDIO MCP configuration under <code>mcpServers</code>. Use this on the computer running Maestro.</li><li>Save or restart that app, then check its MCP server list. Copying JSON does not configure or connect it.</li></ol>}
+            {target === 'other' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>Copy the JSON under Advanced / manual setup.</li><li>Add it to the other app’s local STDIO MCP configuration under <code>mcpServers</code>. Use this on the computer running Maestro.</li><li>Save or restart that app, then check its MCP server list. Copying JSON does not configure or connect it.</li></ol>}
 
-            {validCommand && target === 'chatgpt' && <button type="button" onClick={() => onCopy(target)} disabled={!enabled} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{copied === copyTarget ? <Check size={13} /> : <Copy size={13} />}{copied === copyTarget ? 'ChatGPT configuration copied' : 'Copy ChatGPT configuration'}</button>}
             {validCommand && target === 'codex' && <button type="button" onClick={() => onCopy(target)} disabled={!enabled} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{copied === copyTarget ? <Check size={13} /> : <Copy size={13} />}{copied === copyTarget ? 'Codex config copied' : 'Copy Codex config section'}</button>}
             {validCommand && target === 'claude-desktop' && <button type="button" onClick={onDownload} disabled={!enabled || downloading} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{downloading ? <LoaderCircle size={13} className="animate-spin" /> : <Copy size={13} />}{downloading ? 'Preparing extension…' : 'Download Claude Desktop extension'}</button>}
             {validCommand && target === 'claude-code' && <button type="button" onClick={() => onCopy(target)} disabled={!enabled} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{copied === copyTarget ? <Check size={13} /> : <Copy size={13} />}{copied === copyTarget ? 'Claude Code command copied' : 'Copy Claude Code command'}</button>}
@@ -342,18 +367,14 @@ function LocalClientSetup({ client, target, open, enabled, copied, downloading, 
         {!target && <p className="text-[9px] leading-relaxed text-text-muted">Choose a target app to see its setup steps. Existing local clients can be reused; creating another grant is optional.</p>}
 
         <details className="rounded-lg border border-border bg-bg-secondary">
-          <summary className="min-h-10 cursor-pointer list-none px-3 py-2 text-[9px] font-semibold text-text-secondary">Manual setup details</summary>
+          <summary className="min-h-10 cursor-pointer list-none px-3 py-2 text-[9px] font-semibold text-text-secondary">Advanced / manual setup</summary>
           <div className="space-y-2 border-t border-border p-3">
             {!validCommand ? <p className="text-[9px] leading-relaxed text-text-muted">Maestro has not returned a safe launch command for this client. Refresh the client list before copying setup.</p> : <>
               {target === 'chatgpt' && <section className="space-y-1">
-                <h6 className="text-[9px] font-semibold text-text-secondary">ChatGPT config.toml</h6>
+                <h6 className="text-[9px] font-semibold text-text-secondary">ChatGPT config.toml · manual file setup</h6>
+                <p className="text-[9px] leading-relaxed text-text-muted">Optional fallback for manually editing a config file. Do not paste this block into Add MCP server; use the separate fields above for normal setup.</p>
                 <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} ChatGPT config.toml`}>{codexConfig}</pre>
-                <h6 className="pt-1 text-[9px] font-semibold text-text-secondary">Optional separate STDIO fields</h6>
-                <p className="text-[9px] text-text-muted">Only use these if the app has distinct executable and arguments fields. If it has one command field, use config.toml above.</p>
-                <h6 className="text-[9px] font-semibold text-text-secondary">Executable</h6>
-                <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} ChatGPT executable`}>{client.command}</pre>
-                <h6 className="text-[9px] font-semibold text-text-secondary">Arguments, in order</h6>
-                <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} ChatGPT arguments`}>{(client.args || []).join('\n')}</pre>
+                <button type="button" onClick={() => onCopy('chatgpt-toml')} disabled={!enabled} className="inline-flex min-h-9 w-full items-center justify-center gap-2 rounded-lg border border-border px-3 text-[9px] font-semibold text-text-secondary disabled:opacity-40">{copied === `${client.id}:chatgpt-toml` ? <Check size={12} /> : <Copy size={12} />}{copied === `${client.id}:chatgpt-toml` ? 'ChatGPT config.toml section copied' : 'Copy ChatGPT config.toml section'}</button>
               </section>}
               {target === 'codex' && <section className="space-y-1"><h6 className="text-[9px] font-semibold text-text-secondary">Codex config.toml</h6><pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} Codex config`}>{codexConfig}</pre></section>}
               {(target === 'other' || !target) && <section className="space-y-1"><h6 className="text-[9px] font-semibold text-text-secondary">Generic MCP JSON</h6><pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} generic MCP JSON`}>{config}</pre></section>}
@@ -365,6 +386,37 @@ function LocalClientSetup({ client, target, open, enabled, copied, downloading, 
       </div>
     </details>
   )
+}
+
+function ChatGPTCopyField({ label, value, copyAction, clientId, copied, disabled, onCopy }: {
+  label: string
+  value: string
+  copyAction: Extract<LocalMcpCopyAction, `chatgpt-${string}`>
+  clientId: string
+  copied: string | null
+  disabled: boolean
+  onCopy: (action: LocalMcpCopyAction) => void
+}) {
+  const isCopied = copied === `${clientId}:${copyAction}`
+  return (
+    <div className="min-w-0 space-y-1">
+      <div className="flex flex-wrap items-center justify-between gap-1">
+        <span className="text-[9px] font-semibold text-text-secondary">{label}</span>
+        <button type="button" onClick={() => onCopy(copyAction)} disabled={disabled} aria-label={`Copy ${label}`} className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded-md border border-border px-2 text-[9px] font-semibold text-text-secondary disabled:opacity-40">
+          {isCopied ? <Check size={11} /> : <Copy size={11} />}{isCopied ? 'Copied' : `Copy ${label}`}
+        </button>
+      </div>
+      <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-md bg-bg-secondary px-2 py-1.5 font-mono text-[9px] leading-relaxed text-text-primary" aria-label={`ChatGPT ${label}`}>{value}</pre>
+    </div>
+  )
+}
+
+function chatgptArgumentLabel(args: string[], index: number): string {
+  const number = index + 1
+  if (index === 0) return `Argument ${number} (script path)`
+  if (args[index] === '--client') return `Argument ${number} (--client)`
+  if (args[index - 1] === '--client') return `Argument ${number} (client ID)`
+  return `Argument ${number}`
 }
 
 export function AgentGenerationDefaults({ ownerSession }: { ownerSession: boolean }) {

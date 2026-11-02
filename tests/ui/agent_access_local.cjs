@@ -168,9 +168,17 @@ async function main() {
         name: 'Saved local client',
         scopes: ['observe'],
         command: 'C:\\Program Files\\Maestro\\python.exe',
-        args: ['C:\\Maestro\\app\\maestro_mcp.py', '--client', 'local-client-saved'],
+        args: ['C:\\Users\\A Name\\Maestro\\app\\maestro_mcp.py', '--client', 'local-client-saved', 'say "hello"'],
         access_token: 'must-not-leak-list-token',
         credential_path: 'must-not-leak-list-path',
+      }, {
+        id: 'local-client-revoked',
+        name: 'Revoked local client',
+        scopes: ['observe'],
+        revoked: true,
+        command: 'C:\\Program Files\\Maestro\\python.exe',
+        args: ['C:\\Maestro\\app\\maestro_mcp.py', '--client', 'local-client-revoked'],
+        access_token: 'must-not-leak-revoked-token',
       }] });
     }
     if (String(url).endsWith('/creative-defaults')) return response(creativeFixture);
@@ -196,9 +204,10 @@ async function main() {
     assert.deepEqual(created.scopes, ['observe', 'admin']);
 
     const listed = await api.fetchAgentAccessLocalClients();
-    assert.equal(listed.length, 1);
+    assert.equal(listed.length, 2);
     assert.equal(JSON.stringify(listed).includes('must-not-leak'), false, 'list responses strip token and credential path fields');
-    assert.deepEqual(listed[0].args, ['C:\\Maestro\\app\\maestro_mcp.py', '--client', 'local-client-saved']);
+    assert.deepEqual(listed[0].args, ['C:\\Users\\A Name\\Maestro\\app\\maestro_mcp.py', '--client', 'local-client-saved', 'say "hello"']);
+    assert.equal(listed[1].revoked, true, 'revoked local clients remain marked as revoked in the API response');
     const extension = await api.fetchAgentAccessLocalClientExtension('local-client-saved');
     assert.equal(extension.size, 8);
     assert.equal(requests[4].url, '/api/v1/agent-access/local-clients/local-client-saved/extension');
@@ -232,7 +241,7 @@ async function main() {
       name: 'Windows client',
       scopes: ['observe'],
       command: "C:\\Program Files\\Maestro O'Neil\\python.exe",
-      args: ["C:\\Users\\A Name\\Maestro O'Neil\\app\\maestro_mcp.py", '--client', 'client-space-1'],
+      args: ["C:\\Users\\A Name\\Maestro O'Neil\\app\\maestro_mcp.py", '--client', 'client-space-1', 'say "hello"'],
     };
     const config = JSON.parse(api.formatLocalAgentClientJson({ ...windowsClient, access_token: 'extra-secret-field' }));
     const entry = Object.values(config.mcpServers)[0];
@@ -244,6 +253,7 @@ async function main() {
     assert.ok(codex.includes(`command = ${JSON.stringify(windowsClient.command)}`));
     assert.ok(codex.includes(`args = [${windowsClient.args.map(value => JSON.stringify(value)).join(', ')}]`));
     assert.equal(codex.includes('extra-secret-field'), false);
+    assert.equal(api.formatLocalAgentClientServerName(windowsClient), 'maestro-clientspace1', 'ChatGPT gets a predictable local server name derived only from this client ID');
     const windowsClaude = api.formatLocalAgentClientClaudeCommand(windowsClient);
     assert.match(windowsClaude, /^& 'claude' 'mcp' 'add'/, 'Windows Claude Code commands use PowerShell call operator before the quoted executable');
     assert.ok(windowsClaude.includes("'C:\\Program Files\\Maestro O''Neil\\python.exe'"), 'PowerShell command quoting preserves spaces and escapes apostrophes');
@@ -276,6 +286,7 @@ async function main() {
       tree = renderer.render(component.LocalMcpSettings, componentProps);
       assert.match(visibleText(tree), /Saved local client/, 'an existing local client is available before creating a new one');
       assert.match(visibleText(tree), /existing grant/, 'existing grants are labeled as reusable');
+      assert.doesNotMatch(visibleText(tree), /Revoked local client/, 'revoked client details are not rendered');
       assert.match(visibleText(tree), /Step 1 · Choose the app/, 'new-client flow starts with target selection');
 
       openDetailsWithText(tree, 'Saved local client');
@@ -284,40 +295,55 @@ async function main() {
       clientTarget.props.onChange({ target: { value: 'chatgpt' } });
       tree = renderer.render(component.LocalMcpSettings, componentProps);
       openDetailsWithText(tree, 'Saved local client');
-      assert.match(visibleText(tree), /ChatGPT desktop → Settings → Configuration → Open config\.toml/);
-      assert.match(visibleText(tree), /Replace this client’s Maestro server section/);
-      assert.match(visibleText(tree), /Do not duplicate this server/);
-      assert.match(visibleText(tree), /command-only Add MCP field/);
-      assert.ok(buttonByText(tree, 'Copy ChatGPT configuration'));
-      assert.equal(buttonsContaining(tree, 'Copy').filter(button => visibleText(button).includes('ChatGPT configuration')).length, 1, 'ChatGPT has one TOML copy action');
+      assert.match(visibleText(tree), /ChatGPT desktop → Settings → Plugins \(or MCP servers\) → Add MCP server → STDIO/);
+      assert.match(visibleText(tree), /click\s+Add argument\s+once for each numbered value/);
+      assert.ok(buttonByText(tree, 'Copy Server name'));
+      assert.ok(buttonByText(tree, 'Copy Command to Launch'));
+      assert.ok(buttonByText(tree, 'Copy Argument 1 (script path)'));
+      assert.ok(buttonByText(tree, 'Copy Argument 2 (--client)'));
+      assert.ok(buttonByText(tree, 'Copy Argument 3 (client ID)'));
+      assert.ok(buttonByText(tree, 'Copy Argument 4'));
+      assert.equal(buttonByText(tree, 'Copy Arguments'), undefined, 'ChatGPT array arguments are never combined into one copied line');
+      assert.doesNotMatch(visibleText(tree), /Copy ChatGPT config\.toml section/, 'TOML copying stays hidden in advanced/manual setup');
       assert.equal(buttonByText(tree, 'Copy Codex config section'), undefined, 'the Codex action is not shown for ChatGPT');
-      assert.doesNotMatch(visibleText(tree), /mcpServers/, 'raw configuration is hidden while Manual setup details is collapsed');
-      await buttonByText(tree, 'Copy ChatGPT configuration').props.onClick();
+      assert.doesNotMatch(visibleText(tree), /mcpServers|mcp_servers|command =/, 'no configuration block appears in the primary ChatGPT flow');
+      await buttonByText(tree, 'Copy Server name').props.onClick();
       await settle();
+      await buttonByText(tree, 'Copy Command to Launch').props.onClick();
+      await settle();
+      for (const label of ['Copy Argument 1 (script path)', 'Copy Argument 2 (--client)', 'Copy Argument 3 (client ID)', 'Copy Argument 4']) {
+        await buttonByText(tree, label).props.onClick();
+        await settle();
+      }
       tree = renderer.render(component.LocalMcpSettings, componentProps);
-      assert.equal(clipboard[0], api.formatLocalAgentClientCodexConfig(listed[0]), 'ChatGPT copies the existing TOML formatter with separate command and args');
-      assert.match(clipboard[0], /^\[mcp_servers\.maestro-localclientsaved\]/);
-      assert.match(clipboard[0], /command = "/);
-      assert.match(clipboard[0], /args = \[/);
+      assert.deepEqual(clipboard.slice(0, 6), [
+        'maestro-localclientsaved',
+        listed[0].command,
+        ...listed[0].args,
+      ], 'ChatGPT copies the raw executable and each exact argument separately, preserving spaces, quotes, and array boundaries');
+      assert.equal(clipboard[1], listed[0].command, 'Command to Launch is the raw executable only, with no arguments or surrounding quotes');
+      assert.equal(clipboard.slice(0, 6).some(value => /mcp_servers|command =|access_token|credential_path/.test(value)), false, 'primary field copies never contain TOML or unrelated secrets/configuration');
       assert.match(visibleText(findNode(tree, node => node.props?.role === 'status')), /does not connect/i, 'copying setup is not reported as a successful connection');
       openDetailsWithText(tree, 'Saved local client');
       assert.match(visibleText(tree), /Start a local Codex chat in ChatGPT desktop/);
 
       openDetailsWithText(tree, 'Saved local client');
-      const chatgptManual = findNode(tree, node => node.type === 'details' && node.props.className?.includes('bg-bg-secondary') && visibleText(node).includes('Manual setup details'));
-      assert.ok(chatgptManual, 'ChatGPT raw setup remains under optional manual details');
+      const chatgptManual = findNode(tree, node => node.type === 'details' && node.props.className?.includes('bg-bg-secondary') && visibleText(node).includes('Advanced / manual setup'));
+      assert.ok(chatgptManual, 'ChatGPT TOML is clearly placed under advanced/manual setup');
       chatgptManual.props.open = true;
-      assert.match(visibleText(chatgptManual), /ChatGPT config\.toml/);
-      assert.match(visibleText(chatgptManual), /Optional separate STDIO fields/);
-      assert.match(visibleText(chatgptManual), /Executable/);
-      assert.match(visibleText(chatgptManual), /Arguments, in order/);
+      assert.match(visibleText(chatgptManual), /ChatGPT config\.toml · manual file setup/);
+      assert.match(visibleText(chatgptManual), /Do not paste this block into Add MCP server/);
+      assert.ok(buttonByText(chatgptManual, 'Copy ChatGPT config.toml section'));
+      await buttonByText(chatgptManual, 'Copy ChatGPT config.toml section').props.onClick();
+      await settle();
+      assert.equal(clipboard[6], api.formatLocalAgentClientCodexConfig(listed[0]), 'the TOML block remains available only as the explicit manual file fallback');
 
       clientTarget = findNode(tree, node => node.type === 'select' && node.props['aria-label'] === 'Saved local client app setup target');
       clientTarget.props.onChange({ target: { value: 'codex' } });
       tree = renderer.render(component.LocalMcpSettings, componentProps);
       openDetailsWithText(tree, 'Saved local client');
       assert.ok(buttonByText(tree, 'Copy Codex config section'));
-      assert.equal(buttonByText(tree, 'Copy ChatGPT configuration'), undefined);
+      assert.equal(buttonByText(tree, 'Copy Command to Launch'), undefined);
       assert.match(visibleText(tree), /%USERPROFILE%\\.codex\\config\.toml/);
 
       clientTarget = findNode(tree, node => node.type === 'select' && node.props['aria-label'] === 'Saved local client app setup target');
@@ -341,8 +367,8 @@ async function main() {
       openDetailsWithText(tree, 'Saved local client');
       assert.ok(buttonByText(tree, 'Copy Claude Code command'));
       assert.match(visibleText(tree), /PowerShell on Windows/);
-      const manualDetails = findNode(tree, node => node.type === 'details' && node.props.className?.includes('bg-bg-secondary') && visibleText(node).includes('Manual setup details'));
-      assert.ok(manualDetails, 'raw config stays inside optional manual details');
+      const manualDetails = findNode(tree, node => node.type === 'details' && node.props.className?.includes('bg-bg-secondary') && visibleText(node).includes('Advanced / manual setup'));
+      assert.ok(manualDetails, 'raw config stays inside advanced/manual details');
       manualDetails.props.open = true;
       assert.match(visibleText(manualDetails), /Claude Code command/);
 
@@ -370,6 +396,18 @@ async function main() {
       assert.ok(createdSetup, 'the new client opens directly to its next setup step');
       assert.equal(findNode(createdSetup, node => node.type === 'select' && node.props.autoFocus === true)?.props.value, 'codex', 'the new client app picker receives focus');
       assert.ok(buttonByText(tree, 'Copy Codex config section'), 'the newly created client immediately exposes its app-specific action');
+
+      const disabledProps = { ...componentProps, enabled: false };
+      const savedTargetWhileDisabled = findNode(tree, node => node.type === 'select' && node.props['aria-label'] === 'Saved local client app setup target');
+      savedTargetWhileDisabled.props.onChange({ target: { value: 'chatgpt' } });
+      tree = renderer.render(component.LocalMcpSettings, disabledProps);
+      openDetailsWithText(tree, 'Saved local client');
+      const disabledCommandCopy = buttonByText(tree, 'Copy Command to Launch');
+      assert.ok(disabledCommandCopy?.props.disabled, 'ChatGPT field copies are disabled when Local MCP is turned off');
+      const clipboardBeforeDisabledCopy = clipboard.length;
+      await disabledCommandCopy.props.onClick();
+      await settle();
+      assert.equal(clipboard.length, clipboardBeforeDisabledCopy, 'a disabled or stale ChatGPT field action cannot copy setup data');
     } finally {
       for (const [key, descriptor] of [['window', previousWindow], ['document', previousDocument], ['navigator', previousNavigator]]) {
         if (descriptor) Object.defineProperty(global, key, descriptor);
@@ -385,10 +423,11 @@ async function main() {
     assert.match(source, /Choose this client’s access scopes/);
     assert.match(source, /Step 1 · Choose the app/);
     assert.match(source, /Existing local clients/);
-    assert.match(source, /Manual setup details/);
-    assert.match(source, /ChatGPT desktop → Settings → Configuration → Open config\.toml/);
-    assert.match(source, /Copy ChatGPT configuration/);
-    assert.match(source, /command-only Add MCP field/);
+    assert.match(source, /Advanced \/ manual setup/);
+    assert.match(source, /ChatGPT desktop → Settings → Plugins \(or MCP servers\) → Add MCP server → STDIO/);
+    assert.match(source, /label="Command to Launch"/);
+    assert.match(source, /Add argument/);
+    assert.match(source, /Copy ChatGPT config\.toml section/);
     assert.match(source, /type <code>\/mcp<\/code>/);
     assert.match(source, /Download Claude Desktop extension/);
     assert.match(source, /Claude Desktop → Settings → Extensions → Install Extension/);

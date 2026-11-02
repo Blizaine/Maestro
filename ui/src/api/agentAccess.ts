@@ -446,6 +446,11 @@ function localClientServerName(id: string): string {
   return `maestro-${id.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'local'}`
 }
 
+export function formatLocalAgentClientServerName(client: AgentAccessLocalClient): string {
+  return localClientServerName(client.id)
+}
+
+/** Keep generic setup JSON limited to this client's executable and ordered arguments. */
 export function formatLocalAgentClientJson(client: AgentAccessLocalClient): string {
   const command = typeof client.command === 'string' ? client.command : ''
   const args = Array.isArray(client.args) ? client.args.filter((value): value is string => typeof value === 'string') : []

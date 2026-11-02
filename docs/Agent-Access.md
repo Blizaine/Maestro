@@ -90,19 +90,24 @@ clients; the list labels each grant **Local MCP** or **Remote MCP**.
 Choose the app you want to connect in the Local MCP setup. Maestro shows the
 steps and action for that app; it does not ask you to choose a configuration
 format. Existing local clients can be reused. Raw configuration is available
-under **Manual setup** when needed.
+under **Advanced / manual setup** when needed.
 
-For **ChatGPT desktop**, copy **ChatGPT configuration**, then open
-**Settings → Configuration → Open config.toml**. Add the copied server section
-once, or replace only this same client's existing Maestro entry. If you
-previously pasted a combined launch command into Add MCP, replace that broken
-entry rather than keeping a duplicate. Save and restart ChatGPT.
+For **ChatGPT desktop**, open **Settings → Plugins → Add MCP server → STDIO**
+(some versions label this area **MCP servers**). In Maestro, select
+**ChatGPT desktop** for the local client; copy **Server name** and
+**Command to Launch** into those fields. In **Arguments**, click
+**Add argument** once for each numbered value, then copy each raw value into
+its own row in order. Do not add quotes or combine the values; paths with
+spaces remain one argument because each goes in its own row. Save the server,
+then use `/mcp` in a local Codex chat on this computer to confirm Maestro is
+listed. When repairing an existing entry, edit it and remove its old argument
+rows before adding the numbered values; do not create a duplicate server.
 
-The configuration keeps the Python executable in `command` and the script,
-`--client`, and client ID in an ordered `args` array. Do not paste both into a
-command-only Add MCP field: the desktop app can save the entire line as the
-executable name, which fails to start. If a host has separate executable and
-argument fields, the individual values are under Manual setup.
+The **Advanced / manual setup** section contains an optional ChatGPT
+`config.toml` entry for people who edit the file directly. Use that only as a
+manual file setup; do not paste the TOML block into **Add MCP server**. If this
+same local client already has a broken combined-command entry, replace that
+entry instead of adding a duplicate.
 
 For **Codex CLI or IDE**, copy its configuration section into
 `~/.codex/config.toml`. ChatGPT's local Codex host, Codex CLI and the IDE
