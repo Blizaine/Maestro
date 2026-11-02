@@ -15,6 +15,7 @@ import { QRCodeSVG } from 'qrcode.react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import type { TailscaleRemoteAccessStatus } from '../../types'
+import { fetchPinokioRemoteAccessStatus, type PinokioRemoteAccessStatus } from '../../api/agentAccess'
 import {
   disableBackgroundPush,
   enableBackgroundPush,
@@ -91,26 +92,29 @@ export function NotificationSettingsPanel() {
   const [testingPush, setTestingPush] = useState(false)
   const [pushState, setPushState] = useState<BackgroundPushState | null>(null)
   const [tailscale, setTailscale] = useState<TailscaleRemoteAccessStatus | null>(null)
+  const [pinokioRemote, setPinokioRemote] = useState<PinokioRemoteAccessStatus | null>(null)
   const [loadingRemote, setLoadingRemote] = useState(true)
   const [changingRemote, setChangingRemote] = useState(false)
   const [copiedRemoteUrl, setCopiedRemoteUrl] = useState(false)
+  const [copiedPinokioUrl, setCopiedPinokioUrl] = useState(false)
 
   useEffect(() => subscribeDeviceNotificationPreferences(setPreferences), [])
 
   useEffect(() => {
     let cancelled = false
-    void Promise.all([
+    void Promise.allSettled([
       getBackgroundPushState(),
       api.fetchTailscaleRemoteAccessStatus(),
-    ]).then(([nextPush, nextTailscale]) => {
+      fetchPinokioRemoteAccessStatus(),
+    ]).then(([pushResult, tailscaleResult, pinokioResult]) => {
       if (cancelled) return
-      setPushState(nextPush)
-      setTailscale(nextTailscale)
-    }).catch(error => {
-      if (!cancelled) {
-        setMessage(error instanceof Error ? error.message : 'Remote access status is unavailable.')
+      if (pushResult.status === 'fulfilled') setPushState(pushResult.value)
+      if (tailscaleResult.status === 'fulfilled') setTailscale(tailscaleResult.value)
+      if (pinokioResult.status === 'fulfilled') setPinokioRemote(pinokioResult.value)
+      const failed = [tailscaleResult, pinokioResult].find(result => result.status === 'rejected')
+      if (failed?.status === 'rejected') {
+        setMessage(failed.reason instanceof Error ? failed.reason.message : 'Private access status is unavailable.')
       }
-    }).finally(() => {
       if (!cancelled) setLoadingRemote(false)
     })
     return () => { cancelled = true }
@@ -217,13 +221,17 @@ export function NotificationSettingsPanel() {
   const refreshRemoteStatus = async () => {
     setLoadingRemote(true)
     setMessage(null)
-    try {
-      setTailscale(await api.fetchTailscaleRemoteAccessStatus())
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Could not read Tailscale status.')
-    } finally {
-      setLoadingRemote(false)
+    const [tailscaleResult, pinokioResult] = await Promise.allSettled([
+      api.fetchTailscaleRemoteAccessStatus(),
+      fetchPinokioRemoteAccessStatus(),
+    ])
+    if (tailscaleResult.status === 'fulfilled') setTailscale(tailscaleResult.value)
+    if (pinokioResult.status === 'fulfilled') setPinokioRemote(pinokioResult.value)
+    const failed = [tailscaleResult, pinokioResult].find(result => result.status === 'rejected')
+    if (failed?.status === 'rejected') {
+      setMessage(failed.reason instanceof Error ? failed.reason.message : 'Could not read private access status.')
     }
+    setLoadingRemote(false)
   }
 
   const handleRemoteToggle = async (enabled: boolean) => {
@@ -252,8 +260,21 @@ export function NotificationSettingsPanel() {
     window.setTimeout(() => setCopiedRemoteUrl(false), 1500)
   }
 
+  const copyPinokioUrl = async () => {
+    const url = readyPinokioBrowserUrl(pinokioRemote)
+    if (!url) return
+    try {
+      await navigator.clipboard.writeText(url)
+      setCopiedPinokioUrl(true)
+      window.setTimeout(() => setCopiedPinokioUrl(false), 1500)
+    } catch {
+      setMessage('Clipboard access is unavailable. Select the Pinokio Remote link and copy it manually.')
+    }
+  }
+
   const hostEnabled = systemConfig?.host_notification_sound_enabled ?? false
   const hostVolume = systemConfig?.host_notification_sound_volume ?? 50
+  const pinokioBrowserUrl = readyPinokioBrowserUrl(pinokioRemote)
 
   const handleHostTest = async () => {
     setTestingHost(true)
@@ -424,102 +445,141 @@ export function NotificationSettingsPanel() {
             <ShieldCheck size={15} className="text-accent-blue" />
             <div>
               <div className="text-xs font-medium text-text-primary">Private phone access</div>
-              <div className="text-[10px] text-text-muted">Optional Tailscale HTTPS · never public</div>
+              <div className="text-[10px] text-text-muted">Pinokio Remote for authorized devices · Tailscale fallback</div>
             </div>
           </div>
           <button
             type="button"
             onClick={refreshRemoteStatus}
             disabled={loadingRemote}
-            aria-label="Refresh Tailscale status"
+            aria-label="Refresh private access status"
             className="rounded p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary disabled:opacity-40"
           >
             <RefreshCw size={12} className={loadingRemote ? 'animate-spin' : ''} />
           </button>
         </div>
 
-        {loadingRemote && !tailscale ? (
-          <div className="text-[10px] text-text-muted">Checking this computer…</div>
-        ) : tailscale && !tailscale.installed ? (
-          <div className="space-y-2">
-            <p className="text-[10px] leading-relaxed text-text-muted">
-              Install the free Tailscale Personal app on this computer and your phone, then sign both into your own account. Maestro never joins or manages your tailnet.
-            </p>
-            <a
-              href={tailscale.install_url}
-              target="_blank"
-              rel="noreferrer"
-              className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border px-2 py-1.5 text-[10px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
-            >
-              Install Tailscale on this computer <ExternalLink size={10} />
-            </a>
-          </div>
-        ) : tailscale && !tailscale.connected ? (
-          <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-2.5 py-2 text-[10px] leading-relaxed text-amber-100">
-            <div className="font-medium">Tailscale is installed but not connected</div>
-            <div>Open the Tailscale app on this computer, sign in, then refresh this status.</div>
-          </div>
-        ) : tailscale ? (
-          <>
-            <Toggle
-              checked={tailscale.configured && tailscale.enabled}
-              onChange={checked => void handleRemoteToggle(checked)}
-              label="Private HTTPS access"
-              description="Tailscale Serve securely proxies only devices in your personal tailnet to this local Maestro instance."
-              disabled={changingRemote}
-            />
-
-            {tailscale.https_url && tailscale.configured && (
-              <div className="space-y-3 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3">
-                <div className="flex flex-col items-center gap-2">
-                  <div className="rounded-lg bg-white p-2">
-                    <QRCodeSVG
-                      value={tailscale.https_url}
-                      size={132}
-                      level="M"
-                      marginSize={1}
-                    />
-                  </div>
-                  <div className="text-center text-[9px] leading-relaxed text-emerald-100">
-                    Scan after installing Tailscale on your phone and signing into the same account.
-                  </div>
-                </div>
-                <div className="break-all rounded bg-bg-primary/70 px-2 py-1.5 text-[9px] text-text-secondary">
-                  {tailscale.https_url}
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={copyRemoteUrl}
-                    className="flex items-center justify-center gap-1 rounded-md border border-border px-2 py-1.5 text-[10px] text-text-secondary hover:bg-bg-hover hover:text-text-primary"
-                  >
-                    {copiedRemoteUrl ? <Check size={10} /> : <Copy size={10} />}
-                    {copiedRemoteUrl ? 'Copied' : 'Copy URL'}
-                  </button>
-                  <a
-                    href={tailscale.https_url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex items-center justify-center gap-1 rounded-md border border-border px-2 py-1.5 text-[10px] text-text-secondary hover:bg-bg-hover hover:text-text-primary"
-                  >
-                    Open <ExternalLink size={10} />
-                  </a>
-                </div>
+        {loadingRemote && !pinokioRemote ? (
+          <div className="text-[10px] text-text-muted">Checking private access…</div>
+        ) : pinokioBrowserUrl ? (
+          <div className="space-y-3 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3">
+            <div className="flex flex-col items-center gap-2">
+              <div className="rounded-lg bg-white p-2">
+                <QRCodeSVG value={pinokioBrowserUrl} size={132} level="M" marginSize={1} />
               </div>
+              <div className="text-center text-[9px] leading-relaxed text-emerald-100">
+                Pinokio Remote is ready on this PC. This PC does not need a second Tailscale install; open the link on a device authorized for this app.
+              </div>
+            </div>
+            <div className="break-all rounded bg-bg-primary/70 px-2 py-1.5 text-[9px] text-text-secondary">{pinokioBrowserUrl}</div>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => void copyPinokioUrl()}
+                className="flex items-center justify-center gap-1 rounded-md border border-border px-2 py-1.5 text-[10px] text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+              >
+                {copiedPinokioUrl ? <Check size={10} /> : <Copy size={10} />}
+                {copiedPinokioUrl ? 'Copied' : 'Copy link'}
+              </button>
+              <a
+                href={pinokioBrowserUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center justify-center gap-1 rounded-md border border-border px-2 py-1.5 text-[10px] text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+              >
+                Open <ExternalLink size={10} />
+              </a>
+            </div>
+            <p className="text-[9px] leading-relaxed text-text-muted">This is browser access. AI agent access has its own Remote MCP and Pinokio Remote opt-in controls in Settings → Agent Access.</p>
+          </div>
+        ) : (
+          <div className="rounded-md bg-bg-primary p-2.5 text-[10px] leading-relaxed text-text-muted" role="status">
+            {pinokioStatusMessage(pinokioRemote?.reason ?? null, pinokioRemote?.phase ?? 'unavailable')} Use the standalone Tailscale setup below only if you need that separate option.
+          </div>
+        )}
+
+        <details className="rounded-md border border-border/60 p-2">
+          <summary className="cursor-pointer text-[10px] font-medium text-text-secondary">Standalone Tailscale setup (fallback)</summary>
+          <div className="mt-3 space-y-3">
+            {loadingRemote && !tailscale ? (
+              <div className="text-[10px] text-text-muted">Checking Tailscale on this computer…</div>
+            ) : tailscale && !tailscale.installed ? (
+              <div className="space-y-2">
+                <p className="text-[10px] leading-relaxed text-text-muted">
+                  Tailscale is a separate manual option. Install its Personal app on this computer and your phone, then sign both into your own account. Maestro never joins or manages your tailnet.
+                </p>
+                <a
+                  href={tailscale.install_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex w-full items-center justify-center gap-1.5 rounded-md border border-border px-2 py-1.5 text-[10px] text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+                >
+                  Install Tailscale on this computer <ExternalLink size={10} />
+                </a>
+              </div>
+            ) : tailscale && !tailscale.connected ? (
+              <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-2.5 py-2 text-[10px] leading-relaxed text-amber-100">
+                <div className="font-medium">Tailscale is installed but not connected</div>
+                <div>Open the Tailscale app on this computer, sign in, then refresh this status.</div>
+              </div>
+            ) : tailscale ? (
+              <>
+                <Toggle
+                  checked={tailscale.configured && tailscale.enabled}
+                  onChange={checked => void handleRemoteToggle(checked)}
+                  label="Private HTTPS access"
+                  description="Tailscale Serve securely proxies only devices in your personal tailnet to this local Maestro instance. Hosted cloud connectors are not automatically authorized by your tailnet."
+                  disabled={changingRemote}
+                />
+
+                {tailscale.https_url && tailscale.configured && (
+                  <div className="space-y-3 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3">
+                    <div className="flex flex-col items-center gap-2">
+                      <div className="rounded-lg bg-white p-2">
+                        <QRCodeSVG value={tailscale.https_url} size={132} level="M" marginSize={1} />
+                      </div>
+                      <div className="text-center text-[9px] leading-relaxed text-emerald-100">
+                        Scan after installing Tailscale on your phone and signing into the same account.
+                      </div>
+                    </div>
+                    <div className="break-all rounded bg-bg-primary/70 px-2 py-1.5 text-[9px] text-text-secondary">{tailscale.https_url}</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={copyRemoteUrl}
+                        className="flex items-center justify-center gap-1 rounded-md border border-border px-2 py-1.5 text-[10px] text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+                      >
+                        {copiedRemoteUrl ? <Check size={10} /> : <Copy size={10} />}
+                        {copiedRemoteUrl ? 'Copied' : 'Copy URL'}
+                      </button>
+                      <a
+                        href={tailscale.https_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex items-center justify-center gap-1 rounded-md border border-border px-2 py-1.5 text-[10px] text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+                      >
+                        Open <ExternalLink size={10} />
+                      </a>
+                    </div>
+                  </div>
+                )}
+
+                <ol className="space-y-1 text-[9px] leading-relaxed text-text-muted">
+                  <li className="flex gap-1.5"><span>1.</span><span>Install Tailscale on the phone and use the same personal account.</span></li>
+                  <li className="flex gap-1.5"><span>2.</span><span>Open the secure URL in Safari, then Share → Add to Home Screen.</span></li>
+                  <li className="flex gap-1.5"><span>3.</span><span>Open the installed Maestro app and enable System notifications above.</span></li>
+                </ol>
+              </>
+            ) : (
+              <p className="text-[10px] leading-relaxed text-text-muted">Tailscale status is not reported. Refresh private access status to try again.</p>
             )}
 
-            <ol className="space-y-1 text-[9px] leading-relaxed text-text-muted">
-              <li className="flex gap-1.5"><span>1.</span><span>Install Tailscale on the phone and use the same personal account.</span></li>
-              <li className="flex gap-1.5"><span>2.</span><span>Open the secure URL in Safari, then Share → Add to Home Screen.</span></li>
-              <li className="flex gap-1.5"><span>3.</span><span>Open the installed Maestro app and enable System notifications above.</span></li>
-            </ol>
-          </>
-        ) : null}
-
-        <div className="flex items-start gap-1.5 rounded-md border border-border/60 bg-bg-primary/40 px-2.5 py-2 text-[9px] leading-relaxed text-text-muted">
-          <Smartphone size={11} className="mt-0.5 shrink-0" />
-          <span>Tailscale&apos;s Personal plan can be used independently by each user. This feature does not use Funnel and does not expose Maestro to the public internet.</span>
-        </div>
+            <div className="flex items-start gap-1.5 rounded-md border border-border/60 bg-bg-primary/40 px-2.5 py-2 text-[9px] leading-relaxed text-text-muted">
+              <Smartphone size={11} className="mt-0.5 shrink-0" />
+              <span>Tailscale&apos;s Personal plan can be used independently by each user. This feature does not use Funnel and does not expose Maestro to the public internet.</span>
+            </div>
+          </div>
+        </details>
       </section>
 
       <section className="space-y-3 rounded-lg border border-border bg-bg-tertiary p-3">
@@ -575,4 +635,29 @@ export function NotificationSettingsPanel() {
       )}
     </div>
   )
+}
+
+function readyPinokioBrowserUrl(status: PinokioRemoteAccessStatus | null): string | null {
+  if (!status?.available || status.phase.toLowerCase() !== 'ready' || typeof status.browser_url !== 'string') return null
+  try {
+    const url = new URL(status.browser_url)
+    if (url.protocol !== 'https:' || !url.hostname.toLowerCase().endsWith('.ts.net') || url.username || url.password) return null
+    return status.browser_url
+  } catch {
+    return null
+  }
+}
+
+function pinokioStatusMessage(reason: string | null, phase: string): string {
+  const code = (reason || phase).trim().toLowerCase().replace(/[\s-]+/g, '_')
+  if (['app_not_installed', 'app_not_published', 'remote_disabled'].includes(code)) {
+    return 'Start Maestro and enable Remote for this app in Pinokio, then refresh.'
+  }
+  if (['controller_starting', 'starting', 'restarting', 'agent_access_restarting'].includes(code)) {
+    return 'Maestro is refreshing its Agent Access controller. Refresh this status in a moment.'
+  }
+  if (['node_unavailable', 'node_offline', 'remote_unavailable', 'unavailable', 'not_available'].includes(code)) {
+    return 'Pinokio Remote is unavailable right now. Check that Maestro is running from Pinokio and refresh.'
+  }
+  return 'Pinokio Remote is not reporting a ready browser link.'
 }

@@ -110,6 +110,19 @@ class AuthStore:
         with self._connection() as conn:
             return self._meta_bool(conn, "enabled", default=False)
 
+    def pinokio_proxy_key(self) -> bytes:
+        """Private installation key for the native-to-controller HTTPS hop.
+
+        This authenticates an origin envelope, never a user or an MCP grant.
+        It is deliberately absent from public status and client configuration.
+        """
+        with self._transaction() as conn:
+            value = self._meta(conn, "pinokio_proxy_key")
+            if not value:
+                value = secrets.token_hex(32)
+                conn.execute("INSERT INTO meta(key, value) VALUES('pinokio_proxy_key', ?)", (value,))
+            return bytes.fromhex(value)
+
     @property
     def local_enabled(self) -> bool:
         with self._connection() as conn:

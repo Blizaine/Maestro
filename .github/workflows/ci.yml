@@ -134,7 +134,7 @@ jobs:
       - name: Install CPU-only controller dependencies
         run: python -m pip install -r app/requirements-agent-access.txt "pytest==8.4.2"
       - name: Test authentication, ownership, transfers and both MCP protocols
-        run: python -m pytest -q tests/test_agent_access_*.py tests/test_pinokio_agent_access.py
+          run: python -m pytest -q tests/test_agent_access_*.py tests/test_pinokio_agent_access.py tests/test_pinokio_remote.py tests/test_server_startup.py
 
   ui-build:
     name: UI type-check + build
@@ -179,6 +179,7 @@ jobs:
           node tests/ui/agent_access.cjs
           node tests/ui/agent_access_local.cjs
           node tests/ui/agent_access_onboarding.cjs
+          node tests/ui/pinokio_remote_access.cjs
       - name: Type-check and staged UI build
         working-directory: ui
         run: npm run build

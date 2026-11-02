@@ -146,6 +146,8 @@ def create_app(
         allow_local_ui=True,
         frame_ancestor_origins=frame_ancestor_origins,
     )
+    from .pinokio_proxy import PinokioControllerEnvelope
+    app.add_middleware(PinokioControllerEnvelope, runtime=runtime)
     # /mcp is mounted without a trailing-slash redirect or scope rewriting.
     app.router.routes.append(Route("/mcp", _MCPRoute(transport), methods=["GET", "POST", "DELETE"]))
 
@@ -456,6 +458,10 @@ async def _serve_runtime(args, runtime):
     while True:
         enabled = runtime.auth.enabled
         config = runtime.config
+        pinokio_remote = {}
+        if config.get("pinokio_remote_enabled") is True:
+            pinokio_remote = await asyncio.to_thread(runtime.refresh_pinokio_remote)
+        active_pinokio_origin = runtime.pinokio_remote_origin
         tailscale_material = None
         tailscale_evidence = {
             "installed": bool(find_tailscale()), "connected": False,
@@ -496,6 +502,7 @@ async def _serve_runtime(args, runtime):
             **network_metadata,
             "lan_mcp_urls": network_metadata["lan_mcp_urls"] if enabled else [],
             "tailscale": tailscale_evidence,
+            "pinokio_remote": pinokio_remote,
         }
         bridge = BackendClient(runtime)
         bridge.lifecycle_manager = LifecycleManager(runtime, idle_probe=bridge.idle_probe)
@@ -519,10 +526,11 @@ async def _serve_runtime(args, runtime):
         if tailscale_material is not None:
             _configure_tailscale_sni(server_config.ssl, runtime, tailscale_material)
         server = uvicorn.Server(server_config)
-        async def watch(server=server, enabled=enabled, config=config, discovery_status=discovery_status, active_network_metadata=active_network_metadata, tailscale_material=tailscale_material):
+        async def watch(server=server, enabled=enabled, config=config, discovery_status=discovery_status, active_network_metadata=active_network_metadata, tailscale_material=tailscale_material, active_pinokio_origin=active_pinokio_origin):
             announced = False
             checked_tailscale_at = time.monotonic()
             renewed_tailscale_at = checked_tailscale_at
+            checked_pinokio_at = checked_tailscale_at
             while not server.should_exit:
                 if server.started and not announced:
                     atomic_json(runtime.directory / "controller.json", {"status": "ready", "pid": os.getpid(), "certificate_sha256": material.fingerprint_sha256, "discovery_status": discovery_status, **active_network_metadata, "updated_at": time.time()})
@@ -532,6 +540,14 @@ async def _serve_runtime(args, runtime):
                 if runtime.auth.enabled != enabled or runtime.config != config:
                     server.should_exit = True
                     return True
+                if config.get("pinokio_remote_enabled") is True and time.monotonic() - checked_pinokio_at >= 15:
+                    checked_pinokio_at = time.monotonic()
+                    await asyncio.to_thread(runtime.refresh_pinokio_remote)
+                    if active_pinokio_origin != runtime.pinokio_remote_origin:
+                        # Rebuild the SDK's exact host/origin allowlist after
+                        # reconnect, app-port changes or a Pinokio node rename.
+                        server.should_exit = True
+                        return True
                 if enabled and runtime.tailscale_hostname and time.monotonic() - checked_tailscale_at >= 60:
                     # Identity is checked in the background, never by ordinary
                     # UI polling. Certificate renewal is bounded to hourly.

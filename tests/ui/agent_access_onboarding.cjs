@@ -211,6 +211,7 @@ async function main() {
     if (name === 'react') return react;
     if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: Symbol('Fragment') };
     if (name === 'lucide-react') return icons;
+    if (name.endsWith('PinokioRemoteAccess')) return { PinokioRemoteAccess: () => null };
     if (name.endsWith('AgentAccessAdditionalSettings')) return { AgentGenerationDefaults: () => null, LocalMcpSettings: () => null };
     if (name.includes('agentAccess')) return api;
     throw new Error('Unexpected panel import: ' + name);

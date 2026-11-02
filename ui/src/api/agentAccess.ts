@@ -22,6 +22,7 @@ export interface AgentAccessStatus {
   lan_mcp_urls?: string[]
   preferred_mcp_url?: string | null
   tailscale?: AgentAccessTailscaleStatus | null
+  pinokio_remote?: AgentAccessPinokioRemoteStatus | null
   certificate_sha256?: string | null
   controller_status?: string | null
   discovery_status?: string | null
@@ -38,6 +39,24 @@ export interface AgentAccessTailscaleStatus {
   mcp_url: string | null
   error: string | null
   expires_at: string | null
+}
+
+/** Read-only details about the browser address published by Pinokio Remote. */
+export interface PinokioRemoteAccessStatus {
+  available: boolean
+  phase: string
+  browser_url: string | null
+  node_hostname: string | null
+  dns_name: string | null
+  app_id: string | null
+  reason: string | null
+}
+
+/** Owner-managed MCP access layered on the public Pinokio Remote detection. */
+export interface AgentAccessPinokioRemoteStatus extends PinokioRemoteAccessStatus {
+  enabled: boolean
+  ready: boolean
+  mcp_url: string | null
 }
 
 export interface AgentAccessGrant {
@@ -216,8 +235,74 @@ async function requestJson<T>(
   return (payload ?? {}) as T
 }
 
-export function fetchAgentAccessStatus(): Promise<AgentAccessStatus> {
-  return requestJson('/api/v1/agent-access/status')
+export async function fetchAgentAccessStatus(): Promise<AgentAccessStatus> {
+  const status = await requestJson<AgentAccessStatus>('/api/v1/agent-access/status')
+  if (status.pinokio_remote !== undefined && status.pinokio_remote !== null) {
+    status.pinokio_remote = safeAgentAccessPinokioRemoteStatus(status.pinokio_remote)
+  }
+  return status
+}
+
+function nullableText(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key]
+  if (value === null) return null
+  if (value === undefined) {
+    throw new AgentAccessApiError(502, `Maestro omitted the Pinokio Remote ${key} value.`)
+  }
+  if (typeof value !== 'string') {
+    throw new AgentAccessApiError(502, `Maestro returned an invalid Pinokio Remote ${key} value.`)
+  }
+  return value
+}
+
+function safePinokioRemoteAccessStatus(value: unknown): PinokioRemoteAccessStatus {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new AgentAccessApiError(502, 'Maestro returned an invalid Pinokio Remote status.')
+  }
+  const record = value as Record<string, unknown>
+  if (typeof record.available !== 'boolean' || typeof record.phase !== 'string') {
+    throw new AgentAccessApiError(502, 'Maestro returned an incomplete Pinokio Remote status.')
+  }
+  return {
+    available: record.available,
+    phase: record.phase,
+    browser_url: nullableText(record, 'browser_url'),
+    node_hostname: nullableText(record, 'node_hostname'),
+    dns_name: nullableText(record, 'dns_name'),
+    app_id: nullableText(record, 'app_id'),
+    reason: nullableText(record, 'reason'),
+  }
+}
+
+function safeAgentAccessPinokioRemoteStatus(value: unknown): AgentAccessPinokioRemoteStatus {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new AgentAccessApiError(502, 'Maestro returned an invalid Pinokio Remote MCP status.')
+  }
+  const record = value as Record<string, unknown>
+  const detected = safePinokioRemoteAccessStatus(record)
+  if (typeof record.enabled !== 'boolean' || typeof record.ready !== 'boolean') {
+    throw new AgentAccessApiError(502, 'Maestro returned an incomplete Pinokio Remote MCP status.')
+  }
+  return { ...detected, enabled: record.enabled, ready: record.ready, mcp_url: nullableText(record, 'mcp_url') }
+}
+
+/** Older Maestro versions do not have this endpoint; treat only 404 as unsupported. */
+export async function fetchPinokioRemoteAccessStatus(): Promise<PinokioRemoteAccessStatus | null> {
+  try {
+    const result = await requestJson<unknown>('/api/v1/remote-access/pinokio/status', { credentials: 'omit' })
+    return safePinokioRemoteAccessStatus(result)
+  } catch (error) {
+    if (error instanceof AgentAccessApiError && error.status === 404) return null
+    throw error
+  }
+}
+
+export function updateAgentAccessPinokioRemoteSettings(settings: { enabled: boolean }): Promise<AgentAccessPinokioRemoteStatus> {
+  return requestJson<unknown>('/api/v1/agent-access/pinokio', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  }).then(safeAgentAccessPinokioRemoteStatus)
 }
 
 export function fetchAgentAccessTailscaleStatus(): Promise<AgentAccessTailscaleStatus> {

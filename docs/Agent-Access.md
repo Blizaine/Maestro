@@ -133,7 +133,29 @@ workstations. `list_workstations` reports the local installation identity but
 does not discover peers in this mode. To use the existing paired remote
 workstation route or discover peers, configure a Remote MCP client below.
 
-## Recommended: trusted Tailscale HTTPS
+## Pinokio Remote (Pinokio 8.3 or later)
+
+If Pinokio Remote is already connected, Maestro detects this installation's
+published HTTPS address. Settings → Agent Access shows browser access separately
+from AI agent access; Notifications also offers the verified browser link and QR
+code. There is no second Tailscale installation or sign-in on the Maestro PC.
+
+To use that connection for an agent on your private network, enable Remote MCP,
+then select **Use Pinokio Remote for MCP**. Copy the resulting server URL into
+your MCP client and complete its normal Maestro OAuth approval. Permissions,
+job ownership and grant revocation work exactly as on the other transports.
+Keep **both Maestro and Agent Access running**: this URL shares Maestro's web
+route. The separate direct controller endpoint remains available for clients
+that need access while the model backend is stopped.
+
+Maestro reads Pinokio's local status API; it does not change Pinokio's Tailscale
+login, certificates, Serve configuration, remote port assignments or daemon.
+Existing Maestro Tailscale links, local MCP and ordinary LAN browser access are
+preserved. On older Pinokio versions, the standalone setup below remains
+available. Pinokio Remote is private: a hosted cloud connector cannot reach it
+merely because a browser or agent on your tailnet can.
+
+## Standalone option: trusted Tailscale HTTPS
 
 Agent Access can use a separate trusted `.ts.net` certificate on its existing
 MCP HTTPS port. This is the recommended Remote MCP path when the agent runs on

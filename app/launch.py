@@ -33158,7 +33158,7 @@ if __name__ == "__main__":
             ready=True,
             session_id=_agent_access_backend.session_id,
             launcher_script=_agent_launcher_script,
-            auth_boundary_version=2,
+            auth_boundary_version=3,
         )
         print(f"\n{'='*50}")
         print(f"  Maestro UI:    http://{display_host}:{port}/")
@@ -33186,6 +33186,8 @@ if __name__ == "__main__":
         allow_local_ui=True,
         allow_legacy_browser=True,
     )
+    from services.agent_access.pinokio_proxy import PinokioNativeMcpProxy
+    _authenticated_app = PinokioNativeMcpProxy(_authenticated_app, _agent_access_runtime)
 
     try:
         run_reserved_server(_authenticated_app, host=host, server_socket=server_socket, on_ready=_announce_ready)

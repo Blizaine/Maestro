@@ -255,6 +255,36 @@ def management_router(
     local_challenges = LocalApprovalChallenges(clock=local_approval_clock)
     tailscale_manager = None
 
+    @router.get("/api/v1/remote-access/pinokio/status")
+    def pinokio_browser_status():
+        return runtime.refresh_pinokio_remote()
+
+    @router.get("/api/v1/agent-access/pinokio")
+    def pinokio_mcp_status():
+        owner_required()
+        runtime.refresh_pinokio_remote()
+        return runtime.pinokio_remote_status()
+
+    @router.post("/api/v1/agent-access/pinokio")
+    async def pinokio_mcp_settings(request: Request):
+        owner = owner_required()
+        body = await json_body(request)
+        if set(body) != {"enabled"} or type(body["enabled"]) is not bool:
+            raise HTTPException(400, "Provide only enabled as a boolean")
+        if body["enabled"]:
+            if not runtime.auth.enabled:
+                raise HTTPException(409, "Enable Remote MCP first")
+            backend = runtime.backend()
+            if backend.get("auth_boundary_version", 0) < 3:
+                raise HTTPException(409, "Restart Maestro with the updated Pinokio Remote support first")
+            evidence = await asyncio.to_thread(runtime.refresh_pinokio_remote)
+            from .state import _pinokio_web_origin
+            if _pinokio_web_origin(evidence) is None:
+                raise HTTPException(409, "Enable Pinokio Remote and wait for Maestro's published address")
+        runtime.configure_pinokio_remote(body["enabled"])
+        runtime.audit(owner.id, "agent_access_pinokio_remote", "enabled" if body["enabled"] else "disabled")
+        return runtime.pinokio_remote_status()
+
     def certificate_manager():
         nonlocal tailscale_manager
         if tailscale_manager is None:

@@ -31,12 +31,14 @@ import {
   revokeAgentAccessGrant,
   updateAgentAccessSettings,
   updateAgentAccessTailscaleSettings,
+  type AgentAccessPinokioRemoteStatus,
   type AgentAccessAuditEvent,
   type AgentAccessGrant,
   type AgentAccessStatus,
   type AgentAccessTailscaleStatus,
 } from '../../api/agentAccess'
 import { AgentGenerationDefaults, LocalMcpSettings } from './AgentAccessAdditionalSettings'
+import { PinokioRemoteAccess } from './PinokioRemoteAccess'
 
 type CopyTarget = 'agent' | 'chatgpt' | 'codex' | 'claude' | 'url' | null
 
@@ -70,15 +72,19 @@ export function AgentAccessSettingsPanel() {
   const localApproval = status?.local_approval_available === true
   const localDeviceAccess = status?.auth_method === 'local_device'
   const tailscale = status?.tailscale ?? null
+  const pinokioRemote = status?.pinokio_remote ?? null
+  const pinokioRemoteMcpUrl = isAgentAccessPinokioRemoteReady(pinokioRemote) ? safePinokioMcpUrl(pinokioRemote?.mcp_url) : null
   const tailscaleMcpUrl = isAgentAccessTailscaleReady(status?.tailscale) ? safeTailscaleMcpUrl(status?.tailscale?.mcp_url) : null
   const preferredMcpUrl = safeMcpUrl(status?.preferred_mcp_url)
   const usablePreferredMcpUrl = preferredMcpUrl && (isTailscaleHostname(preferredMcpUrl) ? preferredMcpUrl === tailscaleMcpUrl : true)
     ? preferredMcpUrl
     : null
-  const mcpUrls = useMemo(() => [...new Set([tailscaleMcpUrl, usablePreferredMcpUrl, status?.mcp_url, ...(status?.lan_mcp_urls || [])]
-    .filter((value): value is string => safeMcpUrl(value) !== null))], [status, tailscaleMcpUrl, usablePreferredMcpUrl])
+  const mcpUrls = useMemo(() => [...new Set([pinokioRemoteMcpUrl, tailscaleMcpUrl, usablePreferredMcpUrl, status?.mcp_url, ...(status?.lan_mcp_urls || [])]
+    .filter((value): value is string => safeMcpUrl(value) !== null))], [status, pinokioRemoteMcpUrl, tailscaleMcpUrl, usablePreferredMcpUrl])
   const mcpUrl = mcpUrls.includes(selectedMcpUrl) ? selectedMcpUrl : mcpUrls[0] || ''
   const trustedTailscaleMcpUrl = Boolean(tailscaleMcpUrl && mcpUrl === tailscaleMcpUrl)
+  const trustedPinokioMcpUrl = Boolean(pinokioRemoteMcpUrl && mcpUrl === pinokioRemoteMcpUrl)
+  const trustedPrivateMcpUrl = trustedTailscaleMcpUrl || trustedPinokioMcpUrl
   const controllerUrl = safeControllerUrl(mcpUrl.endsWith('/mcp') ? mcpUrl.slice(0, -4) : status?.controller_url)
 
   const refresh = useCallback(async () => {
@@ -104,6 +110,7 @@ export function AgentAccessSettingsPanel() {
         setPairingCode(null)
         setPairingExpiresAt(null)
       }
+      return next
     } catch (requestError) {
       setStatus(null)
       setGrants([])
@@ -113,6 +120,7 @@ export function AgentAccessSettingsPanel() {
       } else {
         setError(requestError instanceof Error ? requestError.message : 'Could not load Agent Access status.')
       }
+      return null
     } finally {
       setLoading(false)
     }
@@ -415,8 +423,8 @@ export function AgentAccessSettingsPanel() {
       await navigator.clipboard.writeText(clientSetupText(
         target,
         mcpUrl,
-        trustedTailscaleMcpUrl ? '' : status?.certificate_sha256 || '',
-        trustedTailscaleMcpUrl,
+        trustedPrivateMcpUrl ? '' : status?.certificate_sha256 || '',
+        trustedTailscaleMcpUrl ? 'tailscale' : trustedPinokioMcpUrl ? 'pinokio' : null,
       ))
       setCopyTarget(target)
       window.setTimeout(() => setCopyTarget(current => current === target ? null : current), 1800)
@@ -464,6 +472,18 @@ export function AgentAccessSettingsPanel() {
 
       {error && <Notice kind="error">{error}</Notice>}
       {message && <Notice kind="success">{message}</Notice>}
+
+      <PinokioRemoteAccess
+        ownerSession={ownerSession}
+        remoteMcpEnabled={remoteEnabled}
+        managedStatus={pinokioRemote}
+        onManagedStatusChange={next => setStatus(current => current ? {
+          ...current,
+          pinokio_remote: next,
+          preferred_mcp_url: next.ready ? next.mcp_url : current.preferred_mcp_url,
+        } : current)}
+        refreshOwnerStatus={refresh}
+      />
 
       {!backendMissing && status && (
         <>
@@ -532,7 +552,7 @@ export function AgentAccessSettingsPanel() {
                 </div>
                 <div className="rounded-lg border border-border bg-bg-primary p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="min-w-0"><h4 className="text-xs font-semibold text-text-primary">Remote MCP · other computers</h4><p className="mt-1 text-[10px] leading-relaxed text-text-secondary">Use a network URL from another device. Tailscale HTTPS is optional and remains a separate, manual setup action.</p></div>
+                    <div className="min-w-0"><h4 className="text-xs font-semibold text-text-primary">Remote MCP · other computers</h4><p className="mt-1 text-[10px] leading-relaxed text-text-secondary">Remote MCP is the agent transport. Pinokio Remote is an explicit opt-in for its verified address; Tailscale HTTPS remains available separately.</p></div>
                     <StatusPill label={remoteEnabled ? 'On' : 'Off'} good={remoteEnabled} />
                   </div>
                   <div className="mt-3"><ToggleRow checked={remoteEnabled} disabled={busyAction !== null || !status.available} label={remoteEnabled ? 'Remote MCP is enabled' : 'Enable Remote MCP'} description={remoteEnabled ? 'Remote clients still need their own authorization. Tailscale remains a separate setting.' : 'Remote MCP is off. Enabling it does not enable or provision Tailscale.'} onChange={value => void handleToggle('remote', value)} /></div>
@@ -587,12 +607,14 @@ export function AgentAccessSettingsPanel() {
                 </section>
                 <p className="text-xs leading-relaxed text-text-secondary">Automatic setup depends on your agent’s available tools. Use the client-specific steps when the chat cannot manage connections. Copying text does not register, connect or approve the client.</p>
                 {trustedTailscaleMcpUrl
-                  ? <div className="rounded-lg border border-border bg-bg-primary p-3 text-[11px] leading-relaxed text-text-secondary">This selected URL uses trusted Tailscale HTTPS. No manual certificate download, import, or fingerprint matching is needed. The client computer must be on the same Tailscale network; Agent Access OAuth approval is still separate.</div>
-                  : <div className="rounded-lg border border-border bg-bg-primary p-3 text-[11px] leading-relaxed text-text-secondary">Certificate trust is a separate first-time step. Verify Maestro’s TLS certificate against the SHA-256 fingerprint in Connection details and use a trust method supported by your MCP client.</div>}
+                  ? <div className="rounded-lg border border-border bg-bg-primary p-3 text-[11px] leading-relaxed text-text-secondary">This selected URL uses trusted Tailscale HTTPS. No manual certificate download, import, or fingerprint matching is needed. The client computer must be on the same Tailscale network; hosted cloud connectors are not automatically authorized by that network. Agent Access OAuth approval is still separate.</div>
+                  : trustedPinokioMcpUrl
+                    ? <div className="rounded-lg border border-border bg-bg-primary p-3 text-[11px] leading-relaxed text-text-secondary">This selected URL uses trusted Pinokio Remote HTTPS. No manual certificate download, import, or fingerprint matching is needed. The client device must be authorized for this Pinokio Remote app; hosted cloud connectors do not automatically inherit that authorization. Agent Access OAuth approval is still separate.</div>
+                    : <div className="rounded-lg border border-border bg-bg-primary p-3 text-[11px] leading-relaxed text-text-secondary">Certificate trust is a separate first-time step. Verify Maestro’s TLS certificate against the SHA-256 fingerprint in Connection details and use a trust method supported by your MCP client.</div>}
                 {!mcpUrl && <p className="text-[10px] text-amber-300">The connection URL is not available yet. Refresh this panel after the service is ready.</p>}
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  <CopySetupButton target="agent" copied={copyTarget === 'agent'} disabled={!mcpUrl || (!trustedTailscaleMcpUrl && !status.certificate_sha256)} onClick={() => void handleCopy('agent')} />
-                  <CopySetupButton target="chatgpt" copied={copyTarget === 'chatgpt'} disabled={!mcpUrl || (!trustedTailscaleMcpUrl && !status.certificate_sha256)} onClick={() => void handleCopy('chatgpt')} />
+                  <CopySetupButton target="agent" copied={copyTarget === 'agent'} disabled={!mcpUrl || (!trustedPrivateMcpUrl && !status.certificate_sha256)} onClick={() => void handleCopy('agent')} />
+                  <CopySetupButton target="chatgpt" copied={copyTarget === 'chatgpt'} disabled={!mcpUrl || (!trustedPrivateMcpUrl && !status.certificate_sha256)} onClick={() => void handleCopy('chatgpt')} />
                   <CopySetupButton target="codex" copied={copyTarget === 'codex'} disabled={!mcpUrl} onClick={() => void handleCopy('codex')} />
                   <CopySetupButton target="claude" copied={copyTarget === 'claude'} disabled={!mcpUrl} onClick={() => void handleCopy('claude')} />
                   <CopySetupButton target="url" copied={copyTarget === 'url'} disabled={!mcpUrl} onClick={() => void handleCopy('url')} />
@@ -648,9 +670,9 @@ export function AgentAccessSettingsPanel() {
                   <label className="block space-y-1 text-[10px] text-text-secondary">
                     <span>Connection address</span>
                     <select aria-label="MCP connection address" value={mcpUrl} onChange={event => { setSelectedMcpUrl(event.target.value); setCopyTarget(null) }} className="w-full rounded-lg border border-border bg-bg-primary px-2 py-2 text-[10px]">
-                      {mcpUrls.map(url => <option key={url} value={url}>{url === tailscaleMcpUrl ? 'Trusted Tailscale HTTPS' : url === status.mcp_url ? 'Discoverable hostname' : 'Direct LAN address'} — {url}</option>)}
+                      {mcpUrls.map(url => <option key={url} value={url}>{url === pinokioRemoteMcpUrl ? 'Trusted Pinokio Remote HTTPS' : url === tailscaleMcpUrl ? 'Trusted Tailscale HTTPS' : url === status.mcp_url ? 'Discoverable hostname' : 'Direct LAN address'} — {url}</option>)}
                     </select>
-                    <span className="block text-text-muted">Use a direct LAN address if your network blocks discovery. Trust the same verified certificate.</span>
+                    <span className="block text-text-muted">Pinokio Remote and Tailscale HTTPS are trusted transports. Direct LAN addresses keep the certificate trust step.</span>
                   </label>
                 )}
                 <InfoLine label="MCP connection URL" value={mcpUrl || 'Not available'} mono copyable={!!mcpUrl} onCopy={() => void handleCopy('url')} copied={copyTarget === 'url'} />
@@ -922,7 +944,8 @@ function safeMcpUrl(value: unknown): string | null {
   const safe = safeControllerUrl(value)
   if (!safe) return null
   try {
-    return new URL(safe).pathname.endsWith('/mcp') ? safe : null
+    const url = new URL(safe)
+    return url.pathname === '/mcp' && !url.search && !url.hash ? safe : null
   } catch {
     return null
   }
@@ -951,6 +974,27 @@ function isAgentAccessTailscaleReady(value: AgentAccessTailscaleStatus | null | 
     && !value.error
     && safeTailscaleMcpUrl(value.mcp_url),
   )
+}
+
+function safePinokioMcpUrl(value: unknown): string | null {
+  const safe = safeMcpUrl(value)
+  if (!safe) return null
+  try {
+    const url = new URL(safe)
+    return url.protocol === 'https:'
+      && url.hostname.toLowerCase().endsWith('.ts.net')
+      && url.pathname === '/mcp'
+      && !url.search
+      && !url.hash
+      ? safe
+      : null
+  } catch {
+    return null
+  }
+}
+
+function isAgentAccessPinokioRemoteReady(value: AgentAccessPinokioRemoteStatus | null | undefined): boolean {
+  return Boolean(value?.enabled && value.ready && safePinokioMcpUrl(value.mcp_url))
 }
 
 function formatTailscaleError(value: string): string {
@@ -1000,18 +1044,22 @@ function formatDate(value: number | string | null | undefined): string | null {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'short' }).format(date)
 }
 
-function clientSetupText(target: Exclude<CopyTarget, null>, url: string, fingerprint: string, trustedTailscale = false): string {
-  const certificate = trustedTailscale
-    ? '\nTLS transport: trusted Tailscale HTTPS; the client computer must be signed into the same Tailscale network. No LAN certificate import or fingerprint matching is needed for this URL.'
+function clientSetupText(target: Exclude<CopyTarget, null>, url: string, fingerprint: string, trustedTransport: 'tailscale' | 'pinokio' | null = null): string {
+  const trustedPrivate = trustedTransport !== null
+  const privateAccessDescription = trustedTransport === 'tailscale'
+    ? 'This URL uses trusted Tailscale HTTPS. The client device must be signed into the same Tailscale network; hosted cloud connectors are not automatically authorized by that network.'
+    : 'This URL uses trusted Pinokio Remote HTTPS. The client device must be authorized for this Pinokio Remote app; hosted cloud connectors do not automatically inherit that authorization.'
+  const certificate = trustedPrivate
+    ? `\nTLS transport: ${privateAccessDescription} No LAN certificate import or fingerprint matching is needed for this URL.`
     : fingerprint ? `\nTLS certificate SHA-256: ${fingerprint}` : ''
-  const fingerprintPrompt = trustedTailscale
+  const fingerprintPrompt = trustedPrivate
     ? null
     : `Expected public TLS certificate SHA-256 fingerprint: ${fingerprint || 'NOT REPORTED — stop and ask me to verify it before trusting any certificate.'}`
-  const chatGptFingerprintPrompt = trustedTailscale
+  const chatGptFingerprintPrompt = trustedPrivate
     ? null
     : `Expected public TLS certificate SHA-256 fingerprint: ${fingerprint || 'NOT REPORTED — stop before connecting and ask me to verify it.'}`
-  const trustInstructions = trustedTailscale
-    ? 'This URL uses trusted Tailscale HTTPS. Do not download or import Maestro’s LAN certificate or request fingerprint matching for this URL. The computer running this MCP client must be signed into the same Tailscale network.'
+  const trustInstructions = trustedPrivate
+    ? `${privateAccessDescription} Do not download or import Maestro’s LAN certificate or request fingerprint matching for this URL.`
     : 'Before connecting, obtain the exact public TLS certificate from Maestro Settings > Agent Access > Connection details > Download public TLS certificate on the Maestro PC, transfer that public file to the client computer, and verify that its SHA-256 exactly matches the fingerprint above. Trust it only through a certificate trust mechanism supported by the client. If the client cannot verify and safely trust that certificate, stop and tell me the specific blocker. Never disable TLS verification or use an insecure bypass.'
   if (target === 'agent') {
     return [
@@ -1020,8 +1068,8 @@ function clientSetupText(target: Exclude<CopyTarget, null>, url: string, fingerp
       fingerprintPrompt,
       'First inspect which MCP setup tools and client capabilities are actually available in this session. Do not claim you can register a server or change settings unless an available tool supports that action.',
       'If you do not have a server-registration tool, do not stop at a refusal: give me concrete manual steps for the client I named. For ChatGPT desktop, use Settings > MCP servers > Add server > enter a server name > select Streamable HTTP > enter the URL above > Save > restart ChatGPT > Authenticate. If that section or a step is missing, name the exact missing UI and continue with safe manual guidance.',
-      trustedTailscale
-        ? 'Set up the client on a computer signed into the same Tailscale network as Maestro. Claim that it can reach this URL only after the client confirms the connection.'
+      trustedPrivate
+        ? `${privateAccessDescription} Confirm that the MCP client itself can reach this URL before claiming that it is connected.`
         : 'Perform setup in the client that will connect. Do not assume a cloud agent can reach a private LAN URL because my desktop computer is on the same Wi-Fi as Maestro; first confirm the client itself can reach this URL.',
       'Preserve the client’s existing configuration. Add only a Maestro server entry; do not remove or rewrite unrelated settings.',
       'If another Maestro installation is already configured, keep it and add this installation under a distinct server name.',
@@ -1038,11 +1086,13 @@ function clientSetupText(target: Exclude<CopyTarget, null>, url: string, fingerp
       `Server URL: ${url}`,
       chatGptFingerprintPrompt,
       'In the ChatGPT desktop app, open Settings > MCP servers > Add server. Enter a distinct server name of your choice, select Streamable HTTP, enter the URL above, and select Save. Restart ChatGPT, then select Authenticate and complete the OAuth flow.',
-      trustedTailscale
-        ? 'This URL uses trusted Tailscale HTTPS, so do not download or import Maestro’s LAN certificate or request fingerprint matching. The computer running ChatGPT must be signed into the same Tailscale network as Maestro.'
+      trustedPrivate
+        ? trustedTransport === 'tailscale'
+          ? 'This URL uses trusted Tailscale HTTPS, so do not download or import Maestro’s LAN certificate or request fingerprint matching. The computer running ChatGPT must be signed into the same Tailscale network as Maestro. Hosted cloud connectors are not automatically authorized by that network.'
+          : `${privateAccessDescription} Do not download or import Maestro’s LAN certificate or request fingerprint matching for this URL.`
         : 'Before connecting, use Maestro Settings > Agent Access > Connection details > Download public TLS certificate on the Maestro PC. Transfer that public file to the Mac or other client computer and verify that its SHA-256 exactly matches the fingerprint above. Configure trust through a mechanism supported by the MCP client; browser trust alone does not prove the MCP client will accept it. If no supported trust method is available, explain that specific blocker. Never disable TLS verification or use an insecure bypass.',
-      trustedTailscale
-        ? 'Complete setup in ChatGPT desktop on a computer signed into the same Tailscale network as Maestro.'
+      trustedPrivate
+        ? `Complete setup on a device authorized to reach this private address. ${privateAccessDescription}`
         : 'Complete setup in ChatGPT desktop and confirm that the desktop client itself can reach this URL. Being on the same Wi-Fi does not mean a cloud-hosted agent can reach a private LAN URL.',
       'When Maestro shows the OAuth request, review the requested scopes and approve only the access you intend. Keep OAuth codes and tokens out of chat; let ChatGPT manage credentials in its protected store.',
       'After authentication, verify with a read-only server status or help request only. Do not render or create images, video, audio, or other media during setup.',
@@ -1064,17 +1114,19 @@ function clientSetupText(target: Exclude<CopyTarget, null>, url: string, fingerp
   if (target === 'claude') {
     return [
       'Claude Code MCP setup for Maestro',
-      trustedTailscale
-        ? 'Run this command in a terminal on the computer running Claude Code, signed into the same Tailscale network as Maestro:'
+      trustedPrivate
+        ? trustedTransport === 'tailscale'
+          ? 'Run this command in a terminal on the computer running Claude Code, signed into the same Tailscale network as Maestro:'
+          : 'Run this command in a terminal on a device authorized for this Pinokio Remote app:'
         : 'Run this command in a terminal on a computer that can reach this Maestro URL, using Claude Code locally:',
       'claude mcp add --transport http maestro ' + JSON.stringify(url),
       'In Claude Code, run /mcp to complete OAuth authentication, then verify with a read-only status or help request.',
-      'Claude Desktop custom connectors are cloud-hosted: Anthropic says those requests come from its cloud, so they cannot reach a private LAN or Tailscale URL through your computer’s connection. Do not use this private HTTP URL for Claude Desktop.',
+      'Claude Desktop custom connectors are cloud-hosted: Anthropic says those requests come from its cloud, so they cannot reach a private LAN or Tailscale URL through your computer’s connection. Pinokio Remote authorization on your browser device is not automatically available to a hosted connector. Do not use this private HTTP URL for Claude Desktop unless that client confirms access.',
       'For Claude Desktop on this same computer, use the per-client Local MCP .mcpb extension from Maestro Settings → Agent Access → Local MCP. This remote HTTP setup does not provide a public relay for Claude Desktop.',
-      trustedTailscale
-        ? 'This URL uses trusted Tailscale HTTPS. No LAN certificate import or fingerprint matching is needed.'
+      trustedPrivate
+        ? `${privateAccessDescription} No LAN certificate import or fingerprint matching is needed.`
         : fingerprintPrompt,
-      trustedTailscale ? '' : trustInstructions,
+      trustedPrivate ? '' : trustInstructions,
       '',
       'No bearer token is included. Approve the requested scopes in Maestro when prompted.',
     ].filter(Boolean).join('\n')

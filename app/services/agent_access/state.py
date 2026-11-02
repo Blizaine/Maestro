@@ -174,6 +174,8 @@ class RuntimeState:
         self.hostname = "maestro-" + self.installation_id.replace("-", "")[:16] + ".local"
         self.app_root = Path(app_root).resolve() if app_root else None
         self._certificate_ip_addresses: tuple[str, ...] = ()
+        self._pinokio_remote_evidence: dict = {}
+        self._pinokio_remote_discovery = None
         self._lock = threading.RLock()
         self._config_path = self.directory / "runtime.json"
         self._initialize(port)
@@ -270,7 +272,10 @@ class RuntimeState:
         hosts.extend(self._certificate_ip_addresses)
         if self.tailscale_hostname:
             hosts.append(self.tailscale_hostname)
-        return tuple(dict.fromkeys(f"https://{_format_host(host)}:{self.port}" for host in hosts))
+        origins = [f"https://{_format_host(host)}:{self.port}" for host in hosts]
+        if self.pinokio_remote_origin:
+            origins.append(self.pinokio_remote_origin)
+        return tuple(dict.fromkeys(origins))
 
     @property
     def allowed_authorities(self) -> tuple[str, ...]:
@@ -278,7 +283,55 @@ class RuntimeState:
         hosts.extend(self._certificate_ip_addresses)
         if self.tailscale_hostname:
             hosts.append(self.tailscale_hostname)
-        return tuple(dict.fromkeys(f"{_format_host(host)}:{self.port}" for host in hosts))
+        authorities = [f"{_format_host(host)}:{self.port}" for host in hosts]
+        if self.pinokio_remote_origin:
+            authorities.append(urlsplit(self.pinokio_remote_origin).netloc)
+        return tuple(dict.fromkeys(authorities))
+
+    def refresh_pinokio_remote(self) -> dict:
+        """Read Pinokio's published route; never start or configure networking."""
+        if self.app_root is None:
+            self._pinokio_remote_evidence = {"available": False, "phase": "unsupported", "browser_url": None}
+            return self._pinokio_remote_evidence
+        from ..pinokio_remote import PinokioRemoteDiscovery
+        if self._pinokio_remote_discovery is None:
+            self._pinokio_remote_discovery = PinokioRemoteDiscovery(self.app_root)
+        self._pinokio_remote_evidence = self._pinokio_remote_discovery.status()
+        return self._pinokio_remote_evidence
+
+    @property
+    def pinokio_remote_origin(self) -> str | None:
+        if self.config.get("pinokio_remote_enabled") is not True or not self.auth.enabled:
+            return None
+        return _pinokio_web_origin(self._pinokio_remote_evidence)
+
+    def configure_pinokio_remote(self, enabled: bool) -> None:
+        if type(enabled) is not bool:
+            raise ValueError("enabled must be a boolean")
+        with self._lock:
+            config = self.config
+            config["pinokio_remote_enabled"] = enabled
+            atomic_json(self._config_path, config)
+
+    def pinokio_remote_status(self, controller: dict | None = None) -> dict:
+        controller = controller if controller is not None else read_json(self.directory / "controller.json")
+        active_evidence = controller.get("pinokio_remote")
+        active_evidence = active_evidence if isinstance(active_evidence, dict) else {}
+        evidence = self._pinokio_remote_evidence or active_evidence
+        enabled = self.config.get("pinokio_remote_enabled") is True
+        origin = _pinokio_web_origin(evidence)
+        backend = self.backend()
+        ready = bool(
+            enabled and self.auth.enabled and origin
+            and origin == _pinokio_web_origin(active_evidence)
+            and controller.get("status") == "ready" and process_alive(controller.get("pid"))
+            and backend.get("ready") and process_alive(backend.get("pid"))
+            and backend.get("auth_boundary_version", 0) >= 3
+        )
+        return {"available": False, "phase": "unsupported", "browser_url": None,
+                "node_hostname": None, "dns_name": None, "app_id": None, "reason": None,
+                **evidence, "enabled": enabled, "ready": ready,
+                "mcp_url": origin + "/mcp" if ready else None}
 
     @property
     def tailscale_hostname(self) -> str | None:
@@ -345,6 +398,11 @@ class RuntimeState:
 
     def origin_for_scope(self, scope: dict, *, allow_insecure_remote: bool = False) -> str | None:
         """Return the exact approved endpoint origin represented by an ASGI scope."""
+        # Only the authenticated loopback envelope middleware sets this ASGI
+        # value. HTTP headers alone never establish a public origin or owner.
+        pinokio_origin = scope.get("maestro.pinokio_origin")
+        if pinokio_origin is not None:
+            return pinokio_origin if pinokio_origin == self.pinokio_remote_origin else None
         scheme = str(scope.get("scheme", "")).lower()
         if scheme not in {"https", "http"}:
             return None
@@ -397,6 +455,8 @@ class RuntimeState:
         """Map an exact approved controller/MCP alias to the canonical audience."""
         if not isinstance(resource, str) or len(resource) > 2048 or "?" in resource or "#" in resource:
             raise ValueError("resource must be an approved Maestro MCP URL")
+        if self.pinokio_remote_origin and resource == self.pinokio_remote_origin + "/mcp":
+            return self.mcp_url
         try:
             parsed = urlsplit(resource)
             port = parsed.port
@@ -528,18 +588,37 @@ class RuntimeState:
         backend = self.backend()
         lan_mcp_urls = controller.get("lan_mcp_urls", []) if auth.get("enabled") else []
         tailscale = self.tailscale_status(controller)
+        pinokio_remote = self.pinokio_remote_status(controller)
         return {
             **auth, "available": True, "label": config["label"],
             "workstation_id": config["workstation_id"], "controller_url": self.origin,
             "local_setup_url": self.local_url, "mcp_url": self.mcp_url,
             "lan_mcp_urls": lan_mcp_urls,
             "tailscale": tailscale,
-            "preferred_mcp_url": tailscale["mcp_url"] or self.mcp_url,
+            "pinokio_remote": pinokio_remote,
+            "preferred_mcp_url": pinokio_remote["mcp_url"] or tailscale["mcp_url"] or self.mcp_url,
             "controller_status": controller_status,
             "certificate_sha256": controller.get("certificate_sha256", ""),
             "discovery_status": controller.get("discovery_status", "disabled"),
             "backend_online": bool(backend.get("ready") and process_alive(backend.get("pid"))),
         }
+
+
+def _pinokio_web_origin(evidence: dict) -> str | None:
+    """MCP shares only a verified root web route, never an inferred port."""
+    if evidence.get("available") is not True or evidence.get("phase") != "ready":
+        return None
+    try:
+        url = urlsplit(evidence.get("browser_url") or "")
+        port = url.port
+        if (url.scheme != "https" or not _valid_tailscale_hostname(url.hostname)
+                or url.username is not None or url.password is not None
+                or url.path not in {"", "/"} or url.fragment
+                or port is not None and not 1 <= port <= 65535):
+            return None
+        return "https://" + url.netloc
+    except (ValueError, TypeError):
+        return None
 
 
 def _format_host(host: str) -> str:

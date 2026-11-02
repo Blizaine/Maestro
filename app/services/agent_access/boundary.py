@@ -38,6 +38,7 @@ MAX_MULTIPART_FIELD_BYTES = 1024 * 1024
 MULTIPART_CHUNK_SIZE = 64 * 1024
 MAX_CONCURRENT_MULTIPART = 2
 PUBLIC = frozenset({
+    "/api/v1/remote-access/pinokio/status",
     "/api/v1/agent-access/status", "/api/v1/agent-access/request-console-code",
     "/api/v1/agent-access/certificate",
     "/api/v1/agent-access/local-challenge", "/api/v1/agent-access/local-approve",
@@ -687,6 +688,9 @@ def validate_media_paths(
 
 def browser_login_origin(status: dict, scope: dict) -> str:
     """Use a certificate-backed address for this browser's actual host."""
+    # This value is inserted only by the signed Pinokio controller envelope.
+    if scope.get("maestro.pinokio_origin"):
+        return scope["maestro.pinokio_origin"]
     try:
         headers = dict(scope.get("headers", []))
         host = urlsplit("//" + headers.get(b"host", b"").decode("latin1")).hostname
@@ -804,8 +808,11 @@ class AccessBoundary:
         path = scope.get("path", "/")
         method = scope.get("method", "GET").upper()
         headers = {k.lower(): v.decode("latin1") for k, v in scope.get("headers", [])}
+        frame_sources = self.frame_ancestor_sources
+        if scope.get("maestro.pinokio_frame_origin"):
+            frame_sources = (*frame_sources, scope["maestro.pinokio_frame_origin"])
         fresh_ui_shell = (
-            bool(self.frame_ancestor_sources)
+            bool(frame_sources)
             and scope["type"] == "http"
             and method in {"GET", "HEAD"}
             and path in {"/", "/index.html"}
@@ -819,7 +826,7 @@ class AccessBoundary:
                 if key.lower() not in {b"if-none-match", b"if-modified-since"}
             ]}
         if (
-            self.frame_ancestor_sources
+            frame_sources
             and not path.startswith(("/uploads/", "/api/v1/uploads/"))
         ):
             original_send = send
@@ -838,7 +845,7 @@ class AccessBoundary:
                             ]
                             response_headers.append((b"cache-control", b"no-store"))
                         response_headers = _apply_frame_ancestors(
-                            response_headers, self.frame_ancestor_sources,
+                            response_headers, frame_sources,
                         )
                         message = {**message, "headers": response_headers}
                 await original_send(message)

@@ -2,10 +2,24 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import os
 import socket
 from typing import Any
 
 import uvicorn
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+
+class PreserveTransportPeer:
+    """Keep the socket peer separate from Uvicorn's forwarded client address."""
+
+    def __init__(self, app):
+        self.app = ProxyHeadersMiddleware(app, trusted_hosts=os.environ.get("FORWARDED_ALLOW_IPS", "127.0.0.1"))
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in {"http", "websocket"}:
+            scope = {**scope, "maestro.transport_client": scope.get("client")}
+        await self.app(scope, receive, send)
 
 
 def run_reserved_server(
@@ -29,7 +43,7 @@ def run_reserved_server(
 
     try:
         port = int(server_socket.getsockname()[1])
-        config = uvicorn.Config(app, host=host, port=port)
+        config = uvicorn.Config(PreserveTransportPeer(app), host=host, port=port, proxy_headers=False)
         ReadyServer(config).run(sockets=[server_socket])
     finally:
         server_socket.close()

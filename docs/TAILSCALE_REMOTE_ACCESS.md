@@ -19,6 +19,14 @@ uses **Tailscale Serve**, never the public Tailscale Funnel feature.
 
 ## One-time setup
 
+**Already using Pinokio Remote?** Maestro detects its published app address in
+Settings → Agent Access and Notifications. Use that browser link or QR code;
+you do not need a second Tailscale setup on this PC. For AI agents, enable
+Remote MCP and choose **Use Pinokio Remote for MCP** in Agent Access. Maestro
+and Agent Access must both be running for that shared URL. Existing standalone
+links continue working, and the instructions below remain available for older
+Pinokio installations or users who prefer a separate connection.
+
 ### 1. Create a Tailscale account
 
 1. Open [tailscale.com/start](https://login.tailscale.com/start).

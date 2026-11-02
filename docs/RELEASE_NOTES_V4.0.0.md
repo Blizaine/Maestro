@@ -13,6 +13,10 @@ candidate combines the changes below with the fixes already tested on Dev.
   Director productions directly, including lyrics and music-video plans using
   native song/beat analysis. Existing Pinokio and LAN browser access remains
   available. [Setup and client requirements](Agent-Access.md).
+- **Pinokio Remote integration:** detects this installation's published browser
+  address, offers a QR code and optional MCP access through the same private
+  HTTPS route, and avoids a second Tailscale setup. Existing local, LAN and
+  standalone Tailscale connections are preserved.
 - **Source-driven Pika music videos:** Pika References now accepts an exact
   soundtrack as clean target-audio conditioning during all six sampler steps.
   Director and MCP preserve each shot's source offset. Fixes also cover false
