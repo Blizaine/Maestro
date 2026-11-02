@@ -571,7 +571,9 @@ def test_preview_endpoint_cannot_serve_completed_or_cross_job_media():
     cache.set_context("active", context)
     preview = cache.publish("active", Image.new("RGB", (4, 4)), context)
     jobs = {"active": {"status": "running"}, "finished": {"status": "completed"}, "other": {"status": "running"}}
+    access_check = mock.Mock()
     endpoint = isolated_function("launch.py", "get_generation_preview", {
+        "_agent_require_job_access": access_check,
         "_generation_previews": cache, "_jobs": jobs, "is_cancel_requested": lambda job: False,
         "HTTPException": HTTPException, "preview_response": preview_response, "Request": Request,
     })
@@ -581,3 +583,9 @@ def test_preview_endpoint_cannot_serve_completed_or_cross_job_media():
         with pytest.raises(HTTPException) as error:
             endpoint(job_id, preview["revision"], request)
         assert error.value.status_code == 404
+    assert access_check.call_args_list == [mock.call(name) for name in ("active", "finished", "other", "unknown")]
+    access_check.side_effect = HTTPException(status_code=404, detail="Job not available")
+    with mock.patch.object(cache, "get", side_effect=AssertionError("Denied clients must not read preview media")):
+        with pytest.raises(HTTPException) as denied:
+            endpoint("active", preview["revision"], request)
+    assert denied.value.status_code == 404
