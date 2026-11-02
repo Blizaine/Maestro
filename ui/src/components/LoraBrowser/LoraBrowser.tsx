@@ -12,6 +12,8 @@ import { ModelCard } from './ModelCard'
 import { ModelDetail } from './ModelDetail'
 import { DownloadBar } from './DownloadBar'
 import { InstalledCheckpoints } from './InstalledCheckpoints'
+import { LoraAccelerationFilter } from '../SettingsDrawer/LoraAccelerationFilter'
+import { matchesLoraAccelerationFilter } from '../../lib/loraAcceleration'
 import { CharacterBrowser } from '../Characters/CharacterBrowser'
 
 const SORT_OPTIONS = [
@@ -98,6 +100,8 @@ export function LoraBrowser() {
   // Checkpoint-mode equivalent of "My LoRAs" — shows imported checkpoints.
   const [showCkptInstalled, setShowCkptInstalled] = useState(false)
   const [installedLoras, setInstalledLoras] = useState<InstalledLora[]>([])
+  const accelerationFilter = useStore(state => state.loraAccelerationFilter)
+  const activeLoras = useStore(state => state.params.activated_loras)
   const [installedLoading, setInstalledLoading] = useState(false)
   const [showUrlImport, setShowUrlImport] = useState(false)
   const [importUrl, setImportUrl] = useState('')
@@ -756,6 +760,7 @@ export function LoraBrowser() {
         ) : showInstalled ? (
           /* Installed LoRAs view */
           <div className="h-full overflow-y-auto p-4">
+            <LoraAccelerationFilter />
             {installedLoading ? (
               <div className="flex items-center justify-center py-20">
                 <Loader2 size={24} className="animate-spin text-accent-blue" />
@@ -768,6 +773,8 @@ export function LoraBrowser() {
             ) : (() => {
               // Filter installed LoRAs by active model filter and search query
               const filtered = installedLoras.filter(lora => {
+                if (!activeLoras.includes(lora.filename)
+                  && !matchesLoraAccelerationFilter(lora.filename, accelerationFilter, lora.is_acceleration)) return false
                 // Filter by NSFW — when the master gate is off OR the
                 // local checkbox is unchecked, hide NSFW LoRAs.
                 // Uses effectiveNsfw so disabling NSFW in services

@@ -71,6 +71,7 @@ export interface ApiOutput {
 }
 
 export interface ApiJobStatus {
+  generation_details?: import('../types').GenerationDetails | null
   enhancement?: import('../types').PromptEnhancementRecord | null
   job_id: string
   /** Stable browser-generated identity used to recover an accepted submit. */
@@ -2958,6 +2959,7 @@ export type LoraUpdateStatus = 'current' | 'available' | 'unknown' | 'local' | '
 
 export interface InstalledLora {
   filename: string
+  is_acceleration?: boolean
   directory: string
   /** Resolved user-facing name, independent from the on-disk filename. */
   display_name?: string

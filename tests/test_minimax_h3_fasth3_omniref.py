@@ -91,7 +91,8 @@ class OmniRefTests(unittest.TestCase):
         self.assertTrue(options['returns_audio'])
         for key in ('sliding_window', 'video_continuation', 'i2v_class', 'sol_attention', 'sla_attention', 'veda_attention', 'first_block_cache'):
             self.assertFalse(options[key], key)
-        self.assertTrue(options['loras_disabled'])
+        self.assertFalse(options['loras_disabled'])
+        self.assertTrue(options['experimental_loras_available'])
         self.assertEqual(model['source_sha256'], omni.SHA256)
         self.assertEqual(model['source_size_bytes'], omni.SIZE)
         self.assertIn(omni.REVISION, model['URLs'][0])
@@ -134,12 +135,20 @@ class OmniRefTests(unittest.TestCase):
         self.assertEqual([r['path'] for r in request['minimax_h3_references']], [r['path'] for r in refs])
         self.assertEqual(request['flow_shift'], 12)
         self.assertEqual(request['override_attention'], 'sdpa')
+        experimental = {'minimax_h3_references': refs, 'activated_loras': ['film_style.safetensors'],
+                        'minimax_h3_experimental_loras': True, 'num_inference_steps': 8,
+                        'video_length': 124}
+        omni.validate_request(experimental)
+        self.assertEqual(experimental['activated_loras'], ['film_style.safetensors'])
         for update in ({'num_inference_steps': 4}, {'image_start': 'start.png'},
                        {'minimax_h3_multi_window': True}, {'input_masks': object()},
                        {'activated_loras': ['turbo']}, {'minimax_h3_references': []},
                        {'minimax_h3_references': [refs[0], {**refs[2], 'audio_intent': 'drive'}]}):
             with self.subTest(update=update), self.assertRaises((TypeError, ValueError)):
                 omni.validate_request({**request, **update})
+        with self.assertRaisesRegex(ValueError, 'experimental and off by default'):
+            omni.validate_request({'minimax_h3_references': refs,
+                                   'activated_loras': ['film_style.safetensors']})
 
 
 if __name__ == '__main__':

@@ -22,6 +22,8 @@ from shared.utils import files_locator as fl
 
 FULL_TIME_DIM = 2688
 _PRUNED_WIDTHS = (4, 8, 64)
+_AFFINE_FIT_RELATIVE_TOLERANCE = 1e-5
+_BF16_ROUNDING_BUDGET_FACTOR = 1.25
 _MAP_RELATIVE_DIR = os.path.join("minimax_h3", "lora_affine_maps")
 _ARCHITECTURES = {
     "viggle_animate": "viggle",
@@ -89,6 +91,65 @@ def _load_affine_package(architecture: str, width: int = 8):
     return table, affine
 
 
+def _bf16_rounding_fit_error(
+    canonical_table: torch.Tensor,
+    target_table: torch.Tensor,
+) -> float | None:
+    """Estimate only the affine-fit residual expected from a BF16 table.
+
+    Imported H3 checkpoints can store an FP32 curve buffer whose values were
+    rounded to BF16 before serialization. A least-squares affine map cannot
+    remove that per-entry rounding noise, so compare its residual with a
+    simulated BF16 rounding of the best affine prediction. This keeps the
+    compatibility guard strict for ordinary FP32 tables and for residuals
+    larger than the checkpoint's measured rounding floor.
+    """
+
+    target_float = target_table.float()
+    if not torch.equal(target_float, target_float.to(torch.bfloat16).float()):
+        return None
+
+    canonical_h = torch.cat(
+        (
+            canonical_table.double(),
+            canonical_table.new_ones(canonical_table.shape[0], 1, dtype=torch.float64),
+        ),
+        dim=1,
+    )
+    forward_fit = torch.linalg.lstsq(
+        canonical_h,
+        target_float.double(),
+        rcond=1e-14,
+    )
+    if int(forward_fit.rank) != canonical_h.shape[1]:
+        return None
+
+    rounded_target = (canonical_h @ forward_fit.solution).to(
+        torch.bfloat16
+    ).float().double()
+    rounded_h = torch.cat(
+        (
+            rounded_target,
+            rounded_target.new_ones(rounded_target.shape[0], 1, dtype=torch.float64),
+        ),
+        dim=1,
+    )
+    reverse_fit = torch.linalg.lstsq(
+        rounded_h,
+        canonical_h,
+        rcond=1e-14,
+    )
+    if int(reverse_fit.rank) != rounded_h.shape[1]:
+        return None
+    denominator = torch.linalg.vector_norm(canonical_h)
+    if denominator == 0:
+        return None
+    return float(
+        torch.linalg.vector_norm(rounded_h @ reverse_fit.solution - canonical_h)
+        / denominator
+    )
+
+
 def _aligned_affine_map(architecture: str, target_table: torch.Tensor):
     target_table = target_table.detach().to(device="cpu", dtype=torch.float64)
     if target_table.ndim != 2 or target_table.shape[1] not in _PRUNED_WIDTHS:
@@ -106,6 +167,7 @@ def _aligned_affine_map(architecture: str, target_table: torch.Tensor):
             canonical_table.shape[0] - 1,
             target_table.shape[0],
             dtype=torch.float64,
+            device=canonical_table.device,
         )
         lower = position.floor().long().clamp(max=canonical_table.shape[0] - 2)
         canonical_table = torch.lerp(
@@ -129,7 +191,18 @@ def _aligned_affine_map(architecture: str, target_table: torch.Tensor):
         torch.linalg.vector_norm(target_h @ fit.solution - canonical_h)
         / torch.linalg.vector_norm(canonical_h)
     )
-    if relative_error > 1e-5:
+    allowed_error = _AFFINE_FIT_RELATIVE_TOLERANCE
+    if relative_error > allowed_error:
+        rounding_floor = _bf16_rounding_fit_error(
+            canonical_table,
+            target_table,
+        )
+        if rounding_floor is not None:
+            allowed_error = max(
+                allowed_error,
+                rounding_floor * _BF16_ROUNDING_BUDGET_FACTOR + 1e-7,
+            )
+    if relative_error > allowed_error:
         raise ValueError(
             f"MiniMax H3 {architecture} checkpoint AdaLN table is "
             "incompatible with the canonical LoRA map "

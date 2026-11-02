@@ -404,6 +404,8 @@ from services.job_lifecycle import (
     update_job,
 )
 
+from services.generation_details import is_terminal_studio_failure, public_generation_details
+from services.lora_acceleration import is_acceleration_lora
 from services.studio_enhancement import (
     StudioJobArchive, current_settings as enhancement_settings,
     captured_settings, enhancement_context, enhancement_warnings, record_review_warning,
@@ -1119,6 +1121,7 @@ def list_models():
             # nsfw_mode toggle can show/hide without reloading models.
             "nsfw_only": bool(md.get("nsfw_only", False)),
             "loras_disabled": bool(md.get("loras_disabled", False)),
+            "experimental_loras_available": bool(md.get("experimental_loras_available", False)),
         })
 
     return {"families": families, "models": models}
@@ -2498,6 +2501,7 @@ def list_all_installed_loras():
                 except Exception:
                     pass
             info.update(lora_date_fields(full_path, meta))
+            info["is_acceleration"] = is_acceleration_lora(f, meta)
             # Check for local preview files (downloaded from HF)
             if not info.get("preview_url"):
                 for _b in _bases:
@@ -2654,10 +2658,18 @@ def _lora_is_compatible_with_model(model_def: dict, path: str) -> bool:
     # adapter is tied to one checkpoint shape.
     architecture = str((model_def or {}).get("architecture") or "")
     if architecture.startswith("minimax_h3"):
-        if (model_def or {}).get("minimax_h3_fused_turbo", False):
-            from models.minimax_h3.fused_turbo import fused_h3_lora_incompatibility
+        if (model_def or {}).get("minimax_h3_fasth3"):
+            from models.minimax_h3.lora_compatibility import fasth3_lora_incompatibility
 
-            return fused_h3_lora_incompatibility(path) is None
+            return fasth3_lora_incompatibility(
+                path, omni_reference=bool(model_def.get("minimax_h3_fasth3_omniref")),
+            ) is None
+        from models.minimax_h3.lora_compatibility import minimax_h3_lora_incompatibility
+
+        if minimax_h3_lora_incompatibility(model_def, path) is not None:
+            return False
+        if (model_def or {}).get("minimax_h3_fused_turbo", False):
+            return True
         from models.minimax_h3.turbo import (
             minimax_h3_adapter_workflow,
             minimax_h3_turbo_preset_for_path,
@@ -2676,6 +2688,23 @@ def _lora_is_compatible_with_model(model_def: dict, path: str) -> bool:
                 return False
             return True
     return True
+
+
+def _validate_h3_lora_selection(model_def: dict, params: dict) -> None:
+    """Catch known adapter/model mismatches before starting expensive loading."""
+    from models.minimax_h3.lora_compatibility import validate_fasth3_loras, validate_minimax_h3_loras
+
+    paths = [
+        wgp.resolve_lora_path(params["model_type"], name) or name
+        for name in params.get("activated_loras") or []
+    ]
+    if model_def.get("minimax_h3_fasth3"):
+        validate_fasth3_loras(
+            paths, enabled=params.get("minimax_h3_experimental_loras"),
+            omni_reference=bool(model_def.get("minimax_h3_fasth3_omniref")),
+        )
+    else:
+        validate_minimax_h3_loras(paths, model_def)
 
 
 def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
@@ -2927,6 +2956,7 @@ def list_loras_details(model_type: str):
             except Exception:
                 meta = None
         info.update(lora_date_fields(f, meta))
+        info["is_acceleration"] = is_acceleration_lora(basename, meta)
         # Fallback: infer NSFW from filename + tags + description + guide
         # only when no authoritative signal exists.
         has_override = isinstance(meta, dict) and isinstance(meta.get("nsfw_override"), bool)
@@ -2987,6 +3017,7 @@ def list_loras_details(model_type: str):
                 loras.append(info)
             info.update({
                 "managed": True,
+                "is_acceleration": True,
                 "managed_channel": preset["status"],
                 "recommended_weights": {
                     "source": "default",
@@ -7028,6 +7059,7 @@ def get_model_options(model_type: str):
         "minimax_h3_fasth3_omniref": md.get("minimax_h3_fasth3_omniref", False),
         "minimax_h3_full_checkpoint": md.get("minimax_h3_full_checkpoint", False),
         "loras_disabled": md.get("loras_disabled", False),
+        "experimental_loras_available": md.get("experimental_loras_available", False),
         "minimax_h3_runtime_advisory": _minimax_h3_runtime_advisory(md),
         "minimax_h3_media_sources": md.get(
             "minimax_h3_media_sources", False
@@ -12128,6 +12160,7 @@ async def _prepare_generation_submission(
                 ),
                 workflow=minimax_h3_adapter_workflow(_generation_model_def),
             )
+            _validate_h3_lora_selection(_generation_model_def, body)
             if _generation_model_def.get("omni_reference"):
                 from models.minimax_h3.turbo import find_minimax_h3_pdd_loras
 
@@ -30713,6 +30746,7 @@ def get_status(job_id: str):
         "finishing_warnings": j.get("finishing_warnings", []),
         "reconstruction_report": j.get("reconstruction_report"),
         "error": j["error"],
+        "generation_details": public_generation_details(j),
         "viggle_preparation": j.get("viggle_preparation"),
         "enhancement": public_enhancement(j.get("enhancement"), summary=True),
         # Present only on failed jobs that look like CUDA OOMs. UI
@@ -31032,7 +31066,7 @@ def list_jobs():
         j = snapshot_job(job)
         if j.get("dismissed"):
             continue
-        if j["status"] in ("held", "queued", "running") or j.get("enhancement") or j.get("finishing_warnings"):
+        if j["status"] in ("held", "queued", "running") or is_terminal_studio_failure(j) or j.get("enhancement") or j.get("finishing_warnings"):
             active.append({
                 "job_id": j["id"],
                 "client_submission_id": j.get("client_submission_id"),
@@ -31048,6 +31082,7 @@ def list_jobs():
                 "output_files": j["output_files"],
                 "finishing_warnings": j.get("finishing_warnings", []),
                 "error": j["error"],
+                "generation_details": public_generation_details(j),
                 "enhancement": public_enhancement(j.get("enhancement"), summary=True),
                 "oom_info": j.get("oom_info"),
                 "performance_plan": j.get("performance_plan"),

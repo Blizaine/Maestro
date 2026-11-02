@@ -88,8 +88,8 @@ from .first_block_cache import MiniMaxH3FirstBlockCache
 from .fused_turbo import (
     FUSED_H3_MAX_EVALUATIONS,
     FUSED_H3_MIN_EVALUATIONS,
-    validate_fused_h3_loras,
 )
+from .lora_compatibility import validate_minimax_h3_loras
 from .transformer import (
     MiniMaxH3Transformer,
     _activation_chunk_tokens,
@@ -1821,8 +1821,16 @@ class MiniMaxH3Model:
             self._pdd_lora_strength = 1.0
             self._ptd_lora_paths = ()
             return
-        if getattr(self, "fasth3", False) and loras_selected:
-            raise ValueError("FastH3 V2 does not support additional LoRAs.")
+        if getattr(self, "fasth3", False):
+            from .lora_compatibility import validate_fasth3_loras
+
+            validate_fasth3_loras(
+                loras_selected,
+                enabled=minimax_h3_experimental_loras,
+                omni_reference=getattr(self, "fasth3_omniref", False),
+            )
+        else:
+            validate_minimax_h3_loras(loras_selected, self.model_def)
         from .ptd import is_ptd_refasymopd_adapter, ordered_ptd_adapters
 
         ptd_selected = tuple(
@@ -1847,8 +1855,6 @@ class MiniMaxH3Model:
             for path in (loras_selected or [])
             if not is_ptd_refasymopd_adapter(path)
         )
-        if getattr(self, "_fused_turbo", False):
-            validate_fused_h3_loras(loras_selected)
         if getattr(self, "_baked_turbo", False):
             if self.model_def.get("minimax_h3_import_profile"):
                 from .imported import validate_imported_h3_loras
@@ -2766,6 +2772,8 @@ class MiniMaxH3Model:
                 "audio_guide2": audio_guide2, "audio_prompt_type": audio_prompt_type,
                 "video_prompt_type": video_prompt_type, "denoising_strength": denoising_strength,
                 "custom_settings": custom_settings,
+                "loras_selected": _kwargs.get("loras_selected"),
+                "minimax_h3_experimental_loras": _kwargs.get("minimax_h3_experimental_loras"),
             })
             if _face_refinement is not None:
                 raise ValueError("FastH3 V2 does not support H3 face refinement.")

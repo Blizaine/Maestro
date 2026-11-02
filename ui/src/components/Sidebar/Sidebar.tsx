@@ -90,7 +90,9 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
     let focusFrame = 0
     const resize = () => {
       const input = document.activeElement
-      const editing = sidebarOpen && !!sidebarElement?.contains(input) && isKeyboardInput(input)
+      const insideKeyboardSurface = !!sidebarElement?.contains(input)
+        || !!input?.closest('[data-sidebar-overlay]')
+      const editing = sidebarOpen && insideKeyboardSurface && isKeyboardInput(input)
       // Browser chrome and restored tabs can leave innerHeight much taller
       // than the visible page without a keyboard. Measure the actual viewport
       // while idle, retaining that baseline only during text entry. This also

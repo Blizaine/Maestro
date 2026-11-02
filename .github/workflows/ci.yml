@@ -118,6 +118,7 @@ jobs:
           tests/test_pika_flex_attention.py
           tests/test_pika_flex_handler.py
           tests/test_pika_flex_options_compatibility.py
+          tests/test_launch_module_identity.py
 
   agent-access:
     name: Isolated Agent Access protocols and security
@@ -161,6 +162,8 @@ jobs:
           node tests/ui/h3_checkpoint_download_ui.cjs
       - name: FlashVSR versioned selection regressions
         run: node tests/ui/flashvsr_options.cjs
+      - name: H3 LoRA settings roundtrip
+        run: node tests/ui/fused_h3_lora_roundtrip.cjs
       - name: Pika Flex attention default regressions
         run: |
           node tests/ui/pika_attention.cjs
@@ -172,7 +175,10 @@ jobs:
       - name: Reference enhancement request manifest regressions
         run: node tests/ui/reference_enhancement_manifest.cjs
       - name: Agent Access settings and session recovery
-        run: node tests/ui/agent_access.cjs
+        run: |
+          node tests/ui/agent_access.cjs
+          node tests/ui/agent_access_local.cjs
+          node tests/ui/agent_access_onboarding.cjs
       - name: Type-check and staged UI build
         working-directory: ui
         run: npm run build

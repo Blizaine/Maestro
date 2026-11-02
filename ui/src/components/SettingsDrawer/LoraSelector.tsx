@@ -9,6 +9,8 @@ import { formatResolvedLoraDate, resolveLoraDate } from '../../lib/loraDates'
 import { getLoraDisplayName, getLoraSecondaryLabel, indexLoraDisplayNames, LORA_DISPLAY_NAME_CHANGED_EVENT, type LoraDisplayNameMap } from '../../lib/loraDisplayNames'
 import type { LoraRecommendedWeights, LoraUpdateStatus } from '../../types'
 import { LoraDisplayNameEditor } from './LoraDisplayNameEditor'
+import { LoraAccelerationFilter } from './LoraAccelerationFilter'
+import { indexLoraAccelerationFlags, matchesLoraAccelerationFilter } from '../../lib/loraAcceleration'
 
 export function LoraGuideTooltip({ guide, label = 'LoRA usage guide' }: { guide: string; label?: string }) {
   const [show, setShow] = useState(false)
@@ -234,6 +236,8 @@ export function LoraSelector() {
   // by how new they are.
   const [loraDates, setLoraDates] = useState<Record<string, LoraDates>>({})
   const [displayNames, setDisplayNames] = useState<LoraDisplayNameMap>({})
+  const [accelerationFlags, setAccelerationFlags] = useState<Record<string, boolean>>({})
+  const accelerationFilter = useStore(s => s.loraAccelerationFilter)
   // Sticky list order shared with the Director picker via the store.
   const sortMode = useStore(s => s.loraPickerSort)
   const setSortSticky = useStore(s => s.setLoraPickerSort)
@@ -261,6 +265,7 @@ export function LoraSelector() {
       // refresh the age-chip map too, not just update statuses.
       const dates: Record<string, LoraDates> = {}
       setDisplayNames(indexLoraDisplayNames(r.loras))
+      setAccelerationFlags(indexLoraAccelerationFlags(r.loras))
       for (const info of r.loras) {
         if (info.update_status) next[info.filename] = info.update_status
         if (info.released_at || info.downloaded_at) {
@@ -376,6 +381,7 @@ export function LoraSelector() {
       const updates: Record<string, LoraUpdateStatus> = {}
       const dates: Record<string, LoraDates> = {}
       setDisplayNames(indexLoraDisplayNames(r.loras))
+      setAccelerationFlags(indexLoraAccelerationFlags(r.loras))
       for (const info of r.loras) {
         if (info.recommended_weights) recs[info.filename] = info.recommended_weights
         if (info.guide) { guides[info.filename] = info.guide; statuses[info.filename] = 'exists' }
@@ -461,10 +467,12 @@ export function LoraSelector() {
     const secondary = getLoraSecondaryLabel(name, displayNames)?.toLowerCase() || ''
     if (query && !displayName(name).toLowerCase().includes(query) && !secondary.includes(query) && !name.toLowerCase().includes(query)) return false
     const isActivated = activatedLoras.includes(name)
+    if (!isActivated && !matchesLoraAccelerationFilter(name, accelerationFilter, accelerationFlags[name])) return false
     if (!effectiveShowNsfw && !isActivated && nsfwFlags[name]) return false
     if (updatableOnly && !isActivated && updateStatuses[name] !== 'available') return false
     return true
   }), sortMode, loraDates, displayNames)
+  const selectedOutsideFilter = activatedLoras.filter(name => !matchesLoraAccelerationFilter(name, accelerationFilter, accelerationFlags[name])).length
   // "X NSFW hidden" hint only meaningful when the user CAN reveal
   // them (NSFW mode enabled). Otherwise we don't hint at the existence
   // of hidden NSFW LoRAs at all.
@@ -502,6 +510,10 @@ export function LoraSelector() {
       {loraHeader}
       {compatibilityNotice}
 
+      <LoraAccelerationFilter />
+      {selectedOutsideFilter > 0 && <p className="mb-2 text-[10px] text-text-muted">
+        {selectedOutsideFilter} selected LoRA{selectedOutsideFilter === 1 ? ' is' : 's are'} kept visible outside this filter.
+      </p>}
       {/* Search + NSFW + Updatable toggles */}
       <div className="flex items-center gap-2 mb-2">
         <div className="relative flex-1">

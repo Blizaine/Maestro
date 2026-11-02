@@ -18,9 +18,11 @@ const LEFT_WIDTH_MIN = 232
 const LEFT_WIDTH_MAX = 420
 const RIGHT_WIDTH_MIN = 264
 const RIGHT_WIDTH_MAX = 480
-const TIMELINE_HEIGHT_MIN = 180
-const TIMELINE_HEIGHT_MAX = 520
+const TIMELINE_HEIGHT_MIN = 144
+const TIMELINE_HEIGHT_MAX = 960
+const PREVIEW_HEIGHT_MIN = 200
 const RESIZE_HANDLE_SIZE = 8
+const TIMELINE_RESIZE_HANDLE_SIZE = 12
 
 interface EditorLayoutPreferences {
   leftWidth: number
@@ -88,6 +90,8 @@ function ResizeSeparator({
   onPointerMove,
   onPointerUp,
   onKeyDown,
+  onDoubleClick,
+  resizing = false,
   inert = false,
 }: {
   kind: ResizeKind
@@ -98,6 +102,8 @@ function ResizeSeparator({
   onPointerMove: (event: React.PointerEvent<HTMLDivElement>, kind: ResizeKind) => void
   onPointerUp: (event: React.PointerEvent<HTMLDivElement>, kind: ResizeKind) => void
   onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>, kind: ResizeKind) => void
+  onDoubleClick?: (event: React.MouseEvent<HTMLDivElement>, kind: ResizeKind) => void
+  resizing?: boolean
   inert?: boolean
 }) {
   const vertical = kind !== 'timeline'
@@ -114,16 +120,36 @@ function ResizeSeparator({
       tabIndex={0}
       inert={inert}
       data-testid={`editor-resize-${kind}`}
-      className={`group relative z-20 shrink-0 touch-none outline-none focus-visible:bg-accent-blue/15 ${vertical ? 'w-2 cursor-col-resize' : 'h-2 cursor-row-resize'}`}
+      data-resizing={resizing ? 'true' : 'false'}
+      title={kind === 'timeline' ? 'Drag to resize · Arrow keys adjust · Double-click to reset' : undefined}
+      className={`group relative z-20 flex shrink-0 touch-none items-center justify-center outline-none transition-colors focus-visible:bg-accent-blue/10 active:bg-accent-blue/20 ${vertical ? 'w-2 cursor-col-resize' : 'h-3 cursor-row-resize'} ${resizing ? 'bg-accent-blue/15' : ''}`}
       onPointerDown={event => onPointerDown(event, kind)}
       onPointerMove={event => onPointerMove(event, kind)}
       onPointerUp={event => onPointerUp(event, kind)}
       onPointerCancel={event => onPointerUp(event, kind)}
       onLostPointerCapture={event => onPointerUp(event, kind)}
       onKeyDown={event => onKeyDown(event, kind)}
+      onDoubleClick={event => onDoubleClick?.(event, kind)}
     >
-      <span className={`absolute rounded-full bg-border transition-colors group-hover:bg-accent-blue/60 group-focus-visible:bg-accent-blue ${vertical ? 'inset-y-0 left-[3px] w-px' : 'inset-x-0 top-[3px] h-px'}`} />
-      <span className={`absolute rounded-full bg-transparent transition-colors group-hover:bg-accent-blue/10 ${vertical ? 'inset-y-0 inset-x-0' : 'inset-x-0 inset-y-0'}`} />
+      {vertical ? (
+        <>
+          <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 rounded-full bg-border transition-colors group-hover:bg-accent-blue/70 group-focus-visible:bg-accent-blue" />
+          <span className="relative z-10 flex h-10 w-1.5 flex-col items-center justify-center gap-1 rounded-full bg-text-muted/70 transition-colors group-hover:bg-accent-blue/80 group-focus-visible:bg-accent-blue group-active:bg-accent-blue">
+            <i className="h-0.5 w-0.5 rounded-full bg-bg-primary" />
+            <i className="h-0.5 w-0.5 rounded-full bg-bg-primary" />
+            <i className="h-0.5 w-0.5 rounded-full bg-bg-primary" />
+          </span>
+        </>
+      ) : (
+        <>
+          <span className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 rounded-full bg-border transition-colors group-hover:bg-accent-blue/70 group-focus-visible:bg-accent-blue" />
+          <span className="relative z-10 flex h-1.5 w-12 items-center justify-center gap-1 rounded-full bg-text-muted/80 transition-colors group-hover:bg-accent-blue/80 group-focus-visible:bg-accent-blue group-active:bg-accent-blue">
+            <i className="h-0.5 w-0.5 rounded-full bg-bg-primary" />
+            <i className="h-0.5 w-0.5 rounded-full bg-bg-primary" />
+            <i className="h-0.5 w-0.5 rounded-full bg-bg-primary" />
+          </span>
+        </>
+      )}
     </div>
   )
 }
@@ -131,6 +157,7 @@ function ResizeSeparator({
 export function EditorLayout({ isMobile }: { isMobile: boolean }) {
   const isWide = useWideEditorLayout()
   const [layout, setLayout] = useState(readLayoutPreferences)
+  const [resizingKind, setResizingKind] = useState<ResizeKind | null>(null)
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const [lastMobileMode, setLastMobileMode] = useState(isMobile)
   const [layoutRootHeight, setLayoutRootHeight] = useState(640)
@@ -143,9 +170,12 @@ export function EditorLayout({ isMobile }: { isMobile: boolean }) {
   const setMobilePanel = useEditorStore(state => state.setMobilePanel)
   const setSidebarOpen = useStore(state => state.setSidebarOpen)
   const compactInspector = !isMobile && !isWide
-  const minimumTimelineHeight = Math.min(TIMELINE_HEIGHT_MIN, Math.max(90, layoutRootHeight * 0.4))
-  const maxTimelineHeight = Math.max(minimumTimelineHeight, Math.min(TIMELINE_HEIGHT_MAX, layoutRootHeight - 170))
-  const visibleTimelineHeight = Math.min(layout.timelineHeight, maxTimelineHeight)
+  const minimumTimelineHeight = Math.min(TIMELINE_HEIGHT_MIN, Math.max(96, Math.floor(layoutRootHeight * 0.28)))
+  const maxTimelineHeight = Math.max(minimumTimelineHeight, Math.min(
+    TIMELINE_HEIGHT_MAX,
+    layoutRootHeight - PREVIEW_HEIGHT_MIN - TIMELINE_RESIZE_HANDLE_SIZE,
+  ))
+  const visibleTimelineHeight = clamp(layout.timelineHeight, minimumTimelineHeight, maxTimelineHeight)
 
   useEffect(() => {
     try {
@@ -223,7 +253,9 @@ export function EditorLayout({ isMobile }: { isMobile: boolean }) {
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>, kind: ResizeKind) => {
     if (event.button !== 0) return
     event.preventDefault()
+    event.currentTarget.focus()
     activePointer.current = { kind, pointerId: event.pointerId }
+    setResizingKind(kind)
     event.currentTarget.setPointerCapture(event.pointerId)
   }
 
@@ -232,18 +264,20 @@ export function EditorLayout({ isMobile }: { isMobile: boolean }) {
     if (!active || active.kind !== kind || active.pointerId !== event.pointerId) return
     const bounds = layoutRootRef.current?.getBoundingClientRect()
     if (!bounds) return
+    const handleSize = kind === 'timeline' ? TIMELINE_RESIZE_HANDLE_SIZE : RESIZE_HANDLE_SIZE
     if (kind === 'left') {
-      updateSize('left', event.clientX - bounds.left - RESIZE_HANDLE_SIZE / 2)
+      updateSize('left', event.clientX - bounds.left - handleSize / 2)
     } else if (kind === 'right') {
-      updateSize('right', bounds.right - event.clientX - RESIZE_HANDLE_SIZE / 2)
+      updateSize('right', bounds.right - event.clientX - handleSize / 2)
     } else {
-      updateSize('timeline', bounds.bottom - event.clientY - RESIZE_HANDLE_SIZE / 2)
+      updateSize('timeline', bounds.bottom - event.clientY - handleSize / 2)
     }
   }
 
   const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>, kind: ResizeKind) => {
     if (activePointer.current?.kind === kind && activePointer.current.pointerId === event.pointerId) {
       activePointer.current = null
+      setResizingKind(null)
     }
   }
 
@@ -261,9 +295,9 @@ export function EditorLayout({ isMobile }: { isMobile: boolean }) {
       if (event.key === 'Home') value = RIGHT_WIDTH_MIN
       if (event.key === 'End') value = RIGHT_WIDTH_MAX
     } else {
-      if (event.key === 'ArrowUp') value = layout.timelineHeight + step
-      if (event.key === 'ArrowDown') value = layout.timelineHeight - step
-      if (event.key === 'Home') value = TIMELINE_HEIGHT_MIN
+      if (event.key === 'ArrowUp') value = visibleTimelineHeight + step
+      if (event.key === 'ArrowDown') value = visibleTimelineHeight - step
+      if (event.key === 'Home') value = minimumTimelineHeight
       if (event.key === 'End') value = maxTimelineHeight
     }
     if (value === null) return
@@ -274,6 +308,10 @@ export function EditorLayout({ isMobile }: { isMobile: boolean }) {
   const resetLayout = () => {
     setLayout(DEFAULT_LAYOUT)
     setInspectorOpen(false)
+  }
+
+  const handleSeparatorDoubleClick = (_event: React.MouseEvent<HTMLDivElement>, kind: ResizeKind) => {
+    if (kind === 'timeline') updateSize('timeline', DEFAULT_LAYOUT.timelineHeight)
   }
 
   const openMobilePanel = (panel: 'media' | 'timeline' | 'inspector') => {
@@ -364,6 +402,7 @@ export function EditorLayout({ isMobile }: { isMobile: boolean }) {
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
               onKeyDown={handleSeparatorKeyDown}
+              resizing={resizingKind === 'left'}
             />
             <section className="relative flex min-h-0 min-w-0 flex-1 flex-col" data-testid="editor-preview-pane">
               <EditorPreview />
@@ -379,6 +418,7 @@ export function EditorLayout({ isMobile }: { isMobile: boolean }) {
                   onPointerMove={handlePointerMove}
                   onPointerUp={handlePointerUp}
                   onKeyDown={handleSeparatorKeyDown}
+                  resizing={resizingKind === 'right'}
                 />
                 <div className="min-h-0 shrink-0 overflow-hidden border-l border-border" style={{ width: layout.rightWidth }} data-testid="editor-inspector-pane">
                   <EditorInspector compact />
@@ -396,6 +436,8 @@ export function EditorLayout({ isMobile }: { isMobile: boolean }) {
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onKeyDown={handleSeparatorKeyDown}
+            onDoubleClick={handleSeparatorDoubleClick}
+            resizing={resizingKind === 'timeline'}
             inert={inspectorOpen && compactInspector}
           />
           <section className="min-h-0 shrink-0 overflow-hidden" style={{ height: visibleTimelineHeight }} data-testid="editor-timeline-pane" inert={inspectorOpen && compactInspector}>
@@ -416,7 +458,7 @@ export function EditorLayout({ isMobile }: { isMobile: boolean }) {
                 aria-labelledby="editor-inspector-drawer-title"
                 data-testid="editor-inspector-drawer"
                 className="absolute inset-y-0 right-0 flex flex-col overflow-hidden border-l border-border bg-bg-secondary shadow-2xl"
-                style={{ width: 'min(360px, calc(100vw - 1rem))', bottom: visibleTimelineHeight + RESIZE_HANDLE_SIZE }}
+                style={{ width: 'min(360px, calc(100vw - 1rem))', bottom: visibleTimelineHeight + TIMELINE_RESIZE_HANDLE_SIZE }}
               >
                 <div className="flex h-10 shrink-0 items-center justify-between border-b border-border px-3">
                   <h2 id="editor-inspector-drawer-title" className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-secondary">Adjust</h2>

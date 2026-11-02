@@ -16,6 +16,17 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## [4.0.0] - 2026-10-29–30 — Dev release candidate
 
+**2 November — Agent Access and testing updates:** built-in Local MCP and
+authenticated Remote MCP can be enabled independently. Add scoped clients,
+model-aware authoring guides, saved references, asset transfers and agent-authored
+Studio/Director plans, including native song analysis for music videos. Existing
+Pinokio and LAN browser access remains available. Pika References now accepts
+exact source-audio conditioning; fix independent-shot offsets, character-label
+bindings and native Director module identity. Add experimental FastH3 LoRAs,
+shared Turbo LoRA filters, failed-job settings/LoRA details, speech chunk status,
+shorter Editor tracks and an adjustable timeline divider. Keep checkpoint-table
+compatibility fitting on CPU even under a different global tensor device.
+
 Label public Dev v4.0.0 in preparation for the next public Main release.
 The first visit to v4 switches existing and new browser profiles to Graphite
 Studio in Dark mode. Apply that one-time change before the UI mounts, then

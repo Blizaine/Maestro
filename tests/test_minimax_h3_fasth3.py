@@ -40,7 +40,8 @@ class FastH3RecipeTests(unittest.TestCase):
             self.assertFalse(result[capability], capability)
         self.assertEqual(result["image_prompt_types_allowed"], "")
         self.assertTrue(result["returns_audio"])
-        self.assertTrue(result["loras_disabled"])
+        self.assertFalse(result["loras_disabled"])
+        self.assertTrue(result["experimental_loras_available"])
         self.assertEqual(result["compatible_model_paths"], {})
         self.assertEqual(result["inference_steps_min"], result["inference_steps_max"])
         self.assertEqual(result["minimax_h3_qkv_layout"], "grouped")
@@ -50,6 +51,27 @@ class FastH3RecipeTests(unittest.TestCase):
         self.assertTrue(ordinary["i2v_class"])
         self.assertTrue(ordinary["sliding_window"])
         self.assertFalse(ordinary.get("minimax_h3_fasth3"))
+
+    def test_real_fast_h3_defaults_keep_experimental_lora_capabilities_after_registry_merge(self):
+        # Mirror wgp.init_model_def's exact merge order: the family handler
+        # supplies capabilities first, then the raw defaults model overrides
+        # them. This catches stale loras_disabled values in a real definition.
+        for filename in (
+            "minimax_h3_fasth3.json",
+            "minimax_h3_fasth3_omniref.json",
+            "minimax_h3_fasth3_omniref_nvfp4.json",
+        ):
+            with self.subTest(filename=filename):
+                source = json.loads((ROOT / "app/defaults" / filename).read_text())
+                model = source["model"]
+                base_model_type = model["architecture"]
+                merged = family_handler.query_model_def(base_model_type, model)
+                self.assertIsInstance(merged, dict)
+                merged.update(model)
+
+                self.assertIs(merged.get("experimental_loras_available"), True)
+                self.assertIs(merged.get("loras_disabled"), False)
+                self.assertIs(source.get("minimax_h3_experimental_loras"), False)
 
     def test_unverified_model_does_not_inherit_benchmarked_duration_tiers(self):
         from services.h3_duration_recommendations import h3_duration_recommendations_enabled
@@ -73,6 +95,32 @@ class FastH3RecipeTests(unittest.TestCase):
         for case in cases:
             with self.subTest(case=case), self.assertRaises((ValueError, TypeError)):
                 fasth3.validate_fasth3_request(case)
+
+    def test_experimental_lora_opt_in_is_explicit_and_preserves_fixed_recipe(self):
+        request = {"activated_loras": ["film_style.safetensors"],
+                   "minimax_h3_experimental_loras": True, "num_inference_steps": 8,
+                   "video_length": 124, "flow_shift": 99, "override_attention": "sla"}
+        fasth3.validate_fasth3_request(request)
+        self.assertEqual(request["num_inference_steps"], 8)
+        self.assertEqual(request["flow_shift"], 10.0)
+        self.assertEqual(request["override_attention"], "sdpa")
+        for gate in (None, False, 1, "true"):
+            candidate = {"activated_loras": ["film_style.safetensors"],
+                         "num_inference_steps": 8}
+            if gate is not None:
+                candidate["minimax_h3_experimental_loras"] = gate
+            with self.subTest(gate=gate), self.assertRaisesRegex(ValueError, "experimental and off by default"):
+                fasth3.validate_fasth3_request(candidate)
+        with self.assertRaisesRegex(ValueError, "acceleration adapters"):
+            fasth3.validate_fasth3_request({
+                "activated_loras": ["MiniMax-H3-Turbo-v4.safetensors"],
+                "minimax_h3_experimental_loras": True,
+            })
+        with self.assertRaisesRegex(ValueError, "DoRA"):
+            fasth3.validate_fasth3_request({
+                "activated_loras": ["film_dora.safetensors"],
+                "minimax_h3_experimental_loras": True,
+            })
 
     def test_handler_enforces_fixed_settings_and_rejects_reference(self):
         inputs = {"video_length": 243, "sliding_window_size": 124, "num_inference_steps": 8,

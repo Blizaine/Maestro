@@ -50,7 +50,8 @@ HELP = (
     "Official eight-step Ref2VA checkpoint with ordered image, video and audio references. "
     "Uses 32 PDD heads in eight blocks, Euler, shifts 12/3 and trained VSA-H3 "
     "attention (90% sparsity, 4×4×8 tiles). At least one image or video reference is required. "
-    "Available in Studio References. Director, start/end frames, continuation, edit masks, additional LoRAs and audio refinement are unavailable. "
+    "Available in Studio References. Director, start/end frames, continuation, edit masks and audio refinement are unavailable. "
+    "Ordinary/style H3 LoRAs can be enabled experimentally per generation; Turbo, PDD, VDN, DoRA and output-head adapters remain unavailable. "
     "Begin at 480p / 5.2 seconds. GPU performance depends on the selected precision and hardware."
 )
 
@@ -366,7 +367,7 @@ def validate_request(inputs: dict) -> None:
     refs = validate_reference_manifest(refs, require_files=False)
     if any(ref.get("audio_intent") == "drive" for ref in refs):
         raise ValueError("FastH3 OmniRef supports generative reference audio, not an exact target soundtrack.")
-    fasth3.validate_fasth3_request(check)
+    fasth3.validate_fasth3_request(check, omni_reference=True)
     inputs.update({key: value for key, value in check.items() if key not in inputs or key in (
         "num_inference_steps", "guidance_scale", "flow_shift", "audio_flow_shift", "override_attention",
         "skip_steps_cache_type", "minimax_h3_turbo_mode", "minimax_h3_turbo_preset",

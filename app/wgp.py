@@ -8138,8 +8138,8 @@ def generate_video(
     minimax_h3_sequence_clip_frames=None,
     minimax_h3_sequence_memory_override=False,
     minimax_h3_extended_duration=False,
-    # Per-generation, default-off opt-in for ordinary H3 style/content LoRAs
-    # on Pika H3 Flex. Special accelerators remain blocked by its validator.
+    # Per-generation opt-in for ordinary/style FastH3 and Pika LoRAs.
+    # This is never stored on the retained model instance.
     minimax_h3_experimental_loras=False,
     minimax_h3_text_encoder="nvfp4_awq",
     minimax_h3_video_vae="auto",
@@ -8792,7 +8792,7 @@ def generate_video(
         print(f"[LoRA] No LoRAs activated for this generation (model_type={model_type})")
 
     if hasattr(wan_model, "validate_loras"):
-        if model_def.get("minimax_h3_pika_flex"):
+        if model_def.get("minimax_h3_fasth3") or model_def.get("minimax_h3_pika_flex"):
             wan_model.validate_loras(
                 loras_selected,
                 minimax_h3_experimental_loras=minimax_h3_experimental_loras,
@@ -10214,6 +10214,8 @@ def generate_video(
                     **world_generate_kwargs,
                     **({"minimax_h3_extended_duration": minimax_h3_extended_duration}
                        if str(model_def.get("architecture") or "").startswith("minimax_h3") else {}),
+                    **({"minimax_h3_experimental_loras": minimax_h3_experimental_loras}
+                       if model_def.get("minimax_h3_fasth3") else {}),
                     **({
                         "minimax_h3_multi_window": minimax_h3_multi_window,
                         "minimax_h3_reference_sequence": minimax_h3_reference_sequence,

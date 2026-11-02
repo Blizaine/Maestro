@@ -21,7 +21,9 @@ FASTH3_HELP = (
     "attention (80% sparsity, 4×4×4 tiles) and fixed Euler schedule with video/audio "
     "shifts 10/3. Requires CUDA/Triton and BF16 GPU support. This checkpoint was not distilled for "
     "start/end frames, Omni references, source audio or continuation. Those inputs "
-    "and additional LoRAs are unavailable. Begin with 480p / 5.2 seconds. "
+    "are unavailable. Ordinary/style H3 LoRAs can be enabled experimentally per generation; "
+    "Turbo, PDD, VDN, DoRA and other acceleration adapters remain unavailable. "
+    "Begin with 480p / 5.2 seconds. "
     "Real-time generation on consumer GPUs has not been verified in Maestro."
 )
 _VERIFIED: set[tuple[str, int, int, int, str]] = set()
@@ -60,7 +62,7 @@ def verify_checkpoint_pin(filename: str, expected_size: int, expected_sha256: st
     _VERIFIED.add(key)
 
 
-def validate_fasth3_request(inputs: dict) -> None:
+def validate_fasth3_request(inputs: dict, *, omni_reference: bool = False) -> None:
     """Reject unsupported conditioning rather than silently dropping it."""
     media = (
         "image_start", "image_end", "image_refs", "input_frames", "input_ref_images",
@@ -75,8 +77,15 @@ def validate_fasth3_request(inputs: dict) -> None:
         raise ValueError("FastH3 V2 supports text-to-video only; switch off media conditioning.")
     if inputs.get("prefix_frames_count") or inputs.get("window_start_frame_no") or inputs.get("minimax_h3_reference_sequence") or inputs.get("minimax_h3_multi_window"):
         raise ValueError("FastH3 V2 does not support continuation windows.")
-    if inputs.get("activated_loras") or inputs.get("loras_selected") or inputs.get("minimax_h3_turbo_mode"):
-        raise ValueError("FastH3 V2 uses its distilled recipe; additional LoRAs/Turbo are unavailable.")
+    selected_loras = inputs.get("activated_loras") or inputs.get("loras_selected") or ()
+    if inputs.get("minimax_h3_turbo_mode"):
+        raise ValueError("FastH3 V2 uses its fixed distilled recipe; the Turbo mode cannot be changed.")
+    from .lora_compatibility import validate_fasth3_loras
+    validate_fasth3_loras(
+        selected_loras,
+        enabled=inputs.get("minimax_h3_experimental_loras"),
+        omni_reference=omni_reference,
+    )
     if inputs.get("multi_prompts_gen_type") in (3, "3"):
         raise ValueError("FastH3 V2 currently accepts one complete prompt per generation. Queue separate prompts to batch clips.")
     steps = inputs.get("num_inference_steps", inputs.get("sampling_steps", 8))
@@ -122,7 +131,8 @@ def fasth3_capabilities() -> dict:
         "sol_attention": False, "sla_attention": False, "sla_attention_default": False,
         "sla_attention_experimental": False, "veda_attention": False,
         "veda_attention_experimental": False, "first_block_cache": False,
-        "loras_disabled": True, "profiles_dir": [], "compatible_model_paths": {},
+        "loras_disabled": False, "experimental_loras_available": True,
+        "profiles_dir": [], "compatible_model_paths": {},
         "compatible_model_qkv_layouts": {}, "lock_inference_steps": True,
         "inference_steps_min": 8, "inference_steps_max": 8,
         "inference_steps_label": "Denoising Steps",

@@ -1,11 +1,28 @@
 # Maestro v4.0.0 — Dev release candidate
 
-29–30 October 2026. The next major release is available on **public Dev** for
+29 October–2 November 2026. The next major release is available on **public Dev** for
 testing. Public Main remains v3.2.5 until its separate release review. This
 candidate combines the changes below with the fixes already tested on Dev.
 
 ## Changes since v3.2.5 Main
 
+- **Built-in Agent Access/MCP:** independent Local MCP over STDIO and Remote
+  MCP over authenticated HTTPS, with optional Tailscale setup, scoped approval
+  and revocable clients. Agents receive model capabilities, prompting guides,
+  exact timelines and saved references. They can author Studio prompts and
+  Director productions directly, including lyrics and music-video plans using
+  native song/beat analysis. Existing Pinokio and LAN browser access remains
+  available. [Setup and client requirements](Agent-Access.md).
+- **Source-driven Pika music videos:** Pika References now accepts an exact
+  soundtrack as clean target-audio conditioning during all six sampler steps.
+  Director and MCP preserve each shot's source offset. Fixes also cover false
+  continuation detection, duplicate character bindings from generic reference
+  labels, and native Director callbacks importing a second server instance.
+- **LoRA and failure review:** optional experimental style/content LoRAs on
+  FastH3, a shared Turbo LoRA filter, model-aware H3 adapter checks and improved
+  handling of BF16-rounded checkpoint tables. Failed Studio cards retain the
+  actual settings and LoRAs for inspection after a failure or restart. Editor
+  tracks are shorter and its timeline height is adjustable.
 - **A refreshed workspace:** Graphite Studio, an accent-matched M mark,
   resizable gallery thumbnails and a cleaner panel toggle. Studio keeps its
   generation controls above the resource monitor, with compact duration,
@@ -82,6 +99,13 @@ See the [October port scope](WanGP-October-2026-Ports.md),
 for model-specific inputs and limitations.
 
 ## Qualification and limits
+
+The MCP protocol/security suite and focused UI/backend regressions pass locally.
+Pika's exact-audio path completed two 124-frame reference shots and a 248-frame
+join at 832×480 / 24fps / SLA on the RTX 4090. Full CPU decoding, frame counts,
+source-audio correspondence and fixed target-audio runtime evidence passed.
+This confirms functionality for the tested case, not perfect lip sync. These
+latest MCP and LoRA changes await user testing on the 12GB and 8GB workstations.
 
 The release candidate is undergoing a bounded overnight check on the RTX 4090
 (24GB), RTX 3080 Ti (12GB) and RTX 5070 Laptop (8GB), alongside CPU and isolated

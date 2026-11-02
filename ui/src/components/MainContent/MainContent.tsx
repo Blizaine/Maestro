@@ -7,6 +7,7 @@ import { ThumbnailGallery } from './ThumbnailGallery'
 import { MediaFeedItem } from './MediaFeedItem'
 import { GalleryViewer, type GalleryImageChoice } from './GalleryViewer'
 import { GenerationPreview } from './GenerationPreview'
+import { JobSettingsDetails } from './JobSettingsDetails'
 import { GlobalQueuePopover } from '../GlobalQueuePopover'
 import { useStore } from '../../stores/useStore'
 import { useIsMobileSidecar } from '../../lib/useIsMobile'
@@ -429,6 +430,7 @@ export function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob;
           </button>
         )}
       </div>
+      {isFailed && <JobSettingsDetails job={job} />}
     </div>
   )
 }

@@ -4,6 +4,8 @@ import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { generateLoraGuide, fetchLoraGuide, fetchLoraDetails } from '../../api/client'
 import { LoraGuideTooltip, LoraAgeChip, LoraSortToggle, sortLoraNames } from './LoraSelector'
+import { LoraAccelerationFilter } from './LoraAccelerationFilter'
+import { indexLoraAccelerationFlags, matchesLoraAccelerationFilter } from '../../lib/loraAcceleration'
 import { LoraDisplayNameEditor } from './LoraDisplayNameEditor'
 import type { LoraDates } from './LoraSelector'
 import type { LoraRecommendedWeights } from '../../types'
@@ -104,6 +106,8 @@ export function DirectorLoraSelector({ mode, modelType }: {
   const [guideTexts, setGuideTexts] = useState<Record<string, string>>({})
   const [loraDates, setLoraDates] = useState<Record<string, LoraDates>>({})
   const [displayNames, setDisplayNames] = useState<LoraDisplayNameMap>({})
+  const [accelerationFlags, setAccelerationFlags] = useState<Record<string, boolean>>({})
+  const accelerationFilter = useStore(s => s.loraAccelerationFilter)
   // Sticky list order shared with the Studio picker via the store.
   const sortMode = useStore(s => s.loraPickerSort)
   const setSortSticky = useStore(s => s.setLoraPickerSort)
@@ -165,6 +169,7 @@ export function DirectorLoraSelector({ mode, modelType }: {
       const statuses: Record<string, 'exists' | 'none'> = {}
       const dates: Record<string, LoraDates> = {}
       setDisplayNames(indexLoraDisplayNames(r.loras))
+      setAccelerationFlags(indexLoraAccelerationFlags(r.loras))
       for (const info of r.loras) {
         if (info.recommended_weights) recs[info.filename] = info.recommended_weights
         if (info.guide) { guides[info.filename] = info.guide; statuses[info.filename] = 'exists' }
@@ -268,15 +273,17 @@ export function DirectorLoraSelector({ mode, modelType }: {
 
   const query = search.trim().toLowerCase()
   const filtered = sortLoraNames(
-    availableLoras.filter(name =>
+    availableLoras.filter(name => (activatedLoras.includes(name)
+      || matchesLoraAccelerationFilter(name, accelerationFilter, accelerationFlags[name])) && (
       !query || displayName(name).toLowerCase().includes(query)
         || (getLoraSecondaryLabel(name, displayNames)?.toLowerCase().includes(query) ?? false)
         || name.toLowerCase().includes(query)
-    ),
+    )),
     sortMode,
     loraDates,
     displayNames,
   )
+  const selectedOutsideFilter = activatedLoras.filter(name => !matchesLoraAccelerationFilter(name, accelerationFilter, accelerationFlags[name])).length
 
   if (loading) {
     return (
@@ -322,6 +329,10 @@ export function DirectorLoraSelector({ mode, modelType }: {
       </div>
 
       {/* Search */}
+      <LoraAccelerationFilter />
+      {selectedOutsideFilter > 0 && <p className="mb-2 text-[10px] text-text-muted">
+        {selectedOutsideFilter} selected LoRA{selectedOutsideFilter === 1 ? ' is' : 's are'} kept visible outside this filter.
+      </p>}
       <div className="relative mb-2">
         <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
         <input

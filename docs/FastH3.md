@@ -49,8 +49,31 @@ heads and retained FP32 AdaLN projections remain in their source precision.
 Use ordered `<Picture 1>`, `<Video 1>` and `<Audio 1>` references in the prompt.
 At least one image or video reference is required. Reference audio guides the
 generated sound; an exact frozen target soundtrack is not supported by this
-recipe. Start/end frames, masks, continuation, Director, extra LoRAs, First
-Block Cache, SLA, Veda and ordinary H3 audio refinement are unavailable.
+recipe. Start/end frames, masks, continuation, Director, First Block Cache,
+SLA, Veda and ordinary H3 audio refinement are unavailable.
+
+### Experimental LoRAs
+
+In Studio, open **Advanced → LoRAs & presets → Enable LoRAs (experimental)**.
+The toggle defaults off for FastH3 V2, OmniRef and OmniRef QAD NVFP4. It permits
+ordinary H3 style/character LoRAs without changing the trained eight-step recipe
+or attention. Turning it off retains the selection in the form but omits it
+from generation. Saved output settings retain the explicit opt-in.
+
+Turbo/PDD, VDN, DoRA and adapters that replace OmniRef's fused output heads
+remain excluded. Structural checks do not establish visual quality or identity
+fidelity; these combinations have CPU validation, not a new GPU render test.
+For API use, include `minimax_h3_experimental_loras: true` with `activated_loras`
+and `loras_multipliers`; selected adapters without that explicit boolean opt-in
+are rejected.
+
+The shared **Turbo LoRAs** filter offers **All LoRAs**, **Hide Turbo**, and
+**Turbo only** in Studio, Director and the installed library. It includes other
+acceleration families such as Lightning, PDD and low-step adapters. Labels use
+structured metadata or technical filenames; unknown files remain in All/Hide
+Turbo. Filtering never changes activation or strengths, and selected adapters
+stay visible even when they fall outside the filter. Model compatibility
+restrictions still apply.
 
 Maestro keeps the trained sparse-attention pattern, using its BF16/FP16
 Triton VSA implementation. Selecting NVFP4 quantizes transformer linear

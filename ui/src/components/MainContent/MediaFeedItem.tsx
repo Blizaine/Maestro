@@ -1379,6 +1379,14 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
               <dt className="text-text-muted">Audio</dt>
               <dd className="text-text-secondary">{meta.model_details.sample_rate / 1000} kHz · {meta.model_details.channels === 2 ? 'stereo' : `${meta.model_details.channels} channel`}</dd>
             </>}
+            {meta?.model_details?.speech_generation && <>
+              <dt className="text-text-muted">Speech parts</dt>
+              <dd className={meta.model_details.speech_generation.incomplete ? 'text-amber-400' : 'text-text-secondary'}>
+                {meta.model_details.speech_generation.completed_chunks ?? 0} / {meta.model_details.speech_generation.total_chunks ?? 0} generated
+                {meta.model_details.speech_generation.incomplete ? ' · Partial output' : ''}
+                {meta.model_details.speech_generation.warnings?.map((warning, index) => <p key={index} className="mt-1 text-amber-400">{warning}</p>)}
+              </dd>
+            </>}
             {(meta?.model_details?.artists?.length || meta?.model_details?.artist) && <>
               <dt className="text-text-muted">Music LoRAs</dt>
               <dd className="break-words text-text-secondary">

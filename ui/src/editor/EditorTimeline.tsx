@@ -38,7 +38,9 @@ import { EditorClipMedia } from './EditorClipMedia'
 import { useEditorStore } from './useEditorStore'
 
 const TRACK_HEADER_WIDTH = 132
-const TRACK_HEIGHT = 72
+const TRACK_HEIGHT = 48
+const TRACK_HEIGHT_MIN = 48
+const TRACK_HEIGHT_MAX = 132
 
 type DragMode = 'move' | 'trim-start' | 'trim-end' | 'fade-in' | 'fade-out'
 interface DragState {
@@ -101,7 +103,7 @@ export function EditorTimeline({ compact = false, fill = false }: { compact?: bo
   const [preferredTrackHeight, setPreferredTrackHeight] = useState(() => {
     try {
       const saved = Number(localStorage.getItem('maestro-editor-track-height'))
-      return Number.isFinite(saved) && saved >= 48 ? Math.min(132, saved) : TRACK_HEIGHT
+      return Number.isFinite(saved) && saved >= TRACK_HEIGHT_MIN ? Math.min(TRACK_HEIGHT_MAX, saved) : TRACK_HEIGHT
     } catch { return TRACK_HEIGHT }
   })
   const [viewport, setViewport] = useState({ left: 0, top: 0, width: 1200, height: 320 })
@@ -539,7 +541,7 @@ export function EditorTimeline({ compact = false, fill = false }: { compact?: bo
 
   return (
     <section data-testid="editor-timeline" className={`flex min-h-0 flex-col border-t border-border bg-bg-secondary ${compact || fill ? 'h-full' : 'h-[310px] shrink-0'}`}>
-      <div className="flex h-10 shrink-0 items-center gap-1.5 overflow-x-auto border-b border-border px-2.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <div className="flex h-11 shrink-0 items-center gap-1.5 overflow-x-auto border-b border-border px-2.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <button type="button" onClick={splitSelected} disabled={!selectedItemId} className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary disabled:opacity-25" title="Split at playhead (S)">
           <Scissors size={11} /> <span className="hidden sm:inline">Split</span>
         </button>
@@ -610,10 +612,11 @@ export function EditorTimeline({ compact = false, fill = false }: { compact?: bo
           </button>
         </div>
         <div className="ml-auto flex items-center gap-1">
-          <label className="hidden items-center gap-1.5 px-2 text-[11px] text-text-secondary md:flex">
+          <label className="hidden h-11 items-center gap-1.5 px-2 text-[11px] text-text-secondary md:flex">
             Tracks
-            <input type="range" min={48} max={132} step={4} value={preferredTrackHeight} aria-label="Track height"
-              className="w-16 accent-[var(--color-accent-blue)]"
+            <input type="range" min={TRACK_HEIGHT_MIN} max={TRACK_HEIGHT_MAX} step={4} value={preferredTrackHeight} aria-label="Track height"
+              aria-valuetext={`${preferredTrackHeight} pixels`}
+              className="h-11 w-24 touch-pan-x accent-[var(--color-accent-blue)]"
               onChange={event => {
                 const height = Number(event.target.value)
                 setPreferredTrackHeight(height)

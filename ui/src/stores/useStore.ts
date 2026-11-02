@@ -7,6 +7,8 @@ import {
   normalizeModelVisibilityOverrides, type ModelVisibilityOverrides, type ModelVisibilityScope,
 } from '../lib/modelVisibility'
 import { isDirectorRenderChild } from '../lib/directorJobs'
+import { captureGenerationDetails } from '../lib/generationDetails'
+import type { LoraAccelerationFilter } from '../lib/loraAcceleration'
 import { isFishSpeechArchitecture } from '../lib/fishSpeech'
 import { loadSpeechWriterPreferences, saveSpeechWriterPreferences, speechWriterPreferences } from '../lib/speechWriter'
 import {
@@ -2314,6 +2316,8 @@ interface AppState {
   // accordions) stay in sync; persisted to localStorage.
   loraPickerSort: 'name' | 'newest'
   setLoraPickerSort: (sort: 'name' | 'newest') => void
+  loraAccelerationFilter: LoraAccelerationFilter
+  setLoraAccelerationFilter: (filter: LoraAccelerationFilter) => void
 
   // Outputs
   outputs: OutputFile[]
@@ -9761,6 +9765,7 @@ export const useStore = create<AppState>((set, get) => ({
     params._client_submission_id = clientSubmissionId
     const newJob: GenerationJob = {
       id: pendingJobId,
+      generationDetails: captureGenerationDetails(params, state.activeWorkspace),
       showInGallery: !holdForQueue,
       status: holdForQueue ? 'held' : 'queued',
       progress: 0,
@@ -9878,6 +9883,7 @@ export const useStore = create<AppState>((set, get) => ({
               message: status.message,
               outputFiles: status.output_files,
               finishingWarnings: status.finishing_warnings ?? j.finishingWarnings,
+              generationDetails: status.generation_details ?? j.generationDetails,
               error: status.error,
               oomInfo: status.oom_info ?? null,
               h3WindowPlan: status.h3_window_plan ?? j.h3WindowPlan ?? null,
@@ -9982,15 +9988,15 @@ export const useStore = create<AppState>((set, get) => ({
     })
     const ids = new Set(targets.map(job => job.id))
     set(s => {
-      const jobs = s.jobs.filter(j => !ids.has(j.id) || j.enhancement)
-        .map(j => ids.has(j.id) ? {...j, status: 'cancelled' as const, phase: '', message: 'Cancelled'} : j)
+      const jobs = s.jobs.map(j => ids.has(j.id)
+        ? {...j, status: 'cancelled' as const, phase: '', message: 'Cancelled'} : j)
       return {jobs, isGenerating: jobs.some(j => j.status === 'queued' || j.status === 'running')}
     })
   },
 
-  // Persist dismissal so saved enhancement jobs do not reappear on refresh.
+  // Persist dismissal so saved failures and enhancement jobs stay dismissed.
   dismissJob: (jobId) => {
-    if (get().jobs.find(j => j.id === jobId)?.enhancement) {
+    if (get().jobs.find(j => j.id === jobId) && !jobId.startsWith('pending-') && !jobId.includes('-fail-')) {
       void api.dismissJob(jobId).catch(error => {
         console.error('Could not dismiss saved job:', error)
         void get().reconnectJobs()
@@ -10075,6 +10081,7 @@ export const useStore = create<AppState>((set, get) => ({
             message: j.message,
             outputFiles: j.output_files,
             finishingWarnings: j.finishing_warnings,
+            generationDetails: j.generation_details,
             error: j.error,
             ..._directorJobFields(j),
             oomInfo: (j as { oom_info?: import('../types').OomInfo | null }).oom_info ?? null,
@@ -10116,6 +10123,7 @@ export const useStore = create<AppState>((set, get) => ({
                     message: status.message,
                     outputFiles: status.output_files,
                     finishingWarnings: status.finishing_warnings ?? j.finishingWarnings,
+                    generationDetails: status.generation_details ?? j.generationDetails,
                     error: status.error,
                     ..._directorJobFields(status),
                     oomInfo: status.oom_info ?? null,
@@ -10128,7 +10136,7 @@ export const useStore = create<AppState>((set, get) => ({
                 if (status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled') {
                   clearInterval(pollInterval)
                   set(s => {
-                    const remaining = s.jobs.filter(j => j.id !== job.id || !!j.enhancement || !!j.finishingWarnings?.length)
+                    const remaining = s.jobs.filter(j => j.id !== job.id || j.status === 'failed' || j.status === 'cancelled' || !!j.enhancement || !!j.finishingWarnings?.length)
                     return {
                       jobs: remaining,
                       isGenerating: remaining.some(
@@ -13524,6 +13532,17 @@ export const useStore = create<AppState>((set, get) => ({
   setLoraPickerSort: (sort) => {
     try { localStorage.setItem('maestro_lora_picker_sort', sort) } catch { /* private mode */ }
     set({ loraPickerSort: sort })
+  },
+  loraAccelerationFilter: (() => {
+    try {
+      const value = localStorage.getItem('maestro_lora_acceleration_filter')
+      return value === 'hide' || value === 'only' ? value : 'all'
+    } catch { return 'all' }
+  })(),
+  setLoraAccelerationFilter: (filter) => {
+    const value = filter === 'hide' || filter === 'only' ? filter : 'all'
+    try { localStorage.setItem('maestro_lora_acceleration_filter', value) } catch { /* private mode */ }
+    set({ loraAccelerationFilter: value })
   },
 
   outputs: [],

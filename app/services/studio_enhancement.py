@@ -13,6 +13,7 @@ import socket
 import threading
 from typing import Callable
 from services.enhancement_diagnostics import capture_drafts
+from services.generation_details import is_terminal_studio_failure, public_generation_details
 
 
 _request_context: ContextVar[dict | None] = ContextVar("studio_enhancement", default=None)
@@ -344,7 +345,7 @@ async def prepare_enhanced_job(params: dict, model: dict, enhance, prepare, *, p
 
 
 class StudioJobArchive:
-    """Atomic checkpoints for opted-in Studio jobs, without browser state."""
+    """Enhancement checkpoints and terminal Studio failures, without browser state."""
     def __init__(self, directory: str | Path):
         self.directory = Path(directory)
 
@@ -354,15 +355,30 @@ class StudioJobArchive:
         return self.directory / (job_id + ".json")
 
     def save(self, job: dict, *_args) -> None:
-        if not job.get("enhancement"):
-            return
         with _disk_lock:
             if job.get("dismissed"):
                 self.remove(job["id"])
                 return
+            if not self._eligible(job):
+                return
             path = self._path(job["id"])
             self.directory.mkdir(parents=True, exist_ok=True)
-            data = {key: deepcopy(value) for key, value in job.items() if not key.startswith('_')}
+            if job.get("enhancement"):
+                # Enhancement records are resumable and retain their existing
+                # execution checkpoint. Ordinary failures are display history,
+                # never an executable request after restart.
+                data = {key: deepcopy(value) for key, value in job.items() if not key.startswith('_')}
+            else:
+                details = public_generation_details(job)
+                fields = {
+                    "id", "kind", "status", "progress", "step", "total_steps", "phase",
+                    "message", "error", "output_files", "created_at", "workspace",
+                    "client_submission_id", "show_in_gallery", "oom_info",
+                }
+                data = {key: deepcopy(value) for key, value in job.items() if key in fields}
+                data["params"] = details["params"]
+                if "performance_plan" in details:
+                    data["performance_plan"] = details["performance_plan"]
             temporary = path.with_suffix('.tmp')
             with temporary.open('w', encoding='utf-8') as file:
                 json.dump(data, file, ensure_ascii=False)
@@ -370,12 +386,16 @@ class StudioJobArchive:
                 os.fsync(file.fileno())
             os.replace(temporary, path)
 
+    @staticmethod
+    def _eligible(job: dict) -> bool:
+        return bool(job.get("enhancement")) or is_terminal_studio_failure(job)
+
     def recover(self) -> dict:
         result = {}
         for path in self.directory.glob('*.json'):
             try:
                 job = json.loads(path.read_text(encoding='utf-8'))
-                if self._path(job['id']) != path or not job.get('enhancement'):
+                if self._path(job['id']) != path or not self._eligible(job) or job.get('dismissed'):
                     continue
                 if job['status'] in {'queued', 'running'}:
                     # Never rerun a possibly finished diffusion pass after an
