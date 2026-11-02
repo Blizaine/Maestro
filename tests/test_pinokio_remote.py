@@ -443,4 +443,3 @@ def test_redirects_are_never_followed(tmp_path, monkeypatch):
     assert result["available"] is False
     assert result["phase"] == "unsupported"
     assert requested_paths == ["/anywhere/status"]
-
