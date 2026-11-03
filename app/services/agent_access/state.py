@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -184,14 +185,14 @@ class RuntimeState:
         if self._security_required:
             self.mark_security_configured()
         self._audit_db = self.directory / "audit.sqlite3"
-        with sqlite3.connect(self._audit_db) as db:
+        with closing(sqlite3.connect(self._audit_db)) as db, db:
             db.execute("CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, time REAL, actor TEXT, action TEXT, status TEXT)")
         os.chmod(self._audit_db, 0o600)
 
     def _initialize(self, requested_port: int | None) -> None:
         # The backend and controller can start together in separate processes.
         # SQLite releases this initialization lock even after an abrupt exit.
-        with self._lock, sqlite3.connect(self.directory / "runtime-lock.sqlite3", timeout=15) as guard:
+        with self._lock, closing(sqlite3.connect(self.directory / "runtime-lock.sqlite3", timeout=15)) as guard, guard:
             guard.execute("BEGIN IMMEDIATE")
             binding = hashlib.sha256((machine_id() + "|" + os.path.normcase(str(self.app_root))).encode("utf-8")).hexdigest()
             if self._config_path.exists():
@@ -569,12 +570,12 @@ class RuntimeState:
     def audit(self, actor: str, action: str, status: str) -> None:
         # Never record request bodies, prompts, paths, tokens or raw exceptions.
         values = (time.time(), str(actor)[:80], str(action)[:160], str(status)[:80])
-        with sqlite3.connect(self._audit_db) as db:
+        with closing(sqlite3.connect(self._audit_db)) as db, db:
             db.execute("INSERT INTO events(time,actor,action,status) VALUES(?,?,?,?)", values)
             db.execute("DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 2000)")
 
     def events(self, limit: int = 50) -> list[dict]:
-        with sqlite3.connect(self._audit_db) as db:
+        with closing(sqlite3.connect(self._audit_db)) as db, db:
             db.row_factory = sqlite3.Row
             return [dict(row) for row in db.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (max(1, min(int(limit), 200)),))]
 

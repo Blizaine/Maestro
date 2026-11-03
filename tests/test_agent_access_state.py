@@ -1,5 +1,6 @@
 """Control-plane identity and read-only process checks without model imports."""
 import concurrent.futures
+import gc
 import json
 import os
 import socket
@@ -50,6 +51,24 @@ def test_initial_port_uses_os_fallback_for_windows_reserved_blocks(tmp_path, mon
     selected = runtime.port
     assert 1024 <= selected <= 65535
     assert RuntimeState(tmp_path / "agent-access").port == selected
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows enforces open-file delete sharing")
+def test_runtime_state_closes_sqlite_files_without_waiting_for_gc(tmp_path):
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    runtime = None
+    try:
+        runtime = RuntimeState(tmp_path / "agent-access")
+        runtime.audit("test", "sqlite-close", "ok")
+        runtime.events()
+        for name in ("runtime-lock.sqlite3", "audit.sqlite3"):
+            (runtime.directory / name).unlink()
+    finally:
+        runtime = None
+        if gc_was_enabled:
+            gc.enable()
+        gc.collect()
 
 
 def test_controller_lock_is_exclusive_and_released(tmp_path):

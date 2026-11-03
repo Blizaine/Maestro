@@ -47,6 +47,20 @@ def enabled_store(tmp_path, clock: Clock | None = None) -> tuple[AuthStore, Prin
     return store, owner
 
 
+def test_concurrent_first_open_serializes_auth_schema_migrations(tmp_path):
+    directory = tmp_path / "settings"
+    barrier = threading.Barrier(8)
+
+    def open_store(_index):
+        barrier.wait(timeout=10)
+        return AuthStore(directory).status()["installation_id"]
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        installation_ids = list(pool.map(open_store, range(8)))
+
+    assert len(set(installation_ids)) == 1
+
+
 def client(store: AuthStore, redirect_uri: str = REDIRECT) -> dict:
     return store.register_client({"client_name": "Example Agent", "redirect_uris": [redirect_uri]})
 
