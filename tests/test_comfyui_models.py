@@ -122,7 +122,14 @@ home:
             )
 
             env = _isolated_user_env(Path(temp) / "user")
-            env.update({"COMFY_TEST_BASE": str(env_models.parent), "USERPROFILE": str(Path(temp) / "fake-home")})
+            fake_home = Path(temp) / "fake-home"
+            env.update(
+                {
+                    "COMFY_TEST_BASE": str(env_models.parent),
+                    "HOME": str(fake_home),
+                    "USERPROFILE": str(fake_home),
+                }
+            )
             with mock.patch.dict(os.environ, env):
                 found = comfy.discover_comfyui_installations(root)
             install = next(item for item in found if Path(item["path"]) == root)

@@ -18,6 +18,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'app'))
 from services import llm_service, studio_enhancement as enhancement
+from services.comfyui_runtime import ServiceError as ComfyServiceError
 from services.job_lifecycle import finish_job, generation_slot, is_cancel_requested, request_cancel, snapshot_job, try_start, update_job
 from services.agent_access.backend import AgentAccessBackend, is_restricted_agent
 from services.agent_access.context import principal_context
@@ -72,6 +73,10 @@ class EnhancedJobWiringTests(unittest.TestCase):
             return {'params': deepcopy(params), 'workspace': 'captured'}
         self.prepare = AsyncMock(side_effect=prepare)
         self.writer = AsyncMock(return_value={'enhanced': 'Finished native prompt.'})
+        self.comfy_adapter = SimpleNamespace(
+            capture_engine=Mock(return_value={"engine": "native"}),
+            attach_native=Mock(return_value=None),
+        )
         self.ns = dict(asyncio=asyncio, deepcopy=deepcopy, wraps=wraps, Request=Request, HTTPException=HttpError,
             Path=Path, _app_dir=self.temp.name,
             uuid=uuid, time=time, threading=threading, wgp=self.engine, update_job=update_job,
@@ -85,7 +90,8 @@ class EnhancedJobWiringTests(unittest.TestCase):
             new_enhancement=enhancement.new_enhancement, _enhancement_settings_snapshot=lambda: {'llm_model_id': 'writer-a'},
             _llm_enhance_prompt_payload=self.writer, _prepare_generation_submission=self.prepare,
             _get_active_workspace=lambda: 'captured', _workspace_dir=lambda name: 'captured-output',
-            _run_generation=Mock())
+            _run_generation=Mock(), _comfy_adapter=self.comfy_adapter,
+            _ComfyServiceError=ComfyServiceError)
         load('_agent_require_job_access', self.ns)
         self.run_enhancement = load('_prepare_job_enhancement', self.ns)
         load('_pop_editor_submission', self.ns)
@@ -282,11 +288,29 @@ class EnhancedJobWiringTests(unittest.TestCase):
             response = enqueue(body)
         thread.assert_not_called()
         self.writer.assert_not_awaited()
+        self.comfy_adapter.capture_engine.assert_called_once()
+        self.comfy_adapter.attach_native.assert_not_called()
         body['prompt'] = 'Changed after submission'
         saved = self.archive.recover()[response['job_id']]
         self.assertEqual(saved['status'], 'held')
         self.assertEqual(saved['enhancement']['original_prompt'], 'A mountain duel.')
         self.assertNotIn('_deferred_generation_prepare', saved['enhancement']['original_params'])
+
+    def test_comfy_engine_snapshot_is_preserved_for_held_submission(self):
+        snapshot = {"engine": "comfyui", "route": {"name": "fixture"}}
+        self.comfy_adapter.capture_engine.return_value = snapshot
+        enqueue = load("_enqueue_deferred_generation_preparation", self.ns)
+        body = {**self.params, "_enhance_on_generation": True, "_queue_mode": "held"}
+
+        with patch.object(threading, "Thread") as thread:
+            response = enqueue(body)
+
+        saved = self.archive.recover()[response["job_id"]]
+        thread.assert_not_called()
+        self.comfy_adapter.capture_engine.assert_called_once()
+        self.comfy_adapter.attach_native.assert_not_called()
+        self.assertEqual(saved["generation_engine_snapshot"], snapshot)
+        self.writer.assert_not_awaited()
 
     def test_submission_retry_does_not_create_second_job(self):
         load('_enqueue_deferred_generation_preparation', self.ns)
@@ -298,6 +322,8 @@ class EnhancedJobWiringTests(unittest.TestCase):
             second = asyncio.run(generate(request))
         self.assertEqual(first['job_id'], second['job_id'])
         self.assertEqual(thread.call_count, 1)
+        self.comfy_adapter.capture_engine.assert_called_once()
+        self.comfy_adapter.attach_native.assert_not_called()
 
     def test_retry_reuses_draft_refreshes_only_on_request_and_accepts_review_explicitly(self):
         retry = load('retry_enhanced_job', self.ns)
