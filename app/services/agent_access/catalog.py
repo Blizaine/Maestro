@@ -91,6 +91,41 @@ def required_scope(method: str, path: str) -> str:
     segments = tuple(segment for segment in lowered.split("/") if segment)
     read = verb in READ_METHODS
 
+    # ComfyUI is an optional, separately managed execution engine. Reads are
+    # observable (backend job ownership checks still apply); generation and
+    # receipt recovery use exact workflow/submission routes. Model inspection
+    # and the connection probe can access local files or contact another
+    # service, so they require manage. Workflow/configuration writes and every
+    # unknown ComfyUI write remain admin.
+    if len(segments) >= 3 and segments[:3] == ("api", "v1", "comfyui"):
+        if read:
+            return "observe"
+        if (
+            verb == "POST"
+            and len(segments) == 6
+            and segments[3] == "workflows"
+            and segments[4]
+            and segments[5] == "run"
+        ):
+            return "generate"
+        if (
+            verb == "POST"
+            and len(segments) == 7
+            and segments[3:5] == ("jobs", "by-submission")
+            and (segments[5] == "{uuid}" or re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                segments[5],
+            ))
+            and segments[6] in {"resume", "abandon"}
+        ):
+            return "generate"
+        if verb == "POST" and (
+            (len(segments) == 5 and segments[3:5] == ("connection", "test"))
+            or (len(segments) == 5 and segments[3] == "models" and segments[4] in {"discover", "scan", "link"})
+        ):
+            return "manage"
+        return "admin"
+
     # Agent Access owns these endpoints. The two data-plane routes used by the
     # dedicated MCP tools have narrow scopes; auth/owner routes always require
     # admin and remain excluded from generic operation dispatch.

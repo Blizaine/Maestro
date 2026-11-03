@@ -9,6 +9,7 @@ import { MediaTrimDialog } from '../shared/MediaTrimDialog'
 import { useStore } from '../../stores/useStore'
 import { isKreaIdentityEdit, normalizeKreaIdentitySettings } from '../../lib/kreaIdentityControls'
 import { getUploadUrl, fetchOutputMetadata, getFileUrl, moveOutput, uploadImage } from '../../api/client'
+import { requestOpenComfyUIWorkflow, type ComfyUIScalar } from '../../api/comfyui'
 import type { EditorAsset, OutputFile, OutputMetadata } from '../../types'
 import { formatGenerationDuration } from '../../lib/format'
 import { formatDuration } from '../../lib/durationPlanning'
@@ -240,6 +241,16 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   }, [isActive])
 
   const params = meta?.params as Record<string, unknown> | null
+  const comfyWorkflowId = params?.generation_engine === 'comfyui' && typeof params.comfyui_workflow_id === 'string'
+    ? params.comfyui_workflow_id
+    : null
+  const comfyInputs = (() => {
+    const value = params?.comfyui_inputs
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+    return Object.fromEntries(Object.entries(value).filter(([, item]) =>
+      typeof item === 'string' || typeof item === 'boolean' || (typeof item === 'number' && Number.isFinite(item)),
+    )) as Record<string, ComfyUIScalar>
+  })()
   const uploadFilenames = meta?.upload_filenames as Record<string, string | string[]> | undefined
   const mediaTimestamp = getMediaTimestamp(meta?.timestamp, file.created_at)
 
@@ -441,9 +452,13 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   }, [index, onPlaybackStart])
 
   const handleLoadSettings = useCallback(() => {
+    if (comfyWorkflowId) {
+      requestOpenComfyUIWorkflow(comfyWorkflowId, comfyInputs)
+      return
+    }
     setSelectedOutput(index)
     setTimeout(() => loadSettingsFromOutput(), 50)
-  }, [index, setSelectedOutput, loadSettingsFromOutput])
+  }, [comfyWorkflowId, comfyInputs, index, setSelectedOutput, loadSettingsFromOutput])
 
   const handleReroll = useCallback(() => {
     setSelectedOutput(index)
@@ -1029,8 +1044,8 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                 handleLoadSettings()
               }}
               className="rounded-lg p-1.5 text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
-              title="Load settings"
-              aria-label="Load settings"
+              title={comfyWorkflowId ? 'Use ComfyUI settings' : 'Load settings'}
+              aria-label={comfyWorkflowId ? 'Use ComfyUI settings' : 'Load settings'}
             >
               <Pencil size={14} />
             </button>

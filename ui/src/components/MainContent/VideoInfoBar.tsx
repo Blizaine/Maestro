@@ -2,6 +2,7 @@ import { useState, useRef } from 'react'
 import { Pencil, RefreshCw, Copy, Trash2, Check, Combine, Loader2, Sparkles, Mic } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { getUploadUrl } from '../../api/client'
+import { requestOpenComfyUIWorkflow, type ComfyUIScalar } from '../../api/comfyui'
 import { formatGenerationDuration } from '../../lib/format'
 import { modelDisplayName } from '../../lib/modelDisplay'
 import { FaceRefinerButton } from '../Characters/FaceRefiner'
@@ -44,6 +45,17 @@ export function VideoInfoBar() {
 
   // Extract display values
   const prompt = (params?.prompt as string) || ''
+  const comfyWorkflowId = params?.generation_engine === 'comfyui' && typeof params.comfyui_workflow_id === 'string'
+    ? params.comfyui_workflow_id
+    : null
+  const comfyInputs = (() => {
+    const value = params?.comfyui_inputs
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+    return Object.fromEntries(Object.entries(value).filter(([, item]) =>
+      typeof item === 'string' || typeof item === 'boolean' || (typeof item === 'number' && Number.isFinite(item)),
+    )) as Record<string, ComfyUIScalar>
+  })()
+
   const modelType = (params?.model_type as string) || ''
   const modelLabel = modelDisplayName(modelType, models)
   const resolution = (params?.resolution as string) || ''
@@ -167,9 +179,13 @@ export function VideoInfoBar() {
         {params && (
           <>
             <button
-              onClick={loadSettingsFromOutput}
+              onClick={() => {
+                if (comfyWorkflowId) requestOpenComfyUIWorkflow(comfyWorkflowId, comfyInputs)
+                else void loadSettingsFromOutput()
+              }}
               className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
-              title="Load settings"
+              title={comfyWorkflowId ? 'Use ComfyUI settings' : 'Load settings'}
+              aria-label={comfyWorkflowId ? 'Use ComfyUI settings' : 'Load settings'}
             >
               <Pencil size={14} />
             </button>

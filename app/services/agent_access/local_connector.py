@@ -292,21 +292,28 @@ def run_local_stdio(runtime, client_id: str, *, backend=None, version: str | Non
     if created_backend:
         from .bridge import BackendClient
         backend = BackendClient(runtime)
-    try:
-        if created_backend:
-            from .lifecycle import LifecycleManager
-            backend.lifecycle_manager = LifecycleManager(runtime, idle_probe=backend.idle_probe)
-        server = create_local_mcp_server(
-            backend, runtime.app_root, version, runtime.auth, client_id, credential,
-        )
-        server.run("stdio")
-    finally:
-        import asyncio
-        close = getattr(backend, "close", None)
-        if callable(close):
-            result = close()
-            if hasattr(result, "__await__"):
-                asyncio.run(result)
+    import asyncio
+
+    async def serve() -> None:
+        try:
+            if created_backend:
+                from .lifecycle import LifecycleManager
+                backend.lifecycle_manager = LifecycleManager(runtime, idle_probe=backend.idle_probe)
+            server = create_local_mcp_server(
+                backend, runtime.app_root, version, runtime.auth, client_id, credential,
+            )
+            # MCPServer.run("stdio") starts and closes its own event loop.
+            # Use the SDK's async entry point so BackendClient.aclose() runs
+            # before that same loop is torn down.
+            await server.run_stdio_async()
+        finally:
+            close = getattr(backend, "close", None)
+            if callable(close):
+                result = close()
+                if hasattr(result, "__await__"):
+                    await result
+
+    asyncio.run(serve())
 
 
 __all__ = [

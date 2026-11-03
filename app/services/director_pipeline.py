@@ -67,6 +67,7 @@ _gen_lock = None            # reference to launch._gen_lock
 _active_gen_states = None   # reference to launch._active_gen_states (abort signaling)
 _terminal_callback = None   # top-level Director completion notification
 _queue_terminal_callback = None  # complete Director queue notification
+_prepare_generation_engine = None  # optional per-child engine snapshot callback
 
 _pipelines: dict = {}
 _pipeline_lock = threading.Lock()
@@ -4715,10 +4716,11 @@ def init(
     active_gen_states=None,
     terminal_callback=None,
     queue_terminal_callback=None,
+    prepare_generation_engine=None,
 ):
     """Called by launch.py to wire up shared references."""
     global _jobs, _run_generation, _wgp, _gen_lock, _active_gen_states
-    global _terminal_callback, _queue_terminal_callback
+    global _terminal_callback, _queue_terminal_callback, _prepare_generation_engine
     _jobs = jobs_dict
     _run_generation = run_gen_fn
     _wgp = wgp_module
@@ -4726,6 +4728,7 @@ def init(
     _active_gen_states = active_gen_states
     _terminal_callback = terminal_callback
     _queue_terminal_callback = queue_terminal_callback
+    _prepare_generation_engine = prepare_generation_engine
 
 
 class _DirectorOutputs(list):
@@ -4814,6 +4817,11 @@ def _submit_and_wait(
         "workspace": workspace,
         "out_dir": out_dir,
     }
+    if _prepare_generation_engine is not None:
+        # Freeze route selection before registering or starting this child.
+        # The callback only captures the engine choice; ComfyUI receipts and
+        # prompt submission remain owned by launch.py's normal worker path.
+        job["generation_engine_snapshot"] = _prepare_generation_engine(params)
     _dir_pid = params.get("_director_pipeline_id")
     _detached_operation = bool(params.get("_director_detached_operation"))
     _repair_operation_id = params.get("_director_repair_operation_id")

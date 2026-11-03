@@ -798,6 +798,7 @@ def _init_pipeline():
             _active_gen_states,
             terminal_callback=_on_director_pipeline_terminal,
             queue_terminal_callback=_on_director_queue_terminal,
+            prepare_generation_engine=lambda params: _comfy_adapter.capture_engine(params),
         )
         original_start_worker = _director_state._start_pipeline_worker
         if not getattr(original_start_worker, "_agent_access_owner_hook", False):
@@ -7725,6 +7726,111 @@ from services.active_downloads_api import create_router as _active_downloads_rou
 api.include_router(_active_downloads_router())
 
 
+# ComfyUI is an optional external executor. Its requests use the same durable,
+# owned jobs and GPU admission slot as native generation; it is never imported
+# into the model environment or enabled during startup.
+from services.comfyui_api import create_router as _create_comfyui_router
+from services.comfyui_integration import ComfyJobAdapter, resolve_workflow_media
+from services.comfyui_runtime import ServiceError as _ComfyServiceError
+
+
+def _comfy_workspace_dir(workspace):
+    base = Path(_workspace_dir("default")).resolve()
+    candidate = base if workspace == "default" else (base / workspace).resolve()
+    if candidate != base and base not in candidate.parents:
+        raise _ComfyServiceError(422, "The ComfyUI workspace is outside Maestro's output library.")
+    return _workspace_dir(workspace)
+
+
+def _comfy_link_folders(paths):
+    current = _get_linked_model_folders()
+    merged = list(dict.fromkeys([*current, *paths]))
+    prepared = _validate_linked_model_folders(merged)
+    result = _apply_linked_model_folders(merged, prepared=prepared)
+    with open(wgp.server_config_filename, "w", encoding="utf-8") as file:
+        json.dump(wgp.server_config, file, indent=4)
+    return result
+
+
+def _comfy_known_assets():
+    # Names are only hints, not compatibility proof. Only explicit size+SHA
+    # metadata can authorize a verified-native result in the model scanner.
+    from urllib.parse import unquote, urlsplit
+    found = {}
+    budget = [20000]
+    def walk(value, depth=0):
+        budget[0] -= 1
+        if depth > 12 or budget[0] < 0:
+            return
+        if isinstance(value, dict):
+            filename = value.get("filename") or value.get("file_name")
+            if isinstance(filename, str) and filename.lower().endswith((".safetensors", ".gguf")):
+                record = {"filename": os.path.basename(filename)}
+                hashes = value.get("hashes") or {}
+                digest = value.get("sha256") or (hashes.get("SHA256") if isinstance(hashes, dict) else None)
+                size = value.get("size_bytes") or value.get("file_size")
+                if isinstance(digest, str) and len(digest) == 64 and type(size) is int:
+                    record.update(expected_sha256=digest.lower(), expected_size=size)
+                found[(record["filename"], record.get("expected_sha256"))] = record
+            for item in value.values():
+                walk(item, depth + 1)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item, depth + 1)
+        elif isinstance(value, str) and value.startswith("https://"):
+            filename = os.path.basename(unquote(urlsplit(value).path))
+            if filename.lower().endswith((".safetensors", ".gguf")):
+                found.setdefault((filename, None), {"filename": filename})
+    walk(getattr(wgp, "models_def", {}))
+    return list(found.values())
+
+
+def _comfy_authorize_media(value):
+    principal = principal_context.get()
+    if principal is None or getattr(principal, "owner", False):
+        return value
+    try:
+        return str(_agent_access_backend.asset_store.resolve(principal.id, value))
+    except Exception:
+        reference = _agent_access_backend.asset_store.reference_for_path(principal.id, value)
+        if reference is None:
+            raise _ComfyServiceError(403, "Use a media asset imported by this agent; another client's local paths cannot be used.") from None
+        return str(_agent_access_backend.asset_store.resolve(principal.id, reference))
+
+
+def _comfy_release_native_models():
+    # Called only by a worker that already owns _gen_lock.
+    if getattr(wgp, "wan_model", None) is not None or getattr(wgp, "offloadobj", None) is not None:
+        wgp.release_model()
+    from services.generation_memory import release_auxiliary_models
+    release_auxiliary_models()
+    try:
+        from services import llm_service
+        if llm_service.is_loaded():
+            llm_service.unload_model()
+    except Exception as error:
+        print(f"[ComfyUI] Auxiliary writer cleanup: {type(error).__name__}")
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+_comfy_adapter = ComfyJobAdapter(
+    _app_dir, jobs=_jobs, workspace_dir=_comfy_workspace_dir,
+    start_worker=lambda job_id: threading.Thread(target=_run_generation, args=(job_id,), daemon=False, name="maestro_comfyui").start(),
+    require_job_access=_agent_require_job_access,
+    principal_id=lambda: getattr(principal_context.get(), "id", None),
+    link_folders=_comfy_link_folders, known_assets=_comfy_known_assets,
+    resolve_media=lambda raw, workspace: resolve_workflow_media(_app_dir, wgp.server_config.get("save_path", "outputs"), raw, workspace),
+    authorize_media=_comfy_authorize_media,
+    is_owner=lambda: principal_context.get() is None or getattr(principal_context.get(), "owner", False),
+    finish_job=finish_job, update_job=update_job, is_cancelled=is_cancel_requested,
+    unload_native=_comfy_release_native_models,
+)
+api.include_router(_create_comfyui_router(_comfy_adapter.service))
+
+
 @api.post("/api/v1/downloads/cancel")
 async def cancel_download(request: Request):
     try:
@@ -11642,6 +11748,11 @@ def _enqueue_deferred_generation_preparation(body: dict) -> dict:
     """Create a visible job before any automatic sequence planning begins."""
 
     body = deepcopy(body)
+    body.pop("_comfyui_submission", None)
+    try:
+        engine_snapshot = _comfy_adapter.capture_engine(body)
+    except _ComfyServiceError as error:
+        raise HTTPException(error.status, str(error)) from error
     correlation = _pop_editor_submission(body)
     client_submission_id = str((correlation or {}).get("client_submission_id") or "").strip()
     editor_operation_id = (correlation or {}).get("editor_operation_id")
@@ -11682,6 +11793,7 @@ def _enqueue_deferred_generation_preparation(body: dict) -> dict:
         "step": 0,
         "total_steps": 0,
         "phase": "",
+        "generation_engine_snapshot": engine_snapshot,
         "message": (
             "Ready - AI planning will run when queue starts"
             if hold_for_queue
@@ -11941,6 +12053,8 @@ async def _prepare_generation_submission(
     """Normalize/plan a request, then submit it or return prepared params."""
 
     body = dict(body)
+    # Only the trusted provider adapter may attach an existing durable intent.
+    body.pop("_comfyui_submission", None)
     principal = principal_context.get()
     if principal is not None and not getattr(principal, "owner", False):
         # These IDs are written only by trusted Director route code. A grant
@@ -13414,6 +13528,13 @@ async def _prepare_generation_submission(
 
     job_id = uuid.uuid4().hex[:8]
     initial_status = "held" if hold_for_queue else "queued"
+    try:
+        engine_snapshot = _comfy_adapter.capture_engine(body)
+        existing_comfy = _comfy_adapter.attach_native(body, workspace, job_id, client_submission_id, engine_snapshot=engine_snapshot)
+    except _ComfyServiceError as error:
+        raise HTTPException(error.status, str(error)) from error
+    if existing_comfy is not None:
+        return existing_comfy
     job = {
         "id": job_id,
         "show_in_gallery": not hold_for_queue and not body.get("_viggle_prepare_only"),
@@ -13422,6 +13543,7 @@ async def _prepare_generation_submission(
         "step": 0,
         "total_steps": 0,
         "phase": "",
+        "generation_engine_snapshot": engine_snapshot,
         "message": (
             "Ready - waiting for Start Queue"
             if hold_for_queue
@@ -27149,10 +27271,15 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             elif not try_start(job, message="Preparing..."):
                 return False
 
+            if job["params"].get("model_type") == "comfyui_workflow":
+                return _comfy_adapter.execute(job, finalize=finalize)
+            _comfy_adapter.service.assert_native_idle()
+
             # Automatic H3/LTX window planners are intentionally part of the
             # queued job. They must never load before this worker owns the
             # generation lock, otherwise a second submission can place the
             # prompt LLM beside an active diffusion model and freeze the host.
+            comfy_submission_before_planning = job["params"].get("_comfyui_submission")
             try:
                 _prepare_job_enhancement(job)
                 if is_cancel_requested(job):
@@ -27166,6 +27293,19 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 detail = getattr(error, "detail", None) or str(error)
                 finish_job(job, "failed", error=str(detail), message=str(detail))
                 return False
+
+            if comfy_submission_before_planning:
+                job["params"]["_comfyui_submission"] = comfy_submission_before_planning
+            elif (job.get("generation_engine_snapshot") or {}).get("engine") == "comfyui":
+                existing_comfy = _comfy_adapter.attach_native(
+                    job["params"], job.get("workspace") or "default", job_id,
+                    job.get("client_submission_id"),
+                    engine_snapshot=job["generation_engine_snapshot"],
+                )
+                if existing_comfy is not None and existing_comfy["job_id"] != job_id:
+                    raise _ComfyServiceError(409, "This workflow already has an owned submission receipt: " + existing_comfy["job_id"])
+            if job["params"].get("_comfyui_submission"):
+                return _comfy_adapter.execute(job, finalize=finalize)
 
             if (not _slot_owned and job["params"].get("viggle_character")
                     and (wgp.get_model_def(job["params"].get("model_type")) or {}).get("minimax_h3_viggle")):
@@ -29831,6 +29971,9 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 "error": str(e),
                 "message": f"Error: {e}",
             }
+            comfy_submission = (job.get("params") or {}).get("_comfyui_submission")
+            if comfy_submission:
+                _comfy_adapter.service.fail_prepared(comfy_submission, str(e))
             # Tag with OOM info — see _run_sfx_generation for rationale.
             try:
                 from services.oom_detect import detect_oom
@@ -30860,6 +31003,9 @@ def cancel_job(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
 
     job = _jobs[job_id]
+    comfy_submission = (job.get("params") or {}).get("_comfyui_submission")
+    if comfy_submission:
+        _comfy_adapter.service.cancel_prepared(comfy_submission)
     result = request_cancel(
         job,
         job_id=job_id,

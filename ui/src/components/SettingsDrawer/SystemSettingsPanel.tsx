@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { ChevronDown, ChevronRight, RotateCcw, Check, Download, Trash2, Cpu, RefreshCw, Loader2, FolderOpen, Plus, HardDrive, X } from 'lucide-react'
 import type { ModelFolderCandidate } from '../../types'
 import { MemorySettingsPanel } from './MemorySettingsPanel'
+import { ComfyUISettingsPanel } from './ComfyUISettingsPanel'
 import { useStore, getModelGroupsForVisibilityScope } from '../../stores/useStore'
 import { MODEL_VISIBILITY_GROUPS, isModelEnabledInScope, type ModelVisibilityScope } from '../../lib/modelVisibility'
 import { modelNameForContext } from '../../lib/modelDisplay'
@@ -1306,6 +1307,10 @@ export function SystemSettingsPanel() {
 
       {/* Linked model folders — reuse checkpoints from other installs */}
       <LinkedModelFoldersSection />
+
+      <hr className="border-border" />
+
+      <ComfyUISettingsPanel />
 
       <hr className="border-border" />
 

@@ -23,6 +23,7 @@ DISPLAY_PARAMETERS = frozenset({
     "sliding_window_size", "sliding_window_overlap", "denoising_strength",
     "skip_steps_cache_type", "skip_steps_multiplier", "skip_steps_start_step_perc",
     "spatial_upsampling", "temporal_upsampling", "repeat_generation",
+    "generation_engine", "comfyui_workflow_id", "comfyui_workflow_name",
 })
 DISPLAY_PERFORMANCE = frozenset({
     "applied", "profile", "transformer_budget_mb", "attention_head_split",

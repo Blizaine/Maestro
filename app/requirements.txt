@@ -11,6 +11,8 @@
 optimum-quanto==0.2.7
 safetensors==0.8.0
 psutil==7.2.2
+httpx==0.28.1
+PyYAML==6.0.3
 
 # Optional CUDA acceleration with a guarded fallback on CUDA 12 runtimes.
 comfy-kitchen==0.2.35

@@ -45,6 +45,7 @@ Start with the [README](../README.md) for installation and the feature overview.
 
 ## Performance and access
 
+- [ComfyUI integration](ComfyUI.md) — shared model folders, imported workflows and optional execution mappings.
 - [Optional CUDA kernels](optional-kernel-pins.md) — supported stacks, pinned downloads and fallbacks.
 - [Performance Auto-Tune](Performance-auto-tune.md) — hardware recommendations and manual controls.
 - [Experimental Profile 0](Profile-0.md) — separate memory runtime, restart requirements and compatibility limits.

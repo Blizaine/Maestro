@@ -482,12 +482,15 @@ def test_run_local_stdio_wires_lifecycle_for_owned_backend_and_close_never_stops
         def __init__(self):
             self.lifecycle_manager = None
             self.closed = False
+            self.server_loop = None
+            self.close_loop = None
 
         async def idle_probe(self):
             return {"idle": True, "certain": True}
 
         async def close(self):
             self.closed = True
+            self.close_loop = asyncio.get_running_loop()
 
     class FakeLifecycleManager:
         def __init__(self, runtime_arg, *, idle_probe):
@@ -502,9 +505,9 @@ def test_run_local_stdio_wires_lifecycle_for_owned_backend_and_close_never_stops
         def __init__(self, selected_backend):
             self.backend = selected_backend
 
-        def run(self, transport):
-            assert transport == "stdio"
+        async def run_stdio_async(self):
             assert self.backend.lifecycle_manager is not None
+            self.backend.server_loop = asyncio.get_running_loop()
 
     backend = FakeBackend()
     managers = []
@@ -531,6 +534,7 @@ def test_run_local_stdio_wires_lifecycle_for_owned_backend_and_close_never_stops
     assert managers[0].idle_probe == backend.idle_probe
     assert managers[0].actions == []
     assert backend.closed is True
+    assert backend.server_loop is backend.close_loop, "The backend's async HTTP client must close on the MCP server loop."
 
     # Explicitly supplied fakes are kept as supplied and do not gain a real
     # Pinokio lifecycle manager as a side effect.
@@ -540,4 +544,5 @@ def test_run_local_stdio_wires_lifecycle_for_owned_backend_and_close_never_stops
     run_local_stdio(runtime, record["id"], backend=injected, version="test")
     assert injected.lifecycle_manager is sentinel
     assert injected.closed is True
+    assert injected.server_loop is injected.close_loop
     assert managers[0].actions == []
