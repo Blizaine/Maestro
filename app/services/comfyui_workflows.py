@@ -445,6 +445,72 @@ def builtin_templates() -> list[dict[str, Any]]:
         "1": {"class_type": "EmptyImage", "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0}},
         "2": {"class_type": "SaveImage", "inputs": {"filename_prefix": "maestro_cpu_smoke", "images": ["1", 0]}},
     }
+    flux3_klein_workflow = {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "", "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "", "type": "flux3", "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": ""}},
+        "4": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["2", 0]}},
+        "5": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["2", 0]}},
+        "6": {
+            "class_type": "EmptyFlux2LatentImage",
+            "inputs": {"width": 512, "height": 512, "batch_size": 1},
+        },
+        "7": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": 1,
+                "steps": 16,
+                "cfg": 1.0,
+                "sampler_name": "euler",
+                "scheduler": "simple",
+                "denoise": 1.0,
+                "model": ["1", 0],
+                "positive": ["4", 0],
+                "negative": ["5", 0],
+                "latent_image": ["6", 0],
+            },
+        },
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {"filename_prefix": "maestro_flux3_klein_distilled", "images": ["8", 0]},
+        },
+    }
+    flux3_klein_bindings = [
+        {"name": "diffusion_model", "label": "Diffusion model", "node_id": "1", "input": "unet_name", "type": "string", "required": True},
+        {"name": "text_encoder", "label": "Text encoder", "node_id": "2", "input": "clip_name", "type": "string", "required": True},
+        {"name": "vae", "label": "VAE", "node_id": "3", "input": "vae_name", "type": "string", "required": True},
+        {"name": "positive_prompt", "label": "Prompt", "node_id": "4", "input": "text", "type": "string", "required": True},
+        {"name": "width", "label": "Width", "node_id": "6", "input": "width", "type": "integer", "default": 512, "min": 64, "max": 2048},
+        {"name": "height", "label": "Height", "node_id": "6", "input": "height", "type": "integer", "default": 512, "min": 64, "max": 2048},
+        {"name": "steps", "label": "Steps", "node_id": "7", "input": "steps", "type": "integer", "default": 16, "min": 1, "max": 64},
+        {"name": "cfg", "label": "CFG", "node_id": "7", "input": "cfg", "type": "number", "default": 1.0, "min": 0.0, "max": 5.0},
+        {"name": "seed", "label": "Seed", "node_id": "7", "input": "seed", "type": "integer", "default": 1, "min": 0, "max": 0xFFFFFFFFFFFFFFFF},
+    ]
+    flux3_klein_edit_workflow = copy.deepcopy(flux3_klein_workflow)
+    flux3_klein_edit_workflow["7"]["inputs"]["positive"] = ["12", 0]
+    flux3_klein_edit_workflow["7"]["inputs"]["negative"] = ["13", 0]
+    flux3_klein_edit_workflow.update(
+        {
+            "10": {"class_type": "LoadImage", "inputs": {"image": ""}},
+            "11": {
+                "class_type": "VAEEncode",
+                "inputs": {"pixels": ["10", 0], "vae": ["3", 0]},
+            },
+            "12": {
+                "class_type": "ReferenceLatent",
+                "inputs": {"conditioning": ["4", 0], "latent": ["11", 0]},
+            },
+            "13": {
+                "class_type": "ReferenceLatent",
+                "inputs": {"conditioning": ["5", 0], "latent": ["11", 0]},
+            },
+        }
+    )
+    flux3_klein_edit_bindings = copy.deepcopy(flux3_klein_bindings)
+    flux3_klein_edit_bindings.append(
+        {"name": "reference_image", "label": "Reference image", "node_id": "10", "input": "image", "type": "image", "required": True}
+    )
     return [
         {
             "id": "sdxl_checkpoint_txt2img",
@@ -479,6 +545,40 @@ def builtin_templates() -> list[dict[str, Any]]:
                 {"name": "height", "label": "Height", "node_id": "1", "input": "height", "type": "integer", "default": 64, "min": 1, "max": 4096},
                 {"name": "color", "label": "Color", "node_id": "1", "input": "color", "type": "integer", "default": 0, "min": 0, "max": 16777215},
             ],
+        },
+        {
+            "id": "flux3_klein_distilled_txt2img",
+            "name": "FLUX3 Klein distilled text to image",
+            "kind": "image",
+            "description": (
+                "Uses ComfyUI core UNETLoader, CLIPLoader (flux3), VAELoader, CLIPTextEncode, "
+                "EmptyFlux2LatentImage, KSampler, VAEDecode, and SaveImage nodes. Select a locally "
+                "installed FLUX3 Klein distilled diffusion model, its matching Qwen3-VL 4B text "
+                "encoder, and VAE. Defaults match the validated 512×512, 16-step Euler/simple, "
+                "CFG 1.0 path. The negative prompt is intentionally empty for this distilled "
+                "setup. Width and height should be multiples of 16. This is not a generic Flux 2 "
+                "or FLUX3 base workflow."
+            ),
+            "workflow": flux3_klein_workflow,
+            "bindings": flux3_klein_bindings,
+        },
+        {
+            "id": "flux3_klein_distilled_reference_edit",
+            "name": "FLUX3 Klein distilled single-reference edit (Experimental)",
+            "kind": "image",
+            "description": (
+                "Uses ComfyUI core nodes for FLUX3 Klein distilled reference editing. Select a "
+                "locally installed compatible diffusion model, Qwen3-VL 4B text encoder, and VAE, "
+                "then provide one reference image. VAEEncode and ReferenceLatent append the image "
+                "to positive and empty-negative conditioning. Sampling starts from an independent "
+                "empty Flux2 latent, so the width and height bindings set output size regardless "
+                "of the reference image dimensions. Defaults use 16-step Euler/simple sampling "
+                "with distilled CFG 1.0. Width and height should be multiples of 16. This is not a "
+                "generic Flux 2 or FLUX3 base workflow. Inspect the rendered edit: successful "
+                "reference conditioning does not guarantee the requested visual change."
+            ),
+            "workflow": flux3_klein_edit_workflow,
+            "bindings": flux3_klein_edit_bindings,
         },
     ]
 

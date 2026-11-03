@@ -174,7 +174,11 @@ class ComfyClient:
         response = self._request("GET", path, operation=operation, params=params)
         return self._json(response, operation=operation)
 
-    def _mutation_json(self, response: httpx.Response, *, operation: str) -> dict[str, Any]:
+    def _mutation_json(self, response: httpx.Response, *, operation: str, allow_empty: bool = False) -> dict[str, Any]:
+        # Core /queue deletion and /free acknowledge with an empty 200 body.
+        # Submission and upload still require their identifying JSON receipts.
+        if allow_empty and not response.content:
+            return {}
         try:
             payload = self._json(response, operation=operation)
         except ComfyResponseError as exc:
@@ -326,7 +330,7 @@ class ComfyClient:
             ambiguous=True,
             json={"delete": [prompt_id]},
         )
-        return self._mutation_json(response, operation="delete_queued")
+        return self._mutation_json(response, operation="delete_queued", allow_empty=True)
 
     def release_memory(self) -> dict[str, Any]:
         """Explicitly ask ComfyUI to unload models and release cached memory.
@@ -342,7 +346,7 @@ class ComfyClient:
             ambiguous=True,
             json={"unload_models": True, "free_memory": True},
         )
-        return self._mutation_json(response, operation="release_memory")
+        return self._mutation_json(response, operation="release_memory", allow_empty=True)
 
 
 __all__ = [

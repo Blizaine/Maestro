@@ -76,6 +76,23 @@ checks basic service and request handling; it does not prove that an AI model
 loaded or that the full workflow generated correctly. Successful generated
 outputs are handled as normal Maestro jobs and appear in the normal gallery.
 
+### Starter workflows
+
+The library includes an SDXL checkpoint workflow, a model-free connection check,
+and FLUX 3 Klein distilled workflows for text-to-image and single-reference
+editing. FLUX 3 requires a ComfyUI version with its core model and text encoder
+support. Select the diffusion model, matching FLUX 3 text encoder, and VAE
+advertised by that server; the templates do not download them or assume that
+Maestro's quantized exports are interchangeable with ComfyUI's formats.
+
+The distilled recipes use 16 Euler/simple steps and CFG 1. The reference recipe
+encodes the selected image into reference conditioning while retaining the
+chosen output width and height. These defaults are for distilled Klein; they
+are not a recipe for Klein Base or an arbitrary FLUX checkpoint. Start small,
+validate the actual component filenames, then inspect a generated result.
+Reference editing remains experimental: a completed job and correct reference
+handoff do not establish that the model followed the requested visual change.
+
 ### HTTP API request shape
 
 - `POST /api/v1/comfyui/workflows` registers `name`, `kind`, the API-format
@@ -93,8 +110,10 @@ outputs are handled as normal Maestro jobs and appear in the normal gallery.
 
 ## Route Maestro models through ComfyUI
 
-Maestro's native engine remains the default unless a caller explicitly selects
-ComfyUI and an enabled route is configured for that model type.
+Maestro's native engine remains the default until ComfyUI and a route for that
+model type are enabled. An explicit Native engine selection bypasses a saved
+route. Turning off the integration also restores Native for ordinary requests
+while preserving the saved mappings.
 
 Configure a route per Maestro model type after its graph has passed validation.
 Select the registered workflow, match its image/video/audio kind, and map each

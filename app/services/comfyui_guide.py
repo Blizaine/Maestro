@@ -35,6 +35,16 @@ def get_comfyui_guide() -> dict[str, object]:
                 "model, and binding requirements; it does not test output quality."
             ),
         },
+        "starter_workflows": (
+            "The workflow library includes SDXL checkpoint text-to-image, a "
+            "model-free connection check, and FLUX 3 Klein distilled text-to-image "
+            "and single-reference editing templates. FLUX 3 needs current core "
+            "node/model support and compatible diffusion model, text encoder and "
+            "VAE filenames selected from that ComfyUI server. Its templates use "
+            "16 Euler/simple steps, CFG 1, and independently selected output "
+            "dimensions. Do not apply these distilled defaults to Klein Base "
+            "or assume every Maestro quantized export is ComfyUI-compatible."
+        ),
         "native_routes": (
             "Maestro keeps its native engine as the default. A ComfyUI route is "
             "opt-in per model type and runs through Maestro's shared generation "

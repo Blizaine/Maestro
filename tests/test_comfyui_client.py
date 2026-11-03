@@ -20,6 +20,7 @@ from app.services.comfyui_client import (
 class _State:
     requests: list[dict] = []
     post_prompt_mode = "ok"
+    maintenance_mode = "json"
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -78,6 +79,11 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length", "0"))
         body = self.rfile.read(length)
         self._record(body)
+        if self.path in {"/queue", "/free"} and _State.maintenance_mode == "empty":
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if self.path == "/prompt" and _State.post_prompt_mode == "validation":
             self._send_json({"error": "private token text should never escape"}, status=400)
         elif self.path == "/prompt" and _State.post_prompt_mode == "server_error":
@@ -123,6 +129,7 @@ class TestComfyClient(unittest.TestCase):
     def setUp(self):
         _State.requests.clear()
         _State.post_prompt_mode = "ok"
+        _State.maintenance_mode = "json"
 
     def test_endpoint_rejects_unsafe_or_ambiguous_urls(self):
         for endpoint in (
@@ -182,6 +189,27 @@ class TestComfyClient(unittest.TestCase):
         request = next(item for item in _State.requests if item["path"] == "/free")
         self.assertEqual(request["method"], "POST")
         self.assertEqual(json.loads(request["body"]), {"unload_models": True, "free_memory": True})
+
+    def test_core_maintenance_empty_acknowledgements_do_not_require_json(self):
+        _State.maintenance_mode = "empty"
+        with ComfyClient(self.endpoint) as client:
+            self.assertEqual(client.release_memory(), {})
+            self.assertEqual(client.delete_queued("owned-prompt"), {})
+        self.assertEqual([r["path"] for r in _State.requests], ["/free", "/queue"])
+        self.assertEqual(json.loads(_State.requests[1]["body"]), {"delete": ["owned-prompt"]})
+
+    def test_empty_acknowledgements_are_limited_to_maintenance(self):
+        import httpx
+        empty = httpx.Response(200, content=b"")
+        malformed = httpx.Response(200, content=b"not-json")
+        with ComfyClient(self.endpoint) as client:
+            for operation in ("submit", "upload_image"):
+                with self.subTest(operation=operation), self.assertRaises(comfyui_client.ComfyResponseError) as raised:
+                    client._mutation_json(empty, operation=operation)
+                self.assertTrue(raised.exception.ambiguous)
+            with self.assertRaises(comfyui_client.ComfyResponseError) as raised:
+                client._mutation_json(malformed, operation="release_memory", allow_empty=True)
+            self.assertTrue(raised.exception.ambiguous)
 
     def test_known_validation_response_is_safe_and_not_ambiguous(self):
         _State.post_prompt_mode = "validation"
