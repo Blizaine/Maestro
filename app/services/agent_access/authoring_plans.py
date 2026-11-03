@@ -1003,6 +1003,30 @@ def compute_studio_timeline(context: Mapping[str, Any]) -> dict[str, Any]:
             director_timeline["windows"] = windows
         else:
             director_timeline["kind"] = "authored_native_clips"
+        timeline_id_required = director_timeline["kind"] in {
+            "h3_native_story_schedule", "exact_source_audio",
+        }
+        music_video_schedule = director_timeline["kind"] == "exact_source_audio"
+        policy, image_required = _director_image_policy(context, params, model_def)
+        image_prompt_required = bool(image_required(policy))
+        required_clip_fields = ["id"]
+        if timeline_id_required:
+            required_clip_fields.append("timeline_id")
+        required_clip_fields.extend(["start_frame", "end_frame", "duration_frames"])
+        if references:
+            required_clip_fields.append("reference_ids")
+        required_clip_fields.append("video_prompt")
+        if image_prompt_required:
+            required_clip_fields.append("image_prompt")
+        clip_fields = [
+            "id", "start_frame", "end_frame", "duration_frames",
+            "previous_clip_id", "reference_ids", "video_prompt", "image_prompt",
+            "label", "scene_type", "keyframe_prompts", "narrative_role",
+        ]
+        if timeline_id_required:
+            clip_fields.insert(1, "timeline_id")
+        if not music_video_schedule:
+            clip_fields.append("window_prompts")
         return {
             "context_id": context_id,
             "workflow": workflow,
@@ -1015,11 +1039,32 @@ def compute_studio_timeline(context: Mapping[str, Any]) -> dict[str, Any]:
             "plan_schema": {
                 "mode": "director_clips",
                 "required_fields": ["context_id", "clips"],
-                "clip_fields": [
-                    "id", "start_frame", "end_frame", "duration_frames",
-                    "previous_clip_id", "reference_ids", "video_prompt",
-                ],
-                "window_prompt_fields": [
+                "required_clip_fields": required_clip_fields,
+                "clip_fields": clip_fields,
+                "conditional_clip_requirements": {
+                    "previous_clip_id": {
+                        "expected_value": "prior authored clip ID when continuity_mode is continuous",
+                        "required_when": "a prior authored clip exists and continuity_mode is continuous",
+                        "first_or_independent_value": None,
+                        "may_omit_when_expected_value_is_null": True,
+                    },
+                    "reference_ids": {
+                        "expected_value": list(references),
+                        "required": bool(references),
+                        "may_omit_when_empty": not references,
+                    },
+                    "image_prompt": {"required": image_prompt_required},
+                    "window_prompts": {
+                        "allowed": not music_video_schedule,
+                        "required_when": (
+                            "the clip spans multiple native windows"
+                            if not music_video_schedule else None
+                        ),
+                    },
+                },
+                "image_prompt_required": image_prompt_required,
+                "window_prompts_allowed": not music_video_schedule,
+                "window_prompt_fields": [] if music_video_schedule else [
                     "id", "start_frame", "end_frame", "prompt",
                     "reference_ids", "previous_window_id",
                 ],
@@ -1028,9 +1073,7 @@ def compute_studio_timeline(context: Mapping[str, Any]) -> dict[str, Any]:
                     if director_timeline["kind"] == "exact_source_audio"
                     else "native_frames"
                 ),
-                "timeline_id_required": director_timeline["kind"] in {
-                    "h3_native_story_schedule", "exact_source_audio",
-                },
+                "timeline_id_required": timeline_id_required,
                 "native_duration_field": (
                     "native_duration_frames"
                     if director_timeline["kind"] == "exact_source_audio"
@@ -1677,6 +1720,55 @@ def _authored_clip_prompts(
     return video_prompt, image_prompt
 
 
+def _unique_director_timeline_window_ids(
+    expected: Sequence[Any],
+    *,
+    label: str,
+) -> set[str]:
+    identifiers: set[str] = set()
+    for index, raw_geometry in enumerate(expected, start=1):
+        geometry = _mapping(raw_geometry, f"{label}[{index}]")
+        identifier = _required_text(geometry.get("id"), f"{label}[{index}].id")
+        if identifier in identifiers:
+            raise AuthoringPlanError(
+                f"The current Director schedule contains duplicate timeline window ID {identifier!r}."
+            )
+        identifiers.add(identifier)
+    return identifiers
+
+
+def _authored_timeline_id(
+    clip: Mapping[str, Any],
+    geometry: Mapping[str, Any],
+    known_window_ids: set[str],
+    *,
+    index: int,
+    schedule_label: str,
+) -> str:
+    expected_id = _required_text(
+        geometry.get("id"), f"current {schedule_label} timeline window[{index}].id"
+    )
+    if "timeline_id" in clip:
+        timeline_id = _required_text(clip.get("timeline_id"), f"plan.clips[{index}].timeline_id")
+    else:
+        source_id = _required_text(clip.get("id"), f"plan.clips[{index}].id")
+        if source_id not in known_window_ids:
+            raise AuthoringPlanError(
+                f"plan.clips[{index}].timeline_id is required unless plan.clips[{index}].id "
+                "exactly matches one unique timeline window ID from the current context."
+            )
+        timeline_id = source_id
+    if timeline_id != expected_id:
+        if schedule_label == "H3 schedule":
+            source = "the current context"
+        else:
+            source = "the current soundtrack schedule"
+        raise AuthoringPlanError(
+            f"plan.clips[{index}].timeline_id must be {expected_id!r} from {source}."
+        )
+    return timeline_id
+
+
 def _normalize_h3_story_schedule(
     context: Mapping[str, Any],
     plan: Mapping[str, Any],
@@ -1697,6 +1789,9 @@ def _normalize_h3_story_schedule(
             f"The current H3 Director context requires {len(expected)} native shots; "
             f"received {len(raw_clips)}. Refresh the context before revising the screenplay."
         )
+    known_window_ids = _unique_director_timeline_window_ids(
+        expected, label="current H3 Director schedule.windows"
+    )
     policy, image_required = _director_image_policy(context, params, model_def)
     requires_image = bool(image_required(policy))
     references = _reference_ids(context)
@@ -1712,11 +1807,13 @@ def _normalize_h3_story_schedule(
         if source_id in source_ids:
             raise AuthoringPlanError(f"plan.clips[{index}].id is duplicated: {source_id!r}.")
         source_ids.add(source_id)
-        timeline_id = _required_text(clip.get("timeline_id"), f"plan.clips[{index}].timeline_id")
-        if timeline_id != geometry.get("id"):
-            raise AuthoringPlanError(
-                f"plan.clips[{index}].timeline_id must be {geometry.get('id')!r} from the current context."
-            )
+        timeline_id = _authored_timeline_id(
+            clip,
+            geometry,
+            known_window_ids,
+            index=index,
+            schedule_label="H3 schedule",
+        )
         expected_values = {
             "start_frame": int(geometry["start_frame"]),
             "end_frame": int(geometry["end_frame"]),
@@ -1839,6 +1936,9 @@ def _normalize_director_music_timeline(
             f"The current soundtrack schedule requires {len(expected_windows)} editorial shots; "
             f"received {len(raw_clips)}. Refresh the context before revising the screenplay."
         )
+    known_window_ids = _unique_director_timeline_window_ids(
+        expected_windows, label="current soundtrack schedule.windows"
+    )
     profile = timeline.get("director_profile") or {}
     fps = float(profile.get("fps") or 24)
     minimum = int(profile.get("minimum_frames") or model_def.get("frames_minimum") or 1)
@@ -1861,11 +1961,13 @@ def _normalize_director_music_timeline(
             raise AuthoringPlanError(f"plan.clips[{index}].id is duplicated: {source_id!r}.")
         source_ids.add(source_id)
         ordered_source_ids.append(source_id)
-        timeline_id = _required_text(clip.get("timeline_id"), f"plan.clips[{index}].timeline_id")
-        if timeline_id != geometry.get("id"):
-            raise AuthoringPlanError(
-                f"plan.clips[{index}].timeline_id must be {geometry.get('id')!r} from the current soundtrack schedule."
-            )
+        timeline_id = _authored_timeline_id(
+            clip,
+            geometry,
+            known_window_ids,
+            index=index,
+            schedule_label="music-video schedule",
+        )
         start = _integer(clip.get("start_frame"), f"plan.clips[{index}].start_frame", minimum=0)
         end = _integer(clip.get("end_frame"), f"plan.clips[{index}].end_frame")
         duration = _integer(clip.get("duration_frames"), f"plan.clips[{index}].duration_frames")

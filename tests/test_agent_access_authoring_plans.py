@@ -129,6 +129,28 @@ def _beat_aware_music_context(analysis=None, *, energy_bias=0):
     )
 
 
+def _schedule_clips(context, windows, *, include_timeline_id=True):
+    clips = []
+    previous_id = None
+    continuous = context["timeline"].get("continuity_mode") == "continuous"
+    for index, window in enumerate(windows, start=1):
+        clip_id = window["id"]
+        clip = {
+            "id": clip_id,
+            "start_frame": window["start_frame"],
+            "end_frame": window["end_frame"],
+            "duration_frames": window["duration_frames"],
+            "previous_clip_id": previous_id if continuous else None,
+            "reference_ids": list(context["timeline"].get("reference_ids") or []),
+            "video_prompt": f"Preserve the scheduled visual beat {index}.",
+        }
+        if include_timeline_id:
+            clip["timeline_id"] = window["id"]
+        clips.append(clip)
+        previous_id = clip_id
+    return clips
+
+
 class StudioAuthoringPlanTests(unittest.TestCase):
     def test_native_resolver_enables_ltx_continuation_for_long_request(self):
         context = {
@@ -428,8 +450,165 @@ class DirectorAuthoringPlanTests(unittest.TestCase):
         required_images.pop("timeline")
         required_images["shot_image_policy"] = "generate"
         required_images["timeline"] = compute_studio_timeline(required_images)
+        image_schema = required_images["timeline"]["plan_schema"]
+        self.assertTrue(image_schema["image_prompt_required"])
+        self.assertIn("image_prompt", image_schema["required_clip_fields"])
         with self.assertRaisesRegex(AuthoringPlanError, "image_prompt is required"):
             normalize_authored_director_plan(required_images, self._plan())
+
+    def test_story_schema_keeps_valid_window_prompt_support(self):
+        schema = self.context["timeline"]["plan_schema"]
+        self.assertTrue(schema["window_prompts_allowed"])
+        self.assertIn("window_prompts", schema["clip_fields"])
+        self.assertIn("prompt", schema["window_prompt_fields"])
+
+        plan = self._plan()
+        for clip in plan["clips"]:
+            clip["window_prompts"] = [{
+                "id": f"{clip['id']}-window-1",
+                "start_frame": clip["start_frame"],
+                "end_frame": clip["end_frame"],
+                "prompt": f"Keep the full authored shot {clip['id']} coherent.",
+                "reference_ids": ["ref-main"],
+                "previous_window_id": None,
+            }]
+        result = normalize_authored_director_plan(self.context, plan)
+        self.assertTrue(all(
+            item["window_prompts"]
+            for item in result["native_params"]["prepared_clip_plans"]
+        ))
+
+    def test_h3_story_accepts_only_exact_unique_window_id_as_legacy_timeline_alias(self):
+        context = _context(
+            "director.story",
+            "minimax_h3_fused_turbo",
+            {
+                "architecture": "minimax_h3",
+                "frames_minimum": 124,
+                "frames_maximum": 243,
+                "frames_steps": 17,
+                "fps": 24,
+                "director_shot_image_support": "optional",
+            },
+            {"duration_seconds": 30, "pipeline_type": "story", "shot_image_guidance": "prompt_only"},
+            execution_profile={
+                "fps": 24,
+                "frames_minimum": 124,
+                "frame_step": 17,
+                "effective_max_frames": 243,
+            },
+            shot_image_policy="prompt_only",
+        )
+        schema = context["timeline"]["plan_schema"]
+        self.assertIn("timeline_id", schema["clip_fields"])
+        self.assertIn("timeline_id", schema["required_clip_fields"])
+
+        windows = context["timeline"]["director_timeline"]["windows"]
+        clips = _schedule_clips(context, windows, include_timeline_id=False)
+        result = normalize_authored_director_plan(
+            context, {"context_id": context["context_id"], "clips": clips}
+        )
+        prepared = result["native_params"]["prepared_clip_plans"]
+        self.assertEqual(
+            [item["agent_timeline_id"] for item in prepared],
+            [item["id"] for item in windows],
+        )
+        self.assertEqual(
+            [item["agent_source_clip_id"] for item in prepared],
+            [item["id"] for item in windows],
+        )
+
+    def test_music_video_schema_and_legacy_alias_preserve_exact_schedule(self):
+        context = _beat_aware_music_context()
+        schema = context["timeline"]["plan_schema"]
+        windows = context["timeline"]["windows"]
+        self.assertIn("timeline_id", schema["clip_fields"])
+        self.assertIn("timeline_id", schema["required_clip_fields"])
+        self.assertTrue(schema["timeline_id_required"])
+        self.assertFalse(schema["image_prompt_required"])
+        self.assertNotIn("image_prompt", schema["required_clip_fields"])
+        self.assertEqual(schema["required_clip_fields"], [
+            "id", "timeline_id", "start_frame", "end_frame", "duration_frames",
+            "reference_ids", "video_prompt",
+        ])
+        self.assertFalse(schema["window_prompts_allowed"])
+        self.assertEqual(schema["window_prompt_fields"], [])
+        self.assertNotIn("window_prompts", schema["clip_fields"])
+
+        clips = _schedule_clips(context, windows, include_timeline_id=False)
+        normalized = normalize_authored_director_plan(
+            context, {"context_id": context["context_id"], "clips": clips}
+        )
+        prepared = normalized["native_params"]["prepared_clip_plans"]
+        planned = normalized["native_params"]["prepared_planned_clips"]
+        self.assertEqual(
+            [item["agent_timeline_id"] for item in prepared],
+            [item["id"] for item in windows],
+        )
+        self.assertEqual(
+            [item["agent_source_clip_id"] for item in prepared],
+            [item["id"] for item in windows],
+        )
+        self.assertEqual(
+            [item["agent_previous_clip_id"] for item in planned],
+            [clip["previous_clip_id"] for clip in clips],
+        )
+        self.assertEqual(
+            [item["agent_reference_ids"] for item in prepared],
+            [clip["reference_ids"] for clip in clips],
+        )
+        self.assertEqual(
+            [item["output_frames"] for item in planned],
+            [window["output_frames"] for window in windows],
+        )
+
+        unknown = copy.deepcopy(clips)
+        unknown[0]["id"] = "agent-invented-shot-id"
+        with self.assertRaisesRegex(AuthoringPlanError, "exactly matches one unique timeline window ID"):
+            normalize_authored_director_plan(
+                context,
+                {"context_id": context["context_id"], "clips": unknown},
+            )
+
+        explicit_conflict = copy.deepcopy(clips)
+        explicit_conflict[0]["timeline_id"] = windows[1]["id"]
+        with self.assertRaisesRegex(AuthoringPlanError, "from the current soundtrack schedule"):
+            normalize_authored_director_plan(
+                context,
+                {"context_id": context["context_id"], "clips": explicit_conflict},
+            )
+
+        duplicate = copy.deepcopy(clips)
+        duplicate[1]["id"] = duplicate[0]["id"]
+        with self.assertRaisesRegex(AuthoringPlanError, "id is duplicated"):
+            normalize_authored_director_plan(
+                context,
+                {"context_id": context["context_id"], "clips": duplicate},
+            )
+
+        empty_explicit = copy.deepcopy(clips)
+        empty_explicit[0]["timeline_id"] = ""
+        with self.assertRaisesRegex(AuthoringPlanError, "timeline_id is required"):
+            normalize_authored_director_plan(
+                context,
+                {"context_id": context["context_id"], "clips": empty_explicit},
+            )
+
+        duplicate_schedule = copy.deepcopy(context)
+        duplicate_schedule["timeline"]["director_timeline"]["windows"][1]["id"] = windows[0]["id"]
+        with self.assertRaisesRegex(AuthoringPlanError, "duplicate timeline window ID"):
+            normalize_authored_director_plan(
+                duplicate_schedule,
+                {"context_id": context["context_id"], "clips": clips},
+            )
+
+        supplied_window_prompts = copy.deepcopy(clips)
+        supplied_window_prompts[0]["window_prompts"] = []
+        with self.assertRaisesRegex(AuthoringPlanError, "editorial music-video segment"):
+            normalize_authored_director_plan(
+                context,
+                {"context_id": context["context_id"], "clips": supplied_window_prompts},
+            )
 
     def test_h3_director_30_and_60_second_requests_use_native_schedule(self):
         for seconds in (30, 60):
