@@ -7211,7 +7211,7 @@ def _trim_video_tail(clip_path, trim_frames, fps):
 def concatenate_multi_clip_videos(
     clip_paths, output_path, audio_path=None, audio_start_sec=0.0,
     abort_callback=None, pad_audio=False, audio_duration_sec=None,
-    video_duration_sec=None,
+    video_duration_sec=None, max_audio_pad_sec=None,
 ):
     """Concatenate video clips into one video, optionally adding a full audio track.
 
@@ -7224,6 +7224,8 @@ def concatenate_multi_clip_videos(
     requested, ``audio_duration_sec`` must identify the exact finite video
     duration; bounding ``apad`` prevents its infinite stream from filling
     ffmpeg's filter buffers before the concat video is flushed.
+    ``max_audio_pad_sec`` additionally probes the source audio and refuses
+    padding a larger gap than the caller's explicit bound.
     """
     import subprocess
     import math
@@ -7231,6 +7233,20 @@ def concatenate_multi_clip_videos(
     output_path = os.path.abspath(output_path)
     output_path_ffmpeg = output_path.replace("\\", "/")
     ffmpeg_bin = os.environ.get("FFMPEG_BINARY", "ffmpeg")
+
+    def _ffprobe_executable():
+        configured = os.environ.get("FFPROBE_BINARY")
+        if configured:
+            return configured
+        executable_name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+        executable_dir = os.path.dirname(ffmpeg_bin)
+        if executable_dir:
+            sibling = os.path.join(executable_dir, executable_name)
+            if os.path.isfile(sibling):
+                return sibling
+        return executable_name
+
+    ffprobe_bin = _ffprobe_executable()
 
     n = len(clip_paths)
     if n == 0:
@@ -7278,6 +7294,23 @@ def concatenate_multi_clip_videos(
             "source-audio padding is disabled."
         )
         pad_audio = False
+    bounded_audio_padding_requested = max_audio_pad_sec is not None
+    try:
+        max_audio_pad_sec = float(max_audio_pad_sec)
+    except (TypeError, ValueError):
+        if bounded_audio_padding_requested:
+            print("[Multi-Clip] Refusing invalid frame-bounded audio padding.")
+            return False
+        max_audio_pad_sec = None
+    if (
+        max_audio_pad_sec is not None
+        and (
+            not math.isfinite(max_audio_pad_sec)
+            or max_audio_pad_sec < 0
+        )
+    ):
+        print("[Multi-Clip] Refusing invalid frame-bounded audio padding.")
+        return False
     try:
         video_duration_sec = float(video_duration_sec)
     except (TypeError, ValueError):
@@ -7295,7 +7328,6 @@ def concatenate_multi_clip_videos(
     clips_have_audio = False
     if not audio_path:
         try:
-            ffprobe_bin = ffmpeg_bin.replace("ffmpeg", "ffprobe")
             probe_result = subprocess.run(
                 [ffprobe_bin, "-i", valid_paths[0].replace("\\", "/"),
                  "-show_streams", "-select_streams", "a", "-loglevel", "error"],
@@ -7324,7 +7356,6 @@ def concatenate_multi_clip_videos(
     # overlaid audio track to progressively desync.
     detected_fps = None
     try:
-        ffprobe_bin = ffmpeg_bin.replace("ffmpeg", "ffprobe")
         fps_probe = subprocess.run(
             [ffprobe_bin, "-i", valid_paths[0].replace("\\", "/"),
              "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate",
@@ -7341,6 +7372,53 @@ def concatenate_multi_clip_videos(
             print(f"[Multi-Clip] Detected clip fps: {detected_fps}")
     except Exception:
         pass
+
+    if bounded_audio_padding_requested:
+        if (
+            not audio_path
+            or not pad_audio
+            or audio_duration_sec is None
+            or video_duration_sec is None
+            or abs(audio_duration_sec - video_duration_sec) > 1e-6
+        ):
+            print(
+                "[Multi-Clip] Refusing frame-bounded audio padding without "
+                "matching finite audio and video durations."
+            )
+            return False
+        try:
+            duration_probe = subprocess.run(
+                [
+                    ffprobe_bin,
+                    "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    os.path.abspath(audio_path).replace("\\", "/"),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            source_audio_duration = float(duration_probe.stdout.strip())
+            if duration_probe.returncode != 0 or not math.isfinite(source_audio_duration):
+                raise ValueError("ffprobe did not return a finite audio duration")
+        except Exception as exc:
+            print(
+                "[Multi-Clip] Refusing frame-bounded audio padding because "
+                f"the soundtrack duration could not be verified: {exc}"
+            )
+            return False
+        available_audio_duration = max(
+            0.0, source_audio_duration - audio_start_sec,
+        )
+        required_padding = audio_duration_sec - available_audio_duration
+        if required_padding > max_audio_pad_sec + 1e-6:
+            print(
+                "[Multi-Clip] Refusing to hide a soundtrack gap larger than "
+                f"the frame-bound ({required_padding:.6f}s > "
+                f"{max_audio_pad_sec:.6f}s)."
+            )
+            return False
 
     # Build ffmpeg command with concat filter
     cmd = [ffmpeg_bin, "-y"]
@@ -11241,16 +11319,25 @@ def generate_video(
                             multi_clip_info.get("target_total_frames", 0) or 0
                         )
                         target_duration_sec = None
+                        join_audio_options = {}
                         if target_total_frames > 0:
                             target_fps = float(model_def.get("fps") or fps or 24)
                             target_duration_sec = target_total_frames / max(1.0, target_fps)
-                        if concatenate_multi_clip_videos(
+                            if concat_audio:
+                                join_audio_options = {
+                                    "pad_audio": True,
+                                    "audio_duration_sec": target_duration_sec,
+                                    "max_audio_pad_sec": 1.0 / max(1.0, target_fps),
+                                }
+                        join_succeeded = concatenate_multi_clip_videos(
                             clip_paths,
                             concat_path,
                             concat_audio,
                             audio_start_sec=multi_clip_info.get("audio_start_sec", 0),
                             video_duration_sec=target_duration_sec,
-                        ):
+                            **join_audio_options,
+                        )
+                        if join_succeeded:
                             print(f"[Multi-Clip] Concatenated video saved: {concat_path}")
                             with lock:
                                 file_list.append(concat_path)
@@ -11310,6 +11397,12 @@ def generate_video(
                                     concat_configs["audio_guide"] = original_audio_guide
                                 file_settings_list.append(concat_configs)
                             send_cmd("output")
+                        elif join_audio_options:
+                            del clip_store[group_id]
+                            raise RuntimeError(
+                                "Director multiclip audio could not be joined "
+                                "to its exact planned video duration."
+                            )
                         del clip_store[group_id]
 
                 # Play notification sound for single video

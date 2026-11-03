@@ -27684,6 +27684,9 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     advance_director_multiclip_audio_offset,
                     should_continue_multi_clip_task,
                 )
+                from services.director_music_timing import (
+                    music_output_frame_total,
+                )
 
                 prompt_text = raw_params.get("prompt", "")
                 prompt_lines = _split_multi_clip_prompt_text(
@@ -27704,6 +27707,11 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     not isinstance(per_clip_output_frames, list) or len(per_clip_output_frames) != len(prompt_lines)
                 ):
                     raise ValueError("Music output durations must match the clip count.")
+                music_output_total_frames = (
+                    music_output_frame_total(per_clip_output_frames)
+                    if per_clip_output_frames is not None
+                    else 0
+                )
                 per_clip_prompt_modes = raw_params.pop(
                     "per_clip_prompt_modes", None,
                 )
@@ -27728,6 +27736,11 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     )
                 except (TypeError, ValueError):
                     omni_sequence_target_frames = 0
+                multi_clip_target_frames = (
+                    music_output_total_frames
+                    if music_output_total_frames > 0
+                    else omni_sequence_target_frames
+                )
                 group_id = f"mc_{int(time.time())}_{raw_params.get('seed', 0)}"
                 clip_count = max(
                     len(prompt_lines),
@@ -27922,7 +27935,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         "audio_start_sec": multi_clip_audio_start_sec,
                         "concat_audio_path": multi_clip_concat_audio,
                         "omni_sequence_continuity": omni_sequence_continuity,
-                        "target_total_frames": omni_sequence_target_frames,
+                        "target_total_frames": multi_clip_target_frames,
                     }
                     # Director supplies the prompt mode explicitly so normal
                     # paragraph breaks cannot be mistaken for window prompts.

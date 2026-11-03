@@ -208,3 +208,15 @@ def music_output_trim(generation_frames, output_frames):
     if isinstance(output_frames, bool) or not isinstance(output_frames, int) or not 1 <= output_frames <= generation_frames:
         raise ValueError('Music output duration must fit inside its generated clip.')
     return generation_frames - output_frames
+
+
+def music_output_frame_total(output_frames):
+    """Return the exact joined frame count for explicit music clip durations."""
+    if not isinstance(output_frames, list) or any(
+        isinstance(frames, bool)
+        or not isinstance(frames, int)
+        or frames < 1
+        for frames in output_frames
+    ):
+        raise ValueError('Music output durations must be positive integer frames.')
+    return sum(output_frames)

@@ -54,6 +54,7 @@ from services.director_video_strategy import (
 from services.h3_window_planner import compute_h3_window_boundaries
 from services.director.source_contract import director_audio_policy
 from services.text_integrity import repair_payload
+from services.director_music_timing import music_output_frame_total
 from models.minimax_h3.reference_manifest import (
     split_exact_drive_audio_reference,
     validate_reference_manifest,
@@ -4059,6 +4060,111 @@ def rejoin_clips(out_dir: str, pid: str) -> dict:
     return _rejoin_clips_impl(out_dir, pid)
 
 
+def _saved_music_rejoin_options(
+    state: dict,
+    clips: list[dict],
+    audio_path: Optional[str],
+) -> dict:
+    """Return exact frame bounds only for a complete saved Music timeline.
+
+    Older projects and Story timelines do not have the explicit per-clip
+    output-frame contract. Keep their historical concat behavior instead of
+    inferring a target from rounded seconds or generated clip metadata.
+    """
+    if not isinstance(state, dict) or state.get("pipeline_type") != "music_video":
+        return {}
+    if not isinstance(clips, list) or len(clips) < 2:
+        return {}
+
+    planned_clips = []
+    for clip in clips:
+        if not isinstance(clip, dict):
+            return {}
+        planned = clip.get("planned_clip")
+        if (
+            not isinstance(planned, dict)
+            or isinstance(planned.get("music_timing_version"), bool)
+            or planned.get("music_timing_version") != 1
+        ):
+            return {}
+        for key in ("start", "end"):
+            value = planned.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return {}
+            if not math.isfinite(float(value)):
+                return {}
+        if float(planned["end"]) <= float(planned["start"]):
+            return {}
+        planned_clips.append(planned)
+
+    # A frame-bounded rejoin is safe only when the persisted soundtrack
+    # windows still form one exact, ordered timeline. Do not silently bridge a
+    # gap or overlap in an incomplete/legacy plan.
+    if any(
+        abs(float(left["end"]) - float(right["start"])) > 1e-6
+        for left, right in zip(planned_clips, planned_clips[1:])
+    ):
+        return {}
+
+    try:
+        total_frames = music_output_frame_total(
+            [planned.get("output_frames") for planned in planned_clips]
+        )
+    except (TypeError, ValueError):
+        return {}
+    if total_frames <= 0:
+        return {}
+
+    snapshot = state.get("_params_snapshot") or {}
+    profile = state.get("video_execution_profile")
+    profile = profile if isinstance(profile, dict) else {}
+    snapshot_profile = snapshot.get("_director_video_execution_profile")
+    snapshot_profile = snapshot_profile if isinstance(snapshot_profile, dict) else {}
+
+    def _valid_fps(value):
+        if isinstance(value, bool):
+            return None
+        try:
+            candidate = float(value)
+        except (TypeError, ValueError):
+            return None
+        return candidate if math.isfinite(candidate) and candidate > 0 else None
+
+    fps = _valid_fps(profile.get("fps"))
+    if fps is None:
+        fps = _valid_fps(snapshot_profile.get("fps"))
+    if fps is None:
+        # Old saved profiles can lack fps. Resolve it from the same model
+        # catalog used by Director generation; never guess from rounded clip
+        # durations or a frontend default.
+        video_model = (
+            state.get("video_model")
+            or snapshot.get("video_model")
+            or profile.get("model_type")
+            or snapshot_profile.get("model_type")
+        )
+        getter = getattr(_wgp, "get_model_def", None)
+        if video_model and callable(getter):
+            try:
+                model_def = getter(video_model) or {}
+            except Exception:
+                model_def = {}
+            if isinstance(model_def, dict):
+                fps = _valid_fps(model_def.get("fps"))
+    if fps is None:
+        return {}
+
+    duration_sec = total_frames / fps
+    options = {"video_duration_sec": duration_sec}
+    if audio_path:
+        options.update({
+            "pad_audio": True,
+            "audio_duration_sec": duration_sec,
+            "max_audio_pad_sec": 1.0 / fps,
+        })
+    return options
+
+
 def _rejoin_clips_impl(out_dir: str, pid: str) -> dict:
     """Re-join all clips from a saved pipeline using current best versions. Returns {filename}."""
     state = load_pipeline_state(out_dir, pid)
@@ -4130,6 +4236,7 @@ def _rejoin_clips_impl(out_dir: str, pid: str) -> dict:
     audio_start_sec = _audio_timeline_start([
         clip.get("planned_clip") or {} for clip in clips
     ]) if audio_path else 0.0
+    join_options = _saved_music_rejoin_options(state, clips, audio_path)
 
     import time as _time
     timestamp = _time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
@@ -4150,6 +4257,7 @@ def _rejoin_clips_impl(out_dir: str, pid: str) -> dict:
             output_path,
             audio_path,
             audio_start_sec=audio_start_sec,
+            **join_options,
         )
         if not ok or not os.path.isfile(output_path):
             raise RuntimeError("ffmpeg concatenation failed (see server log for the clip that broke it)")

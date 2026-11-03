@@ -175,3 +175,128 @@ def test_native_h3_start_keeps_full_124_frame_video_and_audio_after_mux(tmp_path
     audio_stream = next(row for row in probe["streams"] if row["codec_type"] == "audio")
     assert int(video_stream["nb_read_frames"]) == 124
     assert abs(float(audio_stream["duration"]) - 124 / 24) < 1 / 24
+
+
+def test_music_multiclip_join_keeps_all_frames_and_bounds_audio_padding(tmp_path, monkeypatch):
+    ffmpeg_exe, ffprobe_exe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    if not ffmpeg_exe or not ffprobe_exe:
+        pytest.skip("CPU ffmpeg/ffprobe are not installed")
+
+    bin_dir = str(Path(ffmpeg_exe).resolve().parent)
+    monkeypatch.setenv(
+        "PATH",
+        bin_dir + os.pathsep + os.environ.get("PATH", ""),
+    )
+    monkeypatch.setenv("FFMPEG_BINARY", Path(ffmpeg_exe).name)
+    monkeypatch.setenv("FFPROBE_BINARY", Path(ffprobe_exe).name)
+
+    clips = [tmp_path / "first.mp4", tmp_path / "second.mp4"]
+    for clip, color in zip(clips, ("black", "blue")):
+        subprocess.run(
+            [
+                ffmpeg_exe, "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", f"color=c={color}:s=64x64:r=24",
+                "-frames:v", "6", "-an", "-c:v", "libx264",
+                "-pix_fmt", "yuv420p", "-y", str(clip),
+            ],
+            check=True,
+        )
+
+    target_frames = 12
+    target_fps = 24
+    target_duration = target_frames / target_fps
+
+    def write_audio(path, sample_count):
+        with wave.open(str(path), "wb") as stream:
+            stream.setnchannels(2)
+            stream.setsampwidth(2)
+            stream.setframerate(48000)
+            stream.writeframes(b"\0" * (sample_count * 4))
+
+    target_samples = round(target_duration * 48000)
+    marginal_audio = tmp_path / "marginal.wav"
+    write_audio(marginal_audio, target_samples - 64)
+
+    tree = ast.parse((ROOT / "app/wgp.py").read_text(encoding="utf-8"))
+    concat_node = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "concatenate_multi_clip_videos"
+    )
+    concat_namespace = {
+        "os": os,
+        "subprocess": subprocess,
+        "math": __import__("math"),
+        "time": __import__("time"),
+    }
+    exec(
+        compile(
+            ast.Module(body=[concat_node], type_ignores=[]),
+            "actual_wgp_multiclip_concat.py",
+            "exec",
+        ),
+        concat_namespace,
+    )
+    concatenate = concat_namespace["concatenate_multi_clip_videos"]
+
+    original_behavior = tmp_path / "original-shortest.mp4"
+    assert concatenate(
+        [str(clip) for clip in clips],
+        str(original_behavior),
+        str(marginal_audio),
+    )
+
+    def video_frame_count(path):
+        probe = json.loads(
+            subprocess.run(
+                [
+                    ffprobe_exe, "-v", "error", "-count_frames",
+                    "-select_streams", "v:0", "-show_entries",
+                    "stream=nb_read_frames", "-of", "json", str(path),
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        )
+        return int(probe["streams"][0]["nb_read_frames"])
+
+    assert video_frame_count(original_behavior) == target_frames - 1
+
+    frame_preserved = tmp_path / "frame-preserved.mp4"
+    assert concatenate(
+        [str(clip) for clip in clips],
+        str(frame_preserved),
+        str(marginal_audio),
+        pad_audio=True,
+        audio_duration_sec=target_duration,
+        video_duration_sec=target_duration,
+        max_audio_pad_sec=1 / target_fps,
+    )
+    assert video_frame_count(frame_preserved) == target_frames
+
+    decoded = subprocess.run(
+        [
+            ffmpeg_exe, "-hide_banner", "-loglevel", "error", "-xerror",
+            "-hwaccel", "none", "-threads", "1", "-i", str(frame_preserved),
+            "-threads:v", "1", "-threads:a", "1", "-f", "null", os.devnull,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert decoded.returncode == 0, decoded.stderr
+
+    materially_short_audio = tmp_path / "materially-short.wav"
+    write_audio(materially_short_audio, target_samples - round(0.1 * 48000))
+    rejected_join = tmp_path / "rejected-gap.mp4"
+    assert not concatenate(
+        [str(clip) for clip in clips],
+        str(rejected_join),
+        str(materially_short_audio),
+        pad_audio=True,
+        audio_duration_sec=target_duration,
+        video_duration_sec=target_duration,
+        max_audio_pad_sec=1 / target_fps,
+    )
+    assert not rejected_join.exists()

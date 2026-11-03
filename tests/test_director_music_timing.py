@@ -6,7 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'app'))
-from services.director_music_timing import resolve_clip_limits, plan_capped_music_clips, prepare_music_timeline
+from services.director_music_timing import (
+    music_output_frame_total,
+    resolve_clip_limits,
+    plan_capped_music_clips,
+    prepare_music_timeline,
+)
 from services.director_video_strategy import adapt_bounded_timeline
 from services import director_pipeline
 
@@ -23,6 +28,12 @@ class DirectorMusicTimingTests(unittest.TestCase):
                              {'start': .1, 'end': duration-.1, 'label': 'verse', 'energy': .8},
                              {'start': duration-.1, 'end': duration, 'label': 'outro', 'energy': .4}],
                 'lyrics': [{'start': 2, 'end': 5, 'speaker': 'singer'}]}
+
+    def test_music_output_frame_total_is_exact_and_rejects_noninteger_frames(self):
+        self.assertEqual(music_output_frame_total([285, 291]), 576)
+        for invalid in ([285, 291.0], [285, True], [-1], None):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                music_output_frame_total(invalid)
 
     def test_limits_distinguish_recommendation_manual_and_model_max(self):
         auto = resolve_clip_limits(self.H3, execution_profile={'effective_max_frames': 243})
