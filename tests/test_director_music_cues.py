@@ -73,9 +73,44 @@ class MusicCueTests(unittest.TestCase):
         self.assertIn('preserve the full planned clip duration', context)
 
     def test_real_task_setup_advances_soundtrack_by_visible_frames(self):
-        # Execute the production queue's clip timing block without starting
-        # the server or GPU. Padding must not shift the next audio slice.
+        # Execute the production target-frame setup and queue clip timing
+        # without starting the server or GPU. Padding must not shift the next
+        # audio slice, and the planned visible-frame total must reach each task.
+        from services.director_music_timing import music_output_frame_total
+
         tree = ast.parse((ROOT / 'app/launch.py').read_text(encoding='utf-8'))
+        setup_assignments = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            target_name = node.targets[0]
+            if isinstance(target_name, ast.Name) and target_name.id in {
+                'music_output_total_frames', 'multi_clip_target_frames',
+            }:
+                setup_assignments[target_name.id] = node
+        self.assertEqual(set(setup_assignments), {
+            'music_output_total_frames', 'multi_clip_target_frames',
+        })
+        per_clip_output_frames = [180, 166, 231]
+        target_env = {
+            'per_clip_output_frames': per_clip_output_frames,
+            'omni_sequence_target_frames': 0,
+            'music_output_frame_total': music_output_frame_total,
+        }
+        setup_program = compile(
+            ast.Module(
+                body=[setup_assignments['music_output_total_frames'],
+                      setup_assignments['multi_clip_target_frames']],
+                type_ignores=[],
+            ),
+            '<queue target frame setup>',
+            'exec',
+        )
+        exec(setup_program, target_env)
+        expected_target_total = music_output_frame_total(per_clip_output_frames)
+        self.assertEqual(target_env['music_output_total_frames'], expected_target_total)
+        self.assertEqual(target_env['multi_clip_target_frames'], expected_target_total)
+
         target = next(n for n in ast.walk(tree) if isinstance(n, ast.For) and any(
             isinstance(c, ast.Assign) and isinstance(c.value, ast.IfExp)
             and any(isinstance(t, ast.Name) and t.id == 'clip_frames' for t in c.targets)
@@ -86,22 +121,26 @@ class MusicCueTests(unittest.TestCase):
                     and any(isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Constant)
                             and t.slice.value == 'multi_clip_info' for t in n.targets))
         program = compile(ast.Module(body=target.body[start:stop+1], type_ignores=[]), '<queue clip timing>', 'exec')
-        env = dict(per_clip_frames=[192, 175, 243], per_clip_output_frames=[180, 166, 231],
+        env = dict(per_clip_frames=[192, 175, 243], per_clip_output_frames=per_clip_output_frames,
                    sw_size=243, _mc_bounded_director=True, _mc_model_def={'frames_maximum':345},
                    _mc_min_f=124, _mc_fs=17, has_end=False, _mc_trim_end_frames=False,
                    cumulative_offset=0, total_trimmed_frames=0, group_id='test', clip_count=3,
                    multi_clip_audio_start_sec=0, multi_clip_concat_audio='song.wav',
                    omni_sequence_continuity=False, omni_sequence_target_frames=0,
+                   multi_clip_target_frames=target_env['multi_clip_target_frames'],
                    advance_director_multiclip_audio_offset=advance_director_multiclip_audio_offset)
-        offsets, trims = [], []
+        offsets, trims, queued_target_totals = [], [], []
         for i in range(3):
             env.update(i=i, clip_params={})
             exec(program, env)
             offsets.append(env['clip_params']['audio_frame_offset'])
             trims.append(env['clip_params']['trim_tail_frames'])
+            queued_target_totals.append(env['clip_params']['multi_clip_info']['target_total_frames'])
         self.assertEqual(offsets, [0, 180, 346])
         self.assertEqual(trims, [12, 9, 12])
         self.assertEqual(env['cumulative_offset'], 577)
+        self.assertEqual(queued_target_totals, [expected_target_total] * 3)
+        self.assertEqual(expected_target_total, sum(frame - trim for frame, trim in zip([192, 175, 243], trims)))
         compensation = next(n for n in ast.walk(tree) if isinstance(n, ast.If)
                             and 'total_trimmed_frames > 0' in ast.unparse(n.test))
         condition = compile(ast.Expression(compensation.test), '<compensation condition>', 'eval')
