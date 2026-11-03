@@ -2193,7 +2193,12 @@ function StructureView({
   isShortFilm?: boolean
   canAdjust?: boolean
 }) {
-  const autoBias = useStore(s => s.selectedModelPerMode.video?.startsWith('minimax_h3') ? -2 : 0)
+  const autoBias = useStore(s => {
+    // Imported checkpoints (civitai_h3_...) carry their family only in the architecture.
+    const selected = s.selectedModelPerMode.video
+    const architecture = s.models.find(model => model.model_type === selected)?.architecture ?? selected ?? ''
+    return architecture.startsWith('minimax_h3') ? -2 : 0
+  })
   const displayedBias = localBias ?? energyBias ?? (isShortFilm ? 0 : autoBias)
   return (
     <div className="space-y-3">

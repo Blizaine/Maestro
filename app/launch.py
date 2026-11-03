@@ -9979,8 +9979,12 @@ async def _llm_enhance_prompt_payload(body: dict):
 
     model_type = str(body.get("model_type", "") or "")
     generation_mode = str(body.get("mode", "video") or "video")
+    # Route on the model's architecture: imported checkpoints such as
+    # civitai_h3_... do not carry their family in the ID.
+    from services.enhance_guides import model_architecture
+    architecture = model_architecture(model_type).lower()
     needs_h3_context_ir = (
-        model_type.lower().startswith("minimax_h3")
+        architecture.startswith("minimax_h3")
         and generation_mode in ("video", "avatar")
     )
     if needs_h3_context_ir and "minimax_h3_references" in body:
@@ -9996,7 +10000,7 @@ async def _llm_enhance_prompt_payload(body: dict):
             body = {**body, **native_inputs}
             prompt = body["prompt"]
     needs_flux3_image_guide = (
-        model_type.lower().startswith("flux3") and generation_mode == "image"
+        architecture.startswith("flux3") and generation_mode == "image"
     )
     from services.enhance_guides import moss_image_enhancement_kind
     moss_enhancement_kind = moss_image_enhancement_kind(model_type, generation_mode)
@@ -10008,7 +10012,7 @@ async def _llm_enhance_prompt_payload(body: dict):
     except (TypeError, ValueError):
         requested_window_count = 1
     needs_ltx_window_plan = (
-        model_type.lower().startswith("ltx")
+        architecture.startswith("ltx")
         and generation_mode in ("video", "avatar")
         and requested_window_count > 1
     )
@@ -10061,7 +10065,7 @@ async def _llm_enhance_prompt_payload(body: dict):
 
     from services.h3_performance_audio import has_h3_performance_audio
     performance_audio = (
-        model_type.lower().startswith("minimax_h3_ref2va")
+        architecture.startswith("minimax_h3_ref2va")
         and has_h3_performance_audio(body.get("reference_context"))
     )
     if needs_h3_context_ir and not performance_audio:
@@ -26986,7 +26990,9 @@ def _apply_deferred_prompt_enhancement(job: dict, raw_params: dict) -> None:
         if isinstance(job_params, dict):
             job_params["prompt"] = enhanced
 
-        model_type = str(raw_params.get("model_type") or "").lower()
+        from services.enhance_guides import model_architecture
+
+        model_type = model_architecture(str(raw_params.get("model_type") or "")).lower()
         if model_type.startswith("minimax_h3"):
             # Deferred enhancement happens after /generate has already applied
             # its single-pass multiline guard. H3's enhancer returns one

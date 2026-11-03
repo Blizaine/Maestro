@@ -746,8 +746,10 @@ def _validate_saved_profile_for_current_hardware(
 def _prepare_director_generation_params(params: dict) -> None:
     """Apply Director-only H3 guarantees before publishing a child job."""
 
+    from services.enhance_guides import model_architecture
+
     model_type = str(params.get("model_type") or "")
-    if not model_type.lower().startswith("minimax_h3"):
+    if not model_architecture(model_type).lower().startswith("minimax_h3"):
         return
     profile = params.get("_director_video_execution_profile")
     if isinstance(profile, dict):
@@ -876,7 +878,9 @@ def _director_apply_omni_drive_audio(params: dict) -> None:
     not remain packed inside the creative Omni reference sequence.
     """
 
-    model_type = str(params.get("video_model") or "").strip().lower()
+    from services.enhance_guides import model_architecture
+
+    model_type = model_architecture(str(params.get("video_model") or "").strip()).lower()
     references = params.get("minimax_h3_references")
     if not model_type.startswith("minimax_h3_ref2va") or not isinstance(
         references, list
@@ -3326,7 +3330,9 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             reference_detail if reference_detail in {"match", "max"} else "match"
         )
 
-    if str(video_model or "").lower().startswith("minimax_h3"):
+    from services.enhance_guides import model_architecture
+
+    if model_architecture(video_model).lower().startswith("minimax_h3"):
         final_prompt_mode = (
             "ref2va"
             if director_strategy == OMNI_REFERENCE
@@ -5975,13 +5981,15 @@ def _run_pipeline(pid: str, resume: bool = False):
                 # the same list passed to the planner.
                 characters = params.get("characters", []) or []
                 if polish_video_prompts or polish_image_prompts:
+                    from services.enhance_guides import model_architecture
+
                     clip_plans = polish_prompts_third_pass(
                         clip_plans, video_model, image_model, nsfw,
                         video_loras=video_loras, image_loras=image_loras,
                         image_paths=ref_paths or None,
                         characters=characters,
                         preserve_video_character_names=(
-                            str(video_model).lower().startswith("minimax_h3")
+                            model_architecture(video_model).lower().startswith("minimax_h3")
                             and shot_image_policy in {
                                 SHOT_IMAGE_PROMPT_ONLY,
                                 SHOT_IMAGES_DIRECT_REFERENCES,
@@ -6853,10 +6861,12 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
     # explicit extend_previous marker to decide whether a true final frame may
     # become the next shot's start frame.  Ordinary same-scene cuts remain
     # independent even when they share wardrobe and blocking continuity.
-    video_model_lower = str(params.get("video_model") or "").lower()
-    is_h3_model = video_model_lower.startswith("minimax_h3")
+    from services.enhance_guides import model_architecture
+
+    video_architecture = model_architecture(str(params.get("video_model") or "")).lower()
+    is_h3_model = video_architecture.startswith("minimax_h3")
     h3_model_family = (
-        "ref2va" if video_model_lower.startswith("minimax_h3_ref2va") else "base"
+        "ref2va" if video_architecture.startswith("minimax_h3_ref2va") else "base"
     )
     h3_initial_prompt_mode = (
         "ref2va"
@@ -7461,8 +7471,10 @@ def _apply_h3_music_audio_contract(video_model: str, clip_plans: list[dict], par
     compiler removes generated-vocal tags because the exact source track
     supplies the sound; it does not synthesize extra speech over that track.
     """
+    from services.enhance_guides import model_architecture
+
     if (
-        not str(video_model or "").lower().startswith("minimax_h3")
+        not model_architecture(video_model).lower().startswith("minimax_h3")
         or params.get("pipeline_type", "music_video") != "music_video"
         or not str(params.get("audio_path") or "").strip()
     ):
@@ -7504,13 +7516,16 @@ def _preflight_h3_director_prompts(
 ) -> list[dict]:
     """Compile official H3 Context-IR and validate it before GPU work."""
 
-    if not str(video_model or "").lower().startswith("minimax_h3"):
+    from services.enhance_guides import model_architecture
+
+    architecture = model_architecture(video_model).lower()
+    if not architecture.startswith("minimax_h3"):
         return clip_plans
     from services.director.h3_dialogue import compile_h3_clip_plans
 
     if (
         prompt_modes is None
-        and str(video_model or "").lower().startswith("minimax_h3_ref2va")
+        and architecture.startswith("minimax_h3_ref2va")
     ):
         prompt_modes = ["ref2va"] * len(clip_plans)
 
@@ -8278,7 +8293,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                     )
                 )
 
-        if str(video_model or "").lower().startswith("minimax_h3"):
+        if is_minimax_h3:
             final_prompt_modes: list[str] = []
             for index in range(len(clip_plans)):
                 if director_strategy == OMNI_REFERENCE:

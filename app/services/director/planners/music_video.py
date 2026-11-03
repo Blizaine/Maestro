@@ -2223,8 +2223,13 @@ class MusicVideoPlanner(BasePlanner):
             speaker_mappings: {speaker_id: {name, role}} from UI.
             characters: List of character dicts [{name, description}].
         """
+        from services.enhance_guides import model_architecture
+
         has_reference = bool(reference_image_path)
         video_model = str(kwargs.get("video_model") or "")
+        # Imported checkpoints (civitai_h3_...) keep their family only in the
+        # model definition's architecture.
+        video_architecture = model_architecture(video_model).lower()
         self._use_lyrics_context = lyrics_context_enabled(kwargs.get("use_lyrics_context"))
         shot_image_policy = str(kwargs.get("shot_image_policy") or "")
         self._uses_generated_shot_images = shot_image_policy not in {
@@ -2232,11 +2237,11 @@ class MusicVideoPlanner(BasePlanner):
             "direct_references",
         }
         self._preserve_video_character_names = (
-            video_model.lower().startswith("minimax_h3")
+            video_architecture.startswith("minimax_h3")
             and shot_image_policy in {"prompt_only", "direct_references"}
         )
         performer_map = _parse_performer_map(scene_description)
-        source_audio_drives_vocals = video_model.lower().startswith(
+        source_audio_drives_vocals = video_architecture.startswith(
             ("minimax_h3", "ltx2_25")
         )
         vocal_activity = (
@@ -2269,7 +2274,7 @@ class MusicVideoPlanner(BasePlanner):
                 "planner_revision": 27,
                 **(
                     {"h3_music_physical_state_policy": "visual-prose-v1"}
-                    if video_model.lower().startswith("minimax_h3") else {}
+                    if video_architecture.startswith("minimax_h3") else {}
                 ),
                 "use_lyrics_context": self._use_lyrics_context,
                 "scene_description": scene_description,
@@ -2305,7 +2310,7 @@ class MusicVideoPlanner(BasePlanner):
                     ],
                 ],
             )
-            if video_model.lower().startswith("minimax_h3") else {"events": [], "source": scene_description}
+            if video_architecture.startswith("minimax_h3") else {"events": [], "source": scene_description}
         )
         self._music_arc = self._plan_music_arc(
             clips, scene_description, lyrics=lyrics,
@@ -2469,7 +2474,7 @@ class MusicVideoPlanner(BasePlanner):
             speaker_names=speaker_names,
             vocal_activity=vocal_activity,
             project_context=scene_description,
-            ignore_physical_state_ledger=video_model.lower().startswith("minimax_h3"),
+            ignore_physical_state_ledger=video_architecture.startswith("minimax_h3"),
         )
 
         total_duration = sum(c.get("end", 0) - c.get("start", 0) for c in clips) if clips else None
@@ -3924,10 +3929,12 @@ class MusicVideoPlanner(BasePlanner):
             )
 
         from ..guide_loader import load_guide
+        from services.enhance_guides import model_architecture
+
         video_model = str(kwargs.get("video_model") or "")
         music_video_rules = load_guide(
             "minimax_h3_shot_breakdown.md"
-            if video_model.lower().startswith("minimax_h3")
+            if model_architecture(video_model).lower().startswith("minimax_h3")
             else "ltx2_music_video_rules.md"
         )
         h3_direct_rules = (

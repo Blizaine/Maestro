@@ -230,7 +230,9 @@ def enrich_director_output_metadata(
         old_window = native_frames
     recipe["sliding_window_size"] = min(max(old_window, 1), native_frames)
     recipe["multi_prompts_gen_type"] = 0
-    if str(recipe.get("model_type") or "").lower().startswith("minimax_h3"):
+    from .enhance_guides import model_architecture
+
+    if model_architecture(str(recipe.get("model_type") or "")).lower().startswith("minimax_h3"):
         recipe["h3_window_prompts"] = [prompt]
 
     video_model = str(

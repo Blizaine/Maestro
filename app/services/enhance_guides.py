@@ -6,6 +6,7 @@ local LLM to rewrite the user's prompt following that guide.
 """
 
 import os
+import sys
 from typing import Optional
 
 _GUIDES_DIR = os.path.join(os.path.dirname(__file__), "llm_guides", "enhance")
@@ -80,6 +81,28 @@ _MODE_FALLBACK = {
 }
 
 
+def model_architecture(model_type: str) -> str:
+    """Return the architecture that decides which prompt rules apply.
+
+    Imported checkpoints get IDs such as ``civitai_h3_...``, and FastH3 OmniRef
+    pairs an H3 ID with the Omni architecture, so family prefixes must be
+    matched against the model definition rather than the ID. Falls back to the
+    ID when no definition is available.
+    """
+    model_type = str(model_type or "")
+    # Do not import wgp here: it owns the application CLI parser. In Maestro
+    # proper it is already loaded; isolated tools and tests keep the ID.
+    get_model_def = getattr(sys.modules.get("wgp"), "get_model_def", None)
+    if not model_type or not callable(get_model_def):
+        return model_type
+    try:
+        model_def = get_model_def(model_type)
+    except Exception:
+        return model_type
+    architecture = model_def.get("architecture") if isinstance(model_def, dict) else None
+    return str(architecture or model_type)
+
+
 def moss_image_enhancement_kind(model_type: str, generation_mode: str = "image") -> Optional[str]:
     """Return the MOSS prompt contract for a registered image model.
 
@@ -128,7 +151,8 @@ def get_enhance_guide(
          that file. Lets specific community fine-tunes (e.g. 10Eros)
          ship their own prompt-enhancer rules without having to extend
          the architecture map below.
-      2. Architecture-prefix mapping (_ARCHITECTURE_MAP).
+      2. Architecture-prefix mapping (_ARCHITECTURE_MAP), matched against
+         the model definition's architecture (see model_architecture).
       3. Generation-mode fallback (_MODE_FALLBACK).
       4. Ultimate inline fallback string.
 
@@ -192,7 +216,7 @@ def get_enhance_guide(
             base = guide
 
     # 2. Architecture-specific match (longest prefix first)
-    model_lower = model_type.lower()
+    model_lower = model_architecture(model_type).lower()
     best_match = None
     best_len = 0
     for prefix, guide_entry in _ARCHITECTURE_MAP.items():
@@ -215,6 +239,8 @@ def get_enhance_guide(
     if base is None:
         fallback_file = _MODE_FALLBACK.get(generation_mode, "generic_video.md")
         base = _load_guide(fallback_file)
+        if base:
+            print(f"[Enhance] Loaded fallback guide: {fallback_file} for {model_type}")
 
     # 4. Ultimate inline fallback
     if base is None:

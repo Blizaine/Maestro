@@ -1043,7 +1043,9 @@ _IMAGE_ARCH_MAP = {
 
 def _match_arch(model_type: str, arch_map: dict) -> str:
     """Find the longest matching architecture prefix."""
-    model_lower = model_type.lower()
+    from services.enhance_guides import model_architecture
+
+    model_lower = model_architecture(model_type).lower()
     best_key = ""
     for prefix in arch_map:
         if model_lower.startswith(prefix) and len(prefix) > len(best_key):
@@ -1176,7 +1178,9 @@ def should_polish_director_video_prompts(video_model: str) -> bool:
     # compiler. A second creative rewrite adds drift without adding a missing
     # model dialect. Image prompts remain a separate decision because they are
     # consumed by the selected image model, not H3 itself.
-    return not str(video_model or "").lower().startswith("minimax_h3")
+    from services.enhance_guides import model_architecture
+
+    return not model_architecture(video_model).lower().startswith("minimax_h3")
 
 
 def polish_prompts_third_pass(

@@ -34,7 +34,9 @@ def _route_image_pass2_guide(image_model: str) -> str:
     """Pick the Pass 2 image guide filename for the given model."""
     if not image_model:
         return "qwen_image_edit_reference.md"  # legacy fallback
-    model_lower = image_model.lower()
+    from services.enhance_guides import model_architecture
+
+    model_lower = model_architecture(image_model).lower()
     best_match: str | None = None
     best_len = 0
     for prefix, guide_file in _IMAGE_PASS2_GUIDE_MAP.items():

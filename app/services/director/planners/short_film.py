@@ -57,6 +57,7 @@ from ..physical_continuity import (
     identity_only_description,
 )
 from .base import BasePlanner
+from services.enhance_guides import model_architecture
 from services.text_integrity import repair_text
 from services.dialogue_timing import (
     DIALOGUE_DEFAULT_WORDS_PER_SECOND,
@@ -4835,7 +4836,9 @@ def _route_video_pass2_guide(video_model: str) -> str:
     """Pick the Pass 2 video guide for `video_model`, plus any per-checkpoint notes."""
     if not video_model:
         return _load_guide_helper("ltx2_shot_breakdown.md") or ""
-    model_lower = video_model.lower()
+    # Imported checkpoints (civitai_h3_...) keep their family only in the
+    # model definition's architecture.
+    model_lower = model_architecture(video_model).lower()
     best_match: str | None = None
     best_len = 0
     for prefix, guide_file in _VIDEO_PASS2_GUIDE_MAP.items():
@@ -4918,6 +4921,7 @@ class ShortFilmPlanner(BasePlanner):
         # flux_image_edit_pass2.md for Flux.2 Klein, etc.).
         self._video_model = kwargs.get("video_model", "") or ""
         self._image_model = kwargs.get("image_model", "") or ""
+        video_is_h3 = model_architecture(self._video_model).lower().startswith("minimax_h3")
         shot_image_policy = str(kwargs.get("shot_image_policy") or "")
         self._shot_image_policy = shot_image_policy
         self._uses_generated_shot_images = shot_image_policy not in {
@@ -4925,7 +4929,7 @@ class ShortFilmPlanner(BasePlanner):
             "direct_references",
         }
         self._preserve_video_character_names = (
-            self._video_model.lower().startswith("minimax_h3")
+            video_is_h3
             and shot_image_policy in {"prompt_only", "direct_references"}
         )
 
@@ -4958,7 +4962,7 @@ class ShortFilmPlanner(BasePlanner):
         multishot_lora_mode = kwargs.get("multishot_lora_mode", False)
         if (
             multishot_lora_mode
-            and self._video_model.lower().startswith("minimax_h3")
+            and video_is_h3
         ):
             # Maestro's multi-shot toggle targets an LTX IC-LoRA and its
             # ``Shot N (Camera, Xs)`` trigger syntax. H3 has its own native
@@ -5627,7 +5631,7 @@ class ShortFilmPlanner(BasePlanner):
         })
         self._publish_planning_checkpoint(checkpoint)
 
-        is_h3_native = self._video_model.lower().startswith("minimax_h3")
+        is_h3_native = model_architecture(self._video_model).lower().startswith("minimax_h3")
         cached_voice_bible = checkpoint.get("h3_voice_bible")
         if is_h3_native and not isinstance(cached_voice_bible, list):
             self._emit_planning_progress(
@@ -7376,8 +7380,8 @@ Shots to plan:
         preserve_names = bool(
             getattr(self, "_preserve_video_character_names", False)
         )
-        is_h3_native = str(
-            getattr(self, "_video_model", "") or ""
+        is_h3_native = model_architecture(
+            str(getattr(self, "_video_model", "") or "")
         ).lower().startswith("minimax_h3")
         source_contract = build_source_contract(story_description) if is_h3_native else {}
         source_contract_block = format_source_contract(source_contract) if is_h3_native else ""
@@ -8311,7 +8315,7 @@ SCREENPLAY TO REPAIR:
         # etc.) rather than always loading the legacy hardcoded files.
         video_model = getattr(self, '_video_model', '') or ''
         image_model = getattr(self, '_image_model', '') or ''
-        is_ltx_family = str(video_model).strip().casefold().startswith("ltx")
+        is_ltx_family = model_architecture(str(video_model).strip()).casefold().startswith("ltx")
 
         image_prompt_rules = ""
         if uses_generated_images:
@@ -8884,7 +8888,7 @@ SCREENPLAY:
             _discard_unused_image_fields(shot_dicts)
         if (
             is_long_form_sequence
-            and str(video_model or "").strip().casefold().startswith("ltx")
+            and model_architecture(str(video_model or "").strip()).casefold().startswith("ltx")
         ):
             shot_dicts = _prepare_long_form_ltx_prompt_contract(
                 shot_dicts,
@@ -11117,7 +11121,7 @@ description with the locked dialogue in video_prompt."""
 
             is_h3_native = bool(
                 frames_maximum is not None
-                and str(getattr(self, "_video_model", "") or "")
+                and model_architecture(str(getattr(self, "_video_model", "") or ""))
                 .lower().startswith("minimax_h3")
             )
             dialogue_beats = None

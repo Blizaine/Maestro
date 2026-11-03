@@ -1992,6 +1992,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             is_loaded=lambda: True,
             unload_model=mock.Mock(),
         )
+        from services import enhance_guides
+
         services_module = types.ModuleType("services")
         services_module.llm_service = fake_llm
         apply_deferred.__globals__.update({
@@ -2015,7 +2017,8 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         }
         raw_params = dict(job["params"])
 
-        with mock.patch.dict(sys.modules, {"services": services_module}):
+        with mock.patch.dict(sys.modules, {"services": services_module,
+                                           "services.enhance_guides": enhance_guides}):
             apply_deferred(job, raw_params)
 
         self.assertEqual(captured["prompt"], "Raw idea")
