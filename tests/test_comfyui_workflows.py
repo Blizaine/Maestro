@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import json
 import unittest
+from pathlib import Path
 
 from app.services.comfyui_workflows import (
     API_EXPORT_GUIDANCE,
@@ -223,6 +225,109 @@ class TestComfyWorkflowPreflight(unittest.TestCase):
         self.assertEqual(choices["method"], ["safe"])
         self.assertNotIn("reference", choices)
         self.assertNotIn("unrelated", choices)
+
+
+class TestComfyWorkflowDynamicCombo(unittest.TestCase):
+    def setUp(self):
+        fixture = Path(__file__).parent / "fixtures" / "comfy_savevideo_object_info.json"
+        self.object_info = {
+            "VideoSource": {"input": {"required": {}}},
+            "SaveVideo": json.loads(fixture.read_text(encoding="utf-8")),
+        }
+
+    def graph(self, *, container_format="mp4", codec="h264", encoding="re-encode", crf=18.0):
+        inputs = {
+            "video": ["1", 0],
+            "filename_prefix": "smoke-test",
+            "format": container_format,
+            "format.codec": codec,
+        }
+        if encoding is not None:
+            inputs["format.codec.encoding"] = encoding
+        if crf is not None:
+            inputs["format.codec.encoding.crf"] = crf
+        return {
+            "1": {"class_type": "VideoSource", "inputs": {}},
+            "2": {"class_type": "SaveVideo", "inputs": inputs},
+        }
+
+    def test_preflight_accepts_real_savevideo_nested_dynamic_combo_fields(self):
+        result = preflight_workflow(self.graph(), self.object_info)
+        self.assertTrue(result["valid"], result["errors"])
+
+        missing_required_crf = preflight_workflow(
+            self.graph(crf=None), self.object_info,
+        )
+        self.assertFalse(missing_required_crf["valid"])
+        self.assertTrue(any(
+            "missing required input format.codec.encoding.crf" in error
+            for error in missing_required_crf["errors"]
+        ))
+
+    def test_preflight_rejects_inactive_branches_and_unknown_dynamic_fields(self):
+        wrong_codec = preflight_workflow(
+            self.graph(codec="prores"), self.object_info,
+        )
+        self.assertFalse(wrong_codec["valid"])
+        self.assertTrue(any(
+            "input format.codec value 'prores' is not an advertised choice"
+            in error
+            for error in wrong_codec["errors"]
+        ))
+
+        wrong_encoding = preflight_workflow(
+            self.graph(encoding="lossless"), self.object_info,
+        )
+        self.assertFalse(wrong_encoding["valid"])
+        self.assertTrue(any(
+            "input format.codec.encoding value 'lossless' is not an advertised choice"
+            in error
+            for error in wrong_encoding["errors"]
+        ))
+
+        unknown = self.graph()
+        unknown["2"]["inputs"]["format.codec.quality"] = "maximum"
+        result = preflight_workflow(unknown, self.object_info)
+        self.assertFalse(result["valid"])
+        self.assertTrue(any(
+            "has unknown input format.codec.quality" in error
+            for error in result["errors"]
+        ))
+
+    def test_optional_encoding_can_be_omitted_and_pickers_follow_selected_branches(self):
+        no_encoding = preflight_workflow(
+            self.graph(encoding=None, crf=None), self.object_info,
+        )
+        self.assertTrue(no_encoding["valid"], no_encoding["errors"])
+
+        bindings = [
+            {"name": "container", "node_id": "2", "input": "format", "type": "choice"},
+            {"name": "codec", "node_id": "2", "input": "format.codec", "type": "choice"},
+            {"name": "encoding", "node_id": "2", "input": "format.codec.encoding", "type": "choice"},
+        ]
+        choices = binding_choices(self.graph(), bindings, self.object_info)
+        self.assertEqual(choices["container"], ["auto", "mp4", "mkv", "webm", "mov"])
+        self.assertEqual(choices["codec"], ["auto", "h264", "av1"])
+        self.assertEqual(choices["encoding"], ["auto", "re-encode"])
+
+    def test_invalid_dynamic_selections_still_offer_choices_for_repair(self):
+        bindings = [
+            {"name": "container", "node_id": "2", "input": "format", "type": "choice"},
+            {"name": "codec", "node_id": "2", "input": "format.codec", "type": "choice"},
+        ]
+        cases = (
+            (self.graph(container_format="mov", codec="h264"), ["prores"]),
+            (self.graph(container_format="mp4", codec="prores"), ["auto", "h264", "av1"]),
+        )
+        for graph, expected_codecs in cases:
+            with self.subTest(format=graph["2"]["inputs"]["format"]):
+                validation = preflight_workflow(graph, self.object_info)
+                self.assertFalse(validation["valid"])
+                choices = binding_choices(graph, bindings, self.object_info)
+                self.assertEqual(
+                    choices["container"], ["auto", "mp4", "mkv", "webm", "mov"],
+                )
+                self.assertEqual(choices["codec"], expected_codecs)
 
 
 class TestComfyBuiltInTemplates(unittest.TestCase):

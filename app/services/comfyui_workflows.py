@@ -11,6 +11,7 @@ from typing import Any
 
 MAX_WORKFLOW_NODES = 500
 MAX_WORKFLOW_BYTES = 4 * 1024 * 1024
+MAX_DYNAMIC_INPUT_DEPTH = 16
 API_EXPORT_GUIDANCE = (
     "Export the workflow as ComfyUI API format (use Save (API) in ComfyUI), "
     "then retry."
@@ -302,6 +303,120 @@ def _combo_choices(definition: Any) -> list[Any] | None:
     return None
 
 
+def _dynamic_combo_options(definition: Any) -> list[Any] | None:
+    if (
+        not isinstance(definition, (list, tuple))
+        or len(definition) < 2
+        or definition[0] != "COMFY_DYNAMICCOMBO_V3"
+    ):
+        return None
+    metadata = definition[1]
+    options = metadata.get("options") if isinstance(metadata, Mapping) else None
+    return options if isinstance(options, list) else []
+
+
+def _definition_choices(definition: Any) -> list[Any] | None:
+    dynamic_options = _dynamic_combo_options(definition)
+    if dynamic_options is not None:
+        return [
+            option["key"]
+            for option in dynamic_options
+            if isinstance(option, Mapping)
+            and isinstance(option.get("key"), str)
+            and len(option["key"]) <= 4096
+        ]
+    return _combo_choices(definition)
+
+
+def _active_input_definitions(
+    node_info: Mapping[str, Any],
+    provided_inputs: Mapping[str, Any],
+    *,
+    node_id: str,
+    class_type: str,
+) -> tuple[dict[str, Any], set[str], list[str]]:
+    """Flatten the inputs active in each selected DynamicCombo branch."""
+    input_root = node_info.get("input", {})
+    if not isinstance(input_root, Mapping):
+        return {}, set(), []
+
+    definitions: dict[str, Any] = {}
+    required_inputs: set[str] = set()
+    errors: list[str] = []
+
+    def add_input(name: str, definition: Any, required: bool, depth: int) -> None:
+        definitions[name] = definition
+        if required:
+            required_inputs.add(name)
+
+        options = _dynamic_combo_options(definition)
+        if options is None or name not in provided_inputs:
+            return
+        if depth >= MAX_DYNAMIC_INPUT_DEPTH:
+            errors.append(
+                f"Node {node_id} ({class_type}) input {name} exceeds the supported dynamic input depth."
+            )
+            return
+
+        selected_value = provided_inputs[name]
+        if not isinstance(selected_value, str):
+            errors.append(
+                f"Node {node_id} ({class_type}) input {name} must select an advertised choice."
+            )
+            return
+        selected_option = next(
+            (
+                option for option in options
+                if isinstance(option, Mapping)
+                and option.get("key") == selected_value
+            ),
+            None,
+        )
+        if selected_option is None:
+            choices = _definition_choices(definition) or []
+            errors.append(
+                f"Node {node_id} ({class_type}) input {name} value {selected_value!r} "
+                f"is not an advertised choice (expected one of {choices!r})."
+            )
+            return
+
+        nested_inputs = selected_option.get("inputs")
+        if not isinstance(nested_inputs, Mapping):
+            errors.append(
+                f"Node {node_id} ({class_type}) input {name} has an invalid advertised branch schema."
+            )
+            return
+        for group in ("required", "optional"):
+            group_inputs = nested_inputs.get(group, {})
+            if not isinstance(group_inputs, Mapping):
+                errors.append(
+                    f"Node {node_id} ({class_type}) input {name} has an invalid {group} branch schema."
+                )
+                continue
+            for child_name, child_definition in group_inputs.items():
+                if not isinstance(child_name, str) or not child_name:
+                    errors.append(
+                        f"Node {node_id} ({class_type}) input {name} has an invalid branch input name."
+                    )
+                    continue
+                add_input(
+                    f"{name}.{child_name}",
+                    child_definition,
+                    group == "required",
+                    depth + 1,
+                )
+
+    for group in ("required", "optional"):
+        group_inputs = input_root.get(group, {})
+        if not isinstance(group_inputs, Mapping):
+            continue
+        for name, definition in group_inputs.items():
+            if isinstance(name, str) and name:
+                add_input(name, definition, group == "required", 0)
+
+    return definitions, required_inputs, errors
+
+
 def binding_choices(graph: Any, bindings: Any, object_info: Any) -> dict[str, list[Any]]:
     """Return bounded choices for registered inputs advertised by this server.
 
@@ -325,8 +440,16 @@ def binding_choices(graph: Any, bindings: Any, object_info: Any) -> dict[str, li
             break
         node = normalized[binding["node_id"]]
         node_info = object_info.get(node["class_type"], {})
-        definitions = _input_definitions(node_info) if isinstance(node_info, Mapping) else {}
-        choices = _combo_choices(definitions.get(binding["input"]))
+        if isinstance(node_info, Mapping):
+            definitions, _required_inputs, _ = _active_input_definitions(
+                node_info,
+                node["inputs"],
+                node_id=binding["node_id"],
+                class_type=node["class_type"],
+            )
+        else:
+            definitions = {}
+        choices = _definition_choices(definitions.get(binding["input"]))
         if choices is None:
             choices = binding.get("options")
         if choices is None:
@@ -423,15 +546,21 @@ def preflight_workflow(
         if not isinstance(node_info, Mapping):
             missing_nodes.append({"node_id": node_id, "class_type": class_type})
             continue
-        definitions = _input_definitions(node_info)
-        required_group = node_info.get("input", {}).get("required", {}) if isinstance(node_info.get("input"), Mapping) else {}
-        if isinstance(required_group, Mapping):
-            for required_input in required_group:
-                if required_input not in node["inputs"]:
-                    errors.append(f"Node {node_id} ({class_type}) is missing required input {required_input}.")
+        definitions, required_inputs, dynamic_errors = _active_input_definitions(
+            node_info,
+            node["inputs"],
+            node_id=node_id,
+            class_type=class_type,
+        )
+        errors.extend(dynamic_errors)
+        for required_input in required_inputs:
+            if required_input not in node["inputs"]:
+                errors.append(f"Node {node_id} ({class_type}) is missing required input {required_input}.")
         for input_name, value in node["inputs"].items():
             if input_name not in definitions:
                 errors.append(f"Node {node_id} ({class_type}) has unknown input {input_name}.")
+                continue
+            if _dynamic_combo_options(definitions[input_name]) is not None:
                 continue
             choices = _combo_choices(definitions[input_name])
             if not isinstance(value, str):
