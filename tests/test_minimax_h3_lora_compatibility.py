@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import struct
 import sys
 import tempfile
@@ -25,9 +26,54 @@ class H3AdaLNAffineRoundingTests(unittest.TestCase):
         with patch.object(module, "_load_affine_package", return_value=(canonical, affine)):
             # Meta reproduces accidental default-device allocations without CUDA.
             with torch.device("meta"):
+                rounding_floor = module._bf16_rounding_fit_error(canonical, target)
                 result = module._aligned_affine_map("ref2va", target)
+        self.assertIsNotNone(rounding_floor)
+        self.assertTrue(math.isfinite(rounding_floor))
         self.assertEqual(result.device.type, "cpu")
         self.assertTrue(torch.isfinite(result).all())
+
+    def test_row_count_interpolation_stays_on_cpu_under_meta_default(self):
+        from torch.nn import functional as F
+
+        from models.minimax_h3 import lora_affine
+
+        generator = torch.Generator().manual_seed(205)
+        canonical = torch.randn(19, 8, generator=generator, dtype=torch.float64)
+        # Independent CPU interpolation fixture: the checkpoint curve is sampled
+        # at a different row count before a known invertible affine transform.
+        sampled = F.interpolate(
+            canonical.T.unsqueeze(0),
+            size=37,
+            mode="linear",
+            align_corners=True,
+        ).squeeze(0).T.contiguous()
+        basis = torch.eye(8, dtype=torch.float64) + torch.randn(
+            8, 8, generator=generator, dtype=torch.float64
+        ) * 0.12
+        offset = torch.randn(8, generator=generator, dtype=torch.float64) * 0.08
+        target = sampled @ basis + offset
+        affine = torch.randn(
+            9, lora_affine.FULL_TIME_DIM, generator=generator, dtype=torch.float64
+        )
+        self.assertEqual(int(torch.linalg.matrix_rank(torch.cat(
+            (sampled, torch.ones(sampled.shape[0], 1, dtype=torch.float64)), dim=1
+        ))), 9)
+        self.assertEqual(int(torch.linalg.matrix_rank(basis)), 8)
+
+        with patch.object(lora_affine, "_load_affine_package", return_value=(canonical, affine)):
+            # A default meta factory catches an interpolation grid that does not
+            # explicitly follow the CPU checkpoint table's device.
+            with torch.device("meta"):
+                result = lora_affine._aligned_affine_map("ref2va", target)
+
+        self.assertEqual(result.device.type, "cpu")
+        self.assertTrue(torch.isfinite(result).all())
+        target_h = torch.cat((target, torch.ones(37, 1, dtype=torch.float64)), dim=1)
+        sampled_h = torch.cat((sampled, torch.ones(37, 1, dtype=torch.float64)), dim=1)
+        actual_modulation = target_h @ result.double()
+        expected_modulation = sampled_h @ affine
+        torch.testing.assert_close(actual_modulation, expected_modulation, rtol=2e-5, atol=2e-5)
 
     def _tables(self):
         from models.minimax_h3 import lora_affine
