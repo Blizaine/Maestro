@@ -34,6 +34,9 @@ class FakeComfyService:
     def test_connection(self):
         return self._record("test_connection")
 
+    def discover_connections(self):
+        return self._record("discover_connections")
+
     def discover(self, paths):
         return self._record("discover", paths)
 
@@ -45,6 +48,9 @@ class FakeComfyService:
 
     def workflows(self):
         return self._record("workflows")
+
+    def workflow_options(self, workflow_id):
+        return self._record("workflow_options", workflow_id)
 
     def save_workflow(self, payload):
         return self._record("save_workflow", payload)
@@ -75,6 +81,15 @@ def _client(service: FakeComfyService) -> TestClient:
     app = FastAPI()
     app.include_router(create_router(service))
     return TestClient(app)
+
+
+def test_setup_discovery_and_workflow_options_are_typed_explicit_operations():
+    service = FakeComfyService()
+    client = _client(service)
+    assert client.post("/api/v1/comfyui/connection/discover", json={}).status_code == 200
+    assert client.get("/api/v1/comfyui/workflows/known-template/options").status_code == 200
+    assert service.calls == [("discover_connections", ()), ("workflow_options", ("known-template",))]
+    assert client.post("/api/v1/comfyui/connection/discover", json={"arbitrary_endpoint": "http://example.com"}).status_code == 422
 
 
 def test_status_settings_and_connection_use_injected_service():

@@ -99,6 +99,10 @@ def create_router(service) -> APIRouter:
     def test_connection(_payload: _EmptyRequest):
         return _call(service.test_connection)
 
+    @router.post("/api/v1/comfyui/connection/discover")
+    def discover_connections(_payload: _EmptyRequest):
+        return _call(service.discover_connections)
+
     @router.post("/api/v1/comfyui/models/discover")
     def discover_models(payload: DiscoverModelsRequest):
         return _call(service.discover, payload.paths)
@@ -122,6 +126,10 @@ def create_router(service) -> APIRouter:
     @router.delete("/api/v1/comfyui/workflows/{workflow_id}")
     def delete_workflow(workflow_id: WorkflowId):
         return _call(service.delete_workflow, workflow_id)
+
+    @router.get("/api/v1/comfyui/workflows/{workflow_id}/options")
+    def workflow_options(workflow_id: WorkflowId):
+        return _call(service.workflow_options, workflow_id)
 
     @router.post("/api/v1/comfyui/workflows/{workflow_id}/validate")
     def validate_workflow(workflow_id: WorkflowId, payload: ValidateWorkflowRequest):

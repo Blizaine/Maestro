@@ -302,6 +302,51 @@ def _combo_choices(definition: Any) -> list[Any] | None:
     return None
 
 
+def binding_choices(graph: Any, bindings: Any, object_info: Any) -> dict[str, list[Any]]:
+    """Return bounded choices for registered inputs advertised by this server.
+
+    This inspects node schemas only. It never scans disk, picks a checkpoint,
+    or infers compatibility from a model's filename.
+    """
+    normalized = normalize_workflow(graph)
+    errors = validate_bindings(normalized, bindings)
+    if errors:
+        raise WorkflowError("; ".join(errors))
+    if not isinstance(object_info, Mapping):
+        raise WorkflowError("ComfyUI object_info must be an object.")
+    result: dict[str, list[Any]] = {}
+    remaining = 10000
+    for binding in bindings:
+        if binding["type"] in {"image", "video", "audio"}:
+            # Media must come from an authorized Maestro asset/upload, not an
+            # arbitrary filename enumerated from a shared server's input folder.
+            continue
+        if remaining <= 0:
+            break
+        node = normalized[binding["node_id"]]
+        node_info = object_info.get(node["class_type"], {})
+        definitions = _input_definitions(node_info) if isinstance(node_info, Mapping) else {}
+        choices = _combo_choices(definitions.get(binding["input"]))
+        if choices is None:
+            choices = binding.get("options")
+        if choices is None:
+            continue
+        allowed = binding.get("options")
+        values: list[Any] = []
+        for value in choices:
+            if not _is_scalar(value) or isinstance(value, str) and len(value) > 4096:
+                continue
+            if allowed is not None and value not in allowed:
+                continue
+            if value not in values:
+                values.append(value)
+            if len(values) >= min(2000, remaining):
+                break
+        result[binding["name"]] = values
+        remaining -= len(values)
+    return result
+
+
 def _is_model_input(node_class: str, input_name: str) -> bool:
     name = input_name.lower().replace("-", "_")
     return any(marker in name for marker in _MODEL_NAME_MARKERS)
@@ -593,4 +638,5 @@ __all__ = [
     "apply_bindings",
     "preflight_workflow",
     "builtin_templates",
+    "binding_choices",
 ]

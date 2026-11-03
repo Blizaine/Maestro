@@ -181,6 +181,9 @@ export function ComfyUIWorkflowDialog({
   const [values, setValues] = useState<Record<string, api.ComfyUIScalar>>({})
   const [validation, setValidation] = useState<api.ComfyUIWorkflowValidation | null>(null)
   const [validationFor, setValidationFor] = useState<string | null>(null)
+  const [workflowOptions, setWorkflowOptions] = useState<api.ComfyUIWorkflowOptions | null>(null)
+  const [optionsLoading, setOptionsLoading] = useState(false)
+  const [optionsError, setOptionsError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [validating, setValidating] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -351,6 +354,32 @@ export function ComfyUIWorkflowDialog({
     if (currentLaunchRequest && currentLaunchRequest.requestId === appliedLaunchRequest.current) return
     setValues(initialValues(currentSelected.bindings))
   }, [open, selected?.id])
+
+  useEffect(() => {
+    if (!open || !selectedId) {
+      setWorkflowOptions(null)
+      setOptionsLoading(false)
+      setOptionsError(null)
+      return
+    }
+    const controller = new AbortController()
+    setWorkflowOptions(null)
+    setOptionsLoading(true)
+    setOptionsError(null)
+    api.fetchComfyUIWorkflowOptions(selectedId, controller.signal)
+      .then(result => {
+        if (!controller.signal.aborted) setWorkflowOptions(result)
+      })
+      .catch(reason => {
+        if (!controller.signal.aborted) {
+          setOptionsError(reason instanceof Error ? reason.message : 'Server choices are unavailable; you can enter values manually.')
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setOptionsLoading(false)
+      })
+    return () => controller.abort()
+  }, [open, selectedId])
 
   useEffect(() => {
     if (!open || !selectedId || !selected) return
@@ -590,10 +619,13 @@ export function ComfyUIWorkflowDialog({
             </section>
 
             {selected.bindings.length > 0 ? <section className="space-y-2 rounded-lg border border-border bg-bg-secondary p-2.5">
-              <div><h4 className="text-[10px] font-semibold text-text-primary">Inputs</h4><p className="mt-0.5 text-[9px] text-text-muted">Typed values are sent only when you press Generate.</p></div>
+              <div><h4 className="text-[10px] font-semibold text-text-primary">Inputs</h4><p className="mt-0.5 text-[9px] text-text-muted">Required fields are marked. Values are checked in preflight and sent only when you press Generate.</p></div>
+              {optionsLoading && <p role="status" className="text-[9px] text-text-muted">Loading available model and input choices·</p>}
+              {optionsError && <p role="status" className="text-[9px] text-indicator-warning">Could not load server choices. You can still enter values manually. {optionsError}</p>}
               {selected.bindings.map(binding => <BindingField
                 key={`${selected.id}:${binding.name}`}
                 binding={binding}
+                choices={workflowOptions?.choices[binding.name] ?? []}
                 value={values[binding.name]}
                 uploading={uploading === binding.name}
                 onChange={value => setValues(current => ({ ...current, [binding.name]: value }))}
@@ -628,34 +660,50 @@ function IssueList({ title, items }: { title: string; items: string[] }) {
   return <div className="mt-1.5 text-[9px] text-text-secondary"><div className="font-medium text-text-primary">{title}</div><ul className="mt-0.5 list-inside list-disc space-y-0.5">{items.map((item, index) => <li key={`${index}:${item}`} className="break-words">{item}</li>)}</ul></div>
 }
 
-function BindingField({ binding, value, uploading, onChange, onClear, onFile }: {
+function BindingField({ binding, choices = [], value, uploading, onChange, onClear, onFile }: {
   binding: api.ComfyUIBinding
+  choices?: api.ComfyUIScalar[]
   value: api.ComfyUIScalar | undefined
   uploading: boolean
   onChange: (value: api.ComfyUIScalar) => void
   onClear: () => void
   onFile: (file: File) => void
 }) {
-  const id = `comfyui-input-${binding.name.replace(/[^a-zA-Z0-9_-]/g, '-')}`
+  const id = 'comfyui-input-' + binding.name.replace(/[^a-zA-Z0-9_-]/g, '-')
+  const choicesId = id + '-choices'
   const label = binding.label || binding.name
   const common = 'w-full rounded-md border border-border bg-bg-primary px-2 py-1.5 text-[10px] text-text-primary outline-none focus:border-accent-blue'
   const isMedia = binding.type === 'image' || binding.type === 'video' || binding.type === 'audio'
+  const liveChoices = (binding.options ?? []).concat(choices).filter((option, index, options) => options.indexOf(option) === index)
+  const staleChoice = binding.type === 'choice' && value !== undefined && !liveChoices.includes(value)
+  const allChoices = staleChoice ? [value, ...liveChoices] : liveChoices
+  const updateText = (next: string) => {
+    if (!next) { onClear(); return }
+    const matchingChoice = choices.find(option => String(option) === next)
+    onChange(matchingChoice ?? next)
+  }
   return <div className="grid gap-1.5 sm:grid-cols-[minmax(110px,0.7fr)_minmax(0,1.3fr)] sm:items-start">
     <label htmlFor={id} className="pt-1 text-[9px] text-text-secondary">{label}{binding.required && <span className="ml-0.5 text-indicator-warning">*</span>}<span className="mt-0.5 block text-[8px] text-text-muted">{binding.name} · {binding.type}</span></label>
     <div className="min-w-0">
       {isMedia ? <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-        <label htmlFor={id} className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-border bg-bg-primary px-2 py-1.5 text-[9px] text-text-secondary hover:text-text-primary">{uploading ? <Loader2 size={10} className="animate-spin" /> : <Upload size={10} />}{uploading ? 'Uploading…' : `Upload ${binding.type}`}<input id={id} type="file" accept={binding.type === 'image' ? 'image/*' : binding.type === 'video' ? 'video/*' : 'audio/*'} disabled={uploading} className="sr-only" onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; if (file) onFile(file) }} /></label>
+        <label htmlFor={id} className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-border bg-bg-primary px-2 py-1.5 text-[9px] text-text-secondary hover:text-text-primary">{uploading ? <Loader2 size={10} className="animate-spin" /> : <Upload size={10} />}{uploading ? 'Uploading…' : 'Upload ' + binding.type}<input id={id} type="file" accept={binding.type === 'image' ? 'image/*' : binding.type === 'video' ? 'video/*' : 'audio/*'} disabled={uploading} className="sr-only" onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; if (file) onFile(file) }} /></label>
         {value !== undefined && <><span className="min-w-0 flex-1 break-all font-mono text-[8px] text-text-muted">{displayValue(value)}</span><button type="button" onClick={onClear} className="text-[8px] text-text-muted underline">Clear</button></>}
       </div> : binding.type === 'boolean' ? <label className="flex min-h-8 items-center gap-1.5 text-[10px] text-text-primary"><input id={id} type="checkbox" checked={Boolean(value)} onChange={event => onChange(event.target.checked)} /> Enabled</label>
         : binding.type === 'choice' ? <select id={id} value={value === undefined ? '' : JSON.stringify(value)} onChange={event => { try { onChange(JSON.parse(event.target.value) as api.ComfyUIScalar) } catch { onClear() } }} className={common}>
-          {!binding.required && <option value="">Choose…</option>}{(binding.options ?? []).map((option, index) => <option key={`${index}:${String(option)}`} value={JSON.stringify(option)}>{String(option)}</option>)}
-        </select> : <input id={id} type={binding.type === 'integer' || binding.type === 'number' ? 'number' : 'text'} step={binding.type === 'integer' ? 1 : binding.type === 'number' ? 'any' : undefined} min={binding.min} max={binding.max} required={binding.required} value={displayValue(value)} onChange={event => {
-          const next = event.target.value
-          if (!next) { onClear(); return }
-          if (binding.type === 'integer' || binding.type === 'number') { if (Number.isFinite(Number(next))) onChange(Number(next)) }
-          else onChange(next)
-        }} className={common} />}
-      {binding.min !== undefined || binding.max !== undefined ? <p className="mt-0.5 text-[8px] text-text-muted">{binding.min !== undefined ? `Min ${binding.min}` : ''}{binding.min !== undefined && binding.max !== undefined ? ' · ' : ''}{binding.max !== undefined ? `Max ${binding.max}` : ''}</p> : null}
+          <option value="">Choose…</option>{allChoices.map((option, index) => <option key={index + ':' + String(option)} value={JSON.stringify(option)}>{String(option)}{staleChoice && option === value ? ' … saved, no longer listed' : ''}</option>)}
+        </select> : binding.type === 'string' && choices.length > 0
+          ? <div className="space-y-1">
+            <input id={id} list={choicesId} type="text" required={binding.required} value={displayValue(value)} onChange={event => updateText(event.target.value)} placeholder="Choose a server value or enter one" className={common} />
+            <datalist id={choicesId}>{choices.map((option, index) => <option key={index + ':' + String(option)} value={String(option)} />)}</datalist>
+            {choices.length > 0 && value !== undefined && !choices.some(option => String(option) === String(value)) && <p className="text-[8px] text-indicator-warning">Saved value is not in the server list; it is kept as a custom value.</p>}
+            <p className="text-[8px] text-text-muted">ComfyUI server choices · custom values are allowed</p>
+          </div> : <input id={id} type={binding.type === 'integer' || binding.type === 'number' ? 'number' : 'text'} step={binding.type === 'integer' ? 1 : binding.type === 'number' ? 'any' : undefined} min={binding.min} max={binding.max} required={binding.required} value={displayValue(value)} onChange={event => {
+            const next = event.target.value
+            if (!next) { onClear(); return }
+            if (binding.type === 'integer' || binding.type === 'number') { if (Number.isFinite(Number(next))) onChange(Number(next)) }
+            else onChange(next)
+          }} className={common} />}
+      {binding.min !== undefined || binding.max !== undefined ? <p className="mt-0.5 text-[8px] text-text-muted">{binding.min !== undefined ? 'Min ' + binding.min : ''}{binding.min !== undefined && binding.max !== undefined ? ' · ' : ''}{binding.max !== undefined ? 'Max ' + binding.max : ''}</p> : null}
     </div>
   </div>
 }

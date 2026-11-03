@@ -10,6 +10,7 @@ from app.services.comfyui_workflows import (
     MAX_WORKFLOW_BYTES,
     WorkflowError,
     apply_bindings,
+    binding_choices,
     builtin_templates,
     normalize_workflow,
     preflight_workflow,
@@ -207,6 +208,21 @@ class TestComfyWorkflowPreflight(unittest.TestCase):
         omitted = {"1": {"class_type": "Loader", "inputs": {}}}
         result = preflight_workflow(omitted, self.object_info)
         self.assertTrue(any("missing required input ckpt_name" in error for error in result["errors"]))
+
+    def test_picker_choices_come_from_bound_server_schema_and_remain_bounded(self):
+        graph = {"1": {"class_type": "Loader", "inputs": {"ckpt_name": "", "mode": "safe", "image": ""}}}
+        bindings = [
+            {"name": "checkpoint", "node_id": "1", "input": "ckpt_name", "type": "string", "required": True},
+            {"name": "method", "node_id": "1", "input": "mode", "type": "choice", "options": ["safe", "user-only"]},
+            {"name": "reference", "node_id": "1", "input": "image", "type": "image"},
+        ]
+        info = {"Loader": {"input": {"required": {"ckpt_name": [["one.safetensors", "one.safetensors", {}, float("nan")] + [f"model-{n}" for n in range(3000)]], "mode": [["safe", "fast"]], "image": [["another-users-input.png"]]}}}}
+        choices = binding_choices(graph, bindings, info)
+        self.assertEqual(choices["checkpoint"][:2], ["one.safetensors", "model-0"])
+        self.assertEqual(len(choices["checkpoint"]), 2000)
+        self.assertEqual(choices["method"], ["safe"])
+        self.assertNotIn("reference", choices)
+        self.assertNotIn("unrelated", choices)
 
 
 class TestComfyBuiltInTemplates(unittest.TestCase):

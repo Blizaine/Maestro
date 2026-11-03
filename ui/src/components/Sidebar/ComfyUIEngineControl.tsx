@@ -17,26 +17,26 @@ function isMediaBinding(binding: api.ComfyUIBinding): boolean {
 
 const FIELDS_BY_KIND: Record<api.ComfyUIKind, NativeField[]> = {
   image: [
-    { name: 'prompt', label: 'Prompt', valueType: 'text', aliases: ['prompt', 'positive_prompt'] },
-    { name: 'negative_prompt', label: 'Negative prompt', valueType: 'text', aliases: ['negative_prompt'] },
+    { name: 'prompt', label: 'Prompt', valueType: 'text', aliases: ['prompt', 'positive_prompt', 'prompt_text', 'positive'] },
+    { name: 'negative_prompt', label: 'Negative prompt', valueType: 'text', aliases: ['negative_prompt', 'negative'] },
     { name: 'seed', label: 'Seed', valueType: 'number', aliases: ['seed'] },
     { name: 'width', label: 'Width', valueType: 'number', aliases: ['width'] },
     { name: 'height', label: 'Height', valueType: 'number', aliases: ['height'] },
-    { name: 'num_inference_steps', label: 'Steps', valueType: 'number', aliases: ['steps', 'num_inference_steps'] },
-    { name: 'guidance_scale', label: 'Guidance scale', valueType: 'number', aliases: ['cfg', 'guidance_scale'] },
+    { name: 'num_inference_steps', label: 'Steps', valueType: 'number', aliases: ['steps', 'num_inference_steps', 'num_steps'] },
+    { name: 'guidance_scale', label: 'Guidance scale', valueType: 'number', aliases: ['cfg', 'cfg_scale', 'guidance_scale'] },
     { name: 'image_start', label: 'Start image', valueType: 'image', autoMap: false },
     { name: 'image_end', label: 'End image', valueType: 'image', autoMap: false },
     { name: 'image_refs.0', label: 'First image reference', valueType: 'image', autoMap: false },
     { name: 'image_refs.1', label: 'Second image reference', valueType: 'image', autoMap: false },
   ],
   video: [
-    { name: 'prompt', label: 'Prompt', valueType: 'text', aliases: ['prompt', 'positive_prompt'] },
-    { name: 'negative_prompt', label: 'Negative prompt', valueType: 'text', aliases: ['negative_prompt'] },
+    { name: 'prompt', label: 'Prompt', valueType: 'text', aliases: ['prompt', 'positive_prompt', 'prompt_text', 'positive'] },
+    { name: 'negative_prompt', label: 'Negative prompt', valueType: 'text', aliases: ['negative_prompt', 'negative'] },
     { name: 'seed', label: 'Seed', valueType: 'number', aliases: ['seed'] },
     { name: 'width', label: 'Width', valueType: 'number', aliases: ['width'] },
     { name: 'height', label: 'Height', valueType: 'number', aliases: ['height'] },
-    { name: 'num_inference_steps', label: 'Steps', valueType: 'number', aliases: ['steps', 'num_inference_steps'] },
-    { name: 'guidance_scale', label: 'Guidance scale', valueType: 'number', aliases: ['cfg', 'guidance_scale'] },
+    { name: 'num_inference_steps', label: 'Steps', valueType: 'number', aliases: ['steps', 'num_inference_steps', 'num_steps'] },
+    { name: 'guidance_scale', label: 'Guidance scale', valueType: 'number', aliases: ['cfg', 'cfg_scale', 'guidance_scale'] },
     { name: 'video_length', label: 'Frames', valueType: 'number', aliases: ['frames', 'video_length'] },
     { name: 'fps', label: 'Frames per second', valueType: 'number', aliases: ['fps'] },
     { name: 'image_start', label: 'Start image', valueType: 'image', autoMap: false },
@@ -50,8 +50,8 @@ const FIELDS_BY_KIND: Record<api.ComfyUIKind, NativeField[]> = {
     { name: 'duration_seconds', label: 'Duration (seconds)', valueType: 'number', autoMap: false },
   ],
   audio: [
-    { name: 'prompt', label: 'Prompt', valueType: 'text', aliases: ['prompt', 'positive_prompt'] },
-    { name: 'negative_prompt', label: 'Negative prompt', valueType: 'text', aliases: ['negative_prompt'] },
+    { name: 'prompt', label: 'Prompt', valueType: 'text', aliases: ['prompt', 'positive_prompt', 'prompt_text', 'positive'] },
+    { name: 'negative_prompt', label: 'Negative prompt', valueType: 'text', aliases: ['negative_prompt', 'negative'] },
     { name: 'seed', label: 'Seed', valueType: 'number', aliases: ['seed'] },
     { name: 'duration_seconds', label: 'Duration (seconds)', valueType: 'number', aliases: ['duration_seconds'] },
     { name: 'audio_guide', label: 'Audio guide', valueType: 'audio', autoMap: false },
@@ -69,17 +69,29 @@ function initialDefaults(bindings: api.ComfyUIBinding[]): Record<string, api.Com
   return values
 }
 
-function autoMap(fields: NativeField[], bindings: api.ComfyUIBinding[]): Record<string, string> {
+function autoMap(fields: NativeField[], workflow: api.ComfyUIWorkflow): Record<string, string> {
   const result: Record<string, string> = {}
   const used = new Set<string>()
+  const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '')
   for (const field of fields) {
     if (field.autoMap === false || !field.aliases?.length) continue
-    const found = field.aliases
-      .map(alias => bindings.find(binding => binding.name.toLowerCase() === alias || binding.label?.toLowerCase() === alias))
-      .find((binding): binding is api.ComfyUIBinding => Boolean(binding && !used.has(binding.name) && bindingMatchesField(field, binding)))
+    const aliases = field.aliases.map(normalize)
+    const found = workflow.bindings.find(binding =>
+      (aliases.includes(normalize(binding.name)) || aliases.includes(normalize(binding.label ?? '')))
+      && !used.has(binding.name) && bindingMatchesField(field, binding))
     if (found) {
       result[field.name] = found.name
       used.add(found.name)
+    }
+  }
+
+  // This exact built-in template exposes one required image binding. Keep other
+  // templates and imported workflows explicit because media mappings are specific.
+  if (workflow.template && workflow.id === 'flux3_klein_distilled_reference_edit') {
+    const referenceField = fields.find(field => field.name === 'image_refs.0' && field.valueType === 'image')
+    const referenceBinding = workflow.bindings.find(binding => binding.name === 'reference_image' && binding.type === 'image')
+    if (referenceField && referenceBinding && !used.has(referenceBinding.name)) {
+      result[referenceField.name] = referenceBinding.name
     }
   }
   return result
@@ -133,6 +145,9 @@ export function ComfyUIEngineControl({ modelType, kind }: { modelType: string; k
   const [validating, setValidating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [validation, setValidation] = useState<api.ComfyUIWorkflowValidation | null>(null)
+  const [workflowOptions, setWorkflowOptions] = useState<api.ComfyUIWorkflowOptions | null>(null)
+  const [optionsLoading, setOptionsLoading] = useState(false)
+  const [optionsError, setOptionsError] = useState<string | null>(null)
   const [refreshVersion, setRefreshVersion] = useState(0)
 
   const available = useMemo(() => workflows.filter(workflow => workflow.kind === kind), [workflows, kind])
@@ -181,7 +196,7 @@ export function ComfyUIEngineControl({ modelType, kind }: { modelType: string; k
         if (!nextStatus.enabled) return
         const result = await api.fetchComfyUIWorkflows()
         if (cancelled) return
-        const all = [...(result.templates ?? []), ...(result.workflows ?? [])]
+        const all = [...(result.templates ?? []).map(workflow => ({ ...workflow, template: true })), ...(result.workflows ?? [])]
         setWorkflows(all)
         const sameKind = all.filter(workflow => workflow.kind === kind)
         const savedWorkflow = nextRoute?.kind === kind || !nextRoute?.kind
@@ -191,8 +206,8 @@ export function ComfyUIEngineControl({ modelType, kind }: { modelType: string; k
         if (initialWorkflow) {
           setSelectedId(initialWorkflow.id)
           setFieldBindings(nextRoute?.kind === kind || !nextRoute?.kind
-            ? nextRoute?.field_bindings ?? autoMap(fields, initialWorkflow.bindings)
-            : autoMap(fields, initialWorkflow.bindings))
+            ? nextRoute?.field_bindings ?? autoMap(fields, initialWorkflow)
+            : autoMap(fields, initialWorkflow))
           setInputDefaults({ ...initialDefaults(initialWorkflow.bindings), ...(nextRoute?.kind === kind ? nextRoute.input_defaults : {}) })
         }
       } catch (reason) {
@@ -205,11 +220,37 @@ export function ComfyUIEngineControl({ modelType, kind }: { modelType: string; k
     return () => { cancelled = true }
   }, [modelType, kind, fields, refreshVersion])
 
+  useEffect(() => {
+    if (!expanded || !selectedId) {
+      setWorkflowOptions(null)
+      setOptionsError(null)
+      setOptionsLoading(false)
+      return
+    }
+    const controller = new AbortController()
+    setWorkflowOptions(null)
+    setOptionsError(null)
+    setOptionsLoading(true)
+    api.fetchComfyUIWorkflowOptions(selectedId, controller.signal)
+      .then(result => {
+        if (!controller.signal.aborted) setWorkflowOptions(result)
+      })
+      .catch(reason => {
+        if (!controller.signal.aborted) {
+          setOptionsError(reason instanceof Error ? reason.message : 'Server choices are unavailable; enter a value manually.')
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setOptionsLoading(false)
+      })
+    return () => controller.abort()
+  }, [expanded, selectedId])
+
   const chooseWorkflow = (workflowId: string) => {
     setSelectedId(workflowId)
     const workflow = available.find(item => item.id === workflowId)
     if (workflow) {
-      setFieldBindings(autoMap(fields, workflow.bindings))
+      setFieldBindings(autoMap(fields, workflow))
       setInputDefaults(initialDefaults(workflow.bindings))
     } else {
       setFieldBindings({})
@@ -383,6 +424,9 @@ export function ComfyUIEngineControl({ modelType, kind }: { modelType: string; k
         </div>
 
         {selected && <>
+          <p className="text-[9px] leading-relaxed text-text-muted">Native remains the default. Map the Native controls you want to pass through; required workflow inputs and preflight are checked before saving.</p>
+          {optionsLoading && <p role="status" className="text-[9px] text-text-muted">Loading choices from the selected ComfyUI server…</p>}
+          {optionsError && <p role="status" className="text-[9px] text-indicator-warning">Server choices are unavailable. You can still enter values manually. {optionsError}</p>}
           <p className="text-[9px] leading-relaxed text-text-muted">The selected workflow controls its checkpoint, sampler, and performance. Maestro native LoRAs, finishing, and multi-window options are not translated; unsupported options are rejected, with no fallback.</p>
           {kind === 'video' && <p className="text-[9px] leading-relaxed text-text-muted">For driving-audio clips, map Audio guide and one Driving audio offset field. A nonzero audio offset without a workflow mapping is rejected.</p>}
 
@@ -409,11 +453,15 @@ export function ComfyUIEngineControl({ modelType, kind }: { modelType: string; k
           </fieldset>
 
           {unmappedBindings.length > 0 && <fieldset className="space-y-2 border-t border-border pt-3">
-            <legend className="mb-1 text-[10px] font-semibold text-text-secondary">Fixed workflow inputs</legend>
+            <legend className="mb-1 text-[10px] font-semibold text-text-secondary">Workflow defaults</legend><p className="-mt-1 text-[9px] text-text-muted">These values belong to this ComfyUI workflow. Required values and server preflight must pass before routing can be saved.</p>
             {unmappedBindings.map(binding => {
               const safeName = binding.name.replace(/[^a-zA-Z0-9_-]/g, '-')
               const value = inputDefaults[binding.name] ?? binding.default
               const label = binding.label || binding.name
+              const liveChoiceOptions = (binding.options ?? []).concat(workflowOptions?.choices[binding.name] ?? [])
+                .filter((option, index, options) => options.indexOf(option) === index)
+              const staleChoice = binding.type === 'choice' && value !== undefined && !liveChoiceOptions.includes(value)
+              const choiceOptions = staleChoice ? [value, ...liveChoiceOptions] : liveChoiceOptions
               if (isMediaBinding(binding)) return <div key={binding.name} className="grid grid-cols-[minmax(7rem,1fr)_minmax(9rem,1.4fr)] items-center gap-2">
                 <span className="text-[10px] text-text-secondary">{label}{binding.required ? <span className="ml-0.5 text-chip-red">*</span> : null}</span>
                 <p className="text-[9px] text-text-muted">Map a Native media field above. Maestro uploads media for each run.</p>
@@ -431,11 +479,19 @@ export function ComfyUIEngineControl({ modelType, kind }: { modelType: string; k
                   ? <label className="flex items-center gap-2 text-[10px] text-text-primary"><input id={`${panelId}-default-${safeName}`} type="checkbox" checked={value === true} onChange={event => setDefault(binding, event.target.checked)} /> Enabled</label>
                   : binding.type === 'integer' || binding.type === 'number'
                     ? <input id={`${panelId}-default-${safeName}`} aria-label={`Default for ${label}`} type="number" step={binding.type === 'integer' ? 1 : 'any'} min={binding.min} max={binding.max} value={typeof value === 'number' ? value : ''} onChange={updateNumber} className="min-w-0 rounded-md border border-border bg-bg-primary px-2 py-1.5 text-[10px] text-text-primary outline-none focus:border-accent-blue" />
-                    : binding.type === 'choice' && binding.options?.length
-                      ? <select id={`${panelId}-default-${safeName}`} aria-label={`Default for ${label}`} value={binding.options.findIndex(option => option === value)} onChange={event => { const index = Number(event.target.value); setDefault(binding, binding.options?.[index]) }} className="min-w-0 rounded-md border border-border bg-bg-primary px-2 py-1.5 text-[10px] text-text-primary outline-none focus:border-accent-blue">
-                        {binding.options.map((option, index) => <option key={`${binding.name}-${index}`} value={index}>{String(option)}</option>)}
+                    : binding.type === 'choice' && choiceOptions.length > 0
+                      ? <select id={panelId + '-default-' + safeName} aria-label={'Default for ' + label} value={value === undefined ? '-1' : String(choiceOptions.findIndex(option => option === value))} onChange={event => { const index = Number(event.target.value); setDefault(binding, index < 0 ? undefined : choiceOptions[index]) }} className="min-w-0 rounded-md border border-border bg-bg-primary px-2 py-1.5 text-[10px] text-text-primary outline-none focus:border-accent-blue">
+                        {value === undefined && <option value="-1">Choose…</option>}
+                        {choiceOptions.map((option, index) => <option key={binding.name + '-' + index} value={index}>{String(option)}{staleChoice && option === value ? ' · saved, no longer listed' : ''}</option>)}
                       </select>
-                      : <input id={`${panelId}-default-${safeName}`} aria-label={`Default for ${label}`} type="text" value={defaultText(value)} onChange={event => setDefault(binding, event.target.value)} placeholder={binding.type === 'image' || binding.type === 'video' || binding.type === 'audio' ? 'Maestro media reference' : 'Fixed input value'} className="min-w-0 rounded-md border border-border bg-bg-primary px-2 py-1.5 text-[10px] text-text-primary outline-none placeholder:text-text-muted focus:border-accent-blue" />}
+                      : binding.type === 'string' && (workflowOptions?.choices[binding.name]?.length ?? 0) > 0
+                        ? <div className="min-w-0">
+                          <input id={panelId + '-default-' + safeName} aria-label={'Default for ' + label} list={panelId + '-choices-' + safeName} type="text" value={defaultText(value)} onChange={event => setDefault(binding, event.target.value)} placeholder="Choose a server value or enter one" className="min-w-0 w-full rounded-md border border-border bg-bg-primary px-2 py-1.5 text-[10px] text-text-primary outline-none placeholder:text-text-muted focus:border-accent-blue" />
+                          <datalist id={panelId + '-choices-' + safeName}>{workflowOptions?.choices[binding.name]?.map((option, index) => <option key={binding.name + '-' + index} value={String(option)} />)}</datalist>
+                          {workflowOptions && value !== undefined && !(workflowOptions.choices[binding.name] ?? []).some(option => String(option) === String(value)) && <p className="text-[8px] text-indicator-warning">Saved value is not in the server list; it is kept as a custom value.</p>}
+                          <p className="mt-0.5 text-[8px] text-text-muted">ComfyUI server choices · custom values are allowed</p>
+                        </div>
+                        : <input id={panelId + '-default-' + safeName} aria-label={'Default for ' + label} type="text" value={defaultText(value)} onChange={event => setDefault(binding, event.target.value)} placeholder={binding.type === 'image' || binding.type === 'video' || binding.type === 'audio' ? 'Maestro media reference' : 'Fixed input value'} className="min-w-0 rounded-md border border-border bg-bg-primary px-2 py-1.5 text-[10px] text-text-primary outline-none placeholder:text-text-muted focus:border-accent-blue" />}
               </div>
             })}
           </fieldset>}

@@ -48,6 +48,7 @@ async function checkApiPayloads() {
     await api.fetchComfyUIStatus();
     await api.saveComfyUISettings({enabled: true, endpoint: 'http://comfy.lan:8188', dedicated: true});
     await api.testComfyUIConnection();
+    await api.discoverComfyUIConnections();
     await api.discoverComfyUIModels();
     await api.discoverComfyUIModels(['D:/ComfyUI/models']);
     await api.scanComfyUIModels(['D:/ComfyUI/models/checkpoints']);
@@ -56,6 +57,7 @@ async function checkApiPayloads() {
     const workflow = {name: 'Starter', kind: 'image', workflow: {6: {class_type: 'CLIPTextEncode'}}, bindings: []};
     await api.createComfyUIWorkflow(workflow);
     await api.deleteComfyUIWorkflow('workflow / 1');
+    await api.fetchComfyUIWorkflowOptions('workflow / 1');
     await api.validateComfyUIWorkflow('workflow / 1');
     const run = {
       client_submission_id: 'd90b76aa-9267-4cc2-961f-c97f2ce90467',
@@ -71,6 +73,7 @@ async function checkApiPayloads() {
       {url: '/api/v1/comfyui/status', method: 'GET', body: null},
       {url: '/api/v1/comfyui/settings', method: 'PUT', body: {enabled: true, endpoint: 'http://comfy.lan:8188', dedicated: true}},
       {url: '/api/v1/comfyui/connection/test', method: 'POST', body: {}},
+      {url: '/api/v1/comfyui/connection/discover', method: 'POST', body: {}},
       {url: '/api/v1/comfyui/models/discover', method: 'POST', body: {}},
       {url: '/api/v1/comfyui/models/discover', method: 'POST', body: {paths: ['D:/ComfyUI/models']}},
       {url: '/api/v1/comfyui/models/scan', method: 'POST', body: {paths: ['D:/ComfyUI/models/checkpoints']}},
@@ -78,6 +81,7 @@ async function checkApiPayloads() {
       {url: '/api/v1/comfyui/workflows', method: 'GET', body: null},
       {url: '/api/v1/comfyui/workflows', method: 'POST', body: workflow},
       {url: '/api/v1/comfyui/workflows/workflow%20%2F%201', method: 'DELETE', body: null},
+      {url: '/api/v1/comfyui/workflows/workflow%20%2F%201/options', method: 'GET', body: null},
       {url: '/api/v1/comfyui/workflows/workflow%20%2F%201/validate', method: 'POST', body: {inputs: {}}},
       {url: '/api/v1/comfyui/workflows/workflow%20%2F%201/run', method: 'POST', body: run},
       {url: '/api/v1/comfyui/jobs/by-submission/d90b76aa-9267-4cc2-961f-c97f2ce90467', method: 'GET', body: null},
@@ -198,7 +202,10 @@ async function checkDialogWorkflow(browser) {
     const existingWorkflow = {
       id: 'workflow-owned', name: 'Prompted Image', kind: 'image',
       workflow: {6: {class_type: 'CLIPTextEncode', inputs: {text: 'old prompt'}}},
-      bindings: [{name: 'prompt', label: 'Prompt', node_id: '6', input: 'text', type: 'string', required: true}],
+      bindings: [
+        {name: 'prompt', label: 'Prompt', node_id: '6', input: 'text', type: 'string', required: true},
+        {name: 'checkpoint', label: 'Checkpoint', node_id: '7', input: 'ckpt_name', type: 'string'},
+      ],
     };
     const importedWorkflow = {
       id: 'workflow-imported', name: 'Imported Video', kind: 'video', workflow: {1: {class_type: 'SaveVideo'}}, bindings: [],
@@ -215,6 +222,13 @@ async function checkDialogWorkflow(browser) {
       if (url.pathname === '/dialog.js' && request.method() === 'GET') return route.fulfill({contentType: 'text/javascript', body: bundle});
       if (url.pathname === '/api/v1/comfyui/workflows' && request.method() === 'GET') {
         return jsonResponse(route, {workflows: savedWorkflows, templates: []});
+      }
+      if (url.pathname === '/api/v1/comfyui/workflows/workflow-owned/options' && request.method() === 'GET') {
+        return jsonResponse(route, {workflow_id: 'workflow-owned', choices: {checkpoint: ['model-a.safetensors', 'model-b.safetensors']}});
+      }
+      if (url.pathname.endsWith('/options') && request.method() === 'GET') {
+        const id = url.pathname.split('/').slice(-2, -1)[0];
+        return jsonResponse(route, {workflow_id: id, choices: {}});
       }
       if (url.pathname === '/api/v1/comfyui/workflows' && request.method() === 'POST') {
         const body = request.postDataJSON();
@@ -252,6 +266,10 @@ async function checkDialogWorkflow(browser) {
     await page.goto('http://maestro.test/');
     await page.getByRole('dialog', {name: 'ComfyUI workflow library'}).waitFor({state: 'visible'});
     await page.getByText('Ready to run').waitFor({state: 'visible'});
+    await page.waitForFunction(() => Array.from(document.querySelectorAll('datalist')).some(list =>
+      Array.from(list.querySelectorAll('option')).some(option => option.value === 'model-b.safetensors')));
+    assert.ok(state.requests.some(item => item.path === '/api/v1/comfyui/workflows/workflow-owned/options' && item.method === 'GET'),
+      'Opening a workflow loads choices only for that selection');
     assert.equal(state.runs.length, 0, 'Opening a workflow and completing preflight does not submit a run');
 
     await page.getByLabel('Name').fill('Imported Video');
@@ -350,6 +368,12 @@ async function checkSettingsAndDedicatedToggle(browser) {
       config = {...config, ...body};
       return jsonResponse(route, config);
     }
+    if (url.pathname === '/api/v1/comfyui/connection/discover' && request.method() === 'POST') {
+      return jsonResponse(route, {candidates: [
+        {endpoint: 'http://localhost:8188', connected: true, node_count: 12},
+        {endpoint: 'http://localhost:8189', connected: false, error: 'Not reachable'},
+      ]});
+    }
     if (url.pathname === '/api/v1/comfyui/connection/test' && request.method() === 'POST') {
       state.tests.push(body);
       return jsonResponse(route, {connected: true, connection_error: null, node_count: 12});
@@ -390,11 +414,18 @@ async function checkSettingsAndDedicatedToggle(browser) {
   await integration.waitFor({state: 'visible'});
   assert.equal(await integration.isChecked(), false, 'The integration remains off by default');
   assert.equal(await dedicated.isChecked(), false, 'The dedicated server option remains off by default');
+  await page.getByText('Next action: discover a server or enter its address, then save and test. Testing never enables integration.').waitFor({state: 'visible'});
+  await page.getByRole('button', {name: 'Discover endpoints'}).click();
+  await page.getByText('http://localhost:8188').waitFor({state: 'visible'});
+  await page.getByRole('button', {name: 'Use endpoint'}).first().click();
+  assert.equal(await page.getByLabel('ComfyUI endpoint').inputValue(), 'http://localhost:8188',
+    'Selecting a discovered endpoint only fills the saved endpoint field');
+  assert.equal(await integration.isChecked(), false, 'Endpoint discovery never enables integration');
   await dedicated.check();
   await page.getByRole('button', {name: 'Save settings'}).click();
   await page.waitForFunction(() => Array.from(document.querySelectorAll('button')).some(button =>
     button.textContent?.includes('Test connection') && !button.disabled));
-  assert.deepEqual(state.settings, [{enabled: false, endpoint: 'http://127.0.0.1:8188', dedicated: true}],
+  assert.deepEqual(state.settings, [{enabled: false, endpoint: 'http://localhost:8188', dedicated: true}],
     'The dedicated option persists independently while integration stays disabled');
   const testButton = page.getByRole('button', {name: 'Test connection'});
   assert.equal(await testButton.isEnabled(), true, 'An explicitly saved endpoint can be tested while integration is disabled');

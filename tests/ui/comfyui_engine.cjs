@@ -62,7 +62,7 @@ const workflowFixtures = [
       {name: 'prompt', label: 'Positive prompt', node_id: '1', input: 'text', type: 'string', required: true},
       {name: 'steps', label: 'Steps', node_id: '2', input: 'steps', type: 'integer', required: true, min: 1, max: 80},
       {name: 'include_audio', label: 'Include audio', node_id: '3', input: 'enabled', type: 'boolean', required: true, default: false},
-      {name: 'checkpoint', label: 'Checkpoint', node_id: '4', input: 'ckpt_name', type: 'choice', required: true, options: ['model-a.safetensors', 'model-b.safetensors']},
+      {name: 'checkpoint', label: 'Checkpoint', node_id: '4', input: 'ckpt_name', type: 'string', required: true},
       {name: 'style', label: 'Style', node_id: '5', input: 'text', type: 'string', required: true},
       {name: 'start_image', label: 'Start image', node_id: '6', input: 'image', type: 'image'},
     ],
@@ -180,6 +180,9 @@ async function checkConfigurationFlow(browser, harness) {
     if (pathName === '/api/v1/comfyui/workflows' && request.method() === 'GET') {
       return jsonResponse(route, {workflows: workflowFixtures, templates: []});
     }
+    if (pathName === '/api/v1/comfyui/workflows/image-template/options' && request.method() === 'GET') {
+      return jsonResponse(route, {workflow_id: 'image-template', choices: {checkpoint: ['model-a.safetensors', 'model-b.safetensors']}});
+    }
     if (pathName === '/api/v1/comfyui/workflows/image-template/validate' && request.method() === 'POST') {
       state.validations.push(body);
       return jsonResponse(route, {valid: true, errors: [], missing_nodes: [], missing_models: [], pending_media_upload: true});
@@ -203,6 +206,7 @@ async function checkConfigurationFlow(browser, harness) {
   assert.ok(state.requests.some(item => item.path === '/api/v1/comfyui/status' && item.method === 'GET'));
   assert.ok(state.requests.some(item => item.path === '/api/v1/comfyui/workflows' && item.method === 'GET'));
   assert.equal(state.requests.some(item => item.path.includes('/connection/test')), false, 'Loading control state does not ping ComfyUI');
+  assert.equal(state.requests.some(item => item.path.endsWith('/options')), false, 'Collapsed controls do not request server choices');
 
   await page.getByRole('button', {name: /Generation engine/}).click();
   const workflowSelect = page.getByLabel('Verified workflow');
@@ -210,12 +214,16 @@ async function checkConfigurationFlow(browser, harness) {
   assert.equal(await page.getByLabel('Native field mapping: Prompt').inputValue(), 'prompt', 'Prompt is mapped automatically');
   assert.equal(await page.getByLabel('Native field mapping: Steps').inputValue(), 'steps', 'Native steps map to a typed integer workflow input');
   assert.equal(await page.getByRole('checkbox', {name: 'Enabled'}).isChecked(), false, 'A boolean binding retains its false default');
+  await page.waitForFunction(() => Array.from(document.querySelectorAll('datalist')).some(list =>
+    Array.from(list.querySelectorAll('option')).some(option => option.value === 'model-b.safetensors')));
+  assert.ok(state.requests.some(item => item.path === '/api/v1/comfyui/workflows/image-template/options' && item.method === 'GET'),
+    'Opening the selected workflow lazily loads its ComfyUI choices');
   assert.equal(await page.getByLabel('Default for Start image').count(), 0, 'Media bindings cannot be assigned fixed filename defaults');
   assert.equal(await page.getByLabel('Default for Style').isEnabled(), true);
   assert.equal(await page.getByRole('button', {name: 'Save routing'}).isDisabled(), true, 'A required unmapped binding must receive a fixed value or mapping');
 
   await page.getByLabel('Native field mapping: Start image').selectOption('start_image');
-  await page.getByLabel('Default for Checkpoint').selectOption('1');
+  await page.getByLabel('Default for Checkpoint').fill('model-b.safetensors');
   await page.getByLabel('Default for Style').fill('cinematic');
   await page.getByRole('button', {name: 'Validate workflow'}).click();
   await page.getByText('Workflow preflight passed. Saving routing does not start generation.').waitFor({state: 'visible'});
@@ -256,12 +264,69 @@ async function checkConfigurationFlow(browser, harness) {
   await page.close();
 }
 
+async function checkKnownTemplateReferenceAutofill(browser, harness) {
+  const state = {requests: []};
+  const page = await browser.newPage({viewport: {width: 430, height: 900}});
+  page.setDefaultTimeout(7000);
+  const special = {
+    id: 'flux3_klein_distilled_reference_edit',
+    name: 'Reference Edit',
+    kind: 'image',
+    workflow: {},
+    bindings: [
+      {name: 'prompt', label: 'Prompt', node_id: '1', input: 'text', type: 'string', required: true},
+      {name: 'reference_image', label: 'Reference image', node_id: '2', input: 'image', type: 'image', required: true},
+    ],
+  };
+  const custom = {
+    id: 'custom-reference-edit',
+    name: 'Custom Reference Edit',
+    kind: 'image',
+    workflow: {},
+    bindings: [
+      {name: 'prompt', label: 'Prompt', node_id: '1', input: 'text', type: 'string', required: true},
+      {name: 'reference_image', label: 'Reference image', node_id: '2', input: 'image', type: 'image', required: true},
+    ],
+  };
+  await page.route(harness.origin + '/**/*', async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (!url.pathname.startsWith('/api/v1/comfyui/')) return route.continue();
+    state.requests.push({path: url.pathname, method: request.method()});
+    if (url.pathname === '/api/v1/comfyui/status' && request.method() === 'GET') {
+      return jsonResponse(route, {enabled: true, endpoint: 'http://127.0.0.1:8188', connected: true, routes: {}});
+    }
+    if (url.pathname === '/api/v1/comfyui/workflows' && request.method() === 'GET') {
+      return jsonResponse(route, {workflows: [custom], templates: [special]});
+    }
+    if (url.pathname.endsWith('/options') && request.method() === 'GET') {
+      const id = url.pathname.split('/').slice(-2, -1)[0];
+      return jsonResponse(route, {workflow_id: id, choices: {}});
+    }
+    return jsonResponse(route, {detail: 'Unexpected request'}, 404);
+  });
+  await page.goto(harness.origin + harness.pagePath);
+  await page.getByRole('button', {name: /Generation engine/}).click();
+  const reference = page.getByLabel('Native field mapping: First image reference');
+  await page.waitForFunction(() => Array.from(document.querySelectorAll('select')).some(select =>
+    select.getAttribute('aria-label') === 'Native field mapping: First image reference'
+    && select.value === 'reference_image'));
+  assert.equal(await reference.inputValue(), 'reference_image',
+    'The known built-in single-reference template maps its image input automatically');
+  await page.getByLabel('Verified workflow').selectOption('custom-reference-edit');
+  assert.equal(await reference.inputValue(), '',
+    'The same image binding on an arbitrary imported workflow remains explicit');
+  assert.equal(state.requests.some(item => item.path.endsWith('/run')), false,
+    'Reference auto-mapping never submits generation');
+  await page.close();
+}
+
 async function checkNativeWorksWhenComfyIsOffline(browser, harness) {
   const state = {
     requests: [],
     routeSaves: [],
     route: {workflow_id: 'image-template', enabled: true, kind: 'image', name: 'Existing Portrait Route',
-      field_bindings: {prompt: 'prompt'}, input_defaults: {checkpoint: 'model-a.safetensors'}},
+      field_bindings: {prompt: 'prompt'}, input_defaults: {checkpoint: 'model-archived.safetensors'}},
   };
   const page = await browser.newPage();
   page.setDefaultTimeout(7000);
@@ -277,6 +342,9 @@ async function checkNativeWorksWhenComfyIsOffline(browser, harness) {
         routes: {'photo-model': state.route}});
     }
     if (pathName === '/api/v1/comfyui/workflows' && request.method() === 'GET') return jsonResponse(route, {workflows: workflowFixtures, templates: []});
+    if (pathName === '/api/v1/comfyui/workflows/image-template/options' && request.method() === 'GET') {
+      return jsonResponse(route, {workflow_id: 'image-template', choices: {checkpoint: ['model-a.safetensors', 'model-b.safetensors']}});
+    }
     if (pathName === '/api/v1/comfyui/routes/photo-model' && request.method() === 'PUT') {
       state.routeSaves.push(body);
       state.route = {workflow_id: 'image-template', kind: 'image', name: 'Existing Portrait Route', ...body};
@@ -288,13 +356,17 @@ async function checkNativeWorksWhenComfyIsOffline(browser, harness) {
   await page.getByRole('button', {name: /Generation engine/}).waitFor({state: 'visible'});
   assert.equal(await page.getByText('Existing Portrait Route', {exact: true}).count(), 1);
   await page.getByRole('button', {name: /Generation engine/}).click();
+  await page.getByLabel('Default for Checkpoint').waitFor({state: 'visible'});
+  assert.equal(await page.getByLabel('Default for Checkpoint').inputValue(), 'model-archived.safetensors',
+    'A saved model filename not listed by the server remains visible and editable');
+  await page.getByText('Saved value is not in the server list; it is kept as a custom value.').waitFor({state: 'visible'});
   await page.getByRole('button', {name: 'Use Native'}).click();
   await page.getByText('Native', {exact: true}).last().waitFor({state: 'visible'});
   assert.deepEqual(state.routeSaves, [{
     workflow_id: 'image-template',
     enabled: false,
     field_bindings: {prompt: 'prompt'},
-    input_defaults: {checkpoint: 'model-a.safetensors'},
+    input_defaults: {checkpoint: 'model-archived.safetensors'},
     kind: 'image',
   }], 'Choosing Native persists a model-specific disable, including from an offline ComfyUI status');
   assert.equal(state.requests.some(item => item.path.includes('/connection/test') || item.path.includes('/run') || item.path.includes('/queue')), false,
@@ -315,10 +387,11 @@ async function main() {
     const browser = await chromium.launch({headless: true, ...(executablePath ? {executablePath} : {})});
     try {
       await checkConfigurationFlow(browser, harness);
+      await checkKnownTemplateReferenceAutofill(browser, harness);
       await checkNativeWorksWhenComfyIsOffline(browser, harness);
     } finally { await browser.close(); }
   } finally { await harness.close(); }
-  console.log('ComfyUI route API, typed mappings/defaults, workflow verification, Native-offline routing, and no-implicit-run checks passed.');
+  console.log('ComfyUI route API, server choice lists, typed mappings/defaults, built-in reference mapping, stale saved values, Native-offline routing, and no-implicit-run checks passed.');
 }
 
 main().catch(error => {

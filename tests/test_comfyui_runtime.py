@@ -178,6 +178,34 @@ class ComfyRuntimeTestCase(unittest.TestCase):
         self.assertTrue(created)
         return prepared, receipt
 
+    def test_connection_discovery_is_explicit_bounded_and_does_not_change_settings(self):
+        contacted = []
+        good = self.client
+        def factory(endpoint, **options):
+            contacted.append((endpoint, options))
+            if endpoint.endswith(":8189"):
+                raise ComfyTransportError("connect", ambiguous=False)
+            return good
+        service = ComfyService(self.app_root, client_factory=factory)
+        before = service._config()
+        result = service.discover_connections()
+        self.assertEqual([row[0] for row in contacted], ["http://127.0.0.1:8188", "http://127.0.0.1:8189"])
+        self.assertTrue(all(row[1]["timeout"] == 3 for row in contacted))
+        self.assertTrue(result["candidates"][0]["connected"])
+        self.assertFalse(result["candidates"][1]["connected"])
+        self.assertEqual(service._config(), before)
+        self.assertEqual(good.submit_calls, [])
+
+    def test_workflow_options_use_current_schema_without_scanning_or_submission(self):
+        result = self.service.workflow_options("sdxl_checkpoint_txt2img")
+        self.assertEqual(result["choices"], {"checkpoint": ["installed.safetensors"]})
+        self.assertEqual(result["workflow_id"], "sdxl_checkpoint_txt2img")
+        self.assertEqual(self.client.object_info_calls, 1)
+        self.assertEqual(self.client.submit_calls, [])
+        self.service.configure({"enabled": False})
+        with self.assertRaisesRegex(ServiceError, "Enable ComfyUI"):
+            self.service.workflow_options("sdxl_checkpoint_txt2img")
+
     def _run(self, prepared, *, cancelled=lambda: False, resolve_media=None, out_dir=None):
         resolve_media = resolve_media or (lambda _reference, _workspace: self.fail("unexpected media resolution"))
         out_dir = Path(out_dir or (Path(self.temporary.name) / "outputs"))

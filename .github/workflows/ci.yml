@@ -100,6 +100,8 @@ jobs:
         # These are standalone test functions, so unittest discovery does not
         # execute them yet. Keep this explicit runner until they are migrated.
         run: python tests/test_call_llm_json_grammar.py
+      - name: Optional ComfyUI bridge regressions (CPU only)
+        run: python -m pytest -q tests/test_comfyui_*.py tests/test_director_comfyui_engine.py
       - name: Standalone preview, source-camera and media regressions
         # Plain unittest discovery omits pytest functions/fixtures in these
         # modules. CUDA-only checks retain their own skips.
@@ -180,6 +182,17 @@ jobs:
           node tests/ui/agent_access_local.cjs
           node tests/ui/agent_access_onboarding.cjs
           node tests/ui/pinokio_remote_access.cjs
+      - name: Install isolated browser test runner
+        working-directory: ui
+        run: |
+          npm install --no-save --package-lock=false playwright@1.64.1
+          npx playwright install --with-deps chromium
+      - name: ComfyUI setup, routing and mobile browser regressions
+        env:
+          MAESTRO_PLAYWRIGHT: ${{ github.workspace }}/ui/node_modules/playwright
+        run: |
+          node tests/ui/comfyui.cjs
+          node tests/ui/comfyui_engine.cjs
       - name: Type-check and staged UI build
         working-directory: ui
         run: npm run build

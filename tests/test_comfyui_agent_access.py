@@ -39,6 +39,8 @@ def test_only_exact_registered_workflow_run_route_is_generate():
 
 def test_connection_and_model_management_require_manage():
     assert required_scope("POST", "/api/v1/comfyui/connection/test") == "manage"
+    assert required_scope("POST", "/api/v1/comfyui/connection/discover") == "manage"
+    assert required_scope("GET", "/api/v1/comfyui/workflows/template/options") == "manage"
     assert required_scope("POST", "/api/v1/comfyui/models/discover") == "manage"
     assert required_scope("POST", "/api/v1/comfyui/models/scan") == "manage"
     assert required_scope("POST", "/api/v1/comfyui/models/link") == "manage"

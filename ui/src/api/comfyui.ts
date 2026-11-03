@@ -93,6 +93,22 @@ export interface ComfyUIConnectionTest {
   missing?: string[]
 }
 
+export interface ComfyUIEndpointCandidate {
+  endpoint: string
+  connected: boolean
+  node_count?: number
+  error?: string
+}
+
+export interface ComfyUIEndpointDiscovery {
+  candidates: ComfyUIEndpointCandidate[]
+}
+
+export interface ComfyUIWorkflowOptions {
+  workflow_id: string
+  choices: Record<string, ComfyUIScalar[]>
+}
+
 export interface ComfyUIModelPath {
   category: string
   path: string
@@ -186,6 +202,14 @@ export async function testComfyUIConnection(): Promise<ComfyUIConnectionTest> {
   return result
 }
 
+export function discoverComfyUIConnections(signal?: AbortSignal): Promise<ComfyUIEndpointDiscovery> {
+  return requestJson('/api/v1/comfyui/connection/discover', {
+    method: 'POST',
+    body: JSON.stringify({}),
+    signal,
+  })
+}
+
 export function discoverComfyUIModels(paths?: string[]): Promise<ComfyUIModelDiscovery> {
   return requestJson('/api/v1/comfyui/models/discover', {
     method: 'POST',
@@ -232,6 +256,10 @@ export async function deleteComfyUIWorkflow(id: string): Promise<{ deleted: bool
   const result = await requestJson<{ deleted: boolean }>('/api/v1/comfyui/workflows/' + encodeURIComponent(id), { method: 'DELETE' })
   notifyComfyUIStateChanged()
   return result
+}
+
+export function fetchComfyUIWorkflowOptions(id: string, signal?: AbortSignal): Promise<ComfyUIWorkflowOptions> {
+  return requestJson('/api/v1/comfyui/workflows/' + encodeURIComponent(id) + '/options', { signal })
 }
 
 export function validateComfyUIWorkflow(

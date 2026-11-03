@@ -98,6 +98,8 @@ def required_scope(method: str, path: str) -> str:
     # service, so they require manage. Workflow/configuration writes and every
     # unknown ComfyUI write remain admin.
     if len(segments) >= 3 and segments[:3] == ("api", "v1", "comfyui"):
+        if read and len(segments) == 6 and segments[3] == "workflows" and segments[5] == "options":
+            return "manage"
         if read:
             return "observe"
         if (
@@ -120,7 +122,7 @@ def required_scope(method: str, path: str) -> str:
         ):
             return "generate"
         if verb == "POST" and (
-            (len(segments) == 5 and segments[3:5] == ("connection", "test"))
+            (len(segments) == 5 and segments[3] == "connection" and segments[4] in {"test", "discover"})
             or (len(segments) == 5 and segments[3] == "models" and segments[4] in {"discover", "scan", "link"})
         ):
             return "manage"

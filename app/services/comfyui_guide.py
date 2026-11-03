@@ -30,11 +30,20 @@ def get_comfyui_guide() -> dict[str, object]:
             "instructions": (
                 "Bind Maestro inputs to explicit graph node IDs and input names. "
                 "Validate with {\"inputs\": {...}} using the current selected "
-                "values, including the checkpoint, before running. An empty body "
+                "values, including the checkpoint, before running. Read "
+                "GET /api/v1/comfyui/workflows/{id}/options with Manage access "
+                "to obtain the actual server's choices for registered inputs. "
+                "An empty body "
                 "or {} validates defaults only. Preflight checks graph, node, "
                 "model, and binding requirements; it does not test output quality."
             ),
         },
+        "connection_discovery": (
+            "POST /api/v1/comfyui/connection/discover with {} and Manage access "
+            "checks the saved endpoint and loopback ports 8188/8189 only. It "
+            "does not enable or launch ComfyUI or scan the LAN. Choose the "
+            "intended reachable server explicitly in Settings."
+        ),
         "starter_workflows": (
             "The workflow library includes SDXL checkpoint text-to-image, a "
             "model-free connection check, and FLUX 3 Klein distilled text-to-image "

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, Check, ChevronDown, ChevronRight, FolderOpen, Loader2, Plus, RefreshCw, Save } from 'lucide-react'
 import * as api from '../../api/comfyui'
 import { cancelJob } from '../../api/client'
@@ -33,6 +33,10 @@ export function ComfyUISettingsPanel() {
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [discovering, setDiscovering] = useState(false)
+  const [discoveringEndpoints, setDiscoveringEndpoints] = useState(false)
+  const [endpointCandidates, setEndpointCandidates] = useState<api.ComfyUIEndpointCandidate[] | null>(null)
+  const [endpointDiscoveryMessage, setEndpointDiscoveryMessage] = useState<string | null>(null)
+  const endpointDiscoveryController = useRef<AbortController | null>(null)
   const [scanning, setScanning] = useState(false)
   const [linking, setLinking] = useState(false)
   const [receiptAction, setReceiptAction] = useState<string | null>(null)
@@ -44,6 +48,8 @@ export function ComfyUISettingsPanel() {
   const [scan, setScan] = useState<api.ComfyUIModelScan | null>(null)
   const [linkedPaths, setLinkedPaths] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => () => endpointDiscoveryController.current?.abort(), [])
 
   useEffect(() => {
     if (!open || status) return
@@ -79,6 +85,35 @@ export function ComfyUISettingsPanel() {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Could not save ComfyUI settings.')
     } finally { setSaving(false) }
+  }
+
+  const discoverEndpoints = async () => {
+    endpointDiscoveryController.current?.abort()
+    const controller = new AbortController()
+    endpointDiscoveryController.current = controller
+    setDiscoveringEndpoints(true)
+    setEndpointDiscoveryMessage(null)
+    setEndpointCandidates(null)
+    setConnection(null)
+    try {
+      const result = await api.discoverComfyUIConnections(controller.signal)
+      if (!controller.signal.aborted) {
+        setEndpointCandidates(result.candidates ?? [])
+        if (!result.candidates?.length) setEndpointDiscoveryMessage('No reachable ComfyUI endpoint was found. Enter an existing local or LAN endpoint manually.')
+      }
+    } catch (reason) {
+      if (!controller.signal.aborted) {
+        setEndpointDiscoveryMessage((reason instanceof Error ? reason.message + ' ' : '') + 'Enter an existing local or LAN endpoint manually.')
+      }
+    } finally {
+      if (!controller.signal.aborted) setDiscoveringEndpoints(false)
+    }
+  }
+
+  const applyEndpointCandidate = (candidate: api.ComfyUIEndpointCandidate) => {
+    setEndpoint(candidate.endpoint)
+    setConnection(null)
+    setEndpointDiscoveryMessage(null)
   }
 
   const testConnection = async () => {
@@ -197,7 +232,13 @@ export function ComfyUISettingsPanel() {
         type="button"
         aria-expanded={open}
         aria-controls="comfyui-settings-content"
-        onClick={() => setOpen(value => !value)}
+        onClick={() => {
+          if (open) {
+            endpointDiscoveryController.current?.abort()
+            setDiscoveringEndpoints(false)
+          }
+          setOpen(value => !value)
+        }}
         className="flex w-full items-center gap-2 px-3 py-2.5 text-left"
       >
         {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
@@ -211,6 +252,16 @@ export function ComfyUISettingsPanel() {
       {open && <div id="comfyui-settings-content" className="space-y-3 border-t border-border px-3 py-3">
         {loading && <p role="status" className="flex items-center gap-1.5 text-[10px] text-text-muted"><Loader2 size={12} className="animate-spin" /> Loading settings…</p>}
         {error && <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-2.5 py-2 text-[10px] text-chip-red">{error}</div>}
+
+        <div className="rounded-lg border border-border bg-bg-primary px-2.5 py-2.5">
+          <h3 className="text-[10px] font-semibold text-text-primary">Get started</h3>
+          <ol className="mt-1.5 list-inside list-decimal space-y-1 text-[9px] leading-relaxed text-text-secondary">
+            <li>Find or enter an existing ComfyUI server.</li>
+            <li>Save the endpoint, then test that it responds.</li>
+            <li>Enable integration only when you want ComfyUI workflows. Native stays the default.</li>
+          </ol>
+          <p className="mt-1.5 text-[9px] text-text-muted">Next action: discover a server or enter its address, then save and test. Testing never enables integration.</p>
+        </div>
 
         <label className="flex cursor-pointer items-start gap-2 text-[11px] text-text-primary">
           <input type="checkbox" checked={enabled} onChange={event => setEnabled(event.target.checked)} className="mt-0.5 accent-[var(--color-accent-blue)]" />
@@ -226,6 +277,24 @@ export function ComfyUISettingsPanel() {
           <label htmlFor="comfyui-endpoint" className="mb-1 block text-[10px] font-medium text-text-secondary">ComfyUI endpoint</label>
           <input id="comfyui-endpoint" type="url" value={endpoint} onChange={event => setEndpoint(event.target.value)} placeholder="http://127.0.0.1:8188" className="w-full rounded-lg border border-border bg-bg-primary px-2.5 py-2 text-xs text-text-primary outline-none placeholder:text-text-muted focus:border-accent-blue" />
           <p className="mt-1 text-[9px] leading-relaxed text-text-muted">Use an existing local or LAN ComfyUI server. Maestro will not install custom nodes.</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button type="button" onClick={() => void discoverEndpoints()} disabled={discoveringEndpoints || loading} className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-bg-primary px-2.5 py-2 text-[10px] text-text-secondary hover:text-text-primary disabled:opacity-50">
+              {discoveringEndpoints ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} Discover endpoints
+            </button>
+          </div>
+          {endpointDiscoveryMessage && <p role="status" className="mt-1.5 text-[9px] leading-relaxed text-text-muted">{endpointDiscoveryMessage}</p>}
+          {endpointCandidates && <div className="mt-2 max-h-44 space-y-1.5 overflow-y-auto">
+            {endpointCandidates.map(candidate => <div key={candidate.endpoint} className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-bg-primary px-2.5 py-2">
+              <div className="min-w-0 flex-1">
+                <div className="break-all font-mono text-[9px] text-text-primary">{candidate.endpoint}</div>
+                <div className={candidate.connected ? 'mt-0.5 text-indicator-success' : 'mt-0.5 text-indicator-warning'}>
+                  {candidate.connected ? 'Reachable' : 'Not reachable'}{candidate.node_count !== undefined ? ' · ' + candidate.node_count + ' nodes' : ''}
+                </div>
+                {candidate.error && <p className="mt-0.5 break-words text-[8px] text-text-muted">{candidate.error}</p>}
+              </div>
+              <button type="button" onClick={() => applyEndpointCandidate(candidate)} disabled={!candidate.connected} className="shrink-0 rounded-md border border-border px-2 py-1 text-[9px] text-text-secondary hover:text-text-primary disabled:opacity-40">Use endpoint</button>
+            </div>)}
+          </div>}
         </div>
 
         <div className="flex flex-wrap gap-2">

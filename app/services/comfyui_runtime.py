@@ -22,7 +22,7 @@ import uuid
 from .comfyui_client import ComfyClient, ComfyError
 from .comfyui_models import discover_comfyui_installations, scan_comfyui_models
 from .comfyui_workflows import (
-    apply_bindings, builtin_templates, normalize_workflow, preflight_workflow,
+    apply_bindings, binding_choices, builtin_templates, normalize_workflow, preflight_workflow,
     validate_bindings,
 )
 
@@ -231,6 +231,31 @@ class ComfyService:
     def discover(self, paths=None) -> dict:
         return {"installations": discover_comfyui_installations(self.app_root, extra_roots=paths)}
 
+    def discover_connections(self) -> dict:
+        """Explicitly probe the saved endpoint and two loopback defaults.
+
+        No LAN scanning, settings mutation, server launch or automatic enable.
+        A refused candidate does not prevent checking the remaining addresses.
+        """
+        endpoints = list(dict.fromkeys((self._config()["endpoint"], "http://127.0.0.1:8188", "http://127.0.0.1:8189")))
+        candidates = []
+        for endpoint in endpoints:
+            client = None
+            row = {"endpoint": endpoint, "connected": False}
+            try:
+                client = self.client_factory(endpoint, timeout=3)
+                stats, info = client.system_stats(), client.object_info()
+                if not isinstance(stats, dict) or not isinstance(info, dict) or not info:
+                    raise ServiceError(502, "The endpoint did not advertise ComfyUI node schemas.")
+                row.update(connected=True, node_count=len(info))
+            except (ComfyError, ValueError):
+                row["error"] = "ComfyUI was not reachable at this address."
+            finally:
+                if client is not None:
+                    _close_client(client)
+            candidates.append(row)
+        return {"candidates": candidates}
+
     def scan(self, paths: list[str]) -> dict:
         return scan_comfyui_models(paths, known_assets=self.known_assets())
 
@@ -244,6 +269,15 @@ class ComfyService:
         for path in sorted((self.directory / "workflows").glob("*.json")):
             saved.append(_redact(_read_json(path, {})))
         return {"workflows": saved, "templates": builtin_templates()}
+
+    def workflow_options(self, workflow_id: str) -> dict:
+        value = self._workflow(workflow_id)
+        client = self._client()
+        try:
+            choices = binding_choices(value["workflow"], value["bindings"], client.object_info())
+        finally:
+            _close_client(client)
+        return {"workflow_id": workflow_id, "choices": choices}
 
     def _workflow(self, workflow_id: str) -> dict:
         _identifier(workflow_id)

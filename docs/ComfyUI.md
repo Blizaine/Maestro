@@ -16,6 +16,9 @@ workflow at a time, and keep the intended image, video, or audio kind explicit.
    that server address. The
    optional dedicated memory setting asks ComfyUI to free its idle models; it
    does not launch a separate process or reserve GPU memory.
+   **Find running servers** checks the saved address and the standard local
+   ports 8188 and 8189 when clicked. Select a result explicitly; discovery does
+   not enable ComfyUI, scan the network, or launch another application.
 3. Use **Test connection** to check that Maestro can reach the endpoint. This
    is a reachability probe; it does not queue a graph or prove that a model can
    generate successfully.
@@ -70,6 +73,12 @@ endpoint. For each graph:
    model, and binding errors before adding a model route.
 5. Generate a small result and inspect it in Maestro's normal gallery.
 
+Component pickers use the filenames advertised by the selected ComfyUI server
+for that workflow's bound inputs. They do not infer format compatibility or
+choose model files automatically. If a custom node does not advertise choices,
+manual input remains available. Uploaded media comes from Maestro's asset
+handling, rather than another user's ComfyUI input directory.
+
 Validation is a preflight check, not an AI output test or a guarantee of
 visual, audio, or temporal quality. If you use a model-free CPU diagnostic, it
 checks basic service and request handling; it does not prove that an AI model
@@ -97,6 +106,10 @@ handoff do not establish that the model followed the requested visual change.
 
 - `POST /api/v1/comfyui/workflows` registers `name`, `kind`, the API-format
   `workflow` graph, and its typed `bindings` list. `description` is optional.
+- `POST /api/v1/comfyui/connection/discover` explicitly probes the saved address
+  and two loopback defaults; it takes `{}` and does not change settings.
+- `GET /api/v1/comfyui/workflows/{id}/options` reads the configured server's
+  advertised choices for registered bound inputs. It requires Manage access.
 - `POST /api/v1/comfyui/workflows/{id}/validate` accepts `{}` for defaults or
   `{"inputs": {...}}` to preflight actual selected values, including a
   checkpoint selection.
