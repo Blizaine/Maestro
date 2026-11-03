@@ -44,7 +44,7 @@ const options = {model_type:model, architecture:'minimax_h3_ref2va', omni_refere
     await page.waitForFunction(() => document.querySelector('#director-gpu-clip-limit').textContent.includes('10.1'));
     assert.match(await select.textContent(), /14.4s/);
     await select.selectOption('345');
-    await page.waitForFunction(() => document.body.textContent.includes('Above Auto'));
+    await page.waitForFunction(() => document.body.textContent.includes('Above recommended starting point'));
     const music = page.getByRole('group', {name:'Music video clip length'});
     await page.waitForFunction(() => document.querySelector('input[type=range]')?.value === '345');
     assert.equal(await music.getByRole('button', {name:'Auto',exact:true}).getAttribute('aria-pressed'), 'true');

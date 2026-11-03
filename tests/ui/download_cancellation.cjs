@@ -179,8 +179,12 @@ async function renderUntilSettled(hooks, render) {
   assert.fail('UI did not settle');
 }
 
-const api = loadTypeScript('ui/src/api/client.ts', () => {
-  throw new Error('client.ts unexpectedly imported a runtime module');
+const readRequest = loadTypeScript('ui/src/api/readRequest.ts', () => {
+  throw new Error('readRequest.ts unexpectedly imported a runtime module');
+}, {fetch: (url, init) => fetchHandler(url, init)});
+const api = loadTypeScript('ui/src/api/client.ts', name => {
+  if (name === './readRequest') return readRequest;
+  throw new Error(`client.ts unexpectedly imported runtime module ${name}`);
 }, {fetch: (url, init) => fetchHandler(url, init)});
 
 function mockIcons() {
@@ -276,6 +280,7 @@ function createSettingsHarness(initialStatus, options = {}) {
     '../../lib/modelVisibility': loadTypeScript('ui/src/lib/modelVisibility.ts', () => ({})),
     '../../lib/modelDisplay': loadTypeScript('ui/src/lib/modelDisplay.ts', () => ({})),
     './MemorySettingsPanel': {MemorySettingsPanel: () => null},
+    './ComfyUISettingsPanel': {ComfyUISettingsPanel: () => null},
     '../../api/client': modelApi,
     '../../lib/theme': {FAMILIES: [], resolveVariant: () => null, onOsThemeChange: () => () => {}},
   };

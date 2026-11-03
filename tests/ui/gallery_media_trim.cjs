@@ -67,6 +67,7 @@ const {chromium} = require(process.env.MAESTRO_PLAYWRIGHT || 'playwright');
         }
         return route.fulfill({contentType:isVideo?'video/mp4':'audio/wav',body:bytes});
       }
+      if(key.startsWith('/api/v1/media-info/')) return json({duration_seconds:probeDuration});
       if(key.endsWith('/metadata')) return json({params:{prompt:'Fixture'}});
       if(key==='/api/v1/recipes') return json({recipes:[]});
       if(key.includes('/thumbnail/')) return route.fulfill({status:404});
