@@ -3946,9 +3946,16 @@ def enhance_prompt(
             "\n\nCRITICAL MINIMAX H3 REF2VA OUTPUT CONTRACT: Output ONLY the six required fields, "
             "in order: subject_definitions:, summary:, retention_analysis:, detailed_description:, "
             "overall_soundscape:, and non_diegetic_music:. Use only the supplied <Picture n>, <Video n>, "
-            "and <Audio n> labels. These labels and fields are model syntax, not explanatory headings. "
-            "Every VOICE REFERENCE must be bound inside subject_definitions to its matching <Subject n> "
-            "and its stable speaker ID. Subject numbering follows reusable-reference order, while (S1), "
+            "and <Audio n> labels and the native Subject IDs and roles shown in the supplied inventory. "
+            "These labels and fields are model syntax, not explanatory headings. Never invent, renumber, "
+            "or add a Subject ID. A scene/environment or visual-treatment Subject may describe only that "
+            "role; it is never a character identity or dialogue speaker. If no identity-bearing character "
+            "Subject is supplied, keep named cast as plain character names and use supplied Video labels "
+            "only for their listed roles. Do not promote a motion Video or paired/legacy soundtrack Audio "
+            "to character identity or voice reference. Bind an Audio as a voice reference only when the "
+            "inventory explicitly marks it as a voice reference for that owner; use the matching Subject "
+            "when allocated, otherwise keep the owner as a plain character name without inventing a Subject. "
+            "Subject numbering follows reusable-reference order, while (S1), "
             "(S2), etc. are assigned independently by first actual vocal-event order. Spoken lines require "
             "that same event-ordered ID and <d>[Language] literal words</d>. Each line is spoken once by "
             "that character only; no other character repeats, echoes, mouths, or paraphrases it. Voice "
@@ -3957,6 +3964,14 @@ def enhance_prompt(
             "explanation, filenames, or LoRA display names. Exact creator-declared "
             "trainedWords tokens from active-LoRA guidance may appear when relevant."
         )
+        import re
+        native_subject_roles = [
+            line.strip()
+            for line in str(reference_context or "").splitlines()
+            if re.match(r"(?i)^\s*<Subject\s+\d+>\s+is\s+", line)
+        ]
+        if native_subject_roles:
+            system += "\nNATIVE SUBJECT ROLE MAP (authoritative):\n" + "\n".join(native_subject_roles)
     elif is_h3_context_ir:
         system += (
             "\n\nCRITICAL MINIMAX H3 OUTPUT CONTRACT: Output ONLY the structured "
@@ -4331,9 +4346,14 @@ def enhance_prompt(
                     + f"\n\nRETRY REQUIREMENT: Be concise. {field_requirement} "
                     "Do not repeat a subject definition or reference mapping. Never replace a requested "
                     "spoken line with the words 'speaks', 'talks', or 'dialogue'; write the actual <d> block. "
-                    "The numbered Saved character Subject map in the request is immutable: never renumber it, "
-                    "never emit <Subject N>, and never add another Subject for a repeated label. Speaker IDs "
-                    "remain independent and follow first actual vocal-event order."
+                    "The supplied native Subject IDs and roles are immutable: never renumber them, invent a "
+                    "Subject, or add another Subject for a repeated label. A scene/environment or style "
+                    "Subject is never a character or speaker. If no character Subject is supplied, retain "
+                    "named cast as plain names and use Video labels only for their listed roles. A paired or "
+                    "legacy soundtrack Audio is not a voice reference. Bind Audio as voice only when the "
+                    "inventory explicitly marks it for that owner; use a Subject if allocated, otherwise "
+                    "the plain character name. Speaker IDs remain independent and follow first actual "
+                    "vocal-event order."
                 ),
                 max_new_tokens=effective_max_tokens,
                 temperature=min(float(temperature), 0.35),
@@ -4847,6 +4867,211 @@ def _extract_h3_quoted_dialogue(text: str) -> list[str]:
     return [entry["words"] for entry in _extract_h3_source_dialogue_entries(text)]
 
 
+def _h3_explicit_cast_speakers(text: str) -> dict[int, str]:
+    """Read ``Characters: (S1) Name ...`` aliases without treating S as Subject.
+
+    User-authored cast manifests often identify a speaker separately from the
+    numbered Omni Subject map.  In particular, a scene Subject may be S1 only
+    by coincidence; this parser returns names for vocal ownership, never
+    Subject IDs.
+    """
+    import re
+
+    source = str(text or "")
+    manifest: dict[int, str] = {}
+    headings = list(re.finditer(r"(?im)^\s*characters?\s*:\s*", source))
+    for heading_index, heading in enumerate(headings):
+        end = len(source)
+        blank = re.search(r"\n\s*\n", source[heading.end():])
+        if blank:
+            end = min(end, heading.end() + blank.start())
+        next_heading = re.search(
+            r"(?im)^\s*(?:scene|setting|action|story|description|style|audio|music)\s*:",
+            source[heading.end():],
+        )
+        if next_heading:
+            end = min(end, heading.end() + next_heading.start())
+        if heading_index + 1 < len(headings):
+            end = min(end, headings[heading_index + 1].start())
+        body = source[heading.end():end]
+        markers = list(re.finditer(r"\(\s*S(\d+)\s*\)", body, re.IGNORECASE))
+        for index, marker in enumerate(markers):
+            previous_end = markers[index - 1].end() if index else 0
+            next_start = markers[index + 1].start() if index + 1 < len(markers) else len(body)
+            before = body[previous_end:marker.start()]
+            after = body[marker.end():next_start]
+
+            def clean_name(value: str) -> str:
+                value = re.sub(r"<[^>]*>", " ", value)
+                value = re.sub(r"(?i)\b(?:as\s+(?:a\s+)?)?references?\b.*$", " ", value)
+                value = re.sub(r"(?i)\b(?:video|audio)\s+\d+\b", " ", value)
+                value = re.sub(r"(?i)\b(?:is|are|with|using|from)\s*$", " ", value)
+                value = re.sub(r"\s+", " ", value).strip(" \t\r\n:;,.-–—")
+                return value
+
+            # Most manifests put the name after (Sx), while ``JIM (S3)`` is a
+            # common reverse ordering. Restrict the latter to the current
+            # punctuation-delimited entry so a preceding character cannot leak.
+            after_name = clean_name(after.split("<", 1)[0])
+            before_entry = re.split(r"[\r\n.!?;]", before)[-1]
+            before_name = clean_name(before_entry)
+            name = after_name or before_name
+            if not name or re.fullmatch(r"S\d+", name, re.IGNORECASE):
+                continue
+            speaker = int(marker.group(1))
+            previous = manifest.get(speaker)
+            if previous is None or _h3_ref2va_normalized_name(previous) == _h3_ref2va_normalized_name(name):
+                manifest[speaker] = name
+            else:
+                # A conflicting declaration is not reliable ownership proof.
+                manifest.pop(speaker, None)
+    return manifest
+
+
+def _h3_explicit_cast_section_spans(text: str) -> list[tuple[int, int]]:
+    """Return the contents of source ``Characters:`` sections."""
+    import re
+
+    source = str(text or "")
+    spans = []
+    headings = list(re.finditer(r"(?im)^\s*characters?\s*:\s*", source))
+    for index, heading in enumerate(headings):
+        end = len(source)
+        blank = re.search(r"\n\s*\n", source[heading.end():])
+        if blank:
+            end = min(end, heading.end() + blank.start())
+        next_heading = re.search(
+            r"(?im)^\s*(?:scene|setting|action|story|description|style|audio|music)\s*:",
+            source[heading.end():],
+        )
+        if next_heading:
+            end = min(end, heading.end() + next_heading.start())
+        if index + 1 < len(headings):
+            end = min(end, headings[index + 1].start())
+        spans.append((heading.end(), end))
+    return spans
+
+
+def _canonicalize_h3_source_cast_markers(text: str, cast_speakers: dict[int, str]) -> str:
+    """Render source cast IDs as names when event order changes those IDs."""
+    import re
+
+    blocks: list[str] = []
+
+    def protect_dialogue(match):
+        blocks.append(match.group(0))
+        return f"@@MAESTRO_CAST_DIALOGUE_{len(blocks) - 1}@@"
+
+    result = re.sub(r"(?is)<d\b[^>]*>.*?</d\s*>", protect_dialogue, str(text or ""))
+    for start, end in reversed(_h3_explicit_cast_section_spans(result)):
+        section = result[start:end]
+        section = re.sub(r"\(\s*S\d+\s*\)", "", section, flags=re.IGNORECASE)
+        result = result[:start] + section + result[end:]
+
+    def replace_marker(match):
+        name = cast_speakers.get(int(match.group(1)))
+        return name if name else match.group(0)
+
+    result = re.sub(r"\(\s*S(\d+)\s*\)", replace_marker, result, flags=re.IGNORECASE)
+    for index, block in enumerate(blocks):
+        result = result.replace(f"@@MAESTRO_CAST_DIALOGUE_{index}@@", block)
+    return result
+
+
+def _h3_source_speaker_marker_match_for_dialogue(
+    source: str,
+    dialogue_start: int,
+    previous_dialogue_end: int = 0,
+) -> Optional[tuple[int, int, int]]:
+    """Find the source span for a cast marker attached to a speaker cue."""
+    import re
+    from models.minimax_h3.speakers import _SPEECH_VERB_RE
+
+    floor = max(0, int(previous_dialogue_end))
+    prefix = str(source or "")[floor:int(dialogue_start)]
+    prefix_offset = floor
+    clip = list(re.finditer(r"(?i)(?:\[\s*(?:shot|scene)\s+\d+\s*\]|(?:^|\n)\s*(?:shot|scene)\s+\d+\s*:?)", prefix))
+    if clip:
+        prefix_offset += clip[-1].end()
+        prefix = prefix[clip[-1].end():]
+    speech_verbs = list(_SPEECH_VERB_RE.finditer(prefix))
+    if speech_verbs:
+        before_verb = prefix[:speech_verbs[-1].start()]
+        markers = list(re.finditer(r"\(\s*S(\d+)\s*\)", before_verb, re.IGNORECASE))
+        if markers:
+            marker = markers[-1]
+            return prefix_offset + marker.start(), prefix_offset + marker.end(), int(marker.group(1))
+
+    # Without a speech verb, accept only a marker adjacent to the tag. This
+    # covers compact ``Name (S1) <d>`` cues while rejecting ``to (S2)``.
+    trailing = list(re.finditer(r"\(\s*S(\d+)\s*\)", prefix, re.IGNORECASE))
+    if trailing:
+        marker = trailing[-1]
+        suffix = prefix[marker.end():]
+        leading = prefix[max(0, marker.start() - 32):marker.start()]
+        if len(suffix.strip()) <= 24 and not re.search(r"\b(?:to|for|toward|towards)\s*$", leading, re.IGNORECASE):
+            return prefix_offset + marker.start(), prefix_offset + marker.end(), int(marker.group(1))
+    return None
+
+
+def _h3_source_speaker_marker_for_dialogue(
+    source: str,
+    dialogue_start: int,
+    previous_dialogue_end: int = 0,
+) -> Optional[int]:
+    """Find a cast marker attached to the speaker verb, not a speech object."""
+    match = _h3_source_speaker_marker_match_for_dialogue(
+        source, dialogue_start, previous_dialogue_end,
+    )
+    return match[2] if match else None
+
+
+def _h3_ref2va_scene_subject_ids(reference_context: Optional[str]) -> set[int]:
+    """Return native environment/style Subjects that cannot own dialogue."""
+    import re
+    return {
+        int(value)
+        for value in re.findall(
+            r"(?im)^\s*<Subject\s+(\d+)>\s+is\s+(?:the environment and location|the visual treatment)\b",
+            str(reference_context or ""),
+        )
+    }
+
+
+def _extract_h3_ref2va_audio_sections(prompt: str) -> tuple[str, dict[str, str]]:
+    """Lift prompt-native sound fields so fallback keeps them in their fields."""
+    import re
+
+    source = str(prompt or "")
+    field_names = ("subject_definitions", "summary", "retention_analysis", "detailed_description",
+                   "overall_soundscape", "non_diegetic_music")
+    dialogue_spans = [
+        match.span()
+        for match in re.finditer(r"(?is)<d\b[^>]*>.*?</d\s*>", source)
+    ]
+    headers = [header for header in re.finditer(
+        r"(?im)^\s*(" + "|".join(field_names) + r")\s*:\s*", source,
+    ) if not any(start <= header.start() < end for start, end in dialogue_spans)]
+    requested: dict[str, list[str]] = {"overall_soundscape": [], "non_diegetic_music": []}
+    remove_spans: list[tuple[int, int]] = []
+    for index, header in enumerate(headers):
+        field = header.group(1).casefold()
+        if field not in requested:
+            continue
+        end = headers[index + 1].start() if index + 1 < len(headers) else len(source)
+        value = source[header.end():end].strip()
+        if value and value not in requested[field]:
+            requested[field].append(value)
+        remove_spans.append((header.start(), end))
+    for start, end in reversed(remove_spans):
+        source = source[:start] + source[end:]
+    return source.strip(), {
+        field: "\n".join(values)
+        for field, values in requested.items()
+        if values
+    }
+
+
 def _extract_h3_source_dialogue_entries(
     text: str,
     reference_context: Optional[str] = None,
@@ -4939,15 +5164,89 @@ def _extract_h3_source_dialogue_entries(
     spans = filtered_spans
     spans.sort(key=lambda entry: entry["start"])
     manifest = _parse_h3_ref2va_subject_manifest(reference_context)
-    if manifest:
+    scene_subjects = _h3_ref2va_scene_subject_ids(reference_context)
+    speaker_manifest = [
+        subject for subject in manifest
+        if int(subject["index"]) not in scene_subjects
+    ]
+    cast_speakers = _h3_explicit_cast_speakers(source)
+    if cast_speakers:
+        from models.minimax_h3.speakers import (
+            _ref2va_alias_values,
+            _resolve_ref2va_dialogue_owner_name,
+            resolve_ref2va_dialogue_owners,
+        )
+
+        valid_subjects = {int(subject["index"]) for subject in speaker_manifest}
+        subject_aliases: dict[str, set[int]] = {}
+        for subject in speaker_manifest:
+            for alias in _ref2va_alias_values({"character_name": subject["name"]}):
+                subject_aliases.setdefault(alias, set()).add(int(subject["index"]))
+        cast_by_normalized_name = {
+            _h3_ref2va_normalized_name(name): name
+            for name in cast_speakers.values()
+        }
+        vocal_speakers: dict[tuple, int] = {}
+        previous_end = 0
+        for index, entry in enumerate(spans, start=1):
+            owner = entry.get("speaker") or _resolve_ref2va_dialogue_owner_name(
+                source, int(entry["start"]), int(entry["end"]),
+            )
+            cast_marker = _h3_source_speaker_marker_for_dialogue(
+                source, int(entry["start"]), previous_end,
+            )
+            normalized_owner = _h3_ref2va_normalized_name(owner or "")
+            if normalized_owner in cast_by_normalized_name:
+                owner = cast_by_normalized_name[normalized_owner]
+            elif not owner and cast_marker in cast_speakers:
+                owner = cast_speakers[int(cast_marker)]
+
+            subject = None
+            if owner:
+                owner_aliases = _ref2va_alias_values({"character_name": owner})
+                candidates = {
+                    next(iter(subject_aliases[alias]))
+                    for alias in owner_aliases
+                    if alias in subject_aliases and len(subject_aliases[alias]) == 1
+                }
+                if len(candidates) == 1:
+                    subject = next(iter(candidates))
+            if subject is None and not owner and valid_subjects:
+                # Keep the established strict ambiguity behavior for dialogue
+                # without a source-cast attribution.
+                owners = resolve_ref2va_dialogue_owners(
+                    source,
+                    [(int(entry["start"]), int(entry["end"]), entry["words"])],
+                    {
+                        alias: next(iter(subjects))
+                        for alias, subjects in subject_aliases.items()
+                        if len(subjects) == 1
+                    },
+                    valid_subjects,
+                )
+                subject, owner = owners[0]
+            if subject is None and not owner and len(valid_subjects) == 1:
+                subject = next(iter(valid_subjects))
+            if subject is not None:
+                entry["subject_id"] = subject
+            if owner:
+                entry["speaker"] = owner
+            key = ("subject", subject) if subject is not None else (
+                ("name", owner.casefold()) if owner else ("event", index)
+            )
+            entry["speaker_id"] = vocal_speakers.setdefault(
+                key, len(vocal_speakers) + 1,
+            )
+            previous_end = max(previous_end, int(entry["end"]))
+    elif speaker_manifest:
         from models.minimax_h3.speakers import (
             _ref2va_alias_values,
             resolve_ref2va_dialogue_owners,
         )
 
-        valid_subjects = {int(subject["index"]) for subject in manifest}
+        valid_subjects = {int(subject["index"]) for subject in speaker_manifest}
         alias_candidates: dict[str, set[int]] = {}
-        for subject in manifest:
+        for subject in speaker_manifest:
             for alias in _ref2va_alias_values({"character_name": subject["name"]}):
                 alias_candidates.setdefault(alias, set()).add(int(subject["index"]))
         aliases = {
@@ -4971,18 +5270,23 @@ def _extract_h3_source_dialogue_entries(
     else:
         from models.minimax_h3.speakers import _resolve_ref2va_dialogue_owner_name
         vocal_speakers: dict[tuple, int] = {}
+        previous_end = 0
         for index, entry in enumerate(spans, start=1):
-            prefix = source[max(0, int(entry["start"]) - 80):int(entry["start"])]
-            explicit = re.findall(r"\(S(\d+)\)", prefix, flags=re.IGNORECASE)
             owner = entry.get("speaker") or _resolve_ref2va_dialogue_owner_name(
                 source, int(entry["start"]), int(entry["end"]),
             )
             key = ("name", owner.casefold()) if owner else ("event", index)
             if owner:
                 entry["speaker"] = owner
-            entry["speaker_id"] = vocal_speakers.setdefault(
-                key, int(explicit[-1]) if explicit else max(vocal_speakers.values(), default=0) + 1,
+            actor_marker = _h3_source_speaker_marker_for_dialogue(
+                source, int(entry["start"]), previous_end,
             )
+            entry["speaker_id"] = vocal_speakers.setdefault(
+                key,
+                int(actor_marker) if actor_marker is not None
+                else max(vocal_speakers.values(), default=0) + 1,
+            )
+            previous_end = max(previous_end, int(entry["end"]))
     return spans
 
 
@@ -7887,6 +8191,24 @@ def _compile_h3_explicit_dialogue(
     """Compile quotes and bare tags into canonical, speaker-bound H3 dialogue."""
     result = str(prompt or "")
     entries = _extract_h3_source_dialogue_entries(result, reference_context)
+    cast_speakers = _h3_explicit_cast_speakers(result)
+    if cast_speakers and entries:
+        previous_end = 0
+        event_order_differs = False
+        for entry in entries:
+            marker = _h3_source_speaker_marker_match_for_dialogue(
+                result, int(entry["start"]), previous_end,
+            )
+            if marker and marker[2] in cast_speakers and int(entry.get("speaker_id") or 0) != marker[2]:
+                event_order_differs = True
+            previous_end = max(previous_end, int(entry["end"]))
+        if event_order_differs:
+            # Cast-list S numbers are source aliases; H3 dialogue IDs follow
+            # first vocal-event order. Render those aliases as names in the
+            # fallback copy so a reordered cast cannot contradict the emitted
+            # (S1), (S2), ... voice tags. The submitted source stays untouched.
+            result = _canonicalize_h3_source_cast_markers(result, cast_speakers)
+            entries = _extract_h3_source_dialogue_entries(result, reference_context)
     for entry in reversed(entries):
         start = int(entry["start"])
         end = int(entry["end"])
@@ -7921,7 +8243,13 @@ def _compile_h3_explicit_dialogue(
             result = result[:start] + f"<d>[{entry['language']}] {entry['words']}</d>" + result[end:]
             continue
         existing = re.search(r"(?:<Subject\s+\d+>\s*)?\(S\d+\)\s*$", prefix, flags=re.IGNORECASE)
-        if existing:
+        existing_lead = prefix[:existing.start()] if existing else ""
+        recipient_marker = bool(re.search(
+            r"\b(?:to|for|toward|towards|with|at|from|of)\s*$",
+            existing_lead,
+            flags=re.IGNORECASE,
+        ))
+        if existing and not recipient_marker:
             absolute = max(0, start - 60) + existing.start()
             result = result[:absolute] + replacement + result[end:]
         else:
@@ -8040,9 +8368,22 @@ def _strip_h3_untagged_dialogue_duplicates(result: str, prompt: str) -> str:
 
 def _enforce_h3_soundscape_silence(result: str, prompt: str) -> str:
     """Keep the model from filling dialogue gaps with invented human noises."""
+    import re
+    _, explicit_audio_fields = _extract_h3_ref2va_audio_sections(prompt)
+    if "overall_soundscape" in explicit_audio_fields:
+        pattern = re.compile(
+            r"(?ms)^\s*overall_soundscape\s*:.*?(?=^\s*non_diegetic_music\s*:|\Z)",
+        )
+        match = pattern.search(str(result or ""))
+        requested_soundscape = explicit_audio_fields["overall_soundscape"].strip()
+        if not match or requested_soundscape not in match.group(0):
+            replacement = "overall_soundscape: " + requested_soundscape + "\n"
+            if match:
+                result = pattern.sub(lambda _match: replacement, str(result or ""), count=1)
+            else:
+                result = str(result or "").rstrip() + "\n" + replacement.rstrip()
     if not _h3_requests_speech(prompt):
         return result
-    import re
 
     # Preserve vocal reactions only when the source positively requests one.
     # H3 prompts often say "no voices, whispers, grunts..."; a plain keyword
@@ -8142,6 +8483,19 @@ def _enforce_h3_soundscape_silence(result: str, prompt: str) -> str:
     if not match:
         return result
     content = match.group(2).strip()
+    if "overall_soundscape" in explicit_audio_fields and not re.search(
+        r"(?i)\b(?:grunts?|gasps?|screams?|laughs?|laughter|sob\w*|cr(?:y|ies|ied|ying)|"
+        r"chuckl\w*|giggl\w*|audible\s+breathing|nonverbal\s+vocal\w*|"
+        r"chatter\w*|murmur\w*|voice\w*|speech|conversation|talk\w*)\b",
+        explicit_audio_fields["overall_soundscape"],
+    ):
+        silence_clause = (
+            "Outside the tagged dialogue, no human voices, whispers, grunts, audible breathing, "
+            "or speech-like vocalizations occur"
+        )
+        if silence_clause.casefold() not in content.casefold():
+            content = content.rstrip(" .") + ". " + silence_clause + "."
+        return result[:match.start()] + match.group(1) + " " + content + "\n" + result[match.end():]
     sentences = re.split(r"(?<=[.!?])\s+", content)
     kept = []
     for sentence in sentences:
@@ -8182,6 +8536,13 @@ def _enforce_h3_music_request(
 ) -> str:
     """Do not turn visual words such as 'cinematic' into an invented score."""
     import re
+    _, explicit_audio_fields = _extract_h3_ref2va_audio_sections(prompt)
+    if "non_diegetic_music" in explicit_audio_fields:
+        replacement = "non_diegetic_music: " + explicit_audio_fields["non_diegetic_music"].strip()
+        pattern = re.compile(r"(?ms)^\s*non_diegetic_music\s*:.*\Z")
+        if pattern.search(str(result or "")):
+            return pattern.sub(lambda _match: replacement, str(result or ""), count=1)
+        return str(result or "").rstrip() + "\n" + replacement
     requests_music = bool(
         re.search(
             r"(?i)\b(?:music|song|score|soundtrack|orchestra|orchestral|instrumental|melody|theme)\b",
@@ -8219,6 +8580,7 @@ def _build_h3_ref2va_tagged_fallback(
     source_error = unclosed_h3_spoken_quote_error(prompt)
     if source_error:
         raise H3PromptBudgetError(source_error)
+    request_prompt, explicit_audio_fields = _extract_h3_ref2va_audio_sections(prompt)
 
     from services.studio_enhancement import record_review_warning
     if rejection_reasons:
@@ -8231,22 +8593,24 @@ def _build_h3_ref2va_tagged_fallback(
         record_review_warning("The AI draft did not produce a valid H3 reference prompt. Review the source-based draft before generating.")
     if has_h3_performance_audio(reference_context):
         definitions, retention = _canonical_h3_ref2va_subject_fields(reference_context, {})
-        return enforce_h3_performance_audio(
+        request = _compile_h3_explicit_dialogue(request_prompt, reference_context).strip()
+        performance_fallback = enforce_h3_performance_audio(
             f"subject_definitions: {definitions}\n"
             "summary: [reference generation + audio reuse] The requested visual performance.\n"
             f"retention_analysis: {retention}\n"
             "detailed_description: The target video maintains the requested visual style. "
-            f"[Shot 1] {prompt}\n"
-            "overall_soundscape: The supplied target soundtrack.\n"
-            "non_diegetic_music: N/A"
+            f"[Shot 1] {request}\n"
+            f"overall_soundscape: {explicit_audio_fields.get('overall_soundscape', 'The supplied target soundtrack.')}\n"
+            f"non_diegetic_music: {explicit_audio_fields.get('non_diegetic_music', 'N/A')}"
         )
+        return performance_fallback
     manifest = _parse_h3_ref2va_subject_manifest(reference_context)
     speaker_map = _h3_ref2va_subject_speaker_map(prompt, reference_context)
     subject_mapping, retention_mapping = _canonical_h3_ref2va_subject_fields(
         reference_context,
         speaker_map,
     )
-    request = _compile_h3_explicit_dialogue(prompt, reference_context)
+    request = _compile_h3_explicit_dialogue(request_prompt, reference_context)
     request_text = request.strip()
     if request_text and request_text[-1] not in ".!?":
         request_text += "."
@@ -8339,9 +8703,16 @@ def _build_h3_ref2va_tagged_fallback(
     )
     sound_requested = bool(re.search(
         r"(?i)\b(?:sound|audio|soundtrack|music|ambience|ambiance|foley|sound effects?)\b",
-        prompt,
+        request_prompt,
     ))
-    if paired_audio:
+    if "overall_soundscape" in explicit_audio_fields:
+        soundscape = explicit_audio_fields["overall_soundscape"].strip()
+        if paired_audio:
+            soundscape += (
+                f"\nUse {paired_audio.group(1)} as a reference for the supplied soundtrack "
+                "and its audible timing."
+            )
+    elif paired_audio:
         soundscape = (
             f"Use {paired_audio.group(1)} as a reference for the supplied soundtrack and its audible timing."
         )
@@ -8375,7 +8746,7 @@ def _build_h3_ref2va_tagged_fallback(
         f"[Shot 1] The finished target video follows this request: {request_text}{identity_picture_clause}"
         f"{composition_clause}{motion_clause} {speech_boundary}{dialogue_boundary} {timed_clause}\n"
         f"overall_soundscape: {soundscape}{voice_clause}\n"
-        "non_diegetic_music: N/A"
+        f"non_diegetic_music: {explicit_audio_fields.get('non_diegetic_music', 'N/A').strip()}"
     )
 
 

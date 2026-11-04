@@ -503,7 +503,9 @@ def _reference_context(references: list[dict[str, Any]]) -> tuple[str, str, str]
                 subject = auxiliary_subjects[reference_index]
                 relationships.append(
                     f"<Subject {subject}> is the environment and location for "
-                    f"{role}, defined by <Picture {picture}>."
+                    f"{role}, defined by <Picture {picture}>; its architecture, materials, "
+                    "lighting context, and location apply without treating incidental people "
+                    "as target character identities."
                 )
                 retention.append(
                     f"<Subject {subject}>: partially_preserved - preserve the "

@@ -270,8 +270,33 @@ const references = [
     const restoredIntent = await page.evaluate(() => window.store.getState().params.minimax_h3_references
       .find(reference => reference.id === 'laser')?.audio_intent);
     assert.equal(restoredIntent, 'sound', 'Output settings restore preserves sound effect intent');
+
+    await page.getByRole('button', {name: /Edit .*Video 1 reference/}).click();
+    const videoType = page.getByRole('combobox', {name: /Video 1 type$/});
+    assert.equal(await videoType.inputValue(), 'motion', 'Older uploaded videos retain their motion role');
+    await videoType.selectOption('character');
+    let video = await page.evaluate(() => window.store.getState().params.minimax_h3_references.find(ref => ref.id === 'video'));
+    assert.equal(video.video_intent, 'character');
+    assert.equal(video.follow_timeline, false, 'A character sample is reusable rather than following a source timeline');
+    assert.equal(video.include_audio, true, 'Choosing a visual role does not silently change the soundtrack role');
+    const soundtrack = page.getByRole('combobox', {name: /Video 1 soundtrack role$/});
+    await soundtrack.selectOption('voice');
+    await page.evaluate(async () => window.store.getState().enhancePrompt());
+    video = enhanceRequest.minimax_h3_references.find(ref => ref.id === 'video');
+    assert.equal(video.video_intent, 'character', 'Enhance receives the selected character-video role');
+    assert.equal(video.video_audio_role, 'voice', 'Enhance receives the separately selected voice role');
+    assert.equal(video.include_audio, false, 'Voice guidance does not reuse the old soundtrack');
+    await videoType.selectOption('scene');
+    video = await page.evaluate(() => window.store.getState().params.minimax_h3_references.find(ref => ref.id === 'video'));
+    assert.equal(video.video_intent, 'scene');
+    assert.equal(video.follow_timeline, true);
+    assert.equal(video.video_audio_role, 'voice', 'Changing visual intent preserves an explicit audio choice');
+    await videoType.selectOption('motion');
+    await page.evaluate(async () => window.store.getState().startGeneration('queue'));
+    assert.equal(generateRequest.minimax_h3_references.find(ref => ref.id === 'video').video_intent, 'motion',
+      'The selected motion role survives generation submission');
     assert.deepEqual(errors, [], 'The reference editor and store actions render without React errors');
-    console.log('Sound effect reference: mobile help, unchanged duration, saved voice/style semantics, Audio inventory labels, submission, and output restore passed');
+    console.log('Reference roles: mobile video character/motion/scene controls, independent voice choice, unchanged other roles, enhancement, submission, and output restore passed');
   } finally {
     await browser.close();
   }

@@ -22,6 +22,11 @@ const AUDIO_INTENT_HELP: Record<MiniMaxH3AudioIntent, string> = {
   style: 'Follows the source timeline across windows; later windows receive silence once the clip ends. H3 borrows its sound or music style.',
   sound: 'Each window gets the same short sample. Describe the effect and when it happens in your prompt. H3 generates matching sound; it does not play or loop the exact waveform or set total duration.',
 }
+const VIDEO_INTENT_HELP = {
+  character: 'Preserve this character’s identity and appearance while generating your new scene and actions. For new dialogue in their voice, also choose Voice reference below.',
+  motion: 'Guide movement, camera, composition, or timing. This does not assign the people in this video as character identities.',
+  scene: 'Preserve the environment, lighting, and scene continuity without using incidental people as character identities.',
+}
 const VIDEO_AUDIO_ROLE_HELP: Record<MiniMaxH3VideoAudioRole, string> = {
   ignore: 'Use the video for visual guidance and ignore its soundtrack.',
   legacy: 'Generative audio guidance. H3 may change the source sounds or add new audio; the original waveform is not preserved.',
@@ -276,6 +281,7 @@ export function OmniReferenceSection({
           has_audio: type === 'video' ? Boolean('has_audio' in uploaded && uploaded.has_audio) : type === 'audio',
           include_audio: type === 'video' ? Boolean('has_audio' in uploaded && uploaded.has_audio) : undefined,
           audio_intent: type === 'audio' ? 'voice' : undefined,
+          video_intent: type === 'video' ? 'motion' : undefined,
           follow_timeline: type === 'video' ? true : undefined,
           role: '',
         })
@@ -611,6 +617,21 @@ export function OmniReferenceSection({
             <option value="voice">Voice reference</option><option value="drive">Music / performance timeline</option><option value="style">Music / sound style only</option><option value="sound">Sound effect reference</option>
           </select>
         </label>}
+        {reference.type === 'video' && <label className="min-w-[165px] flex-1 space-y-1 text-[11px] text-text-muted">
+          <span>Type</span>
+          <select aria-label={`${labels[index]} type`} value={reference.video_intent ?? 'motion'} disabled={disabled || !!reference.refmod_path}
+            onChange={event => patchReference(index, {
+              video_intent: event.target.value as MiniMaxH3Reference['video_intent'],
+              follow_timeline: event.target.value !== 'character',
+            })} className={fieldClass}>
+            <option value="character">Character / identity</option>
+            <option value="motion">Motion / camera</option>
+            <option value="scene">Scene</option>
+          </select>
+        </label>}
+        {reference.type === 'video' && <p className="basis-full min-w-0 text-[11px] leading-relaxed text-text-muted">
+          {VIDEO_INTENT_HELP[reference.video_intent ?? 'motion']}
+        </p>}
         {reference.type === 'audio' && <p className="basis-full min-w-0 text-[11px] leading-relaxed text-text-muted">
           {AUDIO_INTENT_HELP[reference.audio_intent ?? 'voice']}
         </p>}

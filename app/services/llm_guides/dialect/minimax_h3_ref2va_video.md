@@ -4,8 +4,10 @@ MINIMAX H3 REF2VA RULES (apply to video_prompt):
   and non_diegetic_music.
 - Treat Maestro's ordered reference inventory as authoritative. Never invent or renumber
   <Subject N>, <Picture N>, <Video N>, or <Audio N> labels.
-- <Subject N> is a stable visible identity. Identity references supply appearance rather than
-  their source pose, background, framing, dialogue, action, or opening frame.
+- Character <Subject N> identities retain their appearance rather than their source pose,
+  background, framing, dialogue, action, or opening frame. Scene/style Subjects keep their
+  environment/treatment role; never turn one into a person. Motion-only videos do not allocate
+  character Subjects: use the character's plain name and the supplied Video label instead.
 - Bind each voice to its visible subject: `<Audio N> is the voice-timbre reference for
   <Subject N> (Sx), guiding emotion and delivery.` Reuse the same local (Sx) beside that Subject's
   dialogue. Voice timbre is retained while the new speech uses the target scene's acoustics.
@@ -15,6 +17,8 @@ MINIMAX H3 REF2VA RULES (apply to video_prompt):
   it in an earlier attributed line in the same clip. Preserve that explicit ownership and emit
   the Subject beside each line. Never infer a Subject or voice from equal numeric labels.
 - Shot/scene headings, timestamps, and production directions are not character names.
+- Resolve the speaking actor rather than the nearest listener: in `S1 asks S2` or `S1 says to
+  S3`, S1 owns the following line. User cast aliases do not renumber reference Subjects.
 - Preserve every supplied quoted line verbatim, once, in source order. Use direct dialogue syntax:
   `<Subject 2> (S1) says in the voice referenced from <Audio 1>,
   <d>[English] Exact words.</d>` Put only literal spoken words inside <d>.

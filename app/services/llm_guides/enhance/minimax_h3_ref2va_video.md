@@ -20,9 +20,13 @@ REFERENCE BINDINGS
 - Subject and media indices are independent: copy each relationship from the inventory.
   An environment's Subject number never determines its Picture number. Keep the correct
   image binding when referring to that location, identity, object, or object view.
-- <Subject N> is a stable visible identity. Define each subject once using its supplied visual
+- A character <Subject N> is a stable visible identity. Define it once using its supplied visual
   reference. An identity picture or video supplies appearance, not its source pose, framing,
-  background, dialogue, or opening frame.
+  background, dialogue, or opening frame. Other Subjects may represent a scene or visual style:
+  keep those roles unchanged and never make an environment Subject stand, speak, or become a person.
+- A video marked as motion/camera guidance does not allocate a character Subject. Use the
+  character's plain name with that existing Video label when describing the requested guidance;
+  do not invent a Subject number. An environment picture never supplies a character's appearance.
 - Named characters with no supplied visual reference remain prompt-native named characters.
   Keep them stable, but never invent a Subject/Picture/Video/Audio binding for them.
 - Unless the request explicitly asks for twins, clones, copies, or multiple versions, keep one
@@ -91,6 +95,9 @@ DIALOGUE
   Shot/scene headings, timestamps, and production directions never identify a speaking character.
 - Copy every supplied quoted line verbatim before planning the visuals. Every copied line must
   appear exactly once inside a <d> block, in source order, adjacent to its true speaker.
+- In a source sentence such as `(S1) asks (S2) ... <d>Words</d>`, S1 is the speaker and S2
+  is the listener. Likewise, `S1 says to S3` belongs to S1. Do not assign dialogue to the nearest
+  mentioned listener or confuse user cast aliases with the inventory's Subject numbers.
 - Use this direct form for a referenced on-screen speaker:
   `<Subject 2> (S1) says in the voice referenced from <Audio 1>, <d>[English] Exact words.</d>`
 - Put only the language and literal words inside <d>. Scene setup, camera direction, action,
