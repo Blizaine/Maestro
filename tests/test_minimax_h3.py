@@ -1332,6 +1332,93 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             "model.lm_head.weight",
         )
 
+    def test_conditioner_namespaces_normalize_wrapped_qwen_aliases_together(self):
+        normalize = _load_source_function(
+            _MAIN_PATH,
+            "_normalize_conditioner_checkpoint_namespaces",
+        )
+        state, quantization, tied = normalize(
+            {
+                "model.language_model.embed_tokens.weight": "same embedding",
+                "model.embed_tokens.weight": "same embedding",
+                "model.visual.patch_embed.proj.weight": "vision",
+                "text_encoder.model.language_model.layers.0.weight": "wrapped",
+                "text_encoder.model.visual.proj.weight": "wrapped vision",
+                "model.layers.1.mlp.up_proj.weight": "canonical",
+            },
+            {
+                "model.language_model.layers.0.self_attn.q_proj": {"weights": "int8", "activations": None},
+                "text_encoder.language_model.layers.0.self_attn.q_proj": {"weights": "int8", "activations": None},
+            },
+            {
+                "model.language_model.embed_tokens.weight": [
+                    "model.language_model.lm_head.weight"
+                ],
+                "text_encoder.language_model.embed_tokens.weight": [
+                    "language_model.lm_head.weight"
+                ],
+            },
+        )
+
+        self.assertEqual(state["model.embed_tokens.weight"], "same embedding")
+        self.assertEqual(state["visual.patch_embed.proj.weight"], "vision")
+        self.assertEqual(
+            state["model.layers.0.weight"],
+            "wrapped",
+        )
+        self.assertEqual(state["visual.proj.weight"], "wrapped vision")
+        self.assertEqual(state["model.layers.1.mlp.up_proj.weight"], "canonical")
+        self.assertEqual(len(state), 5)
+        self.assertEqual(
+            quantization,
+            {"model.layers.0.self_attn.q_proj": {"weights": "int8", "activations": None}},
+        )
+        self.assertEqual(
+            tied,
+            {
+                "model.embed_tokens.weight": ["model.lm_head.weight"],
+            },
+        )
+
+    def test_conditioner_namespace_collisions_raise_without_comparing_tensors(self):
+        normalize = _load_source_function(
+            _MAIN_PATH,
+            "_normalize_conditioner_checkpoint_namespaces",
+        )
+
+        class TensorLike:
+            def __eq__(self, other):
+                raise AssertionError("collision handling compared tensor contents")
+
+        with self.assertRaisesRegex(ValueError, "state_dict.*model.weight"):
+            normalize(
+                {
+                    "model.language_model.weight": TensorLike(),
+                    "model.weight": TensorLike(),
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "quantization_map"):
+            normalize(
+                {},
+                {
+                    "model.language_model.proj": "int8",
+                    "model.proj": "fp8",
+                },
+            )
+
+        with self.assertRaisesRegex(ValueError, "tied_weights_map"):
+            normalize(
+                {},
+                None,
+                {
+                    "model.language_model.embed_tokens.weight": [
+                        "model.language_model.lm_head.weight"
+                    ],
+                    "model.embed_tokens.weight": ["model.output.weight"],
+                },
+            )
+
     def test_h3_resolution_and_encoder_capabilities_reach_the_ui_and_backend(self):
         launch = _read(_LAUNCH_PATH)
         wgp = _read(_WGP_PATH)

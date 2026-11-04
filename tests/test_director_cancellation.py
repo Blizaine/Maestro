@@ -1747,7 +1747,11 @@ class TestDirectorCancellation(unittest.TestCase):
                 _args, kwargs = mock_concat.call_args
                 self.assertEqual(
                     kwargs,
-                    {"audio_start_sec": case["expected_audio_start"]},
+                    {
+                        "audio_start_sec": case["expected_audio_start"],
+                        "codec_type": "libx264_8",
+                        "container": "mp4",
+                    },
                 )
 
     def test_server_repair_skips_good_media_and_persists_joined_completion(self):

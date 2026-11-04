@@ -14,6 +14,7 @@ import os.path as osp
 import json
 import numpy as np
 import soundfile as sf
+from services.video_encoding import get_imageio_codec_params
 
 def rand_name(length=8, suffix=''):
     name = binascii.b2a_hex(os.urandom(length)).decode('utf-8')
@@ -614,21 +615,7 @@ def save_video(tensor,
 
 def _get_codec_params(codec_type, container):
     """Get codec parameters based on codec type and container."""
-    if codec_type == 'libx264_8':
-        return {'codec': 'libx264', 'quality': 8, 'pixelformat': 'yuv420p'}
-    elif codec_type == 'libx264_10':
-        return {'codec': 'libx264', 'quality': 10, 'pixelformat': 'yuv420p'}
-    elif codec_type == 'libx265_28':
-        return {'codec': 'libx265', 'pixelformat': 'yuv420p', 'output_params': ['-crf', '28', '-x265-params', 'log-level=none','-hide_banner', '-nostats']}
-    elif codec_type == 'libx265_8':
-        return {'codec': 'libx265', 'pixelformat': 'yuv420p', 'output_params': ['-crf', '8', '-x265-params', 'log-level=none','-hide_banner', '-nostats']}
-    elif codec_type == 'libx264_lossless':
-        if container == 'mkv':
-            return {'codec': 'ffv1', 'pixelformat': 'rgb24'}
-        else:  # mp4
-            return {'codec': 'libx264', 'output_params': ['-crf', '0'], 'pixelformat': 'yuv444p'}
-    else:  # libx264
-        return {'codec': 'libx264', 'pixelformat': 'yuv420p'}
+    return get_imageio_codec_params(codec_type, container)
 
 
 

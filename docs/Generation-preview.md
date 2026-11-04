@@ -16,6 +16,11 @@ The setting takes effect when the next generation begins, including queued jobs.
 
 On phones, live previews play inline. If the browser blocks automatic playback, the preview remains available with a **Play live preview** button. Tap that button to start playback; generation continues while the preview is paused.
 
+Returning from another tab or a restored page resumes a browser-suspended live
+preview even when its revision has not changed. An explicit pause stays paused.
+Browser autoplay permission blocks still require a tap; Maestro does not keep
+retrying them in the background.
+
 Below the setting, Maestro lists native preview support for the selected Studio model. The labels follow the exact model variant and update when the model changes. The preference remains selectable across models; unsupported Tiny VAE modes use Fast Frames where available. Image generations show still previews, including when Live Video is selected. Audio generations have no visual previews.
 
 Intermediate output is approximate and can start as noise. Video previews have reduced resolution and frame rate and show only the current window. They do not establish final detail, sound quality, identity retention or lip sync. Previews add decoding work and can increase GPU memory use and generation time. Leave them Off for the lowest overhead.

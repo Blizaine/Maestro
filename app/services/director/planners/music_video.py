@@ -2903,6 +2903,22 @@ class MusicVideoPlanner(BasePlanner):
         baseline = None
         baseline_findings = []
         best_outline = None
+        saw_empty_outline_response = False
+
+        def response_has_no_outline_rows(response):
+            """Recognize only explicit empty outline containers."""
+            if isinstance(response, list) and not response:
+                return True
+            payload = response
+            if isinstance(response, list):
+                if len(response) != 1 or not isinstance(response[0], dict):
+                    return False
+                payload = response[0]
+            if not isinstance(payload, dict):
+                return False
+            rows = payload.get("beats")
+            return isinstance(rows, list) and not rows
+
         for attempt in range(2):
             self._raise_if_planning_cancelled()
             self._emit_planning_progress(message="Planning progression across the whole song...",
@@ -2948,6 +2964,9 @@ class MusicVideoPlanner(BasePlanner):
                 json_schema=response_schema,
                 remote_json_schema=True,
             )
+            saw_empty_outline_response = (
+                saw_empty_outline_response or response_has_no_outline_rows(response)
+            )
             try:
                 candidate = parse_candidate(response, baseline=baseline)
                 if baseline is None:
@@ -2976,7 +2995,16 @@ class MusicVideoPlanner(BasePlanner):
                     return expand_and_checkpoint(baseline, quality_notes_for(baseline))
         if baseline is not None:
             return expand_and_checkpoint(baseline, quality_notes_for(baseline))
-        raise RuntimeError("Music-video whole-song planning needs revision: " + issue)
+        message = "Music-video whole-song planning needs revision: " + issue
+        if saw_empty_outline_response:
+            message += (
+                " No usable structured outline was returned after JSON repair. "
+                "Check the adjacent LLM completion telemetry; if it shows "
+                "finish=length and answer=0 with reasoning consuming the request "
+                "limit, adjust the provider reasoning/output-token settings. "
+                "Missing actions were not inferred."
+            )
+        raise RuntimeError(message)
 
     # ── Character Building ───────────────────────────────────────────
 

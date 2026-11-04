@@ -1000,17 +1000,21 @@ def _normalize_conditioner_checkpoint_namespaces(
 ):
     """Map every supported Qwen checkpoint layout onto Maestro's wrapper.
 
-    Comfy's NVFP4 export already uses ``model.*`` while the BF16, Quanto
-    INT8, and GGUF files published for WanGP use ``language_model.*``.
-    MMGP applies the same names to its quantization and tied-weight metadata,
-    so all three mappings must be renamed together or the large checkpoint
-    appears to load while every language-model parameter is reported missing.
+    Comfy's NVFP4 export already uses ``model.*`` while BF16, Quanto INT8,
+    and GGUF files can wrap the Qwen model under ``language_model.*`` or
+    ``model.language_model.*``. Apply the same renames to quantization and
+    tied-weight metadata. Reject conflicting aliases instead of silently
+    dropping a state or metadata entry.
     """
 
     prefixes = (
+        ("text_encoder.model.language_model.", "model."),
+        ("text_encoder.model.visual.", "visual."),
         ("text_encoder.language_model.", "model."),
         ("text_encoder.model.", "model."),
         ("text_encoder.visual.", "visual."),
+        ("model.language_model.", "model."),
+        ("model.visual.", "visual."),
         ("language_model.", "model."),
     )
 
@@ -1031,18 +1035,58 @@ def _normalize_conditioner_checkpoint_namespaces(
             return tuple(normalize_tied_value(item) for item in value)
         return value
 
-    def normalize(mapping, *, tied=False):
+    def safely_equal_without_tensor_comparison(left, right):
+        """Compare simple metadata without invoking tensor equality."""
+        if left is right:
+            return True
+        if type(left) is not type(right):
+            return False
+        if isinstance(left, (str, bytes, int, float, complex, bool, type(None))):
+            return left == right
+        if isinstance(left, (list, tuple)):
+            return len(left) == len(right) and all(
+                safely_equal_without_tensor_comparison(a, b)
+                for a, b in zip(left, right)
+            )
+        if isinstance(left, dict) and all(
+            isinstance(key, str) for key in (*left, *right)
+        ):
+            return left.keys() == right.keys() and all(
+                safely_equal_without_tensor_comparison(left[key], right[key])
+                for key in left
+            )
+        # State tensors and unknown metadata objects are only considered equal
+        # when they are the same object. Comparing tensors can read/materialize
+        # billions of checkpoint elements and is unnecessary for collision
+        # handling.
+        return False
+
+    def normalize(mapping, *, mapping_name, tied=False):
         if mapping is None:
             return None
         normalized = {}
+        original_names = {}
         for key, value in mapping.items():
-            normalized[normalize_name(key)] = normalize_tied_value(value) if tied else value
+            normalized_key = normalize_name(key)
+            normalized_value = normalize_tied_value(value) if tied else value
+            if normalized_key in normalized:
+                if safely_equal_without_tensor_comparison(
+                    normalized[normalized_key], normalized_value
+                ):
+                    continue
+                raise ValueError(
+                    "Conflicting conditioner checkpoint namespace aliases in "
+                    f"{mapping_name} for {normalized_key!r}: "
+                    f"{original_names[normalized_key]!r} and {key!r}"
+                )
+            normalized[normalized_key] = normalized_value
+            original_names[normalized_key] = key
         return normalized
 
     return (
-        normalize(state_dict),
-        normalize(quantization_map),
-        normalize(tied_weights_map, tied=True),
+        normalize(state_dict, mapping_name="state_dict"),
+        normalize(quantization_map, mapping_name="quantization_map"),
+        normalize(tied_weights_map, mapping_name="tied_weights_map", tied=True),
     )
 
 

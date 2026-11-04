@@ -104,6 +104,22 @@ for model-specific inputs and limitations.
 
 ## Qualification and limits
 
+Release audit repairs include wrapped H3 BF16 text/vision encoder namespaces,
+explicitly reviewed Director scene images with **None — no generated images**,
+and joined videos honoring the selected codec, quality and MP4/MKV container.
+Joins still re-encode to a consistent output format; they do not promise
+lossless stream-copy for mixed inputs. Live previews recover from browser tab
+suspension while preserving a user pause. Director keeps standalone uploaded
+character-selection instructions out of its performed-action ledger, and
+whole-song outlines can allocate up to 48 source actions rather than sixteen.
+These repairs have focused CPU/browser coverage; the reported external-writer
+and affected-GPU cases still need their own end-to-end retests.
+
+Final name-resolution checks also repaired older pose-validation and face-mask
+errors, initialized audio overlap before multi-window conditioning, and reset
+temporal-upscaling history at each new repeat. The dtype-policy cleanup removes
+an unreachable line and does not change model precision.
+
 The MCP protocol/security suite and focused UI/backend regressions pass locally.
 Pika's exact-audio path completed two 124-frame reference shots and a 248-frame
 join at 832×480 / 24fps / SLA on the RTX 4090. Full CPU decoding, frame counts,

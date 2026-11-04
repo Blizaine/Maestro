@@ -18,6 +18,9 @@ export function GenerationPreview({
   const videoRef = useRef<HTMLVideoElement>(null)
   const playbackRequest = useRef(0)
   const playbackAttemptIdentityRef = useRef<string | null>(null)
+  const blockedPlaybackRef = useRef<{identity: string; reason: 'policy' | 'abort'} | null>(null)
+  const userPausedRef = useRef(initiallyPaused)
+  const pageSuspendedRef = useRef(false)
   const mountedRef = useRef(false)
   const [paused, setPaused] = useState(initiallyPaused)
   const [blockedPreviewIdentity, setBlockedPreviewIdentity] = useState<string | null>(null)
@@ -37,6 +40,9 @@ export function GenerationPreview({
 
   useLayoutEffect(() => {
     previewIdentityRef.current = previewIdentity
+    if (blockedPlaybackRef.current?.identity !== previewIdentity) {
+      blockedPlaybackRef.current = null
+    }
   }, [previewIdentity])
 
   useEffect(() => {
@@ -64,6 +70,10 @@ export function GenerationPreview({
       if (name === 'NotAllowedError' || name === 'AbortError') {
         // Keep the media element and its Play control available so a tap can
         // retry from a user gesture. This state belongs only to this revision.
+        blockedPlaybackRef.current = {
+          identity,
+          reason: name === 'NotAllowedError' ? 'policy' : 'abort',
+        }
         setBlockedPreviewIdentity(identity)
         return
       }
@@ -78,6 +88,59 @@ export function GenerationPreview({
       handleFailure(error)
     }
   }, [])
+
+  const resumePlayback = useCallback(() => {
+    const video = videoRef.current
+    const identity = previewIdentityRef.current
+    if (!video || userPausedRef.current) return
+
+    const blocked = blockedPlaybackRef.current
+    if (blocked?.identity === identity) {
+      if (blocked.reason === 'policy') return
+      // AbortError is transient around tab and page lifecycle changes. Retry
+      // it once on this foreground transition; policy blocks wait for a tap.
+      blockedPlaybackRef.current = null
+      setBlockedPreviewIdentity(current => current === identity ? null : current)
+    }
+
+    if (!video.paused && blocked?.identity !== identity) return
+    playbackAttemptIdentityRef.current = identity
+    requestPlayback(video, identity)
+  }, [requestPlayback])
+
+  useEffect(() => {
+    if (document.visibilityState !== 'visible') pageSuspendedRef.current = true
+    const resume = () => {
+      if (document.visibilityState !== 'visible' || !pageSuspendedRef.current) return
+      pageSuspendedRef.current = false
+      resumePlayback()
+    }
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') {
+        pageSuspendedRef.current = true
+        return
+      }
+      resume()
+    }
+    const handlePageHide = () => {
+      pageSuspendedRef.current = true
+    }
+    const handlePageShow = (event: PageTransitionEvent) => {
+      if (event.persisted && document.visibilityState === 'visible') {
+        pageSuspendedRef.current = true
+      }
+      resume()
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('pagehide', handlePageHide)
+    window.addEventListener('pageshow', handlePageShow)
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('pagehide', handlePageHide)
+      window.removeEventListener('pageshow', handlePageShow)
+    }
+  }, [resumePlayback])
 
   useEffect(() => {
     const video = videoRef.current
@@ -101,7 +164,9 @@ export function GenerationPreview({
     if (!video) return
     if (playbackPaused) {
       onPausedChange?.(false)
+      userPausedRef.current = false
       setPaused(false)
+      blockedPlaybackRef.current = null
       setBlockedPreviewIdentity(null)
       playbackAttemptIdentityRef.current = previewIdentity
       // This call stays directly in the gesture handler for Safari's playback
@@ -109,6 +174,7 @@ export function GenerationPreview({
       requestPlayback(video, previewIdentity)
     } else {
       onPausedChange?.(true)
+      userPausedRef.current = true
       // A late play() resolution must not undo the user's pause.
       invalidatePlaybackRequest()
       video.pause()

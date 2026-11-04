@@ -103,15 +103,43 @@ class MusicArcTests(unittest.TestCase):
         ], [{}], source_contract)
         self.assertEqual(normalized[0]["source_event_ids"], ["M1"])
 
-    def test_real_actions_are_not_silently_truncated_to_the_outline_budget(self):
+    def test_seventeen_source_actions_fit_fourteen_groups_in_order(self):
         source_contract = build_music_narrative_contract(" ".join(
-            f"The courier opens numbered parcel {index}." for index in range(17)
+            f"The courier opens numbered parcel {index}."
+            for index in range(17)
         ))
         self.assertEqual(len(source_contract["events"]), 17)
-        with self.assertRaisesRegex(ValueError, "exceeds 16 source events"):
-            normalize_music_arc([
-                arc_row(0, "The courier examines the numbered parcels."),
-            ], [{}], source_contract)
+
+        rows = []
+        event_offset = 0
+        expected_allocation = []
+        for group_index in range(14):
+            group_size = 2 if group_index < 3 else 1
+            assigned = source_contract["events"][event_offset:event_offset + group_size]
+            event_offset += group_size
+            expected_allocation.extend(
+                {"event_id": event["event_id"], "clip_index": group_index}
+                for event in assigned
+            )
+            visual_beat = " ".join(
+                f"The courier {event['text']}." for event in assigned
+            )
+            rows.append(arc_row(
+                group_index,
+                visual_beat,
+                source_event_ids=[event["event_id"] for event in assigned],
+            ))
+
+        normalized = normalize_music_arc(rows, [{} for _ in range(14)], source_contract)
+        expected_ids = [event["event_id"] for event in source_contract["events"]]
+        self.assertEqual(
+            [event_id for row in normalized for event_id in row["source_event_ids"]],
+            expected_ids,
+        )
+        self.assertEqual(
+            arc_allocation(normalized),
+            expected_allocation,
+        )
 
     def test_remote_wrappers_and_numbered_rows_cover_fixed_15_and_23_group_timelines(self):
         for count in (15, 23):

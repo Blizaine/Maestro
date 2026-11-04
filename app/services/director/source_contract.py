@@ -46,6 +46,13 @@ _STANDALONE_NOMINAL_PRESENTATION_RE = re.compile(
     r"(?:movement|motion|action))?",
     re.IGNORECASE,
 )
+_REFERENCE_CHARACTER_SELECTION_RE = re.compile(
+    r"^(?:please\s+)?use\s+(?:the\s+)?"
+    r"(?:[a-z0-9][a-z0-9'’\-]*\s+){0,6}"
+    r"(?:character|person|subject)\s+in\s+(?:the\s+)?uploaded\s+"
+    r"reference\s+images?\s*[.!?]?$",
+    re.IGNORECASE,
+)
 _DIALOGUE_FINAL_AIRBORNE_RE = re.compile(
     r"\b(?:airborne|in\s+flight|taking\s+flight|takes?\s+flight|"
     r"lifts?\s+off)\b",
@@ -375,6 +382,18 @@ def _is_standalone_nominal_presentation_direction(text: str) -> bool:
     ))
 
 
+def _is_reference_character_selection(text: str) -> bool:
+    """Exclude a standalone instruction to use a supplied character reference.
+
+    The original brief remains unchanged for reference handling and planning;
+    this only keeps reference selection out of the immutable action ledger.
+    """
+
+    return bool(_REFERENCE_CHARACTER_SELECTION_RE.fullmatch(
+        str(text or "").strip()
+    ))
+
+
 def build_source_contract(source: str) -> dict:
     from services.h3_story_ledger import extract_source_events
 
@@ -397,7 +416,7 @@ def build_source_contract(source: str) -> dict:
         # rather than treating them as things an actor must perform once. A
         # standalone nominal production descriptor (for example, "one
         # continuous simple action with visible movement") is context too.
-        if not text or re.match(
+        if not text or _is_reference_character_selection(text) or re.match(
             r"(?:preserve|maintain|keep|avoid|never|do not|no\b|"
             r"(?:picture|image|reference)\s*\d*\s+(?:supplies|provides|defines|is for))\b",
             text, re.IGNORECASE,

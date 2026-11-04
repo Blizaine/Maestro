@@ -30152,7 +30152,10 @@ def _run_recast_shot_generation(job_id):
         os.makedirs(final_out_dir, exist_ok=True)
         seed = int(shot_bundle["resolved_seed"])
         timestamp = time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
-        extension = os.path.splitext(ordered_paths[0])[1] or ".mp4"
+        codec_type = wgp.server_config.get("video_output_codec", "libx264_8")
+        container = wgp.server_config.get("video_container", "mp4")
+        video_encoding = wgp.get_video_encoding(codec_type, container)
+        extension = video_encoding["extension"]
         final_path = wgp.get_available_filename(
             final_out_dir,
             f"{timestamp}_seed{seed}_recast_shot_aware{extension}",
@@ -30180,6 +30183,8 @@ def _run_recast_shot_generation(job_id):
                 float(shot_bundle["frame_count"])
                 / float(shot_bundle["fps"])
             ),
+            codec_type=video_encoding["codec_type"],
+            container=video_encoding["container"],
         )
         if is_cancel_requested(job):
             if final_path and os.path.isfile(final_path):
@@ -30403,7 +30408,10 @@ def _run_repaint_shot_generation(job_id):
         os.makedirs(final_out_dir, exist_ok=True)
         seed = int(shot_bundle["resolved_seed"])
         timestamp = time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
-        extension = os.path.splitext(ordered_paths[0])[1] or ".mp4"
+        codec_type = wgp.server_config.get("video_output_codec", "libx264_8")
+        container = wgp.server_config.get("video_container", "mp4")
+        video_encoding = wgp.get_video_encoding(codec_type, container)
+        extension = video_encoding["extension"]
         final_path = wgp.get_available_filename(
             final_out_dir,
             f"{timestamp}_seed{seed}_repaint_shot_aware{extension}",
@@ -30431,6 +30439,8 @@ def _run_repaint_shot_generation(job_id):
                 float(shot_bundle["frame_count"])
                 / float(shot_bundle["fps"])
             ),
+            codec_type=video_encoding["codec_type"],
+            container=video_encoding["container"],
         )
         if is_cancel_requested(job):
             if final_path and os.path.isfile(final_path):
@@ -30682,7 +30692,10 @@ def _run_outpaint_shot_generation(job_id):
         os.makedirs(final_out_dir, exist_ok=True)
         seed = int(shot_bundle["resolved_seed"])
         timestamp = time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
-        extension = os.path.splitext(ordered_paths[0])[1] or ".mp4"
+        codec_type = wgp.server_config.get("video_output_codec", "libx264_8")
+        container = wgp.server_config.get("video_container", "mp4")
+        video_encoding = wgp.get_video_encoding(codec_type, container)
+        extension = video_encoding["extension"]
         final_path = wgp.get_available_filename(
             final_out_dir,
             f"{timestamp}_seed{seed}_outpaint_shot_aware{extension}",
@@ -30713,6 +30726,8 @@ def _run_outpaint_shot_generation(job_id):
             abort_callback=lambda: is_cancel_requested(job),
             pad_audio=bool(source_audio),
             audio_duration_sec=float(expected_frames) / fps,
+            codec_type=video_encoding["codec_type"],
+            container=video_encoding["container"],
         )
         if is_cancel_requested(job):
             if final_path and os.path.isfile(final_path):
@@ -31580,10 +31595,11 @@ def get_output_metadata(name: str, workspace: str = ""):
 def rejoin_clips(body: dict):
     """Re-concatenate clips from a multi-clip group.
 
-    Body: { group_id: str, audio_file?: str }
+    Body: { group_id: str, audio_file?: str, video_output_codec?: str,
+            video_container?: str }
     Finds all clip files matching the group_id and re-concatenates them.
     """
-    from wgp import concatenate_multi_clip_videos
+    from wgp import concatenate_multi_clip_videos, get_video_encoding
     group_id = body.get("group_id")
     if not group_id:
         raise HTTPException(status_code=400, detail="group_id is required")
@@ -31655,7 +31671,19 @@ def rejoin_clips(body: dict):
     # Generate output path
     import time
     timestamp = time.strftime("%Y-%m-%d_%H%M%S")
-    concat_name = f"{timestamp}_rejoin_multiclip.mp4"
+    codec_type = body.get(
+        "video_output_codec",
+        wgp.server_config.get("video_output_codec", "libx264_8"),
+    )
+    container = body.get(
+        "video_container",
+        wgp.server_config.get("video_container", "mp4"),
+    )
+    try:
+        video_encoding = get_video_encoding(codec_type, container)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    concat_name = f"{timestamp}_rejoin_multiclip{video_encoding['extension']}"
     concat_path = os.path.join(out_dir, concat_name)
 
     success = concatenate_multi_clip_videos(
@@ -31663,6 +31691,8 @@ def rejoin_clips(body: dict):
         concat_path,
         audio_path,
         audio_start_sec=audio_start_sec,
+        codec_type=video_encoding["codec_type"],
+        container=video_encoding["container"],
     )
     if not success or not os.path.isfile(concat_path):
         raise HTTPException(status_code=500, detail="Concatenation failed")

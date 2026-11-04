@@ -2406,6 +2406,11 @@ class TestMultiPersonRecast(unittest.TestCase):
                 },
             }
             fake_wgp = types.SimpleNamespace(
+                server_config={"video_output_codec": "libx264_lossless", "video_container": "mkv"},
+                get_video_encoding=_load_functions(
+                    os.path.join(_ROOT, "app", "services", "video_encoding.py"),
+                    ("get_imageio_codec_params", "get_video_encoding"),
+                )["get_video_encoding"],
                 get_available_filename=(
                     lambda out_dir, name: os.path.join(out_dir, name)
                 ),
@@ -2452,6 +2457,9 @@ class TestMultiPersonRecast(unittest.TestCase):
             self.assertEqual(concat[3]["audio_start_sec"], 0.0)
             self.assertEqual(concat[3]["audio_duration_sec"], 2.0)
             self.assertTrue(concat[3]["pad_audio"])
+            self.assertEqual(concat[3]["codec_type"], "libx264_lossless")
+            self.assertEqual(concat[3]["container"], "mkv")
+            self.assertTrue(concat[1].endswith(".mkv"))
             self.assertEqual(calls["finish"][0], "completed")
             self.assertTrue(calls["sidecar"])
             self.assertFalse(os.path.exists(shot_dir))

@@ -272,6 +272,11 @@ const previewModels = [
       window.__previewPending = [];
       window.__previewPlayCalls = [];
       window.__previewReadyState = 0;
+      window.__previewVisibility = 'visible';
+      window.__setPreviewVisibility = value => {
+        window.__previewVisibility = value;
+        document.dispatchEvent(new Event('visibilitychange'));
+      };
       const mediaSrc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
       Object.defineProperty(HTMLMediaElement.prototype, 'src', {
         configurable: true,
@@ -364,6 +369,31 @@ const previewModels = [
     await videoCard.getByRole('button', {name: 'Play live preview'}).click();
     await videoCard.getByRole('button', {name: 'Pause live preview'}).waitFor();
     assert.equal(await video.getAttribute('data-preview-playback'), 'playing', 'the accessible Play control recovers from a policy-blocked autoplay');
+
+    // Backgrounding can pause muted video without changing the backend's
+    // preview revision. Returning to the tab should retry that same source.
+    const callsBeforeVisibilityResume = await jobsPage.evaluate(() => window.__previewPlayCalls.length);
+    await jobsPage.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => window.__previewVisibility});
+      window.__setPreviewVisibility('hidden');
+      document.querySelector('[data-generation-job-id="video-job"] video').pause();
+      window.__setPreviewVisibility('visible');
+    });
+    await jobsPage.waitForFunction(previous => window.__previewPlayCalls.length === previous + 1, callsBeforeVisibilityResume);
+    await videoCard.getByRole('button', {name: 'Pause live preview'}).waitFor();
+    assert.equal(await video.getAttribute('data-preview-playback'), 'playing', 'visibility return retries playback at the same preview revision');
+
+    // A persisted page restoration is another browser lifecycle path that can
+    // leave media paused without a visibility transition.
+    const callsBeforePageRestore = await jobsPage.evaluate(() => window.__previewPlayCalls.length);
+    await jobsPage.evaluate(() => {
+      window.dispatchEvent(new PageTransitionEvent('pagehide'));
+      document.querySelector('[data-generation-job-id="video-job"] video').pause();
+      window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}));
+    });
+    await jobsPage.waitForFunction(previous => window.__previewPlayCalls.length === previous + 1, callsBeforePageRestore);
+    await videoCard.getByRole('button', {name: 'Pause live preview'}).waitFor();
+
     await videoCard.getByRole('button', {name: 'Hide generation information'}).click();
     await videoCard.getByRole('button', {name: 'Show generation information'}).waitFor();
     assert.equal(await videoCard.getByText('Full Studio render ~50s').isVisible(), false, 'clicking the preview hides its information');
@@ -375,6 +405,14 @@ const previewModels = [
     await videoCard.getByRole('button', {name: 'Play live preview'}).waitFor();
     assert.equal(await video.getAttribute('data-preview-playback'), 'paused', 'the separate Pause control pauses playback');
     assert.equal(await videoCard.getByRole('button', {name: 'Show generation information'}).count(), 1, 'Pause does not change overlay visibility');
+    const callsWhileUserPaused = await jobsPage.evaluate(() => window.__previewPlayCalls.length);
+    await jobsPage.evaluate(() => {
+      window.__setPreviewVisibility('hidden');
+      window.__setPreviewVisibility('visible');
+    });
+    await jobsPage.waitForTimeout(25);
+    assert.equal(await jobsPage.evaluate(() => window.__previewPlayCalls.length), callsWhileUserPaused, 'visibility return preserves an explicit user pause');
+    await videoCard.getByRole('button', {name: 'Play live preview'}).waitFor();
 
     // Only video-job advances. Reconnect polling must update that job's media
     // without replacing another job's preview or undoing a user pause.
@@ -465,6 +503,14 @@ const previewModels = [
     });
     const blockedRetryCard = jobsPage.locator('[data-generation-job-id="blocked-retry-job"]');
     await blockedRetryCard.getByRole('button', {name: 'Play live preview'}).waitFor();
+    const blockedCallsBeforeVisibilityResume = await jobsPage.evaluate(() => window.__previewPlayCalls.filter(call => call.src.includes('blocked-retry-job?revision=1')).length);
+    await jobsPage.evaluate(() => {
+      window.__setPreviewVisibility('hidden');
+      window.__setPreviewVisibility('visible');
+    });
+    await jobsPage.waitForTimeout(25);
+    assert.equal(await jobsPage.evaluate(() => window.__previewPlayCalls.filter(call => call.src.includes('blocked-retry-job?revision=1')).length), blockedCallsBeforeVisibilityResume, 'NotAllowedError is not retried automatically on visibility return');
+    await blockedRetryCard.getByRole('button', {name: 'Play live preview'}).waitFor();
     await jobsPage.evaluate(() => window.store.setState(state => ({jobs: state.jobs.map(job => job.id === 'blocked-retry-job'
       ? {...job, preview: {...job.preview, url: '/api/v1/previews/blocked-retry-job?revision=2', revision: 2}}
       : job)})));
@@ -488,6 +534,27 @@ const previewModels = [
     assert.equal(await abortedVideoCard.getByText('Preview unavailable').count(), 0, 'AbortError is not shown as a media failure');
     await abortedVideoCard.getByRole('button', {name: 'Play live preview'}).click();
     await abortedVideoCard.getByRole('button', {name: 'Pause live preview'}).waitFor();
+
+    // An AbortError caused by backgrounding is transient and can be retried
+    // once when the same page returns to the foreground.
+    await jobsPage.evaluate(() => {
+      window.__nextPreviewPlayError = 'AbortError';
+      const source = window.store.getState().jobs.find(job => job.id === 'video-job');
+      window.store.setState(state => ({jobs: [...state.jobs, {
+        ...source,
+        id: 'abort-resume-video-job',
+        preview: {...source.preview, url: '/api/v1/previews/abort-resume-video-job?revision=1'},
+      }]}));
+    });
+    const abortResumeCard = jobsPage.locator('[data-generation-job-id="abort-resume-video-job"]');
+    await abortResumeCard.getByRole('button', {name: 'Play live preview'}).waitFor();
+    const abortResumeCallsBeforeVisibility = await jobsPage.evaluate(() => window.__previewPlayCalls.filter(call => call.src.includes('abort-resume-video-job?revision=1')).length);
+    await jobsPage.evaluate(() => {
+      window.__setPreviewVisibility('hidden');
+      window.__setPreviewVisibility('visible');
+    });
+    await jobsPage.waitForFunction(previous => window.__previewPlayCalls.filter(call => call.src.includes('abort-resume-video-job?revision=1')).length === previous + 1, abortResumeCallsBeforeVisibility);
+    await abortResumeCard.getByRole('button', {name: 'Pause live preview'}).waitFor();
 
     // A stale policy rejection from an older revision cannot pause or fail the
     // replacement video after its own play() request succeeds.

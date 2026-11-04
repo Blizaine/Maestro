@@ -17,7 +17,10 @@ from typing import Any, Optional
 
 MAX_MUSIC_ARC_ROWS = 48
 MAX_MUSIC_ARC_CLIPS = 2048
-MAX_MUSIC_ARC_EVENTS = 16
+# Bound the total source-action ledger independently from how many IDs one
+# outline row can own. Long songs may legitimately have more than 16 actions.
+MAX_MUSIC_ARC_EVENTS = 48
+MAX_MUSIC_ARC_EVENTS_PER_ROW = 16
 _MAX_BEAT_CHARS = 360
 _MAX_FIELD_CHARS = 240
 _MAX_REPRISE_REASON_CHARS = 200
@@ -80,7 +83,7 @@ def creative_plan_schema() -> dict[str, Any]:
                 "camera": {"type": "string", "minLength": 2, "maxLength": _MAX_FIELD_CHARS},
                 "source_event_ids": {
                     "type": "array",
-                    "maxItems": MAX_MUSIC_ARC_EVENTS,
+                    "maxItems": MAX_MUSIC_ARC_EVENTS_PER_ROW,
                     "items": {"type": "string", "minLength": 1, "maxLength": 80},
                     "uniqueItems": True,
                 },
@@ -648,8 +651,8 @@ def music_arc_quality_issues(
         if not _is_sequence(ids):
             _safe_issue(issues, f"clip {index} source_event_ids must be a list")
         else:
-            if len(ids) > MAX_MUSIC_ARC_EVENTS:
-                _safe_issue(issues, f"clip {index} has more than {MAX_MUSIC_ARC_EVENTS} source_event_ids")
+            if len(ids) > MAX_MUSIC_ARC_EVENTS_PER_ROW:
+                _safe_issue(issues, f"clip {index} has more than {MAX_MUSIC_ARC_EVENTS_PER_ROW} source_event_ids")
             local_seen: set[str] = set()
             for event_id in ids:
                 if not isinstance(event_id, str) or not event_id:
@@ -914,8 +917,8 @@ def normalize_music_arc(rows: Any, clips: Any, contract: Any) -> list[dict[str, 
         seen_indexes.add(index)
 
         ids = raw.get("source_event_ids")
-        if not isinstance(ids, list) or len(ids) > MAX_MUSIC_ARC_EVENTS:
-            raise ValueError(f"music arc row {row_number} source_event_ids must be a list of at most {MAX_MUSIC_ARC_EVENTS} IDs")
+        if not isinstance(ids, list) or len(ids) > MAX_MUSIC_ARC_EVENTS_PER_ROW:
+            raise ValueError(f"music arc row {row_number} source_event_ids must be a list of at most {MAX_MUSIC_ARC_EVENTS_PER_ROW} IDs")
         if any(not isinstance(event_id, str) or not event_id or event_id != event_id.strip() for event_id in ids):
             raise ValueError(f"music arc row {row_number} source_event_ids must use exact nonempty contract IDs")
         if len(set(ids)) != len(ids):

@@ -2263,6 +2263,11 @@ class TestOutpaintShotAwarePlanning(unittest.TestCase):
                 return 25
 
             fake_wgp = types.SimpleNamespace(
+                server_config={"video_output_codec": "libx265_8", "video_container": "mp4"},
+                get_video_encoding=_load_functions(
+                    os.path.join(_ROOT, "app", "services", "video_encoding.py"),
+                    ("get_imageio_codec_params", "get_video_encoding"),
+                )["get_video_encoding"],
                 get_available_filename=lambda directory, name: os.path.join(
                     directory,
                     name,
@@ -2306,6 +2311,8 @@ class TestOutpaintShotAwarePlanning(unittest.TestCase):
             self.assertEqual(joined["audio"], source_video)
             self.assertTrue(joined["kwargs"]["pad_audio"])
             self.assertEqual(joined["kwargs"]["audio_duration_sec"], 1.0)
+            self.assertEqual(joined["kwargs"]["codec_type"], "libx265_8")
+            self.assertEqual(joined["kwargs"]["container"], "mp4")
             self.assertEqual(jobs[job_id]["status"], "completed")
             self.assertTrue(jobs[job_id]["params"]["edit_outpaint_shot_aware"])
             self.assertNotIn(

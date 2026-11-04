@@ -13,6 +13,20 @@ reference component and saved-character support.
 LoRAs and Advanced appear directly below the model selectors, before the music
 and image inputs, so generation settings can be chosen before audio analysis.
 
+## Reviewed scene images
+
+**None — no generated images** disables the image-generation stage. Explicitly
+reviewed per-scene images still guide the corresponding video shots and are
+retained for resume and clip reruns. Maestro copies those images into the saved
+project, so temporary upload paths are not needed later. Missing reviewed images
+produce a repair message instead of silently switching to text-only video.
+
+Frames models use the reviewed image as a start frame. H3 References models use
+it as that shot's composition reference alongside the character and scene
+references. It is not a fixed first frame in References mode. Choosing None
+without reviewed scene images continues to skip generated starts; stale images
+from an older generated-image revision are not reused automatically.
+
 ## Target duration
 
 Target duration uses Studio's compact duration control. Auto and the current
@@ -102,8 +116,10 @@ concept box. The outline contains short beats; the later clip-writing pass build
 the complete model-specific prompts and reference bindings. Formatting instructions,
 schema examples, and native identity/retention/soundscape metadata do not become
 mandatory story actions. Concrete actions in narrative sections remain ordered
-obligations. The bounded outline supports up to sixteen extracted source actions;
-this is separate from the number of clips in the song.
+obligations. The bounded outline supports up to 48 extracted source actions,
+with up to sixteen assigned to one outline group. This is separate from song
+duration and the number of clips. Selecting a character from uploaded reference
+images is context, rather than an action the character must perform.
 
 The internal outline contract depends on those actions. When actions exist,
 `source_event_clips` maps each action to a zero-based timeline item, and beat rows
