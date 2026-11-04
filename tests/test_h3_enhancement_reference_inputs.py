@@ -75,6 +75,11 @@ class DialogueWhitespaceTests(unittest.TestCase):
                               '<Subject 2> (S2) says in the voice referenced from <Audio 2>', 1)
         self.assertFalse(llm_service._h3_ref2va_dialogue_binding_contract_satisfied(SOURCE, draft, INVENTORY))
 
+    def test_matching_vocal_id_cannot_hide_a_different_visible_character(self):
+        draft = DRAFT.replace('<Subject 1> (S1) says in the voice referenced from <Audio 1>',
+                              '<Subject 2> (S1) says in the voice referenced from <Audio 1>', 1)
+        self.assertFalse(llm_service._h3_ref2va_dialogue_binding_contract_satisfied(SOURCE, draft, INVENTORY))
+
     def test_full_enhancement_keeps_safe_whitespace_draft_without_repairs(self):
         with patch.object(llm_service, 'generate', return_value=DRAFT) as writer, patch(
             'services.enhance_guides.get_enhance_guide', return_value='Write a six-field H3 reference prompt.',

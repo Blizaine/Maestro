@@ -8122,6 +8122,7 @@ def _h3_ref2va_dialogue_binding_contract_satisfied(
     )
     definitions = definitions_match.group(1) if definitions_match else ""
     cursor = 0
+    result_entry_cursor = 0
     for entry in source_entries:
         speaker_id = entry.get("speaker_id")
         if not speaker_id:
@@ -8138,6 +8139,20 @@ def _h3_ref2va_dialogue_binding_contract_satisfied(
         if not ids or int(ids[-1]) != int(speaker_id):
             return False
         subject_id = entry.get("subject_id")
+        # A matching vocal ID and a correct header do not prove that the
+        # visible actor beside this particular line is its intended owner.
+        # Compare the resolved event too, independently of the S namespace.
+        resolved_index = next((
+            index for index in range(result_entry_cursor, len(result_entries))
+            if _h3_dialogue_comparison_text(result_entries[index]["words"])
+            == _h3_dialogue_comparison_text(entry["words"])
+        ), None)
+        if resolved_index is None:
+            return False
+        resolved_entry = result_entries[resolved_index]
+        if resolved_entry.get("subject_id") != subject_id:
+            return False
+        result_entry_cursor = resolved_index + 1
         if subject_id is not None and not re.search(
             rf"<Subject\s+{int(subject_id)}>\s*\(S{int(speaker_id)}\)",
             definitions,

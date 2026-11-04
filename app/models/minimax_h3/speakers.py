@@ -619,6 +619,11 @@ def _resolve_ref2va_dialogue_speaker(
         before.rfind("\n"),
     ) + 1
     clause = before[clause_start:]
+    direct_subject_cue = _ref2va_direct_subject_speaker_cue(
+        source, dialogue_start, valid_subjects,
+    )
+    if direct_subject_cue is not None:
+        return direct_subject_cue[0]
     explicit_subjects = re.findall(
         r"<Subject\s+(\d+)>", clause, flags=re.IGNORECASE
     )
@@ -784,6 +789,45 @@ _REF2VA_CLIP_HEADING_RE = re.compile(
     r"(?im)(?:\[\s*(?:shot|scene)\s+\d+\s*\]|"
     r"(?:^|[\r\n])\s*(?:shot|scene)\s+\d+\s*:?)"
 )
+
+
+def _ref2va_direct_subject_speaker_cue(
+    source: str,
+    dialogue_start: int,
+    valid_subjects: set[int],
+) -> tuple[int, int] | None:
+    """Find a ``<Subject N> (Sx)`` owner cue for this line.
+
+    Subject references later in the sentence commonly name the listener. An
+    adjacent Subject/S marker followed by a speech verb is stronger evidence
+    for the speaker than those later mentions, even when a brief physical beat
+    appears before the speech verb. Search from the current tag backward so a
+    listener's earlier ``says nothing`` clause cannot take ownership from the
+    final speaking character. The marker number is never used as a Subject ID.
+    """
+    before_start = max(0, int(dialogue_start) - 360)
+    before = str(source or "")[before_start:int(dialogue_start)]
+    clause_start = max(
+        before.rfind("."), before.rfind("!"), before.rfind("?"),
+        before.rfind(";"), before.rfind("\n"),
+    ) + 1
+    clause = before[clause_start:]
+    pairs = list(_REF2VA_SUBJECT_MARKER_RE.finditer(clause))
+    for pair in reversed(pairs):
+        subject = int(pair.group(1))
+        if subject not in valid_subjects:
+            continue
+        after_pair = clause[pair.end():]
+        before_pair = clause[max(0, pair.start() - 48):pair.start()]
+        if re.search(
+            r"\b(?:to|toward|towards|at|with|beside|near|behind)\s*$",
+            before_pair,
+            re.IGNORECASE,
+        ):
+            continue
+        if _SPEECH_VERB_RE.search(after_pair):
+            return subject, int(pair.group(2))
+    return None
 
 
 def _ref2va_declared_marker_subjects(
@@ -980,12 +1024,18 @@ def _resolve_ref2va_dialogue_owners(
     for start, end, words in spans:
         start, end = int(start), int(end)
         bounded_source = _source_from_latest_clip_heading(source, start, previous_end)
-        subject = _resolve_ref2va_dialogue_speaker(
-            bounded_source, start, end, speaker_aliases, valid_subjects,
+        direct_subject_cue = _ref2va_direct_subject_speaker_cue(
+            bounded_source, start, valid_subjects,
         )
-        owner = _resolve_ref2va_dialogue_owner_name(
-            bounded_source, start, end,
-        )
+        if direct_subject_cue is not None:
+            subject, owner = direct_subject_cue[0], ""
+        else:
+            subject = _resolve_ref2va_dialogue_speaker(
+                bounded_source, start, end, speaker_aliases, valid_subjects,
+            )
+            owner = _resolve_ref2va_dialogue_owner_name(
+                bounded_source, start, end,
+            )
         if owner and is_h3_production_label(owner):
             owner = ""
 
@@ -1003,12 +1053,14 @@ def _resolve_ref2va_dialogue_owners(
             )
         ]
         marker = markers[-1] if markers else None
-        raw_marker = int(marker.group(1)) if marker else None
-        explicit = _ref2va_marker_owner_is_explicit(
+        raw_marker = direct_subject_cue[1] if direct_subject_cue else (
+            int(marker.group(1)) if marker else None
+        )
+        explicit = bool(direct_subject_cue) or _ref2va_marker_owner_is_explicit(
             bounded_source, start, end, marker, owner, valid_subjects,
         )
         natural_subject = subject
-        marker_is_object = _ref2va_marker_is_another_speaker_object(
+        marker_is_object = False if direct_subject_cue else _ref2va_marker_is_another_speaker_object(
             source, start, marker, natural_subject, speaker_aliases,
         )
 
