@@ -2,7 +2,7 @@
 
 A one-click local AI **creative studio, director, and video editor** for creators. Maestro combines a modern interface with powerful image, video, and audio generation, an LLM-directed production workflow, and a non-destructive multi-track editor. Optimized for LTX-2.5, MiniMax H3, and the latest local creative models and LoRAs.
 
-![Maestro v3.2.5 Studio with image references and a generated video](docs/images/maestro-ui-october-2026.png)
+![Maestro v4 Studio in Graphite Dark with an experimental Pika H3 Flex video](docs/images/maestro-ui-october-2026.png)
 
 [Features](#what-it-does) · [Install](#install) · [Updates](#updates) · [Guides](docs/README.md) · [Full update history](docs/UPDATE_HISTORY.md)
 
@@ -21,6 +21,7 @@ Create with **Studio**, plan a production with **Director**, and finish it in th
 - **Reusable characters and references.** Save and share characters with appearance references and optional voices. Combine image, video and audio references in supported workflows to guide identity, action and sound. [Characters and RefMods](docs/Maestro-Characters.md).
 - **Built-in AI writing.** Local language and vision models help develop prompts and plan productions, with models downloaded on first use. Optional external providers include OpenAI, Anthropic and compatible local endpoints such as LM Studio. [Local AI guide](docs/LLM-runtime.md).
 - **Connect your AI agent.** Built-in MCP lets compatible agents discover capabilities, write model-aware prompts, use saved references, submit Studio and Director work, and manage projects. Use Local MCP on the Maestro computer or optional authenticated Tailscale access from another computer. [Agent Access setup](docs/Agent-Access.md).
+- **Bring your ComfyUI setup.** Reuse configured model folders, import and validate API workflows, or map supported Maestro requests to an existing ComfyUI server. The integration is optional and off by default; ComfyUI and its custom nodes remain separately managed. [ComfyUI guide](docs/ComfyUI.md).
 - **Models and LoRAs in one place.** Browse compatible CivitAI LoRAs and community checkpoints, manage downloads and updates, and use prompting guides and recommended strengths. [H3 checkpoint imports](docs/H3-checkpoint-import.md).
 - **Performance matched to your PC.** Auto-Tune uses your GPU, VRAM and RAM to choose starting settings. Quantization, memory offloading and duration recommendations help smaller GPUs, while advanced controls remain available. [Performance guide](docs/Performance-auto-tune.md).
 - **An organized library, wherever you work.** Separate projects into workspaces, search across folders, save favorites and reload generation settings. Use the responsive interface on a phone or tablet, with optional completion alerts and private Tailscale access to your running PC. [Remote access and notifications](docs/TAILSCALE_REMOTE_ACCESS.md).
@@ -36,33 +37,34 @@ Runtime upgrades are explicit menu actions. A missing performance-runtime marker
 does not automatically run Update when you open the launcher. If offered,
 **Start with Compatibility Runtime** keeps the existing runtime available.
 
-### v4.0.0 (updated 2026-11-02) — Dev release candidate
+### v4.0.0 (updated 2026-11-04) — Release candidate
 
 The next major Main release is being prepared on **Dev** as v4.0.0.
 
-- **A fresh appearance:** first opening v4 switches to Graphite Studio in Dark
-  mode, including browsers with a saved theme. This happens once; choose another
-  theme or appearance in Settings afterward and that choice stays saved.
 - **An upgraded Editor and animated titles:** a fuller editing workspace,
-  reviewable Auto-edit plans, chroma key and transparent MOV export; titles can
-  also be generated directly in Studio.
-- **New creative models and tools:** MOSS reference editors, Fibo 2.0, H3
-  accelerators/PTD/two-pass options, FlashVSR+ Turbo and experimental Pika H3
-  Flex with motion/audio sliding windows. Flex is enabled in the default Frames
-  and References lists. Worlds and Profile 0 remain optional experimental tools.
-- **Pika Flex control fixes:** five resolution tiers from 480p through experimental
-  1080p; clip settings reuse and resolution/aspect changes retain an explicitly
-  chosen window. Incompatible First Block and extra Turbo controls are excluded.
-- **Smoother daily use:** compact pinned Studio controls, clearer startup and
-  mobile loading, resizable thumbnails, image-workflow fixes and quieter logs.
+  reviewable Auto-edit plans with undo, chroma key and transparent ProRes 4444
+  MOV export. Describe animated titles directly in Studio or the Editor.
+- **Pika H3 Flex:** experimental Frames and References generation, source-audio
+  conditioning, SLA with a compatibility fallback, and motion/audio sliding
+  windows. Five resolution tiers include experimental 1080p; saved window
+  choices survive settings reuse and resolution changes.
 - **Built-in MCP:** independent local and remote connections, scoped approval,
   model-aware authoring guides, saved characters and externally authored
   music-video plans with native song analysis. Existing browser access stays
   available.
-- **Latest testing fixes:** source-audio-driven Pika References, correct
-  per-shot soundtrack offsets, improved character bindings, experimental
-  FastH3 LoRAs, Turbo LoRA filters, failed-job settings and a more compact,
-  height-adjustable Editor timeline.
+- **Optional ComfyUI integration:** reuse model folders, import typed API
+  workflows and route supported native or Director requests through an existing
+  ComfyUI server. Nothing is enabled or installed automatically.
+- **A fresh appearance:** first opening v4 switches to Graphite Studio in Dark
+  mode once. Choose another theme afterward and that choice stays saved.
+  Compact pinned controls, resizable thumbnails and mobile/startup recovery
+  make everyday use smoother.
+- **More creative models and finishing:** MOSS reference editors, Fibo 2.0,
+  Qwen reference caches, H3 accelerators/PTD/two-pass options and FlashVSR+ Turbo.
+  Worlds and Profile 0 remain optional experimental tools.
+- **More reliable writing and review:** clearer reference roles, exact dialogue
+  and speaker recovery, retained rejected drafts, Director planning fixes,
+  failed-job settings/LoRA details, Turbo LoRA filters and quieter logs.
 
 The existing Dev updates are included. See the
 [v4.0.0 candidate notes and testing limits](docs/RELEASE_NOTES_V4.0.0.md).

@@ -14,7 +14,21 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
   branch tree. Extend the repository guard to reject private notes, local
   configuration and runtime artifacts without printing their contents.
 
-## [4.0.0] - 2026-10-29–30 — Dev release candidate
+## [4.0.0] — Release candidate (updated 2026-11-04)
+
+**4 November — Release preparation and reliability:** add optional ComfyUI
+model-folder reuse, typed API workflow imports, component pickers and explicit
+Native/Comfy routing, including supported Director paths. ComfyUI remains
+separately managed and off by default. Fix wrapped H3 encoder namespaces,
+Director scene-image handling with no image-generation model, selected join
+codecs/containers, suspended preview recovery and several runtime name errors.
+Reference enhancement now distinguishes character, motion and scene videos,
+keeps vocal IDs separate from Subject IDs, and preserves authored speech when
+repairing a rejected draft. Recover a narrowly identifiable final dialogue-tag
+typo, avoid shorter automatic word targets for supplied lines, keep named props
+from stealing dialogue ownership, and include actual failures in repair requests.
+Update the README image and release documentation; Main promotion remains
+pending approval and final candidate validation.
 
 **2 November — Agent Access and testing updates:** built-in Local MCP and
 authenticated Remote MCP can be enabled independently. Add scoped clients,

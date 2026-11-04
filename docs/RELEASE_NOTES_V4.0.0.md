@@ -1,11 +1,25 @@
-# Maestro v4.0.0 — Dev release candidate
+# Maestro v4.0.0 — Release candidate
 
-29 October–2 November 2026. The next major release is available on **public Dev** for
-testing. Public Main remains v3.2.5 until its separate release review. This
-candidate combines the changes below with the fixes already tested on Dev.
+Candidate notes reviewed 4 November 2026. Public Main remains v3.2.5 until
+promotion is approved. These notes describe the v4 candidate, including the
+latest reliability and reference-enhancement fixes.
 
 ## Changes since v3.2.5 Main
 
+- **A larger Editor upgrade:** a media bin, preview, Inspector and multi-track
+  timeline; more direct trimming, linked edits, transitions, keyframes, color
+  and audio controls; media previews/proxies, project recovery and export
+  options. AI round trips retain source/take information. Local Auto-edit
+  proposes a reviewable plan before changes are applied and supports undo;
+  it does not silently replace an authored timeline. Tracks are shorter and
+  the timeline height is adjustable. [Editor guide](Editor.md).
+- **Pika H3 Flex:** experimental Frames and References models, included in
+  their default enabled lists. Its fixed six-evaluation recipe uses SLA on
+  supported runtimes with a dense fallback. Sliding windows carry recent
+  motion frames, a boundary frame and stereo audio; References also retains
+  ordered source inputs. Exact source-audio conditioning and per-shot
+  soundtrack offsets support Director music videos. Experimental 1080p joins
+  the 480p, 540p, 720p and 768p choices. [Pika guide](guides/pika-h3-flex.md).
 - **Built-in Agent Access/MCP:** independent Local MCP over STDIO and Remote
   MCP over authenticated HTTPS, with optional Tailscale setup, scoped approval
   and revocable clients. Agents receive model capabilities, prompting guides,
@@ -13,6 +27,13 @@ candidate combines the changes below with the fixes already tested on Dev.
   Director productions directly, including lyrics and music-video plans using
   native song/beat analysis. Existing Pinokio and LAN browser access remains
   available. [Setup and client requirements](Agent-Access.md).
+- **Optional ComfyUI integration:** discover and reuse configured model
+  folders without moving weights, import API workflows with typed inputs and
+  component pickers, and validate them before generation. Supported Studio
+  routes and Director paths can use explicitly selected ComfyUI mappings.
+  Native remains the default. ComfyUI and its nodes must be installed and
+  managed separately; importing an arbitrary graph does not make it compatible
+  with every Maestro feature. [ComfyUI guide](ComfyUI.md).
 - **Pinokio Remote integration:** detects this installation's published browser
   address, offers a QR code and optional MCP access through the same private
   HTTPS route, and avoids a second Tailscale setup. Existing local, LAN and
@@ -33,12 +54,6 @@ candidate combines the changes below with the fixes already tested on Dev.
   enhancement and model controls. Startup and mobile recovery show loading
   states while controls and the workspace become ready. Near-widescreen videos
   use their native proportions to avoid narrow black gaps inside gallery cards.
-- **A larger Editor upgrade:** a media bin, preview, Inspector and multi-track
-  timeline; more direct trimming, linked edits, transitions, keyframes, color
-  and audio controls; media previews/proxies, project recovery and export
-  options. AI round trips retain source/take information. Local Auto-edit
-  proposes a reviewable plan before changes are applied and supports undo;
-  it does not silently replace an authored timeline.
 - **Animated titles in Studio and Editor:** describe an animation in your own
   words, optionally choose a style, and use AI planning when wanted. Frames
   generation uses a matching canvas rather than unrelated character references.
@@ -51,13 +66,10 @@ candidate combines the changes below with the fixes already tested on Dev.
   guides and updated FLUX/Qwen/image-writer guidance preserve the requested
   artistic medium. Fixes cover FLUX 3 model switching, MOSS mode switching and
   rectangular Fibo VAE decoding.
-- **H3 workflows:** experimental Pika H3 Flex for Frames and References, now
-  included in their default model lists. Its fixed six-evaluation recipe uses
-  SLA on supported runtimes with a dense fallback. Experimental sliding
-  windows carry recent motion frames, a boundary frame and stereo audio;
-  References also retains the ordered source references. Additions include
-  workflow-matched LightX2V accelerators, PTD RefAsymOPD presets and compatible
-  two-pass latent refinement. Existing model-specific recipes remain separate.
+- **H3 accelerators and refinement:** workflow-matched LightX2V accelerators,
+  PTD RefAsymOPD presets and compatible two-pass latent refinement. Existing
+  model-specific recipes remain separate; two-pass is off by default and
+  applies only to compatible standard H3 Euler jobs.
 - **Pika Flex controls:** Frames and References offer 480p, 540p, 720p, 768p
   and experimental 1080p. Reusing a native clip restores its single window;
   resolution and aspect changes retain explicitly chosen window lengths and
@@ -93,6 +105,16 @@ candidate combines the changes below with the fixes already tested on Dev.
   even under a CUDA default tensor device. The vision encoder still receives
   the explicitly selected device and precision. This avoids unintended
   preprocessing allocations; it is not a general low-memory guarantee.
+- **Reference enhancement and dialogue recovery:** video references expose
+  Character / identity, Motion / camera and Scene roles independently from
+  their audio role. Native Subject IDs and vocal IDs stay separate. Recover
+  exact speaker ownership when a listener or named prop appears near a line,
+  preserve authored speech rather than imposing a shorter writing target,
+  and avoid duplicate native sound fields in fallback prompts. A narrowly
+  identifiable final `<d>words<d>` typo is repaired without changing its words;
+  ambiguous or nested tags return a clear error. Focused repairs receive the
+  validation reasons and missing lines. Existing Motion or legacy soundtrack
+  references are not silently converted to character or voice references.
 - **Reliable startup:** the API reserves its actual bind interface through
   server startup and announces the Maestro URL only after its listener is
   ready. Busy ports fall back without taking over a shared Pinokio service.
@@ -125,12 +147,24 @@ Pika's exact-audio path completed two 124-frame reference shots and a 248-frame
 join at 832×480 / 24fps / SLA on the RTX 4090. Full CPU decoding, frame counts,
 source-audio correspondence and fixed target-audio runtime evidence passed.
 This confirms functionality for the tested case, not perfect lip sync. These
-latest MCP and LoRA changes await user testing on the 12GB and 8GB workstations.
+results belong to the earlier v4 candidate and are not a blanket qualification
+of every later fix or model setting.
 
-The release candidate is undergoing a bounded overnight check on the RTX 4090
-(24GB), RTX 3080 Ti (12GB) and RTX 5070 Laptop (8GB), alongside CPU and isolated
-UI regressions. Results must be reviewed before promoting Main; this document
-does not claim that the overnight matrix has already passed.
+The bounded three-workstation qualification completed on 3 November with the
+RTX 4090 (24GB), RTX 3080 Ti (12GB) and RTX 5070 Laptop (8GB). Reviewed native
+renders, ComfyUI outputs, Editor exports and CPU/browser checks were retained.
+Real ComfyUI Wan generation was checked on all three machines; mapped Director
+routes and reference-edit semantics have narrower CPU/mock or manual coverage.
+Local MCP was checked on 01 and 02. It remained off and unowned on 03, so that
+machine's owner-approval gate was respected rather than bypassed for a test.
+
+The 4 November reference-enhancement fixes have CPU regression coverage and
+fresh Gemma/Qwen prompt checks on 01. Four checks preserved the six supplied
+spoken lines and their native speaker bindings without a final fallback.
+These were enhancement checks, not new video renders. A writer can still
+change action detail or return an inconclusive continuity review. The latest
+revision needs final user acceptance; earlier fleet results do not establish
+that every new fix has been rendered again on 12GB and 8GB hardware.
 
 Pika continuation has two decoded 480p functional checks on the 4090. Those
 checks preserve the tested frame counts and actual motion/audio history, but
@@ -143,6 +177,29 @@ certified GPU OOM-recovery result and excludes Fish/CUDA graph capture.
 Experimental features do not establish every GPU, model, long Director project,
 Linux configuration or output-quality claim. Keep important projects and compare
 actual outputs before adopting a new workflow.
+
+Model weights retain their own licenses and use restrictions. In particular,
+review the [Fibo](Fibo-2.md) and [Worlds](Worlds-Hy-Nomas.md) guides before using
+those optional models; Maestro's application license does not replace theirs.
+
+## Upgrade and optional setup
+
+Use Pinokio's Update action while the installation is idle, restart Maestro,
+and refresh the browser. Existing projects and media remain available;
+model-specific defaults and compatibility checks still apply when selecting a
+workflow. The deliberate appearance change is described below.
+
+ComfyUI, Local MCP and Remote MCP are optional. Local MCP needs no Tailscale;
+Remote MCP can reuse an existing Pinokio Remote HTTPS route or the separate
+Tailscale integration. Follow the client-specific Agent Access instructions.
+Enabling an agent connection does not require changing ordinary LAN browser
+access or automatically configuring a ComfyUI server.
+
+When reusing older video references for a character, choose **Character /
+identity** and, for a cloned speaking voice, **Voice reference** as the video's
+audio role. A **Motion / camera** video or a legacy paired soundtrack keeps
+that role until changed explicitly. A room or environment image belongs under
+**Scene**; **Composition** controls framing and blocking rather than identity.
 
 ## First opening v4
 

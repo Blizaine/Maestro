@@ -4,22 +4,34 @@ Every dated update announcement from Maestro's first public release onward, newe
 
 [Back to the README](../README.md#updates) · [Detailed changelog](../CHANGELOG.md)
 
-### v4.0.0 (2026-10-29–30) — Dev release candidate
+### v4.0.0 (updated 2026-11-04) — Release candidate
 
 The next major Main release is being prepared on **Dev** as v4.0.0.
 
-- **A fresh appearance:** first opening v4 switches to Graphite Studio in Dark
-  mode, including browsers with a saved theme. This happens once; choose another
-  theme or appearance in Settings afterward and that choice stays saved.
 - **An upgraded Editor and animated titles:** a fuller editing workspace,
-  reviewable Auto-edit plans, chroma key and transparent MOV export; titles can
-  also be generated directly in Studio.
-- **New creative models and tools:** MOSS reference editors, Fibo 2.0, H3
-  accelerators/PTD/two-pass options, FlashVSR+ Turbo and experimental Pika H3
-  Flex with motion/audio sliding windows. Flex is enabled in the default Frames
-  and References lists. Worlds and Profile 0 remain optional experimental tools.
-- **Smoother daily use:** compact pinned Studio controls, clearer startup and
-  mobile loading, resizable thumbnails, image-workflow fixes and quieter logs.
+  reviewable Auto-edit plans with undo, chroma key and transparent ProRes 4444
+  MOV export. Describe animated titles directly in Studio or the Editor.
+- **Pika H3 Flex:** experimental Frames and References generation, source-audio
+  conditioning, SLA with a compatibility fallback, and motion/audio sliding
+  windows. Five resolution tiers include experimental 1080p; saved window
+  choices survive settings reuse and resolution changes.
+- **Built-in MCP:** independent local and remote connections, scoped approval,
+  model-aware authoring guides, saved characters and externally authored
+  music-video plans with native song analysis. Existing browser access stays
+  available.
+- **Optional ComfyUI integration:** reuse model folders, import typed API
+  workflows and route supported native or Director requests through an existing
+  ComfyUI server. Nothing is enabled or installed automatically.
+- **A fresh appearance:** first opening v4 switches to Graphite Studio in Dark
+  mode once. Choose another theme afterward and that choice stays saved.
+  Compact pinned controls, resizable thumbnails and mobile/startup recovery
+  make everyday use smoother.
+- **More creative models and finishing:** MOSS reference editors, Fibo 2.0,
+  Qwen reference caches, H3 accelerators/PTD/two-pass options and FlashVSR+ Turbo.
+  Worlds and Profile 0 remain optional experimental tools.
+- **More reliable writing and review:** clearer reference roles, exact dialogue
+  and speaker recovery, retained rejected drafts, Director planning fixes,
+  failed-job settings/LoRA details, Turbo LoRA filters and quieter logs.
 
 The existing Dev updates are included. See the
 [v4.0.0 candidate notes and testing limits](RELEASE_NOTES_V4.0.0.md).
