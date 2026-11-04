@@ -455,18 +455,75 @@ _STYLE_WORD_RE = re.compile(
     flags=re.IGNORECASE,
 )
 def normalize_h3_dialogue_tags(value: Any) -> str:
-    """Repair harmless whitespace in user-authored ``<d>`` tags.
+    """Normalize ``<d>`` tags and repair one unambiguous terminal duplicate.
 
     Mobile keyboards and pasted prompts commonly produce ``< d>`` or
     ``< / d >``.  MiniMax understands only the canonical spelling, and the
     story ledger must recognize the line before it removes dialogue from the
     visual event stream.  Normalize only the tag delimiters; spoken words are
-    left byte-for-byte unchanged.
+    left byte-for-byte unchanged. A final repeated opener is treated as the
+    closing delimiter only when the preceding tag stream is balanced, the two
+    openers share one plain-text line, and the duplicate is followed only by
+    EOF or blank-separated native audio fields.
     """
 
     text = str(value or "")
     text = re.sub(r"<\s*d\s*>", "<d>", text, flags=re.IGNORECASE)
-    return re.sub(r"<\s*/\s*d\s*>", "</d>", text, flags=re.IGNORECASE)
+    text = re.sub(r"<\s*/\s*d\s*>", "</d>", text, flags=re.IGNORECASE)
+
+    tags = list(re.finditer(r"</?d>", text, flags=re.IGNORECASE))
+    if len(tags) < 2:
+        return text
+
+    first, duplicate = tags[-2:]
+    if first.group(0).casefold() != "<d>" or duplicate.group(0).casefold() != "<d>":
+        return text
+
+    # The prefix must be a sequence of complete, non-nested dialogue blocks.
+    depth = 0
+    for tag in tags[:-2]:
+        if tag.group(0).casefold() == "<d>":
+            if depth:
+                return text
+            depth = 1
+        else:
+            if not depth:
+                return text
+            depth = 0
+    if depth:
+        return text
+
+    body = text[first.end():duplicate.start()]
+    if not body.strip() or any(char in body for char in "\r\n<>"):
+        return text
+
+    suffix = text[duplicate.end():]
+    if suffix.strip():
+        # Audio fields can follow the last authored line in a prompt, but only
+        # after a blank line and only when every remaining nonempty line is a
+        # native H3 audio field. Any later markup keeps the case ambiguous.
+        separator = re.match(r"\r?\n[ \t]*\r?\n", suffix)
+        if separator is None:
+            return text
+        field_text = suffix[separator.end():]
+        if re.search(r"<[^>]*>", field_text):
+            return text
+        field_names = []
+        for line in field_text.splitlines():
+            if not line.strip():
+                continue
+            field = re.fullmatch(
+                r"[ \t]*(overall_soundscape|non_diegetic_music)\s*:.*",
+                line,
+                flags=re.IGNORECASE,
+            )
+            if field is None:
+                return text
+            field_names.append(field.group(1).casefold())
+        if not field_names or len(field_names) > 2 or len(set(field_names)) != len(field_names):
+            return text
+
+    return text[:duplicate.start()] + "</d>" + text[duplicate.end():]
 
 
 def _is_style_only_fragment(value: str) -> bool:

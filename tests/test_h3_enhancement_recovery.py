@@ -60,6 +60,44 @@ def conversation(*, native_audio_fields=False):
 
 
 class H3EnhancementRecoveryTests(unittest.TestCase):
+    def test_named_prop_does_not_take_ownership_of_a_chained_cast_reply(self):
+        source = CAST_MAP + (
+            'Scene: The friends meet beside the harbor.\n'
+            '(S1) Mira says <d>Are you ready?</d>\n'
+            '(S2) Tavi replies <d>Nearly.</d>\n'
+            '(S2) Tavi then holds the Compass, Northstar, in front of him and smiles '
+            'and says softly <d>I found you.</d>'
+        )
+        entries = llm_service._extract_h3_source_dialogue_entries(source, MOTION_ONLY_CONTEXT)
+        self.assertEqual([entry['speaker'] for entry in entries], ['Mira', 'Tavi', 'Tavi'])
+        self.assertEqual([entry['speaker_id'] for entry in entries], [1, 2, 2])
+        fallback = llm_service._build_h3_ref2va_tagged_fallback(
+            source, MOTION_ONLY_CONTEXT, duration_seconds=12,
+        )
+        compiled = llm_service._extract_h3_source_dialogue_entries(fallback, MOTION_ONLY_CONTEXT)
+        self.assertEqual([entry['speaker_id'] for entry in compiled], [1, 2, 2])
+
+    def test_a_named_guest_after_a_cast_action_keeps_its_own_voice(self):
+        source = CAST_MAP + (
+            'Scene: The friends meet beside the harbor.\n'
+            '(S1) Mira says <d>Are you ready?</d>\n'
+            '(S2) Tavi replies <d>Nearly.</d>\n'
+            '(S2) Tavi holds the Compass and Rook says softly <d>I found you.</d>'
+        )
+        entries = llm_service._extract_h3_source_dialogue_entries(source, MOTION_ONLY_CONTEXT)
+        self.assertEqual([entry['speaker'] for entry in entries], ['Mira', 'Tavi', 'Rook'])
+        self.assertEqual([entry['speaker_id'] for entry in entries], [1, 2, 3])
+
+    def test_rendering_cast_markers_as_names_does_not_duplicate_adjacent_names(self):
+        source = '(S2) Tavi replies to Mira (S1); (S3) watches. <d>Go.</d>'
+        normalized = llm_service._canonicalize_h3_source_cast_markers(
+            source, {1: 'Mira', 2: 'Tavi', 3: 'Juno'},
+        )
+        self.assertNotIn('Tavi Tavi', normalized)
+        self.assertNotIn('Mira Mira', normalized)
+        self.assertIn('Juno watches.', normalized)
+        self.assertIn('<d>Go.</d>', normalized)
+
     def test_cast_manifest_resolves_speaker_before_recipient_with_scene_subject_present(self):
         source = conversation()
         entries = llm_service._extract_h3_source_dialogue_entries(source, CHARACTER_CONTEXT)

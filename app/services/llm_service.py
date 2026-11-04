@@ -3282,6 +3282,34 @@ def _generate_streaming_anthropic(messages: list, max_tokens: int, temperature: 
     return content.strip()
 
 
+def _enhance_dialogue_budget_instruction(prompt, budget, model_type="", window_count=1) -> str:
+    """Keep an automatic writing target from competing with an authored script."""
+    if not str(model_type or "").lower().startswith("minimax_h3"):
+        return budget.instruction()
+    lines = _extract_h3_quoted_dialogue(prompt)
+    if not lines:
+        return budget.instruction()
+    from services.dialogue_writing import spoken_word_count
+
+    count = sum(spoken_word_count(line) for line in lines)
+    duration_guidance = (
+        f"Distribute these lines chronologically across the {window_count} windows, never repeating "
+        f"a line in another window. Each window allows at most {budget.maximum} spoken words. "
+        if window_count and window_count > 1 else
+        f"The selected duration allows at most {budget.maximum} spoken words in total. "
+    )
+    return (
+        f"The user supplied {len(lines)} spoken lines containing {count} spoken words. "
+        "Preserve every supplied line verbatim, once, in its source order and beside its "
+        "requested action and speaker. Do not shorten, omit, or paraphrase a supplied line "
+        "to meet an automatic word-count target. "
+        + duration_guidance +
+        "Additional dialogue is allowed only where the brief explicitly requests an "
+        "unscripted turn and space remains after all supplied lines. Do not pad the script. "
+        "Preserve the requested action and pauses; do not invent faster delivery to make room."
+    )
+
+
 def _build_enhance_user_prompt(
     prompt,
     mode,
@@ -3332,7 +3360,7 @@ def _build_enhance_user_prompt(
         if adaptive_dialogue_expansion_requested(prompt):
             budget = creative_dialogue_budget(prompt, window_size_seconds if window_count and window_count > 1 else duration_seconds)
             if budget:
-                context.append(budget.instruction())
+                context.append(_enhance_dialogue_budget_instruction(prompt, budget, model_type, window_count))
         elif adaptive_dialogue_expected(prompt):
             context.append("Preserve the supplied spoken lines beside their requested actions. Do not add or pad speech to fill the selected duration; develop the visual scene.")
         else:
@@ -3359,7 +3387,7 @@ def _build_enhance_user_prompt(
                 "\n[CREATIVE WRITING: Develop the requested scene and character interaction. "
                 "Preserve all explicit facts and quoted lines. Supporting dialogue may surround "
                 "those exact lines unless the user requests only them. Keep silent requests silent."
-                + (" For each window: " + budget.instruction() if budget else "") + "]"
+                + (" For each window: " + _enhance_dialogue_budget_instruction(prompt, budget, model_type, window_count) if budget else "") + "]"
             )
         if window_count and window_count > 1:
             if planning_style in {"creative", "adaptive"}:
@@ -3472,6 +3500,10 @@ def enhance_prompt(
         and not is_h3_ref2va
     )
     is_h3_structured = is_h3_context_ir or is_h3_ref2va
+    if is_h3_structured:
+        # Keep offsets, admission, immutable dialogue and fallback compilation
+        # on the same normalized copy; the user's stored source stays intact.
+        prompt = normalize_h3_dialogue_tags(prompt)
     is_flux3_image = mode == "image" and (model_type or "").lower().startswith("flux3")
     from services.enhance_guides import moss_image_enhancement_kind
     moss_enhancement_kind = moss_image_enhancement_kind(model_type or "", mode)
@@ -3915,7 +3947,9 @@ def enhance_prompt(
         )
         writing_budget = creative_dialogue_budget(prompt, duration_seconds)
         if writing_budget:
-            system += "\nCREATIVE DIALOGUE ALLOCATION: " + writing_budget.instruction()
+            system += "\nCREATIVE DIALOGUE ALLOCATION: " + _enhance_dialogue_budget_instruction(
+                prompt, writing_budget, model_type,
+            )
 
     if planning_style == "adaptive":
         from services.adaptive_enhancement import adaptive_dialogue_expected, adaptive_writing_guide
@@ -3972,6 +4006,18 @@ def enhance_prompt(
         ]
         if native_subject_roles:
             system += "\nNATIVE SUBJECT ROLE MAP (authoritative):\n" + "\n".join(native_subject_roles)
+        cast = _h3_explicit_cast_speakers(prompt)
+        character_subjects = [
+            item for item in _parse_h3_ref2va_subject_manifest(reference_context)
+            if int(item["index"]) not in _h3_ref2va_scene_subject_ids(reference_context)
+        ]
+        if cast and not character_subjects and not audio_driven:
+            system += (
+                "\nPROMPT-NATIVE CAST: " + "; ".join(dict.fromkeys(cast.values())) + ". "
+                "Use these plain names for visible characters and dialogue. No character Subject "
+                "IDs were allocated. The scene Subject is the environment only. Motion videos "
+                "and paired soundtrack labels do not allocate character or voice identities."
+            )
     elif is_h3_context_ir:
         system += (
             "\n\nCRITICAL MINIMAX H3 OUTPUT CONTRACT: Output ONLY the structured "
@@ -4339,8 +4385,20 @@ def enhance_prompt(
                 if is_h3_ref2va
                 else "Emit each of the three required field labels exactly once, in order."
             )
+            supplied_lines = _extract_h3_quoted_dialogue(prompt) if needs_h3_dialogue else []
+            draft_lines = {_h3_dialogue_comparison_text(line) for line in _extract_h3_dialogue_blocks(result)}
+            missing_lines = [line for line in supplied_lines if _h3_dialogue_comparison_text(line) not in draft_lines]
+            restorations = ""
+            if missing_lines:
+                restorations = (
+                    "\nMISSING SUPPLIED LINES — restore each at its original source position and speaker:\n"
+                    + "\n".join(f"- {line}" for line in missing_lines)
+                )
             retry = generate(
-                prompt=user_prompt + "\n\nPREVIOUS DRAFT TO REPAIR:\n" + result,
+                prompt=(user_prompt + "\n\nPREVIOUS DRAFT TO REPAIR:\n" + result
+                        + "\n\nVALIDATION FAILURES TO FIX:\n- " + "\n- ".join(failures)
+                        + restorations
+                        + "\nReturn the complete corrected prompt, preserving all supplied spoken lines."),
                 system_prompt=(
                     system
                     + f"\n\nRETRY REQUIREMENT: Be concise. {field_requirement} "
@@ -4970,7 +5028,16 @@ def _canonicalize_h3_source_cast_markers(text: str, cast_speakers: dict[int, str
 
     def replace_marker(match):
         name = cast_speakers.get(int(match.group(1)))
-        return name if name else match.group(0)
+        if not name:
+            return match.group(0)
+        # ``Tavi (S2)`` and ``(S2) Tavi`` already contain the actor's name.
+        # Replacing only the marker would create a new "Tavi Tavi" owner.
+        before = result[max(0, match.start() - len(name) - 3):match.start()]
+        after = result[match.end():match.end() + len(name) + 3]
+        if (re.search(rf"(?<!\w){re.escape(name)}\s*$", before, re.I)
+                or re.match(rf"\s*{re.escape(name)}(?!\w)", after, re.I)):
+            return ""
+        return name
 
     result = re.sub(r"\(\s*S(\d+)\s*\)", replace_marker, result, flags=re.IGNORECASE)
     for index, block in enumerate(blocks):
@@ -5200,6 +5267,25 @@ def _extract_h3_source_dialogue_entries(
                 owner = cast_by_normalized_name[normalized_owner]
             elif not owner and cast_marker in cast_speakers:
                 owner = cast_speakers[int(cast_marker)]
+            elif cast_marker in cast_speakers:
+                # A prop named during a chained action is not a new speaker:
+                # ``(S2) Tavi holds the Compass and smiles and says ...``.
+                # Require both the adjacent named actor and a final ownerless
+                # "and says" clause. A named guest in "and Rook says" keeps
+                # its own ownership instead of inheriting this cast marker.
+                marker_span = _h3_source_speaker_marker_match_for_dialogue(
+                    source, int(entry["start"]), previous_end,
+                )
+                if marker_span:
+                    actor_tail = source[marker_span[1]:int(entry["start"])]
+                    cast_name = cast_speakers[int(cast_marker)]
+                    if (re.match(rf"\s*{re.escape(cast_name)}\b", actor_tail, re.I)
+                            and re.search(
+                                r"\band\s+(?:then\s+)?(?:says?|speaks?|replies|answers?|"
+                                r"asks?|whispers?|shouts?)\b[^.!?;\r\n]*$",
+                                actor_tail, re.I,
+                            )):
+                        owner = cast_name
 
             subject = None
             if owner:
@@ -7144,11 +7230,28 @@ def _ensure_h3_visual_grounding(
 def validate_h3_source_dialogue_duration(prompt: str, duration_seconds: Optional[float]) -> None:
     """Reject impossible exact scripts before asking the writer to preserve them."""
     import math
+    import re
     from services.dialogue_timing import DIALOGUE_DEFAULT_WORDS_PER_SECOND, DIALOGUE_MAX_WORDS_PER_SECOND
     from services.dialogue_writing import spoken_word_count
     from services.h3_prompt_budget import H3PromptBudgetError
     from services.h3_dialogue_source import unclosed_h3_spoken_quote_error
 
+    prompt = normalize_h3_dialogue_tags(prompt)
+    inside_dialogue = False
+    for tag in re.finditer(r"</?d>", prompt, flags=re.IGNORECASE):
+        opening = tag.group().lower() == "<d>"
+        if opening == inside_dialogue:
+            raise H3PromptBudgetError(
+                "MiniMax H3 found an unclosed or nested dialogue tag. Use <d>spoken words</d> "
+                "for each line, with stage and sound directions outside the tags. "
+                "Your original prompt has not been changed."
+            )
+        inside_dialogue = opening
+    if inside_dialogue:
+        raise H3PromptBudgetError(
+            "MiniMax H3 found an unclosed dialogue tag. Close the spoken line with </d> "
+            "before enhancing. Your original prompt has not been changed."
+        )
     source_error = unclosed_h3_spoken_quote_error(prompt)
     if source_error:
         raise H3PromptBudgetError(source_error)
