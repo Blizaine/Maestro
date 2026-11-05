@@ -38,11 +38,11 @@ const modelOptionsFor = (modelType, reference = false, rolling = false) => ({
   i2v_class: !reference,
   returns_audio: true,
   audio_only: false,
-  lock_inference_steps: true,
+  lock_inference_steps: false,
   lock_guidance_scale: true,
   lock_guidance_phases: true,
-  inference_steps_min: 6,
-  inference_steps_max: 6,
+  inference_steps_min: 4,
+  inference_steps_max: 12,
   guidance_max_phases: 1,
   default_num_inference_steps: 6,
   resolution_preset_order: ['480p', '540p', '720p', '768p', '1080p'],
@@ -466,7 +466,7 @@ const modelDefFor = (modelType, reference = false) => ({
       assert.equal(submitted.video_length, 230, 'Rolling generation retains the requested total frames');
       assert.equal(submitted.sliding_window_size, 124, 'Rolling generation uses the locked native window');
       assert.equal(submitted.sliding_window_overlap, 18, 'Rolling generation carries the configured overlap');
-      assert.equal(submitted.num_inference_steps, 6, 'Fixed six-step Pika settings remain unchanged');
+      assert.equal(submitted.num_inference_steps, 6, 'Default six-step Pika settings remain unchanged');
       assert.equal(submitted.minimax_h3_multi_window ?? false, !scenario.reference,
         'Frames uses the H3 multi-window sequence flag');
       assert.equal(submitted.minimax_h3_reference_sequence ?? false, scenario.reference,
@@ -848,7 +848,7 @@ const modelDefFor = (modelType, reference = false) => ({
     }, 'The legacy single-pass sidecar still restores its full 362-frame native clip');
 
     assert.deepEqual(errors, [], 'The duration controls render without UI errors');
-    console.log('Pika Flex: legacy single-pass, new Frames/References sequences, exact sidecar restores, fixed steps, and ordinary H3 compatibility passed');
+    console.log('Pika Flex: legacy single-pass, new Frames/References sequences, exact sidecar restores, default steps, and ordinary H3 compatibility passed');
   } finally {
     await browser.close();
   }

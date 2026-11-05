@@ -57,6 +57,20 @@ def test_recipe_and_conditioning_survive_settings_migration(reference):
 
 
 @pytest.mark.parametrize("reference", [False, True])
+@pytest.mark.parametrize("steps", [4, 6, 8, 12])
+def test_fix_settings_preserves_valid_experimental_step_selection(reference, steps):
+    data, base, model = definition(reference)
+    settings = {key: value for key, value in data.items() if key != "model"}
+    settings["num_inference_steps"] = steps
+
+    family_handler.fix_settings(base, 3, model, settings)
+
+    assert settings["num_inference_steps"] == steps
+    assert family_handler.validate_generative_settings(base, model, settings) is None
+    assert validate_pika_flex_single_pass_request(settings, model) is None
+
+
+@pytest.mark.parametrize("reference", [False, True])
 def test_handler_preserves_per_generation_experimental_lora_opt_in(reference):
     data, base, model = definition(reference)
     settings = {key: value for key, value in data.items() if key != "model"}
@@ -317,7 +331,9 @@ def test_flex_has_no_borrowed_duration_evidence_or_extended_override(reference):
     _, _, model = definition(reference)
     assert not h3_duration_recommendations_enabled(model)
     assert h3_duration_model_def(model, {"minimax_h3_extended_duration": True}) is model
-    assert model["inference_steps_min"] == model["inference_steps_max"] == 6
+    assert model["inference_steps_min"] == 4
+    assert model["inference_steps_max"] == 12
+    assert model["lock_inference_steps"] is False
     assert model["sliding_window"]
     assert model["video_continuation"]
     assert model["sliding_window_defaults"]["window_default"] == 124
@@ -393,7 +409,7 @@ def test_flex_auto_memory_profile_is_conservative_estimated_and_manual_can_raise
 
 @pytest.mark.parametrize("change", [
     {"video_length": 123}, {"video_length": 363}, {"video_length": 125},
-    {"resolution": "864x480"}, {"fps": 30}, {"num_inference_steps": 4},
+    {"resolution": "864x480"}, {"fps": 30}, {"num_inference_steps": 13},
     {"minimax_h3_extended_duration": True}, {"activated_loras": ["turbo.safetensors"]},
 ])
 def test_incompatible_requests_fail_before_model_allocation(change):

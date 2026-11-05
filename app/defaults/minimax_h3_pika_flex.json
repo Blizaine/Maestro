@@ -22,9 +22,11 @@
     "minimax_h3_pika_flex_lora_strength": 1.0,
     "minimax_h3_video_vae_filename": "minimax_h3_video_vae_int8_convrot.safetensors",
     "minimax_h3_text_encoder_default": "gguf_q2_k",
-    "lock_inference_steps": true,
-    "inference_steps_min": 6,
-    "inference_steps_max": 6,
+    "lock_inference_steps": false,
+    "inference_steps_min": 4,
+    "inference_steps_max": 12,
+    "inference_steps_label": "Denoising Steps",
+    "inference_steps_help": "6 is recommended (Pika’s released recipe). Other counts are experimental; more steps may not improve quality.",
     "lock_guidance_scale": true,
     "lock_guidance_phases": true,
     "guidance_max_phases": 1,
@@ -156,7 +158,7 @@
     "pika_flex_adapter_sha256": "68783e6447696ec365d13c0554941e070bee4cfea13c37da52498ec4f9a53f89",
     "license_name": "MiniMax H3 Community License",
     "license_url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
-    "selector_help": "PIKA H3 FLEX — FRAMES (EXPERIMENTAL)\nGenerate text-to-video or use first/last images. Six fixed model evaluations; CFG 1, pinned adapter strength 1, video/audio shifts 12/3. Begin at 480p / 5.17 seconds. SLA is the default on supported GPUs and safely falls back to dense attention otherwise. Ordinary H3 style/content LoRAs are experimental and off by default. Turbo, PDD, VDN, PTD, other special-head accelerators, and DoRA remain unavailable, as do control video, cache, and refinement. Maestro does not include Pika's 4K upsampler or stem extraction. Consumer-GPU real-time performance is unverified."
+    "selector_help": "PIKA H3 FLEX — FRAMES (EXPERIMENTAL)\nGenerate text-to-video or use first/last images. Six evaluations use Pika's released knot recipe; 4–12 are available experimentally by resampling that ladder, and only six is upstream-qualified. CFG 1, pinned adapter strength 1, video/audio shifts 12/3. Begin at 480p / 5.17 seconds. SLA is the default on supported GPUs and safely falls back to dense attention otherwise. Ordinary H3 style/content LoRAs are experimental and off by default. Turbo, PDD, VDN, PTD, other special-head accelerators, and DoRA remain unavailable, as do control video, cache, and refinement. Maestro does not include Pika's 4K upsampler or stem extraction. Consumer-GPU real-time performance is unverified."
   },
   "prompt": "A cinematic medium shot of a traveler standing on a windswept overlook at sunrise. The camera slowly arcs around them as their coat moves naturally in the breeze. Distant birds and soft wind are audible, and the traveler says, \"We made it.\"",
   "num_inference_steps": 6,

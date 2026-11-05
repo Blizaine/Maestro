@@ -12,9 +12,12 @@ from typing import Any
 
 from . import fasth3
 from .pika_flex import (
+    PIKA_FLEX_MAX_STEPS,
     PIKA_FLEX_FRAME_MAXIMUM,
     PIKA_FLEX_FRAME_MINIMUM,
     PIKA_FLEX_FRAME_STEP,
+    PIKA_FLEX_MIN_STEPS,
+    PIKA_FLEX_STEPS,
     normalize_pika_flex_attention,
 )
 
@@ -35,7 +38,6 @@ PIKA_FLEX_FRAMES_SHA256 = "68783e6447696ec365d13c0554941e070bee4cfea13c37da52498
 PIKA_FLEX_REFERENCES_FILE = "pika_h3_flex_ref2va_comfy_bf16.safetensors"
 PIKA_FLEX_REFERENCES_SHA256 = "e4d058fbd027377b925a0ee607b514ddd9037873fee3afa05d73b302e6f7f8e1"
 PIKA_FLEX_KNOTS = (1000, 750, 500, 250, 100, 40, 0)
-PIKA_FLEX_STEPS = 6
 PIKA_FLEX_VIDEO_SHIFT = 12.0
 PIKA_FLEX_AUDIO_SHIFT = 3.0
 PIKA_FLEX_GUIDANCE_SCALE = 1.0
@@ -102,7 +104,10 @@ PIKA_FLEX_LORA_SPECS = {
 
 PIKA_FLEX_HELP = (
     "PIKA H3 FLEX — EXPERIMENTAL\n"
-    "Six fixed model evaluations with the pinned Pika H3 Flex adapter, CFG 1, "
+    "Six model evaluations match Pika's released knot recipe. Four to twelve "
+    "evaluations are available experimentally by resampling that knot ladder; "
+    "only the six-step recipe is upstream-qualified. The pinned Pika H3 Flex "
+    "adapter uses CFG 1, "
     "adapter strength 1, and video/audio shifts 12/3. Frames supports text-to-video "
     "and first/last images. References supports ordered image, video, and audio "
     "references and needs at least one image or video. Begin at 480p / 5.17 seconds. "
@@ -228,8 +233,8 @@ def pika_flex_capabilities(reference: bool) -> dict[str, Any]:
         "director_reference_mode": (
             "omni_manifest" if reference else "start_end"
         ),
-        # Ref2VA can freeze the supplied target audio while the six-step
-        # sampler generates video, matching the upstream a2v contract.
+        # Ref2VA can freeze the supplied target audio while the sampler
+        # generates video, matching the upstream a2v contract.
         "director_audio_input_mode": "reference_manifest" if reference else "none",
         "director_shot_image_support": (
             "direct_references" if reference else "optional"
@@ -249,11 +254,14 @@ def pika_flex_capabilities(reference: bool) -> dict[str, Any]:
         "profiles_dir": [],
         "compatible_model_paths": {},
         "compatible_model_qkv_layouts": {},
-        "lock_inference_steps": True,
-        "inference_steps_min": PIKA_FLEX_STEPS,
-        "inference_steps_max": PIKA_FLEX_STEPS,
+        "lock_inference_steps": False,
+        "inference_steps_min": PIKA_FLEX_MIN_STEPS,
+        "inference_steps_max": PIKA_FLEX_MAX_STEPS,
         "inference_steps_label": "Denoising Steps",
-        "inference_steps_help": "Pika H3 Flex uses six fixed model evaluations and does not support step changes.",
+        "inference_steps_help": (
+            "6 is recommended (Pika’s released recipe). Other counts are "
+            "experimental; more steps may not improve quality."
+        ),
         "lock_guidance_scale": True,
         "guidance_max_phases": 1,
         "lock_guidance_phases": True,
@@ -393,6 +401,8 @@ __all__ = [
     "PIKA_FLEX_LORA_SIZE",
     "PIKA_FLEX_LORA_SPECS",
     "PIKA_FLEX_LORA_STRENGTH",
+    "PIKA_FLEX_MAX_STEPS",
+    "PIKA_FLEX_MIN_STEPS",
     "PIKA_FLEX_MODEL_REPO",
     "PIKA_FLEX_MODEL_REVISION",
     "PIKA_FLEX_REFERENCE_LIMITS",

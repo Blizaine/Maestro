@@ -655,7 +655,7 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
                 </label>
                 <p className="mt-1 text-[10px] leading-relaxed text-text-muted">
                   {modelOptions?.minimax_h3_pika_flex
-                    ? 'Try ordinary H3 style/character LoRAs alongside the required Pika adapter. Quality and individual adapter compatibility are unverified. Pika keeps its six steps; extra Turbo/PDD/VDN/PTD and DoRA adapters are unavailable.'
+                    ? 'Try ordinary H3 style/character LoRAs alongside the required Pika adapter. Quality and individual adapter compatibility are unverified. Six steps is recommended; other step counts are experimental. Extra Turbo/PDD/VDN/PTD and DoRA adapters are unavailable.'
                     : 'Try ordinary H3 style/character LoRAs with FastH3. Output quality is unverified. Additional Turbo/PDD adapters remain unavailable.'}
                 </p>
                 {!experimentalLorasEnabled && params.activated_loras.length > 0 && <p className="mt-1 text-[10px] text-text-muted">

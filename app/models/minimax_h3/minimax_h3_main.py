@@ -167,8 +167,13 @@ def _set_h3_generation_shifts(
     video_scheduler.set_shift(shift)
 
 
-def _set_pika_flex_schedules(video_scheduler, audio_scheduler, device) -> None:
-    """Apply Pika Flex's fixed, independently shifted six-evaluation grids."""
+def _set_pika_flex_schedules(
+    video_scheduler,
+    audio_scheduler,
+    device,
+    steps: int,
+) -> None:
+    """Apply Pika Flex's independently shifted released or resampled grids."""
 
     from .pika_flex import pika_flex_sigmas
 
@@ -177,11 +182,11 @@ def _set_pika_flex_schedules(video_scheduler, audio_scheduler, device) -> None:
     video_scheduler.set_solver("euler")
     audio_scheduler.set_solver("euler")
     video_scheduler.set_timesteps(
-        sigmas=pika_flex_sigmas(12.0),
+        sigmas=pika_flex_sigmas(12.0, steps),
         device=device,
     )
     audio_scheduler.set_timesteps(
-        sigmas=pika_flex_sigmas(3.0),
+        sigmas=pika_flex_sigmas(3.0, steps),
         device=device,
     )
 
@@ -2643,8 +2648,11 @@ class MiniMaxH3Model:
         if getattr(self, "pika_flex", False):
             from .pika_flex import (
                 is_pika_flex_single_frame_start_anchor,
+                normalize_pika_flex_steps,
                 validate_pika_flex_request,
             )
+
+            sampling_steps = normalize_pika_flex_steps(sampling_steps)
 
             pika_request = {
                 key: value
@@ -3782,13 +3790,14 @@ class MiniMaxH3Model:
                 self.scheduler,
                 self.audio_scheduler,
                 self.device,
+                steps=sampling_steps,
             )
             pika_noise_generator = torch.Generator(
                 device=self.device
             ).manual_seed(request_seed + 1)
             print(
                 "[Pika H3 Flex] Experimental Maestro native packed sampler: "
-                "six evaluations, clean prediction with fresh target noise, "
+                f"{sampling_steps} evaluations, clean prediction with fresh target noise, "
                 "video/audio shifts 12/3, adapter strength 1.0."
             )
         if _face_refinement is not None:
@@ -3940,7 +3949,7 @@ class MiniMaxH3Model:
                 print(
                     "[Pika H3 Flex] Exact source audio locked: "
                     f"{conditioned_audio_latents}/{num_audio_latents} target "
-                    "latents per channel; clean rows excluded from all six "
+                    f"latents per channel; clean rows excluded from all {model_steps} "
                     "sampler updates."
                 )
         else:

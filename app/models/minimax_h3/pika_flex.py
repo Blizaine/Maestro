@@ -14,6 +14,8 @@ from typing import Any
 
 PIKA_FLEX_KNOTS = (1000, 750, 500, 250, 100, 40, 0)
 PIKA_FLEX_STEPS = len(PIKA_FLEX_KNOTS) - 1
+PIKA_FLEX_MIN_STEPS = 4
+PIKA_FLEX_MAX_STEPS = 12
 PIKA_FLEX_ATTENTION_MODES = ("sage2", "sdpa", "sol", "sla")
 PIKA_FLEX_FRAME_MINIMUM = 124
 PIKA_FLEX_FRAME_STEP = 17
@@ -21,7 +23,7 @@ PIKA_FLEX_FRAME_MAXIMUM = 362
 
 
 def normalize_pika_flex_attention(value: Any) -> str:
-    """Keep attention selection separate from the fixed six-step sampler."""
+    """Keep attention selection separate from Pika Flex's sampling schedule."""
 
     mode = str(value or "sla").strip().lower()
     if mode in {"", "auto", "default"}:
@@ -43,21 +45,72 @@ def _finite_float(value: Any, *, name: str) -> float:
     return number
 
 
-def pika_flex_sigmas(shift: float) -> tuple[float, ...]:
-    """Return Pika Flex's seven shifted knots for one modality.
+def normalize_pika_flex_steps(value: Any = None) -> int:
+    """Validate an experimental evaluation count, defaulting to Pika's recipe."""
 
-    Video and audio call this independently with shifts 12 and 3 respectively.
-    The shift is intentionally an argument so callers cannot accidentally
-    reuse one modality's sigma ladder for the other.
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return PIKA_FLEX_STEPS
+    steps = _strict_int(value, name="Pika H3 Flex inference steps")
+    if not PIKA_FLEX_MIN_STEPS <= steps <= PIKA_FLEX_MAX_STEPS:
+        raise ValueError(
+            f"Pika H3 Flex supports {PIKA_FLEX_MIN_STEPS}-{PIKA_FLEX_MAX_STEPS} "
+            f"experimental denoising steps; {PIKA_FLEX_STEPS} is the official "
+            f"recipe. Received {steps}."
+        )
+    return steps
+
+
+def _pika_flex_unshifted_knots(steps: int) -> tuple[float, ...]:
+    """Resample the released normalized knot ladder in index space.
+
+    The official six-step schedule returns the original integer knots so its
+    shifted arithmetic stays byte-for-byte equivalent to the released recipe.
+    Other counts sample linearly across the six original knot intervals before
+    the modality-specific shift is applied.
+    """
+
+    if steps == PIKA_FLEX_STEPS:
+        return PIKA_FLEX_KNOTS
+
+    source_intervals = len(PIKA_FLEX_KNOTS) - 1
+    sampled: list[float] = []
+    for index in range(steps + 1):
+        if index == 0:
+            sampled.append(float(PIKA_FLEX_KNOTS[0]))
+            continue
+        if index == steps:
+            sampled.append(float(PIKA_FLEX_KNOTS[-1]))
+            continue
+        position = index * source_intervals / steps
+        left = math.floor(position)
+        fraction = position - left
+        start = PIKA_FLEX_KNOTS[left]
+        end = PIKA_FLEX_KNOTS[left + 1]
+        sampled.append(start + (end - start) * fraction)
+    return tuple(sampled)
+
+
+def pika_flex_sigmas(
+    shift: float,
+    steps: int = PIKA_FLEX_STEPS,
+) -> tuple[float, ...]:
+    """Return a shifted Pika Flex sigma ladder for one modality.
+
+    Six steps use the seven released knots verbatim. Experimental counts
+    resample those unshifted knots; video and audio then apply their own shifts
+    (12 and 3). The shift remains an explicit argument so modalities cannot
+    accidentally share a ladder.
     """
 
     shift_value = _finite_float(shift, name="Pika H3 Flex flow shift")
     if shift_value <= 0.0:
         raise ValueError("Pika H3 Flex flow shift must be greater than zero.")
+    steps = normalize_pika_flex_steps(steps)
+    knots = _pika_flex_unshifted_knots(steps)
     return tuple(
         shift_value * (knot / 1000.0)
         / (1.0 + (shift_value - 1.0) * (knot / 1000.0))
-        for knot in PIKA_FLEX_KNOTS
+        for knot in knots
     )
 
 
@@ -70,10 +123,10 @@ def pika_flex_step(
 ) -> Any:
     """Advance one data-ward velocity evaluation in FP32 arithmetic.
 
-    ``prediction`` is the native H3 velocity ``x0 - eps``.  For each of the
-    first five intervals, the clean estimate is mixed with fresh FP32 noise at
-    ``next_sigma``.  The terminal interval returns the clean estimate directly
-    and does not consume RNG state.  The sampler state remains FP32 even when
+    ``prediction`` is the native H3 velocity ``x0 - eps``.  For every
+    nonterminal interval, the clean estimate is mixed with fresh FP32 noise at
+    ``next_sigma``. The terminal interval returns the clean estimate directly
+    and does not consume RNG state. The sampler state remains FP32 even when
     the model evaluates a BF16 or FP16 latent.
 
     Callers handling references should pass only the target rows to this
@@ -389,8 +442,16 @@ def validate_pika_flex_request(
 
     normalize_pika_flex_attention(inputs.get("override_attention"))
 
+    requested_steps: dict[str, int] = {}
     for key in ("num_inference_steps", "sampling_steps"):
-        _require_value(inputs, key, float(PIKA_FLEX_STEPS))
+        value = inputs.get(key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        requested_steps[key] = normalize_pika_flex_steps(value)
+    if len(requested_steps) == 2 and len(set(requested_steps.values())) != 1:
+        raise ValueError(
+            "Pika H3 Flex num_inference_steps and sampling_steps must match."
+        )
     for key in ("guidance_scale", "cfg_scale"):
         _require_value(inputs, key, 1.0)
     _require_value(inputs, "flow_shift", 12.0)
@@ -402,7 +463,7 @@ def validate_pika_flex_request(
         value = inputs.get(key)
         solver = str(value or "").strip().lower()
         if solver and solver not in {"default", "euler"}:
-            raise ValueError("Pika H3 Flex uses its fixed six-evaluation sampler.")
+            raise ValueError("Pika H3 Flex uses its model-owned Euler sampler.")
 
     for key in ("denoising_strength", "denoise_strength", "masking_strength"):
         _require_value(inputs, key, 1.0)

@@ -16,15 +16,24 @@ transformer, the pinned BF16 Pika adapter, and the native INT8 ConvRot video VAE
 The definitions expose only that FP8 checkpoint; BF16 and INT8 base aliases need
 a separately verified adapter conversion before they are qualified.
 
-## Fixed recipe
+## Sampling steps
 
-Pika Flex uses six model evaluations at knot values `1000, 750, 500, 250, 100,
+By default, Pika Flex uses six model evaluations at knot values `1000, 750, 500, 250, 100,
 40, 0`, with video/audio shifts `12/3`, CFG `1`, and adapter strength `1`. The H3
 wrapper advertises its sampler as Euler. Flex transitions use their own fresh
 noise recipe between nonterminal evaluations; this is not an ordinary six-step
 H3 Euler schedule.
 
-Steps, guidance, the required Pika adapter's strength, and shifts are locked.
+In Frames and References, **Advanced → Generation → Denoising Steps** accepts
+**4–12** steps. **Six is the recommended default** and retains the exact released
+schedule. Every other count is experimental: Maestro resamples the released
+noise-level curve before applying the separate video/audio shifts, while keeping
+Flex's fresh-noise transitions. More steps take longer and are not guaranteed to
+improve motion, image quality, reference fidelity or sound. Fewer steps may worsen
+them. A step change does not select a different trained adapter or enable Turbo.
+The selected count is saved with the clip and restored by **Use settings**.
+
+Guidance, the required Pika adapter's strength, and shifts remain locked.
 Extra accelerators, control video, timed frame injection, First Block
 Cache, and Audio Refinement are unavailable. References are ordered; changing
 their order changes the request meaning.
@@ -39,7 +48,7 @@ include their separate native voice reference.
 
 **References** also supports **Music Video** and audio-driven Director. Maestro
 slices the selected soundtrack to each shot, encodes it as clean target audio,
-and holds those audio latents fixed while the six-step sampler generates video.
+and holds those audio latents fixed while the sampler generates video.
 The final assembly uses the original continuous soundtrack. This follows the
 audio-to-video branch in Pika's [official wrapper](https://github.com/Pika-Labs/Pika-H3-Flex/blob/main/src/pika_h3/core/wrapper.py),
 rather than generating unrelated speech and replacing it afterward.
@@ -76,15 +85,15 @@ at a modest strength against a short same-seed clip before stacking several.
 Experimental SLA is the default on supported GPUs and safely falls back to the
 runtime's supported dense attention when unavailable. Sage2 and SDPA remain
 explicit dense choices; SOL remains optional experimental sparse attention.
-These choices leave the six evaluations, sampling knots, shifts, and managed
-adapter unchanged. Sparse attention can change motion, reference fidelity and
+These choices do not change the selected step count, sampling knots, shifts, or
+managed adapter. Sparse attention can change motion, reference fidelity and
 audio, so compare outputs before relying on it for a project. Hardware/runtime
 availability and fallback status are reported beside each option.
 
-First Block Cache remains disabled for this freshly re-noised six-step recipe.
+First Block Cache remains disabled for this freshly re-noised sampling recipe.
 A single native pass retains its selected output duration; older saved window
 lengths must not shorten it. Longer timelines use the experimental continuation
-workflow described below, with the same six evaluations in every pass.
+workflow described below, with the selected step count applied to every pass.
 
 ## Inputs and output sizes
 

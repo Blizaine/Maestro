@@ -2306,6 +2306,7 @@ class family_handler:
                 baked_turbo,
                 audio_only,
                 bool(import_profile),
+                bool((model_def or {}).get("minimax_h3_pika_flex")),
                 locked_inference_steps,
             )
         )
@@ -3649,14 +3650,25 @@ class family_handler:
         ui_defaults["guidance_scale"] = 1.0
         if (model_def or {}).get("minimax_h3_pika_flex"):
             from models.minimax_h3.pika_flex_assets import pika_flex_defaults
+            from models.minimax_h3.pika_flex import normalize_pika_flex_steps
+
+            try:
+                requested_steps = normalize_pika_flex_steps(
+                    ui_defaults.get("num_inference_steps")
+                )
+            except ValueError:
+                # Saved settings may predate the exposed range. Migrate an
+                # unsupported legacy value to the official six-step default.
+                requested_steps = normalize_pika_flex_steps()
 
             ui_defaults.update(pika_flex_defaults(
                 reference=omni_reference,
                 attention=ui_defaults.get("override_attention"),
             ))
-            # pika_flex_defaults supplies fixed recipe values but also has
-            # false sequence defaults. Restore only the already validated
-            # role-specific sequence switch and geometry after applying it.
+            # Keep the selected experimental count and already validated
+            # role-specific sequence switch/geometry when restoring the other
+            # model-owned recipe settings.
+            ui_defaults["num_inference_steps"] = requested_steps
             ui_defaults["minimax_h3_multi_window"] = (
                 pika_sequence and not omni_reference
             )

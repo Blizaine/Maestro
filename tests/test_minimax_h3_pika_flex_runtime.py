@@ -198,37 +198,43 @@ class PikaFlexRuntimeTests(unittest.TestCase):
             reference=True,
         )
 
-    def test_video_and_audio_schedulers_get_distinct_six_step_ladders(self):
+    def test_video_and_audio_schedulers_use_exact_or_resampled_step_ladders(self):
         from models.minimax_h3.pika_flex import pika_flex_sigmas
 
-        video = self.Scheduler(shift=7.0, solver="res_multistep")
-        audio = self.Scheduler(shift=8.0, solver="res_multistep")
-        self.set_schedules(video, audio, "cpu")
+        for steps in (4, 6, 8, 12):
+            with self.subTest(steps=steps):
+                video = self.Scheduler(shift=7.0, solver="res_multistep")
+                audio = self.Scheduler(shift=8.0, solver="res_multistep")
+                self.set_schedules(video, audio, "cpu", steps)
 
-        self.assertEqual(video.solver, "euler")
-        self.assertEqual(audio.solver, "euler")
-        self.assertEqual(video.shift, 12.0)
-        self.assertEqual(audio.shift, 3.0)
-        self.assertEqual(video.timesteps.numel(), 6)
-        self.assertEqual(audio.timesteps.numel(), 6)
-        self.assertTrue(
-            self.torch.equal(
-                video.sigmas,
-                self.torch.tensor(pika_flex_sigmas(12.0), dtype=self.torch.float32),
-            )
-        )
-        self.assertTrue(
-            self.torch.equal(
-                audio.sigmas,
-                self.torch.tensor(pika_flex_sigmas(3.0), dtype=self.torch.float32),
-            )
-        )
+                self.assertEqual(video.solver, "euler")
+                self.assertEqual(audio.solver, "euler")
+                self.assertEqual(video.shift, 12.0)
+                self.assertEqual(audio.shift, 3.0)
+                self.assertEqual(video.timesteps.numel(), steps)
+                self.assertEqual(audio.timesteps.numel(), steps)
+                self.assertTrue(
+                    self.torch.equal(
+                        video.sigmas,
+                        self.torch.tensor(
+                            pika_flex_sigmas(12.0, steps), dtype=self.torch.float32,
+                        ),
+                    )
+                )
+                self.assertTrue(
+                    self.torch.equal(
+                        audio.sigmas,
+                        self.torch.tensor(
+                            pika_flex_sigmas(3.0, steps), dtype=self.torch.float32,
+                        ),
+                    )
+                )
 
     def test_video_update_and_preview_touch_only_generated_target_rows(self):
         torch = self.torch
 
         video = self.Scheduler()
-        self.set_schedules(video, self.Scheduler(), "cpu")
+        self.set_schedules(video, self.Scheduler(), "cpu", 6)
         index = 2
         packed_rows = torch.tensor(
             [[50.0, 51.0], [60.0, 61.0], [0.25, -0.5], [1.0, 0.125]],
@@ -277,7 +283,7 @@ class PikaFlexRuntimeTests(unittest.TestCase):
         torch = self.torch
 
         audio = self.Scheduler()
-        self.set_schedules(self.Scheduler(), audio, "cpu")
+        self.set_schedules(self.Scheduler(), audio, "cpu", 6)
         index = 3
         packed_audio = torch.tensor(
             [
@@ -333,7 +339,7 @@ class PikaFlexRuntimeTests(unittest.TestCase):
         torch = self.torch
         video_scheduler = self.Scheduler()
         audio_scheduler = self.Scheduler()
-        self.set_schedules(video_scheduler, audio_scheduler, "cpu")
+        self.set_schedules(video_scheduler, audio_scheduler, "cpu", 6)
 
         # Reference audio occupies the packed prefix. The exact source song
         # covers every target audio latent in both channels.
@@ -448,18 +454,26 @@ class PikaFlexRuntimeTests(unittest.TestCase):
 
     def test_request_validation_rejects_wrong_steps_and_source_audio(self):
         model = self._flex_model(reference=True)
-        with self.assertRaisesRegex(ValueError, "sampling_steps=6"):
-            model.generate("a test prompt", sampling_steps=5)
+        with self.assertRaisesRegex(ValueError, "supports 4-12"):
+            model.generate("a test prompt", sampling_steps=3)
+        with self.assertRaisesRegex(ValueError, "whole number"):
+            model.generate("a test prompt", sampling_steps=6.5)
+        with self.assertRaisesRegex(ValueError, "must match"):
+            model.generate(
+                "a test prompt",
+                sampling_steps=4,
+                num_inference_steps=8,
+            )
         with self.assertRaisesRegex(ValueError, "masking_strength=1"):
             model.generate(
                 "a test prompt",
-                sampling_steps=6,
+                sampling_steps=8,
                 masking_strength=0.5,
             )
         with self.assertRaisesRegex(ValueError, "source-audio prompt modes"):
             model.generate(
                 "a test prompt",
-                sampling_steps=6,
+                sampling_steps=4,
                 audio_prompt_type="A",
             )
 

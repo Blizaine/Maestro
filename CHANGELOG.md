@@ -3,6 +3,14 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## Unreleased
+
+- Allow experimental 4–12 denoising steps for Pika H3 Flex Frames and References.
+  Keep the released six-step schedule as the recommended default, preserve the
+  selected count when reusing settings, and retain the managed adapter, guidance
+  and video/audio shifts. Other counts are sampling experiments, not trained
+  quality presets.
+
 ## Repository maintenance - 2026-10-31
 
 - Organize public integration records and testing guides under `docs/technical/`

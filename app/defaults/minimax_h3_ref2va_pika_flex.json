@@ -22,9 +22,11 @@
     "minimax_h3_pika_flex_lora_strength": 1.0,
     "minimax_h3_video_vae_filename": "minimax_h3_video_vae_int8_convrot.safetensors",
     "minimax_h3_text_encoder_default": "gguf_q2_k",
-    "lock_inference_steps": true,
-    "inference_steps_min": 6,
-    "inference_steps_max": 6,
+    "lock_inference_steps": false,
+    "inference_steps_min": 4,
+    "inference_steps_max": 12,
+    "inference_steps_label": "Denoising Steps",
+    "inference_steps_help": "6 is recommended (Pika’s released recipe). Other counts are experimental; more steps may not improve quality.",
     "lock_guidance_scale": true,
     "lock_guidance_phases": true,
     "guidance_max_phases": 1,
@@ -162,7 +164,7 @@
     "pika_flex_adapter_sha256": "e4d058fbd027377b925a0ee607b514ddd9037873fee3afa05d73b302e6f7f8e1",
     "license_name": "MiniMax H3 Community License",
     "license_url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
-    "selector_help": "PIKA H3 FLEX — REFERENCES (EXPERIMENTAL)\nUse ordered image, video, and audio references; at least one image or video is required. Six fixed model evaluations; CFG 1, pinned adapter strength 1, video/audio shifts 12/3. Begin at 480p / 5.17 seconds. Up to 9 images, 3 videos, and 3 audio references (12 total). Ordinary H3 style/content LoRAs are experimental and off by default. Turbo, PDD, VDN, PTD, other special-head accelerators, and DoRA remain unavailable, as do control video, cache, and refinement. Maestro does not include Pika's 4K upsampler or stem extraction. Consumer-GPU real-time performance is unverified."
+    "selector_help": "PIKA H3 FLEX — REFERENCES (EXPERIMENTAL)\nUse ordered image, video, and audio references; at least one image or video is required. Six evaluations use Pika's released knot recipe; 4–12 are available experimentally by resampling that ladder, and only six is upstream-qualified. CFG 1, pinned adapter strength 1, video/audio shifts 12/3. Begin at 480p / 5.17 seconds. Up to 9 images, 3 videos, and 3 audio references (12 total). Ordinary H3 style/content LoRAs are experimental and off by default. Turbo, PDD, VDN, PTD, other special-head accelerators, and DoRA remain unavailable, as do control video, cache, and refinement. Maestro does not include Pika's 4K upsampler or stem extraction. Consumer-GPU real-time performance is unverified."
   },
   "prompt": "Use the ordered references to create a coherent cinematic scene with faithful identities, appearance, motion, and sound.",
   "num_inference_steps": 6,

@@ -112,7 +112,7 @@ def pika_flex_lora_incompatibility(path: Any) -> str | None:
         is_minimax_h3_turbo_lora(path)
         or tokens.intersection(_ACCELERATOR_TOKENS)
     ):
-        return "Turbo and other step-acceleration adapters cannot be stacked onto Pika's fixed six-step recipe"
+        return "Turbo and other step-acceleration adapters cannot be stacked onto Pika's model-owned Flex sampling recipe"
     if (
         tokens.intersection(_OTHER_SPECIAL_TOKENS)
         or any(key.endswith(".attn.to_gate_compress.weight") for key in keys)

@@ -11,7 +11,9 @@ const optionsFor = model => ({
   experimental_loras_available: true, loras_disabled: false,
   omni_reference: model.includes('ref2va'), fps: 24, frames_minimum: 124,
   frames_maximum: 362, frames_steps: 17, guidance_max_phases: 1,
-  default_num_inference_steps: 6, lock_inference_steps: true,
+  default_num_inference_steps: 6, lock_inference_steps: false,
+  inference_steps_min: 4, inference_steps_max: 12,
+  inference_steps_help: 'Six steps is recommended; other step counts are experimental.',
   lock_guidance_scale: true, lock_guidance_phases: true,
   t2v_class: true, i2v_class: !model.includes('ref2va'),
 });
@@ -103,6 +105,19 @@ const optionsFor = model => ({
       assert.equal(submissions.at(-1).minimax_h3_experimental_loras,true);
       assert.equal(submissions.at(-1).loras_multipliers,'0.65');
       assert.equal(submissions.at(-1).num_inference_steps,6);
+      const generation = page.getByTestId('advanced-generation');
+      if(await generation.getAttribute('open') === null) await generation.locator('summary').click();
+      const stepsInput = generation.locator('input[type="number"][min="4"][max="12"]');
+      await stepsInput.waitFor();
+      assert.equal(await stepsInput.inputValue(),'6', 'The official six-step default remains visible');
+      assert.match(await generation.innerText(), /other step counts are experimental/);
+      for(const steps of [4,8,12]) {
+        await stepsInput.fill(String(steps));
+        await page.evaluate(() => window.store.setState({jobs:[],isGenerating:false}));
+        await page.evaluate(() => window.store.getState().startGeneration());
+        assert.equal(submissions.at(-1).num_inference_steps,steps,
+          `${model}: the actual Generation control reaches the request without a six-step reset`);
+      }
       const saved = submissions.at(-1);
       await page.evaluate(async params => {
         window.store.setState({jobs:[],isGenerating:false,
@@ -114,6 +129,8 @@ const optionsFor = model => ({
       }, saved);
       assert.equal(await page.evaluate(() => window.store.getState().params.minimax_h3_experimental_loras),true,
         'Pencil restoration retains explicit opt-in and selected weights');
+      assert.equal(await page.evaluate(() => window.store.getState().params.num_inference_steps),12,
+        `${model}: pencil restoration retains the selected experimental step count`);
       await page.evaluate(style => window.store.setState({
         sidebarMode:'director', directorSkill:'short_film', shortFilmPath:'story',
         shortFilmTargetDuration:12,directorStep:'style',directorLoading:false,directorError:null,
@@ -142,6 +159,6 @@ const optionsFor = model => ({
         'Director opt-out does not alter Studio');
     }
     assert.deepEqual(errors,[]);
-    console.log('Pika Frames/References experimental toggle, real submit weights, inactive saved choices, six steps, and Director isolation passed.');
+    console.log('Pika Frames/References experimental LoRAs, 4/8/12-step controls and requests, six-step defaults, settings reuse, and Director isolation passed.');
   } finally {await browser.close();}
 })().catch(error => {console.error(error);process.exitCode=1;});

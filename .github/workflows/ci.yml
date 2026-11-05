@@ -196,5 +196,11 @@ jobs:
       - name: Type-check and staged UI build
         working-directory: ui
         run: npm run build
+      - name: Pika Frames and References controls and saved settings
+        env:
+          MAESTRO_PLAYWRIGHT: ${{ github.workspace }}/ui/node_modules/playwright
+        run: |
+          node tests/ui/pika_loras.cjs
+          node tests/ui/pika_flex_duration.cjs
       - name: Verify built UI matches source and receipt
         run: node ui/scripts/ui-build.mjs verify

@@ -214,7 +214,7 @@ export function DirectorH3Optimizations() {
           <p className="mt-1 text-[10px] leading-relaxed text-text-muted">
             Choose ordinary H3 style/character adapters in Video LoRAs. Saved selections are inactive while this is off.
             {modelOptions.minimax_h3_pika_flex
-              ? ' The required Pika adapter stays at strength 1 and six steps. Extra Turbo/PDD/VDN/PTD and DoRA adapters remain unavailable; output quality is unverified.'
+              ? ' The required Pika adapter stays at strength 1. Six steps is recommended; other step counts are experimental. Extra Turbo/PDD/VDN/PTD and DoRA adapters remain unavailable; output quality is unverified.'
               : ' Additional Turbo/PDD adapters remain unavailable; output quality is unverified.'}
           </p>
         </div>

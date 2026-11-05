@@ -17,8 +17,11 @@ if str(APP) not in sys.path:
 
 from models.minimax_h3.pika_flex import (
     PIKA_FLEX_KNOTS,
+    PIKA_FLEX_MAX_STEPS,
+    PIKA_FLEX_MIN_STEPS,
     PIKA_FLEX_STEPS,
     is_pika_flex_single_frame_start_anchor,
+    normalize_pika_flex_steps,
     pika_flex_sequence_enabled,
     pika_flex_sigmas,
     pika_flex_step,
@@ -27,23 +30,88 @@ from models.minimax_h3.pika_flex import (
 
 
 class PikaFlexSigmaTests(unittest.TestCase):
-    def test_seven_independently_shifted_knots_define_six_evaluations(self):
+    def test_six_step_video_and_audio_sigma_bytes_match_released_baseline(self):
+        video_baseline_hex = (
+            "0x1.0000000000000p+0",
+            "0x1.f22983759f22ap-1",
+            "0x1.d89d89d89d89ep-1",
+            "0x1.999999999999ap-1",
+            "0x1.2492492492493p-1",
+            "0x1.5555555555555p-2",
+            "0x0.0p+0",
+        )
+        audio_baseline_hex = (
+            "0x1.0000000000000p+0",
+            "0x1.ccccccccccccdp-1",
+            "0x1.8000000000000p-1",
+            "0x1.0000000000000p-1",
+            "0x1.0000000000001p-2",
+            "0x1.c71c71c71c71cp-4",
+            "0x0.0p+0",
+        )
+
+        for step_count in (None, 6):
+            with self.subTest(step_count=step_count):
+                self.assertEqual(
+                    tuple(value.hex() for value in pika_flex_sigmas(12.0, step_count)),
+                    video_baseline_hex,
+                )
+                self.assertEqual(
+                    tuple(value.hex() for value in pika_flex_sigmas(3.0, step_count)),
+                    audio_baseline_hex,
+                )
+
+    def test_released_knots_and_experimental_counts_resample_before_shift(self):
         self.assertEqual(PIKA_FLEX_KNOTS, (1000, 750, 500, 250, 100, 40, 0))
         self.assertEqual(PIKA_FLEX_STEPS, 6)
+        self.assertEqual((PIKA_FLEX_MIN_STEPS, PIKA_FLEX_MAX_STEPS), (4, 12))
 
         for shift in (12.0, 3.0):
             with self.subTest(shift=shift):
-                actual = pika_flex_sigmas(shift)
+                actual = pika_flex_sigmas(shift, steps=6)
+                original_recipe = tuple(
+                    shift * (knot / 1000.0)
+                    / (1.0 + (shift - 1.0) * (knot / 1000.0))
+                    for knot in PIKA_FLEX_KNOTS
+                )
                 expected = tuple(
                     (shift * knot) / (1000.0 + (shift - 1.0) * knot)
                     for knot in PIKA_FLEX_KNOTS
                 )
                 self.assertEqual(len(actual), 7)
+                self.assertEqual(actual, original_recipe)
+                self.assertEqual(pika_flex_sigmas(shift), original_recipe)
                 for got, want in zip(actual, expected):
                     self.assertAlmostEqual(got, want, places=14)
                 self.assertEqual(actual[0], 1.0)
                 self.assertEqual(actual[-1], 0.0)
                 self.assertTrue(all(a >= b for a, b in zip(actual, actual[1:])))
+
+        self.assertEqual(
+            pika_flex_sigmas(1.0, steps=4),
+            (1.0, 0.625, 0.25, 0.07, 0.0),
+        )
+        for steps in (4, 6, 8, 12):
+            video = pika_flex_sigmas(12.0, steps)
+            audio = pika_flex_sigmas(3.0, steps)
+            with self.subTest(steps=steps):
+                self.assertEqual(len(video), steps + 1)
+                self.assertEqual(len(audio), steps + 1)
+                self.assertEqual((video[0], video[-1]), (1.0, 0.0))
+                self.assertEqual((audio[0], audio[-1]), (1.0, 0.0))
+                self.assertTrue(all(a > b for a, b in zip(video, video[1:])))
+                self.assertTrue(all(a > b for a, b in zip(audio, audio[1:])))
+                self.assertNotEqual(video[1:-1], audio[1:-1])
+
+    def test_step_count_normalizer_rejects_noninteger_and_out_of_range_values(self):
+        self.assertEqual(normalize_pika_flex_steps(), 6)
+        self.assertEqual(normalize_pika_flex_steps(None), 6)
+        for value in (4, 6, 8, 12, "8", 8.0):
+            with self.subTest(value=value):
+                self.assertEqual(normalize_pika_flex_steps(value), int(value))
+        for value in (True, False, 3, 13, 4.5, "6.5", float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize_pika_flex_steps(value)
 
     def test_bad_shift_is_rejected(self):
         for shift in (0.0, -1.0, float("nan"), float("inf"), True):
@@ -60,38 +128,45 @@ class PikaFlexStepTests(unittest.TestCase):
             raise unittest.SkipTest("Pika H3 Flex sampler tests require PyTorch") from error
         cls.torch = torch
 
-    def test_six_velocity_evaluations_end_cleanly_without_a_sixth_noise_draw(self):
+    def test_variable_velocity_evaluations_end_without_a_terminal_noise_draw(self):
         torch = self.torch
-        sigmas = pika_flex_sigmas(12.0)
         sample = torch.tensor([[0.25, -0.5], [0.75, 0.125]], dtype=torch.float32)
-        predictions = [
-            torch.full_like(sample, (index - 2.0) / 10.0)
-            for index in range(PIKA_FLEX_STEPS)
-        ]
-        generator = torch.Generator(device="cpu").manual_seed(392)
-        reference_generator = torch.Generator(device="cpu").manual_seed(392)
-        calls = 0
-        terminal_expected = None
+        for steps in (4, 6, 8, 12):
+            with self.subTest(steps=steps):
+                sigmas = pika_flex_sigmas(12.0, steps)
+                predictions = [
+                    torch.full_like(sample, (index - 2.0) / 10.0)
+                    for index in range(steps)
+                ]
+                generator = torch.Generator(device="cpu").manual_seed(392)
+                reference_generator = torch.Generator(device="cpu").manual_seed(392)
+                calls = 0
+                terminal_expected = None
+                current = sample.clone()
 
-        for index in range(PIKA_FLEX_STEPS):
-            calls += 1  # One native H3 forward supplies each velocity.
-            if index == PIKA_FLEX_STEPS - 1:
-                terminal_expected = (
-                    sample.float() + sigmas[index] * predictions[index].float()
-                )
-            sample = pika_flex_step(
-                sample,
-                predictions[index],
-                sigmas[index],
-                sigmas[index + 1],
-                generator,
-            )
-            if index < PIKA_FLEX_STEPS - 1:
-                torch.randn(sample.shape, dtype=torch.float32, generator=reference_generator)
+                for index in range(steps):
+                    calls += 1  # One native H3 forward supplies each velocity.
+                    if index == steps - 1:
+                        terminal_expected = (
+                            current.float() + sigmas[index] * predictions[index].float()
+                        )
+                    current = pika_flex_step(
+                        current,
+                        predictions[index],
+                        sigmas[index],
+                        sigmas[index + 1],
+                        generator,
+                    )
+                    if index < steps - 1:
+                        torch.randn(
+                            current.shape,
+                            dtype=torch.float32,
+                            generator=reference_generator,
+                        )
 
-        self.assertEqual(calls, 6)
-        self.assertTrue(torch.equal(generator.get_state(), reference_generator.get_state()))
-        self.assertTrue(torch.equal(sample, terminal_expected))
+                self.assertEqual(calls, steps)
+                self.assertTrue(torch.equal(generator.get_state(), reference_generator.get_state()))
+                self.assertTrue(torch.equal(current, terminal_expected))
 
     def test_transition_matches_explicit_fp32_reference_formula(self):
         torch = self.torch
@@ -439,8 +514,8 @@ class PikaFlexRequestTests(unittest.TestCase):
 
     def test_rejects_wrong_recipe_values(self):
         cases = (
-            ({"num_inference_steps": 5}, "num_inference_steps=6"),
-            ({"sampling_steps": 8}, "sampling_steps=6"),
+            ({"num_inference_steps": 3}, "supports 4-12"),
+            ({"sampling_steps": 13}, "supports 4-12"),
             ({"guidance_scale": 2.0}, "guidance_scale=1"),
             ({"cfg_scale": 0.5}, "cfg_scale=1"),
             ({"flow_shift": 11}, "flow_shift=12"),
@@ -452,6 +527,22 @@ class PikaFlexRequestTests(unittest.TestCase):
         for request, message in cases:
             with self.subTest(request=request), self.assertRaisesRegex(ValueError, message):
                 validate_pika_flex_request(request)
+
+    def test_accepts_experimental_counts_and_rejects_conflicting_aliases(self):
+        for steps in (4, 6, 8, 12):
+            with self.subTest(steps=steps):
+                validate_pika_flex_request({"num_inference_steps": steps})
+                validate_pika_flex_request({"sampling_steps": steps})
+                validate_pika_flex_request({
+                    "num_inference_steps": steps,
+                    "sampling_steps": str(steps),
+                })
+
+        with self.assertRaisesRegex(ValueError, "must match"):
+            validate_pika_flex_request({
+                "num_inference_steps": 4,
+                "sampling_steps": 8,
+            })
 
     def test_rejects_unsupported_accelerators_continuation_and_controls(self):
         cases = (
