@@ -37,9 +37,9 @@ Runtime upgrades are explicit menu actions. A missing performance-runtime marker
 does not automatically run Update when you open the launcher. If offered,
 **Start with Compatibility Runtime** keeps the existing runtime available.
 
-### v4.0.0 (updated 2026-11-04) — Release candidate
+### v4.0.0 (2026-11-04)
 
-The next major Main release is being prepared on **Dev** as v4.0.0.
+Maestro v4.0.0 is available on **Main and Dev**.
 
 - **An upgraded Editor and animated titles:** a fuller editing workspace,
   reviewable Auto-edit plans with undo, chroma key and transparent ProRes 4444
@@ -67,7 +67,7 @@ The next major Main release is being prepared on **Dev** as v4.0.0.
   failed-job settings/LoRA details, Turbo LoRA filters and quieter logs.
 
 The existing Dev updates are included. See the
-[v4.0.0 candidate notes and testing limits](docs/RELEASE_NOTES_V4.0.0.md).
+[v4.0.0 release notes and testing limits](docs/RELEASE_NOTES_V4.0.0.md).
 
 ### v3.3.0 (2026-10-26) — Dev testing
 

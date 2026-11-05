@@ -1,8 +1,7 @@
-# Maestro v4.0.0 — Release candidate
+# Maestro v4.0.0
 
-Candidate notes reviewed 4 November 2026. Public Main remains v3.2.5 until
-promotion is approved. These notes describe the v4 candidate, including the
-latest reliability and reference-enhancement fixes.
+Released 4 November 2026 on Main and Dev. These notes describe the changes
+since v3.2.5, including the latest reliability and reference-enhancement fixes.
 
 ## Changes since v3.2.5 Main
 
@@ -163,8 +162,8 @@ fresh Gemma/Qwen prompt checks on 01. Four checks preserved the six supplied
 spoken lines and their native speaker bindings without a final fallback.
 These were enhancement checks, not new video renders. A writer can still
 change action detail or return an inconclusive continuity review. The latest
-revision needs final user acceptance; earlier fleet results do not establish
-that every new fix has been rendered again on 12GB and 8GB hardware.
+revision has not been fully re-rendered across the fleet; earlier results do
+not establish that every new fix has been rendered again on 12GB and 8GB hardware.
 
 Pika continuation has two decoded 480p functional checks on the 4090. Those
 checks preserve the tested frame counts and actual motion/audio history, but
