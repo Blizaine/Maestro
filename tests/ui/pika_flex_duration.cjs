@@ -429,6 +429,206 @@ const modelDefFor = (modelType, reference = false) => ({
         modelType);
     };
 
+    // API/MCP sidecars do not carry Maestro's private planning-mode UI flag.
+    // A recorded single native References clip must keep its exact 243-frame
+    // duration instead of being expanded from a multi-beat prompt on restore.
+    const restoreWithoutPlanningMode = 'minimax_h3_ref2va_pika_flex';
+    await configure({modelType: restoreWithoutPlanningMode, reference: true,
+      resolution: '1344x768', rolling: true});
+    const syntheticSevenLinePrompt = [
+      'A courier enters the silent archive. She opens a brass cabinet. Morning light crosses the empty hall.',
+      'A folded map slips from a shelf. The courier catches it before it hits the floor. She studies the ink.',
+      'A distant bell rings twice. Dust trembles above the doorway. The courier follows a narrow stairwell.',
+      'A locked gate blocks the passage. She tests the old latch. A hidden spring releases the bolt.',
+      'The courier reaches a glass conservatory. Rain beads along the roof. A small lantern flickers by the path.',
+      'She finds a letter beneath a stone bench. The message names a forgotten station. A train horn sounds beyond the hill.',
+      'The courier steps onto the platform. She folds the map into her coat. The first train arrives through the mist.',
+    ].join('\n');
+    await restoreFromSidecar({
+      modelType: restoreWithoutPlanningMode,
+      params: {
+        model_type: restoreWithoutPlanningMode,
+        prompt: syntheticSevenLinePrompt,
+        resolution: '1344x768',
+        video_length: 243,
+        duration_seconds: 243 / 24,
+        sliding_window_size: 243,
+        sliding_window_overlap: 0,
+        minimax_h3_multi_window: false,
+        minimax_h3_reference_sequence: false,
+        minimax_h3_references: [referenceRecord],
+        num_inference_steps: 6,
+        image_mode: 0,
+        _studio_video_workflow: 'references',
+      },
+      name: restoreWithoutPlanningMode + '-single-native-clip.mp4',
+    });
+    await page.waitForFunction(() => {
+      const state = window.store.getState();
+      return state.durationSeconds !== 243 / 24
+        || state.params._duration_planning_mode === 'duration';
+    });
+    await page.evaluate(() => new Promise(resolve => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    }));
+    const missingPlanningModeRestore = await page.evaluate(() => {
+      const state = window.store.getState();
+      return {
+        planningMode: state.params._duration_planning_mode,
+        durationSeconds: state.durationSeconds,
+        videoLength: state.params.video_length,
+        windowFrames: state.params.sliding_window_size,
+        referenceSequence: state.params.minimax_h3_reference_sequence === true,
+        panel: document.getElementById('root')?.innerText || '',
+      };
+    });
+    console.log('Missing planning-mode References restore:', JSON.stringify(missingPlanningModeRestore));
+    assert.equal(missingPlanningModeRestore.planningMode, 'duration',
+      'A recorded video sidecar without the UI flag restores in exact-duration mode');
+    assert.equal(missingPlanningModeRestore.durationSeconds, 243 / 24,
+      'A one-native-window Pika References clip retains its recorded duration');
+    assert.equal(missingPlanningModeRestore.videoLength, 243);
+    assert.equal(missingPlanningModeRestore.windowFrames, 243);
+    assert.equal(missingPlanningModeRestore.referenceSequence, false,
+      'A one-window sidecar does not become a rolling Reference sequence');
+
+    await restoreFromSidecar({
+      modelType: restoreWithoutPlanningMode,
+      params: {
+        model_type: restoreWithoutPlanningMode,
+        prompt: syntheticSevenLinePrompt,
+        resolution: '1344x768',
+        video_length: 243,
+        duration_seconds: 243 / 24,
+        sliding_window_size: 243,
+        sliding_window_overlap: 0,
+        minimax_h3_multi_window: false,
+        minimax_h3_reference_sequence: false,
+        minimax_h3_references: [referenceRecord],
+        num_inference_steps: 6,
+        image_mode: 0,
+        _studio_video_workflow: 'references',
+        _duration_planning_mode: 'auto',
+      },
+      name: restoreWithoutPlanningMode + '-explicit-auto.mp4',
+    });
+    await page.waitForFunction(() => {
+      const state = window.store.getState();
+      return state.params._duration_planning_mode === 'auto'
+        && state.params.minimax_h3_reference_sequence === true;
+    });
+    const explicitAutoRestore = await page.evaluate(() => {
+      const state = window.store.getState();
+      return {planningMode: state.params._duration_planning_mode,
+        durationSeconds: state.durationSeconds, videoLength: state.params.video_length,
+        referenceSequence: state.params.minimax_h3_reference_sequence === true};
+    });
+    assert.deepEqual(explicitAutoRestore, {
+      planningMode: 'auto', durationSeconds: 81, videoLength: 1944, referenceSequence: true,
+    }, 'An explicitly saved Auto selection continues to follow its prompt plan');
+
+    // The same fallback protects non-Pika H3 sidecars produced through an API.
+    const ordinaryH3Restore = 'ordinary_h3_restore_test';
+    await configure({modelType: ordinaryH3Restore, ordinary: true, rolling: true,
+      resolution: '832x480'});
+    await restoreFromSidecar({
+      modelType: ordinaryH3Restore,
+      params: {
+        model_type: ordinaryH3Restore,
+        prompt: syntheticSevenLinePrompt,
+        resolution: '832x480',
+        video_length: 243,
+        duration_seconds: 243 / 24,
+        sliding_window_size: 243,
+        sliding_window_overlap: 0,
+        minimax_h3_multi_window: false,
+        minimax_h3_reference_sequence: false,
+        num_inference_steps: 8,
+        image_mode: 0,
+        _studio_video_workflow: 'frames',
+      },
+      name: ordinaryH3Restore + '-single-native-clip.mp4',
+    });
+    await page.evaluate(() => new Promise(resolve => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    }));
+    const ordinaryH3RestoreState = await page.evaluate(() => {
+      const state = window.store.getState();
+      return {planningMode: state.params._duration_planning_mode,
+        durationSeconds: state.durationSeconds, videoLength: state.params.video_length,
+        multiWindow: state.params.minimax_h3_multi_window === true,
+        panel: document.getElementById('root')?.innerText || ''};
+    });
+    assert.equal(ordinaryH3RestoreState.planningMode, 'duration',
+      'An ordinary H3 API sidecar with recorded timing does not become Auto');
+    assert.ok(ordinaryH3RestoreState.durationSeconds < 20,
+      'An ordinary H3 clip keeps its recorded short timeline instead of the prompt estimate');
+    assert.equal(ordinaryH3RestoreState.multiWindow, false);
+    assert.doesNotMatch(ordinaryH3RestoreState.panel, /8 windows/);
+
+    const ltxRestoreModel = 'ltx_api_restore_test';
+    const ltxRestoreOptions = {
+      model_type: ltxRestoreModel, architecture: 'ltx-duration-test', fps: 24,
+      frames_minimum: 24, frames_maximum: 144, frames_steps: 24,
+      sliding_window: true, multi_window_sequence_controls: true,
+      sliding_window_defaults: {window_min:48, window_max:144, window_step:24,
+        overlap_min:0, overlap_max:20, overlap_step:4, overlap_default:0,
+        discard_last_frames:0},
+    };
+    optionsByType[ltxRestoreModel] = ltxRestoreOptions;
+    const syntheticLtxPrompt = [
+      'A courier enters the silent archive. She opens a brass cabinet. Morning light crosses the empty hall.',
+      'A folded map slips from a shelf. The courier catches it before it hits the floor. She studies the ink.',
+      'A distant bell rings twice. Dust trembles above the doorway. The courier follows a narrow stairwell.',
+      'A locked gate blocks the passage. She tests the old latch. A hidden spring releases the bolt.',
+      'The courier reaches a glass conservatory. Rain beads along the roof. A small lantern flickers by the path.',
+      'She finds a letter beneath a stone bench. The message names a forgotten station. A train horn sounds beyond the hill.',
+      'The courier steps onto the platform. She folds the map into her coat. The first train arrives through the mist.',
+    ].join('\n');
+    await page.evaluate(({modelType, prompt}) => {
+      const state = window.store.getState();
+      const model = {model_type:modelType, name:modelType, family:'ltx2',
+        architecture:'ltx-duration-test', fps:24, is_downloaded:true,
+        is_i2v:true, is_t2v:true};
+      window.store.setState({
+        generationMode:'video', studioVideoWorkflow:'frames',
+        studioVideoCreateRoute:'auto', studioVideoEffectiveCreateRoute:'generate',
+        modelOptions:null, modelOptionsLoading:false, models:[model], modelsLoaded:true,
+        enabledModels:new Set([modelType]),
+        selectedModelPerMode:{...state.selectedModelPerMode, video:modelType},
+        durationSeconds:4, slidingWindowSeconds:4, slidingWindowOverlap:0,
+        slidingWindowLocked:false,
+        params:{...state.params, model_type:modelType, image_mode:0, prompt,
+          resolution:'960x544', _duration_planning_mode:'duration'},
+      });
+    }, {modelType:ltxRestoreModel, prompt:syntheticLtxPrompt});
+    await restoreFromSidecar({
+      modelType:ltxRestoreModel,
+      params:{model_type:ltxRestoreModel, prompt:syntheticLtxPrompt,
+        resolution:'960x544', image_mode:0, video_length:96, duration_seconds:4,
+        sliding_window_size:96, sliding_window_overlap:0, ltx_multi_window:false,
+        _studio_video_workflow:'frames'},
+      name:ltxRestoreModel + '-single-native-clip.mp4',
+    });
+    await page.evaluate(() => new Promise(resolve => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    }));
+    const ltxRestoreState = await page.evaluate(() => {
+      const state = window.store.getState();
+      return {planningMode:state.params._duration_planning_mode,
+        durationSeconds:state.durationSeconds, videoLength:state.params.video_length,
+        windowFrames:state.params.sliding_window_size,
+        sequence:state.params.ltx_multi_window === true,
+        panel:document.getElementById('root')?.innerText || ''};
+    });
+    assert.deepEqual({planningMode:ltxRestoreState.planningMode,
+      durationSeconds:ltxRestoreState.durationSeconds, videoLength:ltxRestoreState.videoLength,
+      windowFrames:ltxRestoreState.windowFrames, sequence:ltxRestoreState.sequence},
+    {planningMode:'duration', durationSeconds:4, videoLength:96, windowFrames:96, sequence:false},
+    'An LTX API sidecar without Maestro UI mode retains its recorded one-window timeline');
+    assert.doesNotMatch(ltxRestoreState.panel, /8 windows/,
+      'The LTX sidecar does not expand from the synthetic prompt during restore');
+
     for (const scenario of rollingScenarios) {
       submissions.length = 0;
       await configure({...scenario, rolling: true});

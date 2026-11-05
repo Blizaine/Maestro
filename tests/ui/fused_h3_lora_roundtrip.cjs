@@ -78,6 +78,12 @@ const plain = value => JSON.parse(JSON.stringify(value));
       loadLoras: async () => { store.setState({ availableLoras: loras }); },
     });
     await store.getState().loadSettingsFromOutput();
+    assert.equal(store.getState().params._duration_planning_mode, 'duration',
+      'A fused H3 sidecar with recorded frames defaults to its generated timeline');
+    assert.equal(store.getState().params.video_length, 243,
+      'The fused H3 restore keeps its saved native frame count');
+    assert.equal(store.getState().params.num_inference_steps, defaults.num_inference_steps,
+      'Recorded-timeline restoration preserves fused H3 inference steps');
     assert.deepEqual(plain(store.getState().params.activated_loras), loras);
     assert.equal(store.getState().params.loras_multipliers, '0.35 0.00');
     assert.deepEqual(plain(store.getState().loraWeights), {

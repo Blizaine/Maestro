@@ -5,6 +5,10 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
 ## Unreleased
 
+- Restore a recorded video's duration when loading MCP/API or older clip
+  settings without Studio's duration-planning hint. Do not reinterpret a saved
+  single clip as a new prompt-based Auto timeline; retain explicit saved
+  planning modes and continuation geometry.
 - Allow experimental 4–12 denoising steps for Pika H3 Flex Frames and References.
   Keep the released six-step schedule as the recommended default, preserve the
   selected count when reusing settings, and retain the managed adapter, guidance

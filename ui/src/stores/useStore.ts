@@ -14481,11 +14481,23 @@ export const useStore = create<AppState>((set, get) => ({
       || p._audio_sub_mode === 'music'
       || p._audio_sub_mode === 'sfx'
     ) ? p._audio_sub_mode : undefined
-    newParams._duration_planning_mode = isDirectorClip ? 'duration' : (
+    const savedDurationPlanningMode = (
       p._duration_planning_mode === 'duration'
       || p._duration_planning_mode === 'windows'
       || p._duration_planning_mode === 'auto'
-    ) ? p._duration_planning_mode : 'auto'
+    ) ? p._duration_planning_mode : null
+    const recordedVideoFrames = Number(p.video_length)
+    const recordedVideoSeconds = Number(p.duration_seconds ?? p._duration_seconds)
+    const hasRecordedVideoTiming = (restoredModelMode === 'video' || restoredModelMode === 'avatar')
+      && ((Number.isFinite(recordedVideoFrames) && recordedVideoFrames > 0)
+        || (Number.isFinite(recordedVideoSeconds) && recordedVideoSeconds > 0))
+    // API/MCP sidecars do not include Maestro's private UI planning flag.
+    // When they carry a concrete video timeline, restore that recorded target
+    // instead of applying prompt Auto to an already generated clip. Explicit
+    // Auto and Window selections remain authoritative when they were saved.
+    newParams._duration_planning_mode = isDirectorClip ? 'duration' : (
+      savedDurationPlanningMode ?? (hasRecordedVideoTiming ? 'duration' : 'auto')
+    )
 
     // Keep advanced model controls that are intentionally loose in the API
     // schema. This list is explicit so disposable runtime paths and private
