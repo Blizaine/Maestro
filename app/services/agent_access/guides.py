@@ -102,6 +102,15 @@ you have a returned job ID.
    can be read using `get_authored_draft`. Never claim success until terminal
    status and actual media are verified.
 
+For H3 References, preparation includes `prepared.plan_metadata.h3_reference_handoffs`.
+Review each window's compiled prompt, Subject/Speaker/Audio bindings and retained
+voice references. Subject numbers, media numbers and local speaker numbers are
+independent; use their explicit relationships. Unknown or unavailable diagnostics
+are not verified bindings. Completed clip metadata records the actual runtime
+handoff under `model_details.h3_reference_handoffs`, including encoded reference
+row ranges and decoded voice-input hashes. Correct conditioning does not certify
+rendered voice identity; inspect the output before claiming voices are correct.
+
 For a native operation whose OpenAPI body schema is missing, call
 `describe_operation` for source-derived field hints. The Studio generate path
 uses fields such as `model_type`, `prompt`, `generation_mode`, and

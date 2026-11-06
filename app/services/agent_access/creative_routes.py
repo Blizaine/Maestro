@@ -109,7 +109,30 @@ def create_creative_router(backend, service, *, native_prepare, native_director)
                 payload = {**strip_private_director_fields(context["params"]), **authored["native_params"]}
                 payload.update(prompt_enhancer="", enhance_on_generation=False)
                 result = await _await(native_prepare(payload, prepare_only=True))
-                result["plan_metadata"] = authored["plan_metadata"]
+                plan_metadata = authored["plan_metadata"]
+                handoffs = plan_metadata.get("h3_reference_handoffs")
+                prepared_params = result.get("params") if isinstance(result, dict) else None
+                if isinstance(handoffs, list) and isinstance(prepared_params, dict):
+                    from models.minimax_h3.reference_handoff import refresh_ref2va_handoff_traces
+
+                    references = prepared_params.get("minimax_h3_runtime_references")
+                    if not isinstance(references, list):
+                        references = prepared_params.get("minimax_h3_references")
+                    if not isinstance(references, list):
+                        references = context["params"].get("minimax_h3_references") or []
+                    prompts = prepared_params.get("h3_window_prompts")
+                    if not isinstance(prompts, list) or len(prompts) != len(handoffs):
+                        prompts = authored["native_params"].get("h3_window_prompts")
+                    if (not isinstance(prompts, list) or len(prompts) != len(handoffs)) and len(handoffs) == 1:
+                        prompts = [authored["native_params"].get("prompt") or plan.get("prompt") or ""]
+                    if isinstance(prompts, list) and len(prompts) == len(handoffs):
+                        plan_metadata = dict(plan_metadata)
+                        plan_metadata["h3_reference_handoffs"] = refresh_ref2va_handoff_traces(
+                            handoffs,
+                            prompts,
+                            references,
+                        )
+                result["plan_metadata"] = plan_metadata
                 kind = "studio"
             identifier = service.remember_prepared(context_id, principal.id, kind, result)
             return {"prepared_id": identifier, "context_id": context_id, "kind": kind, "local_writer": False, "submitted": False, "prepared": safe(result)}

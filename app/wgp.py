@@ -9417,6 +9417,7 @@ def generate_video(
         overlapped_latents = None
         context_scale = None
         window_no = 0
+        h3_reference_handoffs = []
         extra_windows = 0
         abort_scheduled = False
         guide_start_frame = 0 # pos of of first control video frame of current window  (reuse_frames later than the first processed frame)
@@ -10508,6 +10509,11 @@ def generate_video(
                     )
                     overridden_inputs = samples.get("overridden_inputs", None)
                     artifact_metadata = samples.get("artifact_metadata")
+                    if isinstance(artifact_metadata, dict) and "h3_reference_handoffs" in artifact_metadata:
+                        from models.minimax_h3.handoff_metadata import accumulate_reference_handoffs
+                        h3_reference_handoffs, artifact_metadata = accumulate_reference_handoffs(
+                            h3_reference_handoffs, artifact_metadata,
+                        )
                     if model_def.get("architecture") in ("fish_drama3", "fish_drama3_small"):
                         speech_generation = samples.get("speech_generation")
                         if isinstance(speech_generation, dict):
@@ -11042,6 +11048,8 @@ def generate_video(
                     })
                 embedded_images = {img_name: inputs[img_name] for img_name in image_names_list } if server_config.get("embed_source_images", False) else None
                 configs = prepare_inputs_dict("metadata", inputs, model_type)
+                if h3_reference_handoffs:
+                    configs["h3_reference_handoffs"] = h3_reference_handoffs
                 if sliding_window: configs["window_no"] = window_no
                 configs["prompt"] = "\n".join(original_prompts)
                 if prompt_enhancer_image_caption_model != None and prompt_enhancer !=None and len(prompt_enhancer)>0 and enhancer_mode != 1:

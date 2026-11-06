@@ -9,6 +9,7 @@ timelines behind the caller's back.
 from __future__ import annotations
 
 import copy
+import hashlib
 import math
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -1401,6 +1402,168 @@ def _h3_first_last_metadata(
     return signature, plan
 
 
+def _is_h3_ref2va_reference_workflow(
+    context: Mapping[str, Any],
+    model_def: Mapping[str, Any],
+) -> bool:
+    """Recognize H3 Omni contexts from either definition or family metadata."""
+
+    model = context.get("model") if isinstance(context.get("model"), Mapping) else {}
+    architecture_values = (
+        model_def.get("architecture"),
+        model.get("architecture"),
+        model_def.get("family"),
+        model.get("family"),
+        context.get("model_type"),
+    )
+    normalized = [str(value or "").strip().casefold() for value in architecture_values]
+    is_h3 = any(value.startswith("minimax_h3") for value in normalized)
+    is_ref2va = bool(
+        model_def.get("omni_reference")
+        or model.get("omni_reference")
+        or any("ref2va" in value for value in normalized)
+    )
+    return context.get("workflow") == "video.references" and is_h3 and is_ref2va
+
+
+def _h3_handoff_references(
+    context: Mapping[str, Any],
+    params: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Copy the canonical source manifest and attach stable authoring IDs."""
+
+    source = params.get("minimax_h3_references") or []
+    if not isinstance(source, list):
+        return []
+    references = [copy.deepcopy(row) for row in source if isinstance(row, Mapping)]
+    authoring_rows = context.get("references") or []
+    if not isinstance(authoring_rows, Sequence) or isinstance(authoring_rows, (str, bytes)):
+        return references
+
+    def kind(row: Mapping[str, Any]) -> str:
+        raw = str(row.get("type") or row.get("kind") or row.get("media_type") or "image")
+        return raw.split("/", 1)[0].strip().lower()
+
+    # Native creative contexts keep path-free IDs in the same canonical
+    # reference order as params.minimax_h3_references. Only copy an ID when
+    # the media type at that position agrees.
+    for index, reference in enumerate(references):
+        if reference.get("id") or reference.get("reference_id") or reference.get("ref_id"):
+            continue
+        if index >= len(authoring_rows) or not isinstance(authoring_rows[index], Mapping):
+            continue
+        authoring_row = authoring_rows[index]
+        if kind(reference) != kind(authoring_row):
+            continue
+        identifier = authoring_row.get("id") or authoring_row.get("reference_id") or authoring_row.get("ref_id")
+        if isinstance(identifier, str) and identifier.strip():
+            reference["id"] = identifier.strip()
+    return references
+
+
+def _h3_reference_handoff_metadata(
+    context: Mapping[str, Any],
+    params: Mapping[str, Any],
+    model_def: Mapping[str, Any],
+    timeline: Mapping[str, Any],
+    prompts: Sequence[str],
+    windows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]] | None:
+    """Compile read-only Ref2VA conditioning traces for authored prompts."""
+
+    if not _is_h3_ref2va_reference_workflow(context, model_def):
+        return None
+
+    from models.minimax_h3.reference_handoff import compile_ref2va_prompt_handoff
+
+    references = _h3_handoff_references(context, params)
+    try:
+        fps = float(timeline.get("fps") or model_def.get("fps") or 24)
+    except (TypeError, ValueError, OverflowError):
+        fps = 24.0
+    if not math.isfinite(fps) or fps <= 0:
+        fps = 24.0
+    native_continuation = timeline.get("kind") == "h3_native_sequence"
+    try:
+        native_window_frames = max(
+            1,
+            int(timeline.get("window_frames") or model_def.get("frames_maximum") or 1),
+        )
+    except (TypeError, ValueError, OverflowError):
+        native_window_frames = 1
+    result: list[dict[str, Any]] = []
+    for index, prompt in enumerate(prompts):
+        row = windows[index] if index < len(windows) else {}
+        start = int(row.get("start_frame") or 0)
+        end = int(row.get("end_frame") or start)
+        contribution_frames = max(0, end - start)
+        if native_continuation and len(prompts) > 1:
+            rendered_frames = native_window_frames
+            duration_basis = "native_window_frames"
+        else:
+            rendered_frames = int(
+                row.get("duration_frames")
+                or row.get("frames")
+                or contribution_frames
+                or timeline.get("total_frames")
+                or 1
+            )
+            duration_basis = "per_clip_frames"
+        duration_seconds = rendered_frames / fps
+        continuation = native_continuation and index > 0
+        try:
+            handoff = compile_ref2va_prompt_handoff(
+                prompt,
+                references,
+                duration_seconds=duration_seconds,
+                continuation=continuation,
+                audio_only=bool(model_def.get("audio_only")),
+                window_index=index + 1,
+            )
+            trace = handoff["trace"]
+        except Exception as error:
+            # This is an optional preview. Keep authoring preparation
+            # nonblocking if the render compiler cannot produce diagnostics;
+            # the unchanged native render path remains authoritative.
+            trace = {
+                "schema_version": 1,
+                "stage": "diagnostic_unavailable",
+                "window_index": index + 1,
+                "compiled_prompt": None,
+                "prompt_sha256": None,
+                "authored_prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                "continuation": bool(continuation),
+                "reference_bindings": [],
+                "speaker_bindings": [],
+                "dialogue_bindings": [],
+                "voice_scope": {
+                    "applied": False,
+                    "reason": "diagnostic_unavailable",
+                    "voice_total": 0,
+                    "voice_kept": 0,
+                    "voice_omitted": 0,
+                    "kept_roles": [],
+                    "omitted_roles": [],
+                },
+                "alignment_remap": {},
+                "diagnostic_error": type(error).__name__,
+                "conditioning_note": (
+                    "No compiled handoff trace is available; this diagnostic did not alter the authored prompt."
+                ),
+            }
+        trace.update({
+            "timeline_start_frame": start,
+            "timeline_end_frame": end,
+            "timeline_contribution_frames": contribution_frames,
+            "timeline_contribution_duration_seconds": contribution_frames / fps,
+            "rendered_pass_frames": rendered_frames,
+            "rendered_pass_duration_seconds": duration_seconds,
+            "duration_basis": duration_basis,
+        })
+        result.append(trace)
+    return result
+
+
 def prepare_authored_generation(
     context: Mapping[str, Any],
     plan: Mapping[str, Any],
@@ -1427,15 +1590,26 @@ def prepare_authored_generation(
             native = {"prompt": prompt}
         if plan.get("reference_ids") is not None:
             _ordered_reference_ids(plan.get("reference_ids"), expected_references, "plan.reference_ids")
+        metadata = {
+            "context_id": context_id,
+            "workflow": workflow,
+            "window_count": 1,
+            "reference_ids": expected_references,
+            "authored_by": "external_agent",
+        }
+        handoffs = _h3_reference_handoff_metadata(
+            context,
+            params,
+            model_def,
+            timeline,
+            [prompt],
+            expected_windows,
+        )
+        if handoffs is not None:
+            metadata["h3_reference_handoffs"] = handoffs
         return {
             "native_params": native,
-            "plan_metadata": {
-                "context_id": context_id,
-                "workflow": workflow,
-                "window_count": 1,
-                "reference_ids": expected_references,
-                "authored_by": "external_agent",
-            },
+            "plan_metadata": metadata,
         }
 
     windows = _validate_authored_windows(timeline, plan, expected_references)
@@ -1513,6 +1687,17 @@ def prepare_authored_generation(
         raise AuthoringPlanError(
             f"A per-window authored plan is not supported for {workflow!r} in the current native mode."
         )
+
+    handoffs = _h3_reference_handoff_metadata(
+        context,
+        params,
+        model_def,
+        timeline,
+        prompts,
+        windows,
+    )
+    if handoffs is not None:
+        metadata["h3_reference_handoffs"] = handoffs
 
     return {"native_params": native, "plan_metadata": metadata}
 

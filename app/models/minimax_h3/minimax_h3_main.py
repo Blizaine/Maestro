@@ -70,14 +70,12 @@ from .runtime import runtime
 from .prompt_cache import H3PromptEncodingAborted, MiniMaxH3PromptCache
 from .ref2va import (
     MiniMaxH3PreparedReference,
-    add_ref2va_continuation_context,
-    align_ref2va_voice_reference_order,
     build_ref2va_packed_sequence,
-    ensure_ref2va_prompt_relationships,
     prepare_references,
-    select_ref2va_window_voice_references,
     trim_reference_num_frames,
 )
+from .reference_handoff import compile_ref2va_prompt_handoff
+from .handoff_metadata import capture_reference_handoff
 from .reference_manifest import apply_exact_drive_audio_prompt_contract
 from .scheduler import (
     MiniMaxH3Scheduler,
@@ -3348,6 +3346,7 @@ class MiniMaxH3Model:
         )
 
         audio_condition_rows = None
+        reference_handoff_trace = None
         if self.omni_reference:
             if self.viggle:
                 from .viggle import prepare_window_references
@@ -3388,12 +3387,16 @@ class MiniMaxH3Model:
                         input_prompt,
                         minimax_h3_exact_drive_audio_ordinal,
                     )
-                input_prompt, runtime_references, reference_remap = (
-                    align_ref2va_voice_reference_order(
-                        input_prompt,
-                        minimax_h3_references,
-                    )
+                handoff = compile_ref2va_prompt_handoff(
+                    input_prompt, minimax_h3_references,
+                    duration_seconds=target_frame_num / fps,
+                    continuation=continuation_picture is not None,
+                    audio_only=self.audio_only,
+                    window_index=int(_kwargs.get("window_no") or 1),
                 )
+                input_prompt = handoff["scoped_prompt"]
+                runtime_references = handoff["runtime_references"]
+                reference_remap = handoff["alignment_remap"]
                 if reference_remap:
                     mapping = "; ".join(
                         f"{kind} " + ", ".join(
@@ -3405,12 +3408,7 @@ class MiniMaxH3Model:
                         "[MiniMax H3 Ref2VA] Canonicalized physical reference order "
                         f"and prompt labels ({mapping})."
                     )
-                input_prompt, runtime_references, voice_scope = (
-                    (lambda prompt, refs: (prompt, refs, {"voice_total": 0})) if self.audio_only else select_ref2va_window_voice_references
-                )(
-                        input_prompt,
-                        runtime_references,
-                )
+                voice_scope = handoff["voice_scope"]
                 if voice_scope["voice_total"]:
                     kept = ", ".join(voice_scope["kept_roles"]) or "none"
                     print(
@@ -3424,11 +3422,8 @@ class MiniMaxH3Model:
                             "[MiniMax H3 Ref2VA] Omitted non-speaking or over-limit "
                             f"voice references for this window: {omitted}."
                         )
-                conditioned_prompt = input_prompt if self.audio_only else ensure_ref2va_prompt_relationships(
-                    input_prompt,
-                    runtime_references,
-                    duration_seconds=target_frame_num / fps,
-                )
+                conditioned_prompt = handoff["compiled_prompt"]
+                reference_handoff_trace = handoff["trace"]
                 if conditioned_prompt != str(input_prompt or "").strip():
                     print(
                         "[MiniMax H3 Ref2VA] Applied canonical Subject/Speaker/Audio "
@@ -3474,9 +3469,6 @@ class MiniMaxH3Model:
                 )
                 presentation_references = list(references)
                 if continuation_picture is not None:
-                    conditioned_prompt = add_ref2va_continuation_context(
-                        conditioned_prompt,
-                    )
                     presentation_references.insert(
                         0,
                         MiniMaxH3PreparedReference(
@@ -3535,6 +3527,16 @@ class MiniMaxH3Model:
                 torch.cat(audio_parts)
                 if audio_parts
                 else None
+            )
+            reference_handoff_trace = capture_reference_handoff(
+                reference_handoff_trace, references,
+                window_start_frame=window_start_frame_no,
+                rendered_frames=target_frame_num,
+                fps=fps,
+                continuation_audio_rows=(
+                    int(continuation_audio_rows.shape[0])
+                    if continuation_audio_rows is not None else 0
+                ),
             )
             if self._interrupt:
                 return None
@@ -4396,4 +4398,6 @@ class MiniMaxH3Model:
             "x": output_video,
             "audio": audio,
             "audio_sampling_rate": MINIMAX_H3_AUDIO_SAMPLE_RATE,
+            **({"artifact_metadata": {"h3_reference_handoffs": [reference_handoff_trace]}}
+               if reference_handoff_trace is not None else {}),
         }
