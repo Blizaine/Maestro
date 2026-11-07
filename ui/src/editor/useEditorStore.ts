@@ -8,6 +8,7 @@ import type {
   EditorCanvas,
   EditorExportRecord,
   EditorExportSettings,
+  EditorGraphicLayout,
   EditorMarker,
   EditorMediaProbe,
   EditorOperationSourceSnapshot,
@@ -35,6 +36,7 @@ import { invalidateEditorMediaPreview } from './editorMediaPreview'
 import { applyEditorEditOperation, type EditorEditOperation } from './editorEditOperations'
 import { previewEditorAutoEdit, type EditorAutoProposal } from './editorAutoEdit'
 import { insertAnimatedTitle, type TitleBackground } from './editorAnimatedTitles'
+import { createEditorGraphic } from './editorGraphics'
 
 const HISTORY_LIMIT = 60
 const MIN_ITEM_DURATION = 1 / 30
@@ -129,6 +131,7 @@ interface EditorState {
   clearDirectorRerunError: (itemId: string) => void
   rerunDirectorClip: (itemId: string, prompt?: string) => Promise<void>
   addTitle: (at?: number, trackId?: string) => void
+  addGraphicOverlay: (layout?: EditorGraphicLayout, at?: number, trackId?: string) => void
   addAnimatedTitle: (asset: EditorAsset, options: { id: string; projectId: string; workspace: string; at: number; text: string; keepAudio: boolean; background?: TitleBackground }) => boolean
   addTrack: (type: EditorTrackType) => void
   renameTrack: (trackId: string, name: string) => void
@@ -1746,6 +1749,45 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     })
   },
 
+  addGraphicOverlay: (layout = 'lower-third', at, preferredTrackId) => {
+    const itemId = newId('graphic')
+    const layoutNames: Record<EditorGraphicLayout, string> = {
+      'lower-third': 'Lower third',
+      'feature-panel': 'Feature panel',
+      'full-title': 'Full title',
+    }
+    const requestedStart = Math.max(0, at ?? get().playhead)
+    let placedStart = requestedStart
+    commitProject(set, get, project => {
+      const track = bestTrack(project, 'text', preferredTrackId)
+      placedStart = closestAvailableEditorStart(track, requestedStart, 4, undefined, true)
+      track.items.push({
+        id: itemId,
+        name: `Graphic overlay · ${layoutNames[layout]}`,
+        start: placedStart,
+        duration: 4,
+        source_in: 0,
+        speed: 1,
+        volume: 1,
+        opacity: 1,
+        fit: 'contain',
+        transform: { x: 0, y: 0, scale: 1, rotation: 0 },
+        fade_in: 0,
+        fade_out: 0,
+        graphic: createEditorGraphic(layout, () => newId('graphic-el')),
+      })
+      track.items.sort((left, right) => left.start - right.start)
+    })
+    const track = get().project?.tracks.find(candidate => candidate.items.some(item => item.id === itemId))
+    set({
+      selectedItemId: itemId,
+      selectedItemIds: [itemId],
+      selectedTrackId: track?.id || null,
+      playhead: placedStart,
+      mobilePanel: 'inspector',
+    })
+  },
+
   addAnimatedTitle: (asset, options) => {
     const current = get().project
     if (!current || current.id !== options.projectId || current.workspace !== options.workspace) return false
@@ -2855,7 +2897,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return
     }
     const usedAssetIds = new Set(currentProject.tracks.flatMap(track => (
-      track.items.filter(item => !options || options.itemIds.includes(item.id)).flatMap(item => item.asset_id ? [item.asset_id] : [])
+      track.items.filter(item => !options || options.itemIds.includes(item.id)).flatMap(item => [
+        ...(item.asset_id ? [item.asset_id] : []),
+        ...(item.graphic?.elements.flatMap(element => element.type === 'image' ? [element.asset_id] : []) || []),
+      ])
     )))
     const missing = Object.values(currentProject.assets).filter(asset => (
       asset.missing && usedAssetIds.has(asset.id)

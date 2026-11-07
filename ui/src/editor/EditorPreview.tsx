@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Maximize2, Pause, Play, RotateCcw, SkipBack, SkipForward } from 'lucide-react'
-import type { EditorAsset, EditorTimelineItem, EditorTrack, EditorTransform } from '../types'
+import type { EditorAsset, EditorGraphic, EditorTimelineItem, EditorTrack, EditorTransform } from '../types'
 import { useIsMobileSidecar } from '../lib/useIsMobile'
 import {
   activeEditorItems,
@@ -18,6 +18,7 @@ import { releaseEditorMediaAudio, resumeEditorAudio, setEditorMediaGain } from '
 import { EditorAudioMeter } from './EditorAudioMeter'
 import { EditorKeyedCanvas } from './EditorKeyedCanvas'
 import { normalizeEditorKeying } from './editorKeying'
+import { useEditorGraphicPreview } from './useEditorGraphicPreview'
 
 type CanvasInteractionMode = 'move' | 'resize'
 type PreviewQuality = 'auto' | 'original' | 'proxy' | 'mobile'
@@ -559,6 +560,90 @@ function PreviewAudio({
         syncActiveAudio(false)
       }}
     />
+  )
+}
+
+function GraphicOverlayPreview({
+  item,
+  graphic,
+  track,
+  assets,
+  workspace,
+  canvasWidth,
+  canvasHeight,
+  playhead,
+  selected,
+  locked,
+  previewTransform,
+  onTransformStart,
+}: {
+  item: EditorTimelineItem
+  graphic: EditorGraphic
+  track: EditorTrack
+  assets: Record<string, EditorAsset>
+  workspace: string
+  canvasWidth: number
+  canvasHeight: number
+  playhead: number
+  selected: boolean
+  locked: boolean
+  previewTransform?: EditorTransform
+  onTransformStart: (
+    event: React.PointerEvent<HTMLElement>,
+    item: EditorTimelineItem,
+    track: EditorTrack,
+    mode: CanvasInteractionMode,
+  ) => void
+}) {
+  const preview = useEditorGraphicPreview(
+    graphic,
+    canvasWidth,
+    canvasHeight,
+    assets,
+    workspace,
+  )
+  const transform = previewTransform || item.transform
+  const opacity = item.opacity * clipEnvelope(item, playhead)
+  return (
+    <div
+      data-editor-canvas-item-id={item.id}
+      data-editor-graphic-preview="true"
+      role="group"
+      aria-label={item.text || item.name}
+      className={`absolute touch-none ${selected && !locked ? 'cursor-move' : ''}`}
+      style={{
+        pointerEvents: selected ? undefined : 'none',
+        left: `calc(50% + ${(transform.x || 0) / Math.max(1, canvasWidth) * 100}%)`,
+        top: `calc(50% + ${(transform.y || 0) / Math.max(1, canvasHeight) * 100}%)`,
+        width: '100%',
+        height: '100%',
+        opacity,
+        transform: `translate(-50%, -50%) scale(${transform.scale || 1}) rotate(${transform.rotation || 0}deg)`,
+        transformOrigin: 'center',
+        // Text tracks remain above video media, while the offset preserves
+        // the native z-order between text tracks (including plain titles).
+        zIndex: 1000 + track.z_index,
+      }}
+      onPointerDown={event => {
+        if (selected && !locked) onTransformStart(event, item, track, 'move')
+      }}
+    >
+      {preview.url ? (
+        <img src={preview.url} alt="" draggable={false} className="pointer-events-none h-full w-full select-none" />
+      ) : (
+        <div
+          role={preview.error ? 'alert' : 'status'}
+          className={`pointer-events-none absolute bottom-3 left-1/2 max-w-[90%] -translate-x-1/2 rounded-md border px-3 py-2 text-center text-[10px] shadow-lg ${preview.error ? 'border-red-300/40 bg-red-950/90 text-red-100' : 'border-white/15 bg-black/75 text-white/80'}`}
+        >
+          {preview.error
+            ? `Graphic preview unavailable: ${preview.error} Edit the element bounds or project images in the inspector.`
+            : 'Rendering graphic preview…'}
+        </div>
+      )}
+      {selected && (
+        <div className={`pointer-events-none absolute inset-0 border ${locked ? 'border-dashed border-white/65' : 'border-accent-warm'} shadow-[0_0_0_1px_rgba(0,0,0,0.45)]`} />
+      )}
+    </div>
   )
 }
 
@@ -1134,7 +1219,30 @@ export function EditorPreview() {
               />
             ) : null
           })}
-          {activeText.map(({ item }) => {
+          {activeText.map(({ item, track }) => {
+            if (item.graphic) {
+              return (
+                <GraphicOverlayPreview
+                  key={item.id}
+                  item={item}
+                  graphic={item.graphic}
+                  track={track}
+                  assets={project.assets}
+                  workspace={project.workspace}
+                  canvasWidth={project.canvas.width}
+                  canvasHeight={project.canvas.height}
+                  playhead={playhead}
+                  selected={selectedItemId === item.id}
+                  locked={track.locked}
+                  previewTransform={canvasPinch?.itemId === item.id
+                    ? canvasPinch.previewTransform
+                    : canvasInteraction?.itemId === item.id
+                      ? canvasInteraction.previewTransform
+                      : undefined}
+                  onTransformStart={beginCanvasTransform}
+                />
+              )
+            }
             const style = item.style || {
               x: 0,
               y: 0,
@@ -1161,6 +1269,7 @@ export function EditorPreview() {
                   textAlign,
                   background: hexToRgba(style.background_color || '#000000', style.background_opacity ?? 0.32),
                   opacity: item.opacity * clipEnvelope(item, playhead),
+                  zIndex: 1000 + track.z_index,
                 }}
               >
                 {item.text || 'Title'}

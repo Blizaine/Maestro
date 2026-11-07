@@ -17,7 +17,7 @@ import {
   Type,
   Upload,
 } from 'lucide-react'
-import type { EditorAsset, EditorMediaType, PipelineListItem } from '../types'
+import type { EditorAsset, EditorGraphicLayout, EditorMediaType, PipelineListItem } from '../types'
 import { useEditorMediaPreview } from './editorMediaPreview'
 import { useEditorStore } from './useEditorStore'
 import { EditorSourceViewer } from './EditorSourceViewer'
@@ -116,6 +116,7 @@ function DirectorRunPreview({ run, compact }: { run: PipelineListItem; compact: 
 
 export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
   const inputRef = useRef<HTMLInputElement>(null)
+  const textMenuRef = useRef<HTMLDivElement>(null)
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const [workspaceFilter, setWorkspaceFilter] = useState('all')
@@ -126,6 +127,7 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
   const [usedOnly, setUsedOnly] = useState(false)
   const [sourceAsset, setSourceAsset] = useState<EditorAsset | null>(null)
   const [titleOpen, setTitleOpen] = useState(false)
+  const [textMenuOpen, setTextMenuOpen] = useState(false)
   const project = useEditorStore(state => state.project)
   const cards = compact && view === 'grid'
   const library = useEditorStore(state => state.library)
@@ -139,8 +141,13 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
   const addMedia = useEditorStore(state => state.addMedia)
   const importDirectorRun = useEditorStore(state => state.importDirectorRun)
   const addTitle = useEditorStore(state => state.addTitle)
+  const addGraphicOverlay = useEditorStore(state => state.addGraphicOverlay)
   const usedAssets = useMemo(() => new Set((project?.tracks || []).flatMap(track => track.items)
-    .map(item => project?.assets[item.asset_id || '']).filter((asset): asset is EditorAsset => Boolean(asset))
+    .flatMap(item => [
+      ...(item.asset_id ? [item.asset_id] : []),
+      ...(item.graphic?.elements.flatMap(element => element.type === 'image' ? [element.asset_id] : []) || []),
+    ])
+    .map(assetId => project?.assets[assetId]).filter((asset): asset is EditorAsset => Boolean(asset))
     .map(asset => `${asset.origin}:${asset.workspace || ''}:${asset.name}`)), [project])
   const isUsed = (asset: EditorAsset) => usedAssets.has(`${asset.origin}:${asset.workspace || ''}:${asset.name}`)
 
@@ -165,6 +172,25 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
   const visibleItems = filter === 'director' ? visibleDirectorRuns : visible
   const rendered = visible.slice(0, visibleLimit)
   const renderedDirectorRuns = visibleDirectorRuns.slice(0, visibleLimit)
+
+  useEffect(() => {
+    if (!textMenuOpen) return
+    const closeMenu = (event: PointerEvent) => {
+      if (event.target instanceof Node && !textMenuRef.current?.contains(event.target)) setTextMenuOpen(false)
+    }
+    const closeForEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setTextMenuOpen(false) }
+    document.addEventListener('pointerdown', closeMenu)
+    document.addEventListener('keydown', closeForEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeMenu)
+      document.removeEventListener('keydown', closeForEscape)
+    }
+  }, [textMenuOpen])
+
+  const createGraphic = (layout: EditorGraphicLayout) => {
+    addGraphicOverlay(layout, undefined, selectedTrackId || undefined)
+    setTextMenuOpen(false)
+  }
 
   const handleFiles = async (files: FileList | null) => {
     if (!files?.length) return
@@ -247,10 +273,33 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
             className="flex min-h-9 min-w-0 items-center justify-center gap-1 rounded-lg border border-dashed border-border-light bg-bg-tertiary px-1.5 text-[11px] font-medium text-text-secondary hover:border-accent-blue/50 hover:text-accent-blue disabled:opacity-50">
             {uploading ? <Loader2 size={12} className="shrink-0 animate-spin" /> : <Upload size={12} className="shrink-0" />}<span className="truncate">Upload</span>
           </button>
-          <button type="button" aria-label="Add text title" title="Add text title" onClick={() => addTitle(undefined, selectedTrackId || undefined)}
-            className="flex min-h-9 min-w-0 items-center justify-center gap-1 rounded-lg border border-border bg-bg-tertiary px-1.5 text-[11px] font-medium text-text-secondary hover:border-accent-blue/40 hover:text-accent-blue">
-            <Type size={12} className="shrink-0" /><span className="truncate">Text</span>
-          </button>
+          <div ref={textMenuRef} className="relative min-w-0">
+            <button type="button" aria-label="Add text or graphic overlay" title="Add text or graphic overlay" aria-expanded={textMenuOpen}
+              onClick={() => setTextMenuOpen(value => !value)}
+              className="flex min-h-9 w-full min-w-0 items-center justify-center gap-1 rounded-lg border border-border bg-bg-tertiary px-1.5 text-[11px] font-medium text-text-secondary hover:border-accent-blue/40 hover:text-accent-blue">
+              <Type size={12} className="shrink-0" /><span className="truncate">Text</span>
+            </button>
+            {textMenuOpen && (
+              <div role="menu" aria-label="Text overlays" className="absolute left-0 top-full z-[120] mt-1 w-48 rounded-lg border border-border bg-bg-secondary p-1 shadow-2xl">
+                <button role="menuitem" type="button" onClick={() => { addTitle(undefined, selectedTrackId || undefined); setTextMenuOpen(false) }}
+                  className="flex w-full items-center rounded-md px-2 py-2 text-left text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary">
+                  Text title
+                </button>
+                <div className="my-1 border-t border-border" />
+                <div className="px-2 py-1 text-[9px] font-medium uppercase tracking-wider text-text-muted">Create graphic overlay</div>
+                {([
+                  ['lower-third', 'Lower third'],
+                  ['feature-panel', 'Feature panel'],
+                  ['full-title', 'Full title'],
+                ] as const).map(([layout, label]) => (
+                  <button key={layout} role="menuitem" type="button" onClick={() => createGraphic(layout)}
+                    className="flex w-full items-center rounded-md px-2 py-2 text-left text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary">
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <button type="button" aria-label="Create animated title" title="Create animated title" disabled={!project} onClick={() => setTitleOpen(true)}
             className="flex min-h-9 min-w-0 items-center justify-center gap-1 rounded-lg border border-accent-blue/30 bg-accent-blue/5 px-1.5 text-[11px] font-medium text-accent-blue disabled:opacity-40">
             <Sparkles size={12} className="shrink-0" /><span className="truncate">Animated</span>

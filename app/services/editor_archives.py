@@ -129,6 +129,13 @@ def _referenced_asset_ids(project: Mapping[str, Any]) -> set[str]:
             asset_id = str(item.get("asset_id") or "")
             if asset_id in assets:
                 referenced.add(asset_id)
+            graphic = item.get("graphic")
+            if isinstance(graphic, Mapping):
+                for element in graphic.get("elements") or []:
+                    if isinstance(element, Mapping) and element.get("type") == "image":
+                        image_id = str(element.get("asset_id") or "")
+                        if image_id in assets:
+                            referenced.add(image_id)
             for take_id in item.get("take_asset_ids") or []:
                 take_id = str(take_id or "")
                 if take_id in assets:

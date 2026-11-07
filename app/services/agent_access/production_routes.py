@@ -110,6 +110,8 @@ class ProductionService:
     async def finish(self, body, principal):
         from services.editor_projects import probe_media, save_editor_project
         from services.production_finishing import build_finish_project
+        if not isinstance(body, dict):
+            raise ValueError("finish_film body must be an object.")
         if type(body.get("export", False)) is not bool:
             raise ValueError("export must be a boolean; saving a project alone does not render it.")
         self.workspace(body.get("workspace") or "default")
@@ -118,7 +120,20 @@ class ProductionService:
             return {**probe_media(str(path)), "path": str(path), "workspace": body.get("workspace") or "default"}
         project = await run_in_threadpool(build_finish_project, body, resolve)
         saved = await run_in_threadpool(save_editor_project, str(self.output_root()), project["workspace"], project, expected_revision=0)
-        result = {"project_id": saved["id"], "workspace": saved["workspace"], "revision": saved["revision"], "duration_seconds": max(item["start"] + item["duration"] for item in saved["tracks"][0]["items"]), "exported": False}
+        main_track = next((track for track in saved["tracks"] if track.get("id") == "video-main"), saved["tracks"][0])
+        duration = max((item["start"] + item["duration"] for item in main_track["items"]), default=0)
+        result = {
+            "project_id": saved["id"],
+            "workspace": saved["workspace"],
+            "revision": saved["revision"],
+            "duration_seconds": duration,
+            "editable": True,
+            "tracks": [{
+                "id": track["id"], "name": track["name"], "type": track["type"],
+                "z_index": track["z_index"], "item_count": len(track["items"]),
+            } for track in saved["tracks"]],
+            "exported": False,
+        }
         if body.get("export"):
             result["export"] = await awaited(self.export_editor({"project_id": saved["id"], "workspace": saved["workspace"]}))
             result["exported"] = True

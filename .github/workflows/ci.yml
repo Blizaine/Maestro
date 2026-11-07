@@ -124,6 +124,7 @@ jobs:
           tests/test_director_title_cards.py
           tests/test_title_cards.py
           tests/test_production_review.py
+          tests/test_production_finishing_graphics.py
 
   agent-access:
     name: Isolated Agent Access protocols and security
@@ -177,6 +178,8 @@ jobs:
         run: node tests/ui/theme_migration.cjs
       - name: UI source and deployment safety regressions
         run: node tests/ui/ui_build_safety.cjs
+      - name: Editable graphic layouts and timeline history
+        run: node --test ui/src/editor/editorGraphics.test.mjs
       - name: Reference enhancement request manifest regressions
         run: node tests/ui/reference_enhancement_manifest.cjs
       - name: Agent Access settings and session recovery

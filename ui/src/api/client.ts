@@ -724,6 +724,28 @@ export async function fetchEditorMediaPreview(
   return res.json()
 }
 
+export async function previewEditorGraphic(params: {
+  graphic: import('../types').EditorGraphic
+  width: number
+  height: number
+  assets: Record<string, import('../types').EditorAsset>
+  workspace: string
+}, signal?: AbortSignal): Promise<Blob> {
+  const res = await fetch(`${BASE}/api/v1/editor/graphics/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+    signal,
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Unable to render this graphic overlay' }))
+    throw new Error(error.detail || error.error || 'Unable to render this graphic overlay')
+  }
+  const blob = await res.blob()
+  if (!blob.size) throw new Error('The graphic preview was empty. Check the layout and try again.')
+  return blob
+}
+
 /** Create a separate excerpt; the gallery original is never modified. */
 export async function trimGalleryMedia(
   asset: Pick<import('../types').EditorAsset, 'name' | 'origin' | 'workspace'>,

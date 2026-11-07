@@ -119,6 +119,30 @@ class TestEditorProjectArchives(unittest.TestCase):
             cancel_check=cancel_check,
         )
 
+    def test_graphic_image_is_packaged_and_remains_editable_after_import(self):
+        project = self._project()
+        image_path = self._write_source("logo.png", b"graphic-image-bytes")
+        project["assets"]["logo"] = {
+            "id": "logo", "name": "logo.png", "path": image_path,
+            "type": "image", "origin": "output", "width": 40, "height": 40,
+        }
+        graphic = {"version": 1, "width": 1280, "height": 720, "elements": [
+            {"id": "logo-element", "type": "image", "x": 30, "y": 30, "width": 40, "height": 40, "asset_id": "logo"},
+            {"id": "words", "type": "text", "x": 80, "y": 30, "width": 500, "height": 90,
+             "text": "Editable after import", "font_family": "Arial", "font_size": 32, "color": "#ffffff"},
+        ]}
+        text_track = next(t for t in project["tracks"] if t["type"] == "text")
+        text_track["items"] = [{"id": "graphic", "name": "Logo title", "start": 0, "duration": 2, "graphic": graphic}]
+        package = self._export(os.path.join(self.temp.name, "graphics.maestro.zip"), project)
+        imported = import_editor_project_archive(package, save_root=self.import_root, workspace="ImportedGraphics")
+        self.assertIn("logo", imported["assets"])
+        self.assertEqual(self._sha256(imported["assets"]["logo"]["path"]), self._sha256(image_path))
+        group = next(t for t in imported["tracks"] if t["type"] == "text")["items"][0]["graphic"]
+        self.assertEqual(group["elements"][0]["asset_id"], "logo")
+        self.assertEqual(group["elements"][1]["text"], "Editable after import")
+        group["elements"][1]["text"] = "Changed later"
+        self.assertEqual(graphic["elements"][1]["text"], "Editable after import")
+
     def test_round_trip_only_active_and_alternate_media_without_host_paths(self):
         project = self._project()
         active_original = project["assets"]["active"]["path"]

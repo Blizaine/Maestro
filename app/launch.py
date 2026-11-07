@@ -32946,6 +32946,30 @@ async def editor_media_status(request: Request):
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
+@api.post("/api/v1/editor/graphics/preview")
+async def editor_graphic_preview(request: Request):
+    from services.editor_graphic_preview import build_editor_graphic_preview
+    from starlette.responses import Response
+
+    raw = await request.body()
+    if len(raw) > 512 * 1024:
+        raise HTTPException(status_code=413, detail="Graphic preview request exceeds 512 KiB.")
+    try:
+        body = json.loads(raw)
+        if not isinstance(body, dict):
+            raise ValueError("Graphic preview requires a JSON object.")
+        workspace = body.get("workspace") or _get_active_workspace()
+        content = await asyncio.to_thread(
+            build_editor_graphic_preview, body,
+            save_root=_editor_save_root(), uploads_root=_editor_uploads_root(), workspace=workspace,
+        )
+        return Response(content=content, media_type="image/png", headers={"Cache-Control": "no-store"})
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Graphic image source not found.") from error
+    except (ValueError, EditorProjectError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
 @api.post("/api/v1/editor/media/preview")
 async def editor_media_preview(request: Request):
     body = await request.json()

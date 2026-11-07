@@ -341,13 +341,56 @@ Use finish_film with ordered clips: [{asset,duration?,source_in?,include_audio?,
 gain_db?,fade_in?,fade_out?}]. Media is an uploaded asset ID or
 {filename,workspace}. Images need an explicit hold duration (default 3s).
 Add narration, music and sfx as arrays of {asset,start?,duration?,source_in?,
-gain_db?,fade_in?,fade_out?}. Existing clip audio is kept unless disabled.
-Defaults: narration 0dB, music -18dB, effects -9dB. Music ducks 12dB only under
-placed narration or reviewed speech_ranges:[[start,end]]; never invent spoken
-timestamps from a screenplay. duck_music=false disables that envelope.
+gain_db?,fade_in?,fade_out?,track?,name?}. Existing clip audio is kept unless
+disabled. `track` selects the audio track name; non-overlapping rows in the
+same category with the same track name share a track. Overlapping rows use
+deterministic parallel lanes named from that base (for example, `Voice · 2`)
+so their authored starts stay unchanged. `name` labels each editable audio item.
+Defaults: narration 0dB, music -18dB,
+effects -9dB. Music ducks 12dB only under placed narration or reviewed
+speech_ranges:[[start,end]]; never invent spoken timestamps from a screenplay.
+duck_music=false disables that envelope.
+
+Use `overlays` for native editable graphics. Each entry has name, start,
+duration and `graphic:{version:1,width,height,elements:[...]}`. Elements are
+rect, text or image objects in design coordinates; the shared Editor graphic
+normalizer checks their exact fields and bounds, and design coordinates scale
+to the project canvas. An image element uses `asset` with an uploaded asset ID
+or `{filename,workspace}`; Maestro authorizes it and stores a project `asset_id`.
+Never put a local path or project asset ID directly in a graphic image element.
+Each overlay remains on its own text track above the video, so overlapping
+lower thirds and labels remain separately editable. Overlay timing must fit
+inside the assembled film. Optional transform, keyframes, fades and opacity use
+the native Editor item settings.
+
+Example: assemble video, an editable lower third, two speaker tracks and a music
+bed, then request native export:
+
+```json
+{
+  "workspace": "default",
+  "clips": [{"asset":{"filename":"interview.mp4","workspace":"default"},"duration":30,"include_audio":false}],
+  "overlays": [{
+    "name":"Alex lower third","start":0.5,"duration":7,
+    "graphic":{"version":1,"width":1344,"height":768,"elements":[
+      {"id":"bar","type":"rect","x":72,"y":570,"width":640,"height":120,"fill":"#101820","opacity":0.9,"border_color":"#FFFFFF","border_width":0,"radius":12},
+      {"id":"speaker","type":"text","x":104,"y":592,"width":560,"height":64,"text":"ALEX RIVERA","font_family":"Arial","font_size":40,"color":"#FFFFFF","opacity":1,"align":"left","bold":true}
+    ]}
+  }],
+  "narration": [
+    {"asset":{"filename":"alex.wav","workspace":"default"},"track":"Voice — Alex","name":"Opening answer","start":0,"duration":8},
+    {"asset":{"filename":"jamie.wav","workspace":"default"},"track":"Voice — Jamie","name":"Response","start":12,"duration":9}
+  ],
+  "music": [{"asset":{"filename":"piano.wav","workspace":"default"},"track":"Music bed","name":"Piano","start":0,"duration":30}],
+  "export": true
+}
+```
+
 The tool creates a NEW editable native Editor project, leaving earlier edits
-alone. export=false saves; export=true queues a software native export and
-returns a job to monitor. Canvas accepts width/height/fps/background.
+alone. Its response includes `editable:true`, project ID/revision/workspace and
+a track summary. `export=false` saves without rendering; `export=true` queues a
+software native export and returns a job to monitor. Canvas accepts
+width/height/fps/background.
 
 ## Review and polish
 Inspect actual rendered media with inspect_take, including include_audio=true

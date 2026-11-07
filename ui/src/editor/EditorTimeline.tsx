@@ -795,7 +795,7 @@ export function EditorTimeline({ compact = false, fill = false }: { compact?: bo
                         if (!selectedItemIds.includes(item.id)) selectItem(item.id, track.id)
                         setClipMenu({ left: Math.max(8, Math.min(window.innerWidth - 245, event.clientX)), top: Math.max(8, Math.min(window.innerHeight - 340, event.clientY)) })
                       }}
-                      title={`${item.name} · ${item.duration.toFixed(2)}s`}
+                      title={`${item.text || item.name} · ${item.duration.toFixed(2)}s`}
                     >
                       <EditorClipMedia asset={asset} item={item} trackType={track.type} width={width} workspace={project.workspace} />
                       <div className="relative z-10 flex h-full items-center gap-1 overflow-hidden bg-gradient-to-r from-black/35 via-transparent to-black/20 px-2">

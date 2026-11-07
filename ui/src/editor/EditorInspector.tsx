@@ -24,6 +24,7 @@ import { editorCanvasLabel } from './editorUtils'
 import { DEFAULT_EDITOR_FONT, EDITOR_FONT_OPTIONS, editorFontStack } from './editorFonts'
 import { EditorAnimationControls } from './EditorAnimationControls'
 import { EditorColorControls } from './EditorColorControls'
+import { EditorGraphicControls } from './EditorGraphicControls'
 import { EditorKeyingControls } from './EditorKeyingControls'
 import { EditorExportDialog } from './EditorExportDialog'
 import { EditorTakeComparison } from './EditorTakeComparison'
@@ -230,6 +231,7 @@ function EditorInspectorContent({
   const animatedProperties: EditorAnimatedProperty[] = track
     ? getApplicableEditorProperties(track.type, asset?.type, Boolean(asset?.has_audio))
     : []
+  if (item?.graphic && track?.type === 'text') animatedProperties.push('rotation')
   const hasAITab = Boolean(track?.type === 'video' && (asset?.type === 'video' || item?.director))
   const clipTabs: Array<{ id: 'basic' | 'audio' | 'motion' | 'ai'; label: string }> = [
     { id: 'basic', label: 'Basic' },
@@ -361,7 +363,7 @@ function EditorInspectorContent({
                       <NumberField label="Y" value={item.transform.y} step={1} onChange={value => patchTransform('y', value)} />
                     </div>
                     <SliderField label="Scale" value={item.transform.scale} min={0.1} max={3} step={0.01} onChange={value => patchTransform('scale', value)} />
-                    {track.type !== 'text' && <SliderField label="Rotation" value={item.transform.rotation} min={-180} max={180} step={1} onChange={value => patchTransform('rotation', value)} />}
+                    {(track.type !== 'text' || item.graphic) && <SliderField label="Rotation" value={item.transform.rotation} min={-180} max={180} step={1} onChange={value => patchTransform('rotation', value)} />}
                     {track.type === 'video' && (
                       <div>
                         <FieldLabel>Source fit</FieldLabel>
@@ -457,7 +459,15 @@ function EditorInspectorContent({
                   </div>
                 )}
 
-                {track.type === 'text' && (
+                {track.type === 'text' && (item.graphic ? (
+                  <EditorGraphicControls
+                    key={item.id}
+                    item={item}
+                    assets={project.assets}
+                    disabled={track.locked}
+                    onUpdate={patch => updateItem(item.id, patch)}
+                  />
+                ) : (
                   <div className="space-y-3 rounded-xl border border-border bg-bg-tertiary p-3">
                     <div className="space-y-1">
                       <FieldLabel htmlFor={`${inspectorId}-text`}>Text</FieldLabel>
@@ -525,7 +535,7 @@ function EditorInspectorContent({
                       <SliderField label="Background opacity" value={item.style?.background_opacity ?? 0.32} min={0} max={1} step={0.01} onChange={value => patchStyle('background_opacity', value)} />
                     </div>
                   </div>
-                )}
+                ))}
 
                 <div className="space-y-3 rounded-xl border border-border bg-bg-tertiary p-3">
                   {track.type !== 'audio' && <SliderField label="Opacity" value={item.opacity} min={0} max={1} step={0.01} onChange={value => updateItem(item.id, { opacity: value })} />}

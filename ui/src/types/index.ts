@@ -798,6 +798,63 @@ export interface EditorKeyingSettings {
   spill: number
 }
 
+export interface EditorGraphicRectElement {
+  id: string
+  type: 'rect'
+  x: number
+  y: number
+  width: number
+  height: number
+  fill: string
+  opacity?: number
+  border_color?: string
+  border_width?: number
+  radius?: number
+}
+
+export interface EditorGraphicTextElement {
+  id: string
+  type: 'text'
+  x: number
+  y: number
+  width: number
+  height: number
+  text: string
+  font_family: string
+  font_size: number
+  color: string
+  opacity?: number
+  align?: 'left' | 'center' | 'right'
+  bold?: boolean
+}
+
+export interface EditorGraphicImageElement {
+  id: string
+  type: 'image'
+  x: number
+  y: number
+  width: number
+  height: number
+  asset_id: string
+  opacity?: number
+  fit?: 'contain' | 'cover'
+}
+
+export type EditorGraphicElement =
+  | EditorGraphicRectElement
+  | EditorGraphicTextElement
+  | EditorGraphicImageElement
+
+/** Serializable native composition stored on a text-track item. */
+export interface EditorGraphic {
+  version: 1
+  width: 1344
+  height: 768
+  elements: EditorGraphicElement[]
+}
+
+export type EditorGraphicLayout = 'lower-third' | 'feature-panel' | 'full-title'
+
 export interface EditorTimelineItem {
   /** Correlates an automatically returned title; retained for duplicate protection. */
   animated_title_id?: string
@@ -840,6 +897,8 @@ export interface EditorTimelineItem {
   director?: EditorDirectorClipSource
   text?: string
   style?: EditorTextStyle
+  /** Native editable composition. Absent on legacy plain text titles. */
+  graphic?: EditorGraphic
 }
 
 export interface EditorTrack {

@@ -7,7 +7,10 @@ Dev testing.
 - **Title cards:** exact-text cards without loading an image model; optional
   Director opening, intertitle and end-card planning with persistent assembly.
 - **Agent finishing:** build a new editable cut from takes/cards, narration,
-  score and effects, with explicit mixing and software export.
+  score and effects, with explicit mixing and software export. Custom graphic
+  overlays retain editable text, panels and images on independent title tracks;
+  named voiceover tracks and the source footage remain separate. The exported
+  movie's gallery pencil reopens its saved Editor project.
 - **Review and bounded polishing:** actual sampled images/audio, decode reports,
   concrete creative observations and durable selected-Director-take budgets.
 - **Generation reliability:** PDD BF16 head compatibility, more accurate

@@ -39,6 +39,11 @@ from services.editor_keying import (
     editor_keying_filters,
     normalize_editor_keying,
 )
+from services.editor_graphics import (
+    EditorGraphicError,
+    normalize_editor_graphic,
+    render_editor_graphic,
+)
 
 
 EDITOR_SCHEMA_VERSION = 6
@@ -807,6 +812,20 @@ def normalize_editor_project(project: Mapping[str, Any], *, workspace: str | Non
                             "text_align": text_align
                             if text_align in {"left", "center", "right"} else "center",
                         }
+                        if "graphic" in item:
+                            try:
+                                item["graphic"] = normalize_editor_graphic(
+                                    item["graphic"], assets=assets
+                                )
+                            except EditorGraphicError as error:
+                                raise EditorProjectError(
+                                    f"Editor track {len(tracks) + 1} item {len(items) + 1}: {error}"
+                                ) from error
+                            item["text"] = str(item.get("text") or "Graphic")[:10_000]
+                    elif "graphic" in item:
+                        raise EditorProjectError(
+                            f"Editor track {len(tracks) + 1} item {len(items) + 1}: graphic layers require a text track"
+                        )
                     try:
                         keyframes = normalize_editor_keyframes(
                             item.get("keyframes"), duration=item["duration"]
@@ -1122,6 +1141,15 @@ def prepare_editor_overlay_project(
             take_asset = normalized["assets"].get(str(take_id))
             if take_asset and take_asset.get("type") in {"video", "image"}:
                 used_asset_ids.add(str(take_id))
+        graphic = item.get("graphic")
+        if isinstance(graphic, Mapping):
+            for element in graphic.get("elements") or []:
+                if not isinstance(element, Mapping) or element.get("type") != "image":
+                    continue
+                graphic_asset_id = str(element.get("asset_id") or "")
+                graphic_asset = normalized["assets"].get(graphic_asset_id)
+                if graphic_asset and graphic_asset.get("type") == "image":
+                    used_asset_ids.add(graphic_asset_id)
 
     overlay_tracks: list[dict[str, Any]] = []
     for track in normalized["tracks"]:
@@ -2564,6 +2592,75 @@ def compile_editor_render(
                 inputs.extend(["-i", path])
             source_entries.append((track, item, asset, input_index))
 
+    # Native graphic title groups are rendered by Pillow into private,
+    # content-addressed PNG inputs next to this job's filter script. The JSON
+    # graphic remains on the timeline item and is never replaced by this cache.
+    graphic_input_by_item: dict[int, int] = {}
+    filter_directory = os.path.dirname(os.path.abspath(filter_script_path))
+    for track in project["tracks"]:
+        if track.get("type") != "text" or track.get("muted"):
+            continue
+        for item in track.get("items") or []:
+            graphic = item.get("graphic")
+            if item.get("disabled") or not isinstance(graphic, Mapping):
+                continue
+
+            def resolve_graphic_image(asset_id: str) -> str:
+                asset = assets.get(str(asset_id))
+                if not isinstance(asset, Mapping) or asset.get("type") != "image":
+                    raise EditorProjectError(
+                        f"Graphic image asset '{asset_id}' is missing or is not an image"
+                    )
+                return resolve_editor_asset(
+                    asset,
+                    save_root=save_root,
+                    workspace=workspace,
+                    uploads_root=uploads_root,
+                )
+
+            try:
+                png_bytes = render_editor_graphic(
+                    graphic,
+                    width=width,
+                    height=height,
+                    resolve_image=resolve_graphic_image,
+                )
+            except EditorGraphicError as error:
+                raise EditorProjectError(
+                    f"Editor graphic item '{item.get('id') or 'title'}': {error}"
+                ) from error
+            png_digest = hashlib.sha256(png_bytes).hexdigest()
+            png_path = os.path.join(filter_directory, f"editor-graphic-{png_digest}.png")
+            if os.path.islink(png_path):
+                raise EditorProjectError("Editor graphic cache cannot be a symbolic link")
+            cached_png_matches = False
+            if os.path.isfile(png_path):
+                try:
+                    with open(png_path, "rb") as handle:
+                        cached_png_matches = handle.read() == png_bytes
+                except OSError:
+                    cached_png_matches = False
+            if not cached_png_matches:
+                os.makedirs(filter_directory, exist_ok=True)
+                temporary_png = ""
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb",
+                        prefix=".editor-graphic-",
+                        suffix=".tmp",
+                        dir=filter_directory,
+                        delete=False,
+                    ) as handle:
+                        temporary_png = handle.name
+                        handle.write(png_bytes)
+                    os.replace(temporary_png, png_path)
+                finally:
+                    if temporary_png and os.path.exists(temporary_png):
+                        os.remove(temporary_png)
+            input_index = len(source_entries) + len(graphic_input_by_item)
+            inputs.extend(["-loop", "1", "-framerate", f"{fps:.8f}", "-i", png_path])
+            graphic_input_by_item[id(item)] = input_index
+
     base_source = (
         f"color=c=black@0.0:s={width}x{height}:r={fps:.8f}:d={duration:.8f},format=rgba"
         if alpha_export
@@ -2823,6 +2920,123 @@ def compile_editor_render(
                 text_entries.append((track, item))
     text_entries.sort(key=lambda entry: (int(entry[0].get("z_index") or 0), float(entry[1].get("start") or 0)))
     for text_index, (_track, item) in enumerate(text_entries, start=1):
+        graphic_input = graphic_input_by_item.get(id(item))
+        if graphic_input is not None:
+            start = float(item["start"])
+            clip_duration = float(item["duration"])
+            end = start + clip_duration
+            keyframes = _editor_item_keyframes(item)
+            transform = item.get("transform") if isinstance(item.get("transform"), Mapping) else {}
+            scale = _bounded_number(transform.get("scale"), 1.0, 0.05, 4.0)
+            x = _finite_number(transform.get("x"), 0.0)
+            y = _finite_number(transform.get("y"), 0.0)
+            opacity = _bounded_number(item.get("opacity"), 1.0, 0.0, 1.0)
+            animated_scale = bool(keyframes.get("scale"))
+            animated_opacity = bool(keyframes.get("opacity"))
+            fade_in = min(
+                clip_duration,
+                _bounded_number(item.get("fade_in"), 0.0, 0.0, clip_duration),
+            )
+            fade_out = min(
+                clip_duration,
+                _bounded_number(item.get("fade_out"), 0.0, 0.0, clip_duration),
+            )
+            target_w = max(2, int(round(width * (1.0 if animated_scale else scale) / 2) * 2))
+            target_h = max(2, int(round(height * (1.0 if animated_scale else scale) / 2) * 2))
+            scale_filter = ""
+            if animated_scale:
+                scale_expression = _editor_item_animation_expression(
+                    item, "scale", scale, time_variable="t", clip_start=start
+                )
+                scale_filter = (
+                    ",scale=w='max(2,trunc(iw*("
+                    f"{scale_expression})/2)*2)':"
+                    "h='max(2,trunc(ih*("
+                    f"{scale_expression})/2)*2)':eval=frame"
+                )
+            alpha_filters: list[str] = []
+            if not animated_opacity:
+                if fade_in > 1e-6:
+                    alpha_filters.append(
+                        f"fade=t=in:st={start:.8f}:d={fade_in:.8f}:alpha=1"
+                    )
+                if fade_out > 1e-6:
+                    alpha_filters.append(
+                        f"fade=t=out:st={max(start, end - fade_out):.8f}:"
+                        f"d={fade_out:.8f}:alpha=1"
+                    )
+                alpha_filters.append(f"colorchannelmixer=aa={opacity:.8f}")
+            graphic_source = f"editor_graphic_source_{text_index}"
+            graphic_layer = f"editor_graphic_layer_{text_index}"
+            filters.append(
+                f"[{graphic_input}:v]trim=duration={clip_duration:.8f},"
+                f"setpts=PTS-STARTPTS+{start:.8f}/TB,format=rgba,"
+                f"scale={target_w}:{target_h}{scale_filter}"
+                f"{''.join(',' + value for value in alpha_filters)}"
+                f"[{graphic_source}]"
+            )
+            if animated_opacity:
+                opacity_expression = _editor_item_animation_expression(
+                    item, "opacity", opacity, time_variable="T", clip_start=start
+                )
+                alpha_ramp = _editor_alpha_ramp_expression(
+                    time_variable="T",
+                    clip_start=start,
+                    clip_duration=clip_duration,
+                    fade_in=fade_in,
+                    fade_out=fade_out,
+                )
+                alpha_expression = f"({opacity_expression})*({alpha_ramp})"
+                mask_label = f"editor_graphic_mask_{text_index}"
+                color_label = f"editor_graphic_color_{text_index}"
+                source_alpha_label = f"editor_graphic_source_alpha_{text_index}"
+                alpha_label = f"editor_graphic_alpha_{text_index}"
+                combined_alpha_label = f"editor_graphic_combined_alpha_{text_index}"
+                filters.append(
+                    f"color=c=white:s=2x2:r={fps:.8f}:d={clip_duration:.8f},"
+                    f"setpts=PTS+{start:.8f}/TB,format=gray,"
+                    f"geq=lum='255*({alpha_expression})',"
+                    f"scale={width}:{height}{scale_filter}"
+                    f"[{mask_label}]"
+                )
+                filters.append(
+                    f"[{graphic_source}]split=2[{color_label}][{source_alpha_label}]"
+                )
+                filters.append(
+                    f"[{source_alpha_label}]format=yuva444p,alphaextract,format=gray"
+                    f"[{alpha_label}]"
+                )
+                filters.append(
+                    f"[{alpha_label}][{mask_label}]blend=all_mode=multiply:shortest=1"
+                    f"[{combined_alpha_label}]"
+                )
+                filters.append(
+                    f"[{color_label}][{combined_alpha_label}]alphamerge[{graphic_layer}]"
+                )
+            else:
+                graphic_layer = graphic_source
+            x_expression = _editor_item_animation_expression(
+                item, "x", x, time_variable="t", clip_start=start
+            )
+            y_expression = _editor_item_animation_expression(
+                item, "y", y, time_variable="t", clip_start=start
+            )
+            overlay_eval = (
+                ":eval=frame"
+                if keyframes.get("x") or keyframes.get("y") or animated_scale
+                else ""
+            )
+            output_label = f"editor_text_{text_index}"
+            filters.append(
+                f"[{base_label}][{graphic_layer}]overlay="
+                f"x='(main_w-overlay_w)/2+({x_expression})':"
+                f"y='(main_h-overlay_h)/2+({y_expression})'"
+                f"{':format=auto' if alpha_export else ''}{overlay_eval}:"
+                f"eof_action=pass:shortest=0:"
+                f"enable='between(t,{start:.8f},{end:.8f})'[{output_label}]"
+            )
+            base_label = output_label
+            continue
         text = _escape_drawtext(str(item.get("text") or "Text"))
         style = item.get("style") if isinstance(item.get("style"), Mapping) else {}
         font_size = int(_bounded_number(style.get("font_size"), 64, 8, 400))
