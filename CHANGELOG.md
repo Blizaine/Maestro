@@ -24,6 +24,9 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
   validation without relaxing genuine ordering or object requirements.
 - Retain H3 reference voice handoff diagnostics without claiming that prompting
   guarantees identity or voice matching.
+- Recover stale Agent Access registrations on Windows when complete OS process
+  enumeration proves the recorded PID is absent. Preserve conservative refusal
+  for live processes and incomplete or unavailable process checks.
 
 - Restore a recorded video's duration when loading MCP/API or older clip
   settings without Studio's duration-planning hint. Do not reinterpret a saved

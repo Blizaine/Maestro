@@ -25,6 +25,7 @@ from starlette.requests import Request as StarletteRequest
 from .assets import AssetStore, AssetStoreError
 from .context import principal_context
 from .jobs import JobRegistry, JournalError, SubmissionJournal
+from .state import windows_process_alive
 
 
 _PRIVATE_DIRECTOR_KEYS = frozenset({
@@ -63,37 +64,10 @@ def process_is_alive(pid: int) -> bool:
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         raise ValueError("A verified process ID is required")
     if os.name == "nt":
-        import ctypes
-        from ctypes import wintypes
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
-        ERROR_INVALID_PARAMETER = 87
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        open_process = kernel32.OpenProcess
-        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        open_process.restype = wintypes.HANDLE
-        handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            error = ctypes.get_last_error()
-            if error == ERROR_INVALID_PARAMETER:
-                return False
-            # Access denied and other failures do not prove that the process
-            # exited, so startup must conservatively refuse takeover.
-            return True
         try:
-            exit_code = wintypes.DWORD()
-            get_exit_code = kernel32.GetExitCodeProcess
-            get_exit_code.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-            get_exit_code.restype = wintypes.BOOL
-            if not get_exit_code(handle, ctypes.byref(exit_code)):
-                return True
-            return exit_code.value == STILL_ACTIVE
-        finally:
-            close_handle = kernel32.CloseHandle
-            close_handle.argtypes = [wintypes.HANDLE]
-            close_handle.restype = wintypes.BOOL
-            close_handle(handle)
+            return windows_process_alive(pid)
+        except Exception:
+            return True
     try:
         os.kill(pid, 0)
         return True

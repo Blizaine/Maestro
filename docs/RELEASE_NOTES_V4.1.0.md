@@ -11,7 +11,8 @@ Dev testing.
 - **Review and bounded polishing:** actual sampled images/audio, decode reports,
   concrete creative observations and durable selected-Director-take budgets.
 - **Generation reliability:** PDD BF16 head compatibility, more accurate
-  Director source-action validation and H3 reference handoff diagnostics.
+  Director source-action validation, H3 reference handoff diagnostics and
+  verified stale Agent Access PID recovery on Windows.
 - **Settings reuse and Pika experiments:** recover recorded MCP/API clip timing
   and offer experimental 4–12 step Pika H3 Flex sampling. Six remains recommended;
   extra steps do not guarantee better quality.

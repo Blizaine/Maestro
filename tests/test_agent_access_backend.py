@@ -22,7 +22,11 @@ from services.agent_access.backend import (  # noqa: E402
 from services.agent_access.boundary import AccessBoundary  # noqa: E402
 from services.agent_access.context import principal_context  # noqa: E402
 from services.agent_access.jobs import JournalError, SubmissionJournal  # noqa: E402
-from services.agent_access.state import RuntimeState  # noqa: E402
+from services.agent_access.state import (  # noqa: E402
+    RuntimeState,
+    _windows_liveness_from_probe,
+    _windows_pid_presence,
+)
 
 
 def _route_endpoint(router, path, method="GET"):
@@ -202,6 +206,75 @@ class AgentAccessBackendTests(unittest.TestCase):
                 pid_checker=lambda _pid: True,
             )
         self.assertEqual(journal.get_job("pending", "actor-a")["snapshot"]["status"], "running")
+
+    def test_windows_pid_presence_requires_complete_enumeration(self):
+        pid = 14148
+
+        def absent(_capacity):
+            return True, [10, 20], 8
+
+        def included(_capacity):
+            return True, [10, pid], 8
+
+        self.assertIs(_windows_pid_presence(pid, absent, initial_capacity=4, max_capacity=4), False)
+        self.assertIs(_windows_pid_presence(pid, included, initial_capacity=4, max_capacity=4), True)
+        capacities = []
+
+        def grows(capacity):
+            capacities.append(capacity)
+            if capacity == 2:
+                return True, [10, 20], 8
+            return True, [pid, 20], 8
+
+        self.assertIs(_windows_pid_presence(pid, grows, initial_capacity=2, max_capacity=4), True)
+        self.assertEqual(capacities, [2, 4])
+        self.assertIs(
+            _windows_pid_presence(
+                pid, lambda capacity: (True, [pid] * capacity, capacity * 4),
+                initial_capacity=2, max_capacity=4,
+            ),
+            None,
+        )
+        self.assertIs(_windows_pid_presence(pid, lambda _capacity: (False, [], 0)), None)
+        self.assertIs(_windows_pid_presence(pid, lambda _capacity: (True, [], 0)), None)
+        self.assertIs(_windows_pid_presence(pid, lambda _capacity: (True, [], 3)), None)
+
+        def failed(_capacity):
+            raise OSError("process enumeration unavailable")
+
+        self.assertIs(_windows_pid_presence(pid, failed), None)
+
+    def test_windows_liveness_uses_complete_absence_for_ambiguous_probes(self):
+        pid = 14148
+        absent = lambda _pid: False
+        included = lambda _pid: True
+        unknown = lambda _pid: None
+
+        # Access denied is ambiguous until the complete OS PID snapshot excludes it.
+        self.assertFalse(_windows_liveness_from_probe(pid, open_error=5, pid_presence=absent))
+        self.assertTrue(_windows_liveness_from_probe(pid, open_error=5, pid_presence=included))
+        self.assertTrue(_windows_liveness_from_probe(pid, open_error=5, pid_presence=unknown))
+        # EnumProcesses also overrides a stale STILL_ACTIVE result when the PID is absent.
+        self.assertFalse(
+            _windows_liveness_from_probe(
+                pid, exit_query_ok=True, exit_code=259, pid_presence=absent,
+            )
+        )
+        self.assertTrue(
+            _windows_liveness_from_probe(
+                pid, exit_query_ok=True, exit_code=259, pid_presence=unknown,
+            )
+        )
+        self.assertFalse(
+            _windows_liveness_from_probe(
+                pid, exit_query_ok=True, exit_code=None, pid_presence=absent,
+            )
+        )
+        self.assertTrue(
+            _windows_liveness_from_probe(
+                pid, exit_query_ok=True, exit_code=None, pid_presence=unknown,
+            )
+        )
 
     def test_request_private_director_markers_are_removed_recursively(self):
         cleaned = strip_private_director_fields({

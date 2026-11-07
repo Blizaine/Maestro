@@ -21,29 +21,127 @@ from urllib.parse import urlsplit
 from .auth import AuthStore
 
 
+def _windows_pid_presence(
+    pid: int,
+    enumerate_processes=None,
+    *,
+    initial_capacity: int = 4096,
+    max_capacity: int = 1_048_576,
+) -> bool | None:
+    """Return membership only from a complete EnumProcesses snapshot.
+
+    ``None`` means the OS call failed, returned malformed counts, or stayed
+    truncated at the safety limit. The optional callback keeps the buffer
+    growth contract testable without a Windows host.
+    """
+    if type(pid) is not int or pid <= 0:
+        return None
+    if initial_capacity < 1 or max_capacity < initial_capacity:
+        return None
+    if enumerate_processes is None:
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            enum_processes = psapi.EnumProcesses
+            enum_processes.argtypes = (
+                ctypes.POINTER(wintypes.DWORD), wintypes.DWORD,
+                ctypes.POINTER(wintypes.DWORD),
+            )
+            enum_processes.restype = wintypes.BOOL
+
+            def enumerate_processes(capacity):
+                buffer = (wintypes.DWORD * capacity)()
+                bytes_needed = wintypes.DWORD()
+                ok = enum_processes(buffer, ctypes.sizeof(buffer), ctypes.byref(bytes_needed))
+                return bool(ok), buffer, int(bytes_needed.value)
+        except Exception:
+            return None
+
+    capacity = initial_capacity
+    item_size = 4  # DWORD
+    while capacity <= max_capacity:
+        try:
+            ok, values, bytes_needed = enumerate_processes(capacity)
+        except Exception:
+            return None
+        if not ok or isinstance(bytes_needed, bool) or not isinstance(bytes_needed, int):
+            return None
+        if bytes_needed <= 0 or bytes_needed % item_size:
+            return None
+        buffer_size = capacity * item_size
+        if bytes_needed < buffer_size:
+            count = bytes_needed // item_size
+            try:
+                if len(values) < count:
+                    return None
+                return pid in values[:count]
+            except (TypeError, IndexError):
+                return None
+        capacity *= 2
+    return None
+
+
+def _windows_liveness_from_probe(
+    pid: int,
+    *,
+    pid_presence,
+    open_error: int | None = None,
+    exit_query_ok: bool = False,
+    exit_code: int | None = None,
+) -> bool:
+    """Resolve ambiguous Win32 probes using complete PID enumeration."""
+    if open_error == 87:  # ERROR_INVALID_PARAMETER: no such PID.
+        return False
+    if open_error is None and exit_query_ok and type(exit_code) is int and exit_code != 259:  # STILL_ACTIVE
+        return False
+    # A complete exclusion proves absence even if OpenProcess was denied or
+    # GetExitCodeProcess returned STILL_ACTIVE. All other outcomes fail closed.
+    return pid_presence(pid) is not False
+
+
+def windows_process_alive(pid: int) -> bool:
+    """Windows liveness probe with a complete PID-list fallback for ambiguity."""
+    if type(pid) is not int or pid <= 0:
+        raise ValueError("A verified process ID is required")
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return _windows_liveness_from_probe(
+            pid, open_error=ctypes.get_last_error(), pid_presence=_windows_pid_presence,
+        )
+    try:
+        exit_code = wintypes.DWORD()
+        query_ok = bool(kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code)))
+        return _windows_liveness_from_probe(
+            pid,
+            exit_query_ok=query_ok,
+            exit_code=int(exit_code.value) if query_ok else None,
+            pid_presence=_windows_pid_presence,
+        )
+    finally:
+        kernel.CloseHandle(handle)
+
+
 def process_alive(pid: int) -> bool:
     """Read-only PID probe. Unknown/access-denied is treated as still alive."""
     if type(pid) is not int or pid <= 0:
         return False
     if os.name == "nt":
-        import ctypes
-        from ctypes import wintypes
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-        kernel.OpenProcess.restype = wintypes.HANDLE
-        kernel.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
-        kernel.GetExitCodeProcess.restype = wintypes.BOOL
-        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
-        handle = kernel.OpenProcess(0x1000, False, pid)
-        if not handle:
-            return ctypes.get_last_error() != 87  # ERROR_INVALID_PARAMETER: no PID
         try:
-            exit_code = wintypes.DWORD()
-            if not kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                return True
-            return exit_code.value == 259  # STILL_ACTIVE
-        finally:
-            kernel.CloseHandle(handle)
+            return windows_process_alive(pid)
+        except Exception:
+            return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

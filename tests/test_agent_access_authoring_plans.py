@@ -330,7 +330,14 @@ class StudioAuthoringPlanTests(unittest.TestCase):
         )
         self.assertEqual(context["timeline"]["kind"], "h3_hard_cut_sequence")
         prompts = [f"Independent cut {i}." for i in range(context["timeline"]["window_count"])]
-        result = prepare_authored_generation(context, _window_plan(context, prompts))
+        # This fixture covers CPU-side native sequence packing. Ref2VA
+        # conditioning diagnostics are exercised by their separate tests and
+        # import the model environment, which is intentionally absent here.
+        with patch(
+            "services.agent_access.authoring_plans._h3_reference_handoff_metadata",
+            return_value=None,
+        ):
+            result = prepare_authored_generation(context, _window_plan(context, prompts))
         native = result["native_params"]
         self.assertEqual(native["minimax_h3_sequence_prompt_mode"], "manual")
         self.assertFalse(native["minimax_h3_sequence_continuity"])
