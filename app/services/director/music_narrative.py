@@ -394,6 +394,64 @@ _ACTION_CLAUSE_BREAK_RE = re.compile(
     r"[,;.!?]|\b(?:and\s+then|then|and|but|while|as|after|before|when|because)\b",
     re.I,
 )
+_SOURCE_COPULA_RE = re.compile(r"\b(?:am|is|are|was|were)\b", re.I)
+_SOURCE_SUBJECT_COORDINATION_RE = re.compile(
+    r"[,;]|\b(?:and|or|nor|both|either|neither|as\s+well\s+as)\b",
+    re.I,
+)
+_SOURCE_CLAUSE_CONNECTOR_RE = re.compile(
+    r"\b(?:and\s+then|then|and|or|but|while|as|after|before|when)\b",
+    re.I,
+)
+_SOURCE_DIRECTIVE_RE = re.compile(
+    r"^\s*(?:(?:also|please)\s+)?(?:show|include|depict|feature|capture|"
+    r"follow|frame|focus(?:\s+on)?|illustrate|portray)\b",
+    re.I,
+)
+_SOURCE_PRONOUN_PREFIX_RE = re.compile(
+    r"^\s*(?:(?:and\s+then|then|as|while|when|after|before)\s+)?"
+    r"(?:it|he|she|they|them)\b",
+    re.I,
+)
+_SOURCE_RELATIONSHIP_ENTITY_RE = re.compile(
+    r"\b(?:with|without|for|against|beside|near|at|about|of|from|to|next\s+to|alongside|"
+    r"between|in\s+front\s+of|behind|across\s+from)\s+"
+    r"(?:(?:a|an|the|this|that)\s+)?"
+    r"[a-z][\w’'-]*\b",
+    re.I,
+)
+_SOURCE_POSSIBLE_CHARACTER_HEADS = {
+    "adult", "artist", "bandmate", "boy", "child", "character", "creature",
+    "dancer", "drummer", "father", "friend", "girl", "guitarist", "hero",
+    "king", "knight", "lady", "man", "musician", "person", "performer",
+    "prince", "princess", "queen", "sailor", "singer", "soldier", "stranger",
+    "vocalist", "warrior", "witch", "wizard", "woman",
+}
+_PRONOUN_WITH_AUX_RE = re.compile(
+    r"\b(?:(?:as|while|when|after|before|and\s+then|then)\s+)?"
+    r"(?P<pronoun>it|he|she|they|them)"
+    r"(?:\s+(?:am|is|are|was|were|be|being|been|has|have|had|do|does|did|"
+    r"will|can|could|may|might|must|shall|should|would|not))*\s*$",
+    re.I,
+)
+_DROP_SOURCE_RELATION_RE = re.compile(r"\b(?P<relation>from|out\s+of)\b", re.I)
+_DROP_ORIGIN_CONTINUATION_RE = re.compile(
+    r"\b(?:with|of|in|on|to|at|under|behind|next\s+to|beside|near|"
+    r"across\s+from|around|over|by)\b",
+    re.I,
+)
+_DROP_REPORTING_FRAME_RE = re.compile(
+    r"\b(?:caption|text|sign|screen|lyrics?|script|description|storyboard|"
+    r"message|note)\b[^.!?;]{0,72}\b(?:mentions?|describes?|references?|"
+    r"quotes?|reads?|says?)\b",
+    re.I,
+)
+_DROP_FUTURE_RE = re.compile(
+    r"\b(?:about\s+to|ready\s+to|preparing\s+to|plans?\s+to|"
+    r"intends?\s+to|expects?\s+to|sets?\s+to|will|might|may|could|"
+    r"would|is\s+going\s+to|are\s+going\s+to)\s*$",
+    re.I,
+)
 _ACTION_RELATION_RE = re.compile(
     r"\b(away\s+from|in\s+front\s+of|next\s+to|up\s+to|out\s+of|"
     r"towards?|across|along|around|behind|beneath|beside|between|beyond|"
@@ -923,14 +981,145 @@ def _select_entity(candidates: list[tuple[int, int, list[str]]]) -> list[str]:
     return list(usable[-1][2]) if usable else []
 
 
+def _entity_candidate_groups(
+    value: str,
+) -> list[list[tuple[int, int, list[str]]]]:
+    """Group overlapping article-led and proper-name views of one entity."""
+
+    groups: list[list[tuple[int, int, list[str]]]] = []
+    for candidate in _entity_candidates(value):
+        overlapping = [
+            index for index, group in enumerate(groups)
+            if any(candidate[0] < item[1] and candidate[1] > item[0] for item in group)
+        ]
+        if not overlapping:
+            groups.append([candidate])
+            continue
+        first = overlapping[0]
+        groups[first].append(candidate)
+        for index in reversed(overlapping[1:]):
+            groups[first].extend(groups.pop(index))
+    return groups
+
+
+def _single_source_subject_aliases(value: str) -> list[str]:
+    """Return a simple, sentence-initial subject only when it is unambiguous."""
+
+    leading = len(value) - len(value.lstrip())
+    if _SOURCE_SUBJECT_COORDINATION_RE.search(value):
+        return []
+    groups = _entity_candidate_groups(value)
+    if len(groups) != 1 or min(item[0] for item in groups[0]) != leading:
+        return []
+    widest = max(groups[0], key=lambda item: item[1] - item[0])
+    return list(widest[2])
+
+
+def _preceding_sentence_actor_aliases(
+    original_sentence: str,
+    visible_sentence: str,
+) -> list[str]:
+    """Infer an actor from one immediately prior, simple source sentence.
+
+    This is intentionally narrower than general coreference: quotes,
+    directives, coordinated clauses, multi-entity action sentences, and
+    pronoun-only sentences do not carry an actor forward.
+    """
+
+    if (
+        not visible_sentence.strip()
+        or _mask_quoted_text(original_sentence) != original_sentence
+        or _SOURCE_DIRECTIVE_RE.match(visible_sentence)
+        or _SOURCE_PRONOUN_PREFIX_RE.match(visible_sentence)
+    ):
+        return []
+
+    # A coordinated following subject can make even an otherwise simple
+    # sentence ambiguous (for example, "The wizard opens a door, then the fox
+    # enters"). Keep the carry rule conservative around those clause joins.
+    for connector in _SOURCE_CLAUSE_CONNECTOR_RE.finditer(visible_sentence):
+        following = visible_sentence[connector.end():]
+        if re.match(
+            r"\s*(?:(?:a|an|the|this|that|these|those|he|she|it|they|them)\b|"
+            r"[A-Z][\w’'-]*\b)",
+            following,
+            re.I,
+        ):
+            return []
+
+    actions = [
+        match for match in _action_matches(visible_sentence)
+        if not _is_static_modifier_match(
+            visible_sentence, match[0], match[1], match[3],
+        )
+        and not _is_nominal_action_reference(
+            visible_sentence, match[0], match[1], match[3],
+        )
+        and not _is_formatting_action(visible_sentence, match[0], match[1])
+        and not _is_structural_heading_action(
+            visible_sentence, match[0], match[1], match[3],
+        )
+    ]
+
+    copulas = list(_SOURCE_COPULA_RE.finditer(visible_sentence))
+    if copulas:
+        copula = copulas[0]
+        action_after_copula = next(
+            (action for action in actions if action[0] > copula.end()), None,
+        )
+        auxiliary_progressive = bool(
+            action_after_copula
+            and re.fullmatch(r"\s*", visible_sentence[copula.end():action_after_copula[0]])
+        )
+        if not auxiliary_progressive:
+            if len(copulas) != 1:
+                return []
+            subject = visible_sentence[:copula.start()]
+            aliases = _single_source_subject_aliases(subject)
+            if not aliases:
+                return []
+            predicate = visible_sentence[copula.end():]
+            # An unrecognized progressive verb is not a simple identity
+            # predicate; its object may be another character ("is guiding Mira").
+            if re.match(r"\s*(?:not\s+)?[a-z]+ing\b", predicate, re.I):
+                return []
+            predicate_mentions_character = any(
+                set(_WORD_RE.findall(" ".join(candidate[2]))) & _SOURCE_POSSIBLE_CHARACTER_HEADS
+                for group in _entity_candidate_groups(predicate)
+                for candidate in group
+            )
+            if (
+                _SOURCE_RELATIONSHIP_ENTITY_RE.search(predicate)
+                or predicate_mentions_character
+            ):
+                return []
+            return aliases
+
+    # Only carry an actor from an action sentence if there is one simple action
+    # and no other entity candidate anywhere in that sentence. This avoids
+    # binding a later pronoun to the grammatical subject when an object could
+    # itself be a character ("The wizard hands the dancer a lantern").
+    if len(actions) != 1 or actions[0][2] == "combat":
+        return []
+    if len(_entity_candidate_groups(visible_sentence)) != 1:
+        return []
+    return _single_source_subject_aliases(visible_sentence[:actions[0][0]])
+
+
 def _actor_aliases(
     sentence: str,
     action_start: int,
     prior_actor: list[str],
     action_number: int,
+    prior_sentence_actor: list[str] | None = None,
 ) -> list[str]:
     prefix = sentence[:action_start]
-    pronoun = re.search(r"\b(?:as|while|when|after|before|and\s+then|then)?\s*(it|he|she|they|them)\s*$", prefix, re.I)
+    pronoun = re.search(
+        r"\b(?:as|while|when|after|before|and\s+then|then)?\s*"
+        r"(it|he|she|they|them)\s*$",
+        prefix,
+        re.I,
+    ) or _PRONOUN_WITH_AUX_RE.search(prefix)
     if pronoun:
         antecedents = _entity_candidates(prefix[:pronoun.start()])
         if antecedents:
@@ -940,6 +1129,14 @@ def _actor_aliases(
                     aliases.extend(candidate[2])
                 return _dedupe(aliases)
             return _select_entity(antecedents)
+        prefix_before_pronoun = prefix[:pronoun.start()]
+        if prior_sentence_actor and re.fullmatch(
+            r"\s*(?:(?:and\s+then|then|as|while|when|after|before)\s+)?",
+            prefix_before_pronoun,
+            re.I,
+        ):
+            return list(prior_sentence_actor)
+        return []
 
     if action_number == 0:
         directive = _DIRECTORIAL_SENTENCE_PREFIX_RE.match(sentence)
@@ -1265,6 +1462,7 @@ def build_music_narrative_contract(
         _music_participant_context(original),
     ))
     events: list[dict[str, Any]] = []
+    prior_sentence_actor: list[str] = []
     for sentence_start, sentence_end in _sentence_ranges(extraction_source):
         sentence = extraction_source[sentence_start:sentence_end]
         visible_sentence = visible_source[sentence_start:sentence_end]
@@ -1317,6 +1515,7 @@ def build_music_narrative_contract(
             else:
                 actor_aliases = _actor_aliases(
                     visible_sentence, action_start, prior_actor, action_number,
+                    prior_sentence_actor,
                 )
             prior_actor = actor_aliases or prior_actor
             tail = sentence[action_end:]
@@ -1367,6 +1566,9 @@ def build_music_narrative_contract(
             if target_aliases:
                 event["target_aliases"] = _dedupe(target_aliases)
             events.append(event)
+        prior_sentence_actor = _preceding_sentence_actor_aliases(
+            sentence, visible_sentence,
+        )
 
     return {"revision": _REVISION, "source": original, "events": events}
 
@@ -2005,6 +2207,50 @@ def _semantic_action_clause_tail(tail: str) -> str:
     return tail
 
 
+def _drop_source_location_context(source_text: str) -> dict[str, Any] | None:
+    """Return direct-object and origin anchors for drop-from source clauses."""
+
+    source_match = re.match(r"drop(?:s|ped|ping)?\b", source_text)
+    if source_match is None:
+        return None
+    tail = source_text[source_match.end():]
+    relation = _DROP_SOURCE_RELATION_RE.search(tail)
+    if relation is None:
+        return None
+
+    direct_object = tail[:relation.start()].strip()
+    origin_text = _semantic_action_clause_tail(tail[relation.end():]).strip()
+    next_relation = _DROP_ORIGIN_CONTINUATION_RE.search(origin_text)
+    if next_relation is not None:
+        origin_text = origin_text[:next_relation.start()].strip()
+    object_aliases = _target_aliases(direct_object)
+    origin_candidates = _entity_candidates(origin_text)
+    origin_aliases = (
+        list(origin_candidates[0][2])
+        if origin_candidates else _target_aliases(origin_text)
+    )
+    if not object_aliases or not origin_aliases:
+        return None
+    return {
+        "object_text": direct_object,
+        "object_aliases": object_aliases,
+        "origin_text": origin_text,
+        "origin_aliases": origin_aliases,
+        "relation": _normal_text(relation.group("relation")),
+    }
+
+
+def _drop_action_is_nonperformed(sentence: str, action_start: int) -> bool:
+    """Exclude quoted/reported and explicitly future drop mentions."""
+
+    clause_prefix = _last_clause_prefix(sentence, action_start)
+    return bool(
+        _ACTION_REFERENCE_VERB_PREFIX_RE.search(clause_prefix)
+        or _DROP_REPORTING_FRAME_RE.search(clause_prefix)
+        or _DROP_FUTURE_RE.search(clause_prefix)
+    )
+
+
 def _traversal_clause_tail(tail: str) -> str:
     """Keep comma-separated place modifiers while dropping later clauses."""
 
@@ -2092,7 +2338,11 @@ def _generic_semantic_action_positions(prompt: str, event: dict[str, Any]) -> li
     source_match = source_pattern.match(source_text)
     if source_match is None:
         return []
-    anchors = _target_aliases(source_text[source_match.end():])
+    drop_context = _drop_source_location_context(source_text)
+    anchors = (
+        list(drop_context["origin_aliases"])
+        if drop_context else _target_aliases(source_text[source_match.end():])
+    )
 
     analysis_prompt = _mask_quoted_text(prompt)
     ranges = _sentence_ranges(analysis_prompt)
@@ -2103,6 +2353,8 @@ def _generic_semantic_action_positions(prompt: str, event: dict[str, Any]) -> li
         for match in source_pattern.finditer(sentence):
             if _is_negated_before(sentence, match.start()):
                 continue
+            if drop_context and _drop_action_is_nonperformed(sentence, match.start()):
+                continue
             if not _generic_semantic_actor_matches(
                 sentences, sentence_index, sentence, match.start(), actor_aliases,
             ):
@@ -2112,7 +2364,29 @@ def _generic_semantic_action_positions(prompt: str, event: dict[str, Any]) -> li
             source_relation = _relation_before_action_anchor(
                 source_text[source_match.end():], anchors,
             )
-            if anchors:
+            if drop_context:
+                prompt_drop_context = _drop_source_location_context(
+                    f"{match.group(0)} {action_tail}",
+                )
+                if prompt_drop_context is None:
+                    continue
+                prompt_relation = prompt_drop_context["relation"]
+                relation_matches = prompt_relation == drop_context["relation"] or {
+                    prompt_relation, drop_context["relation"],
+                } == {"from", "out of"}
+                if (
+                    not _contains_alias(
+                        prompt_drop_context["object_text"],
+                        drop_context["object_aliases"],
+                    )
+                    or not _contains_alias(
+                        prompt_drop_context["origin_text"],
+                        drop_context["origin_aliases"],
+                    )
+                    or not relation_matches
+                ):
+                    continue
+            elif anchors:
                 if _contains_alias(action_tail, anchors):
                     if source_relation and _relation_before_action_anchor(
                         action_tail, anchors,
@@ -2249,6 +2523,11 @@ def _combat_coverage_positions(prompt: str, event: dict[str, Any]) -> list[int]:
 def _event_coverage_positions(prompt: str, event: dict[str, Any]) -> list[int]:
     if str(event.get("kind") or "").casefold() == "combat":
         return _combat_coverage_positions(prompt, event)
+    if _drop_source_location_context(_normal_text(event.get("text"))) is not None:
+        # Keep from/out-of paraphrase handling on the actor/object-checked
+        # generic path; the literal fast path would otherwise admit reported
+        # or actor-free copies of the source wording.
+        return _generic_semantic_action_positions(prompt, event)
     literal_positions = _action_positions(prompt, event)
     semantic_positions = _semantic_action_positions(prompt, event)
     generic_semantic_positions = _generic_semantic_action_positions(prompt, event)

@@ -549,6 +549,137 @@ class MusicNarrativeTests(unittest.TestCase):
         )
         self.assertIsNotNone(issue)
 
+    def test_drop_inflections_keep_actor_object_and_origin_with_from_out_of_equivalence(self):
+        source = (
+            "The wizard is the star. He is dropping magical music notes "
+            "from his Badbag."
+        )
+        contract = contract_for(source)
+        event = contract["events"][0]
+        allocation = [{"event_id": "M1", "clip_index": 0}]
+
+        self.assertEqual(event["text"], "dropping magical music notes from his Badbag")
+        self.assertIn("wizard", event["actor_aliases"])
+        for prompt in (
+            "The wizard is dropping magical music notes from his Badbag.",
+            "The wizard drops magical music notes from his Badbag.",
+            "The wizard dropped magical music notes out of his Badbag.",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertIsNone(music_narrative_row_issue(
+                    {"source_event_ids": ["M1"], "video_prompt": prompt},
+                    contract=contract, allocation=allocation, index=0,
+                ))
+
+        rejected_prompts = (
+            "The dancer drops magical music notes out of his Badbag.",
+            "The wizard drops golden coins out of his Badbag.",
+            "The wizard drops magical music notes out of his satchel.",
+            "The wizard drops pebbles out of his Badbag decorated with magical music notes.",
+            "The wizard drops magical music notes out of his satchel decorated with a picture of Badbag.",
+            "The wizard drops magical music notes into his Badbag.",
+            "The wizard drops magical music notes onto his Badbag.",
+            "The wizard does not drop magical music notes out of his Badbag.",
+            "The caption mentions the wizard dropping magical music notes from his Badbag.",
+            'A sign reads, "The wizard drops magical music notes out of his Badbag."',
+            "The wizard plans to drop magical music notes out of his Badbag.",
+        )
+        for prompt in rejected_prompts:
+            with self.subTest(prompt=prompt):
+                self.assertIsNotNone(music_narrative_row_issue(
+                    {"source_event_ids": ["M1"], "video_prompt": prompt},
+                    contract=contract, allocation=allocation, index=0,
+                ))
+
+        reverse_source = contract_for(
+            "The wizard is the star. He is dropping magical music notes "
+            "out of his Badbag."
+        )
+        self.assertIsNone(music_narrative_row_issue(
+            {
+                "source_event_ids": ["M1"],
+                "video_prompt": "The wizard drops magical music notes from his Badbag.",
+            },
+            contract=reverse_source,
+            allocation=allocation,
+            index=0,
+        ))
+        for prompt in (
+            "The wizard drops magical music notes into his Badbag.",
+            "The wizard drops magical music notes onto his Badbag.",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertIsNotNone(music_narrative_row_issue(
+                    {"source_event_ids": ["M1"], "video_prompt": prompt},
+                    contract=reverse_source, allocation=allocation, index=0,
+                ))
+
+    def test_drop_pronoun_antecedent_is_immediate_and_conservative(self):
+        ambiguous_sources = (
+            "The wizard hands the dancer a lantern. He is dropping magical music notes from his Badbag.",
+            "The wizard and the dancer are stars. He is dropping magical music notes from his Badbag.",
+            "The wizard is staring at the dancer. He is dropping magical music notes from his Badbag.",
+            "The wizard is talking about the dancer. He is dropping magical music notes from his Badbag.",
+            "The wizard is guiding Mira. He is dropping magical music notes from his Badbag.",
+            "The wizard is a guide for Mira. He is dropping magical music notes from his Badbag.",
+            "The wizard is the dancer's friend. He is dropping magical music notes from his Badbag.",
+            'The line says "The wizard is the star." He is dropping magical music notes from his Badbag.',
+            "Show the wizard on stage. He is dropping magical music notes from his Badbag.",
+            "He is dropping magical music notes from his Badbag.",
+        )
+        for source in ambiguous_sources:
+            with self.subTest(source=source):
+                event = contract_for(source)["events"][-1]
+                self.assertNotIn("actor_aliases", event)
+
+        switched_subject = contract_for(
+            "The wizard is the star. The dancer is the rival. "
+            "He is dropping magical music notes from his Badbag."
+        )["events"][0]
+        self.assertIn("dancer", switched_subject["actor_aliases"])
+        self.assertNotIn("wizard", switched_subject["actor_aliases"])
+
+        local_subject = contract_for(
+            "The wizard is the star. He watches the dancer dropping magical music notes from his Badbag."
+        )["events"][0]
+        self.assertIn("dancer", local_subject["actor_aliases"])
+        self.assertNotIn("wizard", local_subject["actor_aliases"])
+
+        explicit_local_subject = contract_for(
+            "The wizard is the star. The dancer drops magical music notes from her Badbag."
+        )["events"][0]
+        self.assertIn("dancer", explicit_local_subject["actor_aliases"])
+
+        local_pronoun_precedence = contract_for(
+            "The wizard is the star. The dancer enters, then he drops magical music notes from his Badbag."
+        )["events"][-1]
+        self.assertIn("dancer", local_pronoun_precedence["actor_aliases"])
+        self.assertNotIn("wizard", local_pronoun_precedence["actor_aliases"])
+
+    def test_drop_equivalence_does_not_cover_a_future_source_event(self):
+        contract = contract_for(
+            "The wizard is the star. He is dropping magical music notes from his Badbag. "
+            "The wizard opens the door."
+        )
+        allocation = [
+            {"event_id": "M1", "clip_index": 0},
+            {"event_id": "M2", "clip_index": 2},
+        ]
+        issue = music_narrative_row_issue(
+            {
+                "source_event_ids": ["M1"],
+                "video_prompt": (
+                    "The wizard drops magical music notes out of his Badbag, "
+                    "then opens the door."
+                ),
+            },
+            contract=contract,
+            allocation=allocation,
+            index=0,
+        )
+        self.assertIsNotNone(issue)
+        self.assertIn("future music narrative event M2", issue)
+
     def test_nonfantasy_boarding_and_sailing_are_narrative_actions(self):
         contract = contract_for("A passenger boards a boat, then sails across the bay.")
         self.assertEqual([event["kind"] for event in contract["events"]], ["boarding", "action"])

@@ -334,7 +334,7 @@ def _fixed_pdd_plans(
 
 
 def _validate_pdd_head_header(handle, transformer: nn.Module) -> None:
-    """Check PDD head bank shapes and fp32 dtypes before reading payloads."""
+    """Check PDD head bank shapes and FP32/BF16 dtypes before reading payloads."""
 
     final_layer = getattr(transformer, "final_layer", None)
     if final_layer is None:
@@ -360,9 +360,9 @@ def _validate_pdd_head_header(handle, transformer: nn.Module) -> None:
                 f"{expected_shape}, got {shape}."
             )
         dtype = tensor_slice.get_dtype()
-        if dtype != "F32":
+        if dtype not in {"F32", "BF16"}:
             raise ValueError(
-                f"MiniMax H3 PDD head '{key}' must be FP32, got {dtype}."
+                f"MiniMax H3 PDD head '{key}' must be FP32 or BF16, got {dtype}."
             )
 
 
@@ -526,10 +526,10 @@ def install_pdd_parallel_heads(
         # controller keeps these small banks for scheduler-aware re-fusion;
         # owning the storage lets Windows release/update the checkpoint as
         # soon as this context exits.
-        video_weights = handle.get_tensor("proj_out.weight").clone()
-        video_biases = handle.get_tensor("proj_out.bias").clone()
-        audio_weights = handle.get_tensor("audio_proj_out.weight").clone()
-        audio_biases = handle.get_tensor("audio_proj_out.bias").clone()
+        video_weights = handle.get_tensor("proj_out.weight").clone().float()
+        video_biases = handle.get_tensor("proj_out.bias").clone().float()
+        audio_weights = handle.get_tensor("audio_proj_out.weight").clone().float()
+        audio_biases = handle.get_tensor("audio_proj_out.bias").clone().float()
 
     return _install_pdd_interval_heads(
         transformer,

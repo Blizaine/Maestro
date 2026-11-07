@@ -237,9 +237,152 @@ class TestH3PTDRefAsymOPD(unittest.TestCase):
         wrong_dtype["proj_out.weight"] = torch.zeros((32, 2, 3), dtype=torch.float16)
         dtype_handle = _Handle(wrong_dtype)
         with mock.patch("safetensors.safe_open", return_value=dtype_handle):
-            with self.assertRaisesRegex(ValueError, "must be FP32"):
+            with self.assertRaisesRegex(ValueError, "must be FP32 or BF16"):
                 pdd.install_pdd_parallel_heads(fresh_transformer, "wrong-dtype.safetensors")
         self.assertEqual(dtype_handle.reads, [])
+
+    def test_real_bf16_pdd_heads_are_owned_fp32_and_survive_scheduler_refusion(self):
+        import tempfile
+        from safetensors import safe_open
+        from safetensors.torch import save_file
+        from models.minimax_h3 import pdd
+
+        def _bf16_values(shape, offset):
+            count = 1
+            for dimension in shape:
+                count *= dimension
+            return (
+                torch.arange(count, dtype=torch.float32)
+                .reshape(shape)
+                .div(16)
+                .add(offset)
+                .to(torch.bfloat16)
+            )
+
+        source_tensors = {
+            "proj_out.weight": _bf16_values((32, 2, 3), -2),
+            "proj_out.bias": _bf16_values((32, 2), -1),
+            "audio_proj_out.weight": _bf16_values((32, 1, 3), -3),
+            "audio_proj_out.bias": _bf16_values((32, 1), -0.5),
+        }
+        loaded_sources = {}
+
+        class _RecordingHandle:
+            def __init__(self, handle):
+                self.handle = handle
+                self.open_handle = None
+
+            def __enter__(self):
+                self.open_handle = self.handle.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.handle.__exit__(*args)
+
+            def __getattr__(self, name):
+                return getattr(self.open_handle or self.handle, name)
+
+            def get_tensor(self, key):
+                # Preserve the real file values in an owned source tensor so
+                # the checkpoint mapping can close before the mutation check.
+                tensor = self.open_handle.get_tensor(key).clone()
+                loaded_sources[key] = tensor
+                return tensor
+
+        transformer = types.SimpleNamespace(
+            final_layer=types.SimpleNamespace(
+                video_out=torch.nn.Linear(3, 2),
+                audio_out=torch.nn.Linear(3, 1),
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "real-bf16-pdd.safetensors"
+            save_file(source_tensors, str(path))
+            with safe_open(str(path), framework="pt", device="cpu") as handle:
+                for key in source_tensors:
+                    self.assertEqual(handle.get_slice(key).get_dtype(), "BF16")
+
+            def _recording_open(*args, **kwargs):
+                return _RecordingHandle(safe_open(*args, **kwargs))
+
+            with mock.patch("safetensors.safe_open", side_effect=_recording_open):
+                controller = pdd.install_pdd_parallel_heads(transformer, str(path))
+        self.assertFalse(path.exists())
+
+        banks = {
+            "proj_out.weight": controller.video_interval_weights,
+            "proj_out.bias": controller.video_interval_biases,
+            "audio_proj_out.weight": controller.audio_interval_weights,
+            "audio_proj_out.bias": controller.audio_interval_biases,
+        }
+        expected_banks = {
+            key: source.float().clone()
+            for key, source in loaded_sources.items()
+        }
+        self.assertEqual(set(loaded_sources), set(source_tensors))
+        for key, bank in banks.items():
+            with self.subTest(key=key):
+                self.assertEqual(loaded_sources[key].dtype, torch.bfloat16)
+                self.assertEqual(bank.dtype, torch.float32)
+                self.assertEqual(bank.device.type, "cpu")
+                self.assertTrue(torch.equal(bank, expected_banks[key]))
+                self.assertNotEqual(bank.data_ptr(), loaded_sources[key].data_ptr())
+
+        # The handle has closed. Mutating each tensor returned by safe_open must
+        # not change the FP32 banks retained for later scheduler re-fusion.
+        for source in loaded_sources.values():
+            source.zero_()
+        for key, bank in banks.items():
+            self.assertTrue(torch.equal(bank, expected_banks[key]))
+
+        video_sigmas = pdd.shifted_sigma(
+            12.0,
+            torch.linspace(1.0, 0.0, 9, dtype=torch.float64),
+        )
+        audio_sigmas = pdd.shifted_sigma(
+            3.0,
+            torch.linspace(1.0, 0.0, 9, dtype=torch.float64),
+        )
+        controller.configure_sigmas(video_sigmas, audio_sigmas)
+        controller.set_step(3)
+        sample = torch.ones((1, 3), dtype=torch.float32)
+        for head in (transformer.final_layer.video_out, transformer.final_layer.audio_out):
+            self.assertEqual(head(sample).dtype, torch.float32)
+
+        for shift, sigmas, weight_key, bias_key, output in (
+            (
+                12.0,
+                video_sigmas,
+                "proj_out.weight",
+                "proj_out.bias",
+                transformer.final_layer.video_out(sample),
+            ),
+            (
+                3.0,
+                audio_sigmas,
+                "audio_proj_out.weight",
+                "audio_proj_out.bias",
+                transformer.final_layer.audio_out(sample),
+            ),
+        ):
+            plan = pdd.pdd_sampling_plans_for_sigmas(sigmas, shift)[3]
+            expected_weight = torch.zeros_like(expected_banks[weight_key][0])
+            expected_bias = torch.zeros_like(expected_banks[bias_key][0])
+            for interval in torch.nonzero(plan > 0, as_tuple=False).flatten().tolist():
+                expected_weight.add_(
+                    expected_banks[weight_key][interval],
+                    alpha=float(plan[interval]),
+                )
+                expected_bias.add_(
+                    expected_banks[bias_key][interval],
+                    alpha=float(plan[interval]),
+                )
+            self.assertTrue(
+                torch.allclose(
+                    output,
+                    torch.nn.functional.linear(sample, expected_weight, expected_bias),
+                )
+            )
 
     def test_pdd_output_heads_follow_hops_and_restore_base_heads(self):
         video_base = torch.nn.Linear(2, 1, bias=False)

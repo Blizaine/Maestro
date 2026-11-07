@@ -162,6 +162,59 @@ class MusicNarrativeIntegrationTests(unittest.TestCase):
         self.assertIn("must visibly perform assigned source event M1", missing_issue or "")
         self.assertEqual(missing["source_event_ids"], ["M1"])
 
+    def test_resumed_drop_plan_keeps_pronoun_actor_and_origin_paraphrase(self):
+        self.contract = build_music_narrative_contract(
+            "The wizard is the star. He is dropping magical music notes from his Badbag."
+        )
+        self.planner._music_narrative_contract = self.contract
+        self.planner._music_narrative_allocation = [
+            {"event_id": "M1", "clip_index": 0},
+        ]
+        validator = self._row_validator()
+        row = {
+            "video_prompt": "The wizard drops magical music notes out of his Badbag.",
+            "source_event_ids": ["M1"],
+        }
+        self.planner._planning_resume_checkpoint = {
+            "music_video_batches": {
+                "0": {"count": 1, "expected_count": 1, "rows": [copy.deepcopy(row)]},
+            },
+        }
+        with patch.object(
+            self.planner, "_call_llm_json", side_effect=AssertionError("Unexpected writer call"),
+        ) as writer, patch.object(
+            self.planner, "_music_video_row_issue", return_value=None,
+        ), patch.object(
+            self.planner, "_emit_planning_progress",
+        ):
+            result = self.planner._run_checkpointed_json_batches(
+                items=self.clips[:1], batch_size=1,
+                checkpoint_key="music_video_batches", stage="music_video_batch",
+                progress_label="music-video",
+                call_batch=lambda *_: self.planner._call_llm_json(),
+                repair_batch=lambda *_: self.planner._call_llm_json(),
+                row_validator=validator,
+            )
+        self.assertEqual(result, [row])
+        self.assertIn("wizard", self.contract["events"][0]["actor_aliases"])
+        writer.assert_not_called()
+
+    def test_drop_origin_paraphrase_still_cannot_perform_a_future_event(self):
+        self.contract = build_music_narrative_contract(
+            "The wizard is dropping magical music notes from his Badbag."
+        )
+        self.planner._music_narrative_contract = self.contract
+        self.planner._music_narrative_allocation = [
+            {"event_id": "M1", "clip_index": 1},
+        ]
+        row = {
+            "video_prompt": "The wizard drops magical music notes out of his Badbag.",
+            "source_event_ids": [],
+        }
+        with patch.object(self.planner, "_music_video_row_issue", return_value=None):
+            issue = self._row_validator()(0, row, [])
+        self.assertIn("performs future music narrative event M1", issue or "")
+
     def test_narrative_repair_drops_rejected_outline_hint_from_full_writer_context(self):
         arc = [{
             "clip_index": i, "visual_beat": f"Distinct performance detail {i}",
