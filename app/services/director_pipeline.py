@@ -12,6 +12,7 @@ Controlled by feature flags in params or server config.
 
 import os
 import copy
+import hashlib
 import re
 import time
 import json
@@ -82,6 +83,17 @@ _pipeline_deleting: set[str] = set()
 _pipeline_repairs: dict[str, dict] = {}
 _REPAIR_ACTIVE_STATUSES = {"queued", "running", "cancelling"}
 _GENERATION_SETTLE_GRACE_S = 10.0
+_DIRECTOR_TITLE_CARD_FIELDS = frozenset({
+    "text", "subtitle", "role", "style", "background_color", "text_color",
+    "duration_seconds",
+})
+_DIRECTOR_TITLE_CARD_MAX = 12
+_DIRECTOR_TITLE_CARD_AUDIO_LOCK_MESSAGE = (
+    "Intertitles cannot be inserted into music, source-audio, or Seamless "
+    "timelines because they change the analyzed audio-to-picture timing. "
+    "Use the Editor's reserved-timeline workflow to place an intertitle "
+    "without shifting the soundtrack."
+)
 
 # Director's render queue is deliberately separate from the low-level WanGP
 # generation queue.  One entry represents a complete, immutable Director
@@ -233,6 +245,746 @@ def _director_requests_vocal_performance(params: dict) -> bool:
             str(params.get("scene_description") or "")
         )
     )
+
+
+def normalize_director_title_cards(
+    values,
+    *,
+    clip_count: Optional[int] = None,
+    advisory: bool = False,
+    pipeline_type: Optional[str] = None,
+    has_source_audio: Optional[bool] = None,
+    seamless: Optional[bool] = None,
+) -> list[dict]:
+    """Normalize detached Director cards while preserving their exact copy.
+
+    ``after_clip`` is a one-based anchor into the authored clip sequence and
+    is deliberately kept outside the renderer's visual-card schema. Planner
+    suggestions are advisory: malformed rows are logged and skipped. Explicit
+    authored input raises ``ValueError`` so request handlers can return 422.
+    """
+
+    from services.title_cards import normalize_title_card
+
+    if values is None:
+        return []
+    if not isinstance(values, list):
+        message = "title_cards must be a list."
+        if advisory:
+            print(f"[Director] Ignoring malformed title-card suggestions: {message}")
+            return []
+        raise ValueError(message)
+
+    candidates = values
+    if len(candidates) > _DIRECTOR_TITLE_CARD_MAX:
+        message = (
+            "title_cards may contain at most "
+            f"{_DIRECTOR_TITLE_CARD_MAX} cards."
+        )
+        if not advisory:
+            raise ValueError(message)
+        print(f"[Director] {message} Excess planner suggestions were ignored.")
+        candidates = candidates[:_DIRECTOR_TITLE_CARD_MAX]
+
+    normalized_cards: list[dict] = []
+    for index, raw in enumerate(candidates):
+        try:
+            if not isinstance(raw, dict):
+                raise ValueError("each title card must be an object.")
+            allowed = _DIRECTOR_TITLE_CARD_FIELDS | {"after_clip"}
+            unknown = set(raw) - allowed
+            if unknown:
+                name = sorted(str(value) for value in unknown)[0]
+                raise ValueError(f"unsupported title-card field: {name}.")
+
+            card = normalize_title_card({
+                key: raw[key]
+                for key in _DIRECTOR_TITLE_CARD_FIELDS
+                if key in raw
+            })
+            if card["role"] == "intertitle":
+                anchor = raw.get("after_clip")
+                if (
+                    isinstance(anchor, bool)
+                    or not isinstance(anchor, int)
+                    or anchor < 1
+                ):
+                    raise ValueError(
+                        "intertitles require a positive one-based after_clip anchor."
+                    )
+                if clip_count is not None and anchor > int(clip_count):
+                    raise ValueError(
+                        f"after_clip must be between 1 and {int(clip_count)}."
+                    )
+                card["after_clip"] = anchor
+            elif "after_clip" in raw:
+                raise ValueError(
+                    "opening and end cards cannot have an after_clip anchor."
+                )
+            normalized_cards.append(card)
+        except (TypeError, ValueError) as error:
+            if not advisory:
+                raise ValueError(f"Title card {index + 1}: {error}") from error
+            print(
+                f"[Director] Ignoring malformed title-card suggestion "
+                f"{index + 1}: {error}"
+            )
+    policy_supplied = (
+        pipeline_type is not None
+        or has_source_audio is not None
+        or seamless is not None
+    )
+    if policy_supplied and any(
+        card["role"] == "intertitle" for card in normalized_cards
+    ):
+        audio_locked = (
+            str(pipeline_type or "") == "music_video"
+            or bool(has_source_audio)
+            or bool(seamless)
+        )
+        if audio_locked:
+            if not advisory:
+                raise ValueError(_DIRECTOR_TITLE_CARD_AUDIO_LOCK_MESSAGE)
+            print(
+                "[Director] Ignoring planner-suggested intertitles in this "
+                f"audio-locked or Seamless project. {_DIRECTOR_TITLE_CARD_AUDIO_LOCK_MESSAGE}"
+            )
+            normalized_cards = [
+                card for card in normalized_cards if card["role"] != "intertitle"
+            ]
+    return normalized_cards
+
+
+def _director_title_cards_for_pipeline(params: dict, clip_count: int) -> list[dict]:
+    advisory = params.get("_director_title_cards_advisory") is True
+    return normalize_director_title_cards(
+        params.get("title_cards"),
+        clip_count=clip_count,
+        advisory=advisory,
+        pipeline_type=str(params.get("pipeline_type") or "music_video"),
+        has_source_audio=bool(params.get("audio_path")),
+        seamless=bool(params.get("seamless", True)),
+    )
+
+
+def _resolve_director_title_card_anchors(
+    cards: list[dict],
+    *,
+    source_clip_count: int,
+    clip_plans: list[dict],
+    planned_clips: list[dict],
+    advisory: bool = False,
+) -> list[dict]:
+    """Translate authored shot anchors to the final native clip boundaries."""
+
+    resolved = []
+    final_count = len(clip_plans)
+    for index, raw in enumerate(cards):
+        card = copy.deepcopy(raw)
+        if card.get("role") != "intertitle":
+            resolved.append(card)
+            continue
+
+        source_index = int(card["after_clip"]) - 1
+        matches: list[tuple[int, list[int]]] = []
+        for final_index in range(final_count):
+            plan = clip_plans[final_index] if final_index < len(clip_plans) else {}
+            planned = planned_clips[final_index] if final_index < len(planned_clips) else {}
+            source_indices = (
+                plan.get("_director_source_clip_indices")
+                or planned.get("_director_source_clip_indices")
+            )
+            if isinstance(source_indices, list):
+                normalized_indices = []
+                for value in source_indices:
+                    if isinstance(value, bool):
+                        continue
+                    try:
+                        normalized_indices.append(int(value))
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+            elif final_count == source_clip_count:
+                normalized_indices = [final_index]
+            else:
+                normalized_indices = []
+            if source_index in normalized_indices:
+                matches.append((final_index, normalized_indices))
+
+        try:
+            if not matches:
+                raise ValueError(
+                    "the intertitle anchor no longer matches a rendered clip boundary."
+                )
+            final_index, source_indices = matches[-1]
+            if any(value > source_index for value in source_indices):
+                raise ValueError(
+                    "the requested intertitle boundary was merged into a later clip."
+                )
+            card["after_clip"] = final_index + 1
+            resolved.append(card)
+        except ValueError as error:
+            if not advisory:
+                raise ValueError(f"Title card {index + 1}: {error}") from error
+            print(
+                f"[Director] Ignoring planner-suggested intertitle "
+                f"{index + 1}: {error}"
+            )
+    return resolved
+
+
+def _director_title_card_schema() -> dict:
+    """Optional JSON field accepted alongside a plan's shot rows."""
+
+    return {
+        "type": "array",
+        "maxItems": _DIRECTOR_TITLE_CARD_MAX,
+        "items": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "maxLength": 500},
+                "subtitle": {"type": "string", "maxLength": 1000},
+                "role": {"type": "string", "enum": ["opening", "intertitle", "end"]},
+                "style": {"type": "string", "enum": ["minimal", "classic", "bold"]},
+                "background_color": {"type": "string"},
+                "text_color": {"type": "string"},
+                "duration_seconds": {"type": "number", "minimum": 0.5, "maximum": 15},
+                "after_clip": {"type": "integer", "minimum": 1},
+            },
+            "required": ["text", "role"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _extend_director_title_card_schema(schema):
+    """Allow optional detached cards without changing existing shot grammar."""
+
+    if not isinstance(schema, dict):
+        return schema
+    result = copy.deepcopy(schema)
+    card_schema = _director_title_card_schema()
+    if result.get("type") == "array":
+        items = result.get("items")
+        properties = items.get("properties") if isinstance(items, dict) else None
+        if isinstance(properties, dict) and (
+            "video_prompt" in properties or "scene_goal" in properties
+        ):
+            properties.setdefault("title_cards", card_schema)
+        return result
+
+    properties = result.get("properties")
+    if isinstance(properties, dict):
+        shots = properties.get("shots")
+        if isinstance(shots, dict) and shots.get("type") == "array":
+            properties.setdefault("title_cards", card_schema)
+    return result
+
+
+def _director_title_card_canvas(params: dict) -> tuple[int, int, float]:
+    profile = _director_video_execution_profile(params)
+    video_params = params.get("video_params") or {}
+    resolution = (
+        profile.get("normalized_resolution")
+        or video_params.get("resolution")
+        or "1280x720"
+    )
+    try:
+        width_text, height_text = str(resolution).lower().split("x", 1)
+        width, height = int(width_text), int(height_text)
+    except (TypeError, ValueError):
+        width, height = 1280, 720
+    width = width - (width % 2)
+    height = height - (height % 2)
+    if width < 64 or height < 64 or width > 4096 or height > 4096:
+        width, height = 1280, 720
+
+    fps = profile.get("fps") or params.get("fps")
+    if fps is None:
+        video_model = params.get("video_model") or ""
+        getter = getattr(_wgp, "get_model_def", None)
+        if video_model and callable(getter):
+            try:
+                fps = (getter(video_model) or {}).get("fps")
+            except Exception:
+                fps = None
+    try:
+        fps = float(fps or 24)
+    except (TypeError, ValueError):
+        fps = 24.0
+    if not math.isfinite(fps) or fps < 1 or fps > 120:
+        fps = 24.0
+    return width, height, fps
+
+
+def _director_media_tools() -> tuple[str, str]:
+    ffmpeg = os.environ.get("FFMPEG_BINARY")
+    if not ffmpeg:
+        try:
+            from shared.utils.video_decode import _resolve_media_binary
+
+            ffmpeg = _resolve_media_binary("ffmpeg")
+        except Exception:
+            ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("FFmpeg was not found; Director cannot join title cards.")
+    ffprobe = os.environ.get("FFPROBE_BINARY")
+    if not ffprobe:
+        sibling = os.path.join(os.path.dirname(ffmpeg), "ffprobe.exe" if os.name == "nt" else "ffprobe")
+        ffprobe = sibling if os.path.isfile(sibling) else shutil.which("ffprobe")
+    if not ffprobe:
+        raise RuntimeError("FFprobe was not found; Director cannot safely preserve clip audio.")
+    return str(ffmpeg), str(ffprobe)
+
+
+def _director_video_has_audio(path: str, *, ffprobe: Optional[str] = None) -> bool:
+    if ffprobe is None:
+        _ffmpeg, ffprobe = _director_media_tools()
+    result = subprocess.run(
+        [
+            ffprobe, "-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=codec_type", "-of", "csv=p=0", path,
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Could not inspect audio streams in title-card join input: {os.path.basename(path)}"
+        )
+    return bool(result.stdout.strip())
+
+
+def _director_media_duration(path: str, *, ffprobe: str) -> float:
+    result = subprocess.run(
+        [
+            ffprobe, "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", path,
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    try:
+        duration = float(result.stdout.strip())
+    except (TypeError, ValueError):
+        duration = 0.0
+    if result.returncode != 0 or not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError(
+            f"Could not read the duration of title-card join input: {os.path.basename(path)}"
+        )
+    return duration
+
+
+def _director_title_card_video_only(path: str, *, cache_dir: str, ffmpeg: str) -> str:
+    token = hashlib.sha256(os.path.realpath(path).encode("utf-8")).hexdigest()[:16]
+    target = os.path.join(cache_dir, f"{token}_video_only.mp4")
+    if os.path.isfile(target) and os.path.getsize(target) > 0:
+        return target
+    result = subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-i", path, "-map", "0:v:0", "-c:v", "copy", "-an",
+            "-movflags", "+faststart", target,
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode != 0 or not os.path.isfile(target) or os.path.getsize(target) <= 0:
+        raise RuntimeError(
+            "Could not prepare a silent title-card segment: "
+            f"{(result.stderr or 'FFmpeg failed').strip()[-300:]}"
+        )
+    return target
+
+
+def _director_add_silent_audio(
+    path: str,
+    *,
+    cache_dir: str,
+    ffmpeg: str,
+    ffprobe: str,
+) -> str:
+    token = hashlib.sha256(os.path.realpath(path).encode("utf-8")).hexdigest()[:16]
+    target = os.path.join(cache_dir, f"{token}_with_silence.mp4")
+    if os.path.isfile(target) and os.path.getsize(target) > 0:
+        return target
+    duration = _director_media_duration(path, ffprobe=ffprobe)
+    result = subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-i", path,
+            "-f", "lavfi", "-t", f"{duration:.9f}", "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "96k", "-ar", "48000", "-ac", "2",
+            "-shortest", "-movflags", "+faststart", target,
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode != 0 or not os.path.isfile(target) or os.path.getsize(target) <= 0:
+        raise RuntimeError(
+            "Could not preserve clip audio while inserting a title card: "
+            f"{(result.stderr or 'FFmpeg failed').strip()[-300:]}"
+        )
+    return target
+
+
+def _director_render_title_cards(
+    cards: list[dict],
+    *,
+    out_dir: str,
+    pid: str,
+    params: dict,
+) -> list[dict]:
+    from services.title_cards import render_title_card
+
+    width, height, fps = _director_title_card_canvas(params)
+    safe_pid = re.sub(r"[^A-Za-z0-9_-]+", "_", str(pid or "director"))[:80]
+    card_dir = os.path.join(out_dir, "_director_title_cards", safe_pid)
+    os.makedirs(card_dir, exist_ok=True)
+    rendered: list[dict] = []
+    for index, card in enumerate(cards):
+        render_fields = {
+            key: card[key]
+            for key in _DIRECTOR_TITLE_CARD_FIELDS
+            if key in card
+        }
+        fingerprint = json.dumps(
+            {"card": render_fields, "width": width, "height": height, "fps": fps},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        token = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:20]
+        output_path = os.path.join(card_dir, f"card_{token}.mp4")
+        if not os.path.isfile(output_path) or os.path.getsize(output_path) <= 0:
+            result = render_title_card(
+                render_fields,
+                output_path,
+                width=width,
+                height=height,
+                fps=fps,
+                ffmpeg_path=os.environ.get("FFMPEG_BINARY") or None,
+            )
+            warnings = result.get("warnings") or []
+            for warning in warnings:
+                print(f"[Pipeline {pid}] Title card {index + 1}: {warning}")
+        rendered.append({**card, "asset_path": output_path})
+    return rendered
+
+
+def _interleave_director_title_cards(
+    video_files: list[str],
+    cards: list[dict],
+    rendered_cards: list[dict],
+) -> list[str]:
+    by_boundary: dict[int, list[str]] = {}
+    for card, rendered in zip(cards, rendered_cards):
+        if card.get("role") == "intertitle":
+            by_boundary.setdefault(int(card["after_clip"]), []).append(
+                rendered["asset_path"]
+            )
+    ordered: list[str] = []
+    for index, video_file in enumerate(video_files, start=1):
+        ordered.append(video_file)
+        ordered.extend(by_boundary.get(index, []))
+    return ordered
+
+
+def _director_join_title_card_segments(
+    video_files: list[str],
+    output_path: str,
+    *,
+    preserve_embedded_audio: bool,
+    cache_dir: str,
+    abort_callback=None,
+) -> None:
+    if not video_files:
+        raise ValueError("No clips are available for the Director title-card join.")
+    ffmpeg, ffprobe = _director_media_tools()
+    join_files = []
+    for path in video_files:
+        if preserve_embedded_audio:
+            if _director_video_has_audio(path, ffprobe=ffprobe):
+                join_files.append(path)
+            else:
+                join_files.append(_director_add_silent_audio(
+                    path, cache_dir=cache_dir, ffmpeg=ffmpeg, ffprobe=ffprobe,
+                ))
+        else:
+            join_files.append(_director_title_card_video_only(
+                path, cache_dir=cache_dir, ffmpeg=ffmpeg,
+            ))
+
+    output_config = getattr(_wgp, "server_config", {}) or {}
+    encoding = get_video_encoding(
+        output_config.get("video_output_codec", "libx264_8"),
+        output_config.get("video_container", "mp4"),
+    )
+    ok = _wgp.concatenate_multi_clip_videos(
+        join_files,
+        output_path,
+        None,
+        abort_callback=abort_callback,
+        codec_type=encoding["codec_type"],
+        container=encoding["container"],
+    )
+    if not ok or not os.path.isfile(output_path) or os.path.getsize(output_path) <= 0:
+        raise RuntimeError("FFmpeg could not join the Director title-card segments.")
+
+
+def _director_title_card_join_path(
+    base_path: str,
+    *,
+    out_dir: str,
+    multiclip: bool = False,
+) -> str:
+    output_config = getattr(_wgp, "server_config", {}) or {}
+    encoding = get_video_encoding(
+        output_config.get("video_output_codec", "libx264_8"),
+        output_config.get("video_container", "mp4"),
+    )
+    extension = encoding["extension"]
+    stem = os.path.splitext(os.path.basename(base_path))[0]
+    marker = re.search(r"_multiclip(?:_|$)", stem, flags=re.IGNORECASE)
+    if marker or multiclip:
+        if marker:
+            stem = stem[:marker.start()]
+        output_name = f"{stem}_titlecards_multiclip{extension}"
+    else:
+        output_name = f"{stem}_titlecards{extension}"
+    output_path = os.path.join(out_dir, output_name)
+    while os.path.exists(output_path):
+        output_name = f"{os.path.splitext(output_name)[0]}_{uuid.uuid4().hex[:8]}{extension}"
+        output_path = os.path.join(out_dir, output_name)
+    return output_path
+
+
+def _write_director_title_card_manifest(
+    output_path: str,
+    *,
+    pid: str,
+    params: dict,
+    cards: list[dict],
+    source_files: list[str],
+) -> None:
+    output_config = getattr(_wgp, "server_config", {}) or {}
+    encoding = get_video_encoding(
+        output_config.get("video_output_codec", "libx264_8"),
+        output_config.get("video_container", "mp4"),
+    )
+    with _pipeline_file_lock:
+        _write_pipeline_json_unlocked(
+            os.path.splitext(output_path)[0] + ".meta.json",
+            {
+                "params": {
+                    "_director_pipeline_id": pid,
+                    "video_quality": encoding["codec_type"],
+                    "video_container": encoding["container"],
+                },
+                "director_pipeline_id": pid,
+                "director_artifact_kind": "joined",
+                "generation_mode": "video",
+                "created_at": time.time(),
+                "output_filename": os.path.basename(output_path),
+                "director_source_clips": [os.path.basename(path) for path in source_files],
+                "director_title_cards": copy.deepcopy(cards),
+                "pipeline_type": params.get("pipeline_type", "music_video"),
+            },
+        )
+
+
+def _director_find_master_output(
+    output_files: list[str],
+    *,
+    clip_count: int,
+    seamless: bool,
+) -> Optional[str]:
+    candidates = [
+        filename
+        for filename in output_files
+        if filename and "_multiclip" in os.path.splitext(filename)[0].lower()
+    ]
+    if candidates:
+        return candidates[-1]
+    if seamless and output_files:
+        return output_files[-1]
+    if len(output_files) > clip_count:
+        return output_files[-1]
+    if clip_count == 1 and output_files:
+        return output_files[-1]
+    return None
+
+
+def _apply_director_title_cards_to_outputs(
+    pid: str,
+    params: dict,
+    output_files: list[str],
+    clip_plans: list[dict],
+    *,
+    out_dir: str,
+    abort_callback=None,
+) -> list[str]:
+    cards = params.get("_director_title_cards_resolved") or []
+    if not cards:
+        return output_files or []
+    advisory = params.get("_director_title_cards_advisory") is True
+    try:
+        cards = normalize_director_title_cards(
+            cards, clip_count=len(clip_plans), advisory=advisory,
+        )
+        if not cards:
+            return output_files or []
+        rendered = _director_render_title_cards(
+            cards, out_dir=out_dir, pid=pid, params=params,
+        )
+        results = list(output_files or [])
+        master_name = _director_find_master_output(
+            results,
+            clip_count=len(clip_plans),
+            seamless=bool(params.get("seamless", True)),
+        )
+        if not master_name:
+            raise RuntimeError(
+                "Director completed without a joined master to receive its title cards."
+            )
+        master_path = master_name if os.path.isabs(master_name) else os.path.join(out_dir, master_name)
+        if not os.path.isfile(master_path):
+            raise RuntimeError("The Director master video was not found for title-card finishing.")
+        is_multiclip = (
+            not bool(params.get("seamless", True))
+            or len(results) > len(clip_plans)
+        )
+
+        source_files = [master_path]
+        cache_dir = os.path.dirname(rendered[0]["asset_path"])
+        intertitles = [card for card in cards if card["role"] == "intertitle"]
+        if intertitles:
+            clip_names = _clip_video_slots(output_files, len(clip_plans))
+            if len(clip_names) != len(clip_plans) or any(not name for name in clip_names):
+                raise RuntimeError(
+                    "Director needs every per-clip video before inserting intertitles."
+                )
+            clip_paths = [
+                name if os.path.isabs(name) else os.path.join(out_dir, name)
+                for name in clip_names
+            ]
+            ordered = _interleave_director_title_cards(
+                clip_paths, cards, rendered,
+            )
+            preserve_audio = any(
+                _director_video_has_audio(path)
+                for path in clip_paths
+            )
+            intermediate_path = _director_title_card_join_path(
+                master_path,
+                out_dir=out_dir,
+                multiclip=is_multiclip,
+            )
+            _director_join_title_card_segments(
+                ordered,
+                intermediate_path,
+                preserve_embedded_audio=preserve_audio,
+                cache_dir=cache_dir,
+                abort_callback=abort_callback,
+            )
+            source_files = clip_paths
+            master_path = intermediate_path
+
+        edge_cards = [
+            (card, rendered_card)
+            for card, rendered_card in zip(cards, rendered)
+            if card["role"] in {"opening", "end"}
+        ]
+        opening_paths = [item["asset_path"] for card, item in edge_cards if card["role"] == "opening"]
+        end_paths = [item["asset_path"] for card, item in edge_cards if card["role"] == "end"]
+        if opening_paths or end_paths:
+            base_has_audio = _director_video_has_audio(master_path)
+            if not base_has_audio:
+                opening_paths = [
+                    _director_title_card_video_only(path, cache_dir=cache_dir, ffmpeg=_director_media_tools()[0])
+                    for path in opening_paths
+                ]
+                end_paths = [
+                    _director_title_card_video_only(path, cache_dir=cache_dir, ffmpeg=_director_media_tools()[0])
+                    for path in end_paths
+                ]
+            wrapped_path = _director_title_card_join_path(
+                master_path,
+                out_dir=out_dir,
+                multiclip=is_multiclip,
+            )
+            _director_join_title_card_segments(
+                [*opening_paths, master_path, *end_paths],
+                wrapped_path,
+                preserve_embedded_audio=base_has_audio,
+                cache_dir=cache_dir,
+                abort_callback=abort_callback,
+            )
+            source_files = [*source_files, *opening_paths, *end_paths]
+            master_path = wrapped_path
+
+        final_name = os.path.basename(master_path)
+        replaced = False
+        updated = []
+        for filename in results:
+            if filename == master_name or (
+                not replaced
+                and os.path.abspath(os.path.join(out_dir, filename)) == os.path.abspath(
+                    os.path.join(out_dir, master_name)
+                )
+            ):
+                updated.append(final_name)
+                replaced = True
+            else:
+                updated.append(filename)
+        if not replaced:
+            updated.append(final_name)
+        _write_director_title_card_manifest(
+            master_path,
+            pid=pid,
+            params=params,
+            cards=cards,
+            source_files=source_files,
+        )
+        with _pipeline_lock:
+            record = _pipelines.get(pid)
+            if record is not None:
+                record["_director_title_card_artifacts"] = [
+                    {
+                        "role": card["role"],
+                        "path": os.path.relpath(item["asset_path"], out_dir).replace(os.sep, "/"),
+                        **({"after_clip": card["after_clip"]} if "after_clip" in card else {}),
+                    }
+                    for card, item in zip(cards, rendered)
+                ]
+        clip_output_files = getattr(output_files, "clip_output_files", None)
+        if isinstance(clip_output_files, dict) and clip_output_files:
+            return _DirectorOutputs(updated, clip_output_files)
+        return updated
+    except Exception as error:
+        if not advisory:
+            raise
+        print(
+            f"[Pipeline {pid}] Optional planner title cards were skipped: {error}"
+        )
+        return output_files or []
 
 
 def director_music_clip_limits(params: dict, model_def: Optional[dict] = None) -> dict:
@@ -1523,6 +2275,10 @@ def _save_pipeline_state_locked(pid: str) -> bool:
         # project faithfully in the chat/editor.
         "director_ui_snapshot": params.get("director_ui_snapshot", {}),
         "asset_manifest": params.get("_director_asset_manifest", {}),
+        "title_cards": copy.deepcopy(params.get("title_cards") or []),
+        "title_card_artifacts": copy.deepcopy(
+            p.get("_director_title_card_artifacts") or []
+        ),
         "llm_log": p.get("_llm_log"),
         "llm_drafts": copy.deepcopy(p.get("_llm_drafts") or []),
         # Long-form planners publish completed outline/sequence batches as
@@ -2891,7 +3647,25 @@ def _quantize_clip_frame_schedule(
 
 
 @_exclusive_pipeline_operation
-def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: str = None) -> dict:
+def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: str = None, *, expected_take: Optional[dict] = None) -> dict:
+    if expected_take is not None:
+        from services.production_review import director_take_signature
+        state = load_pipeline_state(out_dir, pid)
+        clips = (state or {}).get("clips") or []
+        if not isinstance(expected_take, dict) or clip_index < 0 or clip_index >= len(clips):
+            raise ValueError("The inspected Director take no longer exists")
+        filename = clips[clip_index].get("video_filename")
+        state_path = _find_pipeline_file(out_dir, pid)
+        selected = os.path.realpath(os.path.join(os.path.dirname(state_path), os.path.basename(filename))) if state_path and filename else None
+        if (clips[clip_index].get("video_stale") or director_take_signature(state, clip_index) != expected_take.get("signature")
+                or not selected or selected != os.path.realpath(str(expected_take.get("path") or ""))):
+            raise ValueError("Director take or settings changed after review; inspect the current take before polishing")
+        digest = hashlib.sha256()
+        with open(selected, "rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        if digest.hexdigest() != expected_take.get("fingerprint"):
+            raise ValueError("Director media changed after review; inspect the current take before polishing")
     return _rerun_clip_video_impl(out_dir, pid, clip_index, prompt_override)
 
 
@@ -4299,6 +5073,61 @@ def _rejoin_clips_impl(out_dir: str, pid: str) -> dict:
     # windowed generation, the full track is the real soundtrack. Story-mode
     # pipelines (no song) concat with the clips' own audio.
     snapshot = state.get("_params_snapshot") or {}
+    pipeline_type = str(
+        state.get("pipeline_type") or snapshot.get("pipeline_type") or "music_video"
+    )
+    advisory_cards = snapshot.get("_director_title_cards_advisory") is True
+    seamless = bool(state.get("seamless", snapshot.get("seamless", True)))
+    source_audio_attached = bool(snapshot.get("audio_path"))
+    saved_resolved_cards = snapshot.get("_director_title_cards_resolved")
+    if not isinstance(saved_resolved_cards, list):
+        saved_resolved_cards = None
+    if saved_resolved_cards is not None:
+        title_cards = normalize_director_title_cards(
+            saved_resolved_cards,
+            clip_count=len(clips),
+            advisory=advisory_cards,
+            pipeline_type=pipeline_type,
+            has_source_audio=source_audio_attached,
+            seamless=seamless,
+        )
+    else:
+        raw_title_cards = snapshot.get("title_cards")
+        if raw_title_cards is None:
+            raw_title_cards = state.get("title_cards")
+        try:
+            source_clip_count = int(
+                snapshot.get("_director_title_card_source_clip_count")
+                or len(clips)
+            )
+        except (TypeError, ValueError, OverflowError):
+            source_clip_count = len(clips)
+        title_cards = normalize_director_title_cards(
+            raw_title_cards,
+            clip_count=source_clip_count,
+            advisory=advisory_cards,
+            pipeline_type=pipeline_type,
+            has_source_audio=source_audio_attached,
+            seamless=seamless,
+        )
+        if title_cards:
+            title_cards = _resolve_director_title_card_anchors(
+                title_cards,
+                source_clip_count=source_clip_count,
+                clip_plans=[{} for _clip in clips],
+                planned_clips=[
+                    clip.get("planned_clip") or {} for clip in clips
+                ],
+                advisory=advisory_cards,
+            )
+            title_cards = normalize_director_title_cards(
+                title_cards,
+                clip_count=len(clips),
+                advisory=advisory_cards,
+                pipeline_type=pipeline_type,
+                has_source_audio=source_audio_attached,
+                seamless=seamless,
+            )
     audio_path = snapshot.get("audio_path") or None
     if audio_path and not os.path.isfile(audio_path):
         audio_path = None
@@ -4322,44 +5151,127 @@ def _rejoin_clips_impl(out_dir: str, pid: str) -> dict:
         output_path = os.path.join(clip_out_dir, output_name)
 
     try:
-        # concatenate_multi_clip_videos is the join the original pipeline
-        # uses (ffmpeg concat FILTER, re-encodes to a uniform format). The
-        # previously-called wgp.concatenate_videos never existed — this path
-        # was unreachable until the video_filename backfill fix, so the
-        # AttributeError only surfaced now.
-        ok = _wgp.concatenate_multi_clip_videos(
-            video_files,
-            output_path,
-            audio_path,
-            audio_start_sec=audio_start_sec,
-            codec_type=encoding["codec_type"],
-            container=encoding["container"],
-            **join_options,
-        )
-        if not ok or not os.path.isfile(output_path):
+        rendered_cards = _director_render_title_cards(
+            title_cards,
+            out_dir=clip_out_dir,
+            pid=pid,
+            params=snapshot,
+        ) if title_cards else []
+        intertitles = [
+            card for card in title_cards if card.get("role") == "intertitle"
+        ]
+        if intertitles:
+            ordered = _interleave_director_title_cards(
+                video_files, title_cards, rendered_cards,
+            )
+            preserve_audio = any(
+                _director_video_has_audio(path) for path in video_files
+            )
+            _director_join_title_card_segments(
+                ordered,
+                output_path,
+                preserve_embedded_audio=preserve_audio,
+                cache_dir=os.path.dirname(rendered_cards[0]["asset_path"]),
+            )
+        else:
+            # concatenate_multi_clip_videos is the join the original pipeline
+            # uses (ffmpeg concat FILTER, re-encodes to a uniform format).
+            ok = _wgp.concatenate_multi_clip_videos(
+                video_files,
+                output_path,
+                audio_path,
+                audio_start_sec=audio_start_sec,
+                codec_type=encoding["codec_type"],
+                container=encoding["container"],
+                **join_options,
+            )
+            if not ok or not os.path.isfile(output_path):
+                raise RuntimeError("ffmpeg concatenation failed (see server log for the clip that broke it)")
+
+        title_card_source_files = list(video_files)
+        edge_cards = [
+            (card, rendered)
+            for card, rendered in zip(title_cards, rendered_cards)
+            if card.get("role") in {"opening", "end"}
+        ]
+        opening_paths = [
+            rendered["asset_path"]
+            for card, rendered in edge_cards
+            if card.get("role") == "opening"
+        ]
+        end_paths = [
+            rendered["asset_path"]
+            for card, rendered in edge_cards
+            if card.get("role") == "end"
+        ]
+        if opening_paths or end_paths:
+            base_has_audio = _director_video_has_audio(output_path)
+            cache_dir = (
+                os.path.dirname(rendered_cards[0]["asset_path"])
+                if rendered_cards else os.path.join(clip_out_dir, "_director_title_cards", str(pid))
+            )
+            if not base_has_audio:
+                ffmpeg, _ffprobe = _director_media_tools()
+                opening_paths = [
+                    _director_title_card_video_only(
+                        path, cache_dir=cache_dir, ffmpeg=ffmpeg,
+                    )
+                    for path in opening_paths
+                ]
+                end_paths = [
+                    _director_title_card_video_only(
+                        path, cache_dir=cache_dir, ffmpeg=ffmpeg,
+                    )
+                    for path in end_paths
+                ]
+            wrapped_path = _director_title_card_join_path(
+                output_path,
+                out_dir=clip_out_dir,
+                multiclip=True,
+            )
+            _director_join_title_card_segments(
+                [*opening_paths, output_path, *end_paths],
+                wrapped_path,
+                preserve_embedded_audio=base_has_audio,
+                cache_dir=cache_dir,
+            )
+            title_card_source_files.extend([*opening_paths, *end_paths])
+            output_path = wrapped_path
+            output_name = os.path.basename(output_path)
+
+        if not os.path.isfile(output_path) or os.path.getsize(output_path) <= 0:
             raise RuntimeError("ffmpeg concatenation failed (see server log for the clip that broke it)")
         print(f"[Pipeline] Rejoined {len(video_files)} clips -> {output_name}")
 
         # A rejoined master must retain Director ownership, just like the
         # original output, for gallery grouping and full-project restoration.
         # Keep the original masters and their metadata intact.
-        with _pipeline_file_lock:
-            _write_pipeline_json_unlocked(
-                os.path.splitext(output_path)[0] + ".meta.json",
-                {
-                    "params": {
-                        "_director_pipeline_id": pid,
-                        "video_quality": encoding["codec_type"],
-                        "video_container": encoding["container"],
-                    },
-                    "director_pipeline_id": pid,
-                    "director_artifact_kind": "joined",
-                    "generation_mode": "video",
-                    "created_at": _time.time(),
-                    "output_filename": output_name,
-                    "director_source_clips": [clip["video_filename"] for clip in clips],
-                },
+        if title_cards:
+            _write_director_title_card_manifest(
+                output_path,
+                pid=pid,
+                params=snapshot,
+                cards=title_cards,
+                source_files=title_card_source_files,
             )
+        else:
+            with _pipeline_file_lock:
+                _write_pipeline_json_unlocked(
+                    os.path.splitext(output_path)[0] + ".meta.json",
+                    {
+                        "params": {
+                            "_director_pipeline_id": pid,
+                            "video_quality": encoding["codec_type"],
+                            "video_container": encoding["container"],
+                        },
+                        "director_pipeline_id": pid,
+                        "director_artifact_kind": "joined",
+                        "generation_mode": "video",
+                        "created_at": _time.time(),
+                        "output_filename": output_name,
+                        "director_source_clips": [clip["video_filename"] for clip in clips],
+                    },
+                )
 
         # Update pipeline state
         def _update(s):
@@ -5889,6 +6801,15 @@ def _run_pipeline(pid: str, resume: bool = False):
         if not clip_plans:
             raise RuntimeError("Planning produced no clip plans")
 
+        source_clip_count = len(clip_plans)
+        if resume_plans and params.get("_director_title_card_source_clip_count"):
+            try:
+                source_clip_count = int(
+                    params["_director_title_card_source_clip_count"]
+                )
+            except (TypeError, ValueError, OverflowError):
+                source_clip_count = len(clip_plans)
+
         # Bounded H3 and lip-sync-critical LTX-2.5 music videos need native
         # independent shots. Convert the plan before prompt polish and image
         # generation so every downstream artifact (start images, exact audio
@@ -5939,7 +6860,45 @@ def _run_pipeline(pid: str, resume: bool = False):
                 )
 
         # Store planned clips for persistence
+        title_card_specs = _director_title_cards_for_pipeline(
+            params, clip_count=source_clip_count,
+        )
+        params["title_cards"] = copy.deepcopy(title_card_specs)
+        params["_director_title_card_source_clip_count"] = source_clip_count
+        if title_card_specs:
+            existing_resolved = params.get("_director_title_cards_resolved")
+            if resume_plans and isinstance(existing_resolved, list):
+                resolved_title_cards = normalize_director_title_cards(
+                    existing_resolved,
+                    clip_count=len(clip_plans),
+                    advisory=params.get("_director_title_cards_advisory") is True,
+                    pipeline_type=str(params.get("pipeline_type") or "music_video"),
+                    has_source_audio=bool(params.get("audio_path")),
+                    seamless=bool(params.get("seamless", True)),
+                )
+            else:
+                advisory_cards = params.get("_director_title_cards_advisory") is True
+                resolved_title_cards = _resolve_director_title_card_anchors(
+                    title_card_specs,
+                    source_clip_count=source_clip_count,
+                    clip_plans=clip_plans,
+                    planned_clips=planned_clips,
+                    advisory=advisory_cards,
+                )
+                resolved_title_cards = normalize_director_title_cards(
+                    resolved_title_cards,
+                    clip_count=len(clip_plans),
+                    advisory=advisory_cards,
+                    pipeline_type=str(params.get("pipeline_type") or "music_video"),
+                    has_source_audio=bool(params.get("audio_path")),
+                    seamless=bool(params.get("seamless", True)),
+                )
+            params["_director_title_cards_resolved"] = resolved_title_cards
+        else:
+            params["_director_title_cards_resolved"] = []
         _update_pipeline(pid, _planned_clips=planned_clips)
+        if title_card_specs:
+            _save_pipeline_state(pid)
 
         # Capture LLM logs — collect all passes from the pipeline's accumulated log
         try:
@@ -6255,6 +7214,17 @@ def _run_pipeline(pid: str, resume: bool = False):
             _update_pipeline(pid, **artifacts)
             _save_pipeline_state(pid)
             return
+
+        output_files = _apply_director_title_cards_to_outputs(
+            pid,
+            params,
+            output_files or [],
+            clip_plans,
+            out_dir=pipeline_out_dir,
+            abort_callback=lambda: (
+                (get_pipeline(pid) or {}).get("status") == "cancelled"
+            ),
+        )
 
         completed_clip_videos = []
         if not params.get("seamless", True):
@@ -6588,13 +7558,23 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
     # Wrap LLM functions to capture each pass for the dashboard log
     _pass_counter = [0]
     def _logged_generate(*args, **kwargs):
-        result = llm_service.generate(*args, **kwargs)
+        request = dict(kwargs)
+        if isinstance(request.get("json_schema"), dict):
+            request["json_schema"] = _extend_director_title_card_schema(
+                request["json_schema"]
+            )
+        result = llm_service.generate(*args, **request)
         _pass_counter[0] += 1
         _capture_llm_pass(pid, f"generate_{_pass_counter[0]}")
         return result
 
     def _logged_streaming(*args, **kwargs):
-        result = llm_service.generate_streaming(*args, **kwargs)
+        request = dict(kwargs)
+        if isinstance(request.get("json_schema"), dict):
+            request["json_schema"] = _extend_director_title_card_schema(
+                request["json_schema"]
+            )
+        result = llm_service.generate_streaming(*args, **request)
         _pass_counter[0] += 1
         _capture_llm_pass(pid, f"streaming_{_pass_counter[0]}")
         return result
@@ -6846,8 +7826,19 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
         source_audio=bool(params.get("audio_path")),
         nsfw=bool(services_cfg.get("nsfw_mode", False)),
     )
+    from services.director.guide_loader import load_guide as _load_director_guide
+    title_card_guide = _load_director_guide("title_cards.md")
+    title_card_guide += (
+        "\n\nPROJECT TITLE-CARD CAPABILITIES:\n"
+        f"- Pipeline type: {pipeline_type}.\n"
+        f"- Source audio attached: {bool(params.get('audio_path'))}.\n"
+        f"- Seamless requested: {bool(seamless)}.\n"
+        "- For a source-audio or Seamless project, suggest opening/end cards "
+        "only; do not suggest intertitles.\n"
+    )
     planner_kwargs["polish_block"] = "\n\n".join(filter(None, [
         planner_kwargs.get("polish_block", ""), writing_contract,
+        title_card_guide,
         VISUAL_IDENTITY_GUIDANCE if any(visual_inputs[key] for key in (
             "reference_image_path", "character_ref_paths", "location_ref_paths",
         )) else "",
@@ -6860,6 +7851,14 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
     # Plan
     print(f"[Pipeline {pid}] Planning with DirectorOrchestrator (skill={skill_type})...")
     plan = director.plan(skill_type, **planner_kwargs)
+
+    # User-authored metadata takes precedence. Planner suggestions are kept
+    # detached from shots and treated as advisory by the native render path.
+    if "title_cards" not in params or params.get("title_cards") is None:
+        params["title_cards"] = copy.deepcopy(
+            getattr(plan, "title_cards", None) or []
+        )
+        params["_director_title_cards_advisory"] = True
 
     # Store the production plan in pipeline state for later reference
     _update_pipeline(pid, production_plan=plan.to_dict())

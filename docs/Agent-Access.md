@@ -1,5 +1,9 @@
 # Agent Access
 
+For title cards, agent-authored finishing, actual-media review and bounded
+Director retakes, see [Agent-led filmmaking](Agent-Filmmaking.md). Connected
+agents can also read the live `filmmaking` MCP guide.
+
 Agent Access provides two independent ways for an MCP client to use one Maestro
 installation:
 

@@ -121,6 +121,9 @@ jobs:
           tests/test_pika_flex_handler.py
           tests/test_pika_flex_options_compatibility.py
           tests/test_launch_module_identity.py
+          tests/test_director_title_cards.py
+          tests/test_title_cards.py
+          tests/test_production_review.py
 
   agent-access:
     name: Isolated Agent Access protocols and security
@@ -134,9 +137,9 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install CPU-only controller dependencies
-        run: python -m pip install -r app/requirements-agent-access.txt "pytest==8.4.2"
+        run: python -m pip install -r app/requirements-agent-access.txt "pytest==8.4.2" "Pillow==11.3.0"
       - name: Test authentication, ownership, transfers and both MCP protocols
-        run: python -m pytest -q tests/test_agent_access_*.py tests/test_pinokio_agent_access.py tests/test_pinokio_remote.py tests/test_server_startup.py
+        run: python -m pytest -q tests/test_agent_access_*.py tests/test_agent_production*.py tests/test_pinokio_agent_access.py tests/test_pinokio_remote.py tests/test_server_startup.py
 
   ui-build:
     name: UI type-check + build

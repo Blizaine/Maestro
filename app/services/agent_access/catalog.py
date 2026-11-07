@@ -132,6 +132,17 @@ def required_scope(method: str, path: str) -> str:
     # dedicated MCP tools have narrow scopes; auth/owner routes always require
     # admin and remain excluded from generic operation dispatch.
     if len(segments) >= 3 and segments[:2] == ("api", "v1") and segments[2] == "agent-access":
+        if len(segments) >= 5 and segments[3] == "production":
+            action = segments[4]
+            if verb == "POST" and action == "inspect" and len(segments) == 5:
+                return "observe"
+            if (read and action == "budgets" and len(segments) == 6):
+                return "observe"
+            if verb == "POST" and len(segments) == 5 and action in {"budgets", "polish"}:
+                return "generate"
+            if verb == "POST" and len(segments) == 5 and action in {"finish", "reviews"}:
+                return "manage"
+            return "admin"
         if len(segments) == 4 and segments[3] in {"creative-context", "creative-defaults"} and (read or segments[3] == "creative-context" and verb == "POST"):
             return "observe"
         if len(segments) == 4 and segments[3] in {"prepare-authored", "submit-authored"} and verb == "POST":

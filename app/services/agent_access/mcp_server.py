@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import json
 from collections.abc import Awaitable, Mapping
 from pathlib import Path
 import re
@@ -14,7 +15,7 @@ from urllib.parse import quote
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import Annotations, ToolAnnotations
+from mcp.types import Annotations, ToolAnnotations, CallToolResult, TextContent, ImageContent, AudioContent
 
 from .catalog import (
     DOMAIN_ORDER,
@@ -218,6 +219,7 @@ def create_mcp_server(
         ("studio", "Studio generation"),
         ("director", "Director workflows"),
         ("editor", "Editor projects"),
+        ("filmmaking", "Title cards, finishing and take review"),
         ("models", "Models and performance"),
         ("assets", "Assets and workstations"),
         ("settings", "Settings and workstation controls"),
@@ -426,11 +428,12 @@ def create_mcp_server(
         title="Get native guides and creation timeline",
         description=(
             "Start agent-led creative work here. Body: workflow (video.frames, video.references, image.generate, "
-            "image.edit, audio.music, audio.speech, audio.sfx, director.story, director.music_video), brief, optional "
+            "image.edit, audio.music, audio.speech, audio.sfx, title.card, director.story, director.music_video), brief, optional "
             "model_type/duration_seconds/resolution/params/references/writer_instructions/voice_count. References "
             "use stable IDs plus role/type and an uploaded asset in native params. Resolves compatible installed "
             "defaults and returns the actual model guides, references and exact native window timeline. No local "
-            "writer, downloads or render. You author the requested native prompt/script/lyrics/Director clips."
+            "writer, downloads or render. You author the requested native prompt/script/lyrics/Director clips. "
+            "title.card is exact-text CPU titling; read help(filmmaking) for cards, finishing and bounded polishing."
         ),
         annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=False, openWorldHint=False),
     )
@@ -482,6 +485,38 @@ def create_mcp_server(
     )
     async def get_authored_draft(draft_id: str) -> dict[str, Any]:
         return await _safe_backend(backend.request("GET", f"/api/v1/agent-access/authoring-drafts/{_safe_segment(draft_id, 'draft_id')}"))
+
+    @server.tool(name="finish_film", title="Assemble and finish a film", description="Create a NEW editable Editor project from ordered clips/title-card assets, narration, music and SFX. Body: name/workspace/canvas/clips[{asset,duration?,source_in?,include_audio?,gain_db?,fade_in?,fade_out?}], narration/music/sfx[{asset,start?,duration?,gain_db?,fade_in?,fade_out?}], speech_ranges?, duck_music?, export?. Media uses asset IDs or {filename,workspace}. Defaults music -18dB, SFX -9dB; ducks music only under placed narration/reviewed speech ranges. export=false saves without rendering; true queues native software export. Read help(filmmaking).", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+    async def finish_film(body: dict[str, Any], request_id: str) -> dict[str, Any]:
+        return await _safe_backend(backend.request("POST", "/api/v1/agent-access/production/finish", json=body, idempotency_key=_request_id(request_id)))
+
+    @server.tool(name="inspect_take", title="Inspect actual rendered media", description="CPU-only inspection of an existing asset. Body: asset (uploaded ID or {filename,workspace}), expected_duration?, include_audio?. Returns probe/software-decode evidence plus an actual contact-sheet image and optional audio preview. Stills do not establish continuous motion or voice ownership. Creative status stays not_assessed until YOU inspect and record observations. No model call or generation.", annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=False, openWorldHint=False))
+    async def inspect_take(body: dict[str, Any]) -> CallToolResult:
+        packet = await _safe_backend(backend.request("POST", "/api/v1/agent-access/production/inspect", json=body, idempotency_key="inspect-" + uuid.uuid4().hex))
+        sheet = packet.pop("contact_sheet_base64", None)
+        audio = packet.pop("audio_preview_base64", None)
+        content = [TextContent(type="text", text=json.dumps(packet, ensure_ascii=False))]
+        if sheet:
+            content.append(ImageContent(type="image", data=sheet, mimeType="image/jpeg"))
+        if audio:
+            content.append(AudioContent(type="audio", data=audio, mimeType="audio/wav"))
+        return CallToolResult(content=content, structuredContent=packet)
+
+    @server.tool(name="record_take_review", title="Save an agent's creative take review", description="Record what YOU observed in an inspect_take packet: body {review_id,review:{verdict:keep|needs_work|reject,summary,observations:[{category,severity:low|medium|high|critical,text}]}}. Use concrete observations; skipped/unknown checks are not passes. Advisory metadata never blocks the whole film and never submits a render.", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+    async def record_take_review(body: dict[str, Any], request_id: str) -> dict[str, Any]:
+        return await _safe_backend(backend.request("POST", "/api/v1/agent-access/production/reviews", json=body, idempotency_key=_request_id(request_id)))
+
+    @server.tool(name="create_polish_budget", title="Set explicit retake limits", description="Create an agent-owned durable budget with explicit max_renders (1..12) and max_retakes_per_clip (1..3). Obtain user authorization for extra renders before using it; creating a budget submits no work. Every attempted/uncertain request consumes a slot. The budget cannot be reset by reopening it.", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+    async def create_polish_budget(max_renders: int, max_retakes_per_clip: int, request_id: str) -> dict[str, Any]:
+        return await _safe_backend(backend.request("POST", "/api/v1/agent-access/production/budgets", json={"max_renders": max_renders, "max_retakes_per_clip": max_retakes_per_clip}, idempotency_key=_request_id(request_id)))
+
+    @server.tool(name="get_polish_budget", title="Read retake budget and receipts", description="Read this agent's durable polish budget, consumed attempts and owned receipts. Reconcile an uncertain request through these receipts and the original pipeline; never blindly submit another request ID.", annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+    async def get_polish_budget(budget_id: str) -> dict[str, Any]:
+        return await _safe_backend(backend.request("GET", "/api/v1/agent-access/production/budgets/" + _safe_segment(budget_id, "budget_id")))
+
+    @server.tool(name="polish_take", title="Revise one reviewed Director take", description="Submit ONE explicitly authorized selected-take video rerun. Body: budget_id, review_id (recorded needs_work/reject), pipeline_id, clip_index (zero-based), optional revised prompt. Binds source fingerprint and persists intent before native generation. A changed take or busy/uncertain machine is deferred. Returns an owned job ID; poll get_job. Preserve request_id after timeouts. Rejoin the Director cut explicitly after accepting the replacement.", annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+    async def polish_take(body: dict[str, Any], request_id: str) -> dict[str, Any]:
+        return await _safe_backend(backend.request("POST", "/api/v1/agent-access/production/polish", json={**body, "request_id": _request_id(request_id)}, idempotency_key=_request_id(request_id)))
 
     @server.tool(
         name="prepare_generation",

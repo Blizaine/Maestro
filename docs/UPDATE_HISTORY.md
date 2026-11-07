@@ -4,6 +4,13 @@ Every dated update announcement from Maestro's first public release onward, newe
 
 [Back to the README](../README.md#updates) · [Detailed changelog](../CHANGELOG.md)
 
+### v4.1.0 — Dev testing
+
+- **Agent-led filmmaking:** exact-text title cards, optional Director opening/end cards and intertitles, editable finishing with narration/music/effects, and actual-media review with bounded selected-take polishing.
+- **Reliability and experiments:** PDD BF16 compatibility, Director action validation, H3 reference handoff diagnostics, restored MCP clip durations and experimental Pika 4–12 step controls.
+
+Available on **Dev for testing**. Main remains v4.0.0. See the [release notes](RELEASE_NOTES_V4.1.0.md) and [agent filmmaking guide](Agent-Filmmaking.md) for usage and limits.
+
 ### v4.0.0 (2026-11-04)
 
 Maestro v4.0.0 is available on **Main and Dev**.

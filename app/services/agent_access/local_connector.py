@@ -22,12 +22,15 @@ _OBSERVE_TOOLS = frozenset({
     "help", "list_operations", "describe_operation", "get_job",
     "get_submission", "fetch_media", "list_workstations", "upload_asset_status",
     "get_creation_defaults", "get_creation_context", "get_authored_draft",
+    "inspect_take", "get_polish_budget",
 })
 _GENERATE_TOOLS = frozenset({
     "prepare_generation", "prepare_authored_generation", "submit_authored_generation",
+    "create_polish_budget", "polish_take",
 })
 _MANAGE_TOOLS = frozenset({
     "upload_asset_begin", "upload_asset_chunk", "upload_asset_complete",
+    "finish_film", "record_take_review",
 })
 
 

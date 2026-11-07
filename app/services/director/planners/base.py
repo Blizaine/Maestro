@@ -60,6 +60,7 @@ def _remote_json_schema_rejected(error: Exception) -> bool:
 # the meaning of stored planner rows changes so a repaired runtime never
 # replays structurally valid but semantically stale outlines.
 _PLANNING_CHECKPOINT_SCHEMA_VERSION = 2
+_MAX_DIRECTOR_TITLE_CARD_SUGGESTIONS = 12
 
 
 class BasePlanner(ABC):
@@ -82,6 +83,62 @@ class BasePlanner(ABC):
         self._planning_resume_checkpoint: dict[str, Any] = {}
         self._planning_checkpoint_kind = ""
         self._planning_checkpoint_fingerprint = ""
+        self._director_title_cards: list[dict[str, Any]] = []
+
+    def reset_plan_metadata(self) -> None:
+        """Clear detached project-level metadata before a new plan starts."""
+
+        self._director_title_cards = []
+
+    def get_plan_title_cards(self) -> list[dict[str, Any]]:
+        """Return a defensive copy of title-card suggestions found in LLM output."""
+
+        return copy.deepcopy(self._director_title_cards)
+
+    def _record_plan_title_cards(self, values: Any) -> None:
+        if isinstance(values, dict):
+            candidates = [values]
+        elif isinstance(values, list):
+            candidates = values
+        else:
+            print(
+                "[Planner] Ignoring malformed title-card suggestions; "
+                "expected an object or array."
+            )
+            return
+
+        def signature(item: dict[str, Any]) -> str:
+            # Deduplicate repeated batch suggestions by their authored copy
+            # and placement even if a later batch restates renderer defaults.
+            stable = {
+                "text": item.get("text"),
+                "subtitle": item.get("subtitle", ""),
+                "role": item.get("role", "intertitle"),
+                "after_clip": item.get("after_clip"),
+            }
+            return json.dumps(
+                stable, ensure_ascii=False, sort_keys=True, default=str
+            )
+
+        seen = {signature(item) for item in self._director_title_cards}
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                print(
+                    "[Planner] Ignoring malformed title-card suggestion; "
+                    "expected an object."
+                )
+                continue
+            candidate_signature = signature(candidate)
+            if candidate_signature in seen:
+                continue
+            if len(self._director_title_cards) >= _MAX_DIRECTOR_TITLE_CARD_SUGGESTIONS:
+                print(
+                    "[Planner] Ignoring excess title-card suggestions; "
+                    f"the per-plan limit is {_MAX_DIRECTOR_TITLE_CARD_SUGGESTIONS}."
+                )
+                break
+            self._director_title_cards.append(copy.deepcopy(candidate))
+            seen.add(candidate_signature)
 
     # ── Durable long-form planning helpers ──────────────────────────
 
@@ -746,11 +803,35 @@ class BasePlanner(ABC):
 
         def normalized_items(value: Any) -> list[dict]:
             repaired = repair_payload(value)
+
+            def detach_row_title_cards(rows: Any) -> list[dict]:
+                if not isinstance(rows, list):
+                    rows = [rows]
+                detached = []
+                for row in rows:
+                    if not isinstance(row, dict):
+                        detached.append(row)
+                        continue
+                    row = dict(row)
+                    self._record_plan_title_cards(row.pop("title_cards", None))
+                    metadata = row.get("metadata")
+                    if isinstance(metadata, dict) and "title_cards" in metadata:
+                        metadata = dict(metadata)
+                        self._record_plan_title_cards(metadata.pop("title_cards"))
+                        if metadata:
+                            row["metadata"] = metadata
+                        else:
+                            row.pop("metadata", None)
+                    detached.append(row)
+                return detached
+
             if isinstance(repaired, list):
-                return repaired
-            if isinstance(repaired, dict) and "shots" in repaired:
-                shots = repaired["shots"]
-                return shots if isinstance(shots, list) else [shots]
+                return detach_row_title_cards(repaired)
+            if isinstance(repaired, dict):
+                self._record_plan_title_cards(repaired.get("title_cards"))
+                if "shots" in repaired:
+                    return detach_row_title_cards(repaired["shots"])
+                return detach_row_title_cards(repaired)
             return [repaired]
 
         # Strip thinking tags (Qwen <think>...</think> and Gemma <|channel>thought\n...<channel|>)

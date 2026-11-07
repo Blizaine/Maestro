@@ -3,7 +3,27 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## Unreleased
+## [4.1.0] — Dev testing
+
+- Add exact-text CPU title cards to the agent creation workflow and optional
+  detached opening, intertitle and end cards in Director planning. Keep cards
+  separate from character references; wrap opening/end cards around the muxed
+  master to preserve soundtrack synchronization. Audio-locked intertitles need
+  an explicitly reserved Editor timeline.
+- Add agent-authored finishing into a new editable Editor project: ordered
+  clips/cards, narration, music and sound effects, gains, fades, declared speech
+  ducking and optional software export.
+- Add actual-media take inspection with software decoding, five sampled stills,
+  a contact sheet and optional audio preview delivered directly to MCP clients.
+  Creative judgments remain explicit agent observations, never an automatic pass.
+- Add durable, owner-scoped polish budgets for selected Director takes. Reuse
+  original request IDs after uncertain responses; source fingerprints and receipt
+  guards prevent stale or repeated retakes.
+- Accept the pinned PDD adapter's BF16 head tensors and fit them in FP32. Retain
+  PTD's separate format checks. Improve Director source-action actor/origin
+  validation without relaxing genuine ordering or object requirements.
+- Retain H3 reference voice handoff diagnostics without claiming that prompting
+  guarantees identity or voice matching.
 
 - Restore a recorded video's duration when loading MCP/API or older clip
   settings without Studio's duration-planning hint. Do not reinterpret a saved
@@ -14,6 +34,9 @@ pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
   selected count when reusing settings, and retain the managed adapter, guidance
   and video/audio shifts. Other counts are sampling experiments, not trained
   quality presets.
+
+See [v4.1.0 release notes](docs/RELEASE_NOTES_V4.1.0.md) and the
+[agent filmmaking guide](docs/Agent-Filmmaking.md).
 
 ## Repository maintenance - 2026-10-31
 

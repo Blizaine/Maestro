@@ -182,6 +182,7 @@ def make_native_creative_service(
                 "shot_writing": load_guide("director", "minimax_h3_shot_breakdown" if h3 else "video_prompt_rules"),
                 "camera_style": load_guide("director", "camera_style_guidance"),
                 "contract": "Write actual image_prompt/video_prompt values for the server's editorial schedule. The connected agent performs all writing; native compilation and audio/reference contracts still apply.",
+                "title_cards": "Consider opening titles, intertitles and an end card when they improve this film; do not force cards into every request. Author optional top-level plan.title_cards separately from plan.clips, with exact text, optional subtitle, role opening/intertitle/end, style minimal/classic/bold, #RRGGBB background_color/text_color, duration_seconds 0.5..15. An intertitle also requires after_clip, a one-based index into the final prepared scene list. Opening/end cards must not have an anchor. Cards use the CPU renderer with no character references or local writer. Reserve their hold times in the user's requested overall runtime. Audio-locked/seamless projects support outer opening/end cards after the final audio mux, preserving soundtrack synchronization; use Editor finishing for intertitles on reserved song intervals. For artistic cards generate and review an image separately and assemble it using finish_film. Read help(filmmaking).",
             }
             if request.get("workflow") == "director.music_video":
                 bundle["director_guidance"]["music_video_workflow"] = (

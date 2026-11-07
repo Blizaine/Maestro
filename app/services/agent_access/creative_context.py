@@ -29,6 +29,7 @@ WORKFLOWS = {
     "audio.sfx": "Sound effects",
 }
 DIRECTOR_WORKFLOWS = {"director.story", "director.music_video"}
+TITLE_WORKFLOWS = {"title.card"}
 _FALLBACKS = {
     "video.frames": ("ltx2_25", "minimax_h3_fused_turbo", "ltx2_22B_distilled_1_1"),
     "video.references": ("minimax_h3_ref2va_fused_turbo",),
@@ -162,6 +163,7 @@ class CreativeService:
             "version": 1, "defaults": defaults,
             "workflows": [{"id": key, "label": label} for key, label in WORKFLOWS.items()],
             "director_workflows": ["director.story", "director.music_video"],
+            "title_workflows": [{"id": "title.card", "label": "Title card", "requires_model": False}],
             "models": [{key: row.get(key) for key in ("model_type", "name", "workflows", "is_downloaded")} for row in self.model_rows()],
         }
 
@@ -201,6 +203,8 @@ class CreativeService:
         if not isinstance(body, dict):
             raise CreativeError("Use a creative context object.")
         workflow = body.get("workflow")
+        if workflow == "title.card":
+            return self._title_context(body, principal_id)
         if not isinstance(workflow, str) or workflow not in {*WORKFLOWS, *DIRECTOR_WORKFLOWS}:
             raise CreativeError("Choose a supported workflow; get_creation_defaults lists Studio choices.")
         references = body.get("references") or []
@@ -269,14 +273,7 @@ class CreativeService:
         context["guides"] = self.guides(mt, target, {**body, "references": context["references"], "params": context["params"]}, md)
         context["guides"]["reference_context"] = context.get("reference_context", "")
         context["context_revision"] = hashlib.sha256(json.dumps(context, sort_keys=True, default=str).encode()).hexdigest()
-        with self._lock:
-            now = self.clock()
-            for key, (created, owner, _) in list(self._contexts.items()):
-                if now - created > 1800 or owner == principal_id and sum(row[1] == owner for row in self._contexts.values()) >= 16:
-                    self._contexts.pop(key, None)
-            while len(self._contexts) >= 128:
-                self._contexts.popitem(last=False)
-            self._contexts[context["context_id"]] = (now, principal_id, copy.deepcopy(context))
+        self._store_context(context, principal_id)
         # Registry definitions can contain internal disk paths or URL caches.
         # Agents receive curated capabilities/guides; the server retains full IR.
         public = copy.deepcopy(context)
@@ -286,10 +283,54 @@ class CreativeService:
             analysis = public["music_analysis"]
             analysis["beat_count"] = len(analysis.pop("beats", []))
             analysis["downbeat_count"] = len(analysis.pop("downbeats", []))
-            # Exact beat timing remains attached to each editorial window;
-            # avoid repeating the complete song's beat arrays in the prompt.
             analysis.pop("percussion_activity", None)
         return public
+
+    def _store_context(self, context: dict, principal_id: str) -> None:
+        with self._lock:
+            now = self.clock()
+            for key, (created, owner, _) in list(self._contexts.items()):
+                if now - created > 1800 or owner == principal_id and sum(row[1] == owner for row in self._contexts.values()) >= 16:
+                    self._contexts.pop(key, None)
+            while len(self._contexts) >= 128:
+                self._contexts.popitem(last=False)
+            self._contexts[context["context_id"]] = (now, principal_id, copy.deepcopy(context))
+
+    def _title_context(self, body: dict, principal_id: str) -> dict:
+        brief = body.get("brief", "")
+        if not isinstance(brief, str) or len(brief) > 100_000:
+            raise CreativeError("brief must be text up to 100,000 characters.")
+        if body.get("references") or body.get("model_type"):
+            raise CreativeError("Title cards render exact text without a model or character references. Generate artwork separately with image.generate, then pass image_asset in plan.")
+        duration = body.get("duration_seconds", 3)
+        if type(duration) not in (int, float) or not math.isfinite(duration) or not .5 <= duration <= 15:
+            raise CreativeError("Title-card duration must be between 0.5 and 15 seconds.")
+        resolution = body.get("resolution", "1280x720")
+        if not isinstance(resolution, str) or not _RESOLUTION.fullmatch(resolution):
+            raise CreativeError("Title-card resolution must be WIDTHxHEIGHT.")
+        width, height = map(int, resolution.split("x"))
+        if not all(64 <= value <= 4096 and value % 2 == 0 for value in (width, height)):
+            raise CreativeError("Title-card dimensions must be even and between 64 and 4096.")
+        params = body.get("params") or {}
+        if not isinstance(params, dict) or set(params) - {"workspace", "fps"}:
+            raise CreativeError("Title-card params accept workspace and fps only.")
+        fps = params.get("fps", 24)
+        if type(fps) not in (int, float) or not math.isfinite(fps) or not 1 <= fps <= 120:
+            raise CreativeError("Title-card fps must be between 1 and 120.")
+        frames = max(1, round(duration * fps))
+        context = {
+            "version": 1, "context_id": str(uuid.uuid4()), "workflow": "title.card",
+            "model_type": "maestro_title_card", "model": {"name": "Exact-text title card", "requires_model": False},
+            "model_def": {}, "options": {}, "brief": brief, "references": [],
+            "params": {"workspace": params.get("workspace", "default"), "width": width, "height": height, "fps": fps, "duration_seconds": frames / fps},
+            "fps": fps, "selection_source": "cpu_title_renderer", "session_revision": self.session(),
+            "author": "connected_agent", "local_writer": False,
+            "timeline": {"kind": "title_card", "total_frames": frames, "fps": fps, "duration_seconds": frames / fps},
+            "guides": {"title_cards": "Author plan.card with exact text and optional subtitle; role opening/intertitle/end; style minimal/classic/bold; #RRGGBB background_color/text_color. Keep the context duration. No character references or local writer. For artistic cards generate an image with MOSS/FLUX/etc using image.generate, review its spelling and supply its uploaded image_asset alongside card. For animated typography use video.frames and the title guide available through the filmmaking guide. Review before submitting; no render happens during preparation."},
+        }
+        context["context_revision"] = hashlib.sha256(json.dumps(context, sort_keys=True).encode()).hexdigest()
+        self._store_context(context, principal_id)
+        return copy.deepcopy(context)
 
     def lookup(self, context_id: str, principal_id: str) -> dict:
         if not isinstance(context_id, str):

@@ -22,7 +22,7 @@ async def _await(value):
     return await value if inspect.isawaitable(value) else value
 
 
-def create_creative_router(backend, service, *, native_prepare, native_director) -> APIRouter:
+def create_creative_router(backend, service, *, native_prepare, native_director, production=None) -> APIRouter:
     router = APIRouter()
 
     def safe(value, assets=None):
@@ -94,7 +94,23 @@ def create_creative_router(backend, service, *, native_prepare, native_director)
             context = service.lookup(context_id, principal.id)
             if not isinstance(plan, dict):
                 raise CreativeError("plan must be an object containing context_id and the requested native prompts.")
-            if context["workflow"].startswith("director."):
+            if context["workflow"] == "title.card":
+                from services.title_cards import normalize_title_card
+                if set(plan) - {"context_id", "card", "image_asset"} or plan.get("context_id") != context_id:
+                    raise CreativeError("Title plans need matching context_id, card and optional image_asset.")
+                card = normalize_title_card(plan.get("card"))
+                if "duration_seconds" in (plan.get("card") or {}) and abs(card["duration_seconds"] - context["params"]["duration_seconds"]) > 1e-6:
+                    raise CreativeError("Keep the reviewed title-card duration from its context.")
+                card["duration_seconds"] = context["params"]["duration_seconds"]
+                payload = {**context["params"], "card": card}
+                if plan.get("image_asset"):
+                    if production is None:
+                        raise CreativeError("Title rendering is not available on this backend.", 503)
+                    production.media(plan["image_asset"], principal, payload.get("workspace"))
+                    payload["image_asset"] = plan["image_asset"]
+                result = {"params": payload, "plan_metadata": {"workflow": "title.card", "text_preserved": True}}
+                kind = "title_card"
+            elif context["workflow"].startswith("director."):
                 authored = normalize_authored_director_plan(context, plan)
                 payload = {**strip_private_director_fields(context["params"]), **authored["native_params"]}
                 payload.update(video_model=context["model_type"], pipeline_type="music_video" if context["workflow"] == "director.music_video" else "short_film_story", creative_author="connected_agent")
@@ -102,6 +118,17 @@ def create_creative_router(backend, service, *, native_prepare, native_director)
                 # generation object. Prepared plans bypass all local writing.
                 payload["video_params"] = copy.deepcopy(context["params"].get("video_params") or context["params"])
                 payload["_reference_style"] = str(plan.get("reference_style") or "")[:500]
+                if "title_cards" in plan:
+                    from services.director_pipeline import normalize_director_title_cards
+                    cards = normalize_director_title_cards(
+                        plan["title_cards"], clip_count=len(payload.get("prepared_clip_plans") or []),
+                        pipeline_type=payload["pipeline_type"],
+                        has_source_audio=bool(payload.get("audio_path")),
+                        seamless=bool(payload.get("seamless", False)),
+                    )
+                    payload["title_cards"] = cards
+                    authored["plan_metadata"]["title_cards"] = cards
+                    authored["plan_metadata"]["title_card_duration_seconds"] = sum(card["duration_seconds"] for card in cards)
                 result = {"params": payload, "plan_metadata": authored["plan_metadata"]}
                 kind = "director"
             else:
@@ -152,7 +179,7 @@ def create_creative_router(backend, service, *, native_prepare, native_director)
             # Recheck live memory/profile facts; never adapt reviewed external
             # shot/window plans behind the author's back.
             current = copy.deepcopy(context)
-            if service.resolve is not None:
+            if kind != "title_card" and service.resolve is not None:
                 await run_in_threadpool(service.resolve, current, {"params": current["params"], "references": current["references"]})
                 if (
                     current.get("execution_profile") != context.get("execution_profile")
@@ -161,6 +188,10 @@ def create_creative_router(backend, service, *, native_prepare, native_director)
                 ):
                     raise CreativeError("Execution geometry/profile changed; refresh the context and review the plan before submitting.", 409)
             params = copy.deepcopy(prepared["params"])
+            if kind == "title_card":
+                if production is None:
+                    raise CreativeError("Title rendering is not available on this backend.", 503)
+                return await run_in_threadpool(production.create_title, params, principal)
             if kind == "director":
                 return await _await(native_director(params))
             if prepared.get("workspace"):

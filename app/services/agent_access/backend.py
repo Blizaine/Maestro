@@ -639,14 +639,21 @@ def create_router(
     idle_probe: Callable[[], Mapping[str, Any]],
     creative=None,
     native_director=None,
+    production_callbacks=None,
 ) -> APIRouter:
     """Create the model backend's narrow Agent Access API surface."""
     router = APIRouter()
     from .http import management_router
+    production = None
+    if production_callbacks is not None:
+        from .production_routes import ProductionService, create_production_router
+        production = ProductionService(backend, **production_callbacks)
+        router.include_router(create_production_router(production))
     if creative is not None:
         from .creative_routes import create_creative_router
         router.include_router(create_creative_router(
             backend, creative, native_prepare=prepare_generation, native_director=native_director,
+            production=production,
         ))
 
     async def request_console_code():

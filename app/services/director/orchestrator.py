@@ -149,9 +149,20 @@ class DirectorOrchestrator:
             llm_generate=self._generate,
             llm_generate_streaming=self._generate_streaming,
         )
+        reset_plan_metadata = getattr(planner, "reset_plan_metadata", None)
+        if callable(reset_plan_metadata):
+            reset_plan_metadata()
 
         print(f"[Director] Planning with {planner_cls.__name__}...")
         production_plan = planner.plan(**kwargs)
+        get_plan_title_cards = getattr(planner, "get_plan_title_cards", None)
+        if (
+            callable(get_plan_title_cards)
+            and getattr(production_plan, "title_cards", None) is None
+        ):
+            suggestions = get_plan_title_cards()
+            if suggestions:
+                production_plan.title_cards = suggestions
 
         # Validate shot plans
         if self.flags.use_prompt_validation:

@@ -584,6 +584,60 @@ _agent_creative_service = make_native_creative_service(
     probe_audio=lambda path: _probe_audio_duration(path),
 )
 
+class _AgentProductionRequest:
+    """Internal JSON adapter; authorization stays in native route helpers."""
+    def __init__(self, body):
+        self.payload = body
+
+    async def json(self):
+        return self.payload
+
+
+def _agent_production_snapshot(pid):
+    _agent_require_director_pipeline(pid)
+    _init_pipeline()
+    from services.director_pipeline import load_pipeline_state, _find_pipeline_file
+    root = _editor_save_root()
+    state = load_pipeline_state(root, pid)
+    path = _find_pipeline_file(root, pid)
+    if not state or not path:
+        raise HTTPException(404, "Director pipeline not found")
+    result = deepcopy(state)
+    for clip in result.get("clips", []):
+        filename = clip.get("video_filename")
+        if filename:
+            clip["video_path"] = os.path.join(os.path.dirname(path), os.path.basename(filename))
+    return result
+
+
+def _agent_production_rerun(pid, index, body):
+    _agent_require_director_pipeline(pid)
+    evidence = _agent_access_idle_probe()
+    if evidence.get("idle") is not True or evidence.get("certain") is not True:
+        raise HTTPException(409, "Maestro has active or uncertain work; defer polishing")
+    from contextvars import copy_context
+    context = copy_context()
+    job_id = uuid.uuid4().hex
+    _jobs[job_id] = {"id": job_id, "kind": "director_polish", "status": "running", "progress": 0,
+                     "message": "Revising selected Director take", "output_files": [], "error": None,
+                     "params": {"_director_pipeline_id": pid, "_director_detached_operation": True}}
+
+    def work():
+        try:
+            result = asyncio.run(rerun_pipeline_clip_video(pid, index, _AgentProductionRequest(body)))
+            if isinstance(result, JSONResponse) and result.status_code >= 400:
+                raise RuntimeError(result.body.decode("utf-8", errors="replace")[:1000])
+            files = [result["filename"]] if isinstance(result, dict) and result.get("filename") else []
+            _jobs[job_id].update(status="completed", progress=100, message="Selected take revision complete", result=result, output_files=files)
+        except Exception as error:
+            _jobs[job_id].update(status="failed", message=str(error)[:2000], error=str(error)[:2000])
+        finally:
+            _agent_access_backend.snapshot_job(job_id)
+
+    threading.Thread(target=lambda: context.run(work), name=f"agent-polish-{job_id}", daemon=False).start()
+    return {"job_id": job_id, "pipeline_id": pid, "clip_index": index, "status": "running"}
+
+
 api.include_router(_create_agent_access_router(
     _agent_access_backend,
     prepare_generation=lambda body, **kwargs: _prepare_generation_submission(body, **kwargs),
@@ -591,6 +645,13 @@ api.include_router(_create_agent_access_router(
     idle_probe=lambda: _agent_access_idle_probe(),
     creative=_agent_creative_service,
     native_director=lambda body: _start_director_pipeline_payload(body),
+    production_callbacks={
+        "output_root": lambda: _editor_save_root(),
+        "export_editor": lambda body: editor_export(_AgentProductionRequest(body)),
+        "rerun_director": _agent_production_rerun,
+        "director_snapshot": _agent_production_snapshot,
+        "idle_probe": lambda: _agent_access_idle_probe(),
+    },
 ))
 
 
@@ -11528,12 +11589,14 @@ async def rerun_pipeline_clip_video(pid: str, clip_index: int, request: Request)
     body = await request.json()
     base = wgp.server_config.get("save_path", "outputs")
     try:
+        expectation = {"expected_take": body["_expected_take"]} if body.get("_expected_take") is not None else {}
         result = await asyncio.to_thread(
             rerun_clip_video,
             base,
             pid,
             clip_index,
             prompt_override=body.get("prompt"),
+            **expectation,
         )
         return result
     except PipelineBusyError as e:
@@ -30913,10 +30976,10 @@ def get_status(job_id: str):
         "total_steps": j.get("total_steps", 0),
         "phase": j.get("phase", ""),
         "message": j["message"],
-        "output_files": j["output_files"],
+        "output_files": j.get("output_files", []),
         "finishing_warnings": j.get("finishing_warnings", []),
         "reconstruction_report": j.get("reconstruction_report"),
-        "error": j["error"],
+        "error": j.get("error"),
         "generation_details": public_generation_details(j),
         "viggle_preparation": j.get("viggle_preparation"),
         "enhancement": public_enhancement(j.get("enhancement"), summary=True),

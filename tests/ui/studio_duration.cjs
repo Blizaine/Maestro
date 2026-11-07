@@ -527,12 +527,17 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
     console.log('Experimental H3: both modes submit 719-frame single passes, toggle off and Auto restore native limits');
     await page.evaluate(() => {
       const s = window.store.getState();
+      const source = '/uploads/control.mp4';
+      const sourceSeconds = 9.584;
       window.store.setState({studioVideoWorkflow: 'animate',
         modelOptions: {...s.modelOptions, model_type: 'viggle_animate', architecture: 'viggle_animate',
           omni_reference: false, frames_maximum: 124, sliding_window_memory_policy: null,
           sliding_window_defaults: {...s.modelOptions.sliding_window_defaults, window_max: 124}},
-        params: {...s.params, model_type: 'viggle_animate', video_guide: '/uploads/control.mp4',
-          _viggle_source_seconds: 9.584, _duration_planning_mode: 'auto'}});
+        params: {...s.params, model_type: 'viggle_animate', video_guide: source,
+          _viggle_source_seconds: sourceSeconds,
+          _viggle_source_info: {source, workspace: s.activeWorkspace, duration_seconds: sourceSeconds},
+          _viggle_trim_start: 0, _viggle_trim_end: sourceSeconds,
+          _duration_planning_mode: 'auto'}});
     });
     await page.waitForTimeout(100);
     assert.equal(await page.evaluate(() => window.store.getState().params.video_length), 230);
