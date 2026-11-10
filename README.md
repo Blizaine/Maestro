@@ -37,14 +37,15 @@ Runtime upgrades are explicit menu actions. A missing performance-runtime marker
 does not automatically run Update when you open the launcher. If offered,
 **Start with Compatibility Runtime** keeps the existing runtime available.
 
-### v4.1.0 (2026-11-10)
+### v4.1.1 (2026-11-10)
 
+- **H3 Image memory fix:** Auto-Tune streams model weights for reference-heavy jobs to free VRAM for the requested canvas and references.
 - **MiniMax H3 Image (Experimental):** six-step text-to-image and editing with up to 16 ordered references, with native 1K, 2K and 4K canvases.
 - **Agent-led filmmaking:** exact-text title cards, optional Director opening/end cards and intertitles, editable finishing with narration/music/effects, and actual-media review with bounded selected-take polishing.
 - **Video workflows and finishing:** H3 Remake, Regenerate 2K, new H3 accelerators, Director final takes and RelayVSR 2× upscaling.
 - **Reliability and experiments:** PDD BF16 compatibility, Director action validation, H3 reference handoff diagnostics, restored MCP clip durations and experimental Pika 4–12 step controls.
 
-Maestro v4.1.0 is available on **Main and Dev**. See the [release notes](docs/RELEASE_NOTES_V4.1.0.md) and [agent filmmaking guide](docs/Agent-Filmmaking.md) for usage and limits.
+Maestro v4.1.1 is available on **Main and Dev**. See the [v4.1 release notes](docs/RELEASE_NOTES_V4.1.0.md) and [agent filmmaking guide](docs/Agent-Filmmaking.md) for usage and limits.
 
 ### v4.0.0 (2026-11-04)
 

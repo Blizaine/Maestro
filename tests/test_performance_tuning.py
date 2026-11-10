@@ -335,6 +335,40 @@ class PlannerTests(unittest.TestCase):
         constrained = build_performance_plan(hw, config, model, PARAMS, GUARD, available_ram_gb=40)
         self.assertLess(constrained["reserved_ram_fraction"], .4)
 
+    def test_h3_image_auto_streams_reference_heavy_canvases(self):
+        hw, config = setup()
+        model = {"architecture": "h3_image"}
+        for resolution, references, profile in (
+            ("2752x1536", 10, 2),
+            ("5472x3072", 10, 2),
+            ("4096x4096", 2, 2),
+            ("2048x2048", 2, 1),
+            ("4096x4096", 0, 1),
+        ):
+            with self.subTest(resolution=resolution, references=references):
+                params = {"model_type": "h3_image", "resolution": resolution,
+                          "image_refs": [f"ref-{index}.png" for index in range(references)]}
+                before = copy.deepcopy(params)
+                plan = build_performance_plan(hw, config, model, params, output_type="image",
+                                              profile=1, available_ram_gb=55, own_pinned_gb=25)
+                self.assertTrue(plan["applied"])
+                self.assertEqual(plan["profile"], profile)
+                self.assertEqual(params, before)
+        self.assertEqual(config["image_profile"], 1)
+
+    def test_h3_image_reference_guard_respects_manual_placement_and_host_ram(self):
+        hw, config = setup()
+        model = {"architecture": "h3_image"}
+        params = {"model_type": "h3_image", "resolution": "2752x1536", "image_refs": ["ref.png"] * 10}
+        low_ram = build_performance_plan(hw, config, model, params, output_type="image",
+                                         profile=1, available_ram_gb=24)
+        self.assertEqual(low_ram["profile"], 5)
+        manual = build_performance_plan(hw, config, model, {**params, "override_profile": 1},
+                                        output_type="image", profile=1)
+        self.assertFalse(manual["applied"])
+        self.assertEqual(manual["profile"], 1)
+        self.assertTrue(manual["warnings"])
+
 
 class LearningTests(unittest.TestCase):
     def setUp(self):

@@ -4,6 +4,12 @@ Every dated update announcement from Maestro's first public release onward, newe
 
 [Back to the README](../README.md#updates) · [Detailed changelog](../CHANGELOG.md)
 
+### v4.1.1 (2026-11-10)
+
+Auto-Tune now switches reference-heavy MiniMax H3 Image jobs to a streaming
+profile when needed, retaining the requested canvas and references. Available
+on **Main and Dev**.
+
 ### v4.1.0 (2026-11-10)
 
 - **MiniMax H3 Image (Experimental):** six-step text-to-image and editing with up to 16 ordered references, with native 1K, 2K and 4K canvases.

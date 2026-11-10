@@ -3,6 +3,12 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [4.1.1] — 2026-11-10
+
+- Reserve GPU memory for reference-heavy MiniMax H3 Image renders. Auto-Tune
+  switches fully resident models to a streaming profile based on available
+  VRAM and RAM, retaining the requested canvas and all references.
+
 ## [4.1.0] — 2026-11-10
 
 - Add experimental MiniMax H3 Image to Studio Image Generate. Generate from text
