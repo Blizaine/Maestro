@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 from models.minimax_h3.speakers import is_h3_production_label
 from services.h3_performance_audio import (
-    PERFORMANCE_AUDIO_GUIDANCE,
+    performance_audio_guidance,
     discover_h3_requested_static_holds,
     has_h3_performance_audio,
     performance_audio_window_guidance,
@@ -13329,6 +13329,7 @@ def plan_h3_story_segments(
     llm_generate: Callable[..., str] | None = None,
     lora_system_hint: str = "",
     resume: dict | None = None,
+    source_audio_context_windows: list[str] | None = None,
 ) -> dict[str, Any]:
     """Create a compact ledger and expand one validated local segment at a time."""
 
@@ -13351,6 +13352,7 @@ def plan_h3_story_segments(
             image_reference_roles=image_reference_roles,
             nsfw=nsfw, llm_generate=generate,
             fidelity_retries=retry_limit,
+            source_audio_context_windows=source_audio_context_windows,
         )
         return _render_h3_story_segments(
             context, generate=generate, resume=resume,
@@ -13373,6 +13375,7 @@ def _prepare_h3_story_context(
     llm_generate: Callable[..., str] | None,
     image_reference_roles: list[dict[str, Any]] | None = None,
     fidelity_retries: int = 1,
+    source_audio_context_windows: list[str] | None = None,
 ) -> dict[str, Any]:
     from services import llm_service
 
@@ -13429,12 +13432,17 @@ def _prepare_h3_story_context(
     planning_diagnostics: list[str] = []
     planning_notes: list[str] = []
     if not start_frame_supplied and image_reference_roles:
+        original_reference_context = reference_context
         from services.h3_reference_scope import prepare_scoped_reference_context
         scoped = prepare_scoped_reference_context(
             generate, prompt, reference_context, image_paths, image_reference_roles,
         )
         if scoped["scoped"]:
             reference_context = scoped["context"]
+            if source_audio_context_windows and "SOURCE_AUDIO_TRANSCRIPT_CONTEXT" not in reference_context:
+                marker = original_reference_context.find("SOURCE_AUDIO_TRANSCRIPT_CONTEXT")
+                if marker >= 0:
+                    reference_context += "\n\n" + original_reference_context[marker:]
             image_paths = scoped["image_paths"]
             if scoped.get("warning"):
                 planning_warnings.append(scoped["warning"])
@@ -13711,8 +13719,8 @@ def _prepare_h3_story_context(
         from services.adaptive_enhancement import adaptive_writing_guide
         ledger_guide += "\n\n" + adaptive_writing_guide(prompt)
     if audio_driven:
-        ledger_guide += "\n\n" + PERFORMANCE_AUDIO_GUIDANCE
-        ledger_prompt += "\n\n" + PERFORMANCE_AUDIO_GUIDANCE
+        ledger_guide += "\n\n" + performance_audio_guidance(reference_context)
+        ledger_prompt += "\n\n" + performance_audio_guidance(reference_context)
         if performance_clock:
             ledger_prompt += "\n\nEXACT AUDIO / VISUAL WINDOW CLOCK:\n" + "\n".join(performance_clock)
     ledger_schema = (
@@ -14240,6 +14248,7 @@ def _prepare_h3_story_context(
         )
     return {
         "action_first": action_first,
+        "source_audio_context_windows": list(source_audio_context_windows or []),
         "allow_generated_dialogue": allow_generated_dialogue,
         "camera_coverage": camera_coverage,
         "catalog": catalog,
@@ -14315,7 +14324,9 @@ def _render_h3_story_segments(
         from services.adaptive_enhancement import adaptive_writing_guide
         segment_guide += "\n\n" + adaptive_writing_guide(prompt)
     if audio_driven:
-        segment_guide += "\n\n" + PERFORMANCE_AUDIO_GUIDANCE
+        segment_guide += "\n\n" + performance_audio_guidance(
+            "SOURCE_AUDIO_TRANSCRIPT_CONTEXT" if context.get("source_audio_context_windows") else "",
+        )
     cast_names = list(source_intent.get("cast_names") or [])
     dialogue_by_id = {
         str(item.get("dialogue_id") or "").upper(): item
@@ -14952,7 +14963,12 @@ def _render_h3_story_segments(
                 + (f"Required visible ending: {ledger.get('required_final_outcome')}." if segment_number == segment_count else "")
             )
         if audio_driven:
-            segment_prompt += "\n\n" + PERFORMANCE_AUDIO_GUIDANCE
+            segment_prompt += "\n\n" + performance_audio_guidance(
+                "SOURCE_AUDIO_TRANSCRIPT_CONTEXT" if context.get("source_audio_context_windows") else "",
+            )
+            audio_context_windows = context.get("source_audio_context_windows") or []
+            if index < len(audio_context_windows):
+                segment_prompt += "\n\nMATCHING SOURCE AUDIO CONTEXT:\n" + audio_context_windows[index]
             performance_clock = context.get("performance_audio_clock") or []
             if index < len(performance_clock):
                 segment_prompt += "\n\n" + performance_clock[index]

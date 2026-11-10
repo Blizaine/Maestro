@@ -125,7 +125,8 @@ class PikaFlexRuntimeTests(unittest.TestCase):
                 namespace = {
                     "__package__": "models.minimax_h3", "math": math,
                     "self": SimpleNamespace(pika_flex=pika, _pdd_lora_active=False,
-                                            viggle=False, audio_only=False),
+                                            viggle=False, audio_only=False,
+                                            remake_mode=None, regenerate_ic=False),
                     "frame_num": frames, "fps": 24, "_face_refinement": None,
                     "minimax_h3_extended_duration": False, "MINIMAX_H3_FPS": 24,
                     "MINIMAX_H3_MIN_DURATION": 5, "MINIMAX_H3_MAX_DURATION": 15,

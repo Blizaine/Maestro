@@ -69,6 +69,23 @@ export function getSidebarDialogPosition({
       width,
       maxHeight: Math.max(44, bottomEdge - viewportTop - 18),
     }
+  } else if (variant === 'workflow' && trigger) {
+    // Workflow choices belong beside their selector, including on phones.
+    // Only footer settings/libraries use the mobile bottom-docked treatment.
+    const visibleTop = viewportTop + 8
+    const visibleBottom = viewportTop + viewportHeight - 8
+    const minimumSpace = Math.min(160, Math.max(0, viewportHeight - 16))
+    const candidateTop = Math.max(visibleTop, trigger.bottom + 6)
+    // Keyboard panning or a short landscape viewport can hide the trigger.
+    // Use the visible viewport rather than placing an unusable sliver below it.
+    const top = visibleBottom - candidateTop >= minimumSpace ? candidateTop : visibleTop
+    const width = Math.min(trigger.width, Math.max(0, windowWidth - 16))
+    bounds = {
+      left: Math.max(8, Math.min(trigger.left, windowWidth - width - 8)),
+      top,
+      width,
+      maxHeight: Math.max(0, visibleBottom - top),
+    }
   } else if (mobile) {
     const left = variant === 'settings' && sidebar ? Math.max(8, sidebar.left + 8) : 8
     const right = variant === 'settings' && sidebar ? Math.min(windowWidth - 8, sidebar.right - 8) : windowWidth - 8
@@ -77,13 +94,6 @@ export function getSidebarDialogPosition({
       width: right - left,
       bottom: Math.max(0, windowHeight - viewportHeight - viewportTop) + 8,
       maxHeight: viewportHeight - 16,
-    }
-  } else if (variant === 'workflow' && trigger) {
-    bounds = {
-      left: trigger.left,
-      top: trigger.bottom + 6,
-      width: trigger.width,
-      maxHeight: Math.max(120, viewportHeight + viewportTop - trigger.bottom - 18),
     }
   } else if (variant === 'library' && sidebar && windowWidth - sidebar.right >= 324) {
     bounds = {

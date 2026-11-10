@@ -76,6 +76,7 @@ def validate_methods(spatial="", temporal="", *, image=False, options=None, chec
     scale = dlss_scale(spatial)
     if spatial and scale is None and spatial not in (
         "lanczos1.5", "lanczos2", "lanczos3", "lanczos4", "vae1", "vae2",
+        "relayvsr1", "relayvsr1.5", "relayvsr2", "relayvsr2.5", "relayvsr3", "relayvsr3.5", "relayvsr4",
         "flashvsr2", "flashvsr3", "flashvsr4", "flashvsr2pass2", "flashvsr2pass4",
         "flashvsrplus2", "flashvsrplus3", "flashvsrplus4", "flashvsrplus2pass2", "flashvsrplus2pass4",
     ):

@@ -4,15 +4,13 @@ import {
   FlaskConical,
   Globe,
   Images,
-  Paintbrush,
+  Film,
   PanelsTopLeft,
-  RefreshCw,
   Scan,
   Sparkles,
   StepForward,
   Type,
   UsersRound,
-  WandSparkles,
 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import type { StudioVideoWorkflow } from '../../types'
@@ -22,7 +20,8 @@ import {
   type StudioWorkflowOption,
 } from './StudioWorkflowSelect'
 
-type ActiveVideoWorkflow = StudioVideoWorkflow | 'legacy_multishot' | 'legacy_inpaint'
+type MenuVideoWorkflow = Exclude<StudioVideoWorkflow, 'retake' | 'prompt_edit' | 'repaint' | 'recast'>
+type ActiveVideoWorkflow = MenuVideoWorkflow | 'edit_clip' | 'legacy_multishot' | 'legacy_inpaint'
 type DisplayVideoWorkflow = ActiveVideoWorkflow | 'worlds'
 
 const VIDEO_WORKFLOW_GROUPS: StudioWorkflowGroup<DisplayVideoWorkflow>[] = [
@@ -38,14 +37,16 @@ const VIDEO_WORKFLOW_GROUPS: StudioWorkflowGroup<DisplayVideoWorkflow>[] = [
     ],
   },
   {
-    label: 'Transform',
+    label: 'Animate',
     options: [
-      { value: 'animate', label: 'Animate', description: 'Viggle · animate an edited frame with a control video', icon: UsersRound },
-      { value: 'retake', label: 'Retake', description: 'Regenerate a selected section', icon: RefreshCw },
-      { value: 'prompt_edit', label: 'Prompt Edit', description: 'Modify a clip with natural language', icon: WandSparkles },
-      { value: 'outpaint', label: 'Outpaint', description: 'Expand or reframe the canvas', icon: Scan },
-      { value: 'repaint', label: 'Repaint', description: 'Replace objects or regions', icon: Paintbrush },
-      { value: 'recast', label: 'Recast', description: 'Replace people or characters', icon: UsersRound },
+      { value: 'animate', label: 'Animate', description: 'Animate an edited frame with a control video', icon: UsersRound },
+    ],
+  },
+  {
+    label: 'Edit',
+    options: [
+      { value: 'edit_clip', label: 'Edit Clip', description: 'Retake, replace people, or edit a scene in an existing clip', icon: Film },
+      { value: 'outpaint', label: 'Outpaint', description: 'Expand or reframe the canvas around a clip', icon: Scan },
     ],
   },
   {
@@ -58,8 +59,17 @@ const VIDEO_WORKFLOW_GROUPS: StudioWorkflowGroup<DisplayVideoWorkflow>[] = [
 ]
 
 const OPTIONS = Object.fromEntries(
-  VIDEO_WORKFLOW_GROUPS.flatMap(group => group.options).map(option => [option.value, option]),
-) as Record<StudioVideoWorkflow, StudioWorkflowOption<DisplayVideoWorkflow>>
+  VIDEO_WORKFLOW_GROUPS.flatMap(group => group.options)
+    .filter(option => option.value !== 'edit_clip')
+    .map(option => [option.value, option]),
+) as Record<MenuVideoWorkflow, StudioWorkflowOption<DisplayVideoWorkflow>>
+
+const EDIT_CLIP: StudioWorkflowOption<DisplayVideoWorkflow> = {
+  value: 'edit_clip',
+  label: 'Edit Clip',
+  description: 'Retake, replace people, or edit a scene in an existing clip',
+  icon: Film,
+}
 
 const LEGACY_MULTISHOT: StudioWorkflowOption<DisplayVideoWorkflow> = {
   value: 'legacy_multishot',
@@ -86,11 +96,8 @@ function deriveActiveWorkflow(
   if (generationMode === 'tools' && toolsTool === 'film_grain') return 'film_grain'
   if (generationMode === 'avatar') {
     if (editSubMode === 'inpaint') return 'legacy_inpaint'
-    if (editSubMode === 'edit_anything') return 'prompt_edit'
-    if (editSubMode === 'restyle') return 'repaint'
     if (editSubMode === 'outpaint') return 'outpaint'
-    if (editSubMode === 'recast') return 'recast'
-    return 'retake'
+    return 'edit_clip'
   }
   // Titles has its own UI and always uses the regular video output path. Its
   // durable workflow marker wins over a stale specialized image_mode value.
@@ -148,7 +155,9 @@ export function VideoWorkflowSelector({ onOpenWorlds }: { onOpenWorlds?: () => v
     ? LEGACY_MULTISHOT
     : activeWorkflow === 'legacy_inpaint'
       ? LEGACY_INPAINT
-      : OPTIONS[activeWorkflow]
+      : activeWorkflow === 'edit_clip'
+        ? EDIT_CLIP
+        : OPTIONS[activeWorkflow]
 
   // Gallery loads and Edit → Image round-trips can set the legacy engine
   // modes directly. Remember any regular workflow they land on so returning
@@ -157,6 +166,7 @@ export function VideoWorkflowSelector({ onOpenWorlds }: { onOpenWorlds?: () => v
     if (
       activeWorkflow !== 'legacy_multishot'
       && activeWorkflow !== 'legacy_inpaint'
+      && activeWorkflow !== 'edit_clip'
       && (activeWorkflow !== rememberedWorkflow
         || (activeWorkflow === 'animate' && viggleAvailable && modelType !== 'viggle_animate')
         || (activeWorkflow === 'titles' && imageMode !== 0))
@@ -170,13 +180,23 @@ export function VideoWorkflowSelector({ onOpenWorlds }: { onOpenWorlds?: () => v
       value={activeWorkflow}
       activeOption={activeOption}
       groups={groups}
-      hint="Frames · References · Transform · Finish"
+      hint="Create · Animate · Edit · Finish"
       onChange={workflow => {
         if (workflow === 'worlds') {
           onOpenWorlds?.()
           return
         }
         if (workflow === 'legacy_multishot' || workflow === 'legacy_inpaint') return
+        if (workflow === 'edit_clip') {
+          const state = useStore.getState()
+          if (state.generationMode !== 'avatar') state.setGenerationMode('avatar')
+          if (!['retake', 'recast', 'edit_anything', 'restyle'].includes(state.editSubMode)) {
+            useStore.getState().setEditSubMode('retake')
+            } else {
+              useStore.getState().setEditSubMode(state.editSubMode)
+          }
+          return
+        }
         setWorkflow(workflow)
       }}
     />

@@ -127,10 +127,16 @@ export interface GenerateParams {
   guidance_phases?: number
   video_prompt_type?: string
   audio_prompt_type?: string
+  /** Include matching words from an exact source soundtrack as video prompt context. */
+  source_audio_transcript_in_prompt?: boolean
+  /** Make the exact source soundtrack transcript available to prompt enhancement. */
+  source_audio_transcript_for_enhancement?: boolean
   image_prompt_type?: string
   input_video_strength?: number
   flow_shift?: number
   audio_guide?: string
+  /** Source audio frame offset for aligned multi-clip transcript windows. */
+  audio_frame_offset?: number
   audio_scale?: number
   /** Optional LTX ID-LoRA voice identity reference. */
   voice_reference?: string
@@ -148,6 +154,11 @@ export interface GenerateParams {
   /** Maestro's friendly UI state for MiniMax H3 FL2VA control-video editing. */
   minimax_h3_control_visual_mode?: 'prompt' | 'whole' | 'inside' | 'outside'
   image_refs?: string[]
+  /** Source-video timestamps paired with ordered H3 Remake reference frames. */
+  viggle_remake_frame_times?: number[]
+  /** H3 Remake trim bounds in absolute source-video seconds. */
+  viggle_trim_start?: number
+  viggle_trim_end?: number
   frames_positions?: string
   injection_strength?: number
   settings_version?: number
@@ -269,7 +280,7 @@ export interface GenerateParams {
   minimax_h3_sequence_memory_override?: boolean
   /** Add bounded generated look/blocking references between sequence clips. */
   minimax_h3_sequence_continuity?: boolean
-  minimax_h3_text_encoder?: 'nvfp4_awq' | 'gguf_q2_k' | 'gguf_q4_k_m' | 'int8' | 'bf16'
+  minimax_h3_text_encoder?: 'nvfp4_awq' | 'gguf_q2_k' | 'gguf_q4_k_m' | 'int8' | 'bf16' | 'distilled_4b'
   minimax_h3_video_vae?: 'auto' | 'full' | 'full_int8' | 'lightvae' | 'lightvae_int8'
   /** LTX-2.5 video decoder. Fast ConvVAE is recommended; NAD is experimental. */
   ltx25_video_vae?: 'fast' | 'nad'
@@ -921,6 +932,13 @@ export interface EditorCanvas {
 
 export type EditorUpscaleMethod =
   | ''
+  | 'relayvsr1'
+  | 'relayvsr1.5'
+  | 'relayvsr2'
+  | 'relayvsr2.5'
+  | 'relayvsr3'
+  | 'relayvsr3.5'
+  | 'relayvsr4'
   | 'flashvsr2'
   | 'flashvsr3'
   | 'flashvsr4'

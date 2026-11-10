@@ -102,9 +102,9 @@ async function main() {
     await worlds.waitFor();
     const placement = await dialog.evaluate(element => {
       const titles = [...element.querySelectorAll('div')].filter(item =>
-        item.childElementCount === 0 && ['Create', 'Transform'].includes(item.textContent.trim()));
+        item.childElementCount === 0 && ['Create', 'Animate', 'Edit', 'Finish'].includes(item.textContent.trim()));
       const createTitle = titles.find(item => item.textContent.trim() === 'Create');
-      const transformTitle = titles.find(item => item.textContent.trim() === 'Transform');
+      const editTitle = titles.find(item => item.textContent.trim() === 'Edit');
       const createGroup = createTitle.parentElement;
       const labels = [...createGroup.querySelectorAll(':scope > button')]
         .map(button => button.querySelector('span.min-w-0 > span')?.textContent.trim());
@@ -113,12 +113,12 @@ async function main() {
       return {
         labels,
         inCreate: createGroup.contains(worldsOption),
-        beforeTransform: Boolean(worldsOption.compareDocumentPosition(transformTitle) & Node.DOCUMENT_POSITION_FOLLOWING),
+        beforeEdit: Boolean(worldsOption.compareDocumentPosition(editTitle) & Node.DOCUMENT_POSITION_FOLLOWING),
       };
     });
     assert.deepEqual(placement.labels.slice(-2), ['Titles', 'Worlds'], 'Worlds is immediately after Titles at the end of Create');
     assert.equal(placement.inCreate, true);
-    assert.equal(placement.beforeTransform, true, 'Create appears before Transform');
+    assert.equal(placement.beforeEdit, true, 'Create appears before the edit workflows');
     const beforeOpen = await page.evaluate(() => {
       const state = window.store.getState();
       return {sidebarMode: state.sidebarMode, generationMode: state.generationMode,
@@ -150,6 +150,17 @@ async function main() {
       ['studio_video'], 'Shared mode/default model groups omit world-only models');
     assert.equal(await page.getByRole('button', {name: 'Need model'}).isDisabled(), true,
       'Studio generation stays blocked for a stale world-model selection');
+    assert.deepEqual(await page.evaluate(() => {
+      const family = 'minimax_h3';
+      const models = ['minimax_h3', 'viggle_remake_swap', 'viggle_remake_edit', 'minimax_h3_regenerate_ic']
+        .map(model_type => ({model_type, architecture: model_type, family}));
+      const ids = (mode, task) => window.getModelsForFamily(family, models, mode, task).map(model => model.model_type);
+      return {frames: ids('video'), people: ids('avatar', 'recast'), scene: ids('avatar', 'edit_anything')};
+    }), {
+      frames: ['minimax_h3'],
+      people: ['viggle_remake_swap'],
+      scene: ['viggle_remake_edit'],
+    }, 'Edit Clip filters the normal model picker by task and keeps dedicated finishers out of Frames');
     assert.deepEqual(errors, [], 'The mounted components have no runtime errors');
     await page.close();
   } finally {

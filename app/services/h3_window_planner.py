@@ -259,6 +259,7 @@ def h3_window_plan_signature(
     planning_style: str = "faithful",
     injected_keyframes: list[dict[str, Any]] | None = None,
     lora_system_hint: str = "",
+    source_audio_transcript: dict | None = None,
 ) -> str:
     """Fingerprint every input that can change a window plan."""
 
@@ -291,6 +292,9 @@ def h3_window_plan_signature(
     guidance_fingerprint = lora_guidance_fingerprint(lora_system_hint)
     if guidance_fingerprint:
         payload["lora_guidance_fingerprint"] = guidance_fingerprint
+    if source_audio_transcript is not None:
+        from services.studio_audio_context import transcript_fingerprint
+        payload["source_audio_transcript"] = transcript_fingerprint(source_audio_transcript)
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:24]
 
@@ -1404,10 +1408,12 @@ def plan_h3_sliding_windows(
     planning_style: str = "faithful",
     lora_system_hint: str = "",
     retry_plan: dict[str, Any] | None = None,
+    source_audio_transcript: dict | None = None,
 ) -> dict[str, Any]:
     """Use Maestro's configured LLM to create and compile an H3 window plan."""
 
-    raw_prompt = str(prompt or "").strip()
+    from services.studio_audio_context import strip_window_transcript
+    raw_prompt = strip_window_transcript(str(prompt or ""))
     prompt = recover_h3_plain_story(raw_prompt)
     source_intent = extract_h3_source_intent(prompt)
     if prompt != raw_prompt and "subject_definitions:" in raw_prompt.casefold():
@@ -1445,6 +1451,7 @@ def plan_h3_sliding_windows(
         planning_style=planning_style,
         injected_keyframes=injected_keyframes,
         lora_system_hint=lora_system_hint,
+        source_audio_transcript=source_audio_transcript,
     )
     guidance_fingerprint = lora_guidance_fingerprint(lora_system_hint)
     from services.h3_plan_retry import finish_retry_plan, retry_fingerprint, validate_retry_plan
@@ -1469,7 +1476,12 @@ def plan_h3_sliding_windows(
             **({"lora_guidance_fingerprint": guidance_fingerprint} if guidance_fingerprint else {}),
         }
 
-    media_context = []
+    from services.studio_audio_context import (
+        conditioning_transcript_windows, transcript_plan_context, transcript_window_contexts,
+    )
+    audio_windows = conditioning_transcript_windows(boundaries, overlap_frames=overlap_frames, fps=fps)
+    audio_context = transcript_plan_context(source_audio_transcript, audio_windows)
+    media_context = [audio_context] if audio_context else []
     if has_start_image:
         media_context.append("<Picture 1> is the exact first frame and visual identity/scene anchor.")
     if has_end_image:
@@ -1491,6 +1503,8 @@ def plan_h3_sliding_windows(
     if planning_style == "adaptive":
         from services.adaptive_enhancement import adaptive_dialogue_expected
         expect_dialogue = adaptive_dialogue_expected(prompt)
+    if source_audio_transcript is not None:
+        expect_dialogue = False  # The supplied waveform, not a new script, owns speech.
     resolved_coverage = _infer_camera_coverage(prompt, camera_coverage)
     story_ledger: dict[str, Any] | None = None
     camera_checkpoint = None
@@ -1508,6 +1522,7 @@ def plan_h3_sliding_windows(
             mode="sliding_window",
             camera_coverage=resolved_coverage,
             reference_context=" ".join(media_context),
+            source_audio_context_windows=transcript_window_contexts(source_audio_transcript, audio_windows),
             expect_dialogue=expect_dialogue,
             planning_style=planning_style,
             image_paths=image_paths,

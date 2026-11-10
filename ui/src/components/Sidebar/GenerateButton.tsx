@@ -178,6 +178,35 @@ export function GenerateButton({ stretch = false, submission }: GenerateButtonPr
       || (s.params.audio_prompt_type === 'A' && !s.params.audio_guide)))
   const viggleSourcePending = useStore(s => s.generationMode === 'video' && s.studioVideoWorkflow === 'animate'
     && !!s.params.video_guide && !viggleSourceReady(s.params, s.activeWorkspace))
+  const remakeInputError = useStore(s => {
+    const modelType = s.params.model_type
+    const requiredSubMode = modelType === 'viggle_remake_swap' ? 'recast'
+      : modelType === 'viggle_remake_edit' ? 'edit_anything' : null
+    if (!requiredSubMode) return null
+    if (s.generationMode !== 'avatar' || s.editSubMode !== requiredSubMode) {
+      return requiredSubMode === 'recast'
+        ? 'Choose Replace People for the selected Remake model.'
+        : 'Choose Edit Scene → Prompt Edit for the selected Remake model.'
+    }
+    if (!String(s.params.prompt || '').trim()) return 'Describe the changes you want in the edited clip.'
+    const paths = Array.isArray(s.params.image_refs) ? s.params.image_refs.filter(Boolean) : []
+    const times = Array.isArray(s.params.viggle_remake_frame_times) ? s.params.viggle_remake_frame_times : []
+    if (!s.editVideoPath || !s.params.video_guide) return 'Add a source video for the Remake edit.'
+    if (paths.length < 1 || paths.length > 4) return 'Add 1–4 edited reference frames.'
+    if (times.length !== paths.length) return 'Set a timestamp for each reference frame.'
+    if (!Number.isFinite(s.editVideoDuration) || s.editVideoDuration <= 0) {
+      return 'Wait for the source video duration to load.'
+    }
+    if (s.editVideoDuration < 3.75) return 'Choose a source video at least 3.75 seconds long.'
+    const start = Number(s.params.viggle_trim_start ?? 0)
+    const end = Number(s.params.viggle_trim_end ?? (345 / 24))
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0
+      || end - start < 3.75 || end > Math.min(s.editVideoDuration, 345 / 24) + 0.000001
+      || times.some(time => !Number.isFinite(Number(time)) || Number(time) < start || Number(time) > end)) {
+      return 'Keep every frame timestamp inside the selected source range.'
+    }
+    return null
+  })
   const createWorkflow = studioVideoWorkflow === 'references' ? 'references'
     : studioVideoWorkflow === 'avatar' ? 'avatar' : 'frames'
   const studioMediaIntent = {
@@ -237,7 +266,7 @@ export function GenerateButton({ stretch = false, submission }: GenerateButtonPr
     && Object.values(imagePadding).every(value => value === 0)
   const incompatibleImageModel = generationMode === 'image'
     && !modelSupportsImageWorkflow(currentModel, imageWorkflow, imageRefs.length > 0)
-  const studioBlocked = controlsPending || needsEnabledModel || viggleMissing || viggleSourcePending || needsCreateModel || needsWorkflowModel || !!avatarInputError
+  const studioBlocked = controlsPending || needsEnabledModel || viggleMissing || viggleSourcePending || needsCreateModel || needsWorkflowModel || !!avatarInputError || !!remakeInputError
     || needsGuidance || needsImage || needsReference || needsOutpaintSource || needsOutpaintArea
     || needsImageGenerateSource || needsImageWorkflowSource || needsImageMask
     || needsImageOutpaintArea || incompatibleImageModel
@@ -282,6 +311,8 @@ export function GenerateButton({ stretch = false, submission }: GenerateButtonPr
       ? 'Need model'
       : avatarInputError
         ? avatarInputError.startsWith('Choose') ? 'Choose speakers' : 'Need inputs'
+      : remakeInputError
+        ? 'Need inputs'
       : needsGuidance
         ? 'Need frame'
       : needsImage
@@ -305,6 +336,8 @@ export function GenerateButton({ stretch = false, submission }: GenerateButtonPr
       ? 'Choose a larger output aspect or resize the source to create an area for Outpaint to generate.'
       : avatarInputError
         ? avatarInputError
+      : remakeInputError
+        ? remakeInputError
       : needsWorkflowModel
         ? 'Choose a video model for this workflow. LongCat Avatar uses the Avatar workflow.'
       : needsCreateModel

@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef, Component, type ReactNode } from 'react'
-import { X, ChevronDown, ChevronRight, Play, ImageIcon, Check, AlertTriangle, Clock, Brain, Sparkles, Loader2, Camera, Film, Combine, Pencil, Trash2 } from 'lucide-react'
+import { X, ChevronDown, ChevronRight, Play, ImageIcon, Check, AlertTriangle, Clock, Brain, Sparkles, Loader2, Camera, Film, Combine, Pencil, Trash2, Eye, FileVideo, Volume2 } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
-import { fetchWriterDrafts, getFileUrl, updateClipPrompt } from '../../api/client'
+import { fetchModelOptions, fetchWriterDrafts, getFileUrl, updateClipPrompt } from '../../api/client'
 import { LoadWriterDraftHistory } from '../WriterDraftHistory'
 import type { PipelineClipState, SavedPipelineState } from '../../types'
+import { createDirectorFinal, inspectDirectorShot, selectDirectorShotTake, type DirectorShotInspection, type DirectorTake } from './directorDraftFinalApi'
+import type { ModelOptions, ResolutionPreset } from '../../types'
 
 /** Safely coerce any value to a displayable string */
 function safeStr(val: unknown): string {
@@ -43,6 +45,207 @@ function formatDate(ts: number): string {
   return new Date(ts * 1000).toLocaleString(undefined, {
     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
   })
+}
+
+type ReviewablePipelineClip = PipelineClipState & {
+  takes?: DirectorTake[]
+  selected_take_id?: string | null
+}
+
+type DraftFinalPipeline = SavedPipelineState & {
+  render_stage?: 'draft' | 'final' | string | null
+  draft_final?: {
+    stage?: 'draft' | 'final' | string
+    source_pipeline_id?: string
+    final_resolution?: string
+    final_resolution_preset?: string
+  } | null
+  clip_takes?: DirectorTake[][]
+  clip_selected_take_ids?: Record<string, string>
+}
+
+type FinalPresetOption = {
+  value: string
+  label: string
+  hint?: string
+}
+
+function getFinalPresetOptions(options: ModelOptions | null, aspect: string): FinalPresetOption[] {
+  if (!options) return []
+  const order = options.resolution_preset_order || Object.keys(options.resolution_presets || {}) as ResolutionPreset[]
+  const presets = options.resolution_presets || {}
+  const mapped = order.flatMap(name => {
+    if (name === 'auto') return []
+    const item = presets[name]
+    if (!item) return []
+    const values = item.values as Record<string, string | undefined>
+    const canvas = values[aspect] || values.auto
+    return typeof canvas === 'string' && canvas
+      ? [{ value: name, label: item.label || name, hint: item.hint || undefined }]
+      : []
+  })
+  if (mapped.length) return mapped
+  const fixed = (options as ModelOptions & { resolutions?: Array<{ label?: string; value: string } | string> }).resolutions || []
+  return fixed.flatMap(item => {
+    const value = typeof item === 'string' ? item : item.value
+    if (!/^\d{2,5}x\d{2,5}$/.test(value)) return []
+    return [{ value, label: typeof item === 'string' ? item : item.label || value }]
+  })
+}
+
+function ShotReviewPanel({
+  pipelineId,
+  clip,
+  pipeline,
+  busy,
+  onTakeSelected,
+}: {
+  pipelineId: string
+  clip: ReviewablePipelineClip
+  pipeline: DraftFinalPipeline
+  busy: boolean
+  onTakeSelected: () => Promise<void>
+}) {
+  const [open, setOpen] = useState(false)
+  const [inspection, setInspection] = useState<DirectorShotInspection | null>(null)
+  const [inspectionBusy, setInspectionBusy] = useState(false)
+  const [takeBusy, setTakeBusy] = useState<string | null>(null)
+  const [error, setError] = useState('')
+  const takes = clip.takes || pipeline.clip_takes?.[clip.index] || []
+  const selectedTakeId = clip.selected_take_id || pipeline.clip_selected_take_ids?.[String(clip.index)]
+  const canSelect = ['completed', 'failed', 'cancelled', 'crashed'].includes(pipeline.status)
+    && !clip.video_stale
+
+  const inspect = async () => {
+    setInspectionBusy(true)
+    setError('')
+    try {
+      const result = await inspectDirectorShot(pipelineId, clip.index)
+      setInspection(result)
+      setOpen(true)
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : String(requestError))
+      setOpen(true)
+    } finally {
+      setInspectionBusy(false)
+    }
+  }
+
+  const selectTake = async (takeId: string) => {
+    setTakeBusy(takeId)
+    setError('')
+    try {
+      await selectDirectorShotTake(pipelineId, clip.index, takeId)
+      setInspection(null)
+      setOpen(false)
+      await onTakeSelected()
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : String(requestError))
+    } finally {
+      setTakeBusy(null)
+    }
+  }
+
+  const workspace = pipeline.workspace
+  const technical = inspection?.review.technical
+  const refs = inspection?.reference_evidence
+
+  return (
+    <div className="border border-border rounded-md bg-bg-tertiary/50 p-2 space-y-2">
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => { if (open) setOpen(false); else void inspect() }}
+          disabled={inspectionBusy || busy || !clip.video_filename || clip.video_stale}
+          className="flex items-center gap-1.5 px-2 py-1 text-[10px] rounded border border-accent-blue/30 bg-accent-blue/10 text-accent-blue hover:bg-accent-blue/20 disabled:opacity-40"
+          title={clip.video_stale ? 'Regenerate this shot before reviewing it' : 'Inspect the selected rendered shot'}
+        >
+          {inspectionBusy ? <Loader2 size={11} className="animate-spin" /> : <Eye size={11} />}
+          {inspectionBusy ? 'Inspecting…' : open ? 'Hide review' : 'Review shot'}
+        </button>
+        {takes.length > 0 && <span className="text-[9px] text-text-muted">{takes.length} saved take{takes.length === 1 ? '' : 's'}</span>}
+        {pipeline.draft_final?.stage === 'final' && (
+          <span className="ml-auto text-[9px] text-chip-purple">Draft / Final comparison</span>
+        )}
+      </div>
+
+      {takes.length > 1 && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          {takes.map(take => (
+            <div key={take.id} className={`rounded border p-1.5 space-y-1 ${take.id === selectedTakeId ? 'border-accent-blue/60 bg-accent-blue/5' : 'border-border'}`}>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] font-medium text-text-primary">{take.label}</span>
+                <div className="flex items-center gap-1.5">
+                  {take.approved && <span className="text-[8px] text-indicator-success">Approved Draft</span>}
+                  {take.id === selectedTakeId && <span className="text-[8px] text-accent-blue">Selected for timeline</span>}
+                </div>
+              </div>
+              <video
+                src={getFileUrl(take.filename, workspace)}
+                className="w-full aspect-video rounded bg-black"
+                controls
+                preload="metadata"
+                aria-label={`Shot ${clip.index + 1} ${take.label} take`}
+              />
+              <div className="flex items-center justify-between gap-2 text-[8px] text-text-muted">
+                <span>{take.resolution || 'Resolution unavailable'}{take.seed != null ? ` · seed ${take.seed}` : ''}</span>
+                {canSelect && take.id !== selectedTakeId && (
+                  <button onClick={() => void selectTake(take.id)} disabled={!!takeBusy || busy}
+                    className="px-1.5 py-0.5 rounded border border-border hover:border-accent-blue/50 text-text-secondary disabled:opacity-40">
+                    {takeBusy === take.id ? 'Selecting…' : 'Use this take'}
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {open && inspection && (
+        <div className="space-y-2">
+          <video
+            src={getFileUrl(inspection.filename, inspection.workspace)}
+            className="w-full max-h-[360px] aspect-video rounded bg-black"
+            controls
+            preload="metadata"
+            aria-label={`Shot ${clip.index + 1} selected take review`}
+          />
+          {inspection.artifact_filenames.contact_sheet && (
+            <img src={getFileUrl(inspection.artifact_filenames.contact_sheet, inspection.workspace)}
+              alt={`Shot ${clip.index + 1} sampled frames`} className="w-full rounded border border-border" />
+          )}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[9px] text-text-secondary">
+            <div className="rounded bg-bg-tertiary p-1.5">Probe: {technical?.probe.status || 'unknown'}</div>
+            <div className="rounded bg-bg-tertiary p-1.5">Duration: {formatTime(technical?.duration_seconds ?? null)}</div>
+            <div className="rounded bg-bg-tertiary p-1.5">Canvas: {technical?.geometry?.width || '?'} × {technical?.geometry?.height || '?'}</div>
+            <div className="rounded bg-bg-tertiary p-1.5">Software decode: {technical?.software_decode.status || 'unknown'}</div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 text-[9px] text-text-muted">
+            <span className="flex items-center gap-1"><Volume2 size={10} /> Audio stream: {technical?.audio?.present == null ? 'unknown' : technical.audio.present ? 'present' : 'not present'}</span>
+            {technical?.container_format && <span>Container: {technical.container_format}</span>}
+            {inspection.artifact_filenames.audio_preview && (
+              <audio controls preload="none" className="h-7 max-w-full" src={getFileUrl(inspection.artifact_filenames.audio_preview, inspection.workspace)} aria-label={`Shot ${clip.index + 1} audio preview`} />
+            )}
+          </div>
+          {refs && (
+            <div className="rounded border border-border p-2 space-y-1">
+              <div className="text-[9px] uppercase tracking-wider text-text-muted">Attached reference checks</div>
+              {refs.location_references.length ? refs.location_references.map((item, index) => (
+                <div key={`${item.filename}-${index}`} className="text-[9px] text-text-secondary">
+                  Location: {item.label} — {item.status === 'available' ? 'file available' : 'file missing'}
+                </div>
+              )) : <div className="text-[9px] text-text-muted">No location references attached.</div>}
+              <div className="text-[9px] text-text-secondary">
+                Voice reference: {refs.voice_reference.status === 'available' ? 'file available' : refs.voice_reference.status === 'missing' ? 'file missing' : 'not attached'}
+              </div>
+              <div className="text-[8px] text-text-muted">{refs.voice_verification.message} Location checks report file presence; they do not assess scene matching.</div>
+            </div>
+          )}
+          <div className="text-[8px] text-text-muted">Technical media inspection only. Creative quality, prompt adherence, and continuity are not assessed.</div>
+        </div>
+      )}
+      {open && error && <p role="alert" className="text-[9px] text-red-400">{error}</p>}
+    </div>
+  )
 }
 
 function PipelineProgressBar({ pipeline }: { pipeline: SavedPipelineState }) {
@@ -185,14 +388,15 @@ function LlmLogPanel({ pipeline }: { pipeline: SavedPipelineState }) {
   )
 }
 
-function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVideo, onSavePrompt }: {
-  clip: PipelineClipState
+function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVideo, onSavePrompt, onTakeSelected }: {
+  clip: ReviewablePipelineClip
   pipeline: SavedPipelineState
   busy?: boolean
   onTag: (tag: 'good' | 'needs_work' | null) => void
   onRerunImage: (clipIndex: number, prompt?: string) => void
   onRerunVideo: (clipIndex: number, prompt?: string) => void
   onSavePrompt: (clipIndex: number, update: { image_prompt?: string; video_prompt?: string; window_prompts?: string[] }) => Promise<void>
+  onTakeSelected: () => Promise<void>
 }) {
   const [expandImage, setExpandImage] = useState(false)
   const [expandVideo, setExpandVideo] = useState(false)
@@ -204,6 +408,7 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
   const [editVideoPrompt, setEditVideoPrompt] = useState(clip.video_prompt || '')
   const [savingPrompt, setSavingPrompt] = useState(false)
   const [saveError, setSaveError] = useState('')
+  const draftFinalPipeline = pipeline as DraftFinalPipeline
   const requiresShotImage = !pipeline.shot_image_policy
     || pipeline.shot_image_policy === 'generate'
 
@@ -258,16 +463,23 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
       </div>
 
       <div className="p-2 space-y-2">
+        <ShotReviewPanel
+          pipelineId={pipeline.pipeline_id}
+          clip={clip}
+          pipeline={draftFinalPipeline}
+          busy={busy}
+          onTakeSelected={onTakeSelected}
+        />
         {/* Image section */}
         <div className="flex gap-2">
           {/* Thumbnail */}
           <div className="w-20 h-20 shrink-0 rounded overflow-hidden bg-bg-tertiary border border-border">
             {clip.start_image_filename ? (
-              <img src={getFileUrl(clip.start_image_filename)} alt={`Shot ${clip.index + 1}`}
+              <img src={getFileUrl(clip.start_image_filename, pipeline.workspace)} alt={`Shot ${clip.index + 1}`}
                 className="w-full h-full object-cover" loading="lazy" />
             ) : clip.video_filename ? (
               <video
-                src={`${getFileUrl(clip.video_filename)}#t=0.1`}
+                src={`${getFileUrl(clip.video_filename, pipeline.workspace)}#t=0.1`}
                 className="w-full h-full object-cover"
                 muted
                 playsInline
@@ -334,7 +546,7 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
             <div className="flex gap-1.5 overflow-x-auto">
               {clip.keyframe_filenames?.map((kf, ki) => (
                 <div key={ki} className="shrink-0">
-                  <img src={getFileUrl(kf)} alt={`KF ${ki + 1}`}
+                  <img src={getFileUrl(kf, pipeline.workspace)} alt={`KF ${ki + 1}`}
                     className="w-14 h-14 object-cover rounded border border-border" loading="lazy" />
                   {clip.keyframe_prompts?.[ki] && (
                     <p className="text-[8px] text-text-muted mt-0.5 w-14 truncate" title={safeStr(clip.keyframe_prompts[ki])}>
@@ -551,7 +763,12 @@ function DirectorDashboardInner() {
   const resumePipeline = useStore(s => s.resumePipeline)
   const deletePipeline = useStore(s => s.deletePipeline)
   const loadDirectorFromPipeline = useStore(s => s.loadDirectorFromPipeline)
+  const loadPipelineList = useStore(s => s.loadPipelineList)
   const [resuming, setResuming] = useState(false)
+  const [modelOptions, setModelOptions] = useState<ModelOptions | null>(null)
+  const [modelOptionsError, setModelOptionsError] = useState('')
+  const [finalPreset, setFinalPreset] = useState('')
+  const [finalizingPid, setFinalizingPid] = useState<string | null>(null)
   // Keyed by pipeline id — a bare boolean would let "arm on pipeline A,
   // switch to B, click once" delete B without a confirm.
   const [confirmDeletePid, setConfirmDeletePid] = useState<string | null>(null)
@@ -561,6 +778,22 @@ function DirectorDashboardInner() {
   const [regenErrors, setRegenErrors] = useState<Record<string, string>>({})
   const autoLoadAttemptedPid = useRef<string | null>(null)
   const selectedPid = selectedPipeline?.pipeline_id || null
+  const selectedDraftFinal = selectedPipeline as DraftFinalPipeline | null
+  const draftSizeLabel = selectedPipeline?.director_resolution_preset
+    || safeStr(selectedPipeline?.video_params?.resolution)
+    || 'size unavailable'
+  const finalAspect = selectedPipeline?.director_aspect_ratio || 'auto'
+  const finalPresetOptions = getFinalPresetOptions(modelOptions, finalAspect)
+  const unapprovedShots = selectedPipeline?.clips.filter(clip => clip.tag !== 'good').length || 0
+  const shouldPollFinal = selectedPipeline?.status === 'running'
+    && selectedDraftFinal?.draft_final?.stage === 'final'
+  const canShowFinalControls = !!selectedPipeline
+    && selectedPipeline.status === 'completed'
+    && !selectedPipeline.seamless
+    && selectedDraftFinal?.draft_final?.stage !== 'final'
+  const canCreateFinal = canShowFinalControls
+    && unapprovedShots === 0
+  const finalizing = finalizingPid === selectedPid
   const repairStarting = repairStartingPid === selectedPid
   const repairCancelling = repairCancellingPid === selectedPid
   const regenError = selectedPid ? regenErrors[selectedPid] || null : null
@@ -574,6 +807,31 @@ function DirectorDashboardInner() {
       return next
     })
   }
+
+  useEffect(() => {
+    setFinalPreset('')
+    setModelOptions(null)
+    setModelOptionsError('')
+    const modelType = selectedPipeline?.video_model
+    if (!modelType) return
+    let active = true
+    fetchModelOptions(modelType).then(options => {
+      if (active) setModelOptions(options)
+    }).catch(error => {
+      if (active) setModelOptionsError(error instanceof Error ? error.message : String(error))
+    })
+    return () => { active = false }
+  }, [selectedPipeline?.pipeline_id, selectedPipeline?.video_model])
+
+  useEffect(() => {
+    if (!selectedPid || !shouldPollFinal) return
+    const pid = selectedPid
+    const interval = window.setInterval(() => {
+      void loadPipelineList()
+      void loadPipeline(pid)
+    }, 4000)
+    return () => window.clearInterval(interval)
+  }, [selectedPid, shouldPollFinal, loadPipelineList, loadPipeline])
 
   // Auto-load first pipeline when list loads
   useEffect(() => {
@@ -645,6 +903,30 @@ function DirectorDashboardInner() {
     }
   }
 
+  const createFinal = async () => {
+    if (!selectedPipeline) return
+    if (unapprovedShots > 0) {
+      setRegenError(`Mark all shots Good before creating a Final (${unapprovedShots} still need approval).`)
+      return
+    }
+    if (!finalPreset) {
+      setRegenError('Choose an explicit Final size before creating the Final.')
+      return
+    }
+    const sourcePid = selectedPipeline.pipeline_id
+    setRegenError(null)
+    setFinalizingPid(sourcePid)
+    try {
+      const result = await createDirectorFinal(sourcePid, finalPreset)
+      await loadPipelineList()
+      await loadPipeline(result.pipeline_id)
+    } catch (error) {
+      setRegenError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setFinalizingPid(current => current === sourcePid ? null : current)
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-[60] flex flex-col bg-bg-primary">
       {/* Header */}
@@ -667,6 +949,51 @@ function DirectorDashboardInner() {
           ))}
         </select>
 
+        {canShowFinalControls && (
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-chip-purple/30 bg-chip-purple/5 px-2 py-1.5">
+            <div className="text-[9px] text-text-secondary">
+              <span className="font-medium text-chip-purple">Draft → Final</span>
+              <span className="ml-1">Draft {draftSizeLabel}</span>
+              <span className="ml-1">{unapprovedShots ? `Approve ${unapprovedShots} shot${unapprovedShots === 1 ? '' : 's'} with Good` : 'All shots approved'}</span>
+            </div>
+            <select
+              value={finalPreset}
+              onChange={event => setFinalPreset(event.target.value)}
+              disabled={!modelOptions || finalPresetOptions.length === 0 || finalizing}
+              className="bg-bg-tertiary border border-border rounded px-2 py-1 text-[10px] text-text-primary focus:outline-none focus:border-chip-purple disabled:opacity-50"
+              aria-label="Final resolution size"
+              title="Choose the explicit resolution tier for Final renders"
+            >
+              <option value="">{modelOptions ? 'Choose Final size…' : 'Loading Final sizes…'}</option>
+              {finalPresetOptions.map(option => (
+                <option key={option.value} value={option.value} title={option.hint}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => void createFinal()}
+              disabled={!canCreateFinal || !finalPreset || !finalPresetOptions.length || finalizing || loading}
+              className="flex items-center gap-1 px-2 py-1 text-[10px] rounded bg-chip-purple/15 border border-chip-purple/30 text-chip-purple hover:bg-chip-purple/25 disabled:opacity-40"
+              title={unapprovedShots ? 'Mark every shot Good after review' : 'Render this approved Draft at the selected size'}
+            >
+              {finalizing ? <Loader2 size={10} className="animate-spin" /> : <FileVideo size={10} />}
+              {finalizing ? 'Starting…' : 'Create Final'}
+            </button>
+            {modelOptionsError && <span className="text-[9px] text-red-400" title={modelOptionsError}>Final sizes unavailable</span>}
+            {!modelOptionsError && modelOptions && !finalPresetOptions.length && (
+              <span className="text-[9px] text-text-muted">This model has no published explicit size presets.</span>
+            )}
+          </div>
+        )}
+
+        {selectedDraftFinal?.draft_final?.stage === 'final' && (
+          <span className="flex items-center gap-1 rounded border border-chip-purple/30 bg-chip-purple/5 px-2 py-1 text-[9px] text-chip-purple">
+            Final {selectedDraftFinal.draft_final.final_resolution_preset || ''}
+            {selectedDraftFinal.draft_final.final_resolution ? ` · ${selectedDraftFinal.draft_final.final_resolution}` : ''}
+          </span>
+        )}
+
         {/* Summary badges */}
         {selectedPipeline && (
           <div className="flex items-center gap-2 text-[10px] shrink-0">
@@ -679,7 +1006,8 @@ function DirectorDashboardInner() {
             <span className="text-text-muted">
               / {totalClips} clips
             </span>
-            {(selectedPipeline.status === 'crashed' || selectedPipeline.status === 'failed') && (
+            {(selectedPipeline.status === 'crashed' || selectedPipeline.status === 'failed')
+              && selectedDraftFinal?.draft_final?.stage !== 'final' && (
               <button
                 onClick={async () => {
                   if (!selectedPipeline) return
@@ -913,6 +1241,10 @@ function DirectorDashboardInner() {
                     }}
                     onRerunImage={(idx, prompt) => { setRegenError(null); rerunClipImage(selectedPipeline.pipeline_id, idx, prompt).catch(e => setRegenError(String(e instanceof Error ? e.message : e))) }}
                     onRerunVideo={(idx, prompt) => { setRegenError(null); rerunClipVideo(selectedPipeline.pipeline_id, idx, prompt).catch(e => setRegenError(String(e instanceof Error ? e.message : e))) }}
+                    onTakeSelected={async () => {
+                      await loadPipeline(selectedPipeline.pipeline_id)
+                      await loadPipelineList()
+                    }}
                   />
                 ))}
               </div>

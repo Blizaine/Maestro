@@ -228,10 +228,21 @@ const read = async endpoint => {
     const footerBeforeWorkflow = await page.getByTestId('studio-generate-bar').boundingBox();
     await sidebar.getByRole('button', {name: /^Workflow:/}).click();
     const workflows = page.getByRole('dialog', {name: 'Choose a workflow'});
-    for (const label of ['Frames', 'References', 'Extend', 'Blend', 'Animate', 'Retake', 'Prompt Edit', 'Outpaint', 'Repaint', 'Recast']) {
+    for (const label of ['Frames', 'References', 'Extend', 'Blend', 'Animate', 'Edit Clip', 'Outpaint']) {
       assert.equal(await workflows.getByRole('button', {name: new RegExp('^' + label + ' ')}).count(), 1, 'Workflow remains available: ' + label);
     }
+    for (const label of ['Retake', 'Prompt Edit', 'Repaint', 'Recast', 'Replace People']) {
+      assert.equal(await workflows.getByRole('button', {name: new RegExp('^' + label + ' ')}).count(), 0, 'Edit task is grouped under Edit Clip: ' + label);
+    }
     assert.deepEqual(await page.getByTestId('studio-generate-bar').boundingBox(), footerBeforeWorkflow, 'Workflow menu cannot push Generate offscreen');
+    await workflows.getByRole('button', {name: /^Edit Clip /}).click();
+    const editTasks = sidebar.getByRole('group', {name: 'Edit Clip task', exact: true});
+    await editTasks.getByRole('button', {name: 'Replace People', exact: true}).click();
+    assert.equal(await page.evaluate(() => window.store.getState().editSubMode), 'recast');
+    await editTasks.getByRole('button', {name: 'Edit Scene', exact: true}).click();
+    await sidebar.getByRole('group', {name: 'Edit Scene method'}).getByRole('button', {name: 'Repaint', exact: true}).click();
+    assert.equal(await page.evaluate(() => window.store.getState().editSubMode), 'restyle');
+    await sidebar.getByRole('button', {name: /^Workflow:/}).click();
     await workflows.getByRole('button', {name: /^References /}).click();
 
     // Full backend-provided option lists and selected values, including custom tiers.
@@ -454,22 +465,19 @@ const read = async endpoint => {
           return buttons.every((a, index) => buttons.slice(index + 1).every(b =>
             a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top));
         }), 'Characters and output settings never overlap at width ' + viewport.width);
-        assert.equal(await sidebar.locator('.studio-advanced-label').isVisible(), false, 'Advanced compacts to leave room for the direct Recipes shortcut');
+        assert.equal(await sidebar.locator('.studio-advanced-label').isVisible(), false, 'Advanced compacts to leave room for the prompt tools');
         const characterBox = await sidebar.getByRole('button', {name: /Characters/}).boundingBox();
         const recipesBox = await sidebar.getByRole('button', {name: 'Open recipes'}).boundingBox();
-        const resolutionBox = await sidebar.getByRole('button', {name: /^Resolution:/}).boundingBox();
-        assert.ok(characterBox.x + characterBox.width <= recipesBox.x && recipesBox.x + recipesBox.width <= resolutionBox.x
-          && Math.abs(characterBox.y - recipesBox.y) < 1 && Math.abs(recipesBox.y - resolutionBox.y) < 1,
-        'Recipes sits between Characters and Resolution on the same row');
         const toolbarBounds = await sidebar.getByRole('group', {name: 'Prompt controls', exact: true}).boundingBox();
         const promptBounds = await prompt.boundingBox();
         const enhanceBounds = await sidebar.getByRole('button', {name: 'Enhance prompt'}).boundingBox();
         assert.ok(enhanceBounds.y >= promptBounds.y + promptBounds.height && enhanceBounds.y >= toolbarBounds.y, 'Enhance stays below the text');
         const menuBounds = await sidebar.getByRole('button', {name: 'Prompt enhancement options'}).boundingBox();
-        assert.ok(Math.abs(menuBounds.x + menuBounds.width - toolbarBounds.x - toolbarBounds.width) < 1, 'Prompt tools align to the bottom-right');
-        const stripBounds = await page.getByTestId('studio-settings-strip').boundingBox();
+        assert.ok(Math.abs(menuBounds.x + menuBounds.width - toolbarBounds.x - toolbarBounds.width) <= 2, 'Prompt tools align to the right edge inside the footer border');
         const settingsBounds = await page.getByTestId('studio-output-settings').boundingBox();
-        assert.ok(Math.abs(settingsBounds.x + settingsBounds.width - stripBounds.x - stripBounds.width) < 1, 'Settings group aligns to the right edge');
+        assert.ok(characterBox.x + characterBox.width <= settingsBounds.x
+          && settingsBounds.x + settingsBounds.width <= toolbarBounds.x + 1,
+        'Settings sit between Characters and the footer prompt controls');
         assert.ok(await page.getByTestId('studio-output-settings').evaluate(node => {
           const boxes = [...node.children].map(child => child.getBoundingClientRect());
           return boxes.slice(1).every((box, i) => Math.abs(box.left - boxes[i].right - 4) < 1);
@@ -477,6 +485,8 @@ const read = async endpoint => {
         const modelBox = await sidebar.getByRole('button', {name: 'Choose model'}).boundingBox();
         const bar = await page.getByTestId('studio-generate-bar').boundingBox();
         const browserBox = await sidebar.getByRole('button', {name: 'Open model browser'}).boundingBox();
+        assert.ok(recipesBox.x + recipesBox.width <= browserBox.x && Math.abs(recipesBox.y - browserBox.y) < 1,
+          'Recipes sits to the left of Model Browser on the Generate row');
         assert.ok(browserBox.x + browserBox.width <= modelBox.x && browserBox.y >= bar.y
           && browserBox.y + browserBox.height <= bar.y + bar.height, 'Direct Model Browser shortcut stays beside the model selector');
         assert.ok(modelBox.y >= bar.y && modelBox.y + modelBox.height <= bar.y + bar.height, 'Model selector is beside Generate');

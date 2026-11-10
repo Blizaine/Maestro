@@ -435,6 +435,9 @@ class TestMiniMaxH3Definition(unittest.TestCase):
                 "minimax_h3_ref2va_full",
                 "minimax_h3_voice_audio",
                 "viggle_animate",
+                "viggle_remake_swap",
+                "viggle_remake_edit",
+                "minimax_h3_regenerate_ic",
             ],
         )
         self.assertEqual((model_def["fps"], model_def["frames_minimum"]), (24, 124))
@@ -529,7 +532,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
         self.assertEqual(model_def["minimax_h3_text_encoder_default"], "nvfp4_awq")
         self.assertEqual(
             set(model_def["minimax_h3_text_encoder_variants"]),
-            {"nvfp4_awq", "gguf_q2_k", "gguf_q4_k_m", "int8", "bf16"},
+            {"nvfp4_awq", "gguf_q2_k", "gguf_q4_k_m", "int8", "bf16", "distilled_4b"},
         )
         self.assertEqual(
             model_def["compatible_model_paths"][
@@ -768,6 +771,14 @@ class TestMiniMaxH3Definition(unittest.TestCase):
             self.assertEqual(presets["1080p"]["values"]["9:16"], "1088x1920")
             self.assertEqual(presets["1080p"]["values"]["4:3"], "1440x1088")
             self.assertEqual(presets["1080p"]["values"]["3:4"], "1088x1440")
+
+    def test_source_bound_settings_keep_exact_duration_and_finish_canvas(self):
+        for model_type in ("viggle_remake_edit", "viggle_remake_swap", "minimax_h3_regenerate_ic"):
+            with self.subTest(model_type=model_type):
+                model_def = self.handler.query_model_def(model_type, {})
+                settings = {"video_length": 99, "resolution": "2560x1440"}
+                self.handler.fix_settings(model_type, 2.58, model_def, settings)
+                self.assertEqual(settings, {"video_length": 99, "resolution": "2560x1440"})
 
     def test_old_generic_resolutions_snap_without_changing_orientation(self):
         normalize = _load_source_function(
@@ -3271,7 +3282,7 @@ class TestMiniMaxH3RuntimeSource(unittest.TestCase):
         conditioner = _read(_CONDITIONER_PATH)
         checkpoint = _read(_CHECKPOINT_PATH)
         self.assertIn("_normalize_conditioner_checkpoint_namespaces", main)
-        self.assertIn('if variant == "nvfp4_awq":', main)
+        self.assertIn('if variant == "nvfp4_awq" or distilled:', main)
         self.assertIn("state_dict = preprocess_conditioner_state_dict(state_dict)", main)
         self.assertIn("preprocess_sd=preprocess_checkpoint", main)
         self.assertIn("consumer_quantized=variant == \"nvfp4_awq\"", main)

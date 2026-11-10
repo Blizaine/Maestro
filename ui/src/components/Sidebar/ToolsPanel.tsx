@@ -15,6 +15,7 @@ const upscaleMethods = [
   { value: '', label: 'Original size (temporal only)' },
   ...dlssSpatialOptions,
   ...flashvsrOptions,
+  { value: 'h3_regenerate_ic', label: 'H3 Regenerate 2K IC (Experimental)' },
   { value: 'lanczos1.5', label: 'Lanczos 1.5x (fast)' },
   { value: 'lanczos2', label: 'Lanczos 2x (fast)' },
 ]
@@ -228,14 +229,18 @@ export function ToolsPanel({
           <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">Upscale Method</label>
           <select
             value={method}
-            onChange={e => { setMethod(e.target.value); if (e.target.value.startsWith('flashvsr')) setParam('temporal_upsampling', '') }}
+            onChange={e => {
+              const value = e.target.value
+              setMethod(value)
+              if (value.startsWith('flashvsr') || value === 'h3_regenerate_ic') setParam('temporal_upsampling', '')
+            }}
             className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
           >
             {(mediaKind === 'image' ? imageUpscaleMethods : upscaleMethods).map(o => (
               <option key={o.value} value={o.value} disabled={dlss.disabled(o.value)}>{dlss.label(o.value, o.label)}</option>
             ))}
           </select>
-          {!method.startsWith('flashvsr') && <MediaFinishingControls spatial={method} temporal={temporal}
+          {!method.startsWith('flashvsr') && method !== 'h3_regenerate_ic' && <MediaFinishingControls spatial={method} temporal={temporal}
             onTemporal={value => setParam('temporal_upsampling', value)} options={customSettings || {}} image={mediaKind === 'image'}
             onOptions={value => setParam('custom_settings', value)} />}
           {flashvsrOff && (
@@ -244,7 +249,9 @@ export function ToolsPanel({
             </p>
           )}
           <p className="text-[10px] text-text-muted mt-1.5 leading-snug">
-            FlashVSR is model-based super-resolution (sharper, slower; weights download on first use). Lanczos is a fast classic resize.
+            {method === 'h3_regenerate_ic'
+              ? 'Refine a single draft from 3.75 to 14.37 seconds at up to 2560 × 1440. Weights download on first use.'
+              : 'FlashVSR is model-based super-resolution (sharper, slower; weights download on first use). Lanczos is a fast classic resize.'}
             {mediaKind === 'video' ? " The clip's audio is preserved." : ''}
           </p>
         </div>

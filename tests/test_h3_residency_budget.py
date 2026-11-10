@@ -140,6 +140,20 @@ class H3ResidencyBudgetTests(unittest.TestCase):
                 self.assertNotIn("h3_residency_mb", job["vram_adjustment"])
                 self.assertFalse(hasattr(self.wgp.args, "transformer_budget"))
 
+    def test_regenerate_source_reference_and_bundled_adapters_reduce_residency(self):
+        self.hardware["gpu_vram_gb"] = 24
+        self.model_def = {
+            "architecture": "minimax_h3_regenerate_ic",
+            "preserve_guide_frame_count": True,
+        }
+        params = {"model_type": "minimax_h3_regenerate_ic", "resolution": "2560x320", "video_length": 90}
+        ordinary = self.plan(**params)["vram_adjustment"]["h3_weight_budget_gb"]
+        self.restore()
+        self.model_def["minimax_h3_bundled_lora_reserve_gb"] = 10.3
+        regenerate = self.plan(**params)["vram_adjustment"]
+        self.assertLess(regenerate["h3_weight_budget_gb"], ordinary - 5)
+        self.assertLess(regenerate["effective_coef"] * 24, ordinary)
+
     def test_manual_preload_is_not_replaced(self):
         for cli, saved in ((5000, 0), (0, 6000), (5000, 6000)):
             with self.subTest(cli=cli, saved=saved):

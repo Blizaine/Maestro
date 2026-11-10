@@ -3129,10 +3129,9 @@ def normalize_model_total_frame_count(frame_count, model_def, window_size=None):
     """Normalize an output timeline without treating a window cap as total."""
 
     frame_count = int(frame_count)
-    if model_def.get("minimax_h3_viggle", False):
-        # Animate's output follows the selected source range, even below one
-        # native window. Individual passes still build 124 frames; the assembler
-        # trims their output using this unrounded total.
+    if model_def.get("minimax_h3_viggle") or model_def.get("preserve_guide_frame_count"):
+        # Source-bound jobs pad their native denoise grid, then trim the
+        # published video to the selected source length.
         return max(1, frame_count)
     maximum = model_def.get("frames_maximum", None)
     if maximum is not None and window_size is not None and int(window_size) > 0:
@@ -3680,13 +3679,20 @@ flashvsr = FlashVSRBridge(server_config, fl)
 if int(server_config.get("flashvsr_mode", 0) or 0) == 0:
     server_config["flashvsr_mode"] = FlashVSRBridge.MODE_TINY
 flashvsr.normalize_config()
-edit_mode_handlers = [flashvsr]
+from postprocessing.relayvsr.wgp_bridge import RelayVSRBridge
+relayvsr = RelayVSRBridge(server_config, fl)
+edit_mode_handlers = [flashvsr, relayvsr]
 
 def find_edit_spatial_upsampler(spatial_upsampling):
     return next((handler for handler in edit_mode_handlers if handler.is_upsampling(spatial_upsampling)), None)
 
 def release_flashvsr_vram():
     flashvsr.release_vram()
+
+def release_edit_spatial_upsampler(method):
+    handler = find_edit_spatial_upsampler(method)
+    if handler is not None:
+        handler.release_vram()
 
 if "loras_root" not in server_config: server_config["loras_root"] = DEFAULT_LORA_ROOT
 if "save_queue_if_crash" not in server_config: server_config["save_queue_if_crash"] = 1
@@ -6597,10 +6603,7 @@ def perform_spatial_upsampling(sample, spatial_upsampling, seed=0, abort_callbac
         # Native decoders have already enlarged this tensor. Never apply a
         # second pixel upscale to their output.
         return sample
-    # FlashVSR (DiT super-resolution) dispatch — ported from upstream Wan2GP.
-    # When spatial_upsampling is a "flashvsr"/"flashvsr2pass" method, route to
-    # the model-based upscaler instead of the Lanczos path below. The bridge
-    # auto-downloads the FlashVSR weights on first use.
+    # Model-based spatial upscalers dispatch before the legacy resize path.
     edit_upsampler = find_edit_spatial_upsampler(spatial_upsampling)
     if edit_upsampler is not None:
         # Sync the user's FlashVSR settings (stored under server_config["services"]
@@ -6611,12 +6614,21 @@ def perform_spatial_upsampling(sample, spatial_upsampling, seed=0, abort_callbac
             if _k in _svc:
                 server_config[_k] = _svc[_k]
         profile = loaded_profile if loaded_profile >= 0 else get_default_profile("video")
+        if str(spatial_upsampling).startswith("relayvsr"):
+            result, _relay_cache = edit_upsampler.upscale(
+                sample, spatial_upsampling, seed=seed, frame_offset=0,
+                continue_cache=None, return_continue_cache=False,
+                process_files=process_files_def, init_pipe=init_pipe,
+                profile=profile, abort_callback=abort_callback,
+                progress_callback=progress_callback, still_image=still_image,
+            )
+            return result
         sample, _flashvsr_cache = edit_upsampler.upscale(
             sample, spatial_upsampling, seed=seed,
             continue_cache=None, return_continue_cache=False,
             vae_tile_size=None, process_files=process_files_def,
             vae_config=vae_config, init_pipe=init_pipe, profile=profile,
-            still_image=False, abort_callback=abort_callback,
+            still_image=still_image, abort_callback=abort_callback,
             progress_callback=progress_callback,
         )
         return sample
@@ -8253,6 +8265,11 @@ def generate_video(
     h3_window_prompts=None,
     h3_window_plan_signature=None,
     h3_window_plan=None,
+    # Transcript injection is independent from optional prompt enhancement.
+    # The worker supplies recognized data only after resolving the actual audio driver.
+    source_audio_transcript_in_prompt=False,
+    source_audio_transcript_for_enhancement=False,
+    source_audio_transcript_data=None,
     # Optional pre-separated vocal stem used only for model conditioning.
     # ``audio_guide`` remains the pristine soundtrack that is muxed into the
     # published video. Director uses this to give LTX-2.5 a clearer lip-sync
@@ -8401,7 +8418,7 @@ def generate_video(
             send_cmd("info", f"H3 Veda cannot run: {reason}")
             send_cmd("exit")
             return True
-    if str(model_def.get("architecture") or "").startswith("minimax_h3"):
+    if str(model_def.get("architecture") or "").startswith("minimax_h3") or model_def.get("minimax_h3_viggle_remake"):
         from services.h3_runtime_configuration import two_pass_load_context
         two_pass_options, two_pass_reload = two_pass_load_context(
             model_def, custom_settings, wan_model,
@@ -9521,6 +9538,9 @@ def generate_video(
         while not abort:
             enable_RIFLEx = RIFLEx_setting == 0 and current_video_length > (6* get_model_fps(base_model_type)+1) or RIFLEx_setting == 1
             prompt =  prompts[window_no] if window_no < len(prompts) else prompts[-1]
+            if "[BEGIN SUPPLIED SOURCE-AUDIO TRANSCRIPT CONTEXT]" in prompt:
+                from services.studio_audio_context import strip_window_transcript
+                prompt = strip_window_transcript(prompt)
             if len(prompts) > 1:
                 print(f"[Sliding Window] window_no={window_no}, prompt_idx={'same' if window_no >= len(prompts) else window_no}, prompt='{prompt[:80]}...'")
             new_extra_windows = gen.get("extra_windows",0)
@@ -9694,6 +9714,17 @@ def generate_video(
             if reset_control_aligment:
                 reference_start_frame += source_video_overlap_frames_count
             reference_start_frame += max(0, int(audio_frame_offset or 0))
+            if source_audio_transcript_in_prompt and source_audio_transcript_data is not None and audio_guide is not None:
+                from services.studio_audio_context import append_window_transcript
+                prompt = append_window_transcript(
+                    prompt, source_audio_transcript_data,
+                    reference_start_frame / float(fps),
+                    (reference_start_frame + current_video_length) / float(fps),
+                )
+                # Keep output prompt metadata faithful to the actual conditioning.
+                while len(original_prompts) < window_no:
+                    original_prompts.append(prompts[-1])
+                original_prompts[window_no - 1] = prompt
             input_waveform, input_waveform_sample_rate = None, 0
             if audio_guide is not None and model_def.get("audio_guide_window_slicing", False):
                 audio_start_frame = aligned_window_start_frame
@@ -10025,12 +10056,13 @@ def generate_video(
             if video_guide is not None or len(frames_to_inject_parsed) > 0 or model_def.get("forced_guide_mask_inputs", False): 
                 any_mask = video_mask is not None or model_def.get("forced_guide_mask_inputs", False)
                 any_guide_padding = model_def.get("pad_guide_video", False)
+                guide_frame_step = 1 if model_def.get("preserve_guide_frame_count") else latent_size
                 dont_cat_preguide = extract_guide_from_window_start or model_def.get("dont_cat_preguide", False) or sparse_video_image is not None 
                 from shared.utils.utils import prepare_video_guide_and_mask
                 src_videos, src_masks = prepare_video_guide_and_mask(   [video_guide_processed] + ([] if video_guide_processed2 is None else [video_guide_processed2]),
                                                                         [video_mask_processed] + ([] if video_guide_processed2 is None else [video_mask_processed2]),
                                                                         None if dont_cat_preguide or fake_start_image and window_no==1 else pre_video_guide,
-                                                                        image_size, current_video_length, latent_size,
+                                                                        image_size, current_video_length, guide_frame_step,
                                                                         any_mask, any_guide_padding, guide_inpaint_color, 
                                                                         keep_frames_parsed, frames_to_inject_parsed , outpainting_dims,
                                                                         frame_offset=model_def.get("frame_alignment_remainder", 1))
@@ -10041,6 +10073,10 @@ def generate_video(
                     src_video, src_video2 = src_videos 
                     src_mask, src_mask2 = src_masks 
                 src_videos = src_masks = None
+                if model_def.get("preserve_guide_frame_count") and not any_mask:
+                    # The guide preprocessor may synthesize a canvas mask for
+                    # resizing. These recipes use the video as a reference.
+                    src_mask = src_mask2 = None
                 if src_video is None or window_no >1 and src_video.shape[1] <= sliding_window_overlap and not dont_cat_preguide:
                     abort = True 
                     break
@@ -10686,10 +10722,8 @@ def generate_video(
                     if generated_audio is not None:
                         generated_audio = truncate_audio( generated_audio, reuse_frames, 0, fps, output_audio_sampling_rate,)
 
-                if (
-                    sliding_window
-                    and model_def.get("sliding_window_trim_to_requested", False)
-                ):
+                source_bound = model_def.get("preserve_guide_frame_count", False)
+                if source_bound or (sliding_window and model_def.get("sliding_window_trim_to_requested", False)):
                     # H3's individual passes must lie on a 17*n+5 grid, but
                     # the joined Studio duration can be any frame count. The
                     # final pass may therefore decode a few extra frames (or
@@ -10698,7 +10732,7 @@ def generate_video(
                     # frame so video and native audio keep the exact requested
                     # joined duration.
                     joined_output_frame_target = _joined_output_frame_target(
-                        requested_frames_to_generate,
+                        published_video_length if source_bound else requested_frames_to_generate,
                         source_video_frames_count,
                         source_video_overlap_frames_count,
                     )
@@ -10840,6 +10874,9 @@ def generate_video(
                     extension = container
                     output_dir = save_path
                 inputs = get_function_arguments(generate_video, locals())
+                # Only the window-local context belongs in output prompts.
+                # The full source transcript stays in its private ASR cache.
+                inputs.pop("source_audio_transcript_data", None)
                 if recast_warmup_frames > 0:
                     # The warm-up is an internal conditioning detail, not part
                     # of the duration users see or restore from metadata.

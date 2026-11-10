@@ -48,6 +48,9 @@ _TEXT_ENCODER_BF16 = "Qwen3-VL-32B-Instruct-layer50_bf16.safetensors"
 _TEXT_ENCODER_INT8 = "Qwen3-VL-32B-Instruct-layer50_quanto_bf16_int8.safetensors"
 _TEXT_ENCODER_GGUF_Q2 = "qwen3vl-32B-MiniMax-H3-Q2_K.gguf"
 _TEXT_ENCODER_GGUF_Q4 = "qwen3vl-32B-MiniMax-H3-Q4_K_M.gguf"
+_DISTILLED_ENCODER_REVISION = "4e6c06ff7dd1c781b3265c16fcacc5f8efbf1e51"
+_DISTILLED_ENCODER_FOLDER = "P-H3-Image-Qwen3-VL-4B"
+_DISTILLED_ENCODER_FILE = "P-H3-Image-Qwen3-VL-4B_int8_convrot.safetensors"
 _AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 try:
     from .vae_upsampler import (
@@ -656,6 +659,21 @@ def _text_encoder_variants() -> dict[str, dict]:
                     _DEEPBEEP_REVISION,
                     deepbeep_folder,
                     _TEXT_ENCODER_BF16,
+                )
+            ],
+        },
+        "distilled_4b": {
+            "name": "Distilled Qwen3-VL 4B (Experimental)",
+            "size_hint": (
+                "~5.1 GB download · faster prompt encoding and lower memory use. "
+                "Trained for still images; check video prompt and reference fidelity."
+            ),
+            "URLs": [
+                _hf_url(
+                    _DEEPBEEP_REPO,
+                    _DISTILLED_ENCODER_REVISION,
+                    _DISTILLED_ENCODER_FOLDER,
+                    _DISTILLED_ENCODER_FILE,
                 )
             ],
         },
@@ -2126,6 +2144,9 @@ class family_handler:
             _REF2VA_FULL_MODEL_TYPE,
             _TTS_MODEL_TYPE,
             "viggle_animate",
+            "viggle_remake_swap",
+            "viggle_remake_edit",
+            "minimax_h3_regenerate_ic",
         ]
 
     @staticmethod
@@ -2166,6 +2187,17 @@ class family_handler:
 
     @staticmethod
     def query_model_def(base_model_type, model_def):
+        if base_model_type == "minimax_h3_regenerate_ic":
+            from models.minimax_h3.regenerate_ic import model_definition
+
+            return model_definition(family_handler.query_model_def(_REF2VA_MODEL_TYPE, model_def))
+        if base_model_type in {"viggle_remake_swap", "viggle_remake_edit"}:
+            from models.minimax_h3.viggle_remake import model_definition
+
+            return model_definition(
+                family_handler.query_model_def(_MODEL_TYPE, model_def),
+                base_model_type.removeprefix("viggle_remake_"),
+            )
         if base_model_type == "viggle_animate":
             from models.minimax_h3.viggle import model_definition
             viggle_model_def = dict(model_def or {})
@@ -3098,6 +3130,8 @@ class family_handler:
 
         from models.minimax_h3.two_pass import parse_two_pass_toggle
 
+        if resolved.get("minimax_h3_regenerate_ic"):
+            return resolved
         enabled = parse_two_pass_toggle(context.get("minimax_h3_two_pass"))
         if not enabled:
             if (
@@ -3368,6 +3402,8 @@ class family_handler:
             # single co-resident conditioner.
             pipe.update({"text_encoder": model.conditioner.language_model,
                          "vision_encoder": model.conditioner.visual})
+            if model.conditioner.qwen.text_connector is not None:
+                pipe["text_connector"] = model.conditioner.qwen.text_connector
         if model.audio_only:
             from .dialogue import load_dialogue_whisper
             model.dialogue_whisper = load_dialogue_whisper()
@@ -3485,6 +3521,10 @@ class family_handler:
         if base_model_type == "viggle_animate":
             from models.minimax_h3.viggle import normalize_settings
             normalize_settings(ui_defaults, validate_media=False)
+            return
+        if (model_def or {}).get("preserve_guide_frame_count"):
+            # Source media preparation already owns the exact published
+            # timeline and canvas. Only the denoising pass needs H3 alignment.
             return
         # Saved settings created before this family existed cannot need a
         # migration, but imported presets still need valid H3 geometry.
@@ -3823,6 +3863,16 @@ class family_handler:
             except (ValueError, TypeError) as error:
                 return str(error)
             return None
+        if base_model_type in {"viggle_remake_swap", "viggle_remake_edit"}:
+            from models.minimax_h3.viggle_remake import validate_remake_inputs
+
+            try:
+                validate_remake_inputs(inputs)
+            except ValueError as error:
+                return str(error)
+            return None
+        if base_model_type == "minimax_h3_regenerate_ic":
+            return None if inputs.get("video_guide") else "Choose a source draft for Regenerate 2K IC."
         if (model_def or {}).get("minimax_h3_fasth3"):
             if (model_def or {}).get("minimax_h3_fasth3_omniref"):
                 from models.minimax_h3.fasth3_omniref import validate_request as validate_fasth3_request

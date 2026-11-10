@@ -384,16 +384,28 @@ class MusicReviewTests(unittest.TestCase):
         for beat in beats:
             beat.pop("source_event_ids")
         invalid = {"beats": beats, "source_event_clips": {"M1": True}}
-        valid = {"beats": beats, "source_event_clips": {"M1": 1}}
-        with patch.object(planner, "_call_llm_json", side_effect=[[invalid], [valid]]) as writer:
+        valid_map = {"M1": 1}
+        with patch.object(planner, "_call_llm_json", side_effect=[[invalid], [valid_map]]) as writer:
             result = planner._plan_music_arc(clips, planner._music_narrative_contract["source"])
         self.assertEqual([row["source_event_ids"] for row in result], [[], ["M1"], [], []])
+        self.assertEqual(sum(len(row["source_event_ids"]) for row in result), 1)
         self.assertNotIn("source_event_ids", beats[0])  # Writer input is not mutated.
-        schema = writer.call_args.kwargs["json_schema"]
-        self.assertEqual(schema["type"], "object")
-        self.assertEqual(schema["properties"]["source_event_clips"]["required"], ["M1"])
-        self.assertFalse(schema["properties"]["source_event_clips"]["additionalProperties"])
-        self.assertNotIn("source_event_ids", schema["properties"]["beats"]["items"]["properties"])
+        outline_schema = writer.call_args_list[0].kwargs["json_schema"]
+        self.assertEqual(set(outline_schema["properties"]), {"beats", "source_event_clips"})
+        self.assertEqual(outline_schema["required"], ["beats", "source_event_clips"])
+        self.assertFalse(outline_schema["additionalProperties"])
+        self.assertEqual(outline_schema["properties"]["source_event_clips"]["required"], ["M1"])
+        self.assertFalse(outline_schema["properties"]["source_event_clips"]["additionalProperties"])
+        self.assertNotIn(
+            "source_event_ids",
+            outline_schema["properties"]["beats"]["items"]["properties"],
+        )
+
+        repair_schema = writer.call_args_list[1].kwargs["json_schema"]
+        self.assertEqual(set(repair_schema["properties"]), {"M1"})
+        self.assertEqual(repair_schema["required"], ["M1"])
+        self.assertFalse(repair_schema["additionalProperties"])
+        self.assertNotIn("beats", repair_schema["properties"])
 
     def test_malformed_keyed_outline_is_repaired_without_crashing(self):
         from services.director.music_narrative import build_music_narrative_contract

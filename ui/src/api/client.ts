@@ -263,6 +263,11 @@ export async function planH3Windows(params: {
   custom_settings?: Record<string, unknown>
   sliding_window_memory_override?: boolean
   minimax_h3_extended_duration?: boolean
+  audio_guide?: string
+  audio_frame_offset?: number
+  audio_prompt_type?: string
+  source_audio_transcript_in_prompt?: boolean
+  source_audio_transcript_for_enhancement?: boolean
   has_start_image?: boolean
   has_end_image?: boolean
   image_paths?: string[]
@@ -359,6 +364,11 @@ export async function planH3Sequence(params: {
   minimax_h3_extended_duration?: boolean
   overlap_frames?: number
   sequence_continuity?: boolean
+  audio_guide?: string
+  audio_frame_offset?: number
+  audio_prompt_type?: string
+  source_audio_transcript_in_prompt?: boolean
+  source_audio_transcript_for_enhancement?: boolean
   camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
   planning_style?: 'faithful' | 'creative' | 'adaptive'
 }): Promise<H3WindowPlan> {
@@ -2451,6 +2461,8 @@ export async function llmEnhancePrompt(params: {
   duration_seconds?: number
   window_count?: number
   window_size_seconds?: number
+  window_overlap_seconds?: number
+  window_discard_seconds?: number
   activated_loras?: string[]
   tts_enhance_mode?: string
   tts_writer_instructions?: string
@@ -2459,6 +2471,11 @@ export async function llmEnhancePrompt(params: {
   max_new_tokens?: number
   reference_context?: string
   minimax_h3_references?: MiniMaxH3Reference[]
+  audio_guide?: string
+  audio_frame_offset?: number
+  audio_prompt_type?: string
+  source_audio_transcript_in_prompt?: boolean
+  source_audio_transcript_for_enhancement?: boolean
   planning_style?: 'faithful' | 'creative' | 'adaptive'
 }): Promise<{
   original: string

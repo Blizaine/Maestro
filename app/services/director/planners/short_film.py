@@ -90,6 +90,17 @@ def _h3_source_physical_patch_is_applicable(issues: Sequence[str]) -> bool:
     )
 
 
+def _h3_malformed_physical_state_issues(rows: list[dict]) -> list[str]:
+    """Keep malformed state out of the dialogue compiler's error handling."""
+    issues = []
+    for index, row in enumerate(rows, start=1):
+        try:
+            normalize_physical_state(row.get("physical_state"))
+        except ValueError as error:
+            issues.append(f"Shot {index}: {error}")
+    return issues
+
+
 # ── Pass 2 JSON output schemas (llama-server grammar constraint) ──────
 # These mirror the JSON examples embedded in the Pass 2 / fallback system
 # prompts. llama-server compiles the schema to a GBNF grammar that masks
@@ -9854,6 +9865,52 @@ SCREENPLAY:
 
         return shots, title
 
+    def _repair_h3_grounded_state_values(
+        self, rows: list[dict], *, story_description: str, screenplay: str,
+        planner_token_budget: int, request_budget: int,
+    ) -> tuple[list[dict], int]:
+        """Repair bad enum literals before dialogue prose rebuilds read state.
+
+        This shares the two-request metadata budget with source/physical repair.
+        Valid facts and all creative fields are immutable, even for legacy plans
+        without source-event IDs. No guessed literal or empty-ledger fallback is
+        installed when the writer cannot establish a physical state.
+        """
+        from ..contract_repair import (
+            invalid_grounded_value_fields, build_grounded_value_repair_request,
+            apply_grounded_value_patch,
+        )
+
+        fields = invalid_grounded_value_fields(rows)
+        if not fields:
+            return rows, 0
+        request_budget = max(0, min(2, int(request_budget)))
+        issues = _h3_malformed_physical_state_issues(rows)
+        for attempt in range(request_budget):
+            system, user, schema = build_grounded_value_repair_request(
+                rows, story_description=story_description,
+                screenplay=screenplay, issues=issues,
+            )
+            print("[ShortFilmPlanner] Repairing invalid grounded-state values in fixed shots.")
+            proposal = self._call_llm_json(
+                user_prompt=user, system_prompt=system,
+                max_tokens=min(planner_token_budget, max(512, 32 * len(fields))),
+                thinking_budget=0, temperature=0.1, image_paths=[], json_schema=schema,
+            )
+            if isinstance(proposal, list) and len(proposal) == 1:
+                proposal = proposal[0]
+            try:
+                repaired = apply_grounded_value_patch(rows, proposal)
+            except ValueError as error:
+                issues = [str(error), *_h3_malformed_physical_state_issues(rows)]
+            else:
+                return repaired, attempt + 1
+        raise RuntimeError(
+            "MiniMax H3 could not repair invalid physical-state values within its "
+            "bounded metadata repair: " + "; ".join(issues)
+            + ". No video jobs were queued."
+        )
+
     def _repair_h3_source_physical_plan(
         self,
         rows: list[dict],
@@ -10624,26 +10681,34 @@ SCREENPLAY:
             or any("source_event_ids" in row for row in shot_dicts)
         )
         compact_source_physical_requests = 0
+        if not structure_issues:
+            shot_dicts, requests_used = self._repair_h3_grounded_state_values(
+                shot_dicts, story_description=story_description, screenplay=screenplay,
+                planner_token_budget=planner_token_budget, request_budget=2,
+            )
+            compact_source_physical_requests += requests_used
         semantic_issues = source_contract_issues(
             shot_dicts, source_contract, require_ids=source_contract_active,
         )
         semantic_issues.extend(validate_physical_state_sequence(shot_dicts))
 
         dialogue_integrity_error: Optional[str] = None
-        try:
-            _reconcile_h3_dialogue_manifest(
-                shot_dicts,
-                screenplay_dialogue_manifest,
-            )
-        except ValueError as error:
-            dialogue_integrity_error = str(error)
+        malformed_state = _h3_malformed_physical_state_issues(shot_dicts)
+        if not malformed_state:
+            try:
+                _reconcile_h3_dialogue_manifest(
+                    shot_dicts,
+                    screenplay_dialogue_manifest,
+                )
+            except ValueError as error:
+                dialogue_integrity_error = str(error)
 
         dialogue_violations = _h3_dialogue_budget_violations(
             shot_dicts,
             [frames / fps for frames in schedule],
             words_per_second=_H3_DIALOGUE_WORDS_PER_SECOND,
         )
-        if not structure_issues and (
+        if not structure_issues and not malformed_state and (
             dialogue_integrity_error or dialogue_violations
         ):
             try:
@@ -10767,6 +10832,18 @@ description with the locked dialogue in video_prompt."""
                     "shots. No video jobs were queued."
                 )
             schedule = _apply_native_schedule(shot_dicts)
+            shot_dicts, requests_used = self._repair_h3_grounded_state_values(
+                shot_dicts, story_description=story_description, screenplay=screenplay,
+                planner_token_budget=planner_token_budget,
+                request_budget=2 - compact_source_physical_requests,
+            )
+            compact_source_physical_requests += requests_used
+            malformed_state = _h3_malformed_physical_state_issues(shot_dicts)
+            if malformed_state:
+                raise RuntimeError(
+                    "MiniMax H3's repaired visual shot plan contains invalid physical state: "
+                    + "; ".join(malformed_state) + ". No video jobs were queued."
+                )
             try:
                 shot_dicts, schedule, repair_mode = _compile_locked_dialogue(
                     shot_dicts,

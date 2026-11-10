@@ -85,7 +85,8 @@ _EDITOR_AI_TOOLS = {
     "film_grain", "revoice", "director_rerun",
 }
 _EDITOR_UPSCALE_METHODS = {
-    "", "flashvsr2", "flashvsr3", "flashvsr4", "flashvsr2pass2",
+    "", "relayvsr1", "relayvsr1.5", "relayvsr2", "relayvsr2.5", "relayvsr3", "relayvsr3.5", "relayvsr4",
+    "flashvsr2", "flashvsr3", "flashvsr4", "flashvsr2pass2",
     "flashvsr2pass4",
     "flashvsrplus2", "flashvsrplus3", "flashvsrplus4", "flashvsrplus2pass2", "flashvsrplus2pass4",
 }

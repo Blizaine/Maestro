@@ -6,6 +6,7 @@ import { useIsMobileSidecar } from '../../lib/useIsMobile'
 import { GenerationModeSelector } from './GenerationModeSelector'
 import { InputsPanel } from './InputsPanel'
 import { OmniReferenceSection } from './OmniReferenceSection'
+import { SourceAudioTranscriptControls } from './SourceAudioTranscriptControls'
 import { PromptInput } from './PromptInput'
 import { ImageRefSection } from './ImageRefSection'
 import { AudioModeSection } from './AudioModeSection'
@@ -21,6 +22,8 @@ import { OutpaintControls } from './OutpaintControls'
 import { RetakeControls } from './RetakeControls'
 import { EditAnythingControls } from './EditAnythingControls'
 import { RecastControls } from './RecastControls'
+import { EditClipTaskSelector } from './EditClipTaskSelector'
+import { ViggleRemakeControls } from './ViggleRemakeControls'
 import { BlendControls } from './BlendControls'
 import { AnchorReturnBanner } from './AnchorReturnBanner'
 import { VoiceRefSection } from './VoiceRefSection'
@@ -213,6 +216,11 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
   const isOutpaint = isEdit && editSubMode === 'outpaint'
   const isEditAnything = isEdit && editSubMode === 'edit_anything'
   const isRecast = isEdit && editSubMode === 'recast'
+  const isRemakeControls = (
+    isRecast && selectedModel?.model_type === 'viggle_remake_swap'
+  ) || (
+    isEditAnything && selectedModel?.model_type === 'viggle_remake_edit'
+  )
   const isOmniReference = isVideo && Boolean(
     selectedModel?.omni_reference
     || selectedModel?.director?.video_strategy === 'omni_reference'
@@ -230,7 +238,7 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
   const hasPrompt = !isStandaloneTool && !isAnimate && !isTitles && !(isAudio && ['sfx', 'mixer', 'music'].includes(audioSubMode))
 
   // Video Transform controls backed by the legacy edit-mode engines.
-  const editControls = (
+  const editControls = isRemakeControls ? <ViggleRemakeControls /> : (
     <>
       {isRetake && (
         <>
@@ -306,6 +314,7 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
           <ControlVideoSection galleryOnly />
         )}
         {/* Video Transform workflows use the established Edit engines. */}
+        {isEdit && ['retake', 'recast', 'edit_anything', 'restyle'].includes(editSubMode) && <EditClipTaskSelector />}
         {isEdit && editControls}
 
         {/* Blend mode manages its own duration (overlap_sec) and its own
@@ -327,6 +336,7 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
           </div>
         )}
         {isReferencesWorkflow && <OmniReferenceSection />}
+        {(isFramesWorkflow || isReferencesWorkflow) && <SourceAudioTranscriptControls />}
         {isBlend && <BlendControls />}
 
         {/* Image workflows expose only the inputs their native pipeline uses. */}

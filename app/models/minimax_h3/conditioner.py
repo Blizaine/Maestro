@@ -75,6 +75,35 @@ class MiniMaxH3PreScaledLinear(nn.Linear):
         return F.linear(input * scale, self.weight, self.bias)
 
 
+class H3DistilledTextConnector(nn.Module):
+    """Project Pruna's five 4B snapshots into H3's 5120-channel space.
+
+    Connector layout and normalization follow PH3ImageTextConnector in
+    Diffusers (Copyright 2026 The Hugging Face Team, Apache-2.0).
+    """
+
+    def __init__(self, hidden_size: int = 2560, conditioning_size: int = 5120):
+        super().__init__()
+        width = hidden_size * 5
+        self.input_mean = nn.Parameter(torch.zeros(width, dtype=torch.float32))
+        self.input_std = nn.Parameter(torch.ones(width, dtype=torch.float32))
+        self.proj = nn.Linear(width, conditioning_size, bias=False, dtype=torch.float32)
+        self.output_mean = nn.Parameter(torch.zeros(conditioning_size, dtype=torch.float32))
+        self.output_std = nn.Parameter(torch.ones(conditioning_size, dtype=torch.float32))
+        self.sink_embedding = nn.Parameter(torch.zeros(conditioning_size, dtype=torch.float32))
+        self._convertWeightsFloatTo = None
+        for module in self.modules():
+            module._lock_dtype = torch.float32
+
+    def forward(self, states: list[torch.Tensor]) -> torch.Tensor:
+        joined = torch.cat(states, dim=-1).to(dtype=torch.float32)
+        states.clear()
+        projected = self.proj((joined - self.input_mean) / self.input_std)
+        projected = projected * self.output_std + self.output_mean
+        sink = self.sink_embedding.expand(projected.shape[0], 1, -1)
+        return torch.cat((sink, projected[:, 1:]), dim=1)
+
+
 class MiniMaxH3Qwen3VL(nn.Module):
     """Checkpoint-shaped Qwen3-VL wrapper.
 
@@ -90,12 +119,13 @@ class MiniMaxH3Qwen3VL(nn.Module):
         dtype: torch.dtype | None = None,
         *,
         consumer_quantized: bool = True,
+        distilled: bool = False,
     ):
         super().__init__()
         self.config = config
         self.visual = Qwen3VLVisionModel._from_config(config.vision_config)
         self.model = Qwen3VLTextModel(config.text_config)
-        if consumer_quantized:
+        if consumer_quantized or distilled:
             source_embedding = self.model.embed_tokens
             self.model.embed_tokens = MiniMaxH3Int8Embedding(
                 source_embedding.num_embeddings,
@@ -103,7 +133,10 @@ class MiniMaxH3Qwen3VL(nn.Module):
                 source_embedding.padding_idx,
                 output_dtype=dtype or source_embedding.weight.dtype,
             )
-        self.model.norm = nn.Identity()
+        self.text_connector = H3DistilledTextConnector(config.text_config.hidden_size) if distilled else None
+        self.output_layers = [12, 18, 24, 30] if distilled else [TEXT_ENCODER_LAYERS - 1]
+        if not distilled:
+            self.model.norm = nn.Identity()
         if consumer_quantized:
             for layer in self.model.layers:
                 down = layer.mlp.down_proj
@@ -124,10 +157,11 @@ class MiniMaxH3Qwen3VL(nn.Module):
     get_rope_index = Qwen3VLModel.get_rope_index
 
 
-def load_h3_qwen_config(config_path: str) -> Qwen3VLConfig:
+def load_h3_qwen_config(config_path: str, *, distilled: bool = False) -> Qwen3VLConfig:
     register_qwen3_vl_config()
     config = Qwen3VLConfig.from_json_file(config_path)
-    config.text_config.num_hidden_layers = TEXT_ENCODER_LAYERS
+    if not distilled:
+        config.text_config.num_hidden_layers = TEXT_ENCODER_LAYERS
     return config
 
 
@@ -375,11 +409,12 @@ class MiniMaxH3Conditioner(nn.Module):
             use_cache=False,
             visual_pos_masks=visual_mask,
             deepstack_visual_embeds=deepstack,
-            return_mid_results_layers=[TEXT_ENCODER_LAYERS - 1],
+            return_mid_results_layers=self.qwen.output_layers,
         )
-        if outputs.last_hidden_state is None or not outputs.mid_results:
+        embeddings = self._conditioning(outputs)
+        if embeddings is None:
             return None, None
-        return outputs.mid_results[0], torch.tensor(token_tags, dtype=torch.long)
+        return embeddings, torch.tensor(token_tags, dtype=torch.long)
 
     @torch.inference_mode()
     def forward(self, prompt: str, device: torch.device, images: list | None = None):
@@ -420,11 +455,21 @@ class MiniMaxH3Conditioner(nn.Module):
             use_cache=False,
             visual_pos_masks=visual_mask,
             deepstack_visual_embeds=deepstack,
-            return_mid_results_layers=[TEXT_ENCODER_LAYERS - 1],
+            return_mid_results_layers=self.qwen.output_layers,
         )
-        if outputs.last_hidden_state is None or not outputs.mid_results:
+        embeddings = self._conditioning(outputs)
+        if embeddings is None:
             return None, None
-        # The layer snapshot is taken before the (absent) final norm.
-        embeddings = outputs.mid_results[0]
         tags = _tag_vision_spans(input_ids)
         return embeddings, tags
+    def _conditioning(self, outputs):
+        if outputs.last_hidden_state is None or not outputs.mid_results:
+            return None
+        connector = self.qwen.text_connector
+        if connector is None:
+            return outputs.mid_results[0]
+        dtype = outputs.last_hidden_state.dtype
+        states = [*outputs.mid_results, outputs.last_hidden_state]
+        outputs.mid_results = None
+        outputs.last_hidden_state = None
+        return connector(states).to(dtype=dtype)

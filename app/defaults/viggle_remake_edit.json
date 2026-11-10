@@ -1,0 +1,26 @@
+{
+    "model": {
+        "name": "Viggle Remake Edit (Experimental)",
+        "architecture": "viggle_remake_edit",
+        "description": "Change an existing scene using edited source frames.",
+        "URLs": "minimax_h3",
+        "loras": [
+            "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/4e6c06ff7dd1c781b3265c16fcacc5f8efbf1e51/loras/viggle_remake_edit_bf16.safetensors"
+        ],
+        "loras_multipliers": [
+            1
+        ]
+    },
+    "prompt": "",
+    "num_inference_steps": 6,
+    "video_length": 124,
+    "sliding_window_size": 345,
+    "sliding_window_overlap": 17,
+    "resolution": "auto_480p",
+    "guidance_scale": 1,
+    "flow_shift": 12,
+    "sample_solver": "euler",
+    "video_prompt_type": "IVU",
+    "image_prompt_type": "",
+    "audio_prompt_type": "K"
+}

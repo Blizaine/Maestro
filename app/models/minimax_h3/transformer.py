@@ -1228,7 +1228,7 @@ class MiniMaxH3AdaLNProjection(nn.Module):
         # error coherently through all 50 transformer blocks.
         self.linear._lock_dtype = dtype
 
-    def forward(self, curve: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    def forward(self, curve: torch.Tensor, offset: torch.Tensor | None = None) -> tuple[torch.Tensor, ...]:
         if self.apply_silu:
             curve = F.silu(curve)
         if self.apply_silu:
@@ -1253,6 +1253,8 @@ class MiniMaxH3AdaLNProjection(nn.Module):
             if bias is not None:
                 bias = bias.to(device=curve.device, dtype=torch.float32)
             projected = F.linear(curve.to(dtype=torch.float32), weight, bias)
+        if offset is not None:
+            projected = projected.float() + offset.to(device=projected.device, dtype=torch.float32)
         projected = projected.view(curve.shape[0] * self.modalities, self.outputs * self.hidden_size)
         return projected.chunk(self.outputs, dim=-1)
 
@@ -1340,8 +1342,9 @@ class MiniMaxH3Block(nn.Module):
         rotary: tuple[torch.Tensor, torch.Tensor],
         attention_mask: torch.Tensor | None,
         residual_signature_elements: int = 0,
+        adaln_offset: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(curve)
+        shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(curve, adaln_offset)
         # Transfer the attention input rather than retaining it in this stack
         # frame through the packed SDPA call. Attention empties the list once
         # it owns the tensor and releases the storage after Q/K/V projection.
@@ -1439,8 +1442,9 @@ class MiniMaxH3FinalLayer(nn.Module):
         hidden_states: torch.Tensor,
         curve: torch.Tensor,
         timestep_runs: tuple[tuple[int, int, int], ...],
+        adaln_offset: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        shift, scale = self.adaln_proj(curve)
+        shift, scale = self.adaln_proj(curve, adaln_offset)
         normed = _rms_norm_in_chunks(self.norm, hidden_states)
         return _modulate_by_runs(normed, shift, scale, timestep_runs)
 
@@ -1581,6 +1585,8 @@ class MiniMaxH3Transformer(nn.Module):
             interleave_qkv_lora_b_rows,
             normalize_diffusers_lora,
         )
+        if any(key.startswith("hyperflow_adaln.") for key in state_dict):
+            state_dict = {key: value for key, value in state_dict.items() if not key.startswith("hyperflow_adaln.")}
 
         pdd_adapter = is_pdd_state_dict(state_dict)
         if pdd_adapter:
@@ -1763,8 +1769,11 @@ class MiniMaxH3Transformer(nn.Module):
         else:
             rotary = denoiser_kernels.prepare_rope(rotary)
 
+        hyperflow_offsets = _kwargs.get("hyperflow_block_offsets")
+        if hyperflow_offsets is not None and first_block_cache is not None:
+            raise ValueError("HyperFlow requires all eight evaluations without step caching.")
         if first_block_cache is None:
-            for block in self.blocks:
+            for index, block in enumerate(self.blocks):
                 if self._interrupt:
                     return None
                 packed = block(
@@ -1773,6 +1782,7 @@ class MiniMaxH3Transformer(nn.Module):
                     adaln_runs,
                     rotary,
                     attention_mask,
+                    **({"adaln_offset": hyperflow_offsets[index]} if hyperflow_offsets is not None else {}),
                 )
         else:
             if self._interrupt:
@@ -1825,7 +1835,8 @@ class MiniMaxH3Transformer(nn.Module):
                     packed[:, target_start:]
                 )
 
-        packed = self.final_layer(packed, curve, timestep_runs)
+        final_offset = _kwargs.get("hyperflow_final_offset")
+        packed = self.final_layer(packed, curve, timestep_runs, adaln_offset=final_offset)
         video_output = _project_selected_rows(
             self.final_layer.video_out,
             packed,

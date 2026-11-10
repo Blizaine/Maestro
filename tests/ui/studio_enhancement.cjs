@@ -310,6 +310,7 @@ async function assertExplicitEnhancement(page, sidebar, requests, llmRequests) {
   assert.equal(await page.evaluate(() => window.store.getState().enhanceOnGeneration), true, 'Failed submission keeps its instruction');
   await page.unroute('**/api/v1/generate');
   await page.setViewportSize({width: 390, height: 720});
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const mobileBadge = badge;
   await mobileBadge.scrollIntoViewIfNeeded();
   await page.waitForFunction(() => {

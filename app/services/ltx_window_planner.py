@@ -336,6 +336,9 @@ def plan_ltx_sliding_windows(
     image_paths: Iterable[str] | None = None,
     nsfw: bool = False,
     planning_style: str = "faithful",
+    source_audio_transcript: dict | None = None,
+    overlap_seconds: float = 0,
+    discard_seconds: float = 0,
 ) -> dict:
     """Use Maestro's configured enhancer to create exact LTX window prompts.
 
@@ -350,6 +353,12 @@ def plan_ltx_sliding_windows(
     planning_style = normalize_ltx_planning_style(planning_style)
     planned_by = "llm"
     error = None
+    from services.studio_audio_context import generic_transcript_windows, transcript_plan_context
+    audio_windows = generic_transcript_windows({
+        "duration_seconds": duration_seconds, "window_count": count,
+        "window_size_seconds": window_size_seconds,
+        "window_overlap_seconds": overlap_seconds, "window_discard_seconds": discard_seconds,
+    }) if source_audio_transcript is not None else []
     try:
         from services import llm_service
 
@@ -373,6 +382,7 @@ def plan_ltx_sliding_windows(
                 window_count=count,
                 window_size_seconds=max(1, round(float(window_size_seconds), 1)),
                 planning_style=planning_style,
+                reference_context=transcript_plan_context(source_audio_transcript, audio_windows) or None,
             )
             prompts = parse_ltx_window_prompts(enhanced, expected_count=count)
         else:
@@ -439,6 +449,9 @@ def plan_ltx_sliding_windows(
                         window_count=local_count,
                         window_size_seconds=max(1, round(float(window_size_seconds), 1)),
                         planning_style=planning_style,
+                        reference_context=transcript_plan_context(
+                            source_audio_transcript, audio_windows[start:start + local_count],
+                        ) or None,
                     )
                     prompts.extend(parse_ltx_window_prompts(
                         expanded,

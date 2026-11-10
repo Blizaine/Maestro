@@ -27,10 +27,13 @@ _BF16_ROUNDING_BUDGET_FACTOR = 1.25
 _MAP_RELATIVE_DIR = os.path.join("minimax_h3", "lora_affine_maps")
 _ARCHITECTURES = {
     "viggle_animate": "viggle",
+    "viggle_remake_swap": "fl2va",
+    "viggle_remake_edit": "fl2va",
     "minimax_h3": "fl2va",
     "minimax_h3_full": "fl2va",
     "minimax_h3_ref2va": "ref2va",
     "minimax_h3_ref2va_full": "ref2va",
+    "minimax_h3_regenerate_ic": "ref2va",
 }
 _LORA_SUFFIXES = (
     ("lora_A.weight", "lora_B.weight"),

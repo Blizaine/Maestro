@@ -537,7 +537,11 @@ class FlashVSRRuntimeContractTests(unittest.TestCase):
             instance.dtype = torch.float32
             instance.model = runtime.FLASHVSR_MODEL_PLUS_TURBO
             instance.variant = runtime.FLASHVSR_VARIANT_TINY_LONG
-            instance.dit = SimpleNamespace(blocks=[object() for _ in range(30)], clear_cross_kv=lambda: None)
+            attention = SimpleNamespace(num_heads=2, head_dim=4)
+            instance.dit = SimpleNamespace(
+                blocks=[SimpleNamespace(self_attn=attention) for _ in range(30)],
+                clear_cross_kv=lambda: None,
+            )
             instance.lq_proj = FakeProjection()
             instance.tcdecoder = FakeDecoder()
             instance._prepare_run_state = lambda: None
@@ -554,15 +558,14 @@ class FlashVSRRuntimeContractTests(unittest.TestCase):
             instance._decode_tcdecoder = decode.__get__(instance, runtime.FlashVSRRuntime)
             return instance, decode_calls
 
-        def fake_denoise(_dit, latents, _context, _lq, cache_k, cache_v, _index, *_args, **kwargs):
+        def fake_denoise(_dit, latents, _context, _lq, _stream_cache, _index, *_args, **kwargs):
             denoise_ratios.append(kwargs["topk_ratio"])
-            return torch.zeros_like(latents), cache_k, cache_v
+            return torch.zeros_like(latents)
 
         sample = torch.zeros((3, 17, 3, 5), dtype=torch.float32)
         instance, decode_calls = make_runtime()
         denoise_ratios = []
         with patch.object(runtime, "_denoise_stream_chunk", fake_denoise), \
-             patch.object(runtime, "_maybe_empty_cache"), \
              patch.object(runtime, "_wavelet_color_fix_from_sample"):
             frames, cache = instance.upscale(
                 sample, 2.0, persistent_models=True, return_continue_cache=True, topk_ratio=1.25

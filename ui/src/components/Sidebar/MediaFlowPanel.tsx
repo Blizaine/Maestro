@@ -3,6 +3,7 @@ import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { MediaFinishingControls } from './MediaFinishingControls'
 import { dlssSpatialOptions, trackMediaFlowJobs, useDlssAvailability } from '../../lib/mediaFlow'
+import { relayvsrOptions } from '../../lib/flashvsr'
 
 export function MediaFlowPanel({ image = false }: { image?: boolean }) {
   const dlss = useDlssAvailability()
@@ -60,6 +61,7 @@ export function MediaFlowPanel({ image = false }: { image?: boolean }) {
         <select className="w-full bg-bg-tertiary border border-border rounded-lg p-2" value={spatial} onChange={event => setSpatial(event.target.value)}>
           {!image && <option value="">Original resolution</option>}
           {dlssSpatialOptions.map(option => <option key={option.value} value={option.value} disabled={dlss.disabled(option.value)}>{dlss.label(option.value, option.label)}</option>)}
+          {relayvsrOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
           {[1.5, 2, 3, 4].map(scale => <option key={scale} value={`lanczos${scale}`}>Lanczos ×{scale}</option>)}
         </select>
       </label>

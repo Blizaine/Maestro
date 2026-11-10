@@ -11,12 +11,18 @@ async function assertDurationPopup(page, sidebar, output) {
   const sameBox = (actual, expected, message) => {
     for (const key of ['x', 'y', 'width', 'height']) assert.ok(Math.abs(actual[key] - expected[key]) < 1, `${message}: ${key} ${expected[key]} -> ${actual[key]}`);
   };
-  const fitsSidebar = async () => {
+  const fitsSidebar = async ({keyboard = false} = {}) => {
     const panel = await dialog.boundingBox(), side = await sidebar.boundingBox();
     assert.ok(panel.x >= side.x && panel.x + panel.width <= side.x + side.width, 'Duration stays within the sidebar width');
     assert.ok(panel.y >= side.y && panel.y + panel.height <= side.y + side.height, 'Duration fits the visible sidebar height');
-    const trigger = await sidebar.getByRole('button', {name: /^Duration:/}).boundingBox();
-    assert.ok(panel.y + panel.height <= trigger.y - 5, 'Duration opens directly above its indicator');
+    if (keyboard) {
+      const visible = await page.evaluate(() => ({top: window.visualViewport.offsetTop, height: window.visualViewport.height}));
+      assert.ok(panel.y >= visible.top && panel.y + panel.height <= visible.top + visible.height,
+        'Duration fits the keyboard-reduced visual viewport');
+    } else {
+      const trigger = await sidebar.getByRole('button', {name: /^Duration:/}).boundingBox();
+      assert.ok(panel.y + panel.height <= trigger.y - 5, 'Duration opens directly above its indicator');
+    }
     assert.ok(await dialog.evaluate(node => node.scrollWidth <= node.clientWidth), 'Duration has no horizontal overflow');
   };
   const drag = async (slider, label) => {
@@ -173,7 +179,7 @@ async function assertDurationPopup(page, sidebar, output) {
     window.visualViewport.dispatchEvent(new Event('resize')); window.visualViewport.dispatchEvent(new Event('scroll'));
   });
   await settle();
-  await fitsSidebar();
+  await fitsSidebar({keyboard: true});
   await drag(duration(), 'Time slider above the keyboard');
   await close();
   await page.evaluate(() => {

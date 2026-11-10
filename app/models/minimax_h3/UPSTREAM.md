@@ -428,3 +428,15 @@ sufficient memory, retaining the serial path on smaller or busy devices.
 The existing tile placement, temporal decoding and overlap blending are retained.
 See `THIRD_PARTY_NOTICES.md`, `app/LICENSES/WanGP-Community-2.0.txt` and
 `docs/testing/h3-cross-app-benchmark.md` for provenance and validation scope.
+
+The November 2026 H3 port follows WanGP revision
+`5b63ae9d4c0e8578929c95c4c5e09162f4520d93`. The Remake schedules and source
+reference layout, 4B checkpoint packaging, and HyperFlow Ref2VA offset table
+format follow its MiniMax H3 integration. WanGP-derived code retains the
+WanGP Community License 2.0 at `app/LICENSES/WanGP-Community-2.0.txt`.
+The distilled projection follows the Apache-2.0 Diffusers MiniMax H3
+distilled conditioner. HyperFlow and DMAD describe their sampling methods at
+https://github.com/VideoRebirthAI/HyperFlow and https://github.com/Yzmblog/DMAD.
+Viggle Remake, HyperFlow, DMAD and Regenerate 2K IC weights are downloaded
+separately from the pinned DeepBeepMeep/MiniMax-H3 revision
+`4e6c06ff7dd1c781b3265c16fcacc5f8efbf1e51` and retain their model terms.

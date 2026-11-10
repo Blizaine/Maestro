@@ -440,7 +440,7 @@ class SelfAttention(nn.Module):
 
     def forward(self, x, freqs, f=None, h=None, w=None, local_num=None, topk=None,
                 train_img=False, block_id=None, kv_len=None, is_full_block=False,
-                is_stream=False, pre_cache_k=None, pre_cache_v=None, pre_cache_refs=None, local_range = 9, cache_next=True,
+                is_stream=False, pre_cache_k=None, pre_cache_v=None, pre_cache_refs=None, stream_cache=None, local_range = 9, cache_next=True,
                 allow_short_start=False, topk_groups=None, block_mask=None):
         if isinstance(x, list):
             x_ref = x
@@ -479,6 +479,11 @@ class SelfAttention(nn.Module):
 
         seqlen = f//win[0]
         one_len = k_w.shape[0] // B // seqlen
+        block_s = k_w.shape[1]
+        if stream_cache is not None:
+            cache_refs = stream_cache.prefix(block_id, block_s, D, k_w.device, k_w.dtype)
+            if cache_refs is not None:
+                pre_cache_k, pre_cache_v = cache_refs
         if pre_cache_k is not None and pre_cache_v is not None:
             k_w = torch.cat([pre_cache_k, k_w], dim=0)
             v_w = torch.cat([pre_cache_v, v_w], dim=0)
@@ -496,9 +501,15 @@ class SelfAttention(nn.Module):
         if is_stream and cache_next:
             cache_blocks = min(block_n_kv, one_len * max(1, int(kv_len)))
             cache_k = k_w.view(B, block_n_kv, block_s, D)[:, -cache_blocks:].reshape(B * cache_blocks, block_s, D)
-            cache_k = cache_k.detach().to("cpu")
+            cache_k = cache_k.detach()
             cache_v = v_w.view(B, block_n_kv, block_s, D)[:, -cache_blocks:].reshape(B * cache_blocks, block_s, D)
-            cache_v = cache_v.detach().to("cpu")
+            cache_v = cache_v.detach()
+            if stream_cache is not None:
+                stream_cache.commit(block_id, cache_k, cache_v, block_s)
+                cache_k = cache_v = None
+            else:
+                cache_k = cache_k.to("cpu")
+                cache_v = cache_v.to("cpu")
 
         reorder_q = rearrange(q_w, '(b block_n) (block_s) d -> b (block_n block_s) d', block_n=block_n, block_s=block_s)
         reorder_k = rearrange(k_w, '(b block_n) (block_s) d -> b (block_n block_s) d', block_n=block_n_kv, block_s=block_s)
@@ -629,7 +640,7 @@ class DiTBlock(nn.Module):
 
     def forward(self, x, context, t_mod, freqs, f, h, w, local_num=None, topk=None,
                 train_img=False, block_id=None, kv_len=None, is_full_block=False,
-                is_stream=False, pre_cache_k=None, pre_cache_v=None, pre_cache_refs=None, local_range = 9, cache_next=True,
+                is_stream=False, pre_cache_k=None, pre_cache_v=None, pre_cache_refs=None, stream_cache=None, local_range = 9, cache_next=True,
                 allow_short_start=False, topk_groups=None, block_mask=None):
         if isinstance(x, list):
             x_ref = x
@@ -643,7 +654,7 @@ class DiTBlock(nn.Module):
         self_attn_output, self_attn_cache_k, self_attn_cache_v = self.self_attn(
             x_list , freqs, f, h, w, local_num, topk, train_img, block_id,
             kv_len=kv_len, is_full_block=is_full_block, is_stream=is_stream,
-            pre_cache_k=pre_cache_k, pre_cache_v=pre_cache_v, pre_cache_refs=pre_cache_refs, local_range = local_range, cache_next=cache_next,
+            pre_cache_k=pre_cache_k, pre_cache_v=pre_cache_v, pre_cache_refs=pre_cache_refs, stream_cache=stream_cache, local_range = local_range, cache_next=cache_next,
             allow_short_start=allow_short_start, topk_groups=topk_groups, block_mask=block_mask)
 
         x = self.gate(x, gate_msa, self_attn_output)

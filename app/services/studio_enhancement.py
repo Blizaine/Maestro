@@ -287,6 +287,12 @@ def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
         "duration_seconds": total / fps, "window_count": 1, "window_size_seconds": window / fps,
         "image_paths": images, "reference_context": "\n".join(context),
         "activated_loras": deepcopy(params.get("activated_loras") or []),
+        "audio_guide": params.get("audio_guide"),
+        "audio_prompt_type": params.get("audio_prompt_type"),
+        "source_audio_transcript_in_prompt": params.get("source_audio_transcript_in_prompt") is True,
+        "source_audio_transcript_for_enhancement": params.get("source_audio_transcript_for_enhancement") is True,
+        "window_overlap_seconds": float(params.get("sliding_window_overlap") or 0) / fps,
+        "window_discard_seconds": float(params.get("sliding_window_discard_last_frames") or 0) / fps,
     }
     payload.update(native_reference_inputs)
     return payload, sequence

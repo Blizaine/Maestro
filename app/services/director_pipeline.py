@@ -2153,6 +2153,10 @@ def _save_pipeline_state_locked(pid: str) -> bool:
     # order, followed by the optional *_multiclip join. Preserve a completed
     # prefix after cancellation so the Dashboard can rerun/rejoin those clips.
     clip_videos = p.get("_clip_video_files") or []
+    clip_takes = p.get("_clip_takes") or []
+    selected_take_ids = p.get("_clip_selected_take_ids") or {}
+    approved_take_filenames = p.get("_clip_approved_take_filenames") or []
+    approved_take_fingerprints = p.get("_clip_approved_take_fingerprints") or []
     if not clip_videos and not params.get("seamless", True):
         clip_videos = _clip_video_slots(
             p.get("output_files") or [], len(clip_plans),
@@ -2215,6 +2219,18 @@ def _save_pipeline_state_locked(pid: str) -> bool:
             "start_image_filename": clip_images[i] if i < len(clip_images) else None,
             "keyframe_filenames": (p.get("_clip_keyframes", []) or [])[i] if i < len(p.get("_clip_keyframes", [])) else [],
             "video_filename": clip_videos[i] if i < len(clip_videos) else None,
+            "takes": copy.deepcopy(
+                clip_takes[i] if i < len(clip_takes) and isinstance(clip_takes[i], list) else []
+            ),
+            "selected_take_id": selected_take_ids.get(str(i)),
+            "approved_take_filename": (
+                approved_take_filenames[i]
+                if i < len(approved_take_filenames) else None
+            ),
+            "approved_take_fingerprint": (
+                approved_take_fingerprints[i]
+                if i < len(approved_take_fingerprints) else None
+            ),
             "video_stale": False,
             "tag": (p.get("_clip_tags", []) or [])[i] if i < len(p.get("_clip_tags", [])) else None,
             "image_gen_time_sec": clip_timings.get(f"image_{i}"),
@@ -2230,6 +2246,8 @@ def _save_pipeline_state_locked(pid: str) -> bool:
         # source run as parent_pipeline_id.
         "project_id": params.get("_director_project_id") or pid,
         "parent_pipeline_id": params.get("_director_parent_pipeline_id"),
+        "render_stage": p.get("render_stage") or params.get("_director_render_stage"),
+        "draft_final": copy.deepcopy(p.get("draft_final")) if p.get("draft_final") else None,
         "queue_entry_id": params.get("_director_queue_entry_id"),
         "created_at": p.get("created_at"),
         "completed_at": p.get("_completed_at"),
@@ -2394,6 +2412,9 @@ def list_pipeline_states(out_dir: str) -> list[dict]:
                         "output_count": len(data.get("output_files", [])),
                         "scene_description": (data.get("scene_description", "") or "")[:100],
                         "workspace": os.path.basename(scan_dir) if scan_dir != out_dir else "default",
+                        "parent_pipeline_id": data.get("parent_pipeline_id"),
+                        "render_stage": data.get("render_stage"),
+                        "draft_final": copy.deepcopy(data.get("draft_final")),
                         "repair_status": (data.get("repair") or {}).get("status"),
                         "_filepath": filepath,
                     })
@@ -2824,7 +2845,11 @@ def update_clip_tag(out_dir: str, pid: str, clip_index: int, tag: Optional[str])
         raise PipelineBusyError("Pipeline is still active; try again shortly.")
     try:
         with _pipeline_file_lock:
-            return _update_clip_tag_locked(out_dir, pid, clip_index, tag)
+            updated = _update_clip_tag_locked(out_dir, pid, clip_index, tag)
+        if updated:
+            state = load_pipeline_state(out_dir, pid) or {}
+            _sync_live_pipeline_clip_state(pid, state)
+        return updated
     finally:
         _release_pipeline_operation(pid)
 
@@ -2895,6 +2920,30 @@ def _update_clip_tag_locked(out_dir: str, pid: str, clip_index: int, tag: Option
         return False
     clips[clip_index]["tag"] = tag
 
+    # Bind Good approval to the exact rendered media. A later rerun or file
+    # replacement must not silently carry that approval to a new take.
+    if tag == "good":
+        filename = clips[clip_index].get("video_filename")
+        state_path = _find_pipeline_file(out_dir, pid)
+        media_path = (
+            os.path.join(os.path.dirname(state_path), filename)
+            if state_path and isinstance(filename, str)
+            and os.path.basename(filename) == filename else ""
+        )
+        if media_path and os.path.isfile(media_path):
+            digest = hashlib.sha256()
+            with open(media_path, "rb") as media:
+                for block in iter(lambda: media.read(1024 * 1024), b""):
+                    digest.update(block)
+            clips[clip_index]["approved_take_filename"] = filename
+            clips[clip_index]["approved_take_fingerprint"] = digest.hexdigest()
+        else:
+            clips[clip_index].pop("approved_take_filename", None)
+            clips[clip_index].pop("approved_take_fingerprint", None)
+    else:
+        clips[clip_index].pop("approved_take_filename", None)
+        clips[clip_index].pop("approved_take_fingerprint", None)
+
     # Find and overwrite the file
     target = f"{_PIPELINE_FILE_PREFIX}{pid}.json"
     for search_dir in [out_dir] + [os.path.join(out_dir, d) for d in os.listdir(out_dir) if os.path.isdir(os.path.join(out_dir, d))]:
@@ -2903,6 +2952,26 @@ def _update_clip_tag_locked(out_dir: str, pid: str, clip_index: int, tag: Option
             _write_pipeline_json_unlocked(filepath, state)
             return True
     return False
+
+
+def _sync_live_pipeline_clip_state(pid: str, state: dict) -> None:
+    """Mirror saved clip selections and approvals into a resident snapshot."""
+    clips = state.get("clips") or []
+    if not clips:
+        return
+    with _pipeline_lock:
+        live = _pipelines.get(pid)
+        if live is None:
+            return
+        live["_clip_video_files"] = [clip.get("video_filename") for clip in clips]
+        live["_clip_tags"] = [clip.get("tag") for clip in clips]
+        live["_clip_approved_take_filenames"] = [
+            clip.get("approved_take_filename") for clip in clips
+        ]
+        live["_clip_approved_take_fingerprints"] = [
+            clip.get("approved_take_fingerprint") for clip in clips
+        ]
+        live["output_files"] = list(state.get("output_files") or [])
 
 
 def _find_pipeline_file(out_dir: str, pid: str) -> Optional[str]:
@@ -3013,13 +3082,16 @@ def _delete_pipeline_locked(out_dir: str, pid: str) -> dict:
 
     names = set()
     if state:
+        shared_source_files = set(
+            (state.get("draft_final") or {}).get("shared_source_files") or []
+        )
         for clip in state.get("clips", []) or []:
-            if clip.get("start_image_filename"):
+            if clip.get("start_image_filename") and clip["start_image_filename"] not in shared_source_files:
                 names.add(clip["start_image_filename"])
             for kf in clip.get("keyframe_filenames") or []:
-                if kf:
+                if kf and kf not in shared_source_files:
                     names.add(kf)
-            if clip.get("video_filename"):
+            if clip.get("video_filename") and clip["video_filename"] not in shared_source_files:
                 names.add(clip["video_filename"])
         for out in state.get("output_files", []) or []:
             if out:
@@ -3336,7 +3408,9 @@ def _rerun_clip_image_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
                 snapshot["generated_reference_image_filename"] = (
                     anchor_to_persist
                 )
-    _update_saved_pipeline(out_dir, pid, _update)
+    updated_state = _update_saved_pipeline(out_dir, pid, _update)
+    if updated_state:
+        _sync_live_pipeline_clip_state(pid, updated_state)
 
     return {"filename": new_filename, "clip_index": clip_index}
 
@@ -4242,6 +4316,9 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
     def _update(s):
         s["clips"][clip_index]["video_filename"] = new_filename
         s["clips"][clip_index]["video_stale"] = False
+        s["clips"][clip_index]["tag"] = None
+        s["clips"][clip_index].pop("approved_take_filename", None)
+        s["clips"][clip_index].pop("approved_take_fingerprint", None)
         s["clips"][clip_index]["video_prompt"] = prompt
         s["clips"][clip_index]["_director_rendered_prompt"] = prompt
         s["clips"][clip_index]["_director_vocal_contract"] = (
@@ -4280,7 +4357,9 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
                 "video_params", {}
             )
             snapshot_video_params["resolution"] = gen_params["resolution"]
-    _update_saved_pipeline(out_dir, pid, _update)
+    updated_state = _update_saved_pipeline(out_dir, pid, _update)
+    if updated_state:
+        _sync_live_pipeline_clip_state(pid, updated_state)
 
     return {"filename": new_filename, "clip_index": clip_index}
 
@@ -6399,6 +6478,14 @@ def get_pipeline_status(pid: str, out_dir: str) -> Optional[dict]:
             clip.get("start_image_filename") or "" for clip in clips
         ],
         "output_files": saved.get("output_files", []) or [],
+        "draft_final": copy.deepcopy(saved.get("draft_final")),
+        "render_stage": saved.get("render_stage"),
+        "clip_takes": [copy.deepcopy(clip.get("takes") or []) for clip in clips],
+        "clip_selected_take_ids": {
+            str(index): clip.get("selected_take_id")
+            for index, clip in enumerate(clips)
+            if clip.get("selected_take_id")
+        },
         "error": saved.get("error") or (
             "Maestro no longer has a live worker for this Director run."
             if saved_status == "crashed" else None

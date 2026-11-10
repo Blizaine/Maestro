@@ -1150,6 +1150,8 @@ const avatarModelTypes = new Set([
   'i2v_2_2_multitalk',
   'animate',
   'hunyuan_avatar',
+  'viggle_remake_swap',
+  'viggle_remake_edit',
 ])
 
 // Model types classified as Video Edit (Kiwi Edit, Chrono Edit)
@@ -1164,6 +1166,11 @@ const videoEditModelTypes = new Set([
   // Dedicated to Edit → Recast; the general SCAIL Fast profile remains in
   // Studio Video/Animate.
   'scail2_14B_recast_fast',
+  // Remake models belong only to their matching Edit Clip task.
+  'viggle_remake_swap',
+  'viggle_remake_edit',
+  // Regenerate 2K IC is invoked from Tools, never as a normal video model.
+  'minimax_h3_regenerate_ic',
 ])
 
 // Audio sub-families: split the single "tts" family into Speech, Music, SFX
@@ -1237,6 +1244,9 @@ const DEFAULT_ENABLED_MODELS = new Set([
   'minimax_h3_full',
   'minimax_h3_voice_audio',
   'viggle_animate',
+  // H3 Remake checkpoints are available only through their matching Edit Clip task.
+  'viggle_remake_swap',
+  'viggle_remake_edit',
   // Fused four-step H3 and dedicated LongCat Avatar workflows.
   'minimax_h3_fused_turbo',
   'longcat_avatar',
@@ -1270,7 +1280,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 26
+const DEFAULTS_VERSION = 27
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -1318,6 +1328,8 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   25: ['fibo2_dev', 'fibo2_edit_turbo'],
   // Pika H3 Flex gets workflow defaults through scoped visibility only.
   26: [],
+  // H3 Remake checkpoints: Replace People and Edit Scene.
+  27: ['viggle_remake_swap', 'viggle_remake_edit'],
 }
 const SCOPED_DEFAULTS_ADDED_IN: Record<number, Partial<Record<ModelVisibilityScope, readonly string[]>>> = {
   26: {
@@ -1450,10 +1462,16 @@ export function directorModelUsesFixedMediaStrength(
 
 export function getFamiliesForMode(mode: GenerationMode, allFamilies: ModelFamily[], editSubMode?: string, audioSubMode?: string): ModelFamily[] {
   if (mode === 'avatar') {
-    // Recast and Repaint run on SCAIL-2, which lives under the Wan 2.1
-    // family. The remaining edit sub-modes use LTX models.
-    if (editSubMode === 'recast' || editSubMode === 'restyle') {
+    // Recast includes the H3 Remake Replace People recipe; SCAIL-2 Recast and
+    // Repaint remain under Wan. Other scene edits use LTX plus H3 Remake Edit.
+    if (editSubMode === 'recast') {
+      return allFamilies.filter(f => f.id === 'wan' || f.id === 'minimax_h3')
+    }
+    if (editSubMode === 'restyle') {
       return allFamilies.filter(f => f.id === 'wan')
+    }
+    if (editSubMode === 'edit_anything') {
+      return allFamilies.filter(f => ['ltx2', 'ltxv', 'minimax_h3'].includes(f.id))
     }
     if (editSubMode === 'outpaint') return allFamilies.filter(f => ['ltx2', 'ltxv', 'minimax_h3'].includes(f.id))
     return allFamilies.filter(f => f.id === 'ltx2' || f.id === 'ltxv')
@@ -1488,10 +1506,17 @@ export function getModelsForFamily(familyId: string, allModels: ModelDef[], mode
   if (mode === 'avatar') {
     // Recast exposes its dedicated native-replacement Fast recipe plus HQ.
     if (editSubMode === 'recast') {
+      if (familyId === 'minimax_h3') {
+        return familyModels.filter(m => m.model_type === 'viggle_remake_swap')
+      }
       return familyModels.filter(m =>
         m.model_type === 'scail2_14B_recast_fast'
         || m.model_type === 'scail2_14B'
       )
+    }
+    // Prompt Edit includes the H3 Remake scene-edit recipe alongside LTX.
+    if (editSubMode === 'edit_anything' && familyId === 'minimax_h3') {
+      return familyModels.filter(m => m.model_type === 'viggle_remake_edit')
     }
     // Repaint intentionally mirrors Studio Video/Frames SCAIL Animate:
     // the edited first frame is the primary image and the source video
@@ -2581,6 +2606,8 @@ const defaultParams: GenerateParams = {
   repeat_generation: 1,
   activated_loras: [],
   loras_multipliers: '',
+  source_audio_transcript_in_prompt: false,
+  source_audio_transcript_for_enhancement: false,
   skip_steps_cache_type: '',
   skip_steps_multiplier: 0.08,
   skip_steps_start_step_perc: 25,
@@ -3667,6 +3694,44 @@ function _studioCreateInputState(state: AppState): {
   }
 }
 
+type StudioSourceAudioTranscriptState = {
+  generationMode: GenerationMode
+  studioVideoWorkflow: StudioVideoWorkflow
+  params: Pick<GenerateParams,
+    'image_mode' | 'audio_prompt_type' | 'audio_guide' | 'audio_frame_offset' | 'minimax_h3_references'
+    | 'source_audio_transcript_in_prompt' | 'source_audio_transcript_for_enhancement'>
+}
+
+/** True only when Frames/References has an exact source soundtrack driver. */
+export function hasStudioSourceAudioTranscriptDriver(state: StudioSourceAudioTranscriptState): boolean {
+  if (state.generationMode !== 'video' || Number(state.params.image_mode) !== 0) return false
+  if (state.studioVideoWorkflow === 'frames') {
+    const audioMode = String(state.params.audio_prompt_type || '').replace(/[NV]/g, '')
+    return Boolean(state.params.audio_guide) && audioMode.includes('A')
+  }
+  if (state.studioVideoWorkflow !== 'references') return false
+  return (state.params.minimax_h3_references ?? []).some(reference => (
+    (reference.type === 'audio' && reference.audio_intent === 'drive')
+    || (reference.type === 'video' && _videoAudioRole(reference) === 'drive')
+  ))
+}
+
+function _sourceAudioTranscriptRequestParams(state: StudioSourceAudioTranscriptState): Pick<GenerateParams,
+  'source_audio_transcript_in_prompt' | 'source_audio_transcript_for_enhancement' | 'audio_frame_offset'> {
+  if (!hasStudioSourceAudioTranscriptDriver(state)) return {}
+  return {
+    source_audio_transcript_in_prompt: state.params.source_audio_transcript_in_prompt === true,
+    source_audio_transcript_for_enhancement: state.params.source_audio_transcript_for_enhancement === true,
+    audio_frame_offset: state.params.audio_frame_offset,
+  }
+}
+
+function _sourceAudioTranscriptGuide(state: StudioSourceAudioTranscriptState): string | undefined {
+  return hasStudioSourceAudioTranscriptDriver(state) && state.studioVideoWorkflow === 'frames'
+    ? state.params.audio_guide || undefined
+    : undefined
+}
+
 function _audioSubModeForModel(modelType: string): import('../types').AudioSubMode {
   if (sfxModelTypes.has(modelType)) return 'sfx'
   if (isMusicModelType(modelType)) return 'music'
@@ -4395,11 +4460,29 @@ export const useStore = create<AppState>((set, get) => ({
       }
       return
     }
-    if (mode === prev) return
+    const current = (s.params.model_type as string) || ''
+    const isViggleRemake = current === 'viggle_remake_swap' || current === 'viggle_remake_edit'
+    if (mode === prev && !isViggleRemake) return
+    if (isViggleRemake) {
+      if (mode === 'restyle') _preScail2AvatarModel = current
+      const candidates = getFamiliesForMode('avatar', s.families, mode).flatMap(family =>
+        getModelsForFamily(family.id, s.models, 'avatar', mode),
+      ).filter(model => enabled.has(model.model_type)
+        && (!model.nsfw_only || s.servicesConfig?.nsfw_mode))
+      const remakeTarget = mode === 'recast' ? 'viggle_remake_swap'
+        : mode === 'edit_anything' ? 'viggle_remake_edit' : ''
+      const preferred = mode === 'restyle' ? ['scail2_14B_fast', 'scail2_14B']
+        : mode === 'recast' ? ['scail2_14B_recast_fast', 'scail2_14B']
+          : ['ltx2_22B_distilled_1_1']
+      const target = candidates.find(model => model.model_type === remakeTarget)
+        || candidates.find(model => preferred.includes(model.model_type))
+        || candidates[0]
+      if (target && target.model_type !== current) get().selectModel(target.model_type)
+      return
+    }
     // Recast uses SCAIL-2 Replace; Repaint uses the proven SCAIL-2 Animate
     // path from Studio Video/Frames. Swap recipes when moving between those
     // modes and restore the previous LTX edit model when leaving both.
-    const current = (s.params.model_type as string) || ''
     const isScail2 = (mt: string) => s.models.find(m => m.model_type === mt)?.architecture === 'scail2_14B'
     const enteringScail2Edit = mode === 'recast' || mode === 'restyle'
     const leavingScail2Edit = prev === 'recast' || prev === 'restyle'
@@ -4422,9 +4505,18 @@ export const useStore = create<AppState>((set, get) => ({
         if (target) get().selectModel(target)
       }
     } else if (leavingScail2Edit && isScail2(current)) {
-      const restore = _preScail2AvatarModel && enabled.has(_preScail2AvatarModel) && s.models.some(m => m.model_type === _preScail2AvatarModel)
-        ? _preScail2AvatarModel
-        : getDefaultModelForMode('avatar', s.families, s.models, enabledModelsForContext(s, getModelVisibilityScope({ ...s, editSubMode: mode })))
+      const compatible = getFamiliesForMode('avatar', s.families, mode).flatMap(family =>
+        getModelsForFamily(family.id, s.models, 'avatar', mode),
+      ).filter(model => enabled.has(model.model_type)
+        && (!model.nsfw_only || s.servicesConfig?.nsfw_mode))
+      const remakeCounterpart = mode === 'edit_anything' && _preScail2AvatarModel === 'viggle_remake_swap'
+        ? 'viggle_remake_edit' : ''
+      const restore = compatible.some(model => model.model_type === remakeCounterpart)
+        ? remakeCounterpart
+        : _preScail2AvatarModel && compatible.some(model => model.model_type === _preScail2AvatarModel)
+          ? _preScail2AvatarModel
+        : compatible.find(model => model.model_type === 'ltx2_22B_distilled_1_1')?.model_type
+          || compatible[0]?.model_type
       if (restore) get().selectModel(restore)
     }
   },
@@ -5057,9 +5149,15 @@ export const useStore = create<AppState>((set, get) => ({
       'minimax_h3_sequence_clip_frames',
       'minimax_h3_sequence_memory_override',
       'minimax_h3_extended_duration',
+      'source_audio_transcript_in_prompt',
+      'source_audio_transcript_for_enhancement',
+      'audio_guide', 'audio_prompt_type', 'audio_frame_offset',
     ].includes(String(key))
     set(s => {
       const nextParams = { ...s.params, [key]: value }
+      if (key === 'audio_guide' && value !== s.params.audio_guide) {
+        nextParams.audio_frame_offset = 0
+      }
       if (key === 'video_guide' && value !== s.params.video_guide) {
         // Loaded clip settings may seek into a shared control source. A new
         // source begins at zero; retaining that hidden origin skips its head.
@@ -5098,6 +5196,23 @@ export const useStore = create<AppState>((set, get) => ({
         || key === 'model_type'
       ) {
         delete nextParams._ltx_original_prompt
+        delete nextParams.ltx_window_prompts
+      }
+      if (
+        (key === 'source_audio_transcript_in_prompt' || key === 'source_audio_transcript_for_enhancement'
+          || ((key === 'audio_guide' || key === 'audio_prompt_type' || key === 'audio_frame_offset')
+            && s.params.source_audio_transcript_for_enhancement === true))
+        && Array.isArray(nextParams.ltx_window_prompts)
+      ) {
+        const originalSource = nextParams._ltx_original_prompt
+        if (typeof originalSource === 'string' && originalSource.trim()
+          && nextParams.prompt === nextParams.ltx_window_prompts.join('\n')) {
+          // A transcript choice changes the prompt context. Drop the derived
+          // window draft and return to its untouched source idea so the next
+          // Enhance uses the new setting without losing that source.
+          nextParams.prompt = originalSource
+          delete nextParams._prompt_enhancement
+        }
         delete nextParams.ltx_window_prompts
       }
       return {
@@ -7336,7 +7451,8 @@ export const useStore = create<AppState>((set, get) => ({
             media_path: source,
             media_type: s.toolsUpscaleMedia,
             method: s.toolsUpscaleMethod,
-            temporal_upsampling: s.toolsUpscaleMedia === 'video' ? s.params.temporal_upsampling || '' : '',
+            temporal_upsampling: s.toolsUpscaleMedia === 'video' && s.toolsUpscaleMethod !== 'h3_regenerate_ic'
+              ? s.params.temporal_upsampling || '' : '',
             dlss_intensity: Number(s.params.custom_settings?.dlss_intensity ?? 1),
             dlss_depth: String(s.params.custom_settings?.dlss_depth ?? 'half'),
             dlss_motion: String(s.params.custom_settings?.dlss_motion ?? 'original'),
@@ -8112,7 +8228,8 @@ export const useStore = create<AppState>((set, get) => ({
     // Repaint is the easy front door to the proven Studio Video/Frames
     // SCAIL-2 Animate path: an edited first frame defines the finished look
     // while the source video supplies motion and camera movement.
-    if (state.generationMode === 'avatar' && state.editSubMode === 'restyle') {
+    if (state.generationMode === 'avatar' && state.editSubMode === 'restyle'
+      && selectedModelType !== 'viggle_remake_edit') {
       if (!state.editVideoPath || !state.editRepaintFramePath) return
       const repaintMappings = state.editRepaintMappings.slice(0, 5)
       if (repaintMappings.some(mapping => !mapping.source.trim() || !mapping.target.trim())) return
@@ -8213,7 +8330,8 @@ export const useStore = create<AppState>((set, get) => ({
       return
     }
 
-    if (state.generationMode === 'avatar' && state.editSubMode === 'recast') {
+    if (state.generationMode === 'avatar' && state.editSubMode === 'recast'
+      && selectedModelType !== 'viggle_remake_swap') {
       const recastMappings = state.editRecastMappings.slice(0, 5)
       if (
         !state.editVideoPath
@@ -8329,7 +8447,10 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     // ── Edit mode: Retake / Inpaint / Edit Anything ─────────────
-    if (state.generationMode === 'avatar' && (state.editSubMode === 'retake' || state.editSubMode === 'inpaint' || state.editSubMode === 'edit_anything')) {
+    if (state.generationMode === 'avatar'
+      && (state.editSubMode === 'retake' || state.editSubMode === 'inpaint' || state.editSubMode === 'edit_anything')
+      && selectedModelType !== 'viggle_remake_swap'
+      && selectedModelType !== 'viggle_remake_edit') {
       if (!state.editVideoPath) return
       const prompt = (state.params.prompt as string || '').trim()
       if (!prompt) return
@@ -8474,7 +8595,62 @@ export const useStore = create<AppState>((set, get) => ({
       return  // Don't fall through to normal generation
     }
 
+    const isViggleRemakeModel = selectedModelType === 'viggle_remake_swap'
+      || selectedModelType === 'viggle_remake_edit'
+    if (isViggleRemakeModel) {
+      const requiredSubMode = selectedModelType === 'viggle_remake_swap' ? 'recast' : 'edit_anything'
+      const framePaths = Array.isArray(state.params.image_refs)
+        ? state.params.image_refs.filter((path): path is string => typeof path === 'string' && path.trim().length > 0)
+        : []
+      const frameTimes = Array.isArray(state.params.viggle_remake_frame_times)
+        ? state.params.viggle_remake_frame_times : []
+      const trimStart = Number(state.params.viggle_trim_start ?? 0)
+      const trimEnd = Number(state.params.viggle_trim_end ?? (345 / 24))
+      if (state.generationMode !== 'avatar' || state.editSubMode !== requiredSubMode) {
+        set({ promptEnhanceError: selectedModelType === 'viggle_remake_swap'
+          ? 'Choose Replace People for the selected Remake model.'
+          : 'Choose Edit Scene → Prompt Edit for the selected Remake model.' })
+        return
+      }
+      if (!String(state.params.prompt || '').trim()) {
+        set({ promptEnhanceError: 'Describe the changes you want in the edited clip.' })
+        return
+      }
+      if (!state.editVideoPath || !state.params.video_guide) {
+        set({ promptEnhanceError: 'Add a source video for the Remake edit.' })
+        return
+      }
+      if (framePaths.length < 1 || framePaths.length > 4) {
+        set({ promptEnhanceError: 'Add 1–4 edited reference frames.' })
+        return
+      }
+      if (frameTimes.length !== framePaths.length
+        || !Number.isFinite(trimStart) || !Number.isFinite(trimEnd)
+        || trimStart < 0 || trimEnd - trimStart < 3.75
+        || trimEnd > Math.min(state.editVideoDuration, 345 / 24) + 0.000001
+        || frameTimes.some(time => !Number.isFinite(Number(time))
+          || Number(time) < trimStart || Number(time) > trimEnd)) {
+        set({ promptEnhanceError: 'Keep every frame timestamp inside the selected source range.' })
+        return
+      }
+    }
+
     const params: Record<string, unknown> = { ...state.params, generation_mode: state.generationMode, workspace: state.activeWorkspace }
+    delete params.source_audio_transcript_in_prompt
+    delete params.source_audio_transcript_for_enhancement
+    Object.assign(params, _sourceAudioTranscriptRequestParams(state))
+    if (isViggleRemakeModel) {
+      params.video_guide = state.editVideoPath
+      params.image_refs = [...(state.params.image_refs || [])]
+      params.viggle_remake_frame_times = [...(state.params.viggle_remake_frame_times || [])]
+      params.viggle_trim_start = state.params.viggle_trim_start ?? 0
+      params.viggle_trim_end = state.params.viggle_trim_end ?? (345 / 24)
+      params.image_mode = 0
+    } else {
+      delete params.viggle_remake_frame_times
+      delete params.viggle_trim_start
+      delete params.viggle_trim_end
+    }
     // Generate and Add to Queue consume the text/plan already visible in Studio.
     // Older saved Auto/Creative settings must not schedule an unseen LLM pass.
     delete params._deferred_prompt_enhance
@@ -11519,6 +11695,7 @@ export const useStore = create<AppState>((set, get) => ({
           minimax_h3_extended_duration: params.minimax_h3_extended_duration,
           overlap_frames: state.slidingWindowOverlap,
           sequence_continuity: params.minimax_h3_sequence_continuity !== false,
+          ..._sourceAudioTranscriptRequestParams(state),
           camera_coverage: params.minimax_h3_camera_coverage || 'auto',
           planning_style: planningStyle,
         })
@@ -11575,6 +11752,10 @@ export const useStore = create<AppState>((set, get) => ({
           custom_settings: params.custom_settings,
           sliding_window_memory_override: state.slidingWindowLocked,
           minimax_h3_extended_duration: params.minimax_h3_extended_duration,
+          audio_guide: _sourceAudioTranscriptGuide(state),
+          audio_prompt_type: _sourceAudioTranscriptGuide(state)
+            ? String(params.audio_prompt_type || '') : undefined,
+          ..._sourceAudioTranscriptRequestParams(state),
           has_start_image: !!(startImage || params.image_start),
           has_end_image: !!(endImage || params.image_end),
           image_paths: retryFlaggedWindows ? retryContext?.image_paths : imagePaths.length > 0 ? imagePaths : undefined,
@@ -11651,6 +11832,8 @@ export const useStore = create<AppState>((set, get) => ({
           ? state.durationSeconds : undefined,
         window_count: (generationMode === 'video' || generationMode === 'avatar') ? windowCount : undefined,
         window_size_seconds: (generationMode === 'video' || generationMode === 'avatar') ? state.slidingWindowSeconds : undefined,
+        window_overlap_seconds: generationMode === 'video' ? overlapSec : undefined,
+        window_discard_seconds: generationMode === 'video' ? discardSec : undefined,
         activated_loras: params.activated_loras.length > 0 ? params.activated_loras : undefined,
         tts_enhance_mode: ttsMode || undefined,
         ...(generationMode === 'audio' && state.audioSubMode === 'speech' ? {
@@ -11662,6 +11845,10 @@ export const useStore = create<AppState>((set, get) => ({
         // The server derives authoritative Subject/media/voice bindings from
         // these references; the textual inventory remains a compatibility hint.
         minimax_h3_references: isOmniReference ? (params.minimax_h3_references ?? []) : undefined,
+        audio_guide: _sourceAudioTranscriptGuide(state),
+        audio_prompt_type: _sourceAudioTranscriptGuide(state)
+          ? String(params.audio_prompt_type || '') : undefined,
+        ..._sourceAudioTranscriptRequestParams(state),
         planning_style: planningStyle,
       })
       const preserveH3Source = (
@@ -14309,6 +14496,7 @@ export const useStore = create<AppState>((set, get) => ({
       || savedTextEncoder === 'gguf_q4_k_m'
       || savedTextEncoder === 'int8'
       || savedTextEncoder === 'bf16'
+      || savedTextEncoder === 'distilled_4b'
     ) && restoredModelOptions?.minimax_h3_text_encoder_choices?.some(
       choice => choice.value === savedTextEncoder,
     ) ? savedTextEncoder : undefined
@@ -14356,6 +14544,11 @@ export const useStore = create<AppState>((set, get) => ({
       per_clip_frames: !isDirectorClip && Array.isArray(p.per_clip_frames)
         ? (p.per_clip_frames as number[])
         : undefined,
+      // Old outputs have no opt-in fields; a pencil restore therefore starts
+      // with both transcript behaviors disabled unless a matching video
+      // workflow explicitly restores them below.
+      source_audio_transcript_in_prompt: false,
+      source_audio_transcript_for_enhancement: false,
       minimax_h3_references: Array.isArray(p.minimax_h3_references)
         ? ((p.minimax_h3_references as NonNullable<GenerateParams['minimax_h3_references']>) || [])
           .filter(reference => isDirectorClip || !(
@@ -14403,6 +14596,8 @@ export const useStore = create<AppState>((set, get) => ({
     newParams.flow_shift = migratedLegacyRecast ? 1 : (p.flow_shift as number) ?? undefined
     newParams.self_refiner_setting = (p.self_refiner_setting as number) ?? undefined
     newParams.audio_guide = (p.audio_guide as string) || ''
+    newParams.audio_frame_offset = Number.isFinite(Number(p.audio_frame_offset))
+      ? Number(p.audio_frame_offset) : undefined
     newParams.audio_scale = (p.audio_scale as number) ?? undefined
     newParams.voice_reference = (p.voice_reference as string) || undefined
     newParams.identity_guidance_scale = (p.identity_guidance_scale as number) ?? undefined
@@ -14450,6 +14645,13 @@ export const useStore = create<AppState>((set, get) => ({
           : 'prompt'
     )
     newParams.image_refs = Array.isArray(p.image_refs) ? (p.image_refs as string[]) : []
+    newParams.viggle_remake_frame_times = Array.isArray(p.viggle_remake_frame_times)
+      ? (p.viggle_remake_frame_times as number[]).map(Number).filter(Number.isFinite)
+      : undefined
+    newParams.viggle_trim_start = p.viggle_trim_start != null && Number.isFinite(Number(p.viggle_trim_start))
+      ? Number(p.viggle_trim_start) : undefined
+    newParams.viggle_trim_end = p.viggle_trim_end != null && Number.isFinite(Number(p.viggle_trim_end))
+      ? Number(p.viggle_trim_end) : undefined
     newParams.frames_positions = (p.frames_positions as string) || ''
     newParams.injection_strength = (p.injection_strength as number) ?? undefined
     newParams.remove_background_images_ref = (p.remove_background_images_ref as number) ?? 0
@@ -14923,6 +15125,13 @@ export const useStore = create<AppState>((set, get) => ({
       else if (restoredVideoWorkflow === 'blend') newParams.image_mode = 4
       else if (newParams.image_mode !== 2) newParams.image_mode = 0
     }
+    const restoreAudioTranscriptOptions = restoredModelMode === 'video'
+      && ['frames', 'references'].includes(restoredVideoWorkflow)
+      && Number(newParams.image_mode) === 0
+    newParams.source_audio_transcript_in_prompt = restoreAudioTranscriptOptions
+      && p.source_audio_transcript_in_prompt === true
+    newParams.source_audio_transcript_for_enhancement = restoreAudioTranscriptOptions
+      && p.source_audio_transcript_for_enhancement === true
     // Restore audio guide filename from upload_filenames. Fall back to
     // deriving basename from params.audio_guide for sidecars that pre-date
     // the upload_filenames extraction code.
@@ -15368,7 +15577,9 @@ export const useStore = create<AppState>((set, get) => ({
     // sub-mode-specific controls. The standard restore above already set
     // generationMode from the model family, so we override here when the
     // sidecar tag is authoritative.
-    const editSubMode = (p.edit_sub_mode as string) || ''
+    const editSubMode = (p.edit_sub_mode as string)
+      || (modelType === 'viggle_remake_swap' ? 'recast'
+        : modelType === 'viggle_remake_edit' ? 'edit_anything' : '')
     const validEditSubModes = new Set([
       'retake', 'inpaint', 'restyle', 'outpaint', 'edit_anything', 'recast',
     ])
@@ -15436,8 +15647,11 @@ export const useStore = create<AppState>((set, get) => ({
       }
 
       // Trim range — applies to retake, inpaint, edit_anything, outpaint.
+      const isViggleRemake = modelType === 'viggle_remake_swap' || modelType === 'viggle_remake_edit'
       const trimStart = (p.edit_start_time as number) ?? (p.outpaint_trim_start as number)
+        ?? (isViggleRemake ? newParams.viggle_trim_start : undefined)
       const trimEnd = (p.edit_end_time as number) ?? (p.outpaint_trim_end as number)
+        ?? (isViggleRemake ? newParams.viggle_trim_end : undefined)
       if (trimStart != null && trimStart >= 0) {
         set({ editStartTime: trimStart })
         if (editSubMode === 'outpaint') set({ outpaintTrimStart: trimStart })

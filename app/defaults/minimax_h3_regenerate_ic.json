@@ -1,0 +1,29 @@
+{
+    "model": {
+        "name": "H3 Regenerate 2K IC (Experimental)",
+        "architecture": "minimax_h3_regenerate_ic",
+        "description": "Regenerate an approved H3 draft at 2K with its original soundtrack and a three-step Ref2VA refinement.",
+        "URLs": "minimax_h3_ref2va",
+        "loras": [
+            "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/4e6c06ff7dd1c781b3265c16fcacc5f8efbf1e51/loras/minimax_h3_hyperflow_8step_lora_bf16.safetensors",
+            "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/4e6c06ff7dd1c781b3265c16fcacc5f8efbf1e51/loras/open_h3_regenerate_2k_ic_lora_bf16.safetensors",
+            "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/4e6c06ff7dd1c781b3265c16fcacc5f8efbf1e51/loras/minimax_h3_lms_v1.0_r64.safetensors"
+        ],
+        "loras_multipliers": [
+            1,
+            1,
+            1
+        ]
+    },
+    "prompt": "",
+    "num_inference_steps": 3,
+    "video_length": 124,
+    "sliding_window_size": 345,
+    "sliding_window_overlap": 17,
+    "resolution": "2560x1440",
+    "guidance_scale": 1,
+    "sample_solver": "euler",
+    "flow_shift": 12,
+    "video_prompt_type": "VU",
+    "audio_prompt_type": "K"
+}

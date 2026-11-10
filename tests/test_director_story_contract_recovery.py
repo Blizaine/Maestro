@@ -300,6 +300,128 @@ class DirectorStoryContractRecoveryTests(unittest.TestCase):
         self.assertEqual(planner.calls[1]["json_schema"]["type"], "array")
         self.assertTrue(all(shot.metadata["source_event_ids"] is None for shot in shots))
 
+    def test_issue197_invalid_grounded_values_are_repaired_before_dialogue(self):
+        rows = _three_shots(source_ids=False, broken_state=False, dialogue=True)
+        rows[0]["physical_state"]["opening"][0]["value"] = "sitting on the chair"
+        rows[0]["physical_state"]["closing"][0]["value"] = "seated"
+        original = copy.deepcopy(rows)
+        planner = _SequencePlanner([rows, {
+            "shot_1_opening_1_value": "grounded",
+            "shot_1_closing_1_value": "grounded",
+        }])
+
+        shots, _ = _plan(planner, rows, manifest=[{
+            "speaker_name": "Courier", "spoken_text": "Ready.",
+        }])
+
+        self.assertEqual(len(planner.calls), 2)
+        self.assertEqual(planner.calls[1]["max_tokens"], 512)
+        self.assertEqual(planner.calls[1]["image_paths"], [])
+        self.assertEqual(shots[0].dialogue_beats[0].spoken_text, "Ready.")
+        self.assertIn("Ready.", shots[0].video_prompt)
+        self.assertEqual(shots[0].metadata["physical_state"]["opening"][0]["value"], "grounded")
+        self.assertTrue(all(shot.metadata["source_event_ids"] is None for shot in shots))
+        self.assertEqual(rows, original)
+
+    def test_issue197_grounded_repair_also_runs_after_whole_plan_repair(self):
+        incomplete = [_shot(0, source_ids=False), _shot(1, source_ids=False)]
+        rewritten = _three_shots(source_ids=False, broken_state=False, dialogue=True)
+        rewritten[0]["physical_state"]["opening"][0]["value"] = "sitting on the chair"
+        planner = _SequencePlanner([incomplete, rewritten, {
+            "shot_1_opening_1_value": "grounded",
+        }])
+
+        shots, _ = _plan(planner, incomplete, manifest=[{
+            "speaker_name": "Courier", "spoken_text": "Ready.",
+        }])
+
+        self.assertEqual(len(planner.calls), 3)
+        self.assertEqual(planner.calls[1]["json_schema"]["type"], "array")
+        self.assertEqual(planner.calls[2]["json_schema"]["type"], "object")
+        self.assertEqual(shots[0].dialogue_beats[0].spoken_text, "Ready.")
+        self.assertEqual(shots[0].metadata["physical_state"]["opening"][0]["value"], "grounded")
+
+    def test_issue197_unresolved_enum_repair_is_bounded_and_never_installed(self):
+        rows = _three_shots(source_ids=False, broken_state=False)
+        rows[0]["physical_state"]["opening"][0]["value"] = "seated"
+        original = copy.deepcopy(rows)
+        unresolved = {"shot_1_opening_1_value": "unresolved"}
+        planner = _SequencePlanner([rows, unresolved, unresolved])
+
+        with self.assertRaisesRegex(RuntimeError, "could not repair invalid physical-state values"):
+            _plan(planner, rows, manifest=[])
+
+        self.assertEqual(len(planner.calls), 3)
+        self.assertIn("remains unresolved", planner.calls[2]["user_prompt"])
+        self.assertEqual(rows, original)
+
+    def test_issue197_repairs_share_budget_across_initial_and_rewritten_plans(self):
+        rows = _three_shots(source_ids=False)  # Also has a posture sequence issue.
+        rows[0]["physical_state"]["opening"][0]["value"] = "standing on the floor"
+        rewritten = _three_shots(source_ids=False, broken_state=False)
+        rewritten[0]["physical_state"]["opening"][0]["value"] = "seated"
+        patch = {"shot_1_opening_1_value": "grounded"}
+        planner = _SequencePlanner([rows, patch, rewritten, patch])
+
+        shots, _ = _plan(planner, rows, manifest=[])
+
+        self.assertEqual(len(planner.calls), 4)
+        self.assertEqual(len(shots), 3)
+        self.assertEqual(shots[0].metadata["physical_state"]["opening"][0]["value"], "grounded")
+
+    def test_issue197_spent_metadata_budget_does_not_reset_after_whole_plan_repair(self):
+        rows = _three_shots(source_ids=False)
+        rows[0]["physical_state"]["opening"][0]["value"] = "standing on the floor"
+        rewritten = _three_shots(source_ids=False, broken_state=False)
+        rewritten[0]["physical_state"]["opening"][0]["value"] = "seated"
+        planner = _SequencePlanner([
+            rows, {"shot_1_opening_1_value": "unresolved"},
+            {"shot_1_opening_1_value": "grounded"}, rewritten,
+        ])
+
+        with self.assertRaisesRegex(RuntimeError, "bounded metadata repair"):
+            _plan(planner, rows, manifest=[])
+
+        self.assertEqual(len(planner.calls), 4)
+
+    def test_issue197_other_malformed_state_is_not_reported_as_dialogue_failure(self):
+        rows = _three_shots(source_ids=False, broken_state=False)
+        rows[0]["physical_state"]["opening"][0]["predicate"] = "unsupported_predicate"
+        planner = _SequencePlanner([rows, rows])
+
+        with self.assertRaisesRegex(RuntimeError, "contains invalid physical state") as raised:
+            _plan(planner, rows, manifest=[{
+                "speaker_name": "Courier", "spoken_text": "Ready.",
+            }])
+
+        self.assertNotIn("could not accept the locked screenplay dialogue", str(raised.exception))
+        self.assertEqual(len(planner.calls), 2)
+
+    def test_issue197_enum_repair_does_not_bypass_a_missing_landing_transition(self):
+        rows = _three_shots(source_ids=False, broken_state=False)
+        rows[0]["physical_state"]["opening"][0]["value"] = "in flight"
+        rewritten = copy.deepcopy(rows)
+        rewritten[0]["physical_state"]["opening"][0]["value"] = "airborne"
+        planner = _SequencePlanner([
+            rows, {"shot_1_opening_1_value": "airborne"}, rewritten,
+        ])
+
+        with self.assertRaisesRegex(RuntimeError, "H3 story/physical plan did not validate"):
+            _plan(planner, rows, manifest=[])
+
+        self.assertEqual(len(planner.calls), 3)
+
+    def test_valid_state_does_not_add_an_enum_repair_call(self):
+        rows = _three_shots(source_ids=False, broken_state=False, dialogue=True)
+        planner = _SequencePlanner([rows])
+
+        shots, _ = _plan(planner, rows, manifest=[{
+            "speaker_name": "Courier", "spoken_text": "Ready.",
+        }])
+
+        self.assertEqual(len(planner.calls), 1)
+        self.assertEqual(shots[0].dialogue_beats[0].spoken_text, "Ready.")
+
 
 if __name__ == "__main__":
     unittest.main()

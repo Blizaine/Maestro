@@ -199,6 +199,7 @@ def h3_sequence_plan_signature(
     native_continuation: bool = False,
     planning_style: str = "faithful",
     lora_system_hint: str = "",
+    source_audio_transcript: dict | None = None,
 ) -> str:
     reference_contract = [
         {
@@ -238,6 +239,9 @@ def h3_sequence_plan_signature(
     guidance_fingerprint = lora_guidance_fingerprint(lora_system_hint)
     if guidance_fingerprint:
         payload["lora_guidance_fingerprint"] = guidance_fingerprint
+    if source_audio_transcript is not None:
+        from services.studio_audio_context import transcript_fingerprint
+        payload["source_audio_transcript"] = transcript_fingerprint(source_audio_transcript)
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:24]
 
@@ -1773,10 +1777,12 @@ def plan_h3_reference_sequence(
     planning_style: str = "faithful",
     lora_system_hint: str = "",
     retry_plan: dict[str, Any] | None = None,
+    source_audio_transcript: dict | None = None,
 ) -> dict[str, Any]:
     """Plan H3 Omni windows that share canonical references."""
 
-    raw_prompt = str(prompt or "").strip()
+    from services.studio_audio_context import strip_window_transcript
+    raw_prompt = strip_window_transcript(str(prompt or ""))
     prompt = recover_h3_plain_story(raw_prompt)
     source_intent = extract_h3_source_intent(prompt)
     if prompt != raw_prompt and "subject_definitions:" in raw_prompt.casefold():
@@ -1805,6 +1811,15 @@ def plan_h3_reference_sequence(
         )
     relationships, default_retention, task_types = _reference_context(references)
     relationships = canonicalize_h3_reference_names(relationships, source_intent["cast_names"])
+    from services.studio_audio_context import (
+        conditioning_transcript_windows, transcript_plan_context, transcript_window_contexts,
+    )
+    audio_windows = conditioning_transcript_windows(
+        clips, overlap_frames=overlap_frames if native_continuation else 0, fps=fps,
+    )
+    audio_context = transcript_plan_context(source_audio_transcript, audio_windows)
+    if audio_context:
+        relationships += "\n\n" + audio_context
     signature = h3_sequence_plan_signature(
         prompt,
         model_type=model_type,
@@ -1820,6 +1835,7 @@ def plan_h3_reference_sequence(
         native_continuation=native_continuation,
         planning_style=planning_style,
         lora_system_hint=lora_system_hint,
+        source_audio_transcript=source_audio_transcript,
     )
     guidance_fingerprint = lora_guidance_fingerprint(lora_system_hint)
     from services.h3_plan_retry import finish_retry_plan, retry_fingerprint, validate_retry_plan
@@ -1875,6 +1891,7 @@ def plan_h3_reference_sequence(
             # subject field made every fallback prompt repeat the same
             # fully_preserved/reference list twice.
             reference_context=relationships,
+            source_audio_context_windows=transcript_window_contexts(source_audio_transcript, audio_windows),
             expect_dialogue=expect_dialogue,
             planning_style=planning_style,
             image_paths=image_paths,

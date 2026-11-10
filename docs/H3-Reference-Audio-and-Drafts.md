@@ -26,6 +26,35 @@ Generative audio-reference/style/effect modes cannot guarantee that H3 will
 avoid new voices. Choose exact preservation when the original soundtrack must
 remain authoritative.
 
+## Optional transcript context in Studio
+
+In **Video → Frames**, add a soundtrack that drives the video. In
+**Video → References**, select **Music / performance timeline** for audio,
+or **Preserve soundtrack / performance timeline** for a video's sound.
+Expand **Audio context** beneath the inputs to choose either or both:
+
+- **Include transcript in video prompts** adds the matching source words or
+  lyrics to each window's video-model prompt, including manual window prompts.
+  It works without prompt enhancement.
+- **Use transcript for prompt enhancement** gives the writer time-aligned
+  source context for visual direction. It applies to **Enhance now** and
+  **Enhance on generation**; enabling this switch does not itself start a writer.
+
+Both switches default to off and are restored with a saved clip's settings.
+They apply to the exact driving soundtrack, including a video's preserved
+audio, rather than voice-cloning, style or sound-effect samples. Frames
+includes supported H3 and LTX audio-driven workflows.
+
+Maestro transcribes locally with Whisper small on CPU, downloading the model
+only if needed. Recognized words and timestamps are cached locally; changing
+the source file invalidates its cached transcript. Each prompt receives the
+matching source interval, accounting for rolling overlap and audio offsets,
+rather than the complete track repeated in every window.
+
+Automatic recognition can mishear speech or singing and may return no words
+for a window. Transcript context does not add subtitles, author new dialogue,
+replace lyrics or alter the supplied audio. The waveform remains authoritative.
+
 ## Inspect rejected drafts
 
 Studio's **Job prompts** view includes **Writer drafts**, with the received

@@ -89,6 +89,21 @@ def remote_arc_rows(count: int, *, one_based: bool = False, include_event_ids: b
     return rows
 
 
+def ordered_event_arc_fixture() -> tuple[dict, list[dict]]:
+    source_contract = build_music_narrative_contract(
+        "The traveler runs across the field, then climbs onto a horse."
+    )
+    beats = [
+        arc_row(0, "The traveler runs across the field toward the waiting horse."),
+        arc_row(1, "The horse circles a line of trees as the grass bends."),
+        arc_row(2, "The traveler climbs onto the horse and settles onto its back."),
+        arc_row(3, "Horse and traveler cross a meadow toward the ridge."),
+    ]
+    for row in beats:
+        row.pop("source_event_ids")
+    return source_contract, beats
+
+
 class MusicArcTests(unittest.TestCase):
     def test_formatting_text_does_not_exhaust_source_event_budget(self):
         source = (
@@ -377,6 +392,211 @@ class MusicArcTests(unittest.TestCase):
         self.assertEqual(result[4]["source_event_ids"], [])
         self.assertEqual(result[5]["source_event_ids"], ["M1"])
         self.assertEqual(sum(row["source_event_ids"].count("M1") for row in result), 1)
+
+    def test_reversed_event_map_repairs_only_the_map_and_preserves_authored_beats(self):
+        source_contract, beats = ordered_event_arc_fixture()
+        self.assertEqual([event["event_id"] for event in source_contract["events"]], ["M1", "M2"])
+        calls = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return json.dumps({
+                    "beats": beats,
+                    "source_event_clips": {"M1": 2, "M2": 0},
+                })
+            return json.dumps({"M1": 0, "M2": 2})
+
+        planner = MusicVideoPlanner(llm_generate=generate)
+        planner._music_narrative_contract = source_contract
+        planner._use_lyrics_context = False
+        clips = [{"start": i * 10, "end": (i + 1) * 10, "label": "verse"} for i in range(4)]
+
+        result = planner._plan_music_arc(clips, source_contract["source"])
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("Repair only source_event_clips", calls[1]["prompt"])
+        self.assertIn('"M1": 2', calls[1]["prompt"])
+        self.assertIn('"M2": 0', calls[1]["prompt"])
+        self.assertIn(beats[0]["visual_beat"], calls[1]["prompt"])
+        self.assertNotIn("beats", calls[1]["json_schema"]["properties"])
+        self.assertEqual(calls[1]["json_schema"]["required"], ["M1", "M2"])
+        self.assertEqual(
+            [row["source_event_ids"] for row in result],
+            [["M1"], [], ["M2"], []],
+        )
+        for index, row in enumerate(result):
+            for field in (
+                "visual_beat", "purpose", "environment", "camera",
+                "intentional_reprise", "reprise_reason",
+            ):
+                self.assertEqual(row[field], beats[index][field])
+
+    def test_already_valid_multi_event_map_does_not_retry(self):
+        source_contract, beats = ordered_event_arc_fixture()
+        calls = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            return json.dumps({
+                "beats": beats,
+                "source_event_clips": {"M1": 0, "M2": 2},
+            })
+
+        planner = MusicVideoPlanner(llm_generate=generate)
+        planner._music_narrative_contract = source_contract
+        planner._use_lyrics_context = False
+        clips = [{"start": i * 10, "end": (i + 1) * 10, "label": "verse"} for i in range(4)]
+
+        result = planner._plan_music_arc(clips, source_contract["source"])
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            [row["source_event_ids"] for row in result],
+            [["M1"], [], ["M2"], []],
+        )
+
+    def test_missing_extra_and_out_of_range_event_keys_get_map_only_repairs(self):
+        source_contract, beats = ordered_event_arc_fixture()
+        invalid_maps = (
+            {"M1": 0},
+            {"M1": 0, "M2": 2, "M3": 1},
+            {"M1": 0, "M2": 4},
+        )
+        expected_details = ("missing=['M2']", "unexpected=['M3']", "M2=4 is outside")
+        clips = [{"start": i * 10, "end": (i + 1) * 10, "label": "verse"} for i in range(4)]
+
+        for invalid_map, expected_detail in zip(invalid_maps, expected_details):
+            with self.subTest(invalid_map=invalid_map):
+                calls = []
+
+                def generate(**kwargs):
+                    calls.append(kwargs)
+                    if len(calls) == 1:
+                        return json.dumps({"beats": beats, "source_event_clips": invalid_map})
+                    return json.dumps({"M1": 0, "M2": 2})
+
+                planner = MusicVideoPlanner(llm_generate=generate)
+                planner._music_narrative_contract = source_contract
+                planner._use_lyrics_context = False
+
+                result = planner._plan_music_arc(clips, source_contract["source"])
+
+                self.assertEqual(len(calls), 2)
+                self.assertIn(expected_detail, calls[1]["prompt"])
+                self.assertNotIn("beats", calls[1]["json_schema"]["properties"])
+                self.assertEqual(
+                    [row["source_event_ids"] for row in result],
+                    [["M1"], [], ["M2"], []],
+                )
+
+    def test_invalid_event_map_exhaustion_reports_assignments_without_checkpointing(self):
+        source_contract, beats = ordered_event_arc_fixture()
+        calls = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return json.dumps({
+                    "beats": beats,
+                    "source_event_clips": {"M1": 2, "M2": 0},
+                })
+            return json.dumps({"M1": 2, "M2": 0})
+
+        planner = MusicVideoPlanner(llm_generate=generate)
+        planner._music_narrative_contract = source_contract
+        planner._use_lyrics_context = False
+        clips = [{"start": i * 10, "end": (i + 1) * 10, "label": "verse"} for i in range(4)]
+
+        with self.assertRaisesRegex(RuntimeError, r"M1=2.*M2=0"):
+            planner._plan_music_arc(clips, source_contract["source"])
+
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("music_creative_arc", planner._planning_resume_checkpoint)
+
+    def test_focused_map_repair_rejects_ordered_but_nonperforming_assignment(self):
+        source_contract, beats = ordered_event_arc_fixture()
+        calls = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return json.dumps({
+                    "beats": beats,
+                    "source_event_clips": {"M1": 2, "M2": 0},
+                })
+            # This map is monotonic, but group 1 does not depict M1's run.
+            return json.dumps({"M1": 1, "M2": 2})
+
+        planner = MusicVideoPlanner(llm_generate=generate)
+        planner._music_narrative_contract = source_contract
+        planner._use_lyrics_context = False
+        clips = [{"start": i * 10, "end": (i + 1) * 10, "label": "verse"} for i in range(4)]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "focused source_event_clips repair does not match the locked visual beats",
+        ):
+            planner._plan_music_arc(clips, source_contract["source"])
+
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("music_creative_arc", planner._planning_resume_checkpoint)
+
+    def test_boolean_and_noninteger_event_indexes_are_rejected_before_assignment(self):
+        source_contract, beats = ordered_event_arc_fixture()
+        clips = [{"start": i * 10, "end": (i + 1) * 10, "label": "verse"} for i in range(4)]
+        invalid_maps = (
+            ({"M1": True, "M2": 2}, "M1=True must be an integer group index"),
+            ({"M1": 0, "M2": 2.0}, "M2=2.0 must be an integer group index"),
+        )
+
+        for invalid_map, expected_detail in invalid_maps:
+            with self.subTest(invalid_map=invalid_map):
+                calls = []
+
+                def generate(**kwargs):
+                    calls.append(kwargs)
+                    if len(calls) == 1:
+                        return json.dumps({"beats": beats, "source_event_clips": invalid_map})
+                    return json.dumps({"M1": 0, "M2": 2})
+
+                planner = MusicVideoPlanner(llm_generate=generate)
+                planner._music_narrative_contract = source_contract
+                planner._use_lyrics_context = False
+
+                result = planner._plan_music_arc(clips, source_contract["source"])
+
+                self.assertEqual(len(calls), 2)
+                self.assertIn(expected_detail, calls[1]["prompt"])
+                self.assertEqual(
+                    [row["source_event_ids"] for row in result],
+                    [["M1"], [], ["M2"], []],
+                )
+
+    def test_multiple_consecutive_events_can_share_a_performing_beat(self):
+        source_contract, beats = ordered_event_arc_fixture()
+        beats[1]["visual_beat"] = (
+            "The traveler runs across the field, then climbs onto the horse and settles onto its back."
+        )
+        calls = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            return json.dumps({
+                "beats": beats,
+                "source_event_clips": {"M1": 1, "M2": 1},
+            })
+
+        planner = MusicVideoPlanner(llm_generate=generate)
+        planner._music_narrative_contract = source_contract
+        planner._use_lyrics_context = False
+        clips = [{"start": i * 10, "end": (i + 1) * 10, "label": "verse"} for i in range(4)]
+
+        result = planner._plan_music_arc(clips, source_contract["source"])
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result[1]["source_event_ids"], ["M1", "M2"])
+        self.assertEqual(sum(len(row["source_event_ids"]) for row in result), 2)
 
     def test_action_ids_cannot_assign_a_run_to_a_standing_beat(self):
         source_contract = build_music_narrative_contract(

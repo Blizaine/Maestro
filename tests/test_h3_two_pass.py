@@ -251,6 +251,8 @@ class TestH3TwoPassHelpers(unittest.TestCase):
         model.ptd_refasymopd = False
         model.audio_only = False
         model.viggle = False
+        model.remake_mode = None
+        model.regenerate_ic = False
         model._fused_turbo = False
         model.fasth3 = False
         model.vdn = False
@@ -352,6 +354,8 @@ class TestH3TwoPassHelpers(unittest.TestCase):
         model.fasth3 = False
         model.audio_only = False
         model.viggle = False
+        model.remake_mode = None
+        model.regenerate_ic = False
         model._interrupt = False
         model._baked_turbo = False
         model.model_def = {}

@@ -2771,6 +2771,129 @@ class MusicVideoPlanner(BasePlanner):
                 }
             return payload
 
+        class EventMapRepairRequired(ValueError):
+            """A sound outline whose event-to-group map needs a focused repair."""
+
+            def __init__(self, message, *, beats, assignments):
+                super().__init__(message)
+                self.beats = beats
+                self.assignments = copy.deepcopy(assignments)
+
+        def event_map_issue(assignments, *, check_order=True):
+            """Return a detailed map error without changing any event placement."""
+            if not isinstance(assignments, dict):
+                return "source_event_clips must be an object"
+
+            issues = []
+            expected = set(event_ids)
+            actual = set(assignments)
+            missing = [event_id for event_id in event_ids if event_id not in actual]
+            unexpected = sorted((str(key) for key in actual - expected))
+            if missing or unexpected:
+                issues.append(
+                    "source-event keys must match the contract exactly "
+                    f"(missing={missing[:8]!r}, unexpected={unexpected[:8]!r})"
+                )
+
+            valid_indices = {}
+            for event_id in event_ids:
+                if event_id not in assignments:
+                    continue
+                index = assignments[event_id]
+                if not isinstance(index, int) or isinstance(index, bool):
+                    issues.append(
+                        f"{event_id}={index!r} must be an integer group index"
+                    )
+                elif index < 0 or index >= len(groups):
+                    issues.append(
+                        f"{event_id}={index} is outside group indices "
+                        f"0..{len(groups) - 1}"
+                    )
+                else:
+                    valid_indices[event_id] = index
+
+            if check_order:
+                previous = None
+                for event_id in event_ids:
+                    if event_id not in valid_indices:
+                        continue
+                    index = valid_indices[event_id]
+                    if previous is not None and index < previous[1]:
+                        issues.append(
+                            "source-event order decreases from "
+                            f"{previous[0]}={previous[1]} to {event_id}={index}"
+                        )
+                    previous = (event_id, index)
+
+            if not issues:
+                return None
+            return "source_event_clips invalid: " + "; ".join(issues[:8])
+
+        def source_event_map_schema():
+            return {
+                "type": "object",
+                "properties": {
+                    event_id: {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": len(groups) - 1,
+                    }
+                    for event_id in event_ids
+                },
+                "required": event_ids,
+                "additionalProperties": False,
+            }
+
+        def parse_event_map_response(response):
+            """Decode the focused map-only response and enforce its full contract."""
+            mapping = response
+            if isinstance(response, list):
+                if len(response) != 1 or not isinstance(response[0], dict):
+                    raise ValueError("source-event map repair must return one JSON object")
+                mapping = response[0]
+            issue = event_map_issue(mapping)
+            if issue:
+                raise ValueError(issue)
+            return copy.deepcopy(mapping)
+
+        def focused_event_map_prompt(repair):
+            """Ask only for a source-faithful assignment map; keep beats locked."""
+            locked_beats = []
+            for row in repair.beats:
+                item = copy.deepcopy(row)
+                item.pop("source_event_ids", None)
+                locked_beats.append({
+                    "clip_index": item.get("clip_index"),
+                    "visual_beat": item.get("visual_beat"),
+                })
+            event_details = [
+                copy.deepcopy(event) for event in contract.get("events", [])
+                if isinstance(event, dict)
+            ]
+            return (
+                "The whole-song beat outline below has passed its timeline and field checks. "
+                "It is locked: do not rewrite, reorder, split, merge, or add beats. "
+                "Repair only source_event_clips. Map every immutable source event to the "
+                "zero-based group whose visual_beat visibly performs that event. Keep "
+                "event assignments in the listed source order; group indices must be "
+                "nondecreasing, and multiple events may share one group only when their "
+                "actions are both visibly present there. Do not move an event to a beat "
+                "that does not show it merely to make the indices increase. If this locked "
+                "outline cannot support a complete source-faithful ordered map, repeat the "
+                "rejected map so validation can stop safely instead of guessing.\n"
+                "Source events in immutable order:\n"
+                + json.dumps(event_details, ensure_ascii=False)
+                + "\nFixed timeline groups:\n"
+                + json.dumps(timeline, ensure_ascii=False)
+                + "\nLocked visual beats:\n"
+                + json.dumps(locked_beats, ensure_ascii=False)
+                + "\nRejected source_event_clips:\n"
+                + json.dumps(repair.assignments, ensure_ascii=False)
+                + "\nThe rejected map failed validation: " + str(repair)
+                + "\nReturn only the complete source_event_clips object. Required JSON response schema:\n"
+                + json.dumps(source_event_map_schema(), ensure_ascii=False, separators=(",", ":"))
+            )
+
         def parse_candidate(response, baseline=None):
             """Parse and validate one response, preserving locked source assignments."""
             rows = response
@@ -2781,31 +2904,41 @@ class MusicVideoPlanner(BasePlanner):
                     envelope = response[0]
                 if (
                     not isinstance(envelope, dict)
-                    or set(envelope) != {"beats", "source_event_clips"}
+                    or "beats" not in envelope
+                    or set(envelope) - {"beats", "source_event_clips"}
                 ):
                     raise ValueError("outline response must contain beats and source_event_clips")
                 assignments = envelope.get("source_event_clips")
                 rows = envelope.get("beats")
-                if not isinstance(assignments, dict) or set(assignments) != set(event_ids):
-                    raise ValueError("source_event_clips must contain exactly the required source-event keys")
-                for event_id in event_ids:
-                    index = assignments[event_id]
-                    if (
-                        not isinstance(index, int) or isinstance(index, bool)
-                        or index < 0 or index >= len(groups)
-                    ):
-                        raise ValueError(f"source event {event_id} needs a valid zero-based timeline index")
                 rows = coerce_music_arc_rows(rows, len(groups))
                 if any("source_event_ids" in row for row in rows):
                     raise ValueError("outline beats must omit source_event_ids; use source_event_clips")
                 rows = copy.deepcopy(rows)
-                by_index = {row["clip_index"]: row for row in rows}
                 if baseline is None:
+                    map_issue = event_map_issue(assignments)
+                    if map_issue:
+                        unassigned_rows = copy.deepcopy(rows)
+                        for row in unassigned_rows:
+                            row["source_event_ids"] = []
+                        # Validate and retain the authored beat outline before
+                        # asking for a map-only repair. The real contract is
+                        # applied again once the map is valid.
+                        accepted_beats = normalize_music_arc(
+                            unassigned_rows, groups, {"source": "", "events": []},
+                        )
+                        raise EventMapRepairRequired(
+                            map_issue, beats=accepted_beats, assignments=assignments,
+                        )
                     for row in rows:
                         row["source_event_ids"] = []
+                    by_index = {row["clip_index"]: row for row in rows}
                     for event_id in event_ids:
                         by_index[assignments[event_id]]["source_event_ids"].append(event_id)
                 else:
+                    map_issue = event_map_issue(assignments, check_order=False)
+                    if map_issue:
+                        raise ValueError(map_issue)
+                    by_index = {row["clip_index"]: row for row in rows}
                     baseline_by_index = {row["clip_index"]: row for row in baseline}
                     for row in rows:
                         # Source-event ownership is immutable during a creative repair.
@@ -2904,6 +3037,7 @@ class MusicVideoPlanner(BasePlanner):
         baseline_findings = []
         best_outline = None
         saw_empty_outline_response = False
+        focused_map_repair = None
 
         def response_has_no_outline_rows(response):
             """Recognize only explicit empty outline containers."""
@@ -2921,6 +3055,46 @@ class MusicVideoPlanner(BasePlanner):
 
         for attempt in range(2):
             self._raise_if_planning_cancelled()
+            if focused_map_repair is not None:
+                self._emit_planning_progress(
+                    message="Repairing source-event timing without rewriting the outline...",
+                    current=0, total=len(clips), stage="music_creative_arc",
+                )
+                map_schema = source_event_map_schema()
+                response = self._call_llm_json(
+                    user_prompt=focused_event_map_prompt(focused_map_repair),
+                    system_prompt=(
+                        "You repair only the source-event-to-timeline map for an accepted "
+                        "music-video outline. Never author or edit visual beats. Assign each "
+                        "source event to a group that visibly contains its action, exactly "
+                        "once and in source order. Return only the map JSON object."
+                    ),
+                    max_tokens=max(512, 32 * len(event_ids) + 128),
+                    temperature=0.2,
+                    thinking_budget=0,
+                    json_schema=map_schema,
+                    remote_json_schema=True,
+                )
+                try:
+                    repaired_assignments = parse_event_map_response(response)
+                    repaired_beats = copy.deepcopy(focused_map_repair.beats)
+                    for row in repaired_beats:
+                        row.pop("source_event_ids", None)
+                    candidate = parse_candidate({
+                        "beats": repaired_beats,
+                        "source_event_clips": repaired_assignments,
+                    })
+                    action_issues = music_arc_action_issues(candidate, contract)
+                    if action_issues:
+                        raise ValueError(
+                            "focused source_event_clips repair does not match the locked "
+                            "visual beats: " + "; ".join(action_issues[:3])
+                        )
+                    return expand_and_checkpoint(candidate, quality_notes_for(candidate))
+                except ValueError as exc:
+                    issue = str(exc)
+                    break
+
             self._emit_planning_progress(message="Planning progression across the whole song...",
                                          current=0, total=len(clips), stage="music_creative_arc")
             repair_context = ""
@@ -2988,6 +3162,14 @@ class MusicVideoPlanner(BasePlanner):
                     # malformed, or still-repetitive optional edit cannot abort it.
                     chosen = best_outline or baseline
                     return expand_and_checkpoint(chosen, quality_notes_for(chosen))
+            except EventMapRepairRequired as exc:
+                issue = str(exc)
+                if baseline is not None:
+                    # A valid baseline is already safe; a later optional edit
+                    # cannot invalidate its source-event ownership.
+                    return expand_and_checkpoint(baseline, quality_notes_for(baseline))
+                focused_map_repair = exc
+                continue
             except ValueError as exc:
                 issue = str(exc)
                 if baseline is not None:

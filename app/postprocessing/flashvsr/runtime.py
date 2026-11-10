@@ -20,6 +20,7 @@ from tqdm import tqdm
 from mmgp import offload
 from .attention_backend import log_sparse_backend, require_sparge_attention
 from .tcdecoder import build_tcdecoder
+from .stream_cache import StreamCache
 from .utils import Causal_LQ4x_Proj
 from .wan_video_dit import (
     WanModel,
@@ -441,25 +442,6 @@ def _tcdecoder_mem_halo_latents(tcdecoder: torch.nn.Module) -> int:
     return max(1, int(math.ceil(radius)))
 
 
-def _maybe_empty_cache(min_free_gb: float = 3.0) -> None:
-    """empty_cache only under actual VRAM pressure.
-
-    The original loop called torch.cuda.empty_cache() twice per process
-    step — ~1,600 synchronizing allocator flushes on a 4-minute video —
-    which serialized the GPU for nothing on cards with headroom (FlashVSR
-    peaks at ~6-7 GB). Keep the safety valve for genuinely tight cards.
-    """
-    if not torch.cuda.is_available():
-        return
-    try:
-        free_bytes, _total = torch.cuda.mem_get_info()
-    except Exception:
-        torch.cuda.empty_cache()
-        return
-    if free_bytes < min_free_gb * (1 << 30):
-        torch.cuda.empty_cache()
-
-
 def _frames_to_uint8(frames: torch.Tensor) -> torch.Tensor:
     """[-1,1] float frames -> uint8 (on the tensor's current device)."""
     if frames.dtype == torch.uint8:
@@ -565,8 +547,7 @@ def _denoise_stream_chunk(
     x: torch.Tensor,
     context: torch.Tensor | None,
     lq_layer_chunks: list[list[torch.Tensor | None]],
-    block_cache_k: list[torch.Tensor | None],
-    block_cache_v: list[torch.Tensor | None],
+    stream_cache: StreamCache,
     chunk_index: int,
     timestep_embed: torch.Tensor,
     timestep_mod: torch.Tensor,
@@ -579,7 +560,7 @@ def _denoise_stream_chunk(
     rope_start: int | None = None,
     plus_model: str | None = None,
     abort_callback=None,
-) -> tuple[torch.Tensor | None, list[torch.Tensor | None], list[torch.Tensor | None]]:
+) -> torch.Tensor | None:
     x, (frames, height, width) = dit.patchify(x)
     win = (2, 8, 8)
     seqlen = frames // win[0]
@@ -616,7 +597,7 @@ def _denoise_stream_chunk(
             "block_mask": None,
         }
         if _abort_requested(abort_callback):
-            return None, block_cache_k, block_cache_v
+            return None
         if block_id < len(lq_layer_chunks[0]):
             offset = 0
             for chunk in lq_layer_chunks:
@@ -626,28 +607,20 @@ def _denoise_stream_chunk(
                 offset = next_offset
                 chunk[block_id] = None
                 del lq
-        cache_refs = None
-        if block_cache_k[block_id] is not None:
-            cache_refs = [block_cache_k[block_id].to(x.device, dtype=x.dtype), block_cache_v[block_id].to(x.device, dtype=x.dtype)]
-            block_cache_k[block_id] = None
-            block_cache_v[block_id] = None
         x_ref = [x]
         x = None
-        x, next_cache_k, next_cache_v = block(
+        x, _next_cache_k, _next_cache_v = block(
             x_ref, context, timestep_mod, freqs, frames, height, width, seqlen, topk,
             block_id=block_id, kv_len=layer["kv_len"], is_stream=True,
-            pre_cache_refs=cache_refs, local_range=layer["local_range"], cache_next=cache_next, allow_short_start=allow_short_start,
+            stream_cache=stream_cache, local_range=layer["local_range"], cache_next=cache_next, allow_short_start=allow_short_start,
             topk_groups=layer["topk_groups"], block_mask=layer["block_mask"],
         )
         x_ref.clear()
-        block_cache_k[block_id] = next_cache_k
-        del next_cache_k
-        block_cache_v[block_id] = next_cache_v
-        del next_cache_v, cache_refs
+        del _next_cache_k, _next_cache_v
         if _abort_requested(abort_callback):
-            return None, block_cache_k, block_cache_v
+            return None
     x = dit.head([x], timestep_embed)
-    return dit.unpatchify([x], (frames, height, width)), block_cache_k, block_cache_v
+    return dit.unpatchify([x], (frames, height, width))
 
 
 class FlashVSRRuntime:
@@ -664,6 +637,7 @@ class FlashVSRRuntime:
         self.timestep: torch.Tensor | None = None
         self.timestep_embed: torch.Tensor | None = None
         self.timestep_mod: torch.Tensor | None = None
+        self.stream_cache: StreamCache | None = None
         self.profile = None
         self.model = FLASHVSR_MODEL_V11
         self.transformer_path: str | None = None
@@ -742,6 +716,9 @@ class FlashVSRRuntime:
         self.timestep_mod = self.dit.time_projection(self.timestep_embed).unflatten(1, (6, self.dit.dim))
 
     def _clear_runtime_caches(self) -> None:
+        if self.stream_cache is not None:
+            self.stream_cache.release()
+            self.stream_cache = None
         if self.dit is not None:
             self.dit.clear_cross_kv()
         if self.lq_proj is not None:
@@ -922,8 +899,22 @@ class FlashVSRRuntime:
         latents = torch.empty((1, 16, latent_frame_count, padded_output_height // 8, padded_output_width // 8), device="cpu", dtype=self.dtype)
         latents.normal_(generator=generator)
         process_total = len(schedule.steps) if plus else (num_frames - 1) // 8 - 2
-        pre_cache_k = [None] * len(self.dit.blocks)
-        pre_cache_v = [None] * len(self.dit.blocks)
+        local_layers = FLASHVSR_PLUS_LOCAL_LAYERS[self.model] if plus else frozenset()
+        attention = self.dit.blocks[0].self_attn
+        windows = [
+            FLASHVSR_PLUS_LOCAL_LAYER_CACHE_WINDOWS if block in local_layers else cache_windows
+            for block in range(len(self.dit.blocks))
+        ]
+        self.stream_cache = StreamCache(
+            self.dit.blocks,
+            windows,
+            2 * (padded_output_height // 16) * (padded_output_width // 16),
+            attention.num_heads,
+            attention.head_dim,
+            self.dtype,
+            self.device,
+        )
+        stream_cache = self.stream_cache
         frames_out = None
         frames_cursor = 0
         lq_pre_idx = 0
@@ -933,7 +924,6 @@ class FlashVSRRuntime:
             if _abort_requested(abort_callback):
                 return abort_result()
             lq_layer_chunks = []
-            _maybe_empty_cache()
             step = schedule.steps[process_idx] if plus else None
             if plus:
                 for lq_start, lq_end in step.lq_clips:
@@ -978,10 +968,8 @@ class FlashVSRRuntime:
                 lq_cur_idx = process_idx * 8 + 21
                 latent_start, latent_end = 4 + process_idx * 2, 6 + process_idx * 2
                 cur_latents = latents[:, :, latent_start:latent_end].to(self.device, dtype=self.dtype)
-            _maybe_empty_cache()
-
-            noise_pred, pre_cache_k, pre_cache_v = _denoise_stream_chunk(
-                self.dit, cur_latents, None, lq_layer_chunks, pre_cache_k, pre_cache_v, process_idx,
+            noise_pred = _denoise_stream_chunk(
+                self.dit, cur_latents, None, lq_layer_chunks, stream_cache, process_idx,
                 self.timestep_embed, self.timestep_mod, topk_ratio=topk_ratio, kv_ratio=cache_windows,
                 cache_next=process_idx + 1 < process_total, allow_short_start=optimize_still_image and process_idx == 0,
                 rope_start=step.rope_start if plus else None, plus_model=self.model if plus else None,
@@ -1023,8 +1011,9 @@ class FlashVSRRuntime:
             else:
                 latents[:, :, latent_start:latent_end].copy_(cur_latents.detach().cpu())
             lq_layer_chunks = None
+        stream_cache.release()
+        self.stream_cache = None
         self.lq_proj.clear_cache()
-        pre_cache_k = pre_cache_v = None
         self.dit.clear_cross_kv()
         gc.collect()
         if self.variant == FLASHVSR_VARIANT_TINY_LONG:
@@ -1090,7 +1079,7 @@ class FlashVSRRuntime:
             self.tcdecoder.clean_mem()
         if self.vae is not None:
             self.vae.model.clear_cache()
-        latents = frames_out = pre_cache_k = pre_cache_v = tcdecoder_tile_mems = None
+        latents = frames_out = tcdecoder_tile_mems = None
         noise_pred = cur_latents = lq_layer_chunks = None
         lq_chunk = cur = cur_lq = cur_frames = None
         if torch.is_tensor(frames) and frames.dtype == torch.uint8 and frames.ndim == 4:

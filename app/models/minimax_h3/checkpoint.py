@@ -35,7 +35,7 @@ VIDEO_VAE_HEAD_DIM = 64
 def preprocess_conditioner_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """Validate and expose Comfy's row-scaled INT8 Qwen embedding.
 
-    MMGP handles the checkpoint's NVFP4 linear layers separately.  The token
+    MMGP handles the checkpoint's quantized linear layers separately. The token
     table is the sole ``int8_tensorwise`` layer and is consumed directly by
     :class:`MiniMaxH3Int8Embedding`, so its Comfy metadata marker must not be
     passed to PyTorch as a model parameter.
