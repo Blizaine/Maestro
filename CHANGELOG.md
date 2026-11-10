@@ -3,8 +3,12 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
-## [4.1.0] — Dev testing
+## [4.1.0] — 2026-11-10
 
+- Add experimental MiniMax H3 Image to Studio Image Generate. Generate from text
+  or edit with up to 16 ordered source images at native 1K, 2K and 4K.
+- Add H3 Remake for replacing people or editing a scene, Regenerate 2K, H3
+  accelerator options, Director final takes and RelayVSR 2× video upscaling.
 - Add exact-text CPU title cards to the agent creation workflow and optional
   detached opening, intertitle and end cards in Director planning. Keep cards
   separate from character references; wrap opening/end cards around the muxed

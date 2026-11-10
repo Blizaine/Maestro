@@ -1,9 +1,14 @@
-# Maestro v4.1.0 — Dev testing
+# Maestro v4.1.0 — 2026-11-10
 
-This release expands agent-led filmmaking while retaining Maestro's local
-Studio, Director and Editor workflows. Public Main remains unchanged during
-Dev testing.
+This release brings native MiniMax H3 Image to Studio and expands agent-led
+filmmaking across Studio, Director and Editor.
 
+- **MiniMax H3 Image (Experimental):** create images from text or edit with up
+  to 16 ordered source images in six steps. Studio offers native 1K, 2K and 4K
+  canvases. The model reuses Maestro's H3 32B text encoder, when installed.
+- **Video workflows and finishing:** replace people or edit a scene with H3
+  Remake, use Regenerate 2K and new H3 accelerators, render Director final takes
+  and upscale video 2× with RelayVSR.
 - **Title cards:** exact-text cards without loading an image model; optional
   Director opening, intertitle and end-card planning with persistent assembly.
 - **Agent finishing:** build a new editable cut from takes/cards, narration,
@@ -23,5 +28,4 @@ Dev testing.
 See [Agent-led filmmaking](Agent-Filmmaking.md) for scope, usage and limitations.
 Title cards are optional. Audio-locked intertitles require reserved timeline
 space; opening/end holds extend the finished runtime. Sampled media does not
-prove continuous motion, perfect lip-sync or correct character voices. No new
-model downloads or transports are required for these helpers.
+prove continuous motion, perfect lip-sync or correct character voices.
