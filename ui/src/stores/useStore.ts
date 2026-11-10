@@ -1121,6 +1121,7 @@ const familyModeMap: Record<string, GenerationMode> = {
   flux2: 'image',
   flux3: 'image',
   moss_image: 'image',
+  minimax_h3_image: 'image',
   fibo2: 'image',
   qwen: 'image',
   z_image: 'image',
@@ -1215,6 +1216,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
   // Other image models remain opt-in through Model Visibility.
   'flux2_klein_9b',
   'flux3_klein',
+  'h3_image',
   'moss_image_sft',
   'moss_image_edit',
   'moss_image_edit_hq',
@@ -1280,7 +1282,7 @@ const DEFAULT_ENABLED_MODELS = new Set([
  * a user who then disables them stays disabled forever. (This is
  * deliberately narrower than auto-enabling every unknown model — only
  * the curated list's own additions are pushed.) */
-const DEFAULTS_VERSION = 27
+const DEFAULTS_VERSION = 28
 const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   // v1.2.0: the ACE-Step XL SFT pair; LM_4B becomes the music default.
   2: ['ace_step_v1_5_xl_sft', 'ace_step_v1_5_xl_sft_lm_4b'],
@@ -1330,6 +1332,7 @@ const DEFAULTS_ADDED_IN: Record<number, string[]> = {
   26: [],
   // H3 Remake checkpoints: Replace People and Edit Scene.
   27: ['viggle_remake_swap', 'viggle_remake_edit'],
+  28: ['h3_image'],
 }
 const SCOPED_DEFAULTS_ADDED_IN: Record<number, Partial<Record<ModelVisibilityScope, readonly string[]>>> = {
   26: {
@@ -9621,6 +9624,11 @@ export const useStore = create<AppState>((set, get) => ({
       && state.generationMode === 'image'
       && state.studioImageWorkflow === 'generate'
     )
+    const isH3ImageGenerate = (
+      params.model_type === 'h3_image'
+      && state.generationMode === 'image'
+      && state.studioImageWorkflow === 'generate'
+    )
     const isMossImageEditGenerate = (
       state.generationMode === 'image'
       && state.studioImageWorkflow === 'generate'
@@ -9631,16 +9639,17 @@ export const useStore = create<AppState>((set, get) => ({
     // The generic params snapshot can retain it after a model switch (for
     // example from a music workflow); these native image pipelines use the
     // distinct `image_mode` selector, so omit the unrelated field on submit.
+    const nativeOrderedImageReferences = isFlux3KleinImageGenerate || isMossImageEditGenerate || isH3ImageGenerate
     if (
-      (isMossImageEditGenerate || isFlux3KleinImageGenerate)
+      nativeOrderedImageReferences
       && state.modelOptions != null
       && state.modelOptions.model_type === params.model_type
       && !state.modelOptions.model_modes
     ) {
       delete params.model_mode
     }
-    const nativeOrderedImageReferences = isFlux3KleinImageGenerate || isMossImageEditGenerate
-    const nativeImageModelLabel = isMossImageEditGenerate ? 'MOSS Image Edit' : 'FLUX 3 Klein'
+    const nativeImageModelLabel = isH3ImageGenerate ? 'MiniMax H3 Image'
+      : isMossImageEditGenerate ? 'MOSS Image Edit' : 'FLUX 3 Klein'
     if (nativeOrderedImageReferences && state.modelOptions?.model_type !== params.model_type) {
       set({ promptEnhanceError: `${nativeImageModelLabel} settings are still loading. Try Generate again.` })
       return
@@ -9650,7 +9659,9 @@ export const useStore = create<AppState>((set, get) => ({
       set({ promptEnhanceError: `${nativeImageModelLabel} reference settings are still loading. Try Generate again.` })
       return
     }
-    const effectiveImageRefType = nativeOrderedImageReferences
+    const effectiveImageRefType = isH3ImageGenerate
+      ? (state.aspectRatio === 'auto' ? 'KI' : 'I')
+      : nativeOrderedImageReferences
       ? (supportsNativeImageReferences ? (state.imageRefType === 'KI' ? 'KI' : 'I') : '')
       : state.imageRefType || (
           imageReferenceChoices.some(([, value]) => value.includes('K'))
@@ -9668,6 +9679,10 @@ export const useStore = create<AppState>((set, get) => ({
           refPaths.push(result.path)
         } catch (e) {
           console.error('Failed to upload reference image:', e)
+          if (isH3ImageGenerate) {
+            set({ promptEnhanceError: 'A reference image could not be uploaded. Re-select it and try again.' })
+            return
+          }
           if (state.studioVideoWorkflow === 'avatar') {
             set({ promptEnhanceError: 'The Avatar anchor image could not be uploaded. Try selecting it again.' })
             return
@@ -9678,7 +9693,7 @@ export const useStore = create<AppState>((set, get) => ({
         params.image_refs = refPaths
         params.remove_background_images_ref = state.removeBackgroundRefs ? 1 : 0
         // Merge image ref letter codes into video_prompt_type
-        let vpt = (params.video_prompt_type as string) || ''
+        let vpt = isH3ImageGenerate ? '' : (params.video_prompt_type as string) || ''
         for (const letter of effectiveImageRefType) {
           if (!vpt.includes(letter)) vpt += letter
         }
@@ -10865,7 +10880,7 @@ export const useStore = create<AppState>((set, get) => ({
       let nextResolutionPreset = activeState.resolutionPreset
       let nextAspectRatio = activeState.aspectRatio
       const modelPresetOrder = options.resolution_preset_order || []
-      if (nextResolutionPreset === '2k' && !modelPresetOrder.includes('2k')) {
+      if (['1k', '2k', '4k'].includes(nextResolutionPreset) && !modelPresetOrder.includes(nextResolutionPreset)) {
         nextResolutionPreset = '720p'
         paramUpdates.resolution = resolveResolution(options, nextResolutionPreset, nextAspectRatio)
       }
@@ -10875,9 +10890,8 @@ export const useStore = create<AppState>((set, get) => ({
           // at the end. Select its ordinary 720p tier when the previous
           // model's preset is unavailable instead of silently jumping to the
           // largest canvas.
-          nextResolutionPreset = modelPresetOrder.includes('720p')
-            ? '720p'
-            : modelPresetOrder[0]
+          nextResolutionPreset = options.default_resolution_preset
+            ?? (modelPresetOrder.includes('720p') ? '720p' : modelPresetOrder[0])
         }
         if (nextAspectRatio === 'auto' && !options.supports_auto_aspect) {
           nextAspectRatio = '16:9'

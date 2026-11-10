@@ -241,13 +241,18 @@ class MiniMaxH3Conditioner(nn.Module):
             f"<Picture {index + 1}>: <|vision_start|><|image_pad|><|vision_end|>"
             for index in range(len(images))
         ) + prompt
-        encoded = self.processor(
-            text=[presentation],
-            images=images,
-            add_special_tokens=False,
-            padding=False,
-            return_tensors="pt",
-        ).to(device)
+        # Processor image transforms and tokenizer tensors are CPU work. Keep
+        # their implicit allocations off CUDA when MMGP has installed a CUDA
+        # default; the encoded batch is moved explicitly for model execution.
+        with torch.device("cpu"):
+            encoded = self.processor(
+                text=[presentation],
+                images=images,
+                add_special_tokens=False,
+                padding=False,
+                return_tensors="pt",
+            )
+        encoded = encoded.to(device)
         input_ids = encoded["input_ids"]
         attention_mask = encoded["attention_mask"].bool()
         return input_ids, attention_mask, None, encoded

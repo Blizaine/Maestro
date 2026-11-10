@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from services.agent_access.native_creative import make_native_creative_service
+from services.agent_access.guides import get_guide
 from services.authoring_guides import authoring_guide_bundle
 
 
@@ -35,6 +36,23 @@ def test_model_guides_are_available_without_importing_a_model_runtime(monkeypatc
     assert "Preserve the user's requested medium, style" in result["authoring_contract"]
     assert "do not silently replace it with independently voiced Story scenes" in result["authoring_contract"]
     assert len(result["guide_revision"]) == 64
+
+
+def test_h3_image_agent_access_help_explains_reference_labels_and_routes_native_guides():
+    generation = authoring_guide_bundle(
+        "h3_image", "image.generate", {}, {"architecture": "h3_image"},
+    )
+    edit = authoring_guide_bundle(
+        "h3_image", "image.edit",
+        {"references": [{"id": "portrait", "type": "image", "role": "identity"}],
+         "params": {"image_refs": ["private-path.png"]}},
+        {"architecture": "h3_image"},
+    )
+    studio_help = get_guide("studio")
+
+    assert "MINIMAX H3 IMAGE TEXT-TO-IMAGE GUIDE" in generation["format_guide"]
+    assert "MINIMAX H3 IMAGE REFERENCE AND EDIT GUIDE" in edit["format_guide"]
+    assert "one-based `<Picture N>` labels" in studio_help
 
 
 def test_context_uses_resolved_params_and_can_recheck_private_reference_inputs(tmp_path, monkeypatch):

@@ -13,6 +13,9 @@ _GUIDES_DIR = os.path.join(os.path.dirname(__file__), "llm_guides", "enhance")
 # Map architecture prefixes to guide files
 # Values can be a string (single guide) or a tuple (with_images_guide, without_images_guide)
 _ARCHITECTURE_MAP = {
+    # H3 Image has its own still-image guidance.
+    "h3_image": ("minimax_h3_image_edit.md", "minimax_h3_image.md"),
+
     # MiniMax H3 joint audio-video models
     "minimax_h3_ref2va": "minimax_h3_ref2va_video.md",
     "minimax_h3": "minimax_h3_video.md",
@@ -108,6 +111,10 @@ def moss_image_enhancement_kind(model_type: str, generation_mode: str = "image")
     return "layout"
 
 
+def is_minimax_h3_image_model(model_type: str) -> bool:
+    return str(model_type or "").strip().lower().startswith("h3_image")
+
+
 def _load_guide(filename: str) -> Optional[str]:
     """Load a guide file from the enhance guides directory."""
     filepath = os.path.join(_GUIDES_DIR, filename)
@@ -193,10 +200,12 @@ def get_enhance_guide(
 
     # 2. Architecture-specific match (longest prefix first)
     model_lower = model_type.lower()
+    architecture_lower = str((md or {}).get("architecture") or "").strip().lower()
+    model_selectors = (model_lower, architecture_lower)
     best_match = None
     best_len = 0
     for prefix, guide_entry in _ARCHITECTURE_MAP.items():
-        if model_lower.startswith(prefix) and len(prefix) > best_len:
+        if any(selector.startswith(prefix) for selector in model_selectors) and len(prefix) > best_len:
             best_match = guide_entry
             best_len = len(prefix)
 

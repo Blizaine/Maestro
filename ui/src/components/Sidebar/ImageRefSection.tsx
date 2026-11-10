@@ -31,6 +31,7 @@ export function ImageRefSection() {
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
 
   const config = modelOptions?.image_ref_choices
+  const isH3Image = modelOptions?.architecture === 'h3_image'
   const isAdaptiveImageGenerate = generationMode === 'image' && imageWorkflow === 'generate'
   const bgLabel = modelOptions?.background_removal_label
   // max_image_refs is the model's total conditioning-image budget. In Edit
@@ -124,7 +125,7 @@ export function ImageRefSection() {
               alt={`Ref ${i + 1 + (qwenHasSource ? 1 : 0)}`}
               className="w-full h-full object-cover pointer-events-none"
             />
-            {i === 0 && imageRefs.length > 1 && hasLandscapeMode && imageRefType === 'KI' && (
+            {!isH3Image && i === 0 && imageRefs.length > 1 && hasLandscapeMode && imageRefType === 'KI' && (
               <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-[8px] text-white text-center py-0.5">
                 Main
               </div>
@@ -136,7 +137,7 @@ export function ImageRefSection() {
             )}
             {/* Position number */}
             <span className="absolute top-0.5 left-0.5 bg-black/60 text-white text-[8px] px-1 rounded pointer-events-none">
-              {i + 1 + (qwenHasSource ? 1 : 0)}
+              {isH3Image ? `Picture ${i + 1}` : i + 1 + (qwenHasSource ? 1 : 0)}
             </span>
             <button
               type="button" aria-label={`Remove reference image ${i + 1}`}
@@ -173,14 +174,16 @@ export function ImageRefSection() {
 
       {isAdaptiveImageGenerate && imageRefs.length > 0 && (
         <p className="text-[10px] text-text-muted">
-          {isInstructionImageEditor
+          {isH3Image
+            ? 'Use <Picture 1>, <Picture 2>, and so on to name references in your prompt. Drag to reorder.'
+            : isInstructionImageEditor
             ? 'Describe the requested changes below. References stay in upload order; number each image and explain its role.'
             : 'Describe the finished image below. Add more images when the model supports multi-reference editing.'}
         </p>
       )}
 
       {/* Focus mode toggle — only when images present and model supports both modes */}
-      {imageRefs.length > 0 && hasLandscapeMode && hasPeopleMode && (
+      {!isH3Image && imageRefs.length > 0 && hasLandscapeMode && hasPeopleMode && (
         <div className="flex bg-bg-tertiary rounded-lg p-0.5 border border-border">
           <button
             onClick={() => setImageRefType('KI')}
@@ -206,7 +209,7 @@ export function ImageRefSection() {
       )}
 
       {/* Hint text */}
-      {imageRefs.length > 0 && hasLandscapeMode && imageRefType === 'KI' && (
+      {!isH3Image && imageRefs.length > 0 && hasLandscapeMode && imageRefType === 'KI' && (
         <p className="text-[10px] text-text-muted">
           First image is the main subject/landscape. Additional images are people/objects to inject. Drag to reorder.
         </p>

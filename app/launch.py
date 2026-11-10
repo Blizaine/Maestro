@@ -7132,6 +7132,7 @@ def get_model_options(model_type: str):
         ),
         "resolution_presets": md.get("resolution_presets"),
         "resolution_preset_order": md.get("resolution_preset_order"),
+        "default_resolution_preset": md.get("default_resolution_preset"),
         "supports_auto_aspect": md.get("supports_auto_aspect", False),
 
         # Choice configs
@@ -10087,7 +10088,8 @@ async def _llm_enhance_prompt_payload(body: dict):
     needs_flux3_image_guide = (
         model_type.lower().startswith("flux3") and generation_mode == "image"
     )
-    from services.enhance_guides import moss_image_enhancement_kind
+    from services.enhance_guides import is_minimax_h3_image_model, moss_image_enhancement_kind
+    needs_h3_image_guide = generation_mode == "image" and is_minimax_h3_image_model(model_type)
     moss_enhancement_kind = moss_image_enhancement_kind(model_type, generation_mode)
     needs_moss_image_guide = moss_enhancement_kind == "layout"
     needs_moss_image_edit_guide = moss_enhancement_kind == "edit"
@@ -10120,6 +10122,7 @@ async def _llm_enhance_prompt_payload(body: dict):
         and not needs_h3_context_ir
         and not needs_ltx_window_plan
         and not needs_flux3_image_guide
+        and not needs_h3_image_guide
         and not needs_moss_image_guide
         and not needs_moss_image_edit_guide
         and not needs_speech_writer
@@ -10144,6 +10147,8 @@ async def _llm_enhance_prompt_payload(body: dict):
             )
         elif needs_flux3_image_guide:
             print("[Enhance] FLUX 3 uses native image captions and reference bindings; using Maestro's model-specific LLM guide")
+        elif needs_h3_image_guide:
+            print("[Enhance] MiniMax H3 Image uses its model-specific image guide")
         elif needs_moss_image_guide:
             print("[Enhance] MOSS Image uses native captions and centered-pixel layouts; using Maestro's model-specific LLM guide")
         elif needs_moss_image_edit_guide:

@@ -226,7 +226,7 @@ def get_linear_split_map(
 @dataclass
 class MiniMaxH3TransformerOutput:
     sample: torch.Tensor
-    audio_sample: torch.Tensor
+    audio_sample: torch.Tensor | None
 
 
 def _weight_dtype(module: nn.Module, fallback: torch.dtype) -> torch.dtype:
@@ -1415,11 +1415,12 @@ class MiniMaxH3FinalLayer(nn.Module):
         hidden_size: int,
         curve_dim: int,
         video_dim: int,
-        audio_dim: int,
+        audio_dim: int | None,
         eps: float,
         dtype: torch.dtype,
         *,
         compressed_modulation: bool,
+        video_pdd_steps: int = 1,
     ):
         super().__init__()
         self.norm = nn.RMSNorm(hidden_size, eps=eps, dtype=dtype)
@@ -1431,11 +1432,21 @@ class MiniMaxH3FinalLayer(nn.Module):
             torch.float16 if compressed_modulation else dtype,
             apply_silu=not compressed_modulation,
         )
-        self.video_out = nn.Linear(hidden_size, video_dim, bias=True, dtype=torch.float32)
-        self.audio_out = nn.Linear(hidden_size, audio_dim, bias=True, dtype=torch.float32)
+        self.video_out = nn.Linear(
+            hidden_size,
+            video_dim * video_pdd_steps,
+            bias=True,
+            dtype=torch.float32,
+        )
+        self.audio_out = (
+            nn.Linear(hidden_size, audio_dim, bias=True, dtype=torch.float32)
+            if audio_dim is not None
+            else None
+        )
         # The output heads are the checkpoint's FP32 precision island.
         self.video_out._lock_dtype = torch.float32
-        self.audio_out._lock_dtype = torch.float32
+        if self.audio_out is not None:
+            self.audio_out._lock_dtype = torch.float32
 
     def forward(
         self,
@@ -1461,7 +1472,8 @@ class MiniMaxH3Transformer(nn.Module):
         attention_head_dim: int = 128,
         ffn_dim: int = 14336,
         video_channels: int = 24,
-        audio_channels: int = 32,
+        audio_channels: int | None = 32,
+        video_pdd_steps: int = 1,
         patch_size: tuple[int, int, int] = (1, 2, 2),
         text_dim: int = 5120,
         curve_grid: int | None = 1025,
@@ -1490,10 +1502,15 @@ class MiniMaxH3Transformer(nn.Module):
             curve_dim=curve_dim,
         )
         self.video_patch_proj = nn.Linear(video_patch_dim, hidden_size, bias=True, dtype=torch.float32)
-        self.audio_patch_proj = nn.Linear(audio_channels, hidden_size, bias=True, dtype=torch.float32)
+        self.audio_patch_proj = (
+            nn.Linear(audio_channels, hidden_size, bias=True, dtype=torch.float32)
+            if audio_channels is not None
+            else None
+        )
         # Input projections are also released and evaluated in FP32.
         self.video_patch_proj._lock_dtype = torch.float32
-        self.audio_patch_proj._lock_dtype = torch.float32
+        if self.audio_patch_proj is not None:
+            self.audio_patch_proj._lock_dtype = torch.float32
         self.condition_proj = nn.Linear(text_dim, hidden_size, bias=True, dtype=dtype)
         if self.use_adaln_curves:
             self.register_buffer(
@@ -1548,6 +1565,7 @@ class MiniMaxH3Transformer(nn.Module):
             eps,
             dtype,
             compressed_modulation=self.use_adaln_curves,
+            video_pdd_steps=video_pdd_steps,
         )
         self._interrupt = False
 
@@ -1653,7 +1671,7 @@ class MiniMaxH3Transformer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        audio_hidden_states: torch.Tensor,
+        audio_hidden_states: torch.Tensor | None,
         encoder_hidden_states: torch.Tensor,
         timestep: torch.Tensor,
         timestep_indices: torch.Tensor,
@@ -1677,7 +1695,11 @@ class MiniMaxH3Transformer(nn.Module):
             raise ValueError("MiniMax H3 position_ids must have shape [sequence, 3].")
         device = hidden_states.device
         video_indices = video_indices.to(device=device, dtype=torch.long)
-        audio_indices = audio_indices.to(device=device, dtype=torch.long)
+        audio_indices = (
+            torch.empty(0, device=device, dtype=torch.long)
+            if audio_indices is None
+            else audio_indices.to(device=device, dtype=torch.long)
+        )
         text_indices = text_indices.to(device=device, dtype=torch.long)
         target_order = _kwargs.get("target_video_order")
         target_inverse = _kwargs.get("target_video_inverse_order")
@@ -1705,12 +1727,17 @@ class MiniMaxH3Transformer(nn.Module):
             video_indices,
             packed,
         )
-        _project_token_rows_into_packed(
-            self.audio_patch_proj,
-            audio_hidden_states,
-            audio_indices,
-            packed,
-        )
+        if self.audio_patch_proj is not None:
+            if audio_hidden_states is None:
+                raise ValueError("MiniMax H3 video requires audio_hidden_states.")
+            _project_token_rows_into_packed(
+                self.audio_patch_proj,
+                audio_hidden_states,
+                audio_indices,
+                packed,
+            )
+        elif audio_hidden_states is not None and audio_hidden_states.numel():
+            raise ValueError("The audio-free MiniMax H3 image transformer cannot consume audio rows.")
 
         curve = self._curve_at(timestep, device)
         adaln_indices = timestep_indices * MODALITY_COUNT + token_tags.clamp_min(0)
@@ -1845,10 +1872,10 @@ class MiniMaxH3Transformer(nn.Module):
         if target_inverse is not None:
             video_output = torch.cat((video_output[:, :condition_video_rows],
                 video_output[:, condition_video_rows:].index_select(1, target_inverse)), dim=1)
-        audio_output = _project_selected_rows(
-            self.final_layer.audio_out,
-            packed,
-            audio_indices,
+        audio_output = (
+            _project_selected_rows(self.final_layer.audio_out, packed, audio_indices)
+            if self.final_layer.audio_out is not None
+            else None
         )
         if not return_dict:
             return video_output, audio_output

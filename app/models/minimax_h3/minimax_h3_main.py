@@ -1179,6 +1179,7 @@ def _load_transformer(
     dtype: torch.dtype,
     *,
     qkv_layout: str = "contiguous",
+    image_model: bool = False,
     sla_config=None,
     vdn: bool = False,
     singularity: bool = False,
@@ -1190,6 +1191,22 @@ def _load_transformer(
 ) -> MiniMaxH3Transformer:
     from .turbo import safetensors_header
     header = safetensors_header(_first_path(filename))
+    if image_model:
+        if fasth3 or fasth3_omniref or vdn or singularity or dasiwa or import_profile:
+            raise ValueError("MiniMax H3 Image only supports its native six-step checkpoint.")
+        video_head = header.get("final_layer.video_out.weight", {})
+        video_bias = header.get("final_layer.video_out.bias", {})
+        if video_head.get("shape") != [576, 5376] or video_bias.get("shape") != [576]:
+            raise ValueError(
+                "MiniMax H3 Image requires the native six-head final layer "
+                "(video_out.weight [576,5376], bias [576])."
+            )
+        if str(video_head.get("dtype", "")).upper() != "F32" or str(
+            video_bias.get("dtype", "")
+        ).upper() != "F32":
+            raise ValueError("MiniMax H3 Image final PDD heads must be stored as FP32.")
+        if qkv_layout != "grouped":
+            raise ValueError("MiniMax H3 Image requires grouped ConvRot QKV rows.")
     gates = [key for key in header if key.endswith(".attn.to_gate_compress.weight")]
     omni_variant = None
     if gates and not fasth3:
@@ -1249,6 +1266,8 @@ def _load_transformer(
         transformer = MiniMaxH3Transformer(
             curve_grid=checkpoint["adaln_curve_grid"],
             curve_dim=int(checkpoint["time_embed_dim"]),
+            audio_channels=None if image_model else 32,
+            video_pdd_steps=6 if image_model else 1,
             dtype=dtype,
             sla_config=sla_config,
             vdn=vdn,

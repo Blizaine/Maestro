@@ -87,7 +87,10 @@ you have a returned job ID.
    subject or object reference, style image, pose/control video, first or last
    frame, voice reference, soundtrack, music/style guide, and sound-effect guide
    are different inputs. Use the live `image_ref_choices`, audio-source choices,
-   and limits to select the right role and ordering. Do not use a voice sample as
+   and limits to select the right role and ordering. For MiniMax H3 Image, read
+   the text-to-image or reference-edit guide returned by `get_creation_context`;
+   keep its one-based `<Picture N>` labels aligned with attachment order and
+   preserve only roles the user assigns. Do not use a voice sample as
    a soundtrack or assume a model will preserve every attached audio track.
 4. Use an uploaded asset ID in media fields when the source lives on another
    machine. Do not send a Mac path to Windows or a Windows path to Mac. Review

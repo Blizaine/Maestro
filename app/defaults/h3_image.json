@@ -1,0 +1,32 @@
+{
+    "model": {
+        "name": "MiniMax H3 Image (Experimental)",
+        "architecture": "h3_image",
+        "description": "Six-step text-to-image and editing with up to 16 ordered references. Native canvases up to about 16 megapixels. Powered by MiniMax-H3-Image.",
+        "selector_help": "Powered by MiniMax-H3-Image. Generate from text or use ordered source images in Generate. The INT8 checkpoint and image VAE use about 22 GB of disk and reuse Maestro’s H3 32B text encoder. Larger canvases and reference sets need more memory.",
+        "URLs": ["minimax_h3_image_pruned_int8_convrot.safetensors"],
+        "download_sources": {
+            "minimax_h3_image_pruned_int8_convrot.safetensors": {
+                "url": "https://huggingface.co/Comfy-Org/MiniMax-H3-Image/resolve/5e60435c12302e0fa946b35a309736eb25b9272b/diffusion_models/minimax_h3_image_pruned_int8_convrot.safetensors",
+                "sha256": "83eb140f1ff95c068f8a6886e6d3f3d0d4ab2e07bb2fe6d2ef992a51146ee622",
+                "size_bytes": 20979314802,
+                "anonymous": true
+            }
+        },
+        "source_repo": "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image",
+        "license_name": "MiniMax H3 Image Community License",
+        "license_url": "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/6534ea1c979a5f8cb00c2bd1025d5ca4ee8d8901/LICENSE",
+        "model_size_gb": 38
+    },
+    "prompt": "",
+    "negative_prompt": "",
+    "image_mode": 1,
+    "video_prompt_type": "I",
+    "resolution": "2048x2048",
+    "batch_size": 1,
+    "num_inference_steps": 6,
+    "guidance_scale": 1,
+    "sample_solver": "euler",
+    "prompt_enhancer": "",
+    "multi_prompts_gen_type": "FG"
+}

@@ -1060,7 +1060,7 @@ export interface EditorExportCapabilities {
 
 export type MediaFilter = 'all' | 'images' | 'videos' | 'audio' | 'avatars' | 'multiclip' | 'favorites'
 export type AspectRatio = 'auto' | '21:9' | '16:9' | '9:16' | '1:1' | '4:3' | '3:4'
-export type ResolutionPreset = 'auto' | '480p' | '540p' | '720p' | '768p' | '1080p' | '2k'
+export type ResolutionPreset = 'auto' | '480p' | '540p' | '720p' | '768p' | '1080p' | '1k' | '2k' | '4k'
 export type ScailResolutionProfile = '480p' | '512p' | '704p'
 /** Backward-compatible name for saved Recast/API callers. */
 export type RecastResolutionProfile = ScailResolutionProfile
@@ -1343,6 +1343,7 @@ export interface ModelOptions {
     values: Partial<Record<AspectRatio, string>>
   }>> | null
   resolution_preset_order?: ResolutionPreset[] | null
+  default_resolution_preset?: ResolutionPreset | null
   supports_auto_aspect?: boolean
   guide_preprocessing: ChoiceConfig | null
   guide_custom_choices: ChoiceConfig | null

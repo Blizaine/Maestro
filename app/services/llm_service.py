@@ -3505,12 +3505,15 @@ def enhance_prompt(
         # on the same normalized copy; the user's stored source stays intact.
         prompt = normalize_h3_dialogue_tags(prompt)
     is_flux3_image = mode == "image" and (model_type or "").lower().startswith("flux3")
+    from services.enhance_guides import is_minimax_h3_image_model
+    is_minimax_h3_image = mode == "image" and is_minimax_h3_image_model(model_type or "")
     from services.enhance_guides import moss_image_enhancement_kind
     moss_enhancement_kind = moss_image_enhancement_kind(model_type or "", mode)
     is_moss_image_edit = moss_enhancement_kind == "edit"
     is_moss_image = moss_enhancement_kind == "layout"
-    if is_moss_image or is_moss_image_edit:
-        # A general writer cannot safely rewrite either native MOSS prompt contract.
+    if is_moss_image or is_moss_image_edit or is_minimax_h3_image:
+        # These models have native image-writing guides. A dedicated raw
+        # enhancer bypasses those guides, so use the shared guided enhancer.
         raw_enhancer_mode = False
     audio_driven = is_h3_structured and has_h3_performance_audio(reference_context)
     needs_h3_dialogue = is_h3_structured and not audio_driven
@@ -3883,6 +3886,21 @@ def enhance_prompt(
                 "Each injected picture is a frame-exact visual destination, not "
                 "a general identity reference.\n\n"
                 f"{reference_context}\n\n{user_prompt}"
+            )
+        elif is_minimax_h3_image:
+            ordered_map = "\n".join(
+                f"<Picture {index + 1}> = the attached image in position {index + 1}."
+                for index in range(len(image_paths))
+            )
+            extra_context = (
+                f"\n\nReference roles and notes:\n{reference_context.strip()}"
+                if reference_context and reference_context.strip() else ""
+            )
+            user_prompt = (
+                "I have attached the ordered visual references for MiniMax H3 Image. "
+                "Keep each native <Picture N> label aligned with the image in that exact attachment position. "
+                "Use only references and roles supported by the user's request; do not invent visual details.\n\n"
+                f"Ordered reference map:\n{ordered_map}{extra_context}\n\n{user_prompt}"
             )
         elif is_flux3_image:
             reference_map = "\n".join(
@@ -4285,7 +4303,7 @@ def enhance_prompt(
         result = _clean_enhance_output(
             result,
             preserve_structure=(
-                is_h3_structured or is_flux3_image or is_moss_image
+                is_h3_structured or is_minimax_h3_image or is_flux3_image or is_moss_image
                 or is_moss_image_edit or speech_writer_active
             ),
         )
