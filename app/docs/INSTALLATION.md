@@ -272,6 +272,75 @@ pip install -r requirements.txt
 pip install flash-attn==2.7.2.post1
 ```
  
+# NVIDIA DGX Spark (GB10 / aarch64) Installation
+
+Maestro runs on the NVIDIA DGX Spark (GB10 Grace-Blackwell, sm_121, aarch64, CUDA 13). Pinokio does not ship aarch64 builds, so use a manual install. Several pinned packages have no aarch64 wheels and need substitutions.
+
+## Setup Environment
+
+```
+git clone https://github.com/Blizaine/Maestro.git
+cd Maestro
+python3.12 -m venv env
+source env/bin/activate
+pip install --upgrade pip setuptools wheel
+```
+
+## Install PyTorch (CUDA 13, aarch64 wheels)
+
+```
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+```
+
+## Install Requirements (aarch64 substitutions)
+
+These packages have no aarch64 wheels and must be filtered/replaced:
+- `onnxruntime-gpu` → plain `onnxruntime` (CPU; only affects audio-separator/rembg speed)
+- `rembg[gpu]` → `rembg` (transitively requires onnxruntime-gpu)
+- `torchcodec==0.10.0` → current torchcodec (pairs with torch 2.10+cu128 only)
+- `taichi` → skip (SCAIL pose renderer unavailable; everything else works)
+- `decord` → build from source (see below)
+
+```
+cd app
+grep -vE "^onnxruntime-gpu|^--extra-index-url|^torchcodec|^decord|^taichi" requirements.txt \
+  | sed "s/^rembg\[gpu\]/rembg/" > /tmp/req-aarch64.txt
+echo onnxruntime >> /tmp/req-aarch64.txt
+pip install -r /tmp/req-aarch64.txt
+pip install torchcodec
+```
+
+## Build decord from source
+
+Upstream decord does not compile against ffmpeg 5+/6. Two fixes are needed: add `#include <libavcodec/bsf.h>` to `src/video/ffmpeg/ffmpeg_common.h`, and build with `-fpermissive`.
+
+```
+sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build \
+  libavcodec-dev libavformat-dev libavfilter-dev libavutil-dev libswresample-dev libavdevice-dev
+git clone --recursive https://github.com/dmlc/decord
+cd decord
+sed -i "s|#include <libavcodec/avcodec.h>|#include <libavcodec/avcodec.h>\n#include <libavcodec/bsf.h>|" src/video/ffmpeg/ffmpeg_common.h
+mkdir build && cd build
+cmake .. -DUSE_CUDA=0 -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-fpermissive" -G Ninja
+ninja && cp libdecord.so ../python/decord/
+cd ../python && python setup.py install
+```
+
+## Optional: SageAttention for sm_121
+
+```
+git clone https://github.com/thu-ml/SageAttention
+cd SageAttention
+TORCH_CUDA_ARCH_LIST=12.1a MAX_JOBS=$(nproc) pip install --no-build-isolation .
+```
+
+## GB10 platform notes
+
+- **One CUDA context at a time**: while any process holds a CUDA context (e.g. a running vLLM/Ollama server), Maestro fails with `No CUDA GPUs are available` — even in Default compute mode. Stop other GPU servers first and wait ~30–60 s after they exit (context teardown). Details: https://forums.developer.nvidia.com/t/379266
+- **Sidebar GPU stats**: NVML memory queries are unsupported on GB10 unified memory, so the hardware bar may show "No NVIDIA GPU detected" while generation runs fine on GPU.
+- xformers/flash-attn are not required — sdpa fallback works.
+- A community one-command installer automating all of the above: https://github.com/gizmax/maestro-dgx-spark
+
 ## Attention Modes
 
 ### WanGP supports several attention implementations:
