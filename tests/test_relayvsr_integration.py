@@ -14,14 +14,22 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app"))
 
-from postprocessing.relayvsr import decoder, keyframes
-from postprocessing.relayvsr import wgp_bridge
+from postprocessing.relayvsr import decoder, wgp_bridge
 from services.editor_projects import create_editor_project, normalize_editor_project
 from services.media_info import processing_record
 from services.media_processing import validate_methods
 
+KEYFRAME_SKIP_REASON = "RelayVSR keyframe model tests require optional Wan pose dependency smplfitter"
+try:
+    from postprocessing.relayvsr import keyframes
+except ModuleNotFoundError as error:
+    if (error.name or "").partition(".")[0] != "smplfitter":
+        raise
+    keyframes = None
+
 
 class RelayVSRIntegrationTests(unittest.TestCase):
+    @unittest.skipIf(keyframes is None, KEYFRAME_SKIP_REASON)
     def test_keyframe_block_uses_group_aware_attention_hook(self):
         class FakeSelfAttention(torch.nn.Module):
             def __init__(self):
@@ -80,6 +88,7 @@ class RelayVSRIntegrationTests(unittest.TestCase):
         self.assertEqual(len(groups), 1)
         self.assertEqual(tuple(groups[0].kv), tuple(range(decoder.KV_HEADS)))
 
+    @unittest.skipIf(keyframes is None, KEYFRAME_SKIP_REASON)
     def test_legacy_mmgp_cache_uses_bounded_host_int8_state(self):
         with patch.object(keyframes, "runtime", None), patch.object(
             keyframes, "pay_attention", side_effect=lambda qkv: qkv[0]
