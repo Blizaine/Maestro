@@ -13,9 +13,18 @@ const result = ts.transpileModule(source, {
 assert.equal((result.diagnostics || []).filter(d => d.category === ts.DiagnosticCategory.Error).length, 0);
 const exportsObject = {};
 vm.runInNewContext(result.outputText, { exports: exportsObject });
-const { flashvsrOptions, flashvsrScale } = exportsObject;
-assert.equal(flashvsrOptions.length, 10);
-assert.equal(new Set(flashvsrOptions.map(option => option.value)).size, 10);
+const { flashvsrOptions, flashvsrScale, relayvsrOptions } = exportsObject;
+const relayScales = [1, 1.5, 2, 2.5, 3, 3.5, 4];
+assert.equal(flashvsrOptions.length, 10 + relayScales.length);
+assert.equal(new Set(flashvsrOptions.map(option => option.value)).size, flashvsrOptions.length);
+assert.equal(relayvsrOptions.length, relayScales.length);
+for (const scale of relayScales) {
+  const method = `relayvsr${scale}`;
+  const option = relayvsrOptions.find(entry => entry.value === method);
+  assert.ok(option);
+  assert.equal(flashvsrScale(method), scale);
+  assert.match(option.label, /^RelayVSR /);
+}
 for (const prefix of ['flashvsr', 'flashvsrplus']) {
   for (const [suffix, scale] of [['2', 2], ['3', 3], ['4', 4], ['2pass2', 2], ['2pass4', 4]]) {
     const method = prefix + suffix;
