@@ -45,7 +45,8 @@ class WindowMediaTimelineTests(unittest.TestCase):
         env = dict(guide_start_frame=guide_start, window_no=2 if history else 1,
                    reuse_frames=history, source_video_overlap_frames_count=source_overlap,
                    source_video_frames_count=source_frames, reset_control_aligment=reset,
-                   current_video_length=124, audio_frame_offset=clip_origin)
+                   current_video_length=124, audio_frame_offset=clip_origin,
+                   source_audio_transcript_in_prompt=False)
         exec(compile(ast.Module(body=block[begin:end], type_ignores=[]), 'wgp.py', 'exec'), env)
         return env['reference_start_frame']
 

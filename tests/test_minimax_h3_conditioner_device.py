@@ -85,6 +85,8 @@ class MiniMaxH3ConditionerDeviceTests(unittest.TestCase):
                 self.model = RecordingModel()
                 self.visual = RecordingVisual()
                 self._interrupt = False
+                self.output_layers = [49]
+                self.text_connector = None
 
             @staticmethod
             def get_rope_index(input_ids, **_kwargs):
