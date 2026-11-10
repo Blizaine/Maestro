@@ -205,11 +205,11 @@ def recommend_settings(hw: dict) -> dict:
     underscore prefix marks it as not a config value to apply, just
     metadata for display).
 
-    AMD/CPU fallback: when `cuda_available=False`, returns the most
-    conservative profile (4.5 + INT8 + aggressive tiling) and a
-    label noting auto-tune isn't really applicable. The user will
-    likely want to manually configure, but at least nothing crashes
-    on first launch.
+    AMD/CPU fallback: when `cuda_available=False` but an AMD GPU is present
+    via ROCm or DirectML fallback, return a profile calibrated for AMD
+    hardware. When no usable GPU is detected, return the most conservative
+    profile (4.5 + INT8 + aggressive tiling). The user will likely want to
+    manually configure, but at least nothing crashes on first launch.
 
     Schema:
       video_profile: float   — 1, 2, 3, 3.5, 4, 4.5, or 5
@@ -227,13 +227,67 @@ def recommend_settings(hw: dict) -> dict:
     ram_gb = float(hw.get("ram_gb") or 0)
     platform_name = str(hw.get("platform", ""))
     allocator_supported = bool(hw.get("supports_mmgp_allocator", False))
+    amd_rocm = bool(hw.get("amd_rocm", False))
+    gpu_name = hw.get("gpu_name", "")
+    vram_gb = hw.get("gpu_vram_gb", 0)
     if not cuda_available:
-        # No CUDA — return conservative fallback. User probably needs
-        # manual setup, but defaults shouldn't crash.
+        # No CUDA — if an AMD GPU was detected, compute a real recommendation
+        # from tiers; otherwise return the conservative fallback.
+        if amd_rocm and vram_gb > 0 and ram_gb > 0:
+            vram_tier = "low" if 12 <= vram_gb < 24 else ("high" if vram_gb >= 24 else "tight")
+            ram_tier = "high" if ram_gb >= 63.5 else ("low" if ram_gb >= 31.5 else "very_low")
+            profile = _pick_profile(ram_tier, vram_tier)
+            audio_profile = 3 if (vram_gb >= 12 and int(profile) not in (1, 3)) else profile
+            quant = _pick_quantization(vram_tier, False, False)
+            vae = _pick_vae_config(vram_tier)
+            coef = _pick_coefficient(vram_tier)
+            reason = (
+                f"{gpu_name} ({vram_gb} GB VRAM, {ram_gb} GB RAM, AMD/ROCm): "
+                f"VRAM tier={vram_tier}, RAM tier={ram_tier} → profile {profile:g}, "
+                f"audio profile {audio_profile:g}, {quant.upper()}, VAE config {vae}, coefficient {coef}"
+            )
+            return {
+                "video_profile": profile,
+                "image_profile": profile,
+                "audio_profile": audio_profile,
+                "transformer_quantization": quant,
+                "vae_config": vae,
+                "vram_safety_coefficient": coef,
+                "attention_mode": "auto",
+                "compile": "",
+                "int8_kernels": "disabled",
+                "vram_allocator": "default",
+                "smart_memory_pinning": True,
+                "read_ahead": platform_name == "win32" and ram_tier == "high",
+                "perc_reserved_mem_max": 0,
+                "attention_head_split": 0,
+                "video_preload_mode": "default",
+                "video_preload_in_VRAM": 0,
+                "image_preload_mode": "default",
+                "image_preload_in_VRAM": 0,
+                "audio_preload_mode": "default",
+                "audio_preload_in_VRAM": 0,
+                "_recommendation_label": _profile_label(profile) + " (AMD/ROCm)",
+                "_recommendation_reason": reason,
+                "_recommendation_details": [
+                    f"Profile {profile:g} guides model placement between the detected {vram_gb} GB VRAM and {ram_gb:g} GB system RAM.",
+                    "INT8 kernels use automatic backend selection; model-loading and preload controls start at runtime defaults.",
+                    "Smart memory pinning is enabled; reserved-memory and attention-head limits stay automatic at 0.",
+                    "Video, image, and audio preload modes stay at default with 0 MB requested.",
+                    (
+                        "Read-ahead is enabled for Windows systems in the nominal 64 GB RAM tier."
+                        if platform_name == "win32" and ram_tier == "high"
+                        else "Read-ahead stays off unless Windows is in the nominal 64 GB RAM tier."
+                    ),
+                    "The bundled MMGP allocator is unavailable without CUDA; the runtime default is retained.",
+                    "The generation-aware planner uses workload dimensions and learned VRAM peaks for temporary per-job model budgets; it does not change Sol mode or quality settings.",
+                ],
+            }
+        # No usable GPU detected
         return {
             "video_profile": 4.5,
             "image_profile": 4.5,
-            "audio_profile": 4.5,  # match the others — same hardware, same constraint
+            "audio_profile": 4.5,
             "transformer_quantization": "int8",
             "vae_config": 3,
             "vram_safety_coefficient": 0.70,
@@ -253,12 +307,12 @@ def recommend_settings(hw: dict) -> dict:
             "audio_preload_in_VRAM": 0,
             "_recommendation_label": "Auto-tune unavailable on this hardware",
             "_recommendation_reason": (
-                "No CUDA-capable GPU detected. Maestro requires NVIDIA GPU "
-                "with 6+ GB VRAM. Default conservative profile applied — "
+                "No CUDA-capable or supported AMD GPU detected. Install ROCm/TheRock for AMD, "
+                "or use an NVIDIA GPU with 6+ GB VRAM. Default conservative profile applied — "
                 "performance may be limited."
             ),
             "_recommendation_details": [
-                "The profile favors additional host offload because no CUDA GPU was detected.",
+                "The profile favors additional host offload because no supported GPU was detected.",
                 "Memory controls use safe defaults; the allocator remains on the runtime default.",
                 "Preload modes stay at default/0, while smart memory pinning remains enabled and runtime limits stay automatic.",
                 "The generation-aware planner uses workload dimensions and learned VRAM peaks for temporary per-job model budgets; it does not change Sol mode or quality settings.",

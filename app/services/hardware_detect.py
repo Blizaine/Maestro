@@ -31,6 +31,12 @@ import psutil
 
 _APP_ROOT = Path(__file__).resolve().parents[1]
 
+# AMD DirectML/ROCm fallback: when torch.cuda.is_available() is False but
+# an AMD GPU is present (e.g. DirectML on Windows), this module detects it
+# via WMI/lspci so the recommendation engine can still pick a sensible profile.
+_AMD_WMI_QUERY = "SELECT Name, AdapterRAM FROM Win32_VideoController WHERE Name LIKE '%AMD%' OR Name LIKE '%Radeon%'"
+_AMD_LSPCI_FILTER = "VGA compatible controller"
+
 # RAM is reported in binary GiB, while tier names describe the nominal
 # 32/64-GB machine classes. A small allowance covers firmware-reserved RAM
 # and reporting differences without admitting a materially smaller tier.
@@ -105,6 +111,10 @@ def _detect_gpu() -> dict:
       gpu_vram_gb: float (0 if no CUDA)
       gpu_capability: str (e.g. "sm89", "sm120", or "" if no CUDA)
       gpu_capability_tuple: tuple[int, int] | None
+      nvidia_cuda: bool
+      torch_version: str
+      runtime_version: str
+      amd_rocm: bool  — True when an AMD GPU is present via ROCm or DirectML fallback
     """
     out = {
         "cuda_available": False,
@@ -115,6 +125,7 @@ def _detect_gpu() -> dict:
         "nvidia_cuda": False,
         "torch_version": "unknown",
         "runtime_version": "unknown",
+        "amd_rocm": False,
     }
     try:
         import torch
@@ -141,7 +152,60 @@ def _detect_gpu() -> dict:
         # the no-CUDA defaults. Recommendation engine will pick the
         # AMD/CPU fallback profile.
         pass
+    if not out["cuda_available"]:
+        _detect_amd_fallback(out)
     return out
+
+
+def _detect_amd_fallback(out: dict) -> None:
+    """Populate AMD GPU info when torch.cuda is unavailable."""
+    system = sys.platform
+    machine = host_platform.machine()
+    gpu_name = ""
+    vram_bytes = 0
+    try:
+        if system == "win32" and machine in ("amd64", "x86_64"):
+            import subprocess
+            csv = subprocess.check_output(
+                ["wmic", "path", "Win32_VideoController", "get", "Name,AdapterRAM", "/format:csv"],
+                encoding="utf-8",
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+            for line in csv.splitlines()[2:]:
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 3 and ("AMD" in parts[1] or "Radeon" in parts[1]):
+                    gpu_name = parts[1]
+                    try:
+                        vram_bytes = int(parts[2])
+                    except Exception:
+                        pass
+                    break
+        elif system == "linux":
+            import subprocess
+            full = subprocess.check_output(["lspci"], encoding="utf-8", stderr=subprocess.DEVNULL, timeout=10)
+            for line in full.splitlines():
+                if _AMD_LSPCI_FILTER.lower() in line.lower() and ("AMD" in line or "Radeon" in line):
+                    gpu_name = line.split(":")[-1].strip()
+                    break
+    except Exception:
+        pass
+    if gpu_name:
+        out["gpu_name"] = gpu_name
+        out["amd_rocm"] = True
+        out["gpu_vram_gb"] = round((vram_bytes or 0) / (1024 ** 3), 1)
+        if out["gpu_vram_gb"] <= 0:
+            try:
+                import wmi  # type: ignore
+                c = wmi.WMI()
+                for gpu in c.Win32_VideoController():
+                    if "AMD" in (gpu.Name or "") or "Radeon" in (gpu.Name or ""):
+                        out["gpu_name"] = gpu.Name
+                        out["gpu_vram_gb"] = round((gpu.AdapterRAM or 0) / (1024 ** 3), 1)
+                        out["amd_rocm"] = True
+                        break
+            except Exception:
+                pass
 
 
 def _detect_kernel_support(gpu_cap: Optional[tuple]) -> dict:
@@ -305,6 +369,7 @@ def detect_hardware() -> dict:
         ),
         "torch_version": gpu["torch_version"],
         "runtime_version": gpu["runtime_version"],
+        "amd_rocm": gpu.get("amd_rocm", False),
         "supports_mmgp_allocator": _supports_mmgp_allocator(
             cuda_available=gpu["cuda_available"],
             nvidia_cuda=gpu["nvidia_cuda"],

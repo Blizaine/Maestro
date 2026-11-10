@@ -209,9 +209,10 @@ def get_profile_key(gpu_name, vendor):
         return "GTX_10"
     elif vendor == "AMD":
         if any(x in g for x in ["7600", "7700", "7800", "7900"]): return "AMD_GFX110X"
+        if any(x in g for x in ["9060", "9070", "8000", "STRIX", "1201"]): return "AMD_GFX1201"
         if any(x in g for x in ["7000", "Z1", "PHOENIX"]): return "AMD_GFX1151"
-        if any(x in g for x in ["8000", "STRIX", "1201"]): return "AMD_GFX1201"
-        return "AMD_GFX110X" 
+        if any(x in g for x in ["6800", "6700", "6600", "5700", "5600", "5300", "VEGA"]): return "AMD_GFX1030"
+        return "AMD_GFX1030"
     return "RTX_40"
 
 def get_os_key():
