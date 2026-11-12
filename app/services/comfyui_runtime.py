@@ -25,6 +25,7 @@ from .comfyui_workflows import (
     apply_bindings, binding_choices, builtin_templates, normalize_workflow, preflight_workflow,
     validate_bindings,
 )
+from .workspace_paths import WorkspaceNameError, normalize_workspace_name
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _MEDIA = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm", ".mov", ".mkv", ".wav", ".mp3", ".flac", ".ogg", ".m4a"}
@@ -501,8 +502,12 @@ class ComfyService:
                 inputs[binding["name"]] = self.authorize_media(inputs[binding["name"]])
         apply_bindings(value["workflow"], value["bindings"], inputs)
         workspace = payload.get("workspace") or "default"
-        if not isinstance(workspace, str) or len(workspace) > 120 or workspace in {".", ".."} or any(c in workspace for c in "/\\:\x00"):
-            raise ServiceError(422, "Use an existing Maestro workspace name.")
+        try:
+            if not isinstance(workspace, str):
+                raise WorkspaceNameError("Workspace must be text.")
+            workspace = normalize_workspace_name(workspace)
+        except WorkspaceNameError:
+            raise ServiceError(422, "Use an existing Maestro workspace name.") from None
         return {"workflow_id": workflow_id, "workflow": deepcopy(value), "inputs": deepcopy(inputs), "client_submission_id": submission, "workspace": workspace, "native_model_type": native_model_type, "endpoint": self._config()["endpoint"], "execution_timeout": self._config()["execution_timeout"]}
 
     def reserve(self, prepared: dict, job_id: str, *, owner_id=None) -> tuple[dict, bool]:

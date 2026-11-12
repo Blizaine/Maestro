@@ -590,7 +590,14 @@ def create_mcp_server(
         if any(ord(char) < 32 or ord(char) == 127 for char in name):
             raise ToolError("filename contains a control character")
         if workspace is not None:
-            workspace = _validated_segment(workspace, "workspace")
+            from ..workspace_paths import WorkspaceNameError, normalize_workspace_name
+            if not isinstance(workspace, str):
+                raise ToolError("workspace must be a string")
+            try:
+                # Nested workspaces are folder paths such as "ClientA/Shoot-1".
+                workspace = normalize_workspace_name(workspace)
+            except WorkspaceNameError:
+                raise ToolError("workspace must be a safe workspace name") from None
         return await _safe_backend(backend.fetch_media(name, workspace))
 
     @server.tool(

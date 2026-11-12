@@ -30,6 +30,7 @@ import { DEFAULT_AVATAR_SPEAKER_LOCATIONS, isLongCatAvatarModel, isMultiSpeakerA
 import { TITLE_MODEL } from '../editor/editorAnimatedTitles'
 import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, StudioVideoCreateRoute, StudioVideoEffectiveCreateRoute, StudioImageWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference, AppMode } from '../types'
 import * as api from '../api/client'
+import { WORKSPACE_RELOCATED_EVENT, isWithinWorkspace, rebaseWorkspaceName } from '../lib/workspaceTree'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 import {
   clearPikaFlexCacheSettings,
@@ -2319,7 +2320,8 @@ interface AppState {
   selectModel: (modelType: string, preserveEditsSince?: GenerateParams) => void
 
   // Workspaces
-  workspaces: Array<{ name: string; path: string; file_count?: number }>
+  /** Output folders, parents before children; sub-folder names are paths ("ClientA/Shoot-1"). */
+  workspaces: Array<api.Workspace>
   activeWorkspace: string
   /** Gallery is showing the virtual "Uploads" view (browse-only — the
    *  server-side active workspace, and where generations save, is
@@ -2328,8 +2330,13 @@ interface AppState {
   browsingUploads: boolean
   loadWorkspaces: () => Promise<void>
   switchWorkspace: (name: string) => Promise<void>
-  createWorkspace: (name: string) => Promise<void>
+  /** Create a workspace (a sub-folder when `parent` is given) and switch to it. */
+  createWorkspace: (name: string, parent?: string) => Promise<void>
   deleteWorkspace: (name: string) => Promise<void>
+  /** Rename a folder in place; its sub-folders and saved references follow. */
+  renameWorkspace: (name: string, newName: string) => Promise<void>
+  /** Move a folder into `parent` ("default" = top level). */
+  moveWorkspace: (name: string, parent: string) => Promise<void>
 
   // Storage Manager overlay
   storageDashboardOpen: boolean
@@ -3757,6 +3764,31 @@ export function shouldEnhanceOnGeneration(state: Pick<AppState,
   const hasEnhancedWindows = state.h3WindowPlan?.source_prompt === state.params.prompt
     && state.h3WindowPlan.planned_by !== 'manual' && state.h3WindowPlan.windows.length > 0
   return state.enhanceOnGenerationDefault && !hasEnhancedPrompt && !hasEnhancedWindows
+}
+
+function _applyWorkspaceRelocation(
+  get: () => AppState,
+  set: (partial: Partial<AppState>) => void,
+  result: api.WorkspaceRelocation,
+) {
+  const { name, new_name: newName } = result
+  const state = get()
+  const active = result.active || rebaseWorkspaceName(state.activeWorkspace, name, newName)
+  const viewedMoved = !state.browsingAllFolders && !state.browsingUploads && isWithinWorkspace(state.activeWorkspace, name)
+  if (active !== state.activeWorkspace) set({ activeWorkspace: active })
+  // Gallery items carry workspace-qualified URLs; reload any view that
+  // showed media from the moved folder.
+  if (viewedMoved) {
+    set({ outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+    get().loadOutputs()
+  } else if (state.browsingAllFolders) {
+    get().loadOutputs()
+  }
+  get().loadWorkspaces()
+  // The lazily loaded Editor keeps its open project's workspace in memory.
+  try {
+    window.dispatchEvent(new CustomEvent(WORKSPACE_RELOCATED_EVENT, { detail: { from: name, to: newName } }))
+  } catch { /* non-browser test environments */ }
 }
 
 /** Persist navigation/model choices, step counts, Krea identity, enhancement and H3 acceleration preferences.
@@ -13694,11 +13726,13 @@ export const useStore = create<AppState>((set, get) => ({
       console.error('Failed to switch workspace:', e)
     }
   },
-  createWorkspace: async (name) => {
+  createWorkspace: async (name, parent) => {
     try {
-      await api.createWorkspace(name)
-      await api.setActiveWorkspace(name)
-      set({ browsingAllFolders: false, browsingUploads: false, activeWorkspace: name, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+      // The server answers with the full sub-folder path ("Parent/name").
+      const created = await api.createWorkspace(name, parent)
+      const fullName = created.name || name
+      await api.setActiveWorkspace(fullName)
+      set({ browsingAllFolders: false, browsingUploads: false, activeWorkspace: fullName, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
       get().loadOutputs()
       get().loadWorkspaces()
     } catch (e) {
@@ -13708,18 +13742,26 @@ export const useStore = create<AppState>((set, get) => ({
   },
   deleteWorkspace: async (name) => {
     // The server refuses 'default', refuses while anything generates, and
-    // auto-switches to default when the deleted workspace was active —
-    // its switched_to_default answer is authoritative (a client-side
-    // activeWorkspace comparison could disagree after a desync and would
-    // widen it by force-resetting state the server never changed).
+    // auto-switches to the deleted folder's parent when the deleted folder
+    // was (or contained) the active one — its switched_to answer is
+    // authoritative (a client-side activeWorkspace comparison could
+    // disagree after a desync and would widen it by force-resetting state
+    // the server never changed).
     const result = await api.deleteWorkspace(name)
-    if (result.switched_to_default) {
-      set({ browsingAllFolders: false, browsingUploads: false, activeWorkspace: 'default', outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
+    const switchedTo = result.switched_to ?? (result.switched_to_default ? 'default' : null)
+    if (switchedTo) {
+      set({ browsingAllFolders: false, browsingUploads: false, activeWorkspace: switchedTo, outputs: [], outputsTotal: 0, selectedOutput: 0, selectedOutputMeta: null })
       get().loadOutputs()
     } else if (get().browsingAllFolders) {
       get().loadOutputs()
     }
     get().loadWorkspaces()
+  },
+  renameWorkspace: async (name, newName) => {
+    _applyWorkspaceRelocation(get, set, await api.renameWorkspace(name, newName))
+  },
+  moveWorkspace: async (name, parent) => {
+    _applyWorkspaceRelocation(get, set, await api.moveWorkspace(name, parent))
   },
 
   storageDashboardOpen: false,

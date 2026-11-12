@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import * as api from '../api/client'
 import { useStore } from '../stores/useStore'
+import { WORKSPACE_RELOCATED_EVENT, rebaseWorkspaceName, rebaseWorkspaceUrl } from '../lib/workspaceTree'
 import type {
   EditorAIReturnMode,
   EditorAIRoundTripTool,
@@ -3153,6 +3154,33 @@ function startRoundTripReconciliation(): void {
   if (typeof window === 'undefined' || roundTripReconciliationTimer !== null) return
   void reconcileRoundTrip()
   roundTripReconciliationTimer = window.setInterval(() => { void reconcileRoundTrip() }, 1800)
+}
+
+// A renamed or moved gallery folder: the server already rewrote the saved
+// project, so follow it in memory too — otherwise the next save (or the
+// workspace-switch save in initialize) would recreate the old folder.
+function rebaseEditorAsset(asset: EditorAsset, from: string, to: string): EditorAsset {
+  const workspace = asset.workspace ? rebaseWorkspaceName(asset.workspace, from, to) : asset.workspace
+  const url = asset.url ? rebaseWorkspaceUrl(asset.url, from, to) : asset.url
+  return workspace === asset.workspace && url === asset.url ? asset : { ...asset, workspace, url }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener(WORKSPACE_RELOCATED_EVENT, event => {
+    const detail = (event as CustomEvent<{ from?: string; to?: string }>).detail
+    if (!detail?.from || !detail.to) return
+    const { from, to } = detail
+    useEditorStore.setState(state => ({
+      workspace: rebaseWorkspaceName(state.workspace, from, to),
+      library: state.library.map(asset => rebaseEditorAsset(asset, from, to)),
+      project: state.project ? {
+        ...state.project,
+        workspace: rebaseWorkspaceName(state.project.workspace, from, to),
+        assets: Object.fromEntries(Object.entries(state.project.assets || {}).map(
+          ([id, asset]) => [id, rebaseEditorAsset(asset, from, to)])),
+      } : state.project,
+    }))
+  })
 }
 
 export { projectDuration }

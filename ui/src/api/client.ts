@@ -524,44 +524,74 @@ export async function submitToolRevoice(params: {
 
 // --- Workspaces ---
 
+/** An output folder. Sub-folders are full paths: "ClientA/Shoot-1". */
 export interface Workspace {
   name: string
   path: string
   file_count?: number
+  /** Parent workspace name ("default" for top-level folders, null for default). */
+  parent?: string | null
+  /** 0 for default, 1 for top-level folders, 2 for their sub-folders… */
+  depth?: number
+  /** Folder's own name (the last path segment). */
+  label?: string
+  /** Maestro-managed folder (Worlds): listed, but not renamed, moved or nested into. */
+  reserved?: boolean
 }
+
+export interface WorkspaceRelocation {
+  name: string
+  new_name: string
+  active: string
+  references_updated: number
+}
+
+async function workspaceRequest<T>(url: string, init: RequestInit, fallback: string): Promise<T> {
+  const res = await fetch(url, init)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: fallback }))
+    throw new Error(typeof err.detail === 'string' && err.detail ? err.detail : fallback)
+  }
+  return res.json().catch(() => ({}) as T)
+}
+
+const jsonBody = (method: string, body: unknown): RequestInit => ({
+  method,
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+})
 
 export async function fetchWorkspaces(): Promise<{ workspaces: Workspace[]; active: string }> {
   return getJson(`${BASE}/api/v1/workspaces`, 'Failed to fetch workspaces')
 }
 
 export async function setActiveWorkspace(name: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/v1/workspaces/active`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
-  })
-  if (!res.ok) throw new Error('Failed to switch workspace')
+  await workspaceRequest(`${BASE}/api/v1/workspaces/active`, jsonBody('PUT', { name }), 'Failed to switch workspace')
 }
 
-export async function createWorkspace(name: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/v1/workspaces`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
-  })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Failed to create workspace' }))
-    throw new Error(err.detail || 'Failed to create workspace')
-  }
+/** Create a workspace; with `parent`, a sub-folder inside it. Returns the full name. */
+export async function createWorkspace(name: string, parent?: string): Promise<{ name: string }> {
+  return workspaceRequest(
+    `${BASE}/api/v1/workspaces`,
+    jsonBody('POST', parent && parent !== 'default' ? { name, parent } : { name }),
+    'Failed to create workspace',
+  )
 }
 
-export async function deleteWorkspace(name: string): Promise<{ switched_to_default: boolean; files_deleted: number }> {
-  const res = await fetch(`${BASE}/api/v1/workspaces/${encodeURIComponent(name)}`, { method: 'DELETE' })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Failed to delete workspace' }))
-    throw new Error(err.detail || 'Failed to delete workspace')
-  }
-  return res.json()
+/** Rename a folder in place (`newName` is the new folder name, not a path). */
+export async function renameWorkspace(name: string, newName: string): Promise<WorkspaceRelocation> {
+  return workspaceRequest(`${BASE}/api/v1/workspaces/rename`, jsonBody('POST', { name, new_name: newName }), 'Failed to rename workspace')
+}
+
+/** Move a folder into `parent` ("default" = top level). */
+export async function moveWorkspace(name: string, parent: string): Promise<WorkspaceRelocation> {
+  return workspaceRequest(`${BASE}/api/v1/workspaces/move`, jsonBody('POST', { name, parent }), 'Failed to move workspace')
+}
+
+export async function deleteWorkspace(name: string): Promise<{ switched_to_default: boolean; switched_to?: string | null; files_deleted: number }> {
+  // Sub-folder names keep their "/" separators as path segments.
+  const path = name.split('/').map(encodeURIComponent).join('/')
+  return workspaceRequest(`${BASE}/api/v1/workspaces/${path}`, { method: 'DELETE' }, 'Failed to delete workspace')
 }
 
 // --- Editor projects ---

@@ -490,11 +490,12 @@ class BackendClient:
         if workspace is not None:
             if not isinstance(workspace, str) or not workspace.strip():
                 raise BridgeError(400, "workspace must be a non-empty workspace name or ID")
-            workspace = workspace.strip()
-            if any(char in workspace for char in ("/", "\\", "\x00")) or any(
-                ord(char) < 32 or ord(char) == 127 for char in workspace
-            ):
-                raise BridgeError(400, "workspace must be a safe name or ID")
+            from ..workspace_paths import WorkspaceNameError, normalize_workspace_name
+            try:
+                # Nested workspaces are folder paths such as "ClientA/Shoot-1".
+                workspace = normalize_workspace_name(workspace)
+            except WorkspaceNameError:
+                raise BridgeError(400, "workspace must be a safe name or ID") from None
             query = {"workspace": workspace}
         return await self.request(
             "GET",
