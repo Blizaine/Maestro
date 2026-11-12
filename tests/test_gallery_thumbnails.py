@@ -44,6 +44,7 @@ def _load_gallery_route_functions(root: Path):
         raise AssertionError(f"Missing gallery route functions: {sorted(names - found)}")
     for function in functions:
         function.decorator_list = []
+    from app.services import workspace_paths
     namespace = {
         "os": os,
         "wgp": types.SimpleNamespace(server_config={
@@ -51,6 +52,9 @@ def _load_gallery_route_functions(root: Path):
             "services": {"active_workspace": "default"},
         }),
         "HTTPException": _RouteError,
+        "WorkspaceNameError": workspace_paths.WorkspaceNameError,
+        "split_workspace_name": workspace_paths.split_workspace_name,
+        "iter_workspace_dirs": workspace_paths.iter_workspace_dirs,
     }
     exec(compile(ast.Module(body=functions, type_ignores=[]), "launch.py", "exec"), namespace)
     return namespace
@@ -344,6 +348,33 @@ class GalleryThumbnailTests(unittest.TestCase):
             with self.assertRaises(_RouteError) as bad_workspace:
                 resolve("same.mp4", os.path.join("..", "outside"))
             self.assertEqual(bad_workspace.exception.status_code, 400)
+
+    def test_route_resolver_reaches_nested_workspaces_without_escaping(self):
+        app_root = self.root / "app"
+        outputs = self.root / "outputs"
+        shoot = outputs / "Folder A" / "Shoot 1"
+        hidden = outputs / "Folder A" / "_director_assets"
+        for directory in (app_root / "uploads", shoot, hidden):
+            directory.mkdir(parents=True, exist_ok=True)
+        (shoot / "same.mp4").write_bytes(b"nested")
+        (shoot / "nested-only.mp4").write_bytes(b"nested-only")
+        (hidden / "asset-only.mp4").write_bytes(b"asset")
+
+        namespace = _load_gallery_route_functions(self.root)
+        resolve = namespace["_resolve_gallery_media_file"]
+        with patch("os.getcwd", return_value=str(app_root)):
+            self.assertEqual(resolve("same.mp4", "Folder A/Shoot 1"), str(shoot / "same.mp4"))
+            self.assertEqual(resolve("same.mp4", "Folder A\\Shoot 1"), str(shoot / "same.mp4"))
+            # Unqualified legacy URLs still find media saved in a sub-folder,
+            # but never inside Maestro's own hidden data folders.
+            self.assertEqual(resolve("nested-only.mp4"), str(shoot / "nested-only.mp4"))
+            with self.assertRaises(_RouteError) as hidden_only:
+                resolve("asset-only.mp4")
+            self.assertEqual(hidden_only.exception.status_code, 404)
+            for bad in ("Folder A/../..", "Folder A//Shoot 1", "/Folder A", "C:/Windows"):
+                with self.assertRaises(_RouteError) as rejected:
+                    resolve("same.mp4", bad)
+                self.assertEqual(rejected.exception.status_code, 400, bad)
 
     def test_thumbnail_route_uses_shared_resolver_and_revalidation_headers(self):
         app_root = self.root / "app"

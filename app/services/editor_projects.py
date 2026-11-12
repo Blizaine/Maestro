@@ -26,6 +26,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
+from services.workspace_paths import WorkspaceNameError, normalize_workspace_name
 from services.editor_animation import (
     EditorAnimationError,
     KEYFRAME_VALUE_RANGES,
@@ -359,16 +360,11 @@ def _safe_identifier(value: Any, *, fallback: Optional[str] = None) -> str:
 
 
 def _safe_workspace_name(value: Any) -> str:
-    text = str(value or "default").strip() or "default"
-    if text == "default":
-        return text
-    if (
-        text in {".", ".."}
-        or os.path.basename(text) != text
-        or any(character in text for character in ("/", "\\", "\0"))
-    ):
-        raise EditorProjectError("Invalid workspace name")
-    return text
+    """Canonical workspace name; nested workspaces use "Parent/Child"."""
+    try:
+        return normalize_workspace_name(value)
+    except WorkspaceNameError as error:
+        raise EditorProjectError("Invalid workspace name") from error
 
 
 def _is_under(path: str, root: str) -> bool:
@@ -388,7 +384,7 @@ def _safe_join(root: str, *parts: str) -> Optional[str]:
 def workspace_directory(save_root: str, workspace: str) -> str:
     workspace = _safe_workspace_name(workspace)
     root = os.path.realpath(os.path.abspath(save_root))
-    return root if workspace == "default" else os.path.join(root, workspace)
+    return root if workspace == "default" else os.path.join(root, *workspace.split("/"))
 
 
 def editor_project_directory(save_root: str, workspace: str) -> str:

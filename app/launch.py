@@ -105,6 +105,18 @@ from services.checkpoint_compatibility import (
 from services.generation_eta import AdaptiveGenerationEta, GenerationEtaHistory
 from services.remote_access import TailscaleManager
 from services.web_push import WebPushService, WebPushUnavailable
+from services.workspace_paths import (
+    MAX_WORKSPACE_DEPTH,
+    RESERVED_TOP_LEVEL as _RESERVED_WORKSPACES,
+    WorkspaceNameError,
+    is_within_workspace,
+    iter_workspace_dirs,
+    join_workspace_name,
+    rebase_workspace_name,
+    scan_workspace_tree,
+    split_workspace_name,
+    workspace_parent,
+)
 from services.editor_projects import (
     build_editor_media_preview,
     EditorProjectError,
@@ -771,13 +783,21 @@ def _get_active_workspace() -> str:
 
 
 def _workspace_dir(workspace: str = None) -> str:
-    """Get the output directory for a workspace. Creates it if needed."""
+    """Get the output directory for a workspace. Creates it if needed.
+
+    Workspace names are output-root-relative folder paths ("ClientA" or
+    "ClientA/Shoot-1"); "default" is the output root itself.
+    """
     ws = workspace or _get_active_workspace()
     # Always read base from config, never from wgp.save_path (which may already include workspace)
     base = wgp.server_config.get("save_path", "outputs")
-    if ws == "default":
+    try:
+        parts = split_workspace_name(ws)
+    except WorkspaceNameError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if not parts:
         return base
-    ws_dir = os.path.join(base, ws)
+    ws_dir = os.path.join(base, *parts)
     os.makedirs(ws_dir, exist_ok=True)
     return ws_dir
 
@@ -785,22 +805,19 @@ def _workspace_dir(workspace: str = None) -> str:
 def _workspace_browse_dir(workspace: str) -> str | None:
     """Resolve an existing/legacy workspace name without creating it.
 
-    Workspace creation currently restricts names to simple identifiers, but
+    Workspace creation restricts folder names to simple identifiers, but
     older output folders may legitimately contain spaces. Browsing therefore
-    accepts any single safe path segment while still rejecting traversal and
+    accepts any safe nested folder path while still rejecting traversal and
     paths that escape the configured output root.
     """
-    name = str(workspace or "default").strip() or "default"
     base = wgp.server_config.get("save_path", "outputs")
-    if name == "default":
-        return os.path.realpath(base)
-    if (
-        name in {".", ".."}
-        or os.path.basename(name) != name
-        or any(character in name for character in ("/", "\\", "\0"))
-    ):
+    try:
+        parts = split_workspace_name(workspace)
+    except WorkspaceNameError:
         return None
-    return _safe_join(base, name)
+    if not parts:
+        return os.path.realpath(base)
+    return _safe_join(base, *parts)
 
 
 def _workspace_file_count(path: str) -> int:
@@ -815,15 +832,66 @@ def _workspace_file_count(path: str) -> int:
 
 
 def _list_workspaces() -> list[dict]:
-    """List all workspaces (subdirectories of the base output path + default)."""
+    """List all workspaces: default (the output root), then every folder and
+    sub-folder below it in depth-first order, so a parent always precedes its
+    children. "name" is the full folder path ("ClientA/Shoot-1")."""
     base = wgp.server_config.get("save_path", "outputs")
-    workspaces = [{"name": "default", "path": base, "file_count": _workspace_file_count(base)}]
-    if os.path.isdir(base):
-        for name in sorted(os.listdir(base)):
-            full = os.path.join(base, name)
-            if os.path.isdir(full) and not name.startswith(("_", ".")):
-                workspaces.append({"name": name, "path": full, "file_count": _workspace_file_count(full)})
+    workspaces = [{
+        "name": "default", "path": base, "file_count": _workspace_file_count(base),
+        "parent": None, "depth": 0, "label": "default", "reserved": False,
+    }]
+    for entry in scan_workspace_tree(base):
+        parts = entry["name"].split("/")
+        workspaces.append({
+            **entry,
+            "parent": join_workspace_name(parts[:-1]),
+            "depth": len(parts),
+            "label": parts[-1],
+            "reserved": len(parts) == 1 and parts[0] in _RESERVED_WORKSPACES,
+        })
     return workspaces
+
+
+def _workspace_name_or_400(value, *, strict: bool = True) -> str:
+    """Canonical workspace name for an endpoint, or a 400 with the reason."""
+    try:
+        return join_workspace_name(split_workspace_name(value, strict=strict))
+    except WorkspaceNameError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+def _existing_workspace_dir_or_404(name: str) -> str:
+    """Resolved folder of an existing, non-default workspace."""
+    base = wgp.server_config.get("save_path", "outputs")
+    ws_dir = _safe_join(base, *split_workspace_name(name))
+    if ws_dir is None:
+        raise HTTPException(status_code=400, detail="Invalid workspace path.")
+    if not os.path.isdir(ws_dir):
+        raise HTTPException(status_code=404, detail=f"Workspace not found: {name}")
+    return ws_dir
+
+
+def _refuse_workspace_change_while_busy(action: str) -> None:
+    """Folder deletes, renames and moves wait for an idle queue.
+
+    Jobs capture their workspace folder at submit time and _workspace_dir()
+    recreates folders on demand, so changing a folder mid-generation would
+    silently resurrect it and scatter files. Director pipelines are alive
+    between their generation jobs (LLM planning, review pauses) with no
+    _jobs entry, and their next step would do the same.
+    """
+    busy = any(
+        j.get("status") in ("held", "queued", "running")
+        for j in _jobs.values()
+    )
+    if busy or _active_gen_states:
+        raise HTTPException(status_code=409, detail=f"A generation is held, queued, or running. Remove it or wait for it to finish before {action} a workspace.")
+    try:
+        from services.director_pipeline import any_pipeline_active
+        if any_pipeline_active():
+            raise HTTPException(status_code=409, detail=f"A Director pipeline is running or paused. Stop it before {action} a workspace.")
+    except ImportError:
+        pass
 
 
 def _persist_active_workspace(name: str, apply_save_paths: bool = True) -> str:
@@ -8575,14 +8643,10 @@ def list_workspaces_endpoint():
 
 @api.put("/api/v1/workspaces/active")
 async def set_active_workspace(request: Request):
-    """Switch to a different workspace."""
+    """Switch to a different workspace (a folder or sub-folder path)."""
     body = await request.json()
-    name = body.get("name", "default")
-
-    # Validate name (alphanumeric, hyphens, underscores)
-    import re
-    if name != "default" and not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$', name):
-        raise HTTPException(status_code=400, detail="Invalid workspace name. Use letters, numbers, hyphens, underscores.")
+    # Folder names: letters, numbers, hyphens, underscores; "/" nests.
+    name = _workspace_name_or_400(body.get("name", "default"))
 
     # Persist the switch; only touch wgp.save_path when idle. If a job is
     # in progress it has locked wgp.save_path to its target workspace —
@@ -8599,16 +8663,28 @@ async def set_active_workspace(request: Request):
 
 @api.post("/api/v1/workspaces")
 async def create_workspace(request: Request):
-    """Create a new workspace."""
+    """Create a new workspace, optionally as a sub-folder.
+
+    Body: {"name": "Shoot-1", "parent": "ClientA"} creates ClientA/Shoot-1.
+    "parent" defaults to the output root; it must already exist. A name may
+    also be a full path ("ClientA/Shoot-1"), which creates missing folders.
+    """
     body = await request.json()
-    name = body.get("name", "").strip()
-
-    if not name:
+    raw_name = str(body.get("name") or "").strip()
+    if not raw_name:
         raise HTTPException(status_code=400, detail="Workspace name is required")
-
-    import re
-    if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$', name):
-        raise HTTPException(status_code=400, detail="Invalid workspace name. Use letters, numbers, hyphens, underscores.")
+    parent = _workspace_name_or_400(body.get("parent") or "default", strict=False)
+    if parent != "default":
+        _existing_workspace_dir_or_404(parent)
+    leaf_parts = split_workspace_name(_workspace_name_or_400(raw_name))
+    if not leaf_parts:
+        raise HTTPException(status_code=400, detail='"default" is the output folder itself.')
+    name = _workspace_name_or_400(join_workspace_name(split_workspace_name(parent) + leaf_parts), strict=False)
+    parts = split_workspace_name(name)
+    if len(parts) > MAX_WORKSPACE_DEPTH:
+        raise HTTPException(status_code=400, detail=f"Workspaces can be nested at most {MAX_WORKSPACE_DEPTH} folders deep.")
+    if len(parts) > 1 and parts[0] in _RESERVED_WORKSPACES:
+        raise HTTPException(status_code=400, detail=f"The {parts[0]} folder is managed by Maestro and cannot hold workspaces.")
 
     ws_dir = _workspace_dir(name)
     os.makedirs(ws_dir, exist_ok=True)
@@ -8616,61 +8692,179 @@ async def create_workspace(request: Request):
     return {"status": "ok", "name": name, "path": ws_dir}
 
 
-@api.delete("/api/v1/workspaces/{name}")
+_workspace_change_lock = threading.Lock()
+
+
+def _relocate_workspace(name: str, new_name: str) -> dict:
+    """Rename or move a workspace folder (and every sub-folder inside it).
+
+    The folder moves in one filesystem rename. Afterwards the active
+    workspace, in-memory jobs and Director state, and the saved JSON that
+    records workspace names or paths (sidecars, Director pipelines and
+    queue, Editor projects) are rewritten to the new location.
+    """
+    with _workspace_change_lock:
+        return _relocate_workspace_locked(name, new_name)
+
+
+def _relocate_workspace_locked(name: str, new_name: str) -> dict:
+    if name == "default":
+        raise HTTPException(status_code=400, detail="The default workspace is the outputs folder itself and cannot be renamed or moved.")
+    old_parts = split_workspace_name(name)
+    new_parts = split_workspace_name(new_name)
+    for parts in (old_parts, new_parts):
+        if parts and parts[0] in _RESERVED_WORKSPACES:
+            raise HTTPException(status_code=400, detail=f"The {parts[0]} folder is managed by Maestro and cannot be renamed, moved, or hold workspaces.")
+    case_only = (
+        len(old_parts) == len(new_parts)
+        and is_within_workspace(new_name, name)
+        and old_parts != new_parts
+    )
+    if is_within_workspace(new_name, name) and not case_only:
+        if old_parts == new_parts:
+            raise HTTPException(status_code=400, detail="The folder is already there.")
+        raise HTTPException(status_code=400, detail="A folder cannot be moved into itself or one of its own sub-folders.")
+    base = wgp.server_config.get("save_path", "outputs")
+    src_dir = _existing_workspace_dir_or_404(name)
+    parent = workspace_parent(new_name)
+    parent_dir = (
+        _existing_workspace_dir_or_404(parent) if parent != "default" else os.path.realpath(base)
+    )
+    subtree_depth = max(
+        (len(entry["name"].split("/")) for entry in scan_workspace_tree(src_dir, count_files=False)),
+        default=0,
+    )
+    if len(new_parts) + subtree_depth > MAX_WORKSPACE_DEPTH:
+        raise HTTPException(status_code=400, detail=f"Workspaces can be nested at most {MAX_WORKSPACE_DEPTH} folders deep.")
+    dst_dir = os.path.join(parent_dir, new_parts[-1])
+    if os.path.exists(dst_dir) and not case_only:
+        raise HTTPException(status_code=409, detail=f'A folder named "{new_parts[-1]}" already exists there.')
+
+    _refuse_workspace_change_while_busy("renaming or moving")
+
+    import gc
+    last_error = None
+    for attempt in range(4):
+        try:
+            os.rename(src_dir, dst_dir)
+            last_error = None
+            break
+        except PermissionError as error:
+            # A video still open in the browser or another program can hold
+            # a handle inside the folder for a moment.
+            last_error = error
+            gc.collect()
+            time.sleep(0.25 * (attempt + 1))
+        except OSError as error:
+            raise HTTPException(status_code=500, detail=f"Could not move the folder: {error}") from error
+    if last_error is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Windows is keeping a file in this folder open (for example a video playing in the gallery or another program). Close it and try again.",
+        )
+    print(f"[Workspace] Moved '{name}' -> '{new_name}'")
+
+    # Nothing is generating (guard above), so wgp.save_path can move too.
+    active = _get_active_workspace()
+    rebased_active = rebase_workspace_name(active, name, new_name)
+    if rebased_active is not None:
+        _persist_active_workspace(rebased_active)
+        active = rebased_active
+
+    from services.workspace_relocation import WorkspaceRebase, rewrite_workspace_references
+    # Saved paths may spell the folder through the configured output path
+    # (possibly a link) or through its resolved target.
+    rebase = WorkspaceRebase(name, new_name, src_dir, dst_dir, aliases=[(
+        os.path.join(os.path.abspath(base), *old_parts),
+        os.path.join(os.path.abspath(base), *new_parts),
+    )])
+    for job in list(_jobs.values()):
+        if isinstance(job, dict):
+            rebase.rebase_in_place(job)
+    references = {"files_updated": 0}
+    try:
+        from services.director_pipeline import rebase_live_workspace_state
+        rebase_live_workspace_state(base, rebase)
+    except ImportError:
+        pass
+    except Exception as error:
+        print(f"[Workspace] Director state not updated after move: {error}")
+    try:
+        references = rewrite_workspace_references(base, rebase)
+    except Exception as error:
+        print(f"[Workspace] Saved references not fully updated after move: {error}")
+    return {
+        "status": "ok", "name": name, "new_name": new_name, "path": dst_dir,
+        "active": active, "references_updated": references["files_updated"],
+    }
+
+
+@api.post("/api/v1/workspaces/rename")
+async def rename_workspace(request: Request):
+    """Rename a workspace folder in place. Body: {"name": "ClientA/Shoot-1",
+    "new_name": "Shoot-2"}. Sub-folders, favorites, Director projects and
+    Editor projects move with it."""
+    body = await request.json()
+    name = _workspace_name_or_400(body.get("name"), strict=False)
+    new_leaf = split_workspace_name(_workspace_name_or_400(body.get("new_name")))
+    if len(new_leaf) != 1:
+        raise HTTPException(status_code=400, detail="Enter a single folder name. Drag the folder to move it elsewhere.")
+    new_name = join_workspace_name(split_workspace_name(workspace_parent(name)) + new_leaf)
+    return await asyncio.to_thread(_relocate_workspace, name, new_name)
+
+
+@api.post("/api/v1/workspaces/move")
+async def move_workspace(request: Request):
+    """Move a workspace folder into another one. Body: {"name": "ClientA",
+    "parent": "Archive"}; "parent": "default" moves it to the top level."""
+    body = await request.json()
+    name = _workspace_name_or_400(body.get("name"), strict=False)
+    parent = _workspace_name_or_400(body.get("parent") or "default", strict=False)
+    leaf = split_workspace_name(name)[-1:] if name != "default" else ()
+    new_name = join_workspace_name(split_workspace_name(parent) + leaf)
+    # The moved folder keeps its name, so it must already be a valid one.
+    _workspace_name_or_400(new_name)
+    return await asyncio.to_thread(_relocate_workspace, name, new_name)
+
+
+@api.delete("/api/v1/workspaces/{name:path}")
 def delete_workspace(name: str):
-    """Delete a workspace folder and every asset inside it.
+    """Delete a workspace folder, its sub-folders and every asset inside them.
 
     Refused while anything is queued or generating: jobs capture their
     workspace at submit time and _workspace_dir() recreates folders on
     demand, so a mid-generation delete would silently resurrect the
     workspace and scatter files into it.
     """
-    import re
-    if name == "default":
+    if (name or "").strip() == "default":
         raise HTTPException(status_code=400, detail="The default workspace is the outputs folder itself and cannot be deleted.")
-    if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$', name):
-        raise HTTPException(status_code=400, detail="Invalid workspace name.")
-    base = os.path.abspath(wgp.server_config.get("save_path", "outputs"))
-    # _safe_join resolves symlinks/junctions before the containment check —
-    # the regex blocks traversal but not a junction inside outputs/.
-    ws_dir = _safe_join(base, name)
-    if ws_dir is None:
-        raise HTTPException(status_code=400, detail="Invalid workspace path.")
-    if not os.path.isdir(ws_dir):
-        raise HTTPException(status_code=404, detail=f"Workspace not found: {name}")
+    # Browsing-level validation: a legacy folder with a space in its name
+    # can be deleted too. _safe_join (inside the helper) resolves junctions
+    # before the containment check.
+    name = _workspace_name_or_400(name, strict=False)
+    ws_dir = _existing_workspace_dir_or_404(name)
 
-    busy = any(
-        j.get("status") in ("held", "queued", "running")
-        for j in _jobs.values()
-    )
-    if busy or _active_gen_states:
-        raise HTTPException(status_code=409, detail="A generation is held, queued, or running. Remove it or wait for it to finish before deleting a workspace.")
-    # Director pipelines are alive between their generation jobs (LLM
-    # planning, review pauses) with no _jobs entry — but their next step
-    # would resurrect the folder via _workspace_dir().
-    try:
-        from services.director_pipeline import any_pipeline_active
-        if any_pipeline_active():
-            raise HTTPException(status_code=409, detail="A Director pipeline is running or paused. Stop it before deleting a workspace.")
-    except ImportError:
-        pass
+    with _workspace_change_lock:
+        _refuse_workspace_change_while_busy("deleting")
 
-    # Deleting the active workspace switches to default first. Safe to write
-    # wgp.save_path directly here: nothing is generating (guards above).
-    switched = False
-    if _get_active_workspace() == name:
-        _persist_active_workspace("default")
-        switched = True
-        print(f"[Workspace] Active workspace deleted — switched to default")
+        # Deleting the active workspace (or a folder that contains it)
+        # switches to the deleted folder's parent first. Safe to write
+        # wgp.save_path directly here: nothing is generating (guards above).
+        switched_to = None
+        if is_within_workspace(_get_active_workspace(), name):
+            switched_to = workspace_parent(name)
+            _persist_active_workspace(switched_to)
+            print(f"[Workspace] Active workspace deleted — switched to {switched_to}")
 
-    from services.win_safe_files import safe_delete_dir
-    result = safe_delete_dir(ws_dir)
+        from services.win_safe_files import safe_delete_dir
+        result = safe_delete_dir(ws_dir)
     print(f"[Workspace] Deleted '{name}': {result['files_deleted']} files removed, "
           f"{result['files_deferred']} deferred, dir_removed={result['removed']}")
     return {
         "status": "ok", "name": name,
         "files_deleted": result["files_deleted"], "files_deferred": result["files_deferred"],
-        "dir_removed": result["removed"], "switched_to_default": switched, "errors": result["errors"],
+        "dir_removed": result["removed"], "switched_to": switched_to,
+        "switched_to_default": switched_to == "default", "errors": result["errors"],
     }
 
 
@@ -31821,13 +32015,13 @@ def _resolve_gallery_media_file(filename: str, workspace: str = "") -> str:
     filepath = _safe_join(save_root, filename)
     if filepath and os.path.isfile(filepath):
         return filepath
-    # 3. Search all workspace subdirectories (Director pipeline may have saved
-    #    to a different workspace than the one currently active in the browser)
-    if os.path.isdir(save_root):
-        for d in os.listdir(save_root):
-            candidate = _safe_join(save_root, d, filename)
-            if candidate and os.path.isfile(candidate):
-                return candidate
+    # 3. Search all workspace folders and sub-folders (Director pipeline may
+    #    have saved to a different workspace than the one currently active in
+    #    the browser)
+    for _name, directory in iter_workspace_dirs(save_root)[1:]:
+        candidate = _safe_join(directory, filename)
+        if candidate and os.path.isfile(candidate):
+            return candidate
     # 4. Uploads folder — the gallery's virtual "Uploads" view lists these
     #    files with the same /api/v1/file/ URLs every other gallery flow
     #    builds (thumbnails, playback, send-to-input). Upload names are
@@ -32155,13 +32349,11 @@ async def move_output(name: str, request: Request, workspace: str = ""):
     if not target_ws:
         raise HTTPException(status_code=400, detail="workspace is required")
 
-    import re as _re
-    if target_ws != "default" and not _re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$', target_ws):
-        raise HTTPException(status_code=400, detail="Invalid workspace name")
+    target_ws = _workspace_name_or_400(target_ws)
 
     src_dir = _gallery_directory(workspace, writable=True)
     dst_dir = _workspace_dir(target_ws)
-    if src_dir == dst_dir:
+    if os.path.normcase(os.path.realpath(src_dir)) == os.path.normcase(os.path.realpath(dst_dir)):
         raise HTTPException(status_code=400, detail="Already in that workspace")
 
     src_file = _safe_join(src_dir, name)

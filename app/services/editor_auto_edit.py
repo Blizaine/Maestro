@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from services.workspace_paths import WorkspaceNameError, normalize_workspace_name
 
 MAX_ASSETS = 128
 MAX_CLIPS = 200
@@ -169,8 +170,10 @@ def _project_ledger(project: Mapping[str, Any], workspace: str,
     project_id = str(project.get("id") or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", project_id):
         raise EditorAutoEditError("A saved Editor project id is required.")
-    if workspace in {".", ".."} or any(character in workspace for character in ("/", "\\", ":", "\0")):
-        raise EditorAutoEditError("Editor workspace must be a simple workspace name.")
+    try:
+        workspace = normalize_workspace_name(workspace)
+    except WorkspaceNameError as error:
+        raise EditorAutoEditError("Editor workspace must be a valid workspace name.") from error
     raw_assets = project.get("assets")
     raw_tracks = project.get("tracks")
     if not isinstance(raw_assets, Mapping):
