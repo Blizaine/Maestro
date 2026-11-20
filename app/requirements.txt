@@ -115,6 +115,8 @@ stringzilla==4.0.14
 xxhash==3.6.0
 munch==4.0.0
 wetext==0.1.2
+# kaldifst (wetext dep) 1.9.1 has no win_amd64 cp310 wheel and would need cmake+MSVC to build from source; 1.9.0 ships wheels for every platform.
+kaldifst==1.9.0
 # Director planner — recovers from common LLM JSON output mistakes
 # (missing commas, trailing commas, single quotes, unclosed brackets).
 # Used as a last-resort fallback in BasePlanner._parse_json_response;
