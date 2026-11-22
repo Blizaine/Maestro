@@ -78,7 +78,7 @@ export function DirectorSingingControls() {
     }
   }
 
-  const useSoundtrack = async () => {
+  const applySoundtrack = async () => {
     if (!output || output.source !== sourcePath) return
     setBusy(true)
     setError('')
@@ -130,7 +130,7 @@ export function DirectorSingingControls() {
         {status && <div role="status" className="text-text-secondary">{status}</div>}
         {availableOutput && <div className="space-y-2 rounded-md border border-border p-2">
           <audio className="w-full" controls src={getFileUrl(availableOutput.name, availableOutput.workspace)} aria-label="Preview converted song" />
-          <button type="button" disabled={working} onClick={() => void useSoundtrack()}
+          <button type="button" disabled={working} onClick={() => void applySoundtrack()}
             className="rounded-md bg-bg-hover px-2 py-1.5 text-text-primary disabled:opacity-40">Use this soundtrack</button>
         </div>}
         {error && <p role="alert" className="text-red-400">{error}</p>}
