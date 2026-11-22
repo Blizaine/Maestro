@@ -21,10 +21,12 @@ from .ref2va import (
     _ref2va_voice_audio_by_subject,
     add_ref2va_continuation_context,
     align_ref2va_voice_reference_order,
+    resolve_ref2va_visual_groups,
     ensure_ref2va_prompt_relationships,
     select_ref2va_window_voice_references,
 )
 from .speakers import (
+    H3SpeakerBindingError,
     _ref2va_declared_marker_subjects,
     _ref2va_direct_subject_speaker_cue,
     _resolve_ref2va_dialogue_owners,
@@ -532,6 +534,32 @@ def compile_ref2va_prompt_handoff(
         "voice_scope": voice_scope,
         "trace": trace,
     }
+
+
+def validate_ref2va_window_prompts(
+    prompts: list[str],
+    references,
+    *,
+    first_window: int = 1,
+    exact_drive_audio: bool = False,
+    drive_audio_ordinal: int | None = None,
+) -> None:
+    """Check every prepared prompt with the render-time speaker rules."""
+    from services.studio_audio_context import strip_window_transcript
+
+    from .reference_manifest import apply_exact_drive_audio_prompt_contract
+
+    references = resolve_ref2va_visual_groups(prompts, references or [])
+    for index, prompt in enumerate(prompts, start=first_window):
+        prompt = strip_window_transcript(prompt)
+        if exact_drive_audio:
+            prompt = apply_exact_drive_audio_prompt_contract(prompt, drive_audio_ordinal)
+        try:
+            compile_ref2va_prompt_handoff(prompt, references, window_index=index)
+        except H3SpeakerBindingError as error:
+            raise H3SpeakerBindingError(
+                f"MiniMax H3 References window {index} failed speaker validation. {error}"
+            ) from error
 
 
 def refresh_ref2va_handoff_traces(

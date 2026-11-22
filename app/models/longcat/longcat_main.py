@@ -12,7 +12,7 @@ from tqdm import tqdm
 import librosa
 import pyloudnorm as pyln
 import scipy.signal as ss
-from transformers import Wav2Vec2FeatureExtractor
+from transformers import AutoFeatureExtractor, Wav2Vec2FeatureExtractor, WhisperModel
 
 from shared.utils import files_locator as fl
 from ..wan.modules.t5 import T5EncoderModel
@@ -23,6 +23,7 @@ from .modules.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscrete
 from .audio_process.wav2vec2 import Wav2Vec2ModelWrapper
 from ..qwen.convert_diffusers_qwen_vae import convert_state_dict
 from shared.utils.text_encoder_cache import TextEncoderCache
+from shared.utils.loras_mutipliers import update_loras_slists
 
 
 def _load_json_config(path):
@@ -146,6 +147,8 @@ class LongCatModel:
         self.model_type = model_type
         self.base_model_type = base_model_type
         self.is_avatar = base_model_type in ["longcat_avatar"]
+        self.is_avatar_v1_6 = self.is_avatar and self.model_def.get("avatar_version") == "1.6"
+        self._audio_chunks = {}
         self.sparse_attention_enabled = bool(self.model_def.get("sparse_attention", False))
         self._interrupt = False
         self._reference_image = None
@@ -168,7 +171,7 @@ class LongCatModel:
         )
         self.text_encoder_cache = TextEncoderCache()
 
-        transformer_config_path = (
+        transformer_config_path = self.model_def.get("transformer_config") or (
             "models/longcat/configs/longcat_avatar.json"
             if self.is_avatar
             else "models/longcat/configs/longcat_video.json"
@@ -227,12 +230,28 @@ class LongCatModel:
         self.vae._dtype = VAE_dtype
         self.vae.eval().requires_grad_(False)
 
-        scheduler_cfg = _load_json_config("models/longcat/configs/longcat_scheduler.json")
+        scheduler_cfg = _load_json_config(
+            self.model_def.get("scheduler_config", "models/longcat/configs/longcat_scheduler.json")
+        )
         self.scheduler = FlowMatchEulerDiscreteScheduler(**scheduler_cfg)
         self.num_timesteps = 1000
-        self.num_distill_sample_steps = 50
+        self.num_distill_sample_steps = int(self.model_def.get("num_distill_sample_steps", 50))
 
-        if self.is_avatar:
+        if self.is_avatar_v1_6:
+            folder = self.model_def["audio_encoder_folder"]
+            self.audio_encoder = offload.fast_load_transformers_model(
+                fl.locate_file(os.path.join(folder, self.model_def["audio_encoder_file"])),
+                modelClass=WhisperModel,
+                defaultConfigPath=fl.locate_file(os.path.join(folder, "config.json")),
+                modelPrefix="model", writable_tensors=False, default_dtype=dtype,
+                ignore_unused_weights=True, pre_load_callback=lambda model: delattr(model, "decoder"),
+            )
+            self.audio_encoder._model_dtype = dtype
+            self.audio_encoder.eval().requires_grad_(False)
+            self.audio_feature_extractor = AutoFeatureExtractor.from_pretrained(
+                fl.locate_folder(folder), local_files_only=True,
+            )
+        elif self.is_avatar:
             wav2vec_folder = fl.locate_folder("chinese-wav2vec2-base")
             self.audio_encoder = Wav2Vec2ModelWrapper(wav2vec_folder)
             self.audio_encoder.eval().requires_grad_(False)
@@ -493,6 +512,10 @@ class LongCatModel:
         return audio_emb
 
     def _build_audio_windows(self, audio_path, frame_num, fps, window_start_frame_no, audio_stride):
+        if getattr(self, "is_avatar_v1_6", False):
+            from .audio_process.whisper_windows import audio_windows
+
+            return audio_windows(self, audio_path, frame_num, fps, window_start_frame_no)
         speech_array, sr = librosa.load(audio_path, sr=16000)
         target_len = int((window_start_frame_no + frame_num) / fps * sr)
         if len(speech_array) < target_len:
@@ -540,7 +563,12 @@ class LongCatModel:
             distill_indices = (distill_indices * (self.num_timesteps // self.num_distill_sample_steps)).round().long()
             inference_indices = np.linspace(0, self.num_distill_sample_steps, num=sampling_steps, endpoint=False)
             inference_indices = np.floor(inference_indices).astype(np.int64)
-            sigmas = torch.flip(distill_indices, [0])[inference_indices].float() / self.num_timesteps
+            if self.is_avatar_v1_6:
+                indexes = self.num_timesteps - distill_indices
+                source = torch.linspace(1, 0, self.num_timesteps, device=self.device)
+                sigmas = torch.flip(source[indexes], [0])[inference_indices].float()
+            else:
+                sigmas = torch.flip(distill_indices, [0])[inference_indices].float() / self.num_timesteps
         else:
             sigmas = torch.linspace(1, 0.001, sampling_steps, dtype=torch.float32, device=self.device)
         return sigmas.to(dtype=torch.float32, device="cpu")
@@ -813,7 +841,7 @@ class LongCatModel:
         audio_emb = None
         ref_target_masks = None
         if self.is_avatar:
-            audio_stride = 2
+            audio_stride = int(self.model_def.get("audio_stride", 2))
             audio_emb = _build_avatar_audio_embeddings(
                 model_type=self.model_type,
                 audio_guide=audio_guide,
@@ -852,12 +880,18 @@ class LongCatModel:
                 "mask_frame_range": mask_frame_range,
             }
 
+        lora_schedules = kwargs.get("loras_slists")
+        if self.is_avatar_v1_6 and lora_schedules is not None:
+            update_loras_slists(self.transformer, lora_schedules, len(timesteps))
+
         callback(-1, None, True, override_num_inference_steps = len(timesteps))
 
         with tqdm(total=len(timesteps), desc="Denoising") as progress_bar:
             for i, t in enumerate(timesteps):
                 if self._interrupt:
                     return None
+                if self.is_avatar_v1_6 and lora_schedules is not None:
+                    offload.set_step_no_for_lora(self.transformer, i)
                 def _aborted(outputs):
                     if outputs is None:
                         return True

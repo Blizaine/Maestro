@@ -20,7 +20,8 @@ import uuid
 from .media_flow import _check_abort, _encoding_options
 
 DEFAULTS = {"enabled": False, "face_count": 0, "strength": 0.75,
-            "steps": 4, "window_frames": 243, "model": "auto", "character_ids": []}
+            "steps": 4, "window_frames": 243, "model": "auto", "character_ids": [],
+            "audio_scope": "all", "blend": 1.0}
 _TEMP_CLEANUP_RETRY_DELAYS = (0.05, 0.1, 0.2)
 _DEFERRED_CLEANUP_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0)
 _logger = logging.getLogger(__name__)
@@ -40,6 +41,11 @@ def normalize_options(value=None):
     strength = result["strength"]
     if isinstance(strength, bool) or not isinstance(strength, (int, float)) or not math.isfinite(strength) or not 0 < strength <= 1:
         raise ValueError("Face refinement strength must be greater than 0 and at most 1")
+    blend = result["blend"]
+    if isinstance(blend, bool) or not isinstance(blend, (int, float)) or not math.isfinite(blend) or not 0 < blend <= 1:
+        raise ValueError("Face blend must be greater than 0 and at most 1")
+    if result["audio_scope"] not in ("all", "largest", "none"):
+        raise ValueError("Choose all faces, the largest face, or no faces for audio guidance")
     if result["model"] not in ("auto", "pruned", "fused"):
         raise ValueError("Choose Auto, H3 Pruned or H3 Fused for face refinement")
     if not isinstance(result["enabled"], bool):
@@ -340,15 +346,30 @@ def resolve_mappings(data, assignments=None):
             "character_id": face.get("character_id"), "skip": False}) for face in data["faces"]]
 
 
-def audio_window(source, start, count, fps):
+def face_audio_tracks(scope, tracks, transforms):
+    if scope == "all":
+        return set(tracks)
+    if scope == "none" or not tracks:
+        return set()
+
+    def mean_area(track):
+        boxes = [box for box in transforms[track - 1]["raw_face_boxes"] if box is not None]
+        return sum(max(0, box[2] - box[0]) * max(0, box[3] - box[1]) for box in boxes) / max(1, len(boxes))
+
+    return {max(tracks, key=mean_area)}
+
+
+def audio_window(source, start, count, fps, *, guided=True):
     import numpy as np
+    samples = round(count / fps * 32000)
+    if not guided:
+        return np.zeros((samples, 2), dtype=np.float32), 32000
     from shared.utils.video_decode import _resolve_media_binary
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     probe = subprocess.run([_resolve_media_binary("ffprobe"), "-v", "error", "-select_streams", "a:0",
         "-show_entries", "stream=codec_type", "-of", "json", str(source)], capture_output=True, timeout=30, creationflags=flags)
     if probe.returncode:
         raise ValueError("Cannot inspect source audio for face refinement")
-    samples = round(count / fps * 32000)
     if not json.loads(probe.stdout).get("streams"):
         return np.zeros((samples, 2), dtype=np.float32), 32000
     decoded = subprocess.run([_resolve_media_binary("ffmpeg"), "-v", "error", "-nostdin",
@@ -444,8 +465,12 @@ def process_video(source, destination, *, options=None, analysis_id=None, assign
     data = load_analysis(analysis_id, source, options["face_count"]) if analysis_id else analyze(source, options, abort=abort, progress=progress)
     mappings = resolve_mappings(data, assignments)
     selected = [item for item in mappings if not item["skip"]]
+    guided_tracks = face_audio_tracks(
+        options["audio_scope"], [item["track_id"] for item in selected], data.get("transforms", []),
+    )
     report = {"analysis_id": data["id"], "faces_detected": len(data["faces"]),
-              "faces_refined": len(selected), "assignments": mappings, "warnings": data["warnings"]}
+              "faces_refined": len(selected), "assignments": mappings, "warnings": data["warnings"],
+              "audio_guided_tracks": sorted(guided_tracks), "blend": options["blend"]}
     if not selected:
         # No synthetic generation if there are no relevant faces (or all are
         # skipped). A byte-for-byte copy is a valid, explicitly reported no-op.
@@ -515,7 +540,10 @@ def process_video(source, destination, *, options=None, analysis_id=None, assign
                                     if progress:
                                         progress(f"Face {face_number}/{len(selected)} · Window {window_index}/{len(starts)} · {phase}", step, total)
                                 crop = crop_face_track(frames, transform, start, stop)
-                                audio, rate = audio_window(source, start, stop - start, geometry["fps"])
+                                audio, rate = audio_window(
+                                    source, start, stop - start, geometry["fps"],
+                                    guided=mapping["track_id"] in guided_tracks,
+                                )
                                 refined = refine_window(model, crop, refs[mapping["track_id"]],
                                     fps=geometry["fps"], audio=audio, audio_rate=rate, options=options,
                                     seed=int(seed) + mapping["track_id"] + start, abort=abort, progress=face_progress)
@@ -536,7 +564,7 @@ def process_video(source, destination, *, options=None, analysis_id=None, assign
                                 # over the same base, avoiding doubled masks.
                                 output[start:stop].copy_(base_frames[start:stop])
                                 stitched = stitch(output[start:stop], refined, segment, paste_region="face_only",
-                                    mask_dilation=24, feather=24, colour_match=1.0, blend=1.0,
+                                    mask_dilation=24, feather=24, colour_match=1.0, blend=options["blend"],
                                     undetected_frames="fade_out", feather_scales_with_crop=False,
                                     abort_callback=abort, progress_callback=face_progress)
                                 _check_abort(abort)

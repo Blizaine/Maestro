@@ -133,6 +133,7 @@ class family_handler:
 
     @staticmethod
     def query_model_def(base_model_type, model_def):
+        avatar_16 = (model_def or {}).get("avatar_version") == "1.6"
         extra_model_def = {
             "frames_minimum": 5,
             "frames_steps": 4,
@@ -202,6 +203,23 @@ class family_handler:
                 }
 
 
+        if avatar_16:
+            extra_model_def.update({
+                "fps": 25,
+                "sample_solvers": [("Distill", "distill")],
+                "sample_solver": "distill",
+                "distill_only": True,
+                "num_distill_sample_steps": 8,
+                "transformer_config": "models/longcat/configs/longcat_avatar_v1_6.json",
+                "scheduler_config": "models/longcat/configs/longcat_avatar_v1_6_scheduler.json",
+                "audio_stride": 1,
+                "audio_encoder_folder": "whisper-large-v3",
+                "audio_encoder_file": "whisper_large_v3_encoder_bf16.safetensors",
+                "text_encoder_URLs": [
+                    extra_model_def["text_encoder_URLs"][0],
+                    "https://huggingface.co/DeepBeepMeep/LongCat/resolve/e99c5444ad0e7f6d6027a293469e0f93be772415/umt5-xxl/models_t5_umt5-xxl-enc-int8_convrot.safetensors",
+                ],
+            })
         return extra_model_def
 
     @staticmethod
@@ -212,6 +230,20 @@ class family_handler:
 
     @staticmethod
     def query_model_files(computeList, base_model_type, model_def=None):
+        if (model_def or {}).get("avatar_version") == "1.6":
+            return [
+                {"repoId": "DeepBeepMeep/Wan2.1",
+                 "sourceFolderList": ["umt5-xxl", ""],
+                 "fileList": [
+                     ["special_tokens_map.json", "spiece.model", "tokenizer.json", "tokenizer_config.json"],
+                     ["Wan2.1_VAE_bf16.safetensors"],
+                 ]},
+                {"repoId": "DeepBeepMeep/LongCat",
+                 "revision": "e99c5444ad0e7f6d6027a293469e0f93be772415",
+                 "sourceFolderList": ["whisper-large-v3"],
+                 "fileList": [["config.json", "generation_config.json", "preprocessor_config.json",
+                               "whisper_large_v3_encoder_bf16.safetensors"]]},
+            ]
         download_def = [
             {
                 "repoId": "DeepBeepMeep/Wan2.1",
@@ -280,6 +312,13 @@ class family_handler:
 
     @staticmethod
     def update_default_settings(base_model_type, model_def, ui_defaults):
+        if (model_def or {}).get("avatar_version") == "1.6":
+            ui_defaults.update({
+                "guidance_scale": 1.0, "audio_guidance_scale": 1.0,
+                "num_inference_steps": 8, "video_length": 93, "sliding_window_size": 93,
+                "sliding_window_overlap": 13, "sample_solver": "distill",
+            })
+            return
         ui_defaults.update(
             {
                 "guidance_scale": 4.0,

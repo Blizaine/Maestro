@@ -113,6 +113,11 @@ class StreamCache:
     def storing(self) -> bool:
         return not self.lengths
 
+    def has_prefix(self, block: int) -> bool:
+        """Return whether this block already has a cached attention window."""
+
+        return self.lengths.get(block, 0) > 0
+
     def prefix(
         self,
         block: int,

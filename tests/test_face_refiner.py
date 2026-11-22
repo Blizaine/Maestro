@@ -17,6 +17,20 @@ from postprocessing.h3_face_refiner import runtime, face
 
 
 class FaceRefinerContracts(unittest.TestCase):
+    def test_face_audio_scope_chooses_largest_selected_face_and_accepts_silence(self):
+        transforms = [
+            {"raw_face_boxes": [[0, 0, 20, 20], None]},
+            {"raw_face_boxes": [None, [10, 10, 100, 100]]},
+            {"raw_face_boxes": [[0, 0, 150, 150]]},
+        ]
+        self.assertEqual(service.face_audio_tracks("largest", [1, 2], transforms), {2})
+        self.assertEqual(service.face_audio_tracks("all", [1, 2], transforms), {1, 2})
+        self.assertEqual(service.face_audio_tracks("none", [1, 2], transforms), set())
+        silence, rate = service.audio_window("not-read", 0, 24, 24, guided=False)
+        self.assertEqual(rate, 32000)
+        self.assertEqual(silence.shape, (32000, 2))
+        self.assertFalse(silence.any())
+
     @staticmethod
     def _winerror_145():
         error = OSError(145, "The directory is not empty")

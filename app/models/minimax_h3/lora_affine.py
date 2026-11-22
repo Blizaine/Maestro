@@ -28,12 +28,16 @@ _MAP_RELATIVE_DIR = os.path.join("minimax_h3", "lora_affine_maps")
 _ARCHITECTURES = {
     "viggle_animate": "viggle",
     "viggle_remake_swap": "fl2va",
+    "viggle_remake_swap_aligned": "ref2va",
     "viggle_remake_edit": "fl2va",
     "minimax_h3": "fl2va",
     "minimax_h3_full": "fl2va",
     "minimax_h3_ref2va": "ref2va",
     "minimax_h3_ref2va_full": "ref2va",
     "minimax_h3_regenerate_ic": "ref2va",
+    # H3 Image shares the FL2VA transformer/AdaLN basis. Its six native
+    # output heads change sampling, not the backbone LoRA architecture.
+    "h3_image": "fl2va",
 }
 _LORA_SUFFIXES = (
     ("lora_A.weight", "lora_B.weight"),

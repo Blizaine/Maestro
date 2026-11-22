@@ -341,6 +341,10 @@ def normalize_minimax_h3_turbo_request(
 
     if not isinstance(body, dict):
         return False
+    if (model_def or {}).get("minimax_h3_accelerators_allowed") is False:
+        if body.get("minimax_h3_turbo_mode") is True:
+            raise ValueError("H3 HyperFlow Flash uses its own step schedule and does not support H3 Turbo.")
+        return False
     if (model_def or {}).get("minimax_h3_baked_turbo"):
         from .imported import normalize_baked_h3_request
         normalize_baked_h3_request(body, model_def)

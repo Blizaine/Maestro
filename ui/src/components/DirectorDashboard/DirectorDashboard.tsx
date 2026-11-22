@@ -157,7 +157,9 @@ function ShotReviewPanel({
           onClick={() => { if (open) setOpen(false); else void inspect() }}
           disabled={inspectionBusy || busy || !clip.video_filename || clip.video_stale}
           className="flex items-center gap-1.5 px-2 py-1 text-[10px] rounded border border-accent-blue/30 bg-accent-blue/10 text-accent-blue hover:bg-accent-blue/20 disabled:opacity-40"
-          title={clip.video_stale ? 'Regenerate this shot before reviewing it' : 'Inspect the selected rendered shot'}
+          title={!clip.video_filename
+            ? 'Render this shot before reviewing it'
+            : clip.video_stale ? 'Regenerate this shot before reviewing it' : 'Inspect the selected rendered shot'}
         >
           {inspectionBusy ? <Loader2 size={11} className="animate-spin" /> : <Eye size={11} />}
           {inspectionBusy ? 'Inspecting…' : open ? 'Hide review' : 'Review shot'}
@@ -395,7 +397,7 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
   onTag: (tag: 'good' | 'needs_work' | null) => void
   onRerunImage: (clipIndex: number, prompt?: string) => void
   onRerunVideo: (clipIndex: number, prompt?: string) => void
-  onSavePrompt: (clipIndex: number, update: { image_prompt?: string; video_prompt?: string; window_prompts?: string[] }) => Promise<void>
+  onSavePrompt: (clipIndex: number, update: Parameters<typeof updateClipPrompt>[2]) => Promise<void>
   onTakeSelected: () => Promise<void>
 }) {
   const [expandImage, setExpandImage] = useState(false)
@@ -408,6 +410,21 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
   const [editVideoPrompt, setEditVideoPrompt] = useState(clip.video_prompt || '')
   const [savingPrompt, setSavingPrompt] = useState(false)
   const [saveError, setSaveError] = useState('')
+  const [castDraft, setCastDraft] = useState<string[] | null>(null)
+  const castOptions = pipeline.shot_cast_options || []
+  const castSelection = castDraft ?? clip.shot_reference_cast ?? castOptions.map(option => option.id)
+  const saveCast = async (selection: string[] | null) => {
+    setSavingPrompt(true)
+    setSaveError('')
+    try {
+      await onSavePrompt(clip.index, { shot_reference_cast: selection })
+      setCastDraft(null)
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'Could not save the shot cast')
+    } finally {
+      setSavingPrompt(false)
+    }
+  }
   const draftFinalPipeline = pipeline as DraftFinalPipeline
   const requiresShotImage = !pipeline.shot_image_policy
     || pipeline.shot_image_policy === 'generate'
@@ -470,6 +487,33 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
           busy={busy}
           onTakeSelected={onTakeSelected}
         />
+        {castOptions.length > 1 && (
+          <details className="rounded border border-border bg-bg-tertiary px-2 py-1.5 text-xs">
+            <summary className="cursor-pointer text-text-secondary">
+              Shot cast · {clip.shot_reference_cast == null ? 'Auto' : 'Custom'}
+            </summary>
+            <div className="mt-2 flex flex-wrap gap-x-3 gap-y-2">
+              {castOptions.map(option => (
+                <label key={option.id} className="flex items-center gap-1.5 text-text-primary">
+                  <input type="checkbox" checked={castSelection.includes(option.id)}
+                    disabled={busy || savingPrompt}
+                    onChange={event => setCastDraft(event.target.checked
+                      ? [...castSelection, option.id]
+                      : castSelection.filter(id => id !== option.id))} />
+                  {option.label}
+                </label>
+              ))}
+            </div>
+            <div className="mt-2 flex gap-2">
+              <button type="button" disabled={busy || savingPrompt || castDraft == null}
+                onClick={() => void saveCast(castSelection)}
+                className="rounded border border-border px-2 py-1 text-text-primary disabled:opacity-40">Save cast</button>
+              <button type="button" disabled={busy || savingPrompt || (clip.shot_reference_cast == null && castDraft == null)}
+                onClick={() => void saveCast(null)}
+                className="rounded px-2 py-1 text-text-secondary disabled:opacity-40">Use planned cast</button>
+            </div>
+          </details>
+        )}
         {/* Image section */}
         <div className="flex gap-2">
           {/* Thumbnail */}
@@ -606,13 +650,14 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                 }
               }}
                 disabled={busy || (requiresShotImage && !clip.start_image_filename)}
-                className="p-0.5 rounded text-text-muted hover:text-indicator-success transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                className="flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10px] text-text-secondary hover:text-indicator-success disabled:cursor-not-allowed disabled:opacity-40"
                 title={busy
                   ? 'Wait for pipeline repair to finish'
                   : requiresShotImage && !clip.start_image_filename
                     ? 'Generate the start image first'
-                    : 'Re-generate video clip'}>
+                    : 'Render only this shot'}>
                 <Film size={10} />
+                {clip.video_filename ? 'Regenerate shot' : 'Render shot'}
               </button>
             </div>
           </div>

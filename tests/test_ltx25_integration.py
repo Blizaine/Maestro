@@ -102,7 +102,6 @@ class LTX25HandlerTests(unittest.TestCase):
         self.assertEqual(len(nvfp4["model"]["URLs"]), 1)
         self.assertIn("diffusion_model_nvfp4", nvfp4["model"]["URLs"][0])
         self.assertEqual(nvfp4["num_inference_steps"], 8)
-
     def test_handler_matches_native_two_stage_contract(self):
         model_def = self.handler_module.family_handler.query_model_def(
             "ltx2_25", {}
@@ -498,6 +497,56 @@ class LTX25HandlerTests(unittest.TestCase):
         self.assertIn("9: ['ltx2_25']", store)
         self.assertNotIn("'ltx2_25_dev'", default_block)
         self.assertNotIn("'ltx2_25_nvfp4'", default_block)
+
+
+class LTX25StageFailureContextTests(unittest.TestCase):
+    def test_stage2_diagnostic_carries_render_settings(self):
+        tree = ast.parse(DISTILLED_PATH.read_text(encoding="utf-8"))
+        helper = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_stage2_failure_message"
+        )
+        namespace = {}
+        exec(
+            compile(
+                ast.fix_missing_locations(
+                    ast.Module(body=[helper], type_ignores=[])
+                ),
+                str(DISTILLED_PATH),
+                "exec",
+            ),
+            namespace,
+        )
+
+        message = namespace["_stage2_failure_message"](
+            type("Shape", (), {
+                "frames": 480,
+                "width": 1280,
+                "height": 704,
+                "fps": 24,
+            })(),
+            [1.0, 0.5, 0.0],
+            "torch.bfloat16",
+            "cuda:0",
+        )
+
+        self.assertIn("LTX-2 distilled stage 2 failed", message)
+        self.assertIn("frames=480", message)
+        self.assertIn("resolution=1280x704", message)
+        self.assertIn("fps=24", message)
+        self.assertIn("steps=2", message)
+        self.assertIn("dtype=torch.bfloat16", message)
+        self.assertIn("device=cuda:0", message)
+
+    def test_stage2_error_wrapper_keeps_original_as_cause(self):
+        source = DISTILLED_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            "stage_context = _stage2_failure_message(",
+            source,
+        )
+        self.assertIn('f"{stage_context}: {exc}"', source)
+        self.assertIn("            ) from exc", source)
 
 
 if __name__ == "__main__":

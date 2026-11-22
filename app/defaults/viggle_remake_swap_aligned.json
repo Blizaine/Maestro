@@ -1,0 +1,24 @@
+{
+    "model": {
+        "name": "BFS Aligned Swap (Experimental)",
+        "architecture": "viggle_remake_swap_aligned",
+        "description": "Replace the main subject from a single identity image. Each source frame guides its matching output frame, preserving the scene, performance, and soundtrack.",
+        "URLs": "minimax_h3_ref2va",
+        "experimental": true
+    },
+    "prompt": "",
+    "num_inference_steps": 20,
+    "video_length": 124,
+    "sliding_window_size": 345,
+    "sliding_window_overlap": 17,
+    "sliding_window_discard_last_frames": 0,
+    "resolution": "auto_480p",
+    "guidance_scale": 1.0,
+    "guidance_phases": 1,
+    "flow_shift": 12.0,
+    "audio_flow_shift": 3.0,
+    "sample_solver": "euler",
+    "video_prompt_type": "IVU2",
+    "image_prompt_type": "",
+    "audio_prompt_type": "K"
+}

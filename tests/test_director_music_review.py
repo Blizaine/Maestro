@@ -315,7 +315,7 @@ class MusicReviewTests(unittest.TestCase):
     def test_hard_source_assignment_failure_still_raises_after_two_attempts(self):
         from services.director.music_narrative import build_music_narrative_contract
 
-        contract = build_music_narrative_contract("The traveler climbs onto a horse.")
+        contract = build_music_narrative_contract("The traveler opens a safe.")
         planner, clips = self._arc_planner(contract)
         beats = self._repeated_outline()
         for row in beats:

@@ -15,6 +15,7 @@ import logging
 import requests
 from contextlib import contextmanager
 from typing import Optional
+from urllib.parse import urlparse
 
 from services.text_integrity import repair_text
 from promptbench.trace import traced, record_payload, record_metrics, record_response
@@ -813,16 +814,32 @@ def _finalize_payload(payload: dict) -> dict:
 
     if _provider not in ("remote", "openai"):
         return record_payload(payload, model_id=_model_id, command=getattr(_process, "args", None))
+    try:
+        endpoint_host = (urlparse(str(_remote_url or "")).hostname or "").lower()
+    except (TypeError, ValueError):
+        endpoint_host = ""
+    provider_unsupported_fields = set()
+    if (
+        endpoint_host == "generativelanguage.googleapis.com"
+        or endpoint_host == "aiplatform.googleapis.com"
+        or endpoint_host.endswith(".aiplatform.googleapis.com")
+    ):
+        # Google's OpenAI-compatible Gemini endpoint does not accept these
+        # optional OpenAI sampler fields. Keep them for other compatible
+        # endpoints, which may support the controls.
+        provider_unsupported_fields.update(
+            ("frequency_penalty", "presence_penalty")
+        )
     prepared = {
         key: value
         for key, value in payload.items()
-        if key in _OPENAI_CHAT_FIELDS
+        if key in _OPENAI_CHAT_FIELDS and key not in provider_unsupported_fields
     }
     dropped = sorted(set(payload) - set(prepared))
     if dropped:
         print(
-            f"[LLM] Dropped {len(dropped)} llama.cpp-only field(s) not "
-            f"accepted by provider={_provider}: {', '.join(dropped)}"
+            f"[LLM] Dropped {len(dropped)} request field(s) not accepted "
+            f"by provider={_provider}: {', '.join(dropped)}"
         )
     prepared["model"] = _model_id
     return record_payload(prepared, model_id=_model_id)

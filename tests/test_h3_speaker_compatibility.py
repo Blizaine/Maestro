@@ -1,10 +1,12 @@
 """Prompt-local Ref2VA speaker proof and compatibility regressions."""
 from __future__ import annotations
 
+import ast
 import re
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
@@ -45,6 +47,32 @@ def dialogue_spans(source: str) -> list[tuple[int, int, str]]:
 
 
 class H3SpeakerCompatibilityTests(unittest.TestCase):
+    def test_worker_preflights_later_ref2va_windows_before_render(self):
+        source = Path(__file__).resolve().parents[1] / "app" / "launch.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        validator = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                         and node.name == "_h3_ref2va_queue_speaker_error")
+        model = {"architecture": "minimax_h3_ref2va", "omni_reference": True}
+        namespace = {"wgp": SimpleNamespace(get_model_def=lambda _: model)}
+        exec(compile(ast.Module(body=[validator], type_ignores=[]), str(source), "exec"), namespace)
+        validate = namespace[validator.name]
+
+        def task(*prompts):
+            return {"params": {
+                "model_type": "minimax_h3_ref2va_fused_turbo",
+                "minimax_h3_runtime_references": REFERENCES,
+                "h3_window_prompts": list(prompts),
+            }}
+
+        valid = 'Sam (S1) speaks: <d>[English] Good morning.</d>'
+        invalid = 'She (S1) speaks: <d>[English] Good morning.</d>'
+        for queue in ([task(valid, invalid)], [task(valid), task(invalid)]):
+            with self.subTest(tasks=len(queue)):
+                error = validate(queue)
+                self.assertIn("window 2 failed speaker validation", error)
+                self.assertIn("No windows were rendered.", error)
+        self.assertIsNone(validate([task(valid, valid)]))
+
     def test_declared_subject_marker_handles_both_french_placements(self):
         for french in (
             (

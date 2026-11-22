@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
-import { useStore } from '../../stores/useStore'
+import { ALIGNED_REMAKE_SWAP_MODEL, remakeEditSubMode, useStore } from '../../stores/useStore'
 import { AvatarControls } from './AvatarControls'
 import { ViggleControls } from './ViggleControls'
 import { useIsMobileSidecar } from '../../lib/useIsMobile'
@@ -216,11 +216,8 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
   const isOutpaint = isEdit && editSubMode === 'outpaint'
   const isEditAnything = isEdit && editSubMode === 'edit_anything'
   const isRecast = isEdit && editSubMode === 'recast'
-  const isRemakeControls = (
-    isRecast && selectedModel?.model_type === 'viggle_remake_swap'
-  ) || (
-    isEditAnything && selectedModel?.model_type === 'viggle_remake_edit'
-  )
+  const remakeMode = remakeEditSubMode(selectedModel?.model_type)
+  const isRemakeControls = isEdit && remakeMode !== null && remakeMode === editSubMode
   const isOmniReference = isVideo && Boolean(
     selectedModel?.omni_reference
     || selectedModel?.director?.video_strategy === 'omni_reference'
@@ -238,7 +235,9 @@ export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () 
   const hasPrompt = !isStandaloneTool && !isAnimate && !isTitles && !(isAudio && ['sfx', 'mixer', 'music'].includes(audioSubMode))
 
   // Video Transform controls backed by the legacy edit-mode engines.
-  const editControls = isRemakeControls ? <ViggleRemakeControls /> : (
+  const editControls = isRemakeControls ? (
+    <ViggleRemakeControls key={selectedModel?.model_type} aligned={selectedModel?.model_type === ALIGNED_REMAKE_SWAP_MODEL} />
+  ) : (
     <>
       {isRetake && (
         <>

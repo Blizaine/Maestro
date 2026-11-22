@@ -436,6 +436,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
                 "minimax_h3_voice_audio",
                 "viggle_animate",
                 "viggle_remake_swap",
+                "viggle_remake_swap_aligned",
                 "viggle_remake_edit",
                 "minimax_h3_regenerate_ic",
             ],
@@ -489,6 +490,7 @@ class TestMiniMaxH3Definition(unittest.TestCase):
                 "discard_last_frames": 0,
             },
         )
+
         self.assertTrue(model_def["audio_guide_window_slicing"])
         self.assertTrue(model_def["sliding_window_audio_history"])
         self.assertTrue(model_def["any_audio_prompt"])
@@ -568,6 +570,31 @@ class TestMiniMaxH3Definition(unittest.TestCase):
                     "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
                 )
             ],
+        )
+
+    def test_aligned_remake_type_resolves_ref2va_and_preflights_one_identity(self):
+        from models.minimax_h3.viggle_remake import normalize_request
+
+        model_def = self.handler.query_model_def(
+            "viggle_remake_swap_aligned", {}
+        )
+        self.assertTrue(model_def["minimax_h3_aligned_guide"])
+        self.assertTrue(model_def["omni_reference"])
+        self.assertEqual(model_def["minimax_h3_lora_workflow"], "ref2va")
+        self.assertEqual(model_def["set_video_prompt_type"], "IVU2")
+        body = {
+            "model_type": "viggle_remake_swap_aligned",
+            "video_guide": "source.mp4",
+            "image_refs": ["identity.png"],
+            "viggle_trim_start": 0,
+            "viggle_trim_end": 4,
+            "prompt": "",
+        }
+        normalize_request(body, aligned_guide=True)
+        self.assertIsNone(
+            self.handler.validate_generative_settings(
+                "viggle_remake_swap_aligned", model_def, body
+            )
         )
 
     def test_fl2va_media_source_validation_fails_before_generation(self):

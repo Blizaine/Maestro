@@ -152,7 +152,7 @@ class MusicNarrativeTests(unittest.TestCase):
             "moves, then finishes in the same pose so the clip loops smoothly."
         )
         contract = contract_for(source)
-        self.assertEqual(contract["revision"], 4)
+        self.assertEqual(contract["revision"], 5)
         self.assertEqual(contract["source"], source)
         self.assertIn("spins, footwork and floor moves", contract["source"])
         self.assertEqual(contract["events"], [])
@@ -174,7 +174,7 @@ class MusicNarrativeTests(unittest.TestCase):
         contract = contract_for(source)
         events = contract["events"]
 
-        self.assertEqual(contract["revision"], 4)
+        self.assertEqual(contract["revision"], 5)
         self.assertEqual([event["text"] for event in events], [
             "boards a small boat", "sails across the bay",
         ])
@@ -319,6 +319,18 @@ class MusicNarrativeTests(unittest.TestCase):
                     self.assertEqual(events[0]["kind"], "attack")
                 else:
                     self.assertEqual(events, [])
+
+    def test_framing_directives_leave_the_visible_prop_action_and_actor_intact(self):
+        contract = contract_for(
+            'Do not use Text in the Images besides two shots in which '
+            'Character X proudly presents a document titled "Run. Close the Door." '
+            'Use one shot where Character X stamps the word abgelehnt onto the paper.'
+        )
+        events = contract["events"]
+        self.assertEqual([event["kind"] for event in events], ["action", "action"])
+        self.assertEqual(events[0]["text"], 'presents a document titled "Run. Close the Door."')
+        self.assertEqual(events[1]["text"], "stamps the word abgelehnt onto the paper")
+        self.assertTrue(all("character x" in event["actor_aliases"] for event in events))
 
     def test_physical_shooting_and_throwing_remain_narrative_events(self):
         contract = contract_for(

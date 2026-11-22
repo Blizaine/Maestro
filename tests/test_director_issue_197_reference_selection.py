@@ -25,6 +25,35 @@ GANGSTER_MIRROR_PROMPT = (
 
 
 class DirectorIssue197ReferenceSelectionTests(unittest.TestCase):
+    def test_h3_director_shot_keeps_cast_parts_voice_and_shared_media(self):
+        from services.director.reference_inputs import select_director_shot_references
+
+        def visual(name, path):
+            return {"type": "image", "path": path, "character_name": name,
+                    "library_character_id": name.lower()}
+
+        def voice(name):
+            return {"type": "audio", "path": name + ".wav", "character_name": name,
+                    "library_character_id": name.lower(), "audio_intent": "voice"}
+
+        alice, body, bob = visual("Alice", "alice.png"), visual("Alice", "alice2.png"), visual("Bob", "bob.png")
+        room = {"type": "image", "path": "room.png", "image_intent": "scene", "role": "room"}
+        beat = {"type": "audio", "path": "beat.wav", "audio_intent": "drive"}
+        garden = {"type": "image", "path": "garden.png", "image_intent": "scene", "role": "garden"}
+        references = [alice, voice("Alice"), bob, voice("Bob"), room, body, beat, garden]
+        plan = {
+            "_director_subjects_on_screen": [{"character_id": "char_1", "speaker_name": "Bob"}],
+            "_director_environment": "the room under warm light",
+        }
+        params = {"characters": [{"name": "Alice"}, {"name": "Bob"}]}
+        self.assertEqual(select_director_shot_references(references, plan, params),
+                         [bob, voice("Bob"), room, beat])
+        plan["shot_reference_cast"] = ["character:alice"]
+        self.assertEqual(select_director_shot_references(references, plan, params),
+                         [alice, voice("Alice"), room, body, beat])
+        plan["shot_reference_cast"] = []
+        self.assertEqual(select_director_shot_references(references, plan, params), [room, beat])
+
     def test_reference_instruction_with_a_real_action_is_not_discarded(self):
         contract = build_source_contract(
             "Use the robot character in the uploaded reference images to open the door."

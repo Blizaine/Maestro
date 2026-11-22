@@ -224,6 +224,16 @@ class ReferenceDialogueTests(unittest.TestCase):
         self.assertTrue(adaptive_dialogue_expansion_requested(
             SOURCE + '\nSam then explains how he plans to remove the raccoon.'))
 
+    def test_scripted_interview_cut_does_not_request_an_extra_exchange(self):
+        cut = 'Scene cuts to interview with Pam <picture 4>.'
+        script = cut + ' Pam looks into the camera. She says, "This is what happened."'
+        self.assertFalse(adaptive_dialogue_expansion_requested(script))
+        self.assertTrue(adaptive_dialogue_expansion_requested(cut))
+        self.assertTrue(adaptive_dialogue_expansion_requested(
+            'Sam says, "We are live." ' + cut))
+        self.assertTrue(adaptive_dialogue_expansion_requested(
+            script + ' Pam then explains what she did next.'))
+
     def test_no_writer_calls_to_revise_all_locked_lines(self):
         draft = '\n'.join(f'(S{1 + index % 2}) <d>[English] {line}</d>'
                           for index, line in enumerate(LINES))

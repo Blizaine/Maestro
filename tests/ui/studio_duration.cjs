@@ -13,9 +13,16 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
     stdin: { contents: `
       import React from 'react';
       import { createRoot } from 'react-dom/client';
-      import { useStore } from './src/stores/useStore';
+      import { getModelsForFamily, studioRemakeInputError, useStore } from './src/stores/useStore';
       import { DurationSlider, WindowSettings } from './src/components/Sidebar/DurationSlider';
+      import { ViggleRemakeControls } from './src/components/Sidebar/ViggleRemakeControls';
       window.store = useStore;
+      window.remakeInputError = studioRemakeInputError;
+      window.getModelsForFamily = getModelsForFamily;
+      window.mountAlignedRemake = () => {
+        window.root = createRoot(document.getElementById('root'));
+        window.root.render(<ViggleRemakeControls aligned/>);
+      };
       window.mount = (compact = false) => {
         window.root = createRoot(document.getElementById('root'));
         window.root.render(compact ? <DurationSlider includeWindowSettings/> : <><DurationSlider/><WindowSettings/></>);
@@ -634,5 +641,39 @@ const playwright = require(process.env.MAESTRO_PLAYWRIGHT ||
     assert.equal(await page.evaluate(() => window.store.getState().params.video_length), 1275);
     assert.deepEqual(errors, []);
     console.log('LongCat Avatar: 93-frame cap, native window steps, full audio duration and 16-pass continuation schedule passed');
+    submitted = undefined;
+    const alignedResult = await page.evaluate(async () => {
+      window.root.unmount();
+      window.updates = 0;
+      const s = window.store.getState();
+      const model = 'viggle_remake_swap_aligned';
+      const modelDef = { model_type: model, architecture: model, family: 'minimax_h3', name: 'BFS Aligned Swap' };
+      window.store.setState({ generationMode: 'avatar', editSubMode: 'recast',
+        modelOptions: { ...modelDef, fps:24, frames_minimum:90, frames_maximum:345 },
+        editVideoPath: '/uploads/source.mp4', editVideoUrl: '', editVideoDuration: 8,
+        models: [modelDef], enabledModels: new Set([model]), startImage: null, endImage: null,
+        imageRefs: [], params: { ...s.params, model_type: model, prompt: '',
+          video_guide: '/uploads/source.mp4', image_refs: ['/uploads/one.png', '/uploads/two.png'],
+          viggle_trim_start: 0, viggle_trim_end: 8, viggle_remake_frame_times: [0, 4] } });
+      const missing = window.remakeInputError(window.store.getState());
+      window.store.getState().setParam('image_refs', ['/uploads/one.png']);
+      const ready = window.remakeInputError(window.store.getState());
+      const recast = window.getModelsForFamily('minimax_h3', [modelDef], 'avatar', 'recast').length;
+      const edit = window.getModelsForFamily('minimax_h3', [modelDef], 'avatar', 'edit_anything').length;
+      await window.store.getState().startGeneration();
+      window.mountAlignedRemake();
+      return { missing, ready, recast, edit };
+    });
+    assert.deepEqual(alignedResult, {missing: 'Choose one replacement character image.', ready: null, recast: 1, edit: 0});
+    assert.ok(submitted, 'Aligned swap submits with one identity image and a blank prompt');
+    assert.equal(submitted.model_type, 'viggle_remake_swap_aligned');
+    assert.equal(submitted.video_prompt_type, 'IVU2');
+    assert.equal(submitted.audio_prompt_type, 'K');
+    assert.deepEqual(submitted.image_refs, ['/uploads/one.png']);
+    assert.equal(submitted.viggle_remake_frame_times, undefined);
+    assert.equal(await page.getByText('Replacement character', {exact: true}).count(), 1);
+    assert.equal(await page.getByRole('button', {name: 'Suggest keyframes'}).count(), 0);
+    assert.deepEqual(errors, []);
+    console.log('BFS Aligned Swap: model-picker scope, one identity image, optional prompt, and IVU2 output request passed');
   } finally { await browser.close(); }
 })().catch(e => { console.error(e); process.exitCode = 1; });

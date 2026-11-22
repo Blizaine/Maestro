@@ -133,9 +133,10 @@ export function MemorySettingsPanel() {
         <label className={labelClass} htmlFor={`${id}-heads`}>Attention Head Split</label>
         <select id={`${id}-heads`} className={selectClass} value={config.attention_head_split ?? 0}
           onChange={event => void update({ attention_head_split: Number(event.target.value) })}>
+          <option value={-1}>Auto · based on free VRAM</option>
           <option value={0}>Off</option><option value={1}>Low</option><option value={2}>Medium — balanced</option><option value={3}>High — lowest VRAM</option>
         </select>
-        <p className={helpClass}>Computes supported long attention sequences in groups to reduce peak VRAM, with a speed cost. Unsupported weights or attention paths keep their normal behavior. Sage2 enables additional attention memory savings. Auto-tune can choose Off, Low or Medium for each H3 video on a 12 GB GPU with at least 30 GB RAM. This selector shows the saved setting; changing it selects manual mode.</p>
+        <p className={helpClass}>Groups supported long attention sequences to reduce peak VRAM. Auto uses the free VRAM measured for each job; the fixed options set the split manually. Sage2 can save additional attention memory.</p>
       </div>
       <div>
         <label className={labelClass} htmlFor={`${id}-int8`}>INT8 Kernel Backend</label>

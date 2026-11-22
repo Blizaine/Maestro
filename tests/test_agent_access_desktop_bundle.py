@@ -22,6 +22,7 @@ from services.agent_access.desktop_bundle import (  # noqa: E402
     MAX_VALUE_BYTES,
     build_desktop_bundle,
 )
+from services.agent_access.state import process_alive  # noqa: E402
 
 
 def _config(*, command: str | None = None, args: list[str] | None = None) -> dict[str, object]:
@@ -105,9 +106,7 @@ def test_enforces_launch_config_size_cap():
 def _wait_for_pid_to_exit(pid: int, timeout: float = 3.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except (OSError, ProcessLookupError):
+        if not process_alive(pid):
             return True
         time.sleep(0.05)
     return False

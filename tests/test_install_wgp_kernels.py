@@ -31,7 +31,7 @@ class InstallWGPKernelsTests(unittest.TestCase):
                     digest = installer._WHEEL_SHA256[(tag, wheel_platform)]
                     self.assertEqual(
                         installer.wheel_url(cuda, system, machine, (8, 0), py_minor, torch_version, libc),
-                        f"{installer.BASE}wgpkernels-1.4.2%2B{tag}-py3-none-{wheel_platform}.whl#sha256={digest}",
+                        f"{installer.BASE}wgpkernels-1.5.0%2B{tag}-py3-none-{wheel_platform}.whl#sha256={digest}",
                     )
 
     def test_wheel_url_rejects_unsupported_stack_platform_libc_and_sm(self):
@@ -45,7 +45,7 @@ class InstallWGPKernelsTests(unittest.TestCase):
         self.assertIsNone(installer.wheel_url("13.0", "Linux", "x86_64", (9, 0), 11, "2.10.0", ("musl", "1.2.5")))
 
     def test_newer_release_with_wrong_cuda_variant_is_not_preserved(self):
-        self.assertFalse(installer._newer_public_release_is_installed("1.4.3+cu128", "1.4.2+cu130"))
+        self.assertFalse(installer._newer_public_release_is_installed("1.5.1+cu128", "1.5.0+cu130"))
 
     def test_main_skips_when_mocked_torch_reports_no_cuda_gpu(self):
         torch_stub = ModuleType("torch")
@@ -105,13 +105,13 @@ class InstallWGPKernelsTests(unittest.TestCase):
             patch.object(installer.platform, "system", return_value="Windows"),
             patch.object(installer.platform, "machine", return_value="AMD64"),
             patch.object(installer.sys, "version_info", SimpleNamespace(minor=11)),
-            patch.object(installer.importlib.metadata, "version", return_value="1.4.2+cu130"),
+            patch.object(installer.importlib.metadata, "version", return_value="1.5.0+cu130"),
             patch.object(installer.subprocess, "run") as install,
             patch("sys.stdout", output),
         ):
             self.assertEqual(installer.main(), 0)
         install.assert_not_called()
-        self.assertIn("1.4.2+cu130 already installed", output.getvalue())
+        self.assertIn("1.5.0+cu130 already installed", output.getvalue())
 
     def test_main_preserves_a_newer_manually_installed_release(self):
         torch_stub = ModuleType("torch")
@@ -127,7 +127,7 @@ class InstallWGPKernelsTests(unittest.TestCase):
             patch.object(installer.platform, "system", return_value="Windows"),
             patch.object(installer.platform, "machine", return_value="AMD64"),
             patch.object(installer.sys, "version_info", SimpleNamespace(minor=11)),
-            patch.object(installer.importlib.metadata, "version", return_value="1.4.3+cu130"),
+            patch.object(installer.importlib.metadata, "version", return_value="1.5.1+cu130"),
             patch.object(installer.subprocess, "run") as install,
             patch("sys.stdout", output),
         ):
@@ -148,7 +148,7 @@ class InstallWGPKernelsTests(unittest.TestCase):
             patch.object(installer.platform, "system", return_value="Windows"),
             patch.object(installer.platform, "machine", return_value="AMD64"),
             patch.object(installer.sys, "version_info", SimpleNamespace(minor=11)),
-            patch.object(installer.importlib.metadata, "version", return_value="1.4.2+cu128"),
+            patch.object(installer.importlib.metadata, "version", return_value="1.5.0+cu128"),
             patch.object(installer.subprocess, "run") as install,
             patch("sys.stdout", io.StringIO()),
         ):

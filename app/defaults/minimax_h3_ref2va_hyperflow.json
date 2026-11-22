@@ -1,0 +1,38 @@
+{
+  "model": {
+    "name": "H3 HyperFlow Flash 14B \u2014 References (Experimental)",
+    "architecture": "minimax_h3_ref2va",
+    "minimax_h3_model_id": "minimax_h3_ref2va_hyperflow",
+    "minimax_h3_hyperflow_flash": true,
+    "minimax_h3_accelerators_allowed": false,
+    "minimax_h3_qkv_layout": "grouped",
+    "minimax_h3_sampler": "euler",
+    "minimax_h3_video_shift": 12.0,
+    "minimax_h3_audio_shift": 3.0,
+    "minimax_h3_default_turbo_preset": "",
+    "minimax_h3_turbo_mode_default": false,
+    "minimax_h3_unaccelerated_default_steps": 6,
+    "experimental": true,
+    "model_size_gb": 15.6,
+    "description": "Generates synchronized video and audio from ordered image, video, and audio references with the distinct Ref2VA Flash checkpoint. Experimental HyperFlow Flash checkpoint family distilled to about 14B parameters. The checkpoint has its own endpoint-conditioned 4, 6, and 8 evaluation Euler grids (6 by default, video/audio shifts 12/3) and no classifier-free guidance. It is separate from the ordinary 20B H3 checkpoint and the Ref2VA eight-step HyperFlow LoRA. A second H3 Two-Pass phase is available with 1\u20138 evaluations from the Flash eight-step grid tail. The compressed model may lose fine detail.",
+    "selector_help": "HYPERFLOW FLASH 14B (EXPERIMENTAL)\nGenerates synchronized video and audio from ordered image, video, and audio references with the distinct Ref2VA Flash checkpoint.\nPhase 1 supports 4, 6 (default), or 8 Euler evaluations on the checkpoint\u2019s own 12/3 schedules. The H3 Two-Pass option can upscale the latent and refine with 1\u20138 evaluations from the tail of the eight-step Flash grid. Step caching and additional guidance are not supported. This uses a separate 15 GB-class checkpoint; the existing 8-step HyperFlow Ref2VA LoRA remains for ordinary H3 Ref2VA.",
+    "URLs": [
+      "https://huggingface.co/DeepBeepMeep/MiniMax-H3/resolve/3d3c6fb64d610dcd2d0ea5dd69a9360e69d5f24f/MiniMax-H3-Ref2VA-HyperFlow-Flash-14B_int8_convrot.safetensors"
+    ]
+  },
+  "prompt": "Create a coherent cinematic scene with synchronized motion, identity, and stereo sound.",
+  "num_inference_steps": 6,
+  "video_length": 124,
+  "sliding_window_size": 345,
+  "sliding_window_overlap": 18,
+  "sliding_window_discard_last_frames": 0,
+  "resolution": "864x480",
+  "guidance_scale": 1.0,
+  "guidance_phases": 1,
+  "flow_shift": 12.0,
+  "audio_flow_shift": 3.0,
+  "sample_solver": "euler",
+  "image_prompt_type": "",
+  "minimax_h3_references": [],
+  "minimax_h3_reference_detail": "match"
+}

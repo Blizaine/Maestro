@@ -2144,6 +2144,8 @@ def _save_pipeline_state_locked(pid: str) -> bool:
     params = p.get("params", {})
 
     # Build per-clip state
+    from services.director.reference_inputs import director_shot_cast_options
+
     clip_plans = p.get("clip_plans", [])
     clip_images = p.get("clip_images", [])
     pre_polish = p.get("_clip_plans_pre_polish", [])
@@ -2232,6 +2234,7 @@ def _save_pipeline_state_locked(pid: str) -> bool:
                 if i < len(approved_take_fingerprints) else None
             ),
             "video_stale": False,
+            "shot_reference_cast": plan.get("shot_reference_cast"),
             "tag": (p.get("_clip_tags", []) or [])[i] if i < len(p.get("_clip_tags", [])) else None,
             "image_gen_time_sec": clip_timings.get(f"image_{i}"),
             "video_gen_time_sec": clip_timings.get(f"video_{i}"),
@@ -2272,6 +2275,7 @@ def _save_pipeline_state_locked(pid: str) -> bool:
         ),
         "character_ref_paths": params.get("character_ref_paths", []),
         "location_ref_paths": params.get("location_ref_paths", []),
+        "shot_cast_options": director_shot_cast_options(params),
         "auto_mode": params.get("auto_mode", True),
         "seamless": params.get("seamless", True),
         "image_model": params.get("image_model", ""),
@@ -2500,28 +2504,74 @@ def build_pipeline_first_frame_thumbnail(
 
 
 def _backfill_clip_video_filenames(state: dict, state_dir: str) -> dict:
-    """Derive per-clip video filenames from output_files when absent.
-
-    Multi-clip (non-seamless) runs produce one video per clip, in clip
-    order, plus a trailing *_multiclip.mp4 join — but the runtime never
-    recorded them per clip (_clip_video_files was a dead key), leaving
-    every clip's video_filename null. That made the Dashboard count all
-    clips as "missing" and broke Rejoin (needs >= 2 per-clip files).
-    Fill only null entries (a rerun clip's filename must survive), only
-    when the per-clip count matches exactly, and only for files that
-    still exist next to the pipeline file. Seamless runs (one combined
-    output) never match the count and are left untouched.
-    """
+    """Recover missing clip links from the saved output list or owned sidecars."""
     clips = state.get("clips") or []
-    outputs = [
-        filename for filename in (state.get("output_files") or [])
-        if "_multiclip" not in os.path.splitext(filename)[0].lower()
-    ]
-    if not clips or len(outputs) != len(clips):
+    missing = {i for i, clip in enumerate(clips) if not clip.get("video_filename")}
+    if not missing:
         return state
-    for i, clip in enumerate(clips):
-        if not clip.get("video_filename") and os.path.isfile(os.path.join(state_dir, outputs[i])):
-            clip["video_filename"] = outputs[i]
+
+    outputs = state.get("output_files") or []
+    # Older states listed their clips in order with an optional joined master.
+    # Use that ordering only when every slot is accounted for and the existing
+    # links agree. A partial list cannot safely identify sparse clip indices.
+    ordered = _map_completed_clip_videos(outputs, len(clips))
+    if all(ordered) and len(ordered) == len(clips) and len(set(ordered)) == len(clips):
+        if all(not clip.get("video_filename") or clip["video_filename"] == ordered[i]
+               for i, clip in enumerate(clips)):
+            invalid = _invalid_saved_media_numbers(ordered, len(clips), state_dir, "video")
+            for i in missing.difference(number - 1 for number in invalid):
+                clips[i]["video_filename"] = ordered[i]
+            missing = {i for i in missing if not clips[i].get("video_filename")}
+
+    pid = state.get("pipeline_id")
+    if (
+        not missing or not pid or state.get("seamless") is True
+        or state.get("status") in _ACTIVE_PIPELINE_STATUSES
+    ):
+        return state
+    try:
+        entries = os.listdir(state_dir)
+    except OSError:
+        return state
+
+    # Sidecars record the exact run and clip index. A different revision or
+    # several unselected takes for a slot do not establish ownership.
+    linked = {clip.get("video_filename") for clip in clips}
+    candidates: dict[int, set[str]] = {}
+    for entry in entries:
+        if not entry.endswith(".meta.json"):
+            continue
+        try:
+            with open(os.path.join(state_dir, entry), encoding="utf-8") as handle:
+                meta = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(meta, dict) or meta.get("director_pipeline_id") != pid:
+            continue
+        if meta.get("director_artifact_kind") != "clip":
+            continue
+        index = meta.get("director_clip_index")
+        filename = meta.get("output_filename")
+        if (
+            type(index) is not int or index not in missing or not isinstance(filename, str)
+            or filename in linked or os.path.splitext(filename)[0] + ".meta.json" != entry
+            or _invalid_saved_media_numbers([filename], 1, state_dir, "video")
+        ):
+            continue
+        candidates.setdefault(index, set()).add(filename)
+
+    recovered = list(outputs)
+    for index, names in sorted(candidates.items()):
+        recorded = names.intersection(outputs)
+        choices = recorded or names
+        if len(choices) != 1:
+            continue
+        filename = next(iter(choices))
+        clips[index]["video_filename"] = filename
+        if filename not in recovered:
+            recovered.append(filename)
+    if recovered != outputs:
+        state["output_files"] = recovered
     return state
 
 
@@ -2799,45 +2849,28 @@ def _repair_saved_h3_frame_lattice(state: dict) -> bool:
 def load_pipeline_state(out_dir: str, pid: str) -> Optional[dict]:
     """Load a saved state while serialized against deletion/replacement."""
     with _pipeline_file_lock:
-        return _load_pipeline_state_locked(out_dir, pid)
+        state = _load_pipeline_state_locked(out_dir, pid)
+    if state and "shot_cast_options" not in state:
+        from services.director.reference_inputs import director_shot_cast_options
+
+        state["shot_cast_options"] = director_shot_cast_options(state.get("_params_snapshot") or {})
+    return state
 
 
 def _load_pipeline_state_locked(out_dir: str, pid: str) -> Optional[dict]:
     """Load a saved pipeline state by ID. Searches out_dir and subdirectories."""
-    target = f"{_PIPELINE_FILE_PREFIX}{pid}.json"
-    # Search top-level
-    filepath = os.path.join(out_dir, target)
-    if os.path.isfile(filepath):
-        with _pipeline_file_lock:
-            with open(filepath, "r", encoding="utf-8") as f:
-                loaded_state = json.load(f)
-            state = repair_payload(loaded_state)
-            state_changed = state != loaded_state
-            state_changed = _normalize_interrupted_repair(state, pid) or state_changed
-            state_changed = _repair_saved_h3_frame_lattice(state) or state_changed
-            if state_changed:
-                _write_pipeline_json_unlocked(filepath, state)
-            return _backfill_clip_video_filenames(state, out_dir)
-    # Search subdirectories (workspaces)
-    if os.path.isdir(out_dir):
-        for name in os.listdir(out_dir):
-            sub = os.path.join(out_dir, name, target)
-            if os.path.isfile(sub):
-                with _pipeline_file_lock:
-                    with open(sub, "r", encoding="utf-8") as f:
-                        loaded_state = json.load(f)
-                    state = repair_payload(loaded_state)
-                    state_changed = state != loaded_state
-                    state_changed = _normalize_interrupted_repair(state, pid) or state_changed
-                    state_changed = (
-                        _repair_saved_h3_frame_lattice(state) or state_changed
-                    )
-                    if state_changed:
-                        _write_pipeline_json_unlocked(sub, state)
-                    return _backfill_clip_video_filenames(
-                        state, os.path.join(out_dir, name),
-                    )
-    return None
+    filepath = _find_pipeline_file(out_dir, pid)
+    if not filepath:
+        return None
+    with open(filepath, encoding="utf-8") as handle:
+        loaded_state = json.load(handle)
+    state = repair_payload(loaded_state)
+    _normalize_interrupted_repair(state, pid)
+    _repair_saved_h3_frame_lattice(state)
+    _backfill_clip_video_filenames(state, os.path.dirname(filepath))
+    if state != loaded_state:
+        _write_pipeline_json_unlocked(filepath, state)
+    return state
 
 
 def update_clip_tag(out_dir: str, pid: str, clip_index: int, tag: Optional[str]) -> bool:
@@ -2862,7 +2895,7 @@ def update_clip_prompt(out_dir: str, pid: str, clip_index: int, update: dict) ->
         if not isinstance(update, dict):
             raise ValueError("Prompt update must be a JSON object")
         supplied = {key: update[key] for key in (
-            "image_prompt", "video_prompt", "window_prompts",
+            "image_prompt", "video_prompt", "window_prompts", "shot_reference_cast",
         ) if key in update}
         if not supplied:
             raise ValueError("No prompt field was supplied")
@@ -2876,6 +2909,13 @@ def update_clip_prompt(out_dir: str, pid: str, clip_index: int, update: dict) ->
         ):
             raise ValueError("window_prompts must be a non-empty list of text prompts")
 
+        if "shot_reference_cast" in supplied:
+            cast = supplied["shot_reference_cast"]
+            if cast is not None and (
+                not isinstance(cast, list) or not all(isinstance(item, str) for item in cast)
+            ):
+                raise ValueError("Shot cast must be Auto or a list of character references")
+
         def apply_update(state):
             clips = state.get("clips", [])
             if clip_index < 0 or clip_index >= len(clips):
@@ -2887,6 +2927,19 @@ def update_clip_prompt(out_dir: str, pid: str, clip_index: int, update: dict) ->
                     "This clip has multiple window prompts; save window_prompts instead"
                 )
             previous_prompt = clip.get("video_prompt", "")
+            if "shot_reference_cast" in supplied:
+                from services.director.reference_inputs import director_shot_cast_options
+
+                choices = {
+                    option["id"] for option in director_shot_cast_options(
+                        state.get("_params_snapshot") or {},
+                    )
+                }
+                cast = supplied["shot_reference_cast"]
+                if cast is not None and (not choices or not set(cast) <= choices):
+                    raise ValueError("Choose cast members from this project's character references")
+                if clip.get("video_filename") and clip.get("shot_reference_cast") != cast:
+                    clip["video_stale"] = True
             clip.update(supplied)
             if "window_prompts" in supplied:
                 clip["video_prompt"] = "\n".join(supplied["window_prompts"])
@@ -3471,6 +3524,7 @@ def _director_h3_reference_manifest(
     *,
     out_dir: str,
     drive_audio_path: str | None = None,
+    clip_plan: dict | None = None,
 ) -> list[dict]:
     """Compile Director assets into one Ref2VA manifest for a single shot.
 
@@ -3494,6 +3548,11 @@ def _director_h3_reference_manifest(
         references, _drive_path, _drive_ordinal = (
             split_exact_drive_audio_reference(normalized)
         )
+
+        if clip_plan is not None:
+            from services.director.reference_inputs import select_director_shot_references
+
+            references = select_director_shot_references(references, clip_plan, params)
 
         composition = str(clip_image_path or "").strip()
         if composition and os.path.isfile(composition):
@@ -4227,6 +4286,11 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             # audio_guide/AD above. Only identity, scene, composition, and
             # optional voice references belong in the Omni manifest.
             drive_audio_path=None,
+            clip_plan={
+                **prompt_plan,
+                "_director_environment": clip.get("_director_environment"),
+                "shot_reference_cast": clip.get("shot_reference_cast"),
+            },
         )
         if not any(
             reference.get("type") in {"image", "video"}
@@ -5919,6 +5983,14 @@ class _DirectorOutputs(list):
         self.clip_output_files = dict(clip_output_files or {})
 
 
+class _GenerationFailedError(RuntimeError):
+    """A failed Director video job may still have completed shot files."""
+
+    def __init__(self, message: str, output_files: _DirectorOutputs):
+        super().__init__(message)
+        self.output_files = output_files
+
+
 class _GenerationTimeoutError(RuntimeError):
     def __init__(self, output_files: _DirectorOutputs):
         super().__init__("Generation timed out")
@@ -6119,6 +6191,8 @@ def _submit_and_wait(
         if j["status"] == "failed":
             err = j.get("error") or "Generation failed"
             print(f"[Pipeline] Job {job_id} failed: {err}")
+            if _dir_pid and not _detached_operation and params.get("generation_mode") == "video":
+                raise _GenerationFailedError(err, _director_job_outputs(j))
             raise RuntimeError(err)
         # Backstop for stop_pipeline's abort: if the pipeline was cancelled
         # while this job runs (e.g. the job was submitted in the window
@@ -6638,6 +6712,7 @@ def _resume_pipeline_reserved(pid: str, out_dir: str) -> tuple[bool, str]:
         "keyframe_prompts": c.get("keyframe_prompts", []) or [],
         "window_prompts": c.get("window_prompts", []) or [],
         "window_count": c.get("window_count", 1),
+        "shot_reference_cast": c.get("shot_reference_cast"),
         "_director_dialogue_beats": (
             c.get("_director_dialogue_beats", []) or []
         ),
@@ -9269,7 +9344,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 "MiniMax H3 Omni Director needs the uploaded soundtrack or "
                 "dialogue audio for this workflow."
             )
-        for clip_image in image_start_paths:
+        for clip_index, clip_image in enumerate(image_start_paths):
             manifest = _director_h3_reference_manifest(
                 params,
                 clip_image if uses_shot_images else None,
@@ -9280,6 +9355,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 # second copy in the manifest only made H3 synthesize a
                 # related, rather than exact, performance.
                 drive_audio_path=None,
+                clip_plan=clip_plans[clip_index],
             )
             if not any(
                 reference.get("type") in {"image", "video"}

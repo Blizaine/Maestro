@@ -23,6 +23,7 @@ import {
 } from '../../lib/h3Memory'
 import { DurationPresetControl } from './DurationPresetControl'
 import { viggleTimeline } from '../../lib/viggle'
+import { isLongCatAvatarModel } from '../../lib/avatarWorkflow'
 import { H3DurationGuidance } from './H3DurationGuidance'
 
 export const formatSeconds = (seconds: number) => {
@@ -66,6 +67,7 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
   // repeatedly re-render the Studio shell before it ever becomes visible.
   const h3References = useStore(s => s.params.minimax_h3_references)
   const audioGuide = useStore(s => s.params.audio_guide)
+  const audioPromptType = useStore(s => s.params.audio_prompt_type || '')
   const videoGuide = useStore(s => s.params.video_guide)
   const h3FirstLastMultiWindow = useStore(s => s.params.minimax_h3_multi_window === true)
   const ltxMultiWindow = useStore(s => s.params.ltx_multi_window === true)
@@ -220,12 +222,16 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
   const isMultiClip = imageMode === 2
   const promptLineCount = prompt.split('\n').filter((line: string) => line.trim()).length
   const hasReviewedWindowPrompts = !!h3WindowPlan || (isLtx && !!ltxWindowPrompts?.length)
-  const driveReference = h3References?.find(reference => (
-    reference.type === 'audio' && reference.audio_intent === 'drive'
+  const activeReferences = studioVideoWorkflow === 'references' && isOmniReference
+    ? h3References ?? [] : []
+  const driveReference = activeReferences.find(reference => (
+    (reference.type === 'audio' && reference.audio_intent === 'drive')
+    || (reference.type === 'video' && reference.video_audio_role === 'drive')
   ))
-  const driveDuration = Number(driveReference?.duration_seconds)
-  const referenceVideoDuration = studioVideoWorkflow === 'references' && isOmniReference
-    ? (h3References ?? []).reduce((longest, reference) => {
+  const driveDuration = Number(driveReference?.type === 'video'
+    ? driveReference.audio_duration_seconds : driveReference?.duration_seconds)
+  const referenceVideoDuration = activeReferences.length
+    ? activeReferences.reduce((longest, reference) => {
         const followsTimeline = reference.follow_timeline
           ?? (!reference.library_character_id && reference.video_intent !== 'character')
         if (reference.type !== 'video'
@@ -243,17 +249,25 @@ export function DurationSlider({ includeWindowSettings = false }: { includeWindo
       }, 0)
     : 0
   const hasReferenceVideoTimeline = referenceVideoDuration > 0
-  const hasTimedGuide = Boolean(audioGuide || videoGuide)
+  const activeFrameAudioGuide = studioVideoWorkflow === 'frames'
+    && Boolean(audioGuide) && String(audioPromptType).includes('A')
+  const activeFrameVideoGuide = studioVideoWorkflow === 'frames' && Boolean(videoGuide)
+  const activeAvatarAudioGuide = studioVideoWorkflow === 'avatar'
+    && isLongCatAvatarModel({ model_type: modelType, architecture: modelOptions?.architecture })
+    && Boolean(audioGuide)
+  const hasTimedGuide = activeFrameAudioGuide || activeFrameVideoGuide
   const viggleSourceSeconds = useStore(s => viggleTimeline(s.params).length)
   const autoSourceSeconds = Number.isFinite(driveDuration) && driveDuration > 0
     ? driveDuration
     : hasReferenceVideoTimeline ? referenceVideoDuration
     : modelType === 'viggle_animate' && viggleSourceSeconds ? viggleSourceSeconds
+      : activeAvatarAudioGuide ? duration
       : hasTimedGuide ? duration : null
   const autoSourceLabel = Number.isFinite(driveDuration) && driveDuration > 0
     ? 'music / performance timeline'
     : hasReferenceVideoTimeline ? 'reference video timeline'
-    : videoGuide ? 'control video' : audioGuide ? 'audio track' : undefined
+    : activeAvatarAudioGuide ? 'avatar voice audio'
+    : activeFrameVideoGuide ? 'control video' : activeFrameAudioGuide ? 'audio track' : undefined
 
   return (
     <div className={includeWindowSettings ? 'space-y-3' : undefined}>

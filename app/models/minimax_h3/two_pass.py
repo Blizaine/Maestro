@@ -93,10 +93,14 @@ def _finite_number(value: Any, *, name: str) -> float:
     return number
 
 
-def normalize_two_pass_settings(custom_settings: Any) -> dict[str, Any]:
+def normalize_two_pass_settings(custom_settings: Any, model_def: Any = None) -> dict[str, Any]:
     """Return validated H3 two-pass settings, defaulting old jobs to Off."""
 
     values = custom_settings if isinstance(custom_settings, dict) else {}
+    definition = model_def if isinstance(model_def, dict) else {}
+    flash_phase2 = definition.get("minimax_h3_hyperflow_flash") is True
+    min_steps = 1 if flash_phase2 else H3_PHASE2_STEPS_MIN
+    max_steps = 8 if flash_phase2 else H3_PHASE2_STEPS_MAX
     enabled = parse_two_pass_toggle(values.get(H3_TWO_PASS_ENABLED))
 
     raw_steps = values.get(H3_PHASE2_STEPS, H3_TWO_PASS_DEFAULTS[H3_PHASE2_STEPS])
@@ -104,7 +108,9 @@ def normalize_two_pass_settings(custom_settings: Any) -> dict[str, Any]:
     if not steps_number.is_integer():
         raise ValueError("H3 phase 2 steps must be a whole number.")
     steps = int(steps_number)
-    if not H3_PHASE2_STEPS_MIN <= steps <= H3_PHASE2_STEPS_MAX:
+    if not min_steps <= steps <= max_steps:
+        if flash_phase2:
+            raise ValueError("HyperFlow phase 2 supports one to eight evaluations.")
         raise ValueError(
             f"H3 phase 2 steps must be between {H3_PHASE2_STEPS_MIN} and "
             f"{H3_PHASE2_STEPS_MAX}."
@@ -138,7 +144,10 @@ def normalize_two_pass_settings(custom_settings: Any) -> dict[str, Any]:
         H3_TWO_PASS_ENABLED: "on" if enabled else "off",
         H3_PHASE2_STEPS: steps,
         H3_PHASE2_NOISE: noise,
-        H3_PHASE2_ACCELERATOR_STRENGTH: strength,
+        # HyperFlow Flash's own phase-2 tail grid needs no optional H3
+        # accelerator. Keep old saved settings readable, but never feed their
+        # strength to the phase-2 LoRA schedule for this checkpoint family.
+        H3_PHASE2_ACCELERATOR_STRENGTH: 0.0 if flash_phase2 else strength,
     }
 
 

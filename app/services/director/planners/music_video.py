@@ -2497,7 +2497,7 @@ class MusicVideoPlanner(BasePlanner):
             creative_plan_schema, normalize_music_arc, music_arc_quality_issues,
             music_arc_action_issues, music_arc_repetition_findings,
             music_arc_reprise_reason_findings,
-            ground_music_combat_arc, coerce_music_arc_rows,
+            ground_music_combat_arc, coerce_music_arc_rows, recover_music_arc_event_map,
         )
         cached = self._planning_resume_checkpoint.get("music_creative_arc")
         contract = self._music_narrative_contract
@@ -2989,6 +2989,7 @@ class MusicVideoPlanner(BasePlanner):
                         item["source_event_ids"] = []
                     expanded.append(item)
             checkpoint = copy.deepcopy(self._planning_resume_checkpoint)
+            checkpoint.pop("music_creative_outline_draft", None)
             checkpoint["music_creative_arc"] = expanded
             checkpoint["music_arc_assignment_notes"] = copy.deepcopy(self._music_arc_assignment_notes)
             checkpoint["music_arc_quality_notes"] = copy.deepcopy(self._music_arc_quality_notes)
@@ -3038,6 +3039,18 @@ class MusicVideoPlanner(BasePlanner):
         best_outline = None
         saw_empty_outline_response = False
         focused_map_repair = None
+        draft = self._planning_resume_checkpoint.get("music_creative_outline_draft")
+        if event_ids and isinstance(draft, dict):
+            try:
+                beats = normalize_music_arc(
+                    draft.get("beats"), groups, {"source": "", "events": []},
+                )
+                focused_map_repair = EventMapRepairRequired(
+                    str(draft.get("issue") or ""),
+                    beats=beats, assignments=draft.get("assignments"),
+                )
+            except ValueError:
+                pass
 
         def response_has_no_outline_rows(response):
             """Recognize only explicit empty outline containers."""
@@ -3052,6 +3065,118 @@ class MusicVideoPlanner(BasePlanner):
                 return False
             rows = payload.get("beats")
             return isinstance(rows, list) and not rows
+
+        def plan_sections():
+            from ..music_narrative import music_narrative_row_issue
+
+            state = self._planning_resume_checkpoint
+            mapping = state.get("music_arc_section_event_map", {})
+            if event_ids and event_map_issue(mapping):
+                for _ in range(2):
+                    response = self._call_llm_json(
+                        user_prompt=(
+                            "Assign the requested source actions to the given timeline groups. "
+                            "Use each source ID exactly once, in source order. Honor explicitly "
+                            "requested timing and keep later consequences after their causes. "
+                            "Return only the event-to-group object.\n"
+                            + json.dumps({
+                                "brief": scene_description, "timeline": timeline,
+                                "events": contract.get("events", []),
+                            }, ensure_ascii=False)
+                        ),
+                        system_prompt="Map immutable events to zero-based timeline groups.",
+                        max_tokens=max(512, 32 * len(event_ids) + 128),
+                        temperature=0.2, thinking_budget=0,
+                        json_schema=source_event_map_schema(), remote_json_schema=True,
+                    )
+                    try:
+                        mapping = parse_event_map_response(response)
+                    except ValueError:
+                        continue
+                    if not event_map_issue(mapping):
+                        break
+                if event_map_issue(mapping):
+                    raise RuntimeError("The section planner could not assign every source action in order.")
+                state = copy.deepcopy(self._planning_resume_checkpoint)
+                state["music_arc_section_event_map"] = mapping
+                self._publish_planning_checkpoint(state)
+            mapping = mapping if event_ids else {}
+            allocation = [{"event_id": item, "clip_index": mapping[item]} for item in event_ids]
+            ids_by_group = [[] for _ in groups]
+            for item in allocation:
+                ids_by_group[item["clip_index"]].append(item["event_id"])
+
+            def write_section(_batch, start, section, previous):
+                rows = self._call_llm_json(
+                    user_prompt=(
+                        "Write only these timeline groups as a JSON array. Use their original "
+                        "clip_index and exact source_event_ids. Perform each assigned action "
+                        "visibly with the stated actor. Use the previous beat for continuity.\n"
+                        + json.dumps({
+                            "brief": scene_description, "previous_beat": previous,
+                            "timeline": [
+                                {**group, "source_event_ids": ids_by_group[start + offset]}
+                                for offset, group in enumerate(section)
+                            ],
+                            "events": [
+                                event for event in contract.get("events", [])
+                                if start <= mapping[event["event_id"]] < start + len(section)
+                            ],
+                        }, ensure_ascii=False)
+                        + lyric_context + "\nRequired JSON schema:\n"
+                        + json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+                    ),
+                    system_prompt="Write compact section beats with the supplied source actions and camera constraints. Return only the requested JSON array.",
+                    max_tokens=160 * len(section) + 1024, temperature=0.45, thinking_budget=0,
+                    json_schema=schema, remote_json_schema=True,
+                )
+                return rows
+
+            def validate_section_row(index, row, _prior_rows):
+                if isinstance(row.get("clip_index"), bool) or row.get("clip_index") != index:
+                    return f"Expected outline group {index}."
+                try:
+                    relevant = [event for event in contract.get("events", [])
+                                if mapping[event["event_id"]] == index]
+                    normalize_music_arc(
+                        [{**row, "clip_index": 0}], [groups[index]],
+                        {"source": scene_description, "events": relevant},
+                    )
+                except ValueError as error:
+                    return str(error)
+                return music_narrative_row_issue(
+                    {**row, "video_prompt": row.get("visual_beat", "")},
+                    contract=contract, allocation=allocation, index=index,
+                )
+
+            outline = self._run_checkpointed_json_batches(
+                items=timeline, batch_size=8, checkpoint_key="music_creative_outline_sections",
+                stage="music_creative_arc", progress_label="song outline",
+                call_batch=write_section, row_validator=validate_section_row,
+                repair_batch_size=4, repair_attempts=1,
+            )
+            return normalize_music_arc(outline, groups, contract)
+
+        def candidate_from_event_map(locked_beats, assignments):
+            repaired_beats = [
+                {key: value for key, value in row.items() if key != "source_event_ids"}
+                for row in locked_beats
+            ]
+            candidate = parse_candidate({
+                "beats": repaired_beats,
+                "source_event_clips": assignments,
+            })
+            action_issues = music_arc_action_issues(candidate, contract)
+            if action_issues:
+                raise ValueError(
+                    "focused source_event_clips repair does not match the locked "
+                    "visual beats: " + "; ".join(action_issues[:3])
+                )
+            return candidate
+
+        if self._planning_resume_checkpoint.get("music_creative_outline_sections"):
+            outline = plan_sections()
+            return expand_and_checkpoint(outline, quality_notes_for(outline))
 
         for attempt in range(2):
             self._raise_if_planning_cancelled()
@@ -3076,24 +3201,19 @@ class MusicVideoPlanner(BasePlanner):
                     remote_json_schema=True,
                 )
                 try:
-                    repaired_assignments = parse_event_map_response(response)
-                    repaired_beats = copy.deepcopy(focused_map_repair.beats)
-                    for row in repaired_beats:
-                        row.pop("source_event_ids", None)
-                    candidate = parse_candidate({
-                        "beats": repaired_beats,
-                        "source_event_clips": repaired_assignments,
-                    })
-                    action_issues = music_arc_action_issues(candidate, contract)
-                    if action_issues:
-                        raise ValueError(
-                            "focused source_event_clips repair does not match the locked "
-                            "visual beats: " + "; ".join(action_issues[:3])
-                        )
-                    return expand_and_checkpoint(candidate, quality_notes_for(candidate))
+                    candidate = candidate_from_event_map(
+                        focused_map_repair.beats, parse_event_map_response(response),
+                    )
                 except ValueError as exc:
                     issue = str(exc)
-                    break
+                    repaired = recover_music_arc_event_map(focused_map_repair.beats, contract)
+                    if repaired is None:
+                        break
+                    try:
+                        candidate = candidate_from_event_map(focused_map_repair.beats, repaired)
+                    except ValueError:
+                        break
+                return expand_and_checkpoint(candidate, quality_notes_for(candidate))
 
             self._emit_planning_progress(message="Planning progression across the whole song...",
                                          current=0, total=len(clips), stage="music_creative_arc")
@@ -3169,6 +3289,11 @@ class MusicVideoPlanner(BasePlanner):
                     # cannot invalidate its source-event ownership.
                     return expand_and_checkpoint(baseline, quality_notes_for(baseline))
                 focused_map_repair = exc
+                checkpoint = copy.deepcopy(self._planning_resume_checkpoint)
+                checkpoint["music_creative_outline_draft"] = {
+                    "beats": exc.beats, "assignments": exc.assignments, "issue": issue,
+                }
+                self._publish_planning_checkpoint(checkpoint)
                 continue
             except ValueError as exc:
                 issue = str(exc)
@@ -3177,7 +3302,18 @@ class MusicVideoPlanner(BasePlanner):
                     return expand_and_checkpoint(baseline, quality_notes_for(baseline))
         if baseline is not None:
             return expand_and_checkpoint(baseline, quality_notes_for(baseline))
+        if len(groups) >= 12 and focused_map_repair is None:
+            try:
+                outline = plan_sections()
+            except RuntimeError as error:
+                raise RuntimeError(f"Music-video whole-song planning needs revision. {error}") from error
+            return expand_and_checkpoint(outline, quality_notes_for(outline))
         message = "Music-video whole-song planning needs revision: " + issue
+        if focused_map_repair is not None:
+            message += (
+                " The visual outline was saved. Retry planning to repair the source-action "
+                "assignments without asking the writer to recreate the outline."
+            )
         if saw_empty_outline_response:
             message += (
                 " No usable structured outline was returned after JSON repair. "

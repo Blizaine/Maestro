@@ -723,6 +723,29 @@ def music_arc_action_issues(rows: Any, contract: Any) -> list[str]:
     return issues
 
 
+def recover_music_arc_event_map(rows: list[dict], contract: dict) -> dict[str, int] | None:
+    """Reconstruct a broken event map from actions that already appear in the beats."""
+    from .music_narrative import music_narrative_row_issue
+
+    assignments: dict[str, int] = {}
+    row_index = 0
+    for event in contract.get("events", []):
+        event_id = event["event_id"]
+        for row in rows[row_index:]:
+            index = row["clip_index"]
+            single = {"video_prompt": row["visual_beat"], "source_event_ids": [event_id]}
+            if music_narrative_row_issue(
+                single, contract={"events": [event]},
+                allocation=[{"event_id": event_id, "clip_index": index}], index=index,
+            ) is None:
+                assignments[event_id] = index
+                row_index = index
+                break
+        else:
+            return None
+    return assignments
+
+
 def ground_music_combat_arc(rows: Any, contract: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Recover an omitted combat anchor from its source without resetting the arc.
 

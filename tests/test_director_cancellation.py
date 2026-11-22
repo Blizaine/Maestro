@@ -2961,6 +2961,87 @@ class TestDirectorCancellation(unittest.TestCase):
             ["clip0-window2.mp4", None, "clip1.mp4"],
         )
 
+    def test_failed_video_job_preserves_completed_shot_indices(self):
+        pid = "pipe-video-failure"
+        self._add_pipeline(pid)
+
+        def fake_generation(job_id):
+            job = pipeline._jobs[job_id]
+            self.assertTrue(try_start(job))
+            record_job_outputs(
+                job, ["shot-1.mp4", "shot-4.mp4"],
+                clip_output_files={0: "shot-1.mp4", 3: "shot-4.mp4"},
+            )
+            finish_job(job, "failed", error="Join failed")
+
+        pipeline._run_generation = fake_generation
+        with self.assertRaisesRegex(pipeline._GenerationFailedError, "Join failed") as caught:
+            pipeline._submit_and_wait(
+                {"_director_pipeline_id": pid, "generation_mode": "video"},
+                timeout_s=1, out_dir=self.temp_dir.name,
+            )
+        self.assertEqual(
+            pipeline._clip_video_slots(caught.exception.output_files, 5),
+            ["shot-1.mp4", None, None, "shot-4.mp4", None],
+        )
+
+    def test_repair_recovers_existing_shots_and_only_renders_the_edited_shot(self):
+        pid = "pipe-recover-clips"
+        record = self._add_pipeline(pid, "completed")
+        record["params"].update({"seamless": False, "image_model_type": "none"})
+        record["clip_plans"] = [{"video_prompt": f"Shot {i + 1}"} for i in range(5)]
+        record["clip_images"] = [f"manual_shot_{i + 1}.jpg" for i in range(5)]
+        for name in record["clip_images"]:
+            self._write_media(name)
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+
+        def write_video(stem, clip_index, *, owner=pid, artifact="clip"):
+            filename = stem + ".mp4"
+            self._write_media(filename)
+            self._write_media(stem + ".meta.json", json.dumps({
+                "director_pipeline_id": owner,
+                "director_artifact_kind": artifact,
+                "director_clip_index": clip_index,
+                "output_filename": filename,
+            }).encode("utf-8"))
+            return filename
+
+        expected = [write_video(f"shot-{i + 1}", i) for i in range(5)]
+        write_video("other-revision", 0, owner="other-pipeline")
+        write_video("joined-master", 1, artifact="joined")
+
+        # Loading the Dashboard restores clip review and persists the exact links.
+        state = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        self.assertEqual([clip["video_filename"] for clip in state["clips"]], expected)
+        self.assertEqual(state["output_files"], expected)
+        with open(pipeline._find_pipeline_file(self.temp_dir.name, pid), encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["output_files"], expected)
+
+        self.assertTrue(pipeline.update_clip_prompt(
+            self.temp_dir.name, pid, 4, {"video_prompt": "Updated shot five"},
+        ))
+        state = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        plan = pipeline._plan_pipeline_repair(self.temp_dir.name, pid, state)
+        self.assertEqual(plan["video_indices"], [4])
+        self.assertEqual(plan["image_indices"], [])
+        self.assertTrue(plan["should_rejoin"])
+
+    def test_shot_recovery_leaves_unselected_takes_unlinked(self):
+        pid = "pipe-ambiguous-takes"
+        record = self._add_pipeline(pid, "failed")
+        record["params"]["seamless"] = False
+        record["clip_plans"] = [{"video_prompt": "A single shot"}]
+        self.assertTrue(pipeline._save_pipeline_state(pid))
+        for stem in ("take-one", "take-two"):
+            filename = stem + ".mp4"
+            self._write_media(filename)
+            self._write_media(stem + ".meta.json", json.dumps({
+                "director_pipeline_id": pid, "director_artifact_kind": "clip",
+                "director_clip_index": 0, "output_filename": filename,
+            }).encode("utf-8"))
+        state = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        self.assertIsNone(state["clips"][0]["video_filename"])
+
     def test_cancel_race_completion_fallback_persists_exact_clip_mapping(self):
         source = inspect.getsource(pipeline._run_pipeline)
         fallback = source.split("if not completed:", 1)[1].split(

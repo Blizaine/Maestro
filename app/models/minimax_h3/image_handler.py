@@ -20,6 +20,15 @@ REVISION = "5e60435c12302e0fa946b35a309736eb25b9272b"
 VAE_FILE = "minimax_h3_image_vae_fp16.safetensors"
 STEPS = 6
 MAX_REFS = 16
+PDD_LORA_REPO = "DeepBeepMeep/MiniMax-H3"
+PDD_LORA_REVISION = "3d3c6fb64d610dcd2d0ea5dd69a9360e69d5f24f"
+PDD_LORA_FILENAME = "minimax_h3_pdmd_2nfe_bf16.safetensors"
+PDD_LORA_SIZE_BYTES = 1_383_680_648
+PDD_LORA_SHA256 = "3179e630c3fbd96b9ad7aec3a54fe23fa0ddc63e4afb64607f10cdb3d05c862a"
+PDD_LORA_URL = (
+    f"https://huggingface.co/{PDD_LORA_REPO}/resolve/{PDD_LORA_REVISION}/"
+    f"loras/{PDD_LORA_FILENAME}"
+)
 PROCESSOR_FILES = [
     "chat_template.json", "merges.txt", "preprocessor_config.json", "tokenizer.json",
     "tokenizer_config.json", "video_preprocessor_config.json", "vocab.json",
@@ -69,15 +78,19 @@ class family_handler:
             "dtype": "bf16",
             "auto_quantize": False,
             "compile": False,
-            "loras_disabled": True,
+            "loras_disabled": False,
             "inference_steps": True,
-            "lock_inference_steps": True,
-            "inference_steps_min": STEPS,
+            "lock_inference_steps": False,
+            "inference_steps_min": 2,
             "inference_steps_max": STEPS,
-            "guidance_max_phases": 0,
+            "guidance_max_phases": 1,
+            "lock_guidance_phases": True,
+            "lora_multiplier_phases": 1,
+            "profile_type": "image",
+            "profiles_dir": [MODEL_FAMILY],
             "lock_guidance_scale": True,
             "no_negative_prompt": True,
-            "sample_solvers": [("MiniMax six-step Euler", "euler")],
+            "sample_solvers": [("Euler", "euler")],
             "vae_block_size": 32,
             "resolutions": [
                 (f"{label} · {ratio} ({size})", size)
@@ -155,7 +168,8 @@ class family_handler:
 
     @staticmethod
     def apply_acceleration_profile(settings, *, model_def=None):
-        settings.update(num_inference_steps=STEPS, guidance_scale=1.0, sample_solver="euler")
+        settings.setdefault("num_inference_steps", STEPS)
+        settings.update(guidance_scale=1.0, sample_solver="euler")
         return settings
 
     @staticmethod
@@ -172,6 +186,28 @@ class family_handler:
             return "Use Image Generate with reference images to edit with MiniMax H3 Image."
         if str(inputs.get("video_prompt_type") or "") not in ("", "I", "KI"):
             return "MiniMax H3 Image supports text-to-image and ordered image references."
+        try:
+            steps = int(inputs.get("num_inference_steps", STEPS))
+        except (TypeError, ValueError, OverflowError):
+            return "MiniMax H3 Image sampling steps must be 2, 4, or 6."
+        activated = inputs.get("activated_loras") or []
+        activated = activated if isinstance(activated, (list, tuple)) else [activated]
+        pdmd = any(
+            str(value).split("?", 1)[0].replace("\\", "/").rsplit("/", 1)[-1].casefold()
+            == PDD_LORA_FILENAME.casefold()
+            for value in activated
+        )
+        if pdmd and steps not in (2, 4):
+            return "The pDMD adapter requires its 2-step or 4-step accelerator profile; use the 6-step reset profile for native sampling."
+        if not pdmd and steps != STEPS:
+            return "MiniMax H3 Image needs the pDMD adapter for 2 or 4 steps; use its native 6-step schedule or select a pDMD profile."
+        if inputs.get("sample_solver", "euler") not in ("euler", "default"):
+            return "MiniMax H3 Image requires the Euler sampler."
+        try:
+            if float(inputs.get("guidance_scale", 1.0)) != 1.0:
+                return "MiniMax H3 Image uses native single-pass conditioning with guidance 1."
+        except (TypeError, ValueError, OverflowError):
+            return "MiniMax H3 Image guidance must be exactly 1."
         refs = inputs.get("image_refs") or []
         if len(refs if isinstance(refs, (list, tuple)) else [refs]) > MAX_REFS:
             return f"MiniMax H3 Image accepts up to {MAX_REFS} reference images."

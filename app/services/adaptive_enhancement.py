@@ -52,7 +52,12 @@ def adaptive_dialogue_expansion_requested(prompt: str) -> bool:
     for line in reversed(locked):
         source = source[:line['source_offset']] + marker + source[line['source_end']:]
     # Never infer a writing request from the words spoken by a character.
-    for clause in re.split(r"(?<=[.!?;])\s+|[\r\n]+", source):
+    camera_cut = r"(?:scene|camera|shot)\s+cuts?\s+(?:back\s+)?to\b"
+    clauses = re.split(
+        rf"(?<=[.!?;])\s+|[\r\n]+|(?<={marker})\s+(?=(?i:{camera_cut}))",
+        source,
+    )
+    for clause_index, clause in enumerate(clauses):
         # Performance restrictions do not request additional words. In an
         # already scripted conversation, "No overlapping speech" controls
         # turn-taking rather than imposing a fresh dialogue-writing quota.
@@ -62,6 +67,19 @@ def adaptive_dialogue_expansion_requested(prompt: str) -> bool:
             clause, flags=re.I,
         ):
             continue
+        # With supplied dialogue, a cut to a named interview subject stages
+        # the camera. An unscripted speech cue can still request new lines.
+        if re.fullmatch(
+            rf"\s*(?i:{camera_cut}\s+"
+            r"(?:an?\s+)?interview\s+with\s+)"
+            r"[A-Z][\w’'-]*(?:[ \t]+[A-Z][\w’'-]*){0,3}"
+            r"\s*<(?i:picture|video)\s+\d+>\s*\.?\s*",
+            clause,
+        ):
+            rest = "\n".join(clauses[clause_index + 1:])
+            interview = re.split(rf"(?im)^\s*{camera_cut}", rest, maxsplit=1)[0]
+            if marker in interview:
+                continue
         if marker not in clause and conversation_brief(clause):
             return True
         cues = list(_PLANNER_SPEECH_VERB.finditer(clause))

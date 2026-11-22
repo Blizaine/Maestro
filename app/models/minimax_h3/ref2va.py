@@ -293,15 +293,25 @@ def _build_ref2va_character_bindings(items: list[dict]):
     reference_subjects: dict[int, int] = {}
     character_subjects: dict[str, int] = {}
     alias_candidates: dict[str, set[int]] = {}
+    group_owners = {
+        item["_h3_visual_group"]: str(item["library_character_id"]).strip()
+        for item in items
+        if _ref2va_character_visual(item) and type(item.get("_h3_visual_group")) is int
+        and item.get("library_character_id")
+    }
 
     for reference_index, item in enumerate(items):
         if not _ref2va_character_visual(item):
             continue
-        library_id = str(item.get("library_character_id") or "").strip()
+        group = item.get("_h3_visual_group")
+        group = group if type(group) is int else None
+        library_id = str(item.get("library_character_id") or group_owners.get(group) or "").strip()
         aliases = _ref2va_alias_values(item)
         identity_key = (
             f"library:{library_id}"
             if library_id
+            else f"group:{group}"
+            if group is not None
             else f"name:{aliases[0]}"
             if aliases
             else f"reference:{reference_index}"
@@ -793,6 +803,84 @@ def _ref2va_subject_definition_end(source: str, start: int, limit: int) -> int:
     return limit
 
 
+def _ref2va_subject_clauses(prompt: str):
+    field = _REF2VA_SUBJECT_DEFINITIONS_RE.search(str(prompt or ""))
+    if field:
+        body = field.group(1)
+        declarations = list(re.finditer(r"<Subject\s+(\d+)>", body, re.IGNORECASE))
+        for index, declaration in enumerate(declarations):
+            subject = int(declaration.group(1))
+            limit = declarations[index + 1].start() if index + 1 < len(declarations) else len(body)
+            end = _ref2va_subject_definition_end(body, declaration.end(), limit)
+            yield subject, body[declaration.start():end]
+
+
+def _ref2va_subject_media(clause: str):
+    for kind in ("Picture", "Video"):
+        for match in re.finditer(
+            rf"(?:<{kind}\s+(\d+)>|\b{kind}\s+(\d+)\b)", clause, re.IGNORECASE,
+        ):
+            yield kind, int(match.group(1) or match.group(2))
+
+
+def resolve_ref2va_visual_groups(prompts: list[str], references: list[dict]) -> list[dict]:
+    """Group complementary visual cards explicitly assigned to the same Subject."""
+    media_indexes = {
+        (label, ordinal): index
+        for label, kind in (("Picture", "image"), ("Video", "video"))
+        for ordinal, index in enumerate(
+            (index for index, item in enumerate(references) if item.get("type") == kind),
+            start=1,
+        )
+    }
+    prior_groups: dict[int, set[int]] = {}
+    for index, item in enumerate(references):
+        group = item.get("_h3_visual_group")
+        if type(group) is int and _ref2va_character_visual(item):
+            prior_groups.setdefault(group, set()).add(index)
+    explicit_groups: list[set[int]] = list(prior_groups.values())
+    for prompt in prompts:
+        declarations = list(_ref2va_subject_clauses(prompt))
+        ownership: dict[int, set[int]] = {}
+        for subject, clause in declarations:
+            for media in _ref2va_subject_media(clause):
+                index = media_indexes.get(media)
+                if index is not None and _ref2va_character_visual(references[index]):
+                    ownership.setdefault(index, set()).add(subject)
+        for subject, clause in declarations:
+            media = set(_ref2va_subject_media(clause))
+            indexes = {media_indexes[key] for key in media if key in media_indexes}
+            if len(indexes) < 2 or len(indexes) != len(media):
+                continue
+            if any(ownership.get(index) != {subject} for index in indexes):
+                continue
+            explicit_groups.append(indexes)
+
+    if not explicit_groups:
+        return references
+    groups: list[set[int]] = []
+    for indexes in explicit_groups:
+        overlaps = [group for group in groups if group & indexes]
+        merged = set.union(indexes, *overlaps)
+        owners = {
+            str(references[index].get("library_character_id") or "").strip()
+            for index in merged
+        } - {""}
+        if len(owners) > 1:
+            raise H3SpeakerBindingError(
+                "MiniMax H3 reference binding conflict: one Subject names visual media "
+                "from different saved characters."
+            )
+        groups = [group for group in groups if group not in overlaps]
+        groups.append(merged)
+
+    items = [dict(item) for item in references]
+    for indexes in groups:
+        for index in indexes:
+            items[index]["_h3_visual_group"] = min(indexes)
+    return items
+
+
 def _ref2va_subject_definition_bindings(
     prompt: str,
     picture_targets: dict[int, int | None],
@@ -806,33 +894,17 @@ def _ref2va_subject_definition_bindings(
     reference. If both forms of evidence are present they must agree.
     """
 
-    field = _REF2VA_SUBJECT_DEFINITIONS_RE.search(str(prompt or ""))
-    if not field:
-        return {}
-    body = field.group(1)
-    declarations = list(re.finditer(r"<Subject\s+(\d+)>", body, re.IGNORECASE))
     bindings: dict[int, int | None] = {}
-
-    for index, declaration in enumerate(declarations):
-        subject = int(declaration.group(1))
-        limit = declarations[index + 1].start() if index + 1 < len(declarations) else len(body)
-        end = _ref2va_subject_definition_end(body, declaration.end(), limit)
-        clause = body[declaration.start():end]
-
+    for subject, clause in _ref2va_subject_clauses(prompt):
         media_targets: set[int | None] = set()
-        for kind, targets in (("Picture", picture_targets), ("Video", video_targets)):
-            for media_match in re.finditer(
-                rf"(?:<{kind}\s+(\d+)>|\b{kind}\s+(\d+)\b)",
-                clause,
-                re.IGNORECASE,
-            ):
-                ordinal = int(media_match.group(1) or media_match.group(2))
-                if ordinal not in targets:
-                    raise H3SpeakerBindingError(
-                        "MiniMax H3 reference binding conflict: "
-                        f"<Subject {subject}> names missing <{kind} {ordinal}> media."
-                    )
-                media_targets.add(targets[ordinal])
+        for kind, ordinal in _ref2va_subject_media(clause):
+            targets = picture_targets if kind == "Picture" else video_targets
+            if ordinal not in targets:
+                raise H3SpeakerBindingError(
+                    "MiniMax H3 reference binding conflict: "
+                    f"<Subject {subject}> names missing <{kind} {ordinal}> media."
+                )
+            media_targets.add(targets[ordinal])
 
         name_targets = _ref2va_identity_alias_targets(clause, aliases)
         if len(media_targets) > 1:
@@ -1020,6 +1092,7 @@ def align_ref2va_voice_reference_order(
     source, items, ordinal_maps = canonicalize_ref2va_reference_order(
         prompt, references,
     )
+    items = resolve_ref2va_visual_groups([source], items)
     (
         reference_subjects,
         picture_targets,

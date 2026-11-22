@@ -50,14 +50,30 @@ def _llama_payload():
 
 class TestFinalizePayload(unittest.TestCase):
     def setUp(self):
-        self.saved = (llm_service._provider, llm_service._model_id)
+        self.saved = (
+            llm_service._provider,
+            llm_service._model_id,
+            llm_service._remote_url,
+        )
+        llm_service._remote_url = ""
 
     def tearDown(self):
-        llm_service._provider, llm_service._model_id = self.saved
+        (
+            llm_service._provider,
+            llm_service._model_id,
+            llm_service._remote_url,
+        ) = self.saved
 
-    def _finalize(self, provider, payload, model_id="remote-model"):
+    def _finalize(
+        self,
+        provider,
+        payload,
+        model_id="remote-model",
+        remote_url="",
+    ):
         llm_service._provider = provider
         llm_service._model_id = model_id
+        llm_service._remote_url = remote_url
         return llm_service._finalize_payload(payload)
 
     def test_local_payload_is_untouched(self):
@@ -113,6 +129,33 @@ class TestFinalizePayload(unittest.TestCase):
     def test_every_output_field_is_known(self):
         output = self._finalize("remote", _llama_payload())
         self.assertTrue(set(output).issubset(llm_service._OPENAI_CHAT_FIELDS))
+
+    def test_gemini_compatible_endpoint_drops_only_unsupported_penalties(self):
+        payload = _llama_payload()
+        payload.update(frequency_penalty=0.3, presence_penalty=0.2)
+
+        output = self._finalize(
+            "remote",
+            payload,
+            remote_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        )
+
+        self.assertNotIn("frequency_penalty", output)
+        self.assertNotIn("presence_penalty", output)
+        self.assertEqual(output["temperature"], payload["temperature"])
+
+    def test_other_openai_compatible_providers_keep_sampling_penalties(self):
+        payload = _llama_payload()
+        payload.update(frequency_penalty=0.3, presence_penalty=0.2)
+
+        remote = self._finalize(
+            "remote", payload, remote_url="https://api.example.test/v1"
+        )
+        openai = self._finalize("openai", payload, remote_url="https://api.openai.com/v1")
+
+        for output in (remote, openai):
+            self.assertEqual(output["frequency_penalty"], 0.3)
+            self.assertEqual(output["presence_penalty"], 0.2)
 
 
 class TestRemoteFailureDetail(unittest.TestCase):

@@ -207,6 +207,7 @@ function _adaptiveEtaJobFields(status: api.ApiJobStatus): Partial<GenerationJob>
     clipEtaSeconds: status.clip_eta_seconds,
     generationEtaSeconds: status.generation_eta_seconds,
     projectEtaSeconds: status.project_eta_seconds,
+    secondsPerStep: status.seconds_per_step,
     windowCompletionAt: status.window_completion_at,
     clipCompletionAt: status.clip_completion_at,
     generationCompletionAt: status.generation_completion_at,
@@ -874,6 +875,9 @@ function _loadSettings(): PersistedModeSettings | null {
 const _PRIMARY_MODEL_DEFAULT_FIELDS: ReadonlyArray<string> = [
   'num_inference_steps',
   'guidance_scale',
+  'guidance_phases',
+  'guidance2_scale',
+  'switch_threshold',
   'flow_shift',
   'sample_solver',
   'embedded_guidance_scale',
@@ -1045,6 +1049,11 @@ function _applyModelDefaults(
         (state.params as unknown as Record<string, unknown>)[field],
         (preserveEditsSince as unknown as Record<string, unknown>)[field],
       )) continue
+      if (
+        ['guidance_phases', 'guidance2_scale', 'switch_threshold'].includes(field)
+        && state.modelOptions?.model_type === modelType
+        && (state.params as unknown as Record<string, unknown>)[field] != null
+      ) continue
       // A one-click Full -> Pruned Turbo recommendation switches models and
       // then restores the managed low-step preset. Do not let the asynchronous
       // base-model defaults response race in afterward and put it back at
@@ -1140,6 +1149,49 @@ const familyModeMap: Record<string, GenerationMode> = {
   longcat: 'video',
 }
 
+export const ALIGNED_REMAKE_SWAP_MODEL = 'viggle_remake_swap_aligned'
+
+export function remakeEditSubMode(modelType?: string): 'recast' | 'edit_anything' | null {
+  if (modelType === 'viggle_remake_edit') return 'edit_anything'
+  if (modelType === 'viggle_remake_swap' || modelType === ALIGNED_REMAKE_SWAP_MODEL) return 'recast'
+  return null
+}
+
+export function studioRemakeInputError(state: Pick<AppState, 'params' | 'generationMode' | 'editSubMode' | 'editVideoPath' | 'editVideoDuration'>): string | null {
+  const {params} = state
+  const requiredMode = remakeEditSubMode(params.model_type)
+  if (!requiredMode) return null
+  if (state.generationMode !== 'avatar' || state.editSubMode !== requiredMode) {
+    return requiredMode === 'recast'
+      ? 'Choose Replace People for the selected Remake model.'
+      : 'Choose Edit Scene → Prompt Edit for the selected Remake model.'
+  }
+  const aligned = params.model_type === ALIGNED_REMAKE_SWAP_MODEL
+  if (!aligned && !String(params.prompt || '').trim()) return 'Describe the changes you want in the edited clip.'
+  if (!state.editVideoPath || !params.video_guide) return 'Add a source video for the Remake edit.'
+  const paths = Array.isArray(params.image_refs) ? params.image_refs.filter(Boolean) : []
+  if (aligned && paths.length !== 1) return 'Choose one replacement character image.'
+  if (!aligned && (paths.length < 1 || paths.length > 4)) return 'Add 1–4 edited reference frames.'
+  if (!Number.isFinite(state.editVideoDuration) || state.editVideoDuration <= 0) {
+    return 'Wait for the source video duration to load.'
+  }
+  if (state.editVideoDuration < 3.75) return 'Choose a source video at least 3.75 seconds long.'
+  const start = Number(params.viggle_trim_start ?? 0)
+  const end = Number(params.viggle_trim_end ?? (345 / 24))
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0
+    || end - start < 3.75 || end > Math.min(state.editVideoDuration, 345 / 24) + 0.000001) {
+    return 'Choose a valid source range.'
+  }
+  if (!aligned) {
+    const times = Array.isArray(params.viggle_remake_frame_times) ? params.viggle_remake_frame_times : []
+    if (times.length !== paths.length
+      || times.some(time => !Number.isFinite(Number(time)) || Number(time) < start || Number(time) > end)) {
+      return 'Keep every frame timestamp inside the selected source range.'
+    }
+  }
+  return null
+}
+
 // Model types classified as Avatar even though their family is primarily Video
 const avatarModelTypes = new Set([
   'multitalk',
@@ -1153,6 +1205,7 @@ const avatarModelTypes = new Set([
   'hunyuan_avatar',
   'viggle_remake_swap',
   'viggle_remake_edit',
+  ALIGNED_REMAKE_SWAP_MODEL,
 ])
 
 // Model types classified as Video Edit (Kiwi Edit, Chrono Edit)
@@ -1170,6 +1223,7 @@ const videoEditModelTypes = new Set([
   // Remake models belong only to their matching Edit Clip task.
   'viggle_remake_swap',
   'viggle_remake_edit',
+  ALIGNED_REMAKE_SWAP_MODEL,
   // Regenerate 2K IC is invoked from Tools, never as a normal video model.
   'minimax_h3_regenerate_ic',
 ])
@@ -1510,7 +1564,7 @@ export function getModelsForFamily(familyId: string, allModels: ModelDef[], mode
     // Recast exposes its dedicated native-replacement Fast recipe plus HQ.
     if (editSubMode === 'recast') {
       if (familyId === 'minimax_h3') {
-        return familyModels.filter(m => m.model_type === 'viggle_remake_swap')
+        return familyModels.filter(m => remakeEditSubMode(m.model_type) === 'recast')
       }
       return familyModels.filter(m =>
         m.model_type === 'scail2_14B_recast_fast'
@@ -1796,9 +1850,11 @@ interface AppState {
    *  the user does them sequentially. */
   editReturnTarget: {
     /** Which anchor slot we're populating on return. */
-    anchor: 'start' | 'end' | 'recast' | 'repaint' | 'animate'
+    anchor: 'start' | 'end' | 'recast' | 'repaint' | 'animate' | 'remake'
       previousImages?: string[]
       savedResolutionPreset?: ResolutionPreset
+      /** Absolute source-video timestamp for a Remake keyframe round-trip. */
+      frameSeconds?: number
     /** The pre-extracted source frame at the corresponding trim handle.
      *  This is the frame the user is editing in Image mode; if they
      *  cancel without applying, no anchor is set and the model falls
@@ -1820,7 +1876,7 @@ interface AppState {
    *  sidebar to Studio Image mode (using the proper setGenerationMode
    *  so the model + LoRA + image-mode params all swap correctly) with
    *  that frame loaded as image_start. */
-  sendFrameToImageMode: (which: 'start' | 'end' | 'recast' | 'repaint' | 'animate') => Promise<void>
+  sendFrameToImageMode: (which: 'start' | 'end' | 'recast' | 'repaint' | 'animate' | 'remake', frameSeconds?: number) => Promise<void>
   /** Apply the latest Image-mode output to the requested anchor/reference,
    *  then return to Edit Anything or Recast. */
   applyOutputAsAnchor: () => Promise<void>
@@ -2042,7 +2098,7 @@ interface AppState {
   recipes: import('../api/client').RecipeCard[]
   recipesLoading: boolean
   loadRecipes: () => Promise<void>
-  applyRecipe: (id: string) => Promise<{ missing: import('../api/client').RecipeLora[] }>
+  applyRecipe: (id: string, promptOverride?: string) => Promise<{ missing: import('../api/client').RecipeLora[] }>
   saveRecipeFromOutput: (outputName: string, name: string, description: string, nsfw: boolean, workspace?: string) => Promise<void>
   deleteRecipe: (id: string) => Promise<void>
   downloadRecipeLora: (lora: import('../api/client').RecipeLora, modelType: string) => Promise<void>
@@ -4464,9 +4520,11 @@ export const useStore = create<AppState>((set, get) => ({
       return
     }
     const current = (s.params.model_type as string) || ''
-    const isViggleRemake = current === 'viggle_remake_swap' || current === 'viggle_remake_edit'
+    const currentRemakeMode = remakeEditSubMode(current)
+    const isViggleRemake = currentRemakeMode !== null
     if (mode === prev && !isViggleRemake) return
     if (isViggleRemake) {
+      if (currentRemakeMode === mode && enabled.has(current)) return
       if (mode === 'restyle') _preScail2AvatarModel = current
       const candidates = getFamiliesForMode('avatar', s.families, mode).flatMap(family =>
         getModelsForFamily(family.id, s.models, 'avatar', mode),
@@ -4512,7 +4570,7 @@ export const useStore = create<AppState>((set, get) => ({
         getModelsForFamily(family.id, s.models, 'avatar', mode),
       ).filter(model => enabled.has(model.model_type)
         && (!model.nsfw_only || s.servicesConfig?.nsfw_mode))
-      const remakeCounterpart = mode === 'edit_anything' && _preScail2AvatarModel === 'viggle_remake_swap'
+      const remakeCounterpart = mode === 'edit_anything' && remakeEditSubMode(_preScail2AvatarModel) === 'recast'
         ? 'viggle_remake_edit' : ''
       const restore = compatible.some(model => model.model_type === remakeCounterpart)
         ? remakeCounterpart
@@ -4590,9 +4648,11 @@ export const useStore = create<AppState>((set, get) => ({
   editReturnTarget: null,
   setEditAnythingStartAnchor: (path: string | null) => set({ editAnythingStartAnchor: path }),
   setEditAnythingEndAnchor: (path: string | null) => set({ editAnythingEndAnchor: path }),
-  sendFrameToImageMode: async (which: 'start' | 'end' | 'recast' | 'repaint' | 'animate') => {
+  sendFrameToImageMode: async (which: 'start' | 'end' | 'recast' | 'repaint' | 'animate' | 'remake', frameSeconds?: number) => {
     const state = get()
-    const clipPath = which === 'animate' ? state.params.video_guide : state.editVideoPath
+    const clipPath = which === 'animate' || which === 'remake'
+      ? (which === 'remake' ? state.editVideoPath || state.params.video_guide : state.params.video_guide)
+      : state.editVideoPath
     if (!clipPath) {
       console.error('Edit Anything: no source video loaded')
       return
@@ -4601,11 +4661,27 @@ export const useStore = create<AppState>((set, get) => ({
       throw new Error('Wait for the control video to finish checking before choosing a frame.')
     }
     const animateTimeline = viggleTimeline(state.params, state.activeWorkspace)
-    const startTime = which === 'animate' ? animateTimeline.frame : state.editStartTime || 0
-    const endTime = which === 'animate' ? animateTimeline.end || startTime + 1 : state.editEndTime || state.editVideoDuration || 0
+    const remakeStart = Number(state.params.viggle_trim_start ?? state.editStartTime ?? 0)
+    const remakeEnd = Number(state.params.viggle_trim_end ?? state.editEndTime ?? state.editVideoDuration ?? 0)
+    const selectedRemakeFrame = Number.isFinite(frameSeconds) ? Number(frameSeconds) : remakeStart
+    const startTime = which === 'animate' ? animateTimeline.frame
+      : which === 'remake' ? selectedRemakeFrame : state.editStartTime || 0
+    const endTime = which === 'animate' ? animateTimeline.end || startTime + 1
+      : which === 'remake' ? remakeEnd : state.editEndTime || state.editVideoDuration || 0
     if (endTime <= startTime) {
       console.error('Edit Anything: invalid trim range')
       return
+    }
+    if (which === 'remake' && (startTime < remakeStart || startTime >= remakeEnd)) {
+      throw new Error('Choose a Remake keyframe inside the selected source range.')
+    }
+    if (which === 'remake') {
+      const times = Array.isArray(state.params.viggle_remake_frame_times)
+        ? state.params.viggle_remake_frame_times.map(Number) : []
+      if (!times.some(time => Number.isFinite(time) && Math.abs(time - startTime) < 0.05)
+        && (Array.isArray(state.params.image_refs) ? state.params.image_refs.length : 0) >= 4) {
+        throw new Error('Remake supports up to four edited keyframes. Remove one before adding another.')
+      }
     }
 
     // Snapshot user's current image-mode reference state BEFORE the
@@ -4668,7 +4744,8 @@ export const useStore = create<AppState>((set, get) => ({
         // in video mode's i2v slot, which isn't what we want here.
         startImage: null,
         params: { ...s.params, image_start: '', image_mode: 1,
-          ...(which === 'animate' ? {prompt: 'Replace the character from source image with character from the second image. Preserve the exact pose, body orientation, props, background, camera framing, lighting and image dimensions from the source image.'} : {}) },
+          ...(which === 'animate' ? {prompt: 'Replace the character from source image with character from the second image. Preserve the exact pose, body orientation, props, background, camera framing, lighting and image dimensions from the source image.'}
+            : which === 'remake' ? {prompt: `${String(state.params.prompt || '').trim() || 'Apply the requested Remake change to this source frame.'}\n\nKeep the source pose, camera, background, lighting and frame composition; make only the requested replacement.`} : {}) },
         editReturnTarget: {
           anchor: which,
           framePath,
@@ -4679,11 +4756,12 @@ export const useStore = create<AppState>((set, get) => ({
           savedImageRefType,
           previousImages: state.outputs.filter(output => output.type === 'image').map(output => output.name),
           ...(which === 'animate' ? {savedResolutionPreset: state.resolutionPreset} : {}),
+          ...(which === 'remake' ? {frameSeconds: startTime} : {}),
         },
       }))
     } catch (e) {
       console.error('Failed to send frame to Image mode:', e)
-      if (which === 'animate') throw e
+      if (which === 'animate' || which === 'remake') throw e
     }
   },
   applyOutputAsAnchor: async () => {
@@ -4715,6 +4793,42 @@ export const useStore = create<AppState>((set, get) => ({
       get().setParam('viggle_character', undefined)
       get().setParam('_viggle_prepared', undefined)
       set({editReturnTarget: null, imageRefs: target.savedImageRefs, imageRefType: target.savedImageRefType})
+      return
+    }
+
+    if (target.anchor === 'remake') {
+      const blob = await fetch(latestImage.url).then(response => {
+        if (!response.ok) throw new Error('Could not read the edited image')
+        return response.blob()
+      })
+      const uploaded = await api.uploadImage(new File([blob], latestImage.name, {type: blob.type || 'image/png'}))
+      get().setGenerationMode('avatar')
+      const current = get().params
+      const oldPaths = Array.isArray(current.image_refs)
+        ? current.image_refs.filter((path): path is string => typeof path === 'string' && path.trim().length > 0) : []
+      const oldTimes = Array.isArray(current.viggle_remake_frame_times)
+        ? current.viggle_remake_frame_times.map(Number) : []
+      const entries = oldPaths.map((path, index) => ({path, time: oldTimes[index]}))
+        .filter(entry => Number.isFinite(entry.time))
+      const time = Number(target.frameSeconds)
+      if (!Number.isFinite(time)) throw new Error('This Remake keyframe has no valid source timestamp.')
+      if (entries.length >= 4 && !entries.some(entry => Math.abs(entry.time - time) < 0.05)) {
+        throw new Error('Remake supports up to four edited keyframes. Remove one before adding another.')
+      }
+      const existing = entries.findIndex(entry => Math.abs(entry.time - time) < 0.05)
+      if (existing >= 0) entries[existing] = {path: uploaded.path, time}
+      else entries.push({path: uploaded.path, time})
+      entries.sort((left, right) => left.time - right.time)
+      set(state => ({
+        studioVideoWorkflow: 'recast',
+        editSubMode: 'recast',
+        editReturnTarget: null,
+        imageRefs: target.savedImageRefs,
+        imageRefType: target.savedImageRefType,
+        params: {...state.params,
+          image_refs: entries.map(entry => entry.path),
+          viggle_remake_frame_times: entries.map(entry => entry.time)},
+      }))
       return
     }
 
@@ -4774,6 +4888,12 @@ export const useStore = create<AppState>((set, get) => ({
       set({editReturnTarget: null, imageRefs: target.savedImageRefs, imageRefType: target.savedImageRefType})
       return
     }
+    if (target?.anchor === 'remake') {
+      get().setGenerationMode('avatar')
+      set({studioVideoWorkflow: 'recast', editSubMode: 'recast', editReturnTarget: null,
+        imageRefs: target.savedImageRefs, imageRefType: target.savedImageRefType})
+      return
+    }
     get().setGenerationMode('avatar')
     set({
       editSubMode: target?.anchor === 'recast'
@@ -4787,7 +4907,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
   cancelAnchorReturn: () => {
     const target = get().editReturnTarget
-    if (target?.anchor === 'animate') { get().skipAnchorPhase(); return }
+    if (target?.anchor === 'animate' || target?.anchor === 'remake') { get().skipAnchorPhase(); return }
     get().setGenerationMode('avatar')
     set({
       editSubMode: target?.anchor === 'recast'
@@ -5989,7 +6109,7 @@ export const useStore = create<AppState>((set, get) => ({
       set({ recipes: [], recipesLoading: false })
     }
   },
-  applyRecipe: async (id) => {
+  applyRecipe: async (id, promptOverride) => {
     // Applies a recipe like Load Settings applies a saved output: switch
     // model + generation mode, land the tuned params in the active Studio
     // working set, and PREPOPULATE the prompt (a real, editable value — not
@@ -6018,7 +6138,7 @@ export const useStore = create<AppState>((set, get) => ({
         ...s.params,
         ...(recipe.params as Partial<GenerateParams>),
         model_type: recipe.model_type,
-        prompt: recipe.prompt_example || '',
+        prompt: promptOverride ?? recipe.prompt_example ?? '',
         activated_loras: activated,
         loras_multipliers: multipliers,
         seed: -1,
@@ -8334,7 +8454,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     if (state.generationMode === 'avatar' && state.editSubMode === 'recast'
-      && selectedModelType !== 'viggle_remake_swap') {
+      && remakeEditSubMode(selectedModelType) !== 'recast') {
       const recastMappings = state.editRecastMappings.slice(0, 5)
       if (
         !state.editVideoPath
@@ -8452,8 +8572,7 @@ export const useStore = create<AppState>((set, get) => ({
     // ── Edit mode: Retake / Inpaint / Edit Anything ─────────────
     if (state.generationMode === 'avatar'
       && (state.editSubMode === 'retake' || state.editSubMode === 'inpaint' || state.editSubMode === 'edit_anything')
-      && selectedModelType !== 'viggle_remake_swap'
-      && selectedModelType !== 'viggle_remake_edit') {
+      && remakeEditSubMode(selectedModelType) === null) {
       if (!state.editVideoPath) return
       const prompt = (state.params.prompt as string || '').trim()
       if (!prompt) return
@@ -8598,44 +8717,11 @@ export const useStore = create<AppState>((set, get) => ({
       return  // Don't fall through to normal generation
     }
 
-    const isViggleRemakeModel = selectedModelType === 'viggle_remake_swap'
-      || selectedModelType === 'viggle_remake_edit'
-    if (isViggleRemakeModel) {
-      const requiredSubMode = selectedModelType === 'viggle_remake_swap' ? 'recast' : 'edit_anything'
-      const framePaths = Array.isArray(state.params.image_refs)
-        ? state.params.image_refs.filter((path): path is string => typeof path === 'string' && path.trim().length > 0)
-        : []
-      const frameTimes = Array.isArray(state.params.viggle_remake_frame_times)
-        ? state.params.viggle_remake_frame_times : []
-      const trimStart = Number(state.params.viggle_trim_start ?? 0)
-      const trimEnd = Number(state.params.viggle_trim_end ?? (345 / 24))
-      if (state.generationMode !== 'avatar' || state.editSubMode !== requiredSubMode) {
-        set({ promptEnhanceError: selectedModelType === 'viggle_remake_swap'
-          ? 'Choose Replace People for the selected Remake model.'
-          : 'Choose Edit Scene → Prompt Edit for the selected Remake model.' })
-        return
-      }
-      if (!String(state.params.prompt || '').trim()) {
-        set({ promptEnhanceError: 'Describe the changes you want in the edited clip.' })
-        return
-      }
-      if (!state.editVideoPath || !state.params.video_guide) {
-        set({ promptEnhanceError: 'Add a source video for the Remake edit.' })
-        return
-      }
-      if (framePaths.length < 1 || framePaths.length > 4) {
-        set({ promptEnhanceError: 'Add 1–4 edited reference frames.' })
-        return
-      }
-      if (frameTimes.length !== framePaths.length
-        || !Number.isFinite(trimStart) || !Number.isFinite(trimEnd)
-        || trimStart < 0 || trimEnd - trimStart < 3.75
-        || trimEnd > Math.min(state.editVideoDuration, 345 / 24) + 0.000001
-        || frameTimes.some(time => !Number.isFinite(Number(time))
-          || Number(time) < trimStart || Number(time) > trimEnd)) {
-        set({ promptEnhanceError: 'Keep every frame timestamp inside the selected source range.' })
-        return
-      }
+    const isViggleRemakeModel = remakeEditSubMode(selectedModelType) !== null
+    const remakeError = studioRemakeInputError(state)
+    if (remakeError) {
+      set({ promptEnhanceError: remakeError })
+      return
     }
 
     const params: Record<string, unknown> = { ...state.params, generation_mode: state.generationMode, workspace: state.activeWorkspace }
@@ -8645,7 +8731,13 @@ export const useStore = create<AppState>((set, get) => ({
     if (isViggleRemakeModel) {
       params.video_guide = state.editVideoPath
       params.image_refs = [...(state.params.image_refs || [])]
-      params.viggle_remake_frame_times = [...(state.params.viggle_remake_frame_times || [])]
+      if (selectedModelType === ALIGNED_REMAKE_SWAP_MODEL) {
+        delete params.viggle_remake_frame_times
+        params.video_prompt_type = 'IVU2'
+        params.audio_prompt_type = 'K'
+      } else {
+        params.viggle_remake_frame_times = [...(state.params.viggle_remake_frame_times || [])]
+      }
       params.viggle_trim_start = state.params.viggle_trim_start ?? 0
       params.viggle_trim_end = state.params.viggle_trim_end ?? (345 / 24)
       params.image_mode = 0
@@ -9039,6 +9131,17 @@ export const useStore = create<AppState>((set, get) => ({
       delete params.image_refs
       delete params.frames_positions
       delete params.video_source
+      // The References manifest owns typed voice/style/sound/drive audio.
+      // Clear a Frames soundtrack before it can be mistaken for a References
+      // source. Preserve only the explicit legacy API contract (AD + source).
+      const hasLegacyExactDrive = String(params.audio_prompt_type || '').trim() === 'AD'
+        && Boolean(params.audio_guide || (params as Record<string, unknown>).input_waveform)
+      if (!hasLegacyExactDrive) {
+        delete params.audio_guide
+        delete (params as Record<string, unknown>).input_waveform
+        delete params.audio_frame_offset
+        params.audio_prompt_type = ''
+      }
       const videoPromptType = String(params.video_prompt_type || '').replace(/KFI/g, '')
       if (videoPromptType) params.video_prompt_type = videoPromptType
       else delete params.video_prompt_type
@@ -10804,6 +10907,7 @@ export const useStore = create<AppState>((set, get) => ({
         && String(options.architecture || '').startsWith('minimax_h3')
         && options.omni_reference !== true
       const { durationSeconds, slidingWindowSeconds } = activeState
+      const sameModelOptions = activeState.modelOptions?.model_type === modelType
       const fps = options.fps || 16
       // Set overlap from model defaults
       const swDefaults = (options as unknown as Record<string, unknown>).sliding_window_defaults as Record<string, number> | undefined
@@ -10871,11 +10975,29 @@ export const useStore = create<AppState>((set, get) => ({
       let nextWindowSeconds = nextWindowFrames / fps
       let nextWindowLocked = false
       const paramUpdates: Record<string, unknown> = {
-        guidance_phases: options.guidance_max_phases,
         video_length: Math.round(nextDurationSeconds * fps),
         sliding_window_size: nextWindowFrames,
         sliding_window_overlap: overlapDefault,
         sliding_window_discard_last_frames: discardDefault,
+      }
+      if (!sameModelOptions || activeState.params.guidance_phases == null) {
+        const resolvedPhases = Number(options.default_guidance_phases)
+        const selectedPhases = Number.isFinite(resolvedPhases) && resolvedPhases > 0
+          ? Math.round(resolvedPhases) : 1
+        paramUpdates.guidance_phases = Math.max(
+          1,
+          Math.min(options.guidance_max_phases || selectedPhases, selectedPhases),
+        )
+      }
+      if (!sameModelOptions || activeState.params.guidance2_scale == null) {
+        paramUpdates.guidance2_scale = typeof options.default_guidance2_scale === 'number'
+          && Number.isFinite(options.default_guidance2_scale)
+          ? options.default_guidance2_scale : undefined
+      }
+      if (!sameModelOptions || activeState.params.switch_threshold == null) {
+        paramUpdates.switch_threshold = typeof options.default_switch_threshold === 'number'
+          && Number.isFinite(options.default_switch_threshold)
+          ? options.default_switch_threshold : undefined
       }
       let nextResolutionPreset = activeState.resolutionPreset
       let nextAspectRatio = activeState.aspectRatio
@@ -14602,7 +14724,22 @@ export const useStore = create<AppState>((set, get) => ({
     ) ?? undefined
     newParams.sliding_window_memory_override = p.sliding_window_memory_override === true
     newParams.minimax_h3_extended_duration = p.minimax_h3_extended_duration === true
-    newParams.guidance_phases = (p.guidance_phases as number) ?? undefined
+    newParams.guidance_phases = Number.isFinite(Number(p.guidance_phases))
+      && Number(p.guidance_phases) > 0
+      ? Math.max(1, Math.min(
+          restoredModelOptions?.guidance_max_phases || Number(p.guidance_phases),
+          Math.round(Number(p.guidance_phases)),
+        ))
+      : restoredModelOptions?.default_guidance_phases
+        ?? 1
+    newParams.guidance2_scale = typeof p.guidance2_scale === 'number'
+      && Number.isFinite(p.guidance2_scale)
+      ? p.guidance2_scale
+      : restoredModelOptions?.default_guidance2_scale ?? undefined
+    newParams.switch_threshold = typeof p.switch_threshold === 'number'
+      && Number.isFinite(p.switch_threshold)
+      ? p.switch_threshold
+      : restoredModelOptions?.default_switch_threshold ?? undefined
     newParams.video_prompt_type = (p.video_prompt_type as string) || ''
     newParams.audio_prompt_type = (p.audio_prompt_type as string) || ''
     newParams.image_prompt_type = (p.image_prompt_type as string) || ''
@@ -15592,8 +15729,7 @@ export const useStore = create<AppState>((set, get) => ({
     // generationMode from the model family, so we override here when the
     // sidecar tag is authoritative.
     const editSubMode = (p.edit_sub_mode as string)
-      || (modelType === 'viggle_remake_swap' ? 'recast'
-        : modelType === 'viggle_remake_edit' ? 'edit_anything' : '')
+      || remakeEditSubMode(modelType) || ''
     const validEditSubModes = new Set([
       'retake', 'inpaint', 'restyle', 'outpaint', 'edit_anything', 'recast',
     ])
@@ -15661,7 +15797,7 @@ export const useStore = create<AppState>((set, get) => ({
       }
 
       // Trim range — applies to retake, inpaint, edit_anything, outpaint.
-      const isViggleRemake = modelType === 'viggle_remake_swap' || modelType === 'viggle_remake_edit'
+      const isViggleRemake = remakeEditSubMode(modelType) !== null
       const trimStart = (p.edit_start_time as number) ?? (p.outpaint_trim_start as number)
         ?? (isViggleRemake ? newParams.viggle_trim_start : undefined)
       const trimEnd = (p.edit_end_time as number) ?? (p.outpaint_trim_end as number)

@@ -11,7 +11,7 @@ import re
 from typing import Any
 
 
-_REVISION = 4
+_REVISION = 5
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _SENTENCE_RE = re.compile(r"[^.!?;\n]+(?:[.!?;]+|$)")
 _SUBJECT_TAG_RE = re.compile(r"<\s*subject\s+\d+\s*>", re.IGNORECASE)
@@ -144,6 +144,9 @@ _ACTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"close|closes|closed|closing|grab|grabs|grabbed|grabbing|"
             r"pick\s+up|picks\s+up|picked\s+up|picking\s+up|"
             r"drop|drops|dropped|dropping|throw|throws|threw|thrown|throwing|"
+            r"stamp(?:s|ed|ing)?(?=\s+(?:the|a|an|his|her|their)\s+)|"
+            r"present(?:s|ed|ing)?(?=\s+(?:the|a|an|his|her|their)\s+"
+            r"(?:document|paper|letter|form|certificate|note|sign)\b)|"
             r"stop|stops|stopped|stopping|"
             r"hand|hands|handed|handing|give|gives|gave|given|giving|"
             r"draw|draws|drew|drawn|drawing|raise|raises|raised|raising|"
@@ -214,6 +217,16 @@ _DIRECTIVE_ACTION_REFERENCE_RE = re.compile(
 _BARE_ACTION_ORDER_REFERENCE_RE = re.compile(
     r"^\s*(?:show|include|depict|preserve)\s+(?:the\s+)?[a-z]+ing\s+"
     r"(?:before|after|during)\s*$",
+    re.I,
+)
+_SHOT_HEADING_RE = re.compile(r"^\s*\[?\s*shot\s+\d+\s*(?:\]|:|[-–—])", re.I)
+_SHOT_CLAUSE_RE = re.compile(
+    r"\b(?:shot|shots)\s+(?:where|in\s+which|that\s+(?:shows?|follows?))\s+",
+    re.I,
+)
+_SHOT_NOUN_PREFIX_RE = re.compile(
+    r"\b(?:a|the|one|each|this|that|another|first|second|single|"
+    r"wide|medium|close[- ]?up|establishing|tracking|pov|locked|static|fixed|camera)\s+$",
     re.I,
 )
 _FILMMAKING_CUE_RE = re.compile(
@@ -288,6 +301,12 @@ def _is_filmmaking_action(
     }
     if not camera_action:
         return False
+
+    if normalized == "shot" and (
+        (start < 12 and _SHOT_HEADING_RE.match(value))
+        or _SHOT_NOUN_PREFIX_RE.search(value[:start])
+    ):
+        return True
 
     context = value[max(0, start - 88):min(len(value), end + 100)]
     clause = _action_clause(value, start, end)
@@ -372,6 +391,7 @@ _GENERIC_SEMANTIC_VERB_FAMILIES: tuple[re.Pattern[str], ...] = tuple(
         r"\b(?:open|opens|opened|opening)\b", r"\bclos(?:e|es|ed|ing)\b",
         r"\bgrab(?:s|bed|bing)?\b", r"\bpick(?:s|ed|ing)?\s+up\b",
         r"\bdrop(?:s|ped|ping)?\b", r"\bthrow(?:s|ing)?\b|\bthrew\b|\bthrown\b",
+        r"\bstamp(?:s|ed|ing)?\b", r"\bpresent(?:s|ed|ing)?\b",
         r"\bhand(?:s|ed|ing)?\b", r"\bgiv(?:e|es|en|ing)\b|\bgave\b",
         r"\bdraw(?:s|ing)?\b|\bdrew\b|\bdrawn\b",
         r"\brais(?:e|es|ed|ing)\b", r"\blower(?:s|ed|ing)?\b",
@@ -588,8 +608,8 @@ def _normal_text(value: Any) -> str:
     return " ".join(_WORD_RE.findall(text.casefold()))
 
 
-def _mask_quoted_text(value: str) -> str:
-    """Blank quoted dialogue without shifting source offsets."""
+def _mask_quoted_text(value: str, *, sentence_boundaries: bool = False) -> str:
+    """Blank quoted text without shifting source offsets."""
 
     patterns = (
         r'"[^"\n]*"',
@@ -598,8 +618,17 @@ def _mask_quoted_text(value: str) -> str:
         r"(?<!\w)'[^'\n]+'(?!\w)",
     )
     masked = value
+    def replace(match: re.Match) -> str:
+        quote = match.group(0)
+        if (
+            sentence_boundaries and len(quote) >= 2 and quote[-2] in ".?!"
+            and re.match(r"\s+[A-Z]|\s*$", value[match.end():])
+        ):
+            return " " * (len(quote) - 1) + quote[-2]
+        return " " * len(quote)
+
     for pattern in patterns:
-        masked = re.sub(pattern, lambda match: " " * len(match.group(0)), masked)
+        masked = re.sub(pattern, replace, masked)
     return masked
 
 
@@ -1114,6 +1143,16 @@ def _actor_aliases(
     prior_sentence_actor: list[str] | None = None,
 ) -> list[str]:
     prefix = sentence[:action_start]
+    # A shot directive introduces a new clause. Its wording is never the
+    # actor, even when the source has no name outside the clause.
+    shot_clauses = list(_SHOT_CLAUSE_RE.finditer(prefix))
+    if shot_clauses:
+        return _actor_aliases(
+            sentence[shot_clauses[-1].end():],
+            action_start - shot_clauses[-1].end(),
+            prior_actor, action_number, prior_sentence_actor,
+        )
+
     pronoun = re.search(
         r"\b(?:as|while|when|after|before|and\s+then|then)?\s*"
         r"(it|he|she|they|them)\s*$",
@@ -1463,7 +1502,8 @@ def build_music_narrative_contract(
     ))
     events: list[dict[str, Any]] = []
     prior_sentence_actor: list[str] = []
-    for sentence_start, sentence_end in _sentence_ranges(extraction_source):
+    sentence_source = _mask_quoted_text(extraction_source, sentence_boundaries=True)
+    for sentence_start, sentence_end in _sentence_ranges(sentence_source):
         sentence = extraction_source[sentence_start:sentence_end]
         visible_sentence = visible_source[sentence_start:sentence_end]
         matches = [
@@ -1486,7 +1526,11 @@ def build_music_narrative_contract(
         for action_number, (action_start, action_end, kind, verb_text) in enumerate(matches):
             if kind == "combat" and action_start < combat_covered_until:
                 continue
-            if _is_negated_before(visible_sentence, action_start):
+            shot_clauses = list(_SHOT_CLAUSE_RE.finditer(visible_sentence, 0, action_start))
+            action_clause_start = shot_clauses[-1].end() if shot_clauses else 0
+            if _is_negated_before(
+                visible_sentence[action_clause_start:], action_start - action_clause_start,
+            ):
                 continue
             participants: list[list[str]] = []
             participant_names: list[str] = []
@@ -1527,7 +1571,7 @@ def build_music_narrative_contract(
             text_end = (
                 _combat_event_text_end(sentence, action_end, next_action_start)
                 if kind == "combat"
-                else _event_text_end(sentence, action_end, next_action_start)
+                else _event_text_end(visible_sentence, action_end, next_action_start)
             )
             action_text = sentence[action_start:text_end].strip(" \t\r\n.,;:!?-")
             if not action_text:
@@ -1810,7 +1854,7 @@ def _action_positions(
     *,
     require_actor: bool = True,
 ) -> list[int]:
-    action_text = _normal_text(event.get("text"))
+    action_text = _normal_text(_mask_quoted_text(str(event.get("text") or "")))
     analysis_prompt = _mask_quoted_text(prompt)
     if not action_text:
         return []
@@ -2327,7 +2371,7 @@ def _generic_semantic_action_positions(prompt: str, event: dict[str, Any]) -> li
 
     if str(event.get("kind") or "").casefold() == "boarding":
         return []
-    source_text = _normal_text(event.get("text"))
+    source_text = _normal_text(_mask_quoted_text(str(event.get("text") or "")))
     source_pattern = next(
         (pattern for pattern in _GENERIC_SEMANTIC_VERB_FAMILIES if pattern.match(source_text)),
         None,

@@ -360,6 +360,10 @@ export function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob;
             {hasSteps && !isFailed && (
               <p className="text-[10px] text-text-muted mt-0.5">
                 Step {job.step}/{job.totalSteps}
+                {typeof job.secondsPerStep === 'number' && Number.isFinite(job.secondsPerStep)
+                  && job.secondsPerStep > 0
+                  ? ` · ${job.secondsPerStep >= 10 ? job.secondsPerStep.toFixed(1) : job.secondsPerStep.toFixed(2)} s/step`
+                  : ''}
               </p>
             )}
             {!isFailed && job.status === 'running' && (

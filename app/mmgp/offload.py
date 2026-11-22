@@ -3993,7 +3993,19 @@ class offload:
             self.read_ahead.reset()
             self.read_jobs.clear()
             self.read_plans.clear()
-        torch.cuda.synchronize() # blocks may still be read or written by queued work
+        active_error = sys.exc_info()[1]
+        try:
+            torch.cuda.synchronize() # blocks may still be read or written by queued work
+        except Exception as cleanup_error:
+            if active_error is None:
+                raise
+            print(
+                "[Memory] CUDA synchronization failed during failed-generation "
+                f"cleanup ({cleanup_error}); preserving the original error "
+                f"({type(active_error).__name__}: {active_error}). "
+                "Remaining model unload was skipped."
+            )
+            return
         if self.ring is not None:
             self.ring.reset()
         for model_id in self.active_models_ids:

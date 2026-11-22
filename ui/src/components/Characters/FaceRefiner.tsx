@@ -8,7 +8,7 @@ import type { FaceRefinerOptions, FaceRefinerAnalysis, FaceRefinerAssignment, Sa
 
 const defaultFaceRefiner: FaceRefinerOptions = {
   enabled: false, face_count: 0, strength: 0.75, steps: 4,
-  window_frames: 243, model: 'auto', character_ids: [],
+  window_frames: 243, model: 'auto', character_ids: [], audio_scope: 'all', blend: 1,
 }
 const inputClass = 'w-full min-w-0 rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-sm text-text-primary'
 type Source = { path: string; name: string; url: string | null }
@@ -53,6 +53,20 @@ function FaceSettings({ value, onChange, disabled = false }: {
             <option value="auto">Auto · installed Fused, otherwise Pruned</option><option value="fused">H3 Fused · 4-step</option><option value="pruned">H3 Pruned + LightX2V</option>
           </select>
         </label>
+        <div className="grid grid-cols-2 gap-3">
+          <label className="text-xs text-text-secondary">Source audio guides
+            <select className={inputClass} value={value.audio_scope ?? 'all'}
+              onChange={e => patch('audio_scope', e.target.value as FaceRefinerOptions['audio_scope'])}>
+              <option value="all">All refined faces</option>
+              <option value="largest">Largest refined face</option>
+              <option value="none">No faces</option>
+            </select>
+          </label>
+          <label className="text-xs text-text-secondary">Face blend · {Math.round((value.blend ?? 1) * 100)}%
+            <input className="w-full mt-3 accent-blue-500" type="range" min={0.05} max={1} step={0.05}
+              value={value.blend ?? 1} onChange={e => patch('blend', Number(e.target.value))} />
+          </label>
+        </div>
         <div className="grid grid-cols-2 gap-3">
           <label className="text-xs text-text-secondary">Steps
             <select aria-label="Face refinement steps" className={inputClass} value={value.steps} onChange={e => patch('steps', Number(e.target.value))}>{[4, 5, 6, 7, 8].map(n => <option key={n}>{n}</option>)}</select>
@@ -105,6 +119,9 @@ export function FaceRefinerDialog({ initialSource, onClose }: { initialSource?: 
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
   const [resultUrl, setResultUrl] = useState('')
+  const [showOriginal, setShowOriginal] = useState(false)
+  const comparisonVideo = useRef<HTMLVideoElement>(null)
+  const comparisonTime = useRef(0)
   const [jobId, setJobId] = useState('')
   const file = useRef<HTMLInputElement>(null)
   const dialog = useRef<HTMLDivElement>(null)
@@ -151,7 +168,11 @@ export function FaceRefinerDialog({ initialSource, onClose }: { initialSource?: 
           if (alive.current) { setAnalysis(found); setAssignments(found.faces.map(face => ({ track_id: face.track_id, character_id: face.character_id, skip: false }))) }
         } else {
           await useStore.getState().loadOutputs()
-          if (alive.current && result.output_files[0]) setResultUrl(`/api/v1/file/${encodeURIComponent(result.output_files[0])}?workspace=${encodeURIComponent(workspace)}`)
+          if (alive.current && result.output_files[0]) {
+            setShowOriginal(false)
+            comparisonTime.current = 0
+            setResultUrl(`/api/v1/file/${encodeURIComponent(result.output_files[0])}?workspace=${encodeURIComponent(workspace)}`)
+          }
         }
         useStore.setState(s => ({ jobs: s.jobs.filter(j => j.id !== id) }))
         break
@@ -215,7 +236,25 @@ export function FaceRefinerDialog({ initialSource, onClose }: { initialSource?: 
           {analysis?.warnings.map(warning => <p key={warning} className="text-xs text-indicator-warning">{warning}</p>)}
         </div>
         <p className="text-xs leading-relaxed text-text-muted">Tracks up to five identities, including faces that leave and return. Only face regions are blended back. The source stays in your gallery, and the copy keeps its resolution, frame rate and soundtrack. Detection and H3 models download on first use.</p>
-        {resultUrl && <video aria-label="Refined video" src={resultUrl} controls playsInline className="w-full rounded-xl bg-black" />}
+        {resultUrl && <div className="space-y-2">
+          {source?.url && <div className="flex gap-2 text-xs">
+            {[{ original: true, label: 'Original' }, { original: false, label: 'Refined' }].map(choice =>
+              <button key={choice.label} type="button" aria-pressed={choice.original === showOriginal}
+                className="rounded border border-border px-3 py-1.5 text-text-primary aria-pressed:bg-bg-hover"
+                onClick={() => {
+                  comparisonTime.current = comparisonVideo.current?.currentTime ?? 0
+                  setShowOriginal(choice.original)
+                }}>{choice.label}</button>
+            )}
+          </div>}
+          <video ref={comparisonVideo} aria-label={showOriginal ? 'Original video' : 'Refined video'}
+            src={(showOriginal && source?.url) || resultUrl} controls playsInline
+            onLoadedMetadata={event => {
+              const video = event.currentTarget
+              video.currentTime = Math.min(comparisonTime.current, video.duration || 0)
+            }}
+            className="w-full rounded-xl bg-black" />
+        </div>}
         {error && <p role="alert" className="rounded-lg bg-red-500/10 p-3 text-sm text-red-400">{error}</p>}
       </div>
       <div className="shrink-0 border-t border-border px-4 py-3 sm:px-6 space-y-2">

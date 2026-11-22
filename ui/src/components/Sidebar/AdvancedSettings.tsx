@@ -933,28 +933,48 @@ export function AdvancedSettings({ compact = false }: { compact?: boolean }) {
                   {/* Auto-Split */}
                   {modelOptions?.custom_settings_def?.filter(setting => (
                     !isKreaImageEdit || !KREA_IDENTITY_SETTING_KEYS.includes(setting.id as typeof KREA_IDENTITY_SETTING_KEYS[number])
-                  )).map(setting => (
-                    <div key={setting.id}>
-                      <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">{setting.name}</label>
-                      <input
-                        type="number"
-                        placeholder="Empty = disabled"
-                        value={String((params.custom_settings as Record<string, unknown> | undefined)?.[setting.id] ?? '')}
-                        onChange={e => {
-                          const val = e.target.value.trim()
-                          const cs = { ...(params.custom_settings || {}) } as Record<string, unknown>
-                          if (val === '') {
-                            delete cs[setting.id]
-                          } else {
-                            cs[setting.id] = parseFloat(val)
-                          }
-                          setParam('custom_settings', Object.keys(cs).length > 0 ? cs : undefined)
-                        }}
-                        className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
-                      />
-                      <p className="text-[10px] text-text-muted mt-1">{setting.label}</p>
-                    </div>
-                  ))}
+                  )).map(setting => {
+                    const customSettings = params.custom_settings as Record<string, unknown> | undefined
+                    const value = customSettings?.[setting.id] ?? setting.default ?? ''
+                    const update = (nextValue: string | number) => {
+                      const next = { ...(customSettings || {}) }
+                      if (nextValue === '') delete next[setting.id]
+                      else next[setting.id] = nextValue
+                      setParam('custom_settings', Object.keys(next).length > 0 ? next : undefined)
+                    }
+                    return (
+                      <div key={setting.id}>
+                        <label htmlFor={`custom-setting-${setting.id}`} className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">{setting.name}</label>
+                        {setting.type === 'dropdown' && setting.choices?.length ? (
+                          <select
+                            id={`custom-setting-${setting.id}`}
+                            aria-label={setting.name}
+                            value={String(value)}
+                            onChange={event => update(event.target.value)}
+                            className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
+                          >
+                            {setting.choices.map(([label, choice]) => (
+                              <option key={String(choice)} value={String(choice)}>{label}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <input
+                            id={`custom-setting-${setting.id}`}
+                            type="number"
+                            placeholder="Empty = disabled"
+                            value={String(value)}
+                            onChange={event => {
+                              const raw = event.target.value.trim()
+                              if (raw === '') update('')
+                              else update(parseFloat(raw))
+                            }}
+                            className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
+                          />
+                        )}
+                        <p className="text-[10px] text-text-muted mt-1">{setting.label}</p>
+                      </div>
+                    )
+                  })}
 
                   {/* Compressor Settings — shown when Smooth Speaker Volumes is enabled */}
                   {params.tts_dynaudnorm && (

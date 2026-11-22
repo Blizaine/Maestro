@@ -99,6 +99,9 @@ export interface GenerateParams {
   video_length: number
   num_inference_steps: number
   guidance_scale: number
+  /** Wan 2.2 second-expert guidance defaults and user overrides. */
+  guidance2_scale?: number
+  switch_threshold?: number
   sample_solver?: string
   seed: number
   image_mode: number
@@ -362,6 +365,8 @@ export interface FaceRefinerOptions {
   window_frames: number
   model: 'auto' | 'pruned' | 'fused'
   character_ids: string[]
+  audio_scope?: 'all' | 'largest' | 'none'
+  blend?: number
 }
 
 export interface FaceRefinerAssignment {
@@ -573,6 +578,8 @@ export interface GenerationJob {
   progress: number
   step: number
   totalSteps: number
+  /** Average time per completed denoising step in the active pass. */
+  secondsPerStep?: number | null
   phase: string
   message: string
   outputFiles: string[]
@@ -1179,6 +1186,9 @@ export interface ModelOptions {
   architecture: string
   guidance_max_phases: number
   lock_guidance_phases: boolean
+  default_guidance_phases?: number | null
+  default_guidance2_scale?: number | null
+  default_switch_threshold?: number | null
   sliding_window: boolean
   video_continuation?: boolean
   motion_amplitude: boolean
@@ -1413,7 +1423,14 @@ export interface ModelOptions {
   yue2_composition?: boolean
   pause_between_sentences: boolean
   temperature_enabled: boolean
-  custom_settings_def: { id: string; label: string; name: string; type: string }[] | null
+  custom_settings_def: {
+    id: string
+    label: string
+    name: string
+    type: string
+    default?: string | number | boolean
+    choices?: [string, string | number | boolean][]
+  }[] | null
   music3_structured_caption?: boolean
   music_caption_label?: string
   music_caption_help?: string
@@ -2214,6 +2231,7 @@ export interface PipelineClipState {
   keyframe_filenames: string[]
   video_filename: string | null
   video_stale?: boolean
+  shot_reference_cast?: string[] | null
   tag: 'good' | 'needs_work' | null
   image_gen_time_sec: number | null
   video_gen_time_sec: number | null
@@ -2279,6 +2297,7 @@ export interface SavedPipelineState {
   generated_reference_image_filename?: string | null
   character_ref_paths?: string[]
   location_ref_paths?: string[]
+  shot_cast_options?: { id: string; label: string }[]
   auto_mode: boolean
   seamless: boolean
   image_model: string

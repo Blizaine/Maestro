@@ -108,7 +108,7 @@ def create_progress_hook(filename):
     return hook
 
 
-def process_files_def(repoId=None, sourceFolderList=None, fileList=None, targetFolderList=None):
+def process_files_def(repoId=None, sourceFolderList=None, fileList=None, targetFolderList=None, revision=None):
     """Download a list of HuggingFace files into the local ckpts tree.
 
     Ported from upstream Wan2GP's shared/utils/download.py to support seedvc's
@@ -129,15 +129,15 @@ def process_files_def(repoId=None, sourceFolderList=None, fileList=None, targetF
         local_dir = os.path.join(targetRoot, targetFolder) if targetFolder is not None else targetRoot
         if len(files) == 0:
             if fl.locate_folder(sourceFolder if targetFolder is None else os.path.join(targetFolder, sourceFolder), error_if_none=False) is None:
-                snapshot_download(repo_id=repoId, allow_patterns=sourceFolder + "/*", local_dir=local_dir)
+                snapshot_download(repo_id=repoId, allow_patterns=sourceFolder + "/*", local_dir=local_dir, revision=revision)
         else:
             for onefile in files:
                 if len(sourceFolder) > 0:
                     if fl.locate_file((sourceFolder + "/" + onefile) if targetFolder is None else os.path.join(targetFolder, sourceFolder, onefile), error_if_none=False) is None:
-                        hf_hub_download(repo_id=repoId, filename=onefile, local_dir=local_dir, subfolder=sourceFolder)
+                        hf_hub_download(repo_id=repoId, filename=onefile, local_dir=local_dir, subfolder=sourceFolder, revision=revision)
                 else:
                     if fl.locate_file(onefile if targetFolder is None else os.path.join(targetFolder, onefile), error_if_none=False) is None:
-                        hf_hub_download(repo_id=repoId, filename=onefile, local_dir=local_dir)
+                        hf_hub_download(repo_id=repoId, filename=onefile, local_dir=local_dir, revision=revision)
 
 
 def process_download_defs(download_defs):

@@ -365,8 +365,35 @@ class MusicArcTests(unittest.TestCase):
         clips = [{"start": index, "end": index + 1, "label": "verse"} for index in range(count)]
         with self.assertRaisesRegex(RuntimeError, "needs revision"):
             planner._plan_music_arc(clips, "A traveler crosses the country.")
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 4)
         self.assertNotIn("music_creative_arc", planner._planning_resume_checkpoint)
+
+    def test_long_malformed_outline_recovers_in_checkpointed_sections(self):
+        count = 12
+        beats = [arc_row(i, f"The traveler studies sign {i + 1} along the road.") for i in range(count)]
+        calls = []
+
+        def generate(**kwargs):
+            calls.append(kwargs)
+            if len(calls) <= 2:
+                return json.dumps({"beats": []})
+            start = 0 if len(calls) == 3 else 8
+            return json.dumps(beats[start:start + 8])
+
+        planner = MusicVideoPlanner(llm_generate=generate)
+        planner._music_narrative_contract = contract()
+        planner._use_lyrics_context = False
+        clips = [{"start": i, "end": i + 1, "label": "verse"} for i in range(count)]
+        result = planner._plan_music_arc(clips, "A traveler studies a route across the country.")
+        self.assertEqual([row["clip_index"] for row in result], list(range(count)))
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(
+            sorted(planner._planning_resume_checkpoint["music_creative_outline_sections"]), ["0", "8"],
+        )
+        self.assertEqual(
+            planner._plan_music_arc(clips, "A traveler studies a route across the country."), result,
+        )
+        self.assertEqual(len(calls), 4)
 
     def test_remote_object_with_h3_assignments_keeps_zero_based_event_slot(self):
         count = 23
@@ -490,7 +517,7 @@ class MusicArcTests(unittest.TestCase):
                     [["M1"], [], ["M2"], []],
                 )
 
-    def test_invalid_event_map_exhaustion_reports_assignments_without_checkpointing(self):
+    def test_invalid_event_map_can_recover_from_existing_action_coverage(self):
         source_contract, beats = ordered_event_arc_fixture()
         calls = []
 
@@ -508,14 +535,14 @@ class MusicArcTests(unittest.TestCase):
         planner._use_lyrics_context = False
         clips = [{"start": i * 10, "end": (i + 1) * 10, "label": "verse"} for i in range(4)]
 
-        with self.assertRaisesRegex(RuntimeError, r"M1=2.*M2=0"):
-            planner._plan_music_arc(clips, source_contract["source"])
-
+        result = planner._plan_music_arc(clips, source_contract["source"])
         self.assertEqual(len(calls), 2)
-        self.assertNotIn("music_creative_arc", planner._planning_resume_checkpoint)
+        self.assertEqual([row["source_event_ids"] for row in result], [["M1"], [], ["M2"], []])
+        self.assertNotIn("music_creative_outline_draft", planner._planning_resume_checkpoint)
 
-    def test_focused_map_repair_rejects_ordered_but_nonperforming_assignment(self):
+    def test_focused_map_repair_checkpoints_unresolved_action_coverage(self):
         source_contract, beats = ordered_event_arc_fixture()
+        beats[0]["visual_beat"] = "Mira holds still in the street as lights pass behind her."
         calls = []
 
         def generate(**kwargs):
@@ -541,6 +568,13 @@ class MusicArcTests(unittest.TestCase):
 
         self.assertEqual(len(calls), 2)
         self.assertNotIn("music_creative_arc", planner._planning_resume_checkpoint)
+        draft = planner._planning_resume_checkpoint["music_creative_outline_draft"]
+        self.assertEqual(draft["beats"][0]["visual_beat"], beats[0]["visual_beat"])
+
+        with self.assertRaisesRegex(RuntimeError, "The visual outline was saved"):
+            planner._plan_music_arc(clips, source_contract["source"])
+        self.assertEqual(len(calls), 3)
+        self.assertIn("Repair only source_event_clips", calls[2]["prompt"])
 
     def test_boolean_and_noninteger_event_indexes_are_rejected_before_assignment(self):
         source_contract, beats = ordered_event_arc_fixture()

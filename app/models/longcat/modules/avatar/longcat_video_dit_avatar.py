@@ -233,6 +233,8 @@ class LongCatVideoAvatarTransformer3DModel(
         text_tokens_zero_pad: bool = False,
         # avatar config
         audio_window: int = 5,
+        audio_block: int = 12,
+        audio_channel: int = 768,
         intermediate_dim: int = 512,
         output_dim: int = 768,
         context_tokens: int = 32,
@@ -282,6 +284,8 @@ class LongCatVideoAvatarTransformer3DModel(
         self.audio_proj = AudioProjModel(
                     seq_len=audio_window,
                     seq_len_vf=audio_window+vae_scale-1,
+                    blocks=audio_block,
+                    channels=audio_channel,
                     intermediate_dim=intermediate_dim,
                     output_dim=output_dim,
                     context_tokens=context_tokens

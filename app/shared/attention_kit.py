@@ -10,6 +10,7 @@ from shared.attention import pay_attention, sage2_staged_settings
 
 
 HEAD_SPLIT_CHOICES = [
+    ("Auto (when VRAM is tight)", -1),
     ("Off", 0),
     ("Low: saves some VRAM", 1),
     ("Medium (good balance): saves more VRAM", 2),
@@ -20,6 +21,7 @@ MIN_SPLIT_TOKENS = 8192
 head_split = 0
 _unsplit_notice = False
 _split_notice = False
+_auto_split_decisions = {}
 
 # Ranges of q heads and kv heads for a group. mean_squares contains the
 # per-token full-head statistics needed by norms that span all heads.
@@ -27,11 +29,34 @@ HeadGroup = namedtuple("HeadGroup", "q kv mean_squares")
 
 
 def configure(level):
-    """Set the Attention Head Split level (0 disables it)."""
+    """Set the head split level (-1 uses the current job's VRAM budget)."""
 
     global head_split, _split_notice, _unsplit_notice
-    head_split = min(max(int(level), 0), len(_TARGET_GROUPS) - 1)
+    head_split = min(max(int(level), -1), len(_TARGET_GROUPS) - 1)
     _split_notice = _unsplit_notice = False
+    _auto_split_decisions.clear()
+
+
+def _auto_head_split_level(device, tokens, heads, head_dim, element_size):
+    if device is None or device.type != "cuda" or tokens < MIN_SPLIT_TOKENS:
+        return 0
+    key = (device, tokens, heads, head_dim, element_size)
+    if key not in _auto_split_decisions:
+        try:
+            if torch.cuda.is_current_stream_capturing():
+                return 0
+            free, total = torch.cuda.mem_get_info(device)
+            reusable = max(0, torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device))
+        except (RuntimeError, TypeError, ValueError):
+            return 0
+        budget = free + reusable - max(512 << 20, total // 10)
+        # Q, K, V and the attended rows coexist on the unsplit path.
+        scratch = 4 * tokens * heads * head_dim * element_size
+        _auto_split_decisions[key] = next(
+            (level for level, groups in enumerate(_TARGET_GROUPS) if scratch <= budget * groups),
+            len(_TARGET_GROUPS) - 1,
+        )
+    return _auto_split_decisions[key]
 
 
 @lru_cache(maxsize=128)
@@ -44,7 +69,7 @@ def _cached_head_groups(kv_heads, level, long_sequence):
     )
 
 
-def head_groups(kv_heads, tokens, level=None):
+def head_groups(kv_heads, tokens, level=None, *, device=None, heads=None, head_dim=128, element_size=2):
     """Choose a cached head divisor; split targets apply from 8192 tokens.
 
     Projection splitting also requires MMGP row support. Other quantization or
@@ -52,6 +77,8 @@ def head_groups(kv_heads, tokens, level=None):
     """
 
     level = head_split if level is None else level
+    if level == -1:
+        level = _auto_head_split_level(device, tokens, heads or kv_heads, head_dim, element_size)
     level = min(max(int(level), 0), len(_TARGET_GROUPS) - 1)
     return _cached_head_groups(
         int(kv_heads), level, int(tokens) >= MIN_SPLIT_TOKENS
@@ -130,7 +157,10 @@ def qkv_attention(
     x_list.clear()
     shape = tuple(x.shape[:-1]) if x.dim() > 2 else (1, x.shape[0])
     kv_heads = int(kv_heads or heads)
-    groups = head_groups(kv_heads, shape[-1]) if split_heads else 1
+    groups = head_groups(
+        kv_heads, x.numel() // x.shape[-1], device=x.device,
+        heads=heads, head_dim=head_dim, element_size=x.element_size(),
+    ) if split_heads else 1
     # A caller-supplied attention implementation owns each Q/K/V group. In
     # particular, sparse attention cannot consume Sage2's staged quantized
     # tensors, so do not initialize or enter that path for custom dispatch.

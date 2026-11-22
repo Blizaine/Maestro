@@ -122,6 +122,68 @@ class PinnedStagerAllocationGuardTests(unittest.TestCase):
         self.assertIn("4.00 GiB host reserve", output.getvalue())
         self.assertIn("pageable weights", output.getvalue())
 
+
+    def make_unload_all(self, synchronize_error):
+        class FakeCuda:
+            def synchronize(self):
+                if synchronize_error is not None:
+                    raise synchronize_error
+
+        namespace = {
+            "sys": __import__("sys"),
+            "torch": SimpleNamespace(cuda=FakeCuda()),
+        }
+        tree = ast.parse(OFFLOAD_SOURCE.read_text(encoding="utf-8"))
+        offload_class = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "offload"
+        )
+        method = next(
+            node for node in offload_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "unload_all"
+        )
+        exec(
+            compile(
+                ast.fix_missing_locations(
+                    ast.Module(body=[method], type_ignores=[])
+                ),
+                str(OFFLOAD_SOURCE),
+                "exec",
+            ),
+            namespace,
+        )
+        manager_type = type(
+            "FakeOffload",
+            (),
+            {"wait_prefetch": lambda self: None, "unload_all": namespace["unload_all"]},
+        )
+        manager = manager_type()
+        manager.read_ahead = None
+        return manager
+
+    def test_cleanup_does_not_replace_an_active_generation_error(self):
+        cleanup_error = RuntimeError("CUDA cleanup synchronize failed")
+        manager = self.make_unload_all(cleanup_error)
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            with self.assertRaisesRegex(RuntimeError, "original stage 2 error") as raised:
+                try:
+                    raise RuntimeError("original stage 2 error")
+                except RuntimeError:
+                    manager.unload_all()
+                    raise
+
+        self.assertIn("preserving the original error", output.getvalue())
+        self.assertIn("Remaining model unload was skipped", output.getvalue())
+        self.assertIsNone(raised.exception.__cause__)
+
+    def test_cleanup_sync_error_still_propagates_without_an_active_error(self):
+        manager = self.make_unload_all(RuntimeError("cleanup failed"))
+
+        with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+            manager.unload_all()
+
     def test_reserve_is_ten_percent_of_physical_ram_when_larger(self):
         floor = 10 * GIB
         stager, calls = self.make_stager(

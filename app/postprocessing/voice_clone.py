@@ -72,20 +72,21 @@ import torch
 import torchaudio
 
 
-def _ffmpeg_demux_audio(video_path: str, out_wav: str, sample_rate: int = 22050) -> bool:
-    """Extract the video's audio to a mono WAV at the given sample rate.
+def _ffmpeg_demux_audio(
+    video_path: str, out_wav: str, sample_rate: int | None = 22050, *,
+    preserve_layout: bool = False,
+) -> bool:
+    """Extract the first audio stream to a WAV.
     Returns True on success, False if the video had no audio or ffmpeg failed.
     """
     try:
-        result = subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", video_path,
-                "-vn", "-ac", "1", "-ar", str(sample_rate),
-                "-acodec", "pcm_s16le",
-                out_wav,
-            ],
-            capture_output=True, text=True, timeout=300,
-        )
+        command = ["ffmpeg", "-nostdin", "-y", "-i", video_path, "-map", "0:a:0", "-vn"]
+        if not preserve_layout:
+            command.extend(["-ac", "1"])
+        if sample_rate is not None:
+            command.extend(["-ar", str(sample_rate)])
+        command.extend(["-acodec", "pcm_f32le" if preserve_layout else "pcm_s16le", out_wav])
+        result = subprocess.run(command, capture_output=True, text=True, timeout=300)
     except Exception as e:
         print(f"[VoiceClone] ffmpeg demux failed: {e}")
         return False
@@ -189,12 +190,34 @@ def _ffmpeg_remux_audio(video_path: str, new_audio_wav: str) -> bool:
     return False
 
 
+def _load_wav_tensor(path: str) -> tuple[torch.Tensor, int]:
+    import soundfile as sf
+
+    samples, rate = sf.read(path, dtype="float32", always_2d=True)
+    return torch.from_numpy(samples.T.copy()), rate
+
+
+def _write_wav_tensor(path: str, waveform: torch.Tensor, rate: int) -> None:
+    import soundfile as sf
+
+    sf.write(path, waveform.detach().cpu().float().T.numpy(), rate, subtype="FLOAT")
+
+
 def _load_reference_voice(ref_path: str, max_seconds: float = 25.0) -> tuple[torch.Tensor, int]:
     """Load a reference voice file (any format ffmpeg-readable), return
     (mono float32 tensor [1, samples], sample_rate). Trims to max_seconds.
     SeedVC's convert_tensor handles further resampling internally.
     """
-    waveform, sr = torchaudio.load(ref_path)
+    import soundfile as sf
+
+    try:
+        waveform, sr = _load_wav_tensor(ref_path)
+    except sf.LibsndfileError:
+        with tempfile.TemporaryDirectory(prefix="maestro-voice-reference-") as directory:
+            wave_path = os.path.join(directory, "reference.wav")
+            if not _ffmpeg_demux_audio(ref_path, wave_path):
+                raise RuntimeError("Could not decode the singer's voice reference.") from None
+            waveform, sr = _load_wav_tensor(wave_path)
     # Mixdown to mono
     if waveform.ndim == 2 and waveform.shape[0] > 1:
         waveform = waveform.mean(dim=0, keepdim=True)
@@ -308,17 +331,19 @@ def _diarize_audio_for_segments(audio_path: str, num_speakers: Optional[int] = N
     return segments
 
 
-def _remix_vocals_with_background(vocals_wav: str, background_wav: str, out_wav: str) -> str:
+def _remix_vocals_with_background(
+    vocals_wav: str, background_wav: str, out_wav: str, *, preserve_layout: bool = False,
+) -> str:
     """Sum converted vocals with the original separated background (music /
     SFX), aligning sample rate + channels (mono) + length. Writes and returns
     out_wav."""
-    voc, voc_sr = torchaudio.load(vocals_wav)
-    bg, bg_sr = torchaudio.load(background_wav)
+    voc, voc_sr = _load_wav_tensor(vocals_wav)
+    bg, bg_sr = _load_wav_tensor(background_wav)
     if bg_sr != voc_sr:
         bg = torchaudio.functional.resample(bg, bg_sr, voc_sr)
     if voc.ndim == 2 and voc.shape[0] > 1:
         voc = voc.mean(dim=0, keepdim=True)
-    if bg.ndim == 2 and bg.shape[0] > 1:
+    if not preserve_layout and bg.shape[0] > 1:
         bg = bg.mean(dim=0, keepdim=True)
     n = max(voc.shape[-1], bg.shape[-1])
     if voc.shape[-1] < n:
@@ -329,8 +354,26 @@ def _remix_vocals_with_background(vocals_wav: str, background_wav: str, out_wav:
     peak = float(mixed.abs().max())
     if peak > 1.0:
         mixed = mixed / peak  # prevent clipping after the sum
-    torchaudio.save(out_wav, mixed.float(), voc_sr)
+    _write_wav_tensor(out_wav, mixed, voc_sr)
     return out_wav
+
+
+def _save_converted_song(source_wav, converted_wav, destination):
+    import soundfile as sf
+
+    source = sf.info(source_wav)
+    result = subprocess.run(
+        ["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", converted_wav,
+         "-af", f"aresample={source.samplerate},apad,atrim=end_sample={source.frames}",
+         "-ac", str(source.channels), "-c:a", "pcm_s24le", str(destination)],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(f"Could not save converted song: {result.stderr.strip()}")
+    output = sf.info(destination)
+    if output.frames != source.frames or output.samplerate != source.samplerate:
+        raise RuntimeError("The converted song did not preserve the original sample count.")
+    return True
 
 
 def apply_voice_clone_to_file(
@@ -339,6 +382,8 @@ def apply_voice_clone_to_file(
     mode: str = "single",
     diffusion_steps: int = 25,
     cfg_rate: float = 0.5,
+    *,
+    singing_output: str | None = None,
 ) -> bool:
     """Replace the voice(s) in `video_path` using SeedVC voice conversion.
 
@@ -384,14 +429,19 @@ def apply_voice_clone_to_file(
               "to fetch the seed-vc component (github.com/Blizaine/maestro-seedvc)")
         return False
 
-    with tempfile.TemporaryDirectory(prefix="voice_clone_") as tmpdir:
+    from contextlib import ExitStack
+
+    with tempfile.TemporaryDirectory(prefix="voice_clone_") as tmpdir, ExitStack() as runtime:
         # Step 1: demux audio
         source_wav = os.path.join(tmpdir, "source.wav")
         # Demux at 44.1kHz (the RoFormer separator's native rate) instead of
         # SeedVC's lower native rate, so the separated background keeps full-band
         # music quality. SeedVC resamples its own input internally, so the voice
         # conversion is unaffected.
-        if not _ffmpeg_demux_audio(video_path, source_wav, sample_rate=44100):
+        if not _ffmpeg_demux_audio(
+            video_path, source_wav, sample_rate=None if singing_output else 44100,
+            preserve_layout=bool(singing_output),
+        ):
             return False
 
         # Isolate vocals from the background (music / SFX) up front, so we
@@ -408,23 +458,30 @@ def apply_voice_clone_to_file(
             audio_for_conversion = _vocals_path
             print("[VoiceClone] Isolated vocals from background — converting vocals only; will remix over original background.")
         except Exception as e:
+            if singing_output:
+                raise RuntimeError("Could not isolate singing from the instrumental track.") from e
             audio_for_conversion = source_wav
             instrumental_path = None
             print(f"[VoiceClone] Vocal separation unavailable ({e}) — converting the FULL track (background will NOT be preserved).")
 
         # Step 2: ensure SeedVC assets are downloaded + load converter
-        try:
-            _seedvc.download_assets()
-        except Exception as e:
-            print(f"[VoiceClone] SeedVC asset download failed: {e}")
-            return False
-        try:
-            converter = _seedvc.get_model(
-                dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            )
-        except Exception as e:
-            print(f"[VoiceClone] SeedVC model load failed: {e}")
-            return False
+        if singing_output:
+            from postprocessing.seedvc_singing import singing_converter
+
+            converter = runtime.enter_context(singing_converter())
+        else:
+            try:
+                _seedvc.download_assets()
+            except Exception as e:
+                print(f"[VoiceClone] SeedVC asset download failed: {e}")
+                return False
+            try:
+                converter = _seedvc.get_model(
+                    dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                )
+            except Exception as e:
+                print(f"[VoiceClone] SeedVC model load failed: {e}")
+                return False
 
         # SeedVC's class hardcodes `app_vc.device = torch.device("cpu")` at
         # load time (seedvc/__init__.py:175). It's designed to be loaded on
@@ -439,7 +496,7 @@ def apply_voice_clone_to_file(
         # makes inference run on GPU. Without this, voice cloning takes
         # 5-10x longer because SeedVC runs on CPU even though CUDA is
         # available.
-        if torch.cuda.is_available():
+        if not singing_output and torch.cuda.is_available():
             try:
                 gpu_device = torch.device("cuda")
                 moved = 0
@@ -461,7 +518,15 @@ def apply_voice_clone_to_file(
 
         # Step 3: load source audio (the isolated vocals when separation
         # succeeded, else the full track).
-        source_audio, source_sr = torchaudio.load(audio_for_conversion)
+        source_audio, source_sr = _load_wav_tensor(audio_for_conversion)
+        if singing_output:
+            import soundfile as sf
+
+            source_info = sf.info(source_wav)
+            # RoFormer may pad short songs before separation. Keep that tail out
+            # of the conversion and the audio used to index singer segments.
+            source_samples = round(source_info.frames * source_sr / source_info.samplerate)
+            source_audio = source_audio[..., :source_samples]
         if source_audio.ndim == 2 and source_audio.shape[0] > 1:
             source_audio = source_audio.mean(dim=0, keepdim=True)
 
@@ -483,9 +548,7 @@ def apply_voice_clone_to_file(
                 diffusion_steps=diffusion_steps,
                 cfg_rate=cfg_rate,
             )
-            # Save converted audio (stereo from SeedVC; downmix to mono is fine
-            # for our remux). torchaudio.save accepts (channels, samples).
-            torchaudio.save(out_wav, converted.cpu().float(), source_sr)
+            _write_wav_tensor(out_wav, converted, source_sr)
         else:
             # Two-voice mode with diarization. The user has supplied
             # exactly 2 voice references, so we assert num_speakers=2 to
@@ -494,13 +557,15 @@ def apply_voice_clone_to_file(
             # windows. See _diarize_audio_for_segments() docstring.
             segments = _diarize_audio_for_segments(audio_for_conversion, num_speakers=2)
             if not segments:
+                if singing_output:
+                    raise RuntimeError("Could not distinguish the singers in the duet.")
                 print(f"[VoiceClone] No diarized segments — falling back to single-voice with ref[0]")
                 converted = converter.convert_tensor(
                     source_audio=source_audio, source_rate=source_sr,
                     reference_audio=refs[0][0], reference_rate=refs[0][1],
                     output_rate=source_sr, diffusion_steps=diffusion_steps, cfg_rate=cfg_rate,
                 )
-                torchaudio.save(out_wav, converted.cpu().float(), source_sr)
+                _write_wav_tensor(out_wav, converted, source_sr)
             else:
                 # Build speaker→ref mapping by order of first appearance.
                 speaker_to_ref: dict[str, int] = {}
@@ -509,6 +574,8 @@ def apply_voice_clone_to_file(
                         speaker_to_ref[spk] = len(speaker_to_ref)
                         if len(speaker_to_ref) >= 2:
                             break
+                if singing_output and len(speaker_to_ref) != 2:
+                    raise RuntimeError("Could not distinguish two singers in the duet.")
                 print(f"[VoiceClone] Speaker→ref mapping: {speaker_to_ref}")
 
                 # Build output audio: start with original (preserves silence,
@@ -542,6 +609,8 @@ def apply_voice_clone_to_file(
                             diffusion_steps=diffusion_steps, cfg_rate=cfg_rate,
                         )
                     except Exception as e:
+                        if singing_output:
+                            raise RuntimeError(f"Could not convert singing at {start_sec:.2f}s.") from e
                         print(f"[VoiceClone]   conversion failed (keeping original): {e}")
                         skipped_count += 1
                         continue
@@ -563,7 +632,7 @@ def apply_voice_clone_to_file(
                     converted_count += 1
                 print(f"[VoiceClone] Two-voice mode complete: converted={converted_count}, "
                       f"skipped={skipped_count} (non-mapped or too-short segments)")
-                torchaudio.save(out_wav, output_audio.cpu().float(), source_sr)
+                _write_wav_tensor(out_wav, output_audio, source_sr)
 
         # Step 5b: remix converted vocals back over the original background
         # (music / SFX) so the background is preserved. No-op when separation
@@ -571,11 +640,18 @@ def apply_voice_clone_to_file(
         if instrumental_path:
             try:
                 remixed_wav = os.path.join(tmpdir, "remixed.wav")
-                _remix_vocals_with_background(out_wav, instrumental_path, remixed_wav)
+                _remix_vocals_with_background(
+                    out_wav, instrumental_path, remixed_wav, preserve_layout=bool(singing_output),
+                )
                 out_wav = remixed_wav
                 print("[VoiceClone] Remixed converted vocals with original background.")
             except Exception as e:
+                if singing_output:
+                    raise RuntimeError("Could not restore the original instrumental track.") from e
                 print(f"[VoiceClone] Remix failed ({e}) — using converted vocals without background.")
+
+        if singing_output:
+            return _save_converted_song(source_wav, out_wav, singing_output)
 
         # Step 6: remux
         if not _ffmpeg_remux_audio(video_path, out_wav):

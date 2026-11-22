@@ -12,10 +12,10 @@ import shutil
 import subprocess
 import sys
 
-VERSION = "1.4.2"
+VERSION = "1.5.0"
 BASE = f"https://github.com/deepbeepmeep/WGPKernels/releases/download/v{VERSION}/"
 
-# Exact stack combinations documented and validated by the v1.4.2 release.
+# Exact stack combinations documented and validated by the v1.5.0 release.
 # The wheels are `py3-none`, but only these app-supported Python/Torch stacks
 # have release validation: Python 3.10 + Torch 2.7.1/CUDA 12.8 and Python 3.11
 # + Torch 2.10.0/CUDA 13.0.
@@ -24,10 +24,10 @@ _STACK_TAGS = {
     (11, "2.10.0", "13.0"): "cu130",
 }
 _WHEEL_SHA256 = {
-    ("cu128", "win_amd64"): "9b9747595b3e89cec7c8bf74499bf3f36988f5dc23100797f643fcbd4e2feca7",
-    ("cu128", "linux_x86_64"): "6b63bd5434ddad45d45276782872f88fe8015fe9f1ac56b168ea5d48b5c7f5bb",
-    ("cu130", "win_amd64"): "2fa49576514987fd6725b21b6317cfae1e7856ef54fbbeb22e2cfe50e4fcf88b",
-    ("cu130", "linux_x86_64"): "a33354ea1326c57340172eea86dc4a5f3559ba24665f24746eca7d0ad7d9a3c9",
+    ("cu128", "win_amd64"): "3c471e4de8c6dc89653b4bcfaa0ee39cfa1b538e0303f733f5dc02cdb2078335",
+    ("cu128", "linux_x86_64"): "dff268568701dd2485971d5ffcdc29d61577689092f89a558ba557dd69dc1a17",
+    ("cu130", "win_amd64"): "013a406e47cceca81282e73027c602e2f8db9c6d4bfebba61afb39f7b7551893",
+    ("cu130", "linux_x86_64"): "5206cd03c1f9881c4e257f59b0f6d40f131b4cdd960d400e8869db6a70c41406",
 }
 
 

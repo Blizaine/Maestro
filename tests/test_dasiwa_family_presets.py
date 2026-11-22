@@ -87,7 +87,25 @@ class DaSiWaFamilyPresetTests(unittest.TestCase):
                 "torch": SimpleNamespace(bfloat16="bfloat16", float32="float32"),
             },
         )
-        cls.wan_handler = _load_family_handler(WAN_HANDLER)
+        cls.wan_handler = _load_family_handler(
+            WAN_HANDLER,
+            extra_globals={
+                "build_hf_url": _build_hf_url,
+                "test_class_i2v": lambda model_type: model_type == "i2v_2_2",
+                "test_class_t2v": lambda _model_type: False,
+                "test_multitalk": lambda _model_type: False,
+                "test_standin": lambda _model_type: False,
+                "test_lynx": lambda _model_type: False,
+                "test_alpha": lambda _model_type: False,
+                "test_wan_5B": lambda _model_type: False,
+                "test_vace": lambda _model_type: False,
+                "test_svi2pro": lambda _model_type: False,
+                "test_i2v_2_2": lambda model_type: model_type == "i2v_2_2",
+                "test_scail2": lambda _model_type: False,
+                "test_class_1_3B": lambda _model_type: False,
+                "test_oneframe_overlap": lambda model_type: model_type == "i2v_2_2",
+            },
+        )
         cls.wan_classifiers = _load_functions(
             WAN_HANDLER,
             {"test_class_i2v", "test_class_t2v"},
@@ -135,6 +153,16 @@ class DaSiWaFamilyPresetTests(unittest.TestCase):
         self.assertTrue(ltx_caps["returns_audio"])
         self.assertTrue(ltx_caps["lock_inference_steps"])
         self.assertEqual(ltx_caps["visible_phases"], 0)
+
+    def test_wan_two_expert_models_leave_compile_to_global_setting(self):
+        capabilities = self.wan_handler.query_model_def(
+            "i2v_2_2",
+            {"URLs": ["wan-high.safetensors"], "URLs2": ["wan-low.safetensors"]},
+        )
+
+        self.assertTrue(capabilities["no_steps_skipping"])
+        self.assertTrue(capabilities["multiple_submodels"])
+        self.assertNotIn("compile", capabilities)
 
     def test_family_settings_match_distillation_modes(self):
         turbo = _load_default("dasiwa_krea2_turbo.json")

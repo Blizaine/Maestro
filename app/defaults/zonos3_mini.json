@@ -1,0 +1,20 @@
+{
+    "model": {
+        "name": "TTS ZONOS3 Mini (Experimental)",
+        "architecture": "zonos3_mini",
+        "description": "Multilingual speech in 43 languages with 27 built-in voices, reference voice cloning, emotion and delivery controls, and multi-speaker dialogue.",
+        "URLs": [
+            "https://huggingface.co/DeepBeepMeep/TTS/resolve/87b4ea98d666a4f97eaaef4bfeb4e34975d7a109/ZONOS3_Mini_bf16.safetensors"
+        ]
+    },
+    "prompt": "Hello there. It's lovely to finally meet you. I've heard so much about your work, and I'd love to hear how the new project is going.",
+    "audio_prompt_type": "",
+    "duration_seconds": 60,
+    "pause_seconds": 0.3,
+    "temperature": 0.75,
+    "top_k": 80,
+    "top_p": 0.69,
+    "guidance_scale": 1.0,
+    "num_inference_steps": 1,
+    "prompt_enhancer": ""
+}

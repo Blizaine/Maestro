@@ -39,6 +39,8 @@ IMAGE_PDD_SIGMAS = (
     0.0,
 )
 IMAGE_PDD_STEPS = len(IMAGE_PDD_SIGMAS) - 1
+IMAGE_SHIFT = 12.0
+IMAGE_HEAD_COUNT = IMAGE_PDD_STEPS
 IMAGE_PATCH_SIZE = (1, 2, 2)
 IMAGE_LATENT_CHANNELS = 24
 IMAGE_OUTPUT_CHANNELS = IMAGE_LATENT_CHANNELS * 4
@@ -47,6 +49,40 @@ IMAGE_MAX_REFERENCES = 16
 IMAGE_REFERENCE_CANVAS_MULTIPLE = 32
 IMAGE_REFERENCE_MAX_PIXELS = 4 * 1024 * 1024
 IMAGE_MAX_PIXELS = 17_000_000
+
+
+def h3_image_sigmas(steps: int) -> tuple[float, ...]:
+    """Return the native six-step grid or the pDMD shift-12 grid, with terminal zero."""
+
+    steps = _integer_setting("Sampling steps", steps)
+    if steps == IMAGE_PDD_STEPS:
+        return IMAGE_PDD_SIGMAS
+    if steps <= 0:
+        raise ValueError("MiniMax H3 Image sampling steps must be positive.")
+    base = torch.linspace(1.0, 0.0, steps + 1, dtype=torch.float32, device="cpu")[:-1]
+    shifted = IMAGE_SHIFT * base / (1.0 + (IMAGE_SHIFT - 1.0) * base)
+    return tuple(float(value) for value in shifted.tolist()) + (0.0,)
+
+
+def h3_image_head_plans(sigmas: Sequence[float]) -> torch.Tensor:
+    """Mix the six native PDD output heads across each requested sigma interval."""
+
+    values = torch.as_tensor(sigmas, dtype=torch.float64, device="cpu").flatten()
+    if values.numel() < 2 or not torch.isfinite(values).all():
+        raise ValueError("MiniMax H3 Image sigmas must be a finite schedule with a terminal point.")
+    if not torch.isclose(values[-1], values.new_tensor(0.0), atol=1e-7, rtol=0.0):
+        raise ValueError("MiniMax H3 Image schedules must include terminal sigma zero.")
+    if torch.any(values[:-1] < values[1:]) or torch.any(values < 0.0) or torch.any(values > 1.0):
+        raise ValueError("MiniMax H3 Image sigmas must descend from 1 to 0.")
+    grid = torch.tensor(IMAGE_PDD_SIGMAS, dtype=torch.float64, device="cpu")
+    plans = []
+    for high, low in zip(values[:-1], values[1:]):
+        overlap = (torch.minimum(grid[:-1], high) - torch.maximum(grid[1:], low)).clamp_min_(0.0)
+        total = overlap.sum()
+        if total <= 0:
+            raise ValueError("MiniMax H3 Image sigma interval does not overlap the native six-head grid.")
+        plans.append((overlap / total).to(dtype=torch.float32))
+    return torch.stack(plans, dim=0)
 
 
 def _single_image_latent(value, *, name: str) -> torch.Tensor:
@@ -163,26 +199,39 @@ def build_image_packed_sequence(
 
 def _pdd_interval_head(
     packed_output: torch.Tensor,
-    step_index: int,
+    step_index: int | None = None,
+    *,
+    head_weights: Sequence[float] | torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Select one official H3 Image interval's base-plus-offset head."""
+    """Combine native H3 Image heads for one interval in the requested schedule."""
 
-    if not 0 <= int(step_index) < IMAGE_PDD_STEPS:
-        raise ValueError(
-            f"MiniMax H3 Image step index must be in [0,{IMAGE_PDD_STEPS - 1}], "
-            f"got {step_index}."
-        )
-    if packed_output.shape[-1] != IMAGE_OUTPUT_CHANNELS * IMAGE_PDD_STEPS:
+    if packed_output.shape[-1] != IMAGE_OUTPUT_CHANNELS * IMAGE_HEAD_COUNT:
         raise ValueError(
             "MiniMax H3 Image checkpoint must expose six stacked FP32 heads "
-            f"({IMAGE_OUTPUT_CHANNELS * IMAGE_PDD_STEPS} output rows); "
+            f"({IMAGE_OUTPUT_CHANNELS * IMAGE_HEAD_COUNT} output rows); "
             f"got {packed_output.shape[-1]}."
         )
-    heads = packed_output.reshape(*packed_output.shape[:-1], IMAGE_PDD_STEPS, IMAGE_OUTPUT_CHANNELS)
+    if head_weights is None:
+        if step_index is None or not 0 <= int(step_index) < IMAGE_PDD_STEPS:
+            raise ValueError(
+                f"MiniMax H3 Image step index must be in [0,{IMAGE_PDD_STEPS - 1}], "
+                f"got {step_index}."
+            )
+        weights = torch.zeros(IMAGE_HEAD_COUNT, dtype=torch.float32, device=packed_output.device)
+        weights[int(step_index)] = 1.0
+    else:
+        weights = torch.as_tensor(head_weights, dtype=torch.float32, device=packed_output.device).flatten()
+        if weights.numel() != IMAGE_HEAD_COUNT or not torch.isfinite(weights).all() or torch.any(weights < 0.0):
+            raise ValueError(f"MiniMax H3 Image head weights must be {IMAGE_HEAD_COUNT} finite nonnegative values.")
+        weight_sum = weights.sum()
+        if not torch.isclose(weight_sum, weight_sum.new_tensor(1.0), atol=1e-5, rtol=1e-5):
+            raise ValueError("MiniMax H3 Image head weights must sum to one.")
+    heads = packed_output.reshape(*packed_output.shape[:-1], IMAGE_HEAD_COUNT, IMAGE_OUTPUT_CHANNELS)
     base = heads[..., 0, :]
-    # Head 0 is the full prediction. Heads 1–5 are interval corrections. The
-    # pinned six-knot sigma schedule spans exactly one bank interval per call.
-    return base if step_index == 0 else base + heads[..., int(step_index), :]
+    corrections = heads[..., 1:, :]
+    correction_weights = weights[1:].view(*([1] * (corrections.ndim - 2)), IMAGE_HEAD_COUNT - 1, 1)
+    # Head 0 stores the common prediction; heads 1–5 store relative corrections.
+    return base + torch.sum(corrections * correction_weights, dim=-2)
 
 
 def _patchify_reference_rows(latent: torch.Tensor, seed: int) -> torch.Tensor:
@@ -297,6 +346,7 @@ class MiniMaxH3ImageRuntime:
         sigma: float,
         step_index: int,
         reference_seed: int = 0,
+        head_weights: Sequence[float] | torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         """Predict the data-ward H3 velocity for the target image latent.
 
@@ -387,7 +437,11 @@ class MiniMaxH3ImageRuntime:
             raise RuntimeError("The native MiniMax H3 Image transformer must remain audio-free.")
         target_row_count = target_rows.shape[0]
         target_output = video_output[:, -target_row_count:]
-        velocity_rows = _pdd_interval_head(target_output, int(step_index))[0]
+        velocity_rows = _pdd_interval_head(
+            target_output,
+            int(step_index),
+            head_weights=head_weights,
+        )[0]
         return unpatchify_video_tokens(
             velocity_rows,
             num_latent_frames=1,
@@ -437,8 +491,8 @@ class MiniMaxH3ImageRuntime:
         batch_size = _integer_setting("Batch size", batch_size)
         width = _integer_setting("Image width", width)
         height = _integer_setting("Image height", height)
-        if steps != IMAGE_PDD_STEPS:
-            raise ValueError(f"MiniMax H3 Image requires exactly {IMAGE_PDD_STEPS} sampling steps.")
+        if steps not in (2, 4, IMAGE_PDD_STEPS):
+            raise ValueError("MiniMax H3 Image supports 2 or 4 pDMD steps, or its native 6-step schedule.")
         if batch_size <= 0:
             raise ValueError("MiniMax H3 Image batch size must be positive.")
         if width <= 0 or height <= 0 or width % 32 or height % 32:
@@ -515,7 +569,9 @@ class MiniMaxH3ImageRuntime:
         if prompt_embeds is None or text_token_tags is None or self._interrupt:
             return None
 
-        total_steps = IMAGE_PDD_STEPS * batch_size
+        sigmas = h3_image_sigmas(steps)
+        head_plans = h3_image_head_plans(sigmas)
+        total_steps = steps * batch_size
         if callback is not None:
             callback(-1, None, True, override_num_inference_steps=total_steps)
 
@@ -534,9 +590,7 @@ class MiniMaxH3ImageRuntime:
                 device="cpu",
             ).to(device=device)
 
-            for step_index, (sigma, next_sigma) in enumerate(
-                zip(IMAGE_PDD_SIGMAS[:-1], IMAGE_PDD_SIGMAS[1:])
-            ):
+            for step_index, (sigma, next_sigma) in enumerate(zip(sigmas[:-1], sigmas[1:])):
                 if self._interrupt:
                     return None
                 velocity = self.predict_velocity(
@@ -547,6 +601,7 @@ class MiniMaxH3ImageRuntime:
                     sigma=sigma,
                     step_index=step_index,
                     reference_seed=base_seed,
+                    head_weights=head_plans[step_index],
                 )
                 if velocity is None or self._interrupt:
                     return None
@@ -558,7 +613,7 @@ class MiniMaxH3ImageRuntime:
                     dtype=latents.dtype,
                 )
                 if callback is not None:
-                    callback(image_index * IMAGE_PDD_STEPS + step_index, None, False)
+                    callback(image_index * steps + step_index, None, False)
                 if self._interrupt:
                     return None
 
@@ -689,7 +744,10 @@ def model_factory(
 __all__ = [
     "IMAGE_PDD_SIGMAS",
     "IMAGE_PDD_STEPS",
+    "IMAGE_SHIFT",
     "MiniMaxH3ImageRuntime",
+    "h3_image_head_plans",
+    "h3_image_sigmas",
     "build_image_packed_sequence",
     "model_factory",
 ]

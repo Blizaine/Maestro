@@ -2,8 +2,8 @@
     "model": {
         "name": "MiniMax H3 Image (Experimental)",
         "architecture": "h3_image",
-        "description": "Six-step text-to-image and editing with up to 16 ordered references. Native canvases up to about 16 megapixels. Powered by MiniMax-H3-Image.",
-        "selector_help": "Powered by MiniMax-H3-Image. Generate from text or use ordered source images in Generate. The INT8 checkpoint and image VAE use about 22 GB of disk and reuse Maestro’s H3 32B text encoder. Larger canvases and reference sets need more memory.",
+        "description": "Text-to-image and editing with up to 16 ordered references. Choose the native six-step recipe or a two- or four-step pDMD profile. Native canvases reach about 16 megapixels.",
+        "selector_help": "Generate from text or use ordered source images in Generate. Select a pDMD preset in Advanced to load its accelerator. Larger canvases, reference sets and accelerator adapters need more VRAM. The INT8 checkpoint and image VAE use about 22 GB of disk and reuse Maestro’s H3 32B text encoder.",
         "URLs": ["minimax_h3_image_pruned_int8_convrot.safetensors"],
         "download_sources": {
             "minimax_h3_image_pruned_int8_convrot.safetensors": {

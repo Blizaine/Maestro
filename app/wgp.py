@@ -2246,6 +2246,7 @@ def update_generation_status(html_content):
 
 family_handlers = ["models.wan.wan_handler", "models.wan.ovi_handler", "models.wan.df_handler", "models.hyvideo.hunyuan_handler", "models.ltx_video.ltxv_handler", "models.ltx2.ltx2_handler", "models.ltx25.ltx25_handler", "models.ltx2.scenema_audio_handler", "models.ltx2.ltx_audio_tts_handler", "models.minimax_h3.minimax_h3_handler", "models.minimax_h3.image_handler", "models.longcat.longcat_handler", "models.flux.flux_handler", "models.flux3.flux3_handler", "models.moss_image.moss_image_handler", "models.fibo2.fibo2_handler", "models.qwen.qwen_handler", "models.qwen21.qwen21_handler", "models.kandinsky5.kandinsky_handler",  "models.z_image.z_image_handler", "models.krea2.krea2_handler", "models.hidream.hidream_handler", "models.TTS.ace_step_handler", "models.TTS.chatterbox_handler", "models.TTS.qwen3_handler", "models.TTS.yue_handler", "models.TTS.yue2.yue2_handler", "models.TTS.heartmula_handler", "models.TTS.kugelaudio_handler", "models.TTS.minimax_music3_handler", "models.TTS.index_tts2_handler", "models.TTS.fish_audio.fish_audio_handler"]
 family_handlers.append("models.TTS.fish_audio_small.fish_audio_small_handler")
+family_handlers.append("models.TTS.zonos3.zonos3_handler")
 family_handlers.append("models.hy_nomas.hy_nomas_handler")
 DEFAULT_LORA_ROOT = "loras"
 
@@ -7244,6 +7245,7 @@ def concatenate_multi_clip_videos(
     """
     import subprocess
     import math
+    import json
     import time
     from services.video_encoding import get_video_encoding as _get_video_encoding
 
@@ -7304,6 +7306,91 @@ def concatenate_multi_clip_videos(
         return False
 
     n = len(valid_paths)
+
+    # ffmpeg's concat filter requires identical frame dimensions and sample
+    # aspect ratios. Director clips can differ when they were rendered with
+    # different LTX resolutions, so fit each input into one shared canvas.
+    # Base the canvas on the first clip's display aspect ratio (the project's
+    # established orientation) and the largest input dimension. This keeps
+    # the expected output shape while retaining detail from larger clips.
+    clip_geometry = []
+    try:
+        for path in valid_paths:
+            geometry_probe = subprocess.run(
+                [
+                    ffprobe_bin, "-v", "error", "-select_streams", "v:0",
+                    "-show_entries",
+                    "stream=width,height,sample_aspect_ratio",
+                    "-of", "json", path.replace("\\", "/"),
+                ],
+                capture_output=True, text=True, timeout=10,
+            )
+            if geometry_probe.returncode != 0:
+                raise ValueError(geometry_probe.stderr or "ffprobe failed")
+            streams = json.loads(geometry_probe.stdout).get("streams") or []
+            if not streams:
+                raise ValueError("ffprobe found no video stream")
+            stream = streams[0]
+            width = int(stream["width"])
+            height = int(stream["height"])
+            if width <= 0 or height <= 0:
+                raise ValueError("ffprobe returned invalid video dimensions")
+            sample_aspect_ratio = stream.get("sample_aspect_ratio") or "1:1"
+            try:
+                sar_num, sar_den = (
+                    float(part) for part in sample_aspect_ratio.split(":", 1)
+                )
+                sar = sar_num / sar_den if sar_num > 0 and sar_den > 0 else 1.0
+            except (TypeError, ValueError, ZeroDivisionError):
+                sar = 1.0
+            if not math.isfinite(sar) or sar <= 0:
+                sar = 1.0
+            clip_geometry.append((width, height, sar))
+
+        first_width, first_height, first_sar = clip_geometry[0]
+        canvas_aspect = first_width * first_sar / first_height
+        longest_input_edge = max(
+            max(width * sar, height) for width, height, sar in clip_geometry
+        )
+
+        def _even_dimension(value):
+            return max(2, int(round(float(value) / 2.0) * 2))
+
+        if canvas_aspect >= 1.0:
+            canvas_width = _even_dimension(longest_input_edge)
+            canvas_height = _even_dimension(canvas_width / canvas_aspect)
+        else:
+            canvas_height = _even_dimension(longest_input_edge)
+            canvas_width = _even_dimension(canvas_height * canvas_aspect)
+    except Exception as exc:
+        # Preserve legacy concat behavior if ffprobe is unavailable or cannot
+        # inspect an otherwise decodable input.
+        print(
+            "[Multi-Clip] Could not inspect clip geometry; using direct concat: "
+            f"{exc}"
+        )
+        canvas_width = canvas_height = None
+
+    if canvas_width and canvas_height and len(set(clip_geometry)) > 1:
+        video_filter_prefix = ";".join(
+            (
+                f"[{index}:v]"
+                "scale='max(2,trunc(iw*if(gt(sar,0),sar,1)/2)*2)':ih,setsar=1,"
+                f"scale={canvas_width}:{canvas_height}:"
+                "force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                f"pad={canvas_width}:{canvas_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"setsar=1,setpts=PTS-STARTPTS[normv{index}]"
+            )
+            for index in range(n)
+        ) + ";"
+        video_streams = [f"[normv{index}]" for index in range(n)]
+        print(
+            f"[Multi-Clip] Normalizing video to {canvas_width}x{canvas_height} "
+            "(square pixels, aspect preserved)"
+        )
+    else:
+        video_filter_prefix = ""
+        video_streams = [f"[{index}:v]" for index in range(n)]
 
     try:
         audio_start_sec = float(audio_start_sec or 0)
@@ -7465,27 +7552,37 @@ def concatenate_multi_clip_videos(
     # Build filter_complex string
     if use_clip_audio:
         # Concat both video and audio streams from each clip
-        filter_inputs = "".join(f"[{i}:v][{i}:a]" for i in range(n))
+        filter_inputs = "".join(
+            f"{video_streams[i]}[{i}:a]" for i in range(n)
+        )
         if video_duration_sec is not None:
             filter_str = (
-                f"{filter_inputs}concat=n={n}:v=1:a=1[joinedv][joineda];"
+                f"{video_filter_prefix}{filter_inputs}"
+                f"concat=n={n}:v=1:a=1[joinedv][joineda];"
                 f"[joinedv]trim=duration={video_duration_sec:.6f},setpts=PTS-STARTPTS[outv];"
                 f"[joineda]atrim=duration={video_duration_sec:.6f},asetpts=PTS-STARTPTS[outa]"
             )
         else:
-            filter_str = f"{filter_inputs}concat=n={n}:v=1:a=1[outv][outa]"
+            filter_str = (
+                f"{video_filter_prefix}{filter_inputs}"
+                f"concat=n={n}:v=1:a=1[outv][outa]"
+            )
         cmd += ["-filter_complex", filter_str]
         cmd += ["-map", "[outv]", "-map", "[outa]"]
         cmd += ["-c:a", "aac"]
     else:
-        filter_inputs = "".join(f"[{i}:v]" for i in range(n))
+        filter_inputs = "".join(video_streams)
         if video_duration_sec is not None:
             filter_str = (
-                f"{filter_inputs}concat=n={n}:v=1:a=0[joinedv];"
+                f"{video_filter_prefix}{filter_inputs}"
+                f"concat=n={n}:v=1:a=0[joinedv];"
                 f"[joinedv]trim=duration={video_duration_sec:.6f},setpts=PTS-STARTPTS[outv]"
             )
         else:
-            filter_str = f"{filter_inputs}concat=n={n}:v=1:a=0[outv]"
+            filter_str = (
+                f"{video_filter_prefix}{filter_inputs}"
+                f"concat=n={n}:v=1:a=0[outv]"
+            )
         if audio_path and (audio_start_sec > 0 or pad_audio):
             audio_filters = []
             if audio_start_sec > 0:
@@ -8865,6 +8962,19 @@ def generate_video(
         else:
             prompts = prompt.split("\n")
             prompts = [part.strip() for part in prompts if len(part.strip())>0]
+    if (
+        model_def.get("omni_reference")
+        and str(model_def.get("architecture") or "").startswith("minimax_h3")
+    ):
+        from models.minimax_h3.ref2va import resolve_ref2va_visual_groups
+
+        references = (
+            minimax_h3_runtime_references
+            if minimax_h3_runtime_references is not None
+            else minimax_h3_references
+        )
+        if references:
+            minimax_h3_runtime_references = resolve_ref2va_visual_groups(prompts, references)
     if len(prompts) > 1:
         print(f"[Prompt Split] {len(prompts)} prompts from multi-line input (multi_prompts_gen_type={multi_prompts_gen_type})")
     parsed_keep_frames_video_source= max_source_video_frames if len(keep_frames_video_source) ==0 else int(keep_frames_video_source) 
@@ -9431,6 +9541,14 @@ def generate_video(
         source_video_frames_count = 0  # number of frames to use in source video (processing starts source_video_overlap_frames_count frames before )
         frames_already_processed = []
         frames_already_processed_count = 0
+        window_video_writer = None
+        bounded_window_output = (
+            sliding_window and video_source is None and not trim_tail_frames
+            and _progressive_pad_info is None and not MMAudio_setting
+            and not model_def.get("world_model")
+            and server_config.get("video_container", "mp4") == "mp4"
+            and shutil.which("ffmpeg") is not None
+        )
         overlapped_latents = None
         context_scale = None
         window_no = 0
@@ -10851,9 +10969,24 @@ def generate_video(
                     output_frame_count = None
                     any_mmaudio = False
                 else:
-                    frames_already_processed.append(sample)
                     frames_already_processed_count += sample.shape[1]
-                    output_video_frames = frames_already_processed
+                    if bounded_window_output:
+                        from shared.utils.window_video_writer import WindowVideoWriter
+
+                        if window_video_writer is None:
+                            window_video_writer = WindowVideoWriter(fps=output_fps, directory=save_path)
+                        window_video_writer.append(
+                            sample,
+                            encode=lambda frames, filename: save_video(
+                                tensor=[frames], save_file=filename, fps=output_fps,
+                                nrow=1, normalize=True, value_range=(-1, 1),
+                                codec_type=server_config.get("video_output_codec"), container="mp4",
+                            ),
+                        )
+                        output_video_frames = None
+                    else:
+                        frames_already_processed.append(sample)
+                        output_video_frames = frames_already_processed
                     output_frame_count = frames_already_processed_count
                     sample = None
                     any_mmaudio = MMAudio_setting != 0 and mmaudio_enabled and output_frame_count >= fps
@@ -10940,7 +11073,10 @@ def generate_video(
                 elif len(control_audio_tracks) > 0 or len(source_audio_tracks) > 0 or output_new_audio_filepath is not None or any_mmaudio or output_new_audio_data is not None or audio_source is not None:
                     video_path = os.path.join(save_path, file_name)
                     save_path_tmp = video_path.rsplit('.', 1)[0] + f"_tmp.{container}"
-                    save_video( tensor=output_video_frames, save_file=save_path_tmp, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1), codec_type = server_config.get("video_output_codec", None), container=container)
+                    if window_video_writer is not None:
+                        window_video_writer.write_video(save_path_tmp)
+                    else:
+                        save_video( tensor=output_video_frames, save_file=save_path_tmp, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1), codec_type = server_config.get("video_output_codec", None), container=container)
                     output_new_audio_temp_filepath = None
                     try:
                         new_audio_added_from_audio_start =  reset_control_aligment or full_generated_audio is not None # if not beginning of audio will be skipped
@@ -10996,7 +11132,10 @@ def generate_video(
                                 print(f"  [WARN] Could not delete temp audio file (locked): {output_new_audio_temp_filepath}")
 
                 else:
-                    save_video( tensor=output_video_frames, save_file=video_path, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1),  codec_type= server_config.get("video_output_codec", None), container= container)
+                    if window_video_writer is not None:
+                        window_video_writer.write_video(video_path)
+                    else:
+                        save_video( tensor=output_video_frames, save_file=video_path, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1),  codec_type= server_config.get("video_output_codec", None), container= container)
 
                 # Register primary media immediately after its successful
                 # write. Gallery registration happens later, after metadata
@@ -11501,6 +11640,8 @@ def generate_video(
 
                 send_cmd("output")
 
+        if window_video_writer is not None:
+            window_video_writer.close()
         seed = set_seed(-1)
     _cleanup_generation_resources()
 

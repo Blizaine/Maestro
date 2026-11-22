@@ -266,6 +266,170 @@ class VideoEncodingCommandTests(unittest.TestCase):
                         timeout=30,
                     )
 
+    @unittest.skipUnless(FFMPEG and FFPROBE, "ffmpeg and ffprobe are required")
+    def test_mixed_clip_dimensions_and_sample_aspect_join_with_soundtrack(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            clip_specs = (
+                ("red", 96, 54, "1/1"),
+                ("blue", 160, 90, "1/1"),
+                ("green", 128, 72, "1/1"),
+                ("yellow", 64, 96, "1/1"),
+                # The source pixels are 4:3, but its 2:1 SAR makes the
+                # displayed image 8:3. Re-join should preserve that shape.
+                ("magenta", 64, 48, "2/1"),
+            )
+            clip_paths = []
+            for index, (color, width, height, sar) in enumerate(clip_specs):
+                clip_path = Path(temp_dir) / f"clip{index}.mp4"
+                subprocess.run(
+                    [
+                        FFMPEG, "-y", "-f", "lavfi", "-i",
+                        f"color=c={color}:s={width}x{height}:r=4:d=0.5",
+                        "-vf", f"setsar={sar}", "-frames:v", "2", "-an",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        str(clip_path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=30,
+                )
+                clip_paths.append(str(clip_path))
+
+            soundtrack = Path(temp_dir) / "soundtrack.wav"
+            subprocess.run(
+                [
+                    FFMPEG, "-y", "-f", "lavfi", "-i",
+                    "sine=frequency=440:sample_rate=44100:duration=2.5",
+                    "-c:a", "pcm_s16le", str(soundtrack),
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=30,
+            )
+
+            output_path = Path(temp_dir) / "joined.mp4"
+            concatenate = _load_concat_function({})
+            with mock.patch.dict(
+                os.environ,
+                {"FFMPEG_BINARY": FFMPEG, "FFPROBE_BINARY": FFPROBE},
+            ):
+                self.assertTrue(
+                    concatenate(clip_paths, str(output_path), str(soundtrack))
+                )
+
+            probe = subprocess.run(
+                [
+                    FFPROBE, "-v", "error", "-count_frames", "-show_streams",
+                    "-show_entries",
+                    "stream=codec_type,width,height,sample_aspect_ratio,nb_read_frames",
+                    "-of", "json", str(output_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=30,
+            )
+            streams = json.loads(probe.stdout)["streams"]
+            video = next(stream for stream in streams if stream["codec_type"] == "video")
+            self.assertEqual((video["width"], video["height"]), (160, 90))
+            self.assertEqual(video["sample_aspect_ratio"], "1:1")
+            self.assertEqual(int(video["nb_read_frames"]), 10)
+            self.assertTrue(any(stream["codec_type"] == "audio" for stream in streams))
+
+            last_frame = subprocess.run(
+                [
+                    FFMPEG, "-v", "error", "-i", str(output_path),
+                    "-vf", r"select=eq(n\,9)", "-vsync", "0", "-frames:v", "1",
+                    "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+                ],
+                capture_output=True,
+                timeout=30,
+            )
+            self.assertEqual(last_frame.returncode, 0, last_frame.stderr.decode(errors="replace"))
+            frame = last_frame.stdout
+            self.assertEqual(len(frame), 160 * 90 * 3)
+
+            def pixel(x, y):
+                offset = (y * 160 + x) * 3
+                return tuple(frame[offset:offset + 3])
+
+            self.assertLess(max(pixel(80, 10)), 30, "wide source should have top letterboxing")
+            red, green, blue = pixel(80, 45)
+            self.assertGreater(red, 150)
+            self.assertLess(green, 100)
+            self.assertGreater(blue, 100)
+
+
+@unittest.skipUnless(FFMPEG and FFPROBE, "requires FFmpeg")
+class SoundtrackConversionTests(unittest.TestCase):
+    def test_converted_song_preserves_exact_source_samples(self):
+        import soundfile as sf
+        import numpy as np
+
+        path = APP / "postprocessing" / "voice_clone.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        func = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                    and node.name == "_save_converted_song")
+        namespace = {"subprocess": subprocess}
+        exec(compile(ast.Module(body=[func], type_ignores=[]), str(path), "exec"), namespace)
+        with tempfile.TemporaryDirectory() as work:
+            source, converted, output = (Path(work) / (name + ".wav") for name in ("source", "converted", "output"))
+            sf.write(source, np.zeros((23456, 2)), 44_100)
+            sf.write(converted, np.zeros((7500, 2)), 24_000)
+            self.assertTrue(namespace["_save_converted_song"](source, str(converted), output))
+            self.assertEqual(sf.info(output).frames, 23456)
+            self.assertEqual(sf.info(output).samplerate, 44_100)
+            self.assertEqual(sf.info(output).channels, 2)
+
+    def test_stereo_instrumental_stays_stereo_after_vocal_remix(self):
+        import numpy as np
+        import soundfile as sf
+        from postprocessing.voice_clone import _remix_vocals_with_background
+
+        with tempfile.TemporaryDirectory() as work:
+            vocals, backing, output = (Path(work) / (name + ".wav") for name in ("vocals", "backing", "output"))
+            sf.write(vocals, np.full(128, 0.25), 24_000, subtype="FLOAT")
+            sf.write(backing, np.tile([0.125, -0.125], (128, 1)), 24_000, subtype="FLOAT")
+            _remix_vocals_with_background(vocals, backing, output, preserve_layout=True)
+            audio, _ = sf.read(output)
+            np.testing.assert_allclose(audio, np.tile([0.375, 0.125], (128, 1)))
+
+
+@unittest.skipUnless(FFMPEG and FFPROBE, "requires FFmpeg")
+class WindowVideoWriterTests(unittest.TestCase):
+    def test_cumulative_output_uses_every_window_without_reencoding_prior_frames(self):
+        from shared.utils.window_video_writer import WindowVideoWriter
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            writer = WindowVideoWriter(fps=24, directory=work, ffmpeg=FFMPEG)
+            encodes = []
+
+            def encode(frames, filename):
+                encodes.append(filename)
+                subprocess.run([
+                    FFMPEG, "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=96x64:r=24",
+                    "-frames:v", str(frames.shape[1]), "-c:v", "libx264", "-pix_fmt", "yuv420p", filename,
+                ], capture_output=True, check=True, timeout=30)
+
+            for index, count in enumerate((7, 11, 9), 1):
+                writer.append(SimpleNamespace(shape=(3, count, 64, 96)), encode=encode)
+                writer.write_video(str(root / f"output-{index}.mp4"))
+            writer.close()
+            self.assertEqual(len(encodes), 3)
+            self.assertFalse(writer.root.exists())
+            probe = subprocess.run([
+                FFPROBE, "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=nb_frames,r_frame_rate", "-of", "json",
+                str(root / "output-3.mp4"),
+            ], capture_output=True, check=True, timeout=30)
+            stream = json.loads(probe.stdout)["streams"][0]
+            self.assertEqual(int(stream["nb_frames"]), 27)
+            self.assertEqual(stream["r_frame_rate"], "24/1")
+
 
 if __name__ == "__main__":
     unittest.main()

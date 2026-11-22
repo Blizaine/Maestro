@@ -204,7 +204,8 @@ class family_handler():
         override_text_encoder_folder = model_def.get("text_encoder_folder", None)
         if "URLs2" in model_def:
             extra_model_def["no_steps_skipping"] = True
-            extra_model_def["compile"] = ["transformer","transformer2"]
+            # Leave compilation to WanGP's global setting. A model-level
+            # override here defeats Compile=None on Windows ROCm installs.
         text_encoder_folder = "umt5-xxl"
         text_encoder_urls = [
             build_hf_url("DeepBeepMeep/Wan2.1", text_encoder_folder, "models_t5_umt5-xxl-enc-bf16.safetensors"),

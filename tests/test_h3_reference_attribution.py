@@ -188,6 +188,32 @@ class H3ReferenceAttributionTests(unittest.TestCase):
         self.assertIn("<Audio 2> is the voice-timbre reference for <Subject 2>", aligned)
         self.assertIn("<Audio 1> is the voice-timbre reference for <Subject 1>", aligned)
 
+    def test_explicit_subject_can_pair_a_full_body_image_and_portrait(self):
+        references = [
+            {"type": "image", "path": "body.png", "role": "full-body turnaround"},
+            {"type": "image", "path": "face.png", "role": "facial reference"},
+            character_image("Sam", "sam"),
+        ]
+        prompt = (
+            "subject_definitions: <Subject 1> is Alex from <Picture 1> and <Picture 2>. "
+            "<Subject 2> is Sam from <Picture 3>.\n"
+            "detailed_description: <Subject 1> Alex says <d>Hello.</d>"
+        )
+        aligned, items, _maps = align_ref2va_voice_reference_order(prompt, references)
+        self.assertIn("<Picture 1> and <Picture 2>", aligned)
+        self.assertEqual([item.get("_h3_visual_group") for item in items], [0, 0, None])
+        next_window, _items, _maps = align_ref2va_voice_reference_order(
+            "detailed_description: <Subject 2> Sam says <d>Hi.</d>", items,
+        )
+        self.assertIn("<Subject 2> Sam says", next_window)
+
+    def test_same_subject_cannot_merge_distinct_saved_character_ids(self):
+        prompt = "subject_definitions: <Subject 1> is from <Picture 1> and <Picture 2>."
+        with self.assertRaisesRegex(H3SpeakerBindingError, "different saved characters"):
+            align_ref2va_voice_reference_order(
+                prompt, [character_image("Alex", "alex"), character_image("Sam", "sam")],
+            )
+
     def test_conflicting_or_ambiguous_subject_definitions_fail_early(self):
         references = [
             character_image("Alex", "alex"),

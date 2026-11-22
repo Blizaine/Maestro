@@ -153,6 +153,23 @@ class TestAttentionKit(unittest.TestCase):
         self._attention_kit_offload_patch.stop()
         self._attention_offload_patch.stop()
 
+    def test_auto_head_groups_use_the_budget_and_reset_between_jobs(self):
+        gpu = torch.device("cuda")
+        try:
+            with mock.patch.object(torch.cuda, "is_current_stream_capturing", return_value=False), \
+                 mock.patch.object(torch.cuda, "memory_reserved", return_value=0), \
+                 mock.patch.object(torch.cuda, "memory_allocated", return_value=0), \
+                 mock.patch.object(torch.cuda, "mem_get_info", return_value=(8 << 30, 24 << 30)) as memory:
+                _ATTENTION_KIT.configure(-1)
+                self.assertEqual(_ATTENTION_KIT.head_groups(32, 65_536, device=gpu), 1)
+                memory.return_value = (1 << 30, 24 << 30)
+                self.assertEqual(_ATTENTION_KIT.head_groups(32, 65_536, device=gpu), 1)
+                _ATTENTION_KIT.configure(-1)
+                self.assertEqual(_ATTENTION_KIT.head_groups(32, 65_536, device=gpu), 16)
+                self.assertEqual(_ATTENTION_KIT.head_groups(32, 65_536, device=torch.device("cpu")), 1)
+        finally:
+            _ATTENTION_KIT.configure(0)
+
     def test_head_groups_are_cached_and_use_head_divisors(self):
         with mock.patch.object(_ATTENTION_KIT, "MIN_SPLIT_TOKENS", 1):
             self.assertEqual(_ATTENTION_KIT.head_groups(56, 16, level=2), 8)

@@ -33,6 +33,7 @@ import torch.nn.functional as F
 from .sol_attention import MiniMaxH3SolAttention
 from .sla_attention import MiniMaxH3SLAAttention
 from . import denoiser_kernels
+from .hyperflow_flash import DroppedBlock, two_time_rows
 
 MODALITY_VIDEO = 0
 MODALITY_TEXT = 1
@@ -864,7 +865,14 @@ class MiniMaxH3Attention(nn.Module):
             if can_project_rows:
                 from shared import attention_kit
 
-                split_requested = attention_kit.head_groups(self.heads, length) > 1
+                split_requested = attention_kit.head_groups(
+                    self.heads,
+                    length * batch,
+                    device=hidden_states.device,
+                    heads=self.heads,
+                    head_dim=self.head_dim,
+                    element_size=hidden_states.element_size(),
+                ) > 1
 
                 def norm_rows(norm, rows):
                     if split_requested:
@@ -1485,10 +1493,13 @@ class MiniMaxH3Transformer(nn.Module):
         dtype: torch.dtype = torch.bfloat16,
         sla_config=None,
         vdn: bool = False,
+        dropped_blocks=(),
+        endpoint_gate: float | None = None,
     ):
         super().__init__()
         video_patch_dim = video_channels * math.prod(patch_size)
         self.use_adaln_curves = curve_grid is not None
+        self.endpoint_gate = None if endpoint_gate is None else float(endpoint_gate)
         self.config = SimpleNamespace(
             hidden_size=hidden_size,
             num_layers=num_layers,
@@ -1525,6 +1536,13 @@ class MiniMaxH3Transformer(nn.Module):
                 curve_dim,
                 torch.float32,
             )
+            if self.endpoint_gate is not None:
+                self.endpoint_time_embedder = MiniMaxH3TimeEmbedder(
+                    timestep_input_dim,
+                    time_embed_hidden_size,
+                    curve_dim,
+                    torch.float32,
+                )
         self.rope = MiniMaxH3RotaryEmbedding(rope_freq_dim)
         self.token_refiner = MiniMaxH3TokenRefiner(
             token_refiner_layers,
@@ -1539,9 +1557,15 @@ class MiniMaxH3Transformer(nn.Module):
         # token refiner intentionally retains dense attention.
         self.sol_attention = MiniMaxH3SolAttention()
         self.sla_attention = MiniMaxH3SLAAttention(sla_config)
+        dropped_blocks = {int(index) for index in dropped_blocks}
+        self.dropped_blocks = frozenset(dropped_blocks)
+        if any(index < 0 or index >= num_layers for index in dropped_blocks):
+            raise ValueError("HyperFlow dropped-block indices are outside the H3 transformer.")
         self.blocks = nn.ModuleList(
             [
-                MiniMaxH3Block(
+                DroppedBlock()
+                if index in dropped_blocks
+                else MiniMaxH3Block(
                     hidden_size,
                     num_attention_heads,
                     attention_head_dim,
@@ -1554,7 +1578,7 @@ class MiniMaxH3Transformer(nn.Module):
                     sla_attention=self.sla_attention,
                     vdn=vdn,
                 )
-                for _ in range(num_layers)
+                for index in range(num_layers)
             ]
         )
         self.final_layer = MiniMaxH3FinalLayer(
@@ -1608,7 +1632,13 @@ class MiniMaxH3Transformer(nn.Module):
 
         pdd_adapter = is_pdd_state_dict(state_dict)
         if pdd_adapter:
-            split_qkv = hasattr(self.blocks[0].attn, "q_proj")
+            first_active = next(
+                (block for block in self.blocks if not isinstance(block, DroppedBlock)),
+                None,
+            )
+            if first_active is None:
+                raise ValueError("MiniMax H3 transformer has no active DiT blocks.")
+            split_qkv = hasattr(first_active.attn, "q_proj")
             converted = preprocess_pdd_lora_state_dict(
                 state_dict,
                 split_qkv=split_qkv,
@@ -1629,6 +1659,31 @@ class MiniMaxH3Transformer(nn.Module):
         else:
             converted = normalize_diffusers_lora(state_dict, self)
         converted = normalize_flattened_lora_names(converted, self)
+        dropped_blocks = getattr(self, "dropped_blocks", ())
+        if dropped_blocks:
+            ignored = [
+                key for key in converted
+                if key.startswith("blocks.")
+                and key.split(".", 2)[1].isdecimal()
+                and int(key.split(".", 2)[1]) in dropped_blocks
+            ]
+            for key in ignored:
+                converted.pop(key)
+            if ignored:
+                print(
+                    "[MiniMax H3 LoRA] Skipped tensors for Flash-pruned blocks: "
+                    + ", ".join(map(str, sorted(dropped_blocks)))
+                )
+        if getattr(self, "endpoint_gate", None) is not None:
+            from .hyperflow_flash import convert_adaln_loras as convert_flash_adaln_loras
+
+            count = convert_flash_adaln_loras(self, model_type, converted)
+            if count:
+                print(
+                    f"[MiniMax H3 LoRA] Mapped {count} AdaLN adapter tensors to "
+                    "HyperFlow Flash two-time conditioning."
+                )
+            return converted
         started = time.perf_counter()
         count, architecture, source_width, target_width = convert_adaln_loras(
             getattr(self, "h3_lora_model_type", model_type),
@@ -1659,9 +1714,22 @@ class MiniMaxH3Transformer(nn.Module):
             )
         return converted
 
-    def _curve_at(self, timestep: torch.Tensor, device: torch.device) -> torch.Tensor:
+    def _curve_at(
+        self,
+        timestep: torch.Tensor,
+        device: torch.device,
+        endpoint_timestep: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if not self.use_adaln_curves:
-            return self.time_embedder(timestep.to(device=device, dtype=torch.float32))
+            current = self.time_embedder(timestep.to(device=device, dtype=torch.float32))
+            if self.endpoint_gate is not None:
+                if endpoint_timestep is None:
+                    raise ValueError("HyperFlow H3 Flash requires two-time endpoint conditioning.")
+                endpoint = self.endpoint_time_embedder(
+                    endpoint_timestep.to(device=device, dtype=torch.float32)
+                )
+                current = current + (endpoint - current) * self.endpoint_gate
+            return current
         table = self.adaln_t_table.to(device=device, dtype=torch.float32)
         position = timestep.to(device=device, dtype=torch.float32).clamp_(0.0, 1.0) * (table.shape[0] - 1)
         lower = position.floor().long().clamp_(max=table.shape[0] - 2)
@@ -1713,6 +1781,31 @@ class MiniMaxH3Transformer(nn.Module):
                 hidden_states[:, condition_video_rows:].index_select(1, target_order)), dim=1)
         timestep_indices = timestep_indices.to(device=device, dtype=torch.long)
         token_tags = token_tags.to(device=device, dtype=torch.long)
+        endpoint_timestep = None
+        if self.endpoint_gate is not None:
+            if first_block_cache is not None:
+                raise ValueError("HyperFlow H3 Flash does not support step caching.")
+            layout = _kwargs.get("packed_layout")
+            endpoint_sigmas = _kwargs.get("endpoint_sigmas")
+            if layout is None or endpoint_sigmas is None:
+                raise ValueError("HyperFlow H3 Flash requires its packed layout and next-step sigmas.")
+            endpoint_video_sigma, endpoint_audio_sigma = endpoint_sigmas
+            condition_video_timestep = _kwargs.get("hyperflow_condition_video_timestep")
+            if condition_video_timestep is None:
+                raise ValueError("HyperFlow H3 Flash requires the conditioning-row timestep.")
+            timestep, endpoint_timestep, timestep_indices = two_time_rows(
+                layout,
+                timestep,
+                timestep_indices,
+                (
+                    1.0 - float(endpoint_video_sigma),
+                    1.0 - float(endpoint_audio_sigma),
+                ),
+                float(condition_video_timestep),
+            )
+            timestep = timestep.to(device=device)
+            endpoint_timestep = endpoint_timestep.to(device=device)
+            timestep_indices = timestep_indices.to(device=device, dtype=torch.long)
 
         text_dtype = _weight_dtype(self.condition_proj, torch.bfloat16)
         text_embeds = self.condition_proj(encoder_hidden_states.to(dtype=text_dtype))
@@ -1739,7 +1832,7 @@ class MiniMaxH3Transformer(nn.Module):
         elif audio_hidden_states is not None and audio_hidden_states.numel():
             raise ValueError("The audio-free MiniMax H3 image transformer cannot consume audio rows.")
 
-        curve = self._curve_at(timestep, device)
+        curve = self._curve_at(timestep, device, endpoint_timestep)
         adaln_indices = timestep_indices * MODALITY_COUNT + token_tags.clamp_min(0)
         adaln_runs = _index_runs(adaln_indices)
         timestep_runs = _index_runs(timestep_indices)
@@ -1786,12 +1879,20 @@ class MiniMaxH3Transformer(nn.Module):
                 self.fasth3_attention.begin_forward(layout, latent_shape, self.config.patch_size)
             if first_block_cache is not None:
                 raise ValueError("FastH3 V2 requires all eight forwards without First Block Cache.")
-        if self.blocks[0].attn.vdn is not None:
+        active_blocks = [
+            (index, block)
+            for index, block in enumerate(self.blocks)
+            if not isinstance(block, DroppedBlock)
+        ]
+        if not active_blocks:
+            raise ValueError("MiniMax H3 transformer has no active DiT blocks.")
+        first_active_index, first_active_block = active_blocks[0]
+        if first_active_block.attn.vdn is not None:
             layout = _kwargs.get("packed_layout")
             latent_shape = _kwargs.get("latent_shape")
             if layout is None or latent_shape is None:
                 raise ValueError("H3 VDN requires the packed layout and target latent geometry")
-            for block in self.blocks:
+            for _, block in active_blocks:
                 block.attn.vdn.begin_forward(layout, *latent_shape, self.config.patch_size)
         else:
             rotary = denoiser_kernels.prepare_rope(rotary)
@@ -1803,6 +1904,8 @@ class MiniMaxH3Transformer(nn.Module):
             for index, block in enumerate(self.blocks):
                 if self._interrupt:
                     return None
+                if isinstance(block, DroppedBlock):
+                    continue
                 packed = block(
                     packed,
                     curve,
@@ -1814,7 +1917,7 @@ class MiniMaxH3Transformer(nn.Module):
         else:
             if self._interrupt:
                 return None
-            packed, signature = self.blocks[0](
+            packed, signature = first_active_block(
                 packed,
                 curve,
                 adaln_runs,
@@ -1843,7 +1946,7 @@ class MiniMaxH3Transformer(nn.Module):
                 head_output = first_block_cache.capture_head_output(
                     packed[:, target_start:]
                 )
-                for block in self.blocks[1:]:
+                for _, block in active_blocks[1:]:
                     if self._interrupt:
                         return None
                     packed = block(

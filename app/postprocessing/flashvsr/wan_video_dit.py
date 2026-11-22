@@ -450,11 +450,17 @@ class SelfAttention(nn.Module):
             pre_cache_k, pre_cache_v = pre_cache_refs
         B, L, D = x.shape
         plus_chunk = topk_groups is not None
+        cached_prefix = (
+            pre_cache_k is not None and pre_cache_v is not None
+        ) or (
+            stream_cache is not None
+            and stream_cache.has_prefix(block_id)
+        )
         if is_stream and plus_chunk:
             assert f == 4, "FlashVSR+ streams four latent frames per chunk"
-        elif is_stream and pre_cache_k is not None and pre_cache_v is not None:
+        elif is_stream and cached_prefix:
             assert f == 2, "v1.1 continuation chunks contain two latent frames"
-        elif is_stream and (pre_cache_k is None or pre_cache_v is None):
+        elif is_stream:
             assert f == 6 or (allow_short_start and f == 2), "v1.1 startup chunk contains six latent frames"
         assert L == f * h * w, "Sequence length mismatch with provided (f,h,w)."
 

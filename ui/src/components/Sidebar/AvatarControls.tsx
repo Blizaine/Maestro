@@ -342,6 +342,12 @@ export function AvatarControls() {
       current.setParam(AUDIO_SLOT_KEYS[slot], uploaded.path)
       if (slot === 'voice1') current.setAudioGuideFilename(file.name)
       else current.setAudioGuide2Filename(file.name)
+      if (slot === 'voice1'
+        && (current.params._duration_planning_mode ?? 'auto') === 'auto'
+        && Number.isFinite(uploaded.duration_seconds)
+        && Number(uploaded.duration_seconds) > 0) {
+        current.setDurationSeconds(Math.round(Number(uploaded.duration_seconds) * 10) / 10)
+      }
       return true
     } catch (error) {
       if (isCurrent()) {

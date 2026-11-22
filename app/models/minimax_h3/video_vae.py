@@ -1133,8 +1133,13 @@ class AutoencoderKLMiniMaxH3(ModelMixin, ConfigMixin, AttentionMixin, Autoencode
         mean = chunk.new_tensor((0.485, 0.456, 0.406), dtype=torch.float32).view(1, 3, 1, 1, 1)
         std = chunk.new_tensor((0.229, 0.224, 0.225), dtype=torch.float32).view(1, 3, 1, 1, 1)
         written = 0
-        for start in range(0, frames, 2):
-            stop = min(start + 2, frames)
+        # Pixel shuffling and float conversion have temporary full-resolution
+        # allocations. Keep their combined working size small at 2K and 4K.
+        scale = 2 if upsample else 1
+        scratch_per_frame = 3 * height * width * scale * scale * (chunk.element_size() + 5)
+        frames_per_copy = min(2, max(1, (64 << 20) // scratch_per_frame))
+        for start in range(0, frames, frames_per_copy):
+            stop = min(start + frames_per_copy, frames)
             frame_chunk = chunk[:, :, start:stop]
             frame_count = stop - start
             if upsample:

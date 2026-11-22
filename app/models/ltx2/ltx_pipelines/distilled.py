@@ -67,6 +67,18 @@ def _env_flag(name: str, default: str = "0") -> bool:
     return str(val).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _stage2_failure_message(output_shape, sigmas, dtype, device) -> str:
+    """Describe the active LTX-2 refinement stage without guessing its cause."""
+
+    return (
+        "LTX-2 distilled stage 2 failed "
+        f"(frames={int(output_shape.frames)}, "
+        f"resolution={int(output_shape.width)}x{int(output_shape.height)}, "
+        f"fps={float(output_shape.fps):g}, "
+        f"steps={max(0, len(sigmas) - 1)}, dtype={dtype}, device={device})"
+    )
+
+
 def _select_reference_attention_generation_mask(
     full_resolution_refine: bool,
     generation_mask: torch.Tensor | None,
@@ -1187,27 +1199,38 @@ class DistilledPipeline:
             ]
         else:
             stage_2_audio_conditionings = audio_conditionings
-        video_state, audio_state = denoise_audio_video(
-            output_shape=stage_2_output_shape,
-            conditionings=stage_2_conditionings,
-            audio_conditionings=stage_2_audio_conditionings,
-            noiser=noiser,
-            sigmas=stage_2_sigmas,
-            stepper=stepper_stage2,
-            denoising_loop_fn=denoising_loop_stage2,
-            components=self.pipeline_components,
-            dtype=dtype,
-            device=self.device,
-            noise_scale=stage_2_sigmas[0],
-            # When ID-LoRA active: skip noising audio, freeze it across
-            # the loop. Initial audio latent (stage 1's voice-cloned
-            # output) flows through unchanged.
-            audio_noise_scale=0.0 if _freeze_stage2_audio else None,
-            initial_video_latent=upscaled_video_latent,
-            initial_audio_latent=audio_state.latent,
-            mask_context=mask_context,
-            freeze_audio=_freeze_stage2_audio,
-        )
+        try:
+            video_state, audio_state = denoise_audio_video(
+                output_shape=stage_2_output_shape,
+                conditionings=stage_2_conditionings,
+                audio_conditionings=stage_2_audio_conditionings,
+                noiser=noiser,
+                sigmas=stage_2_sigmas,
+                stepper=stepper_stage2,
+                denoising_loop_fn=denoising_loop_stage2,
+                components=self.pipeline_components,
+                dtype=dtype,
+                device=self.device,
+                noise_scale=stage_2_sigmas[0],
+                # When ID-LoRA active: skip noising audio, freeze it across
+                # the loop. Initial audio latent (stage 1's voice-cloned
+                # output) flows through unchanged.
+                audio_noise_scale=0.0 if _freeze_stage2_audio else None,
+                initial_video_latent=upscaled_video_latent,
+                initial_audio_latent=audio_state.latent,
+                mask_context=mask_context,
+                freeze_audio=_freeze_stage2_audio,
+            )
+            # Surface asynchronous kernels while the stage and its settings
+            # are still in scope, before generation cleanup can obscure them.
+            torch.cuda.synchronize()
+        except Exception as exc:
+            stage_context = _stage2_failure_message(
+                stage_2_output_shape, stage_2_sigmas, dtype, self.device
+            )
+            raise RuntimeError(
+                f"{stage_context}: {exc}"
+            ) from exc
         if bench_transformer:
             stage2_transformer_ms, stage2_transformer_calls = transformer.consume()
             total_transformer_ms = stage1_transformer_ms + stage2_transformer_ms

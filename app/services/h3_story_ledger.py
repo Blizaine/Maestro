@@ -98,7 +98,7 @@ from services.director.long_form_story import (
 )
 
 
-H3_STORY_LEDGER_VERSION = 121
+H3_STORY_LEDGER_VERSION = 123
 
 
 _H3_WINDOW_BOOKKEEPING_RE = re.compile(
@@ -2200,6 +2200,181 @@ def _reference_h3_cast_names(value: Any) -> list[str]:
     return list(dict.fromkeys(names))
 
 
+def _h3_picture_bindings(source: Any, reference_context: Any = "") -> dict[str, str]:
+    """Resolve explicit Picture references to one unambiguous cast identity."""
+
+    source_names: dict[str, list[str]] = {}
+    source_picture = re.compile(
+        r"(?P<name>[A-Z][A-Za-z0-9_'’\-]*(?:[ \t]+[A-Z][A-Za-z0-9_'’\-]*){0,3})"
+        r"[ \t]*(?i:<picture\s+(?P<picture>\d+)>)",
+    )
+    for match in source_picture.finditer(str(source or "")):
+        name = sanitize_h3_prompt_text(match.group("name")).strip(" ,;:.-")
+        if name:
+            source_names.setdefault(match.group("picture"), []).append(name)
+
+    source_bindings: dict[str, str] = {}
+    for picture, labels in source_names.items():
+        unique_labels = list(dict.fromkeys(labels))
+        canonical = max(unique_labels, key=lambda value: (len(_plain_h3_name_parts(value)), len(value)))
+        aliases = {
+            _normalize_key(canonical),
+            *(_normalize_key(alias) for alias in _h3_cast_aliases(canonical, [canonical])),
+        }
+        if all(_normalize_key(label) in aliases for label in unique_labels):
+            source_bindings[picture] = canonical
+
+    reference_names: dict[str, list[str]] = {}
+    for match in re.finditer(
+        r"<Subject\s+\d+>\s+is\s+(?P<name>[^<\r\n]+?)\s+from\s+<Picture\s+(?P<picture>\d+)>",
+        str(reference_context or ""),
+        flags=re.IGNORECASE,
+    ):
+        name = sanitize_h3_prompt_text(match.group("name")).strip(" ,;:.-")
+        if name:
+            reference_names.setdefault(match.group("picture"), []).append(name)
+
+    bindings: dict[str, str] = {}
+    for picture, names in reference_names.items():
+        unique_names = list(dict.fromkeys(names))
+        if len(unique_names) != 1:
+            continue
+        reference_name = unique_names[0]
+        source_name = source_bindings.get(picture)
+        if source_name and _resolve_h3_cast_name(source_name, [reference_name]) != reference_name:
+            # A source label and the attached identity disagree. Keep this
+            # Picture unmapped rather than silently selecting either person.
+            continue
+        bindings[picture] = reference_name
+    for picture, name in source_bindings.items():
+        if picture not in reference_names:
+            bindings[picture] = name
+    return bindings
+
+
+def _resolve_h3_scene_cut_dialogue_speaker(
+    source: str,
+    quote_start: int,
+    speaker: Any,
+    reference_context: Any = "",
+) -> str:
+    """Resolve a pronoun or simple plural typo only within an explicit cut scene."""
+
+    transitions = list(re.finditer(
+        r"\b(?:scene|camera|shot)\s+cuts?\s+(?:back\s+)?to\b",
+        source[:max(0, int(quote_start))],
+        flags=re.IGNORECASE,
+    ))
+    if not transitions:
+        return ""
+    local_start = transitions[-1].start()
+    local = source[local_start:max(0, int(quote_start))]
+    picture_mentions = list(re.finditer(r"<picture\s+(\d+)>", local, flags=re.IGNORECASE))
+    pictures = list(dict.fromkeys(match.group(1) for match in picture_mentions))
+    if len(pictures) != 1:
+        return ""
+
+    bindings = _h3_picture_bindings(source, reference_context)
+    target = bindings.get(pictures[0], "")
+    if not target:
+        return ""
+
+    picture_mention = picture_mentions[-1]
+    label_match = re.search(
+        r"(?P<label>[A-Z][A-Za-z0-9_'’\-]*(?:[ \t]+[A-Z][A-Za-z0-9_'’\-]*){0,3})[ \t]*$",
+        local[:picture_mention.start()],
+    )
+    if not label_match:
+        return ""
+    label_owner = _resolve_h3_cast_name(label_match.group("label"), [target])
+    if label_owner != target:
+        return ""
+
+    clean_speaker = sanitize_h3_prompt_text(speaker).strip(" ,;:.-")
+    if clean_speaker.casefold() in {"he", "she", "they"}:
+        # A scene can introduce another person after its establishing Picture
+        # tag. In that case a later pronoun is no longer bound uniquely to the
+        # tagged interview subject, even when the original cut named one person.
+        local_cue = local[picture_mention.end():]
+        bound_names = list(dict.fromkeys(bindings.values()))
+        for other_name in bound_names:
+            if _normalize_key(other_name) == _normalize_key(target):
+                continue
+            if any(
+                re.search(
+                    rf"(?<![\w]){re.escape(alias)}(?![\w])",
+                    local_cue,
+                    flags=re.IGNORECASE,
+                )
+                for alias in _h3_cast_aliases(other_name, bound_names)
+                if alias
+            ):
+                return ""
+        if re.search(
+            r"\b(?:another|a|an|the|second|different|other)\s+"
+            r"(?:[A-Za-z][A-Za-z'’-]*\s+){0,2}"
+            r"(?:person|man|woman|interviewer|reporter|host|guest|stranger)\b",
+            local_cue,
+            flags=re.IGNORECASE,
+        ):
+            return ""
+        interview_binding = re.search(
+            rf"\binterview\b[^.!?\r\n]*\bwith\b[^.!?\r\n]*<picture\s+{re.escape(pictures[0])}>",
+            local,
+            flags=re.IGNORECASE,
+        )
+        return target if interview_binding else ""
+
+    # A single trailing 's' is accepted only when the corrected stem resolves
+    # to this same explicitly tagged identity (e.g. `Michaels` -> `Michael`).
+    if clean_speaker.casefold().endswith("s") and len(clean_speaker) > 3:
+        corrected = _resolve_h3_cast_name(clean_speaker[:-1], [target])
+        if corrected == target:
+            return target
+    return ""
+
+
+def _canonicalize_h3_source_dialogue_cues(
+    prompt: Any,
+    reference_context: Any = "",
+) -> str:
+    """Fix proven speaker cues in the planning copy without editing quoted words."""
+
+    # extract_locked_dialogue normalizes tags before calculating source offsets.
+    # Work against that same string so cue edits cannot be shifted by `< d>`
+    # normalization and land inside quoted dialogue or a neighboring clause.
+    source = normalize_h3_dialogue_tags(str(prompt or ""))
+    raw_dialogue = extract_locked_dialogue(
+        source,
+        resolve_reference_speakers=False,
+    )
+    if not raw_dialogue or not reference_context and not _h3_picture_bindings(source):
+        return source
+    resolved_dialogue = extract_locked_dialogue(source, reference_context=reference_context)
+    edits: list[tuple[int, int, str]] = []
+    for raw, resolved in zip(raw_dialogue, resolved_dialogue):
+        old_speaker = sanitize_h3_prompt_text(raw.get("speaker"))
+        new_speaker = sanitize_h3_prompt_text(resolved.get("speaker"))
+        if not old_speaker or not new_speaker or old_speaker.casefold() == new_speaker.casefold():
+            continue
+        quote_start = int(raw.get("source_offset") or 0)
+        previous_boundary = max(
+            source.rfind(mark, 0, quote_start)
+            for mark in (".", "!", "?", "\r", "\n")
+        )
+        cue_start = previous_boundary + 1
+        cue = source[cue_start:quote_start]
+        candidates = list(re.finditer(rf"(?<![\w]){re.escape(old_speaker)}(?![\w])", cue, flags=re.IGNORECASE))
+        cue_match = next((match for match in reversed(candidates)
+                          if _SPEECH_VERB.search(cue[match.end():])), None)
+        if cue_match is None:
+            continue
+        edits.append((cue_start + cue_match.start(), cue_start + cue_match.end(), new_speaker))
+    for start, end, replacement in reversed(edits):
+        source = source[:start] + replacement + source[end:]
+    return source
+
+
 def _source_requests_multiple_cast_instances(prompt: Any, name: Any) -> bool:
     """Allow explicitly requested twins, clones, copies, or multiple versions."""
 
@@ -2225,7 +2400,12 @@ def _source_requests_multiple_cast_instances(prompt: Any, name: Any) -> bool:
     ))
 
 
-def _derive_h3_cast_names(source: str, proper_names: list[str]) -> list[str]:
+def _derive_h3_cast_names(
+    source: str,
+    proper_names: list[str],
+    *,
+    reference_context: Any = "",
+) -> list[str]:
     """Separate named principals from works, products, and named locations."""
 
     profile_names = [item["name"] for item in explicit_character_profiles(source)] + [
@@ -2236,7 +2416,7 @@ def _derive_h3_cast_names(source: str, proper_names: list[str]) -> list[str]:
     ]
     spoken_names = [
         sanitize_h3_prompt_text(item.get("speaker"))
-        for item in extract_locked_dialogue(source)
+        for item in extract_locked_dialogue(source, reference_context=reference_context)
         if sanitize_h3_prompt_text(item.get("speaker")) not in {"", "Speaker"}
     ]
     # Explicit cast definitions plus a closed-cast instruction are stronger
@@ -2476,15 +2656,24 @@ def _active_h3_cast_names(names: list[str], value: Any) -> list[str]:
     return active
 
 
-def extract_h3_source_intent(prompt: str) -> dict[str, Any]:
+def extract_h3_source_intent(
+    prompt: str,
+    *,
+    reference_context: Any = "",
+) -> dict[str, Any]:
     """Extract immutable camera, pacing, style, and vocal requirements.
 
     These facts are application-owned. They must survive even when the local
     planning LLM returns malformed JSON or exhausts its response budget.
     """
 
-    raw_source = normalize_h3_dialogue_tags(prompt)
-    locked_dialogue = extract_locked_dialogue(raw_source)
+    raw_source = normalize_h3_dialogue_tags(
+        _canonicalize_h3_source_dialogue_cues(prompt, reference_context)
+    )
+    locked_dialogue = extract_locked_dialogue(
+        raw_source,
+        reference_context=reference_context,
+    )
     source = sanitize_h3_prompt_text(raw_source)
     raw_directive_source = video_direction_source(_without_locked_dialogue(
         raw_source,
@@ -2596,7 +2785,11 @@ def extract_h3_source_intent(prompt: str) -> dict[str, Any]:
             continue
         if name not in proper_names:
             proper_names.append(name)
-    cast_names = _derive_h3_cast_names(raw_source, proper_names)
+    cast_names = _derive_h3_cast_names(
+        raw_source,
+        proper_names,
+        reference_context=reference_context,
+    )
     cast_cardinality = _h3_cast_cardinality_contract(raw_source, cast_names)
     blocking_contract = _infer_h3_blocking_contract(raw_source, cast_names)
 
@@ -2691,7 +2884,11 @@ def extract_h3_source_intent(prompt: str) -> dict[str, Any]:
     if _FAST_ACTION_RE.search(directive_source):
         ambient_parts.append("speed-dependent rushing air")
     video_source = video_direction_source(raw_source)
-    video_dialogue = locked_dialogue if video_source == raw_source else extract_locked_dialogue(video_source)
+    video_dialogue = (
+        locked_dialogue
+        if video_source == raw_source
+        else extract_locked_dialogue(video_source, reference_context=reference_context)
+    )
     directive_spans = _h3_persistent_instruction_spans(video_source)
     opening_only_directions: list[str] = []
     for start, end, text in directive_spans:
@@ -3189,7 +3386,12 @@ def _explicit_speech_action_order(prompt: str) -> dict[str, dict[str, str]]:
     return order
 
 
-def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
+def extract_locked_dialogue(
+    prompt: str,
+    *,
+    reference_context: Any = "",
+    resolve_reference_speakers: bool = True,
+) -> list[dict[str, Any]]:
     """Extract tagged, quoted, or screenplay-form dialogue before rewriting."""
 
     from models.minimax_h3.speakers import h3_action_beat_speaker, is_h3_spoken_quote
@@ -3301,6 +3503,17 @@ def extract_locked_dialogue(prompt: str) -> list[dict[str, Any]]:
             continue
         if label and not screenplay:
             speaker = label.group(1)
+        resolved_speaker = (
+            _resolve_h3_scene_cut_dialogue_speaker(
+                source,
+                start,
+                speaker,
+                reference_context,
+            )
+            if resolve_reference_speakers else ""
+        )
+        if resolved_speaker:
+            speaker = resolved_speaker
         speech_context = source[max(context_start, start - 240):start]
         off_camera = bool(span.get("off_camera")) or bool(re.search(
             r"\b(?:off[- ]camera|offscreen|off[- ]screen|pov\s+(?:off[- ]camera\s+)?voice)\b",
@@ -7100,8 +7313,8 @@ def _prepare_render_dialogue_schedule(
             base > 1
             and is_pure_speech_event(dialogue_id)
             and (
-                word_count > budgets[base - 1]
-                or base_word_totals[base] > budgets[base - 1]
+                word_count > budgets[base - 2]
+                or base_word_totals[base] > budgets[base - 2]
             )
         )
         start = max(last_segment, base - 1 if can_begin_previous else base)
@@ -7787,6 +8000,7 @@ def _deterministic_ledger(
     reference_context: str,
     source_events_override: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    prompt = _canonicalize_h3_source_dialogue_cues(prompt, reference_context)
     source_events = (
         list(source_events_override)
         if source_events_override is not None
@@ -7800,7 +8014,7 @@ def _deterministic_ledger(
         executable_ids = set(executable_h3_source_event_ids(source_events, source_relationships))
         source_events = [event for event in source_events if event["event_id"] in executable_ids]
     fragments = [item["text"] for item in source_events]
-    intent = extract_h3_source_intent(prompt)
+    intent = extract_h3_source_intent(prompt, reference_context=reference_context)
     intent["audio_driven"] = has_h3_performance_audio(reference_context)
     if intent["audio_driven"]:
         locked_dialogue = []
@@ -13379,6 +13593,7 @@ def _prepare_h3_story_context(
 ) -> dict[str, Any]:
     from services import llm_service
 
+    prompt = _canonicalize_h3_source_dialogue_cues(prompt, reference_context)
     generate = llm_generate or llm_service.generate
     durations = [max(0.1, float(value)) for value in segment_durations]
     segment_count = len(durations)
@@ -13386,7 +13601,10 @@ def _prepare_h3_story_context(
         raise ValueError("H3 story planning requires at least one segment.")
     audio_driven = has_h3_performance_audio(reference_context)
     performance_clock = performance_audio_window_guidance(reference_context, durations)
-    locked_dialogue = [] if audio_driven else extract_locked_dialogue(prompt)
+    locked_dialogue = [] if audio_driven else extract_locked_dialogue(
+        prompt,
+        reference_context=reference_context,
+    )
     # Callers historically detected only quotation marks.  Treat any
     # canonical dialogue form, including ``CHARACTER: line`` screenplay rows,
     # as mandatory even when an older caller passes ``expect_dialogue=False``.
@@ -13410,7 +13628,10 @@ def _prepare_h3_story_context(
         if (projected := project_h3_requested_static_tail(reference_context, durations, request))
     ]
     has_authored_timing = bool(authored_timed_brief(prompt)["events"])
-    source_intent = extract_h3_source_intent(prompt)
+    source_intent = extract_h3_source_intent(
+        prompt,
+        reference_context=reference_context,
+    )
     reference_context = canonicalize_h3_reference_names(reference_context, source_intent["cast_names"])
     source_cast_names = _merge_h3_cast_names(
         list(source_intent.get("cast_names") or []),

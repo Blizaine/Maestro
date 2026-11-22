@@ -104,8 +104,9 @@ def validate_memory_updates(body):
         elif key in ("smart_memory_pinning", "read_ahead"):
             valid = isinstance(value, bool)
         else:
+            floor = -1 if key == "attention_head_split" else 0
             limit = 3 if key == "attention_head_split" else 80 if key == "perc_reserved_mem_max" else 40000
-            valid = isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= limit
+            valid = isinstance(value, int) and not isinstance(value, bool) and floor <= value <= limit
         if not valid:
             raise ValueError(f"Invalid {key}: {value!r}")
         updated[key] = value

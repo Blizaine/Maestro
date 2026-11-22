@@ -217,6 +217,28 @@ const video = (id, fields = {}) => ({type: 'video', id, path: `/uploads/${id}.mp
     assert.equal(state.seconds, frameSeconds(audioDrive));
     assert.match(state.dialogText, /music \/ performance timeline/i);
 
+    const videoDriveAudio = 32.625;
+    state = await setReferences([video('audio-drive-video', {
+      duration_seconds: 13, video_audio_role: 'drive', audio_duration_seconds: videoDriveAudio,
+    })]);
+    assert.equal(state.seconds, frameSeconds(videoDriveAudio),
+      'A video reference follows its explicitly selected audio drive duration');
+
+    state = await setReferences([
+      {type: 'audio', id: 'voice', audio_intent: 'voice', duration_seconds: 118},
+      {type: 'audio', id: 'style', audio_intent: 'style', duration_seconds: 117},
+    ]);
+    await page.evaluate(() => {
+      const current = window.store.getState();
+      window.store.setState({params: {...current.params,
+        audio_guide: '/uploads/stale-frames-soundtrack.wav', audio_prompt_type: 'A'}});
+    });
+    state = await settle('References ignores voice/style duration and stale Frames soundtrack');
+    assert.equal(state.seconds, promptDuration,
+      'Voice/style references and a stale Frames soundtrack do not drive Auto duration');
+    assert.doesNotMatch(state.dialogText, /audio track/i,
+      'A stale Frames soundtrack is not presented as an active References timeline');
+
     // Short source lengths still obey H3's native minimum. Automatic source
     // selection also retains the existing one-hour cap.
     state = await setReferences([video('short-native', {duration_seconds: 3.2})]);

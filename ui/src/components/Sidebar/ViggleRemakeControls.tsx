@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
-import { Film, ImagePlus, Upload, X } from 'lucide-react'
+import { Film, ImagePlus, Loader2, Upload, WandSparkles, X } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import { loadMediaInput } from '../../lib/mediaInput'
 import { VideoTimelineSelector } from '../shared/VideoTimelineSelector'
@@ -18,6 +18,7 @@ function basename(path: string): string {
 
 function sourceUrl(path: string): string {
   if (path.includes('/api/v1/file/') || path.includes('/api/v1/uploads/')) return path
+  if (/(?:^|[/\\])uploads(?:[/\\])/i.test(path)) return api.getUploadUrl(basename(path))
   return api.getFileUrl(basename(path))
 }
 
@@ -46,7 +47,7 @@ function formatTime(seconds: number): string {
   return `${minutes}:${remainder.toFixed(3).padStart(6, '0')}`
 }
 
-export function ViggleRemakeControls() {
+export function ViggleRemakeControls({ aligned = false }: { aligned?: boolean }) {
   const editVideoFile = useStore(state => state.editVideoFile)
   const editVideoPath = useStore(state => state.editVideoPath)
   const editVideoUrl = useStore(state => state.editVideoUrl)
@@ -56,9 +57,14 @@ export function ViggleRemakeControls() {
   const setEditVideo = useStore(state => state.setEditVideo)
   const clearEditVideo = useStore(state => state.clearEditVideo)
   const setGuideVideoFps = useStore(state => state.setGuideVideoFps)
+  const sendFrameToImageMode = useStore(state => state.sendFrameToImageMode)
+  const workspace = useStore(state => state.activeWorkspace)
   const [uploadingSource, setUploadingSource] = useState(false)
   const [uploadingFrame, setUploadingFrame] = useState(false)
+  const [selectedFrameTime, setSelectedFrameTime] = useState(0)
+  const [frameEditError, setFrameEditError] = useState('')
   const [framePreviewUrls, setFramePreviewUrls] = useState<Record<string, string>>({})
+  const frameLimit = aligned ? 1 : MAX_FRAMES
   const sourceFileRef = useRef<HTMLInputElement>(null)
   const frameFileRef = useRef<HTMLInputElement>(null)
 
@@ -88,8 +94,8 @@ export function ViggleRemakeControls() {
     const ordered = nextPaths.map((path, index) => ({ path, time: nextTimes[index] }))
       .sort((left, right) => left.time - right.time)
     setParam('image_refs', ordered.map(frame => frame.path))
-    setParam('viggle_remake_frame_times', ordered.map(frame => frame.time))
-  }, [setParam])
+    setParam('viggle_remake_frame_times', aligned ? undefined : ordered.map(frame => frame.time))
+  }, [aligned, setParam])
 
   const handleSourceUpload = useCallback(async (file: File) => {
     setUploadingSource(true)
@@ -101,6 +107,7 @@ export function ViggleRemakeControls() {
       const range = defaultTrim(media.duration || DEFAULT_TRIM_END)
       setParam('viggle_trim_start', range.start)
       setParam('viggle_trim_end', range.end)
+      setSelectedFrameTime(range.start)
       useStore.setState({ editStartTime: range.start, editEndTime: range.end })
     } catch (error) {
       console.error('Remake source upload failed:', error)
@@ -111,7 +118,7 @@ export function ViggleRemakeControls() {
   }, [setEditVideo, setGuideVideoFps, setParam])
 
   const handleFrameUpload = useCallback(async (file: File) => {
-    if (frames.length >= MAX_FRAMES) return false
+    if (frames.length >= frameLimit) return false
     setUploadingFrame(true)
     try {
       const uploaded = await api.uploadImage(file)
@@ -126,7 +133,7 @@ export function ViggleRemakeControls() {
     } finally {
       setUploadingFrame(false)
     }
-  }, [frames, trimStart, trimEnd, writeFrames])
+  }, [frameLimit, frames, trimStart, trimEnd, writeFrames])
 
   const handleTrimChange = useCallback((start: number, end: number) => {
     if (!Number.isFinite(start) || !Number.isFinite(end)) return
@@ -136,9 +143,10 @@ export function ViggleRemakeControls() {
     const safeEnd = Math.min(maxEnd, Math.max(safeStart + minSpan, end))
     setParam('viggle_trim_start', safeStart)
     setParam('viggle_trim_end', safeEnd)
+    setSelectedFrameTime(current => Math.max(safeStart, Math.min(safeEnd - 1 / 24, current)))
     useStore.setState({ editStartTime: safeStart, editEndTime: safeEnd })
     const framePaths = frames.map(frame => frame.path)
-    const nextTimes = frames.map(frame => Math.max(safeStart, Math.min(safeEnd, frame.time)))
+    const nextTimes = frames.map(frame => Math.max(safeStart, Math.min(safeEnd - 1 / 24, frame.time)))
     writeFrames(framePaths, nextTimes)
   }, [duration, frames, setParam, writeFrames])
 
@@ -146,7 +154,7 @@ export function ViggleRemakeControls() {
     if (!Number.isFinite(value)) return
     const framePaths = frames.map(frame => frame.path)
     const nextTimes = frames.map(frame => frame.time)
-    nextTimes[index] = Math.max(trimStart, Math.min(trimEnd, value))
+    nextTimes[index] = Math.max(trimStart, Math.min(trimEnd - 1 / 24, value))
     writeFrames(framePaths, nextTimes)
   }
 
@@ -162,7 +170,76 @@ export function ViggleRemakeControls() {
     setParam('video_guide', undefined)
     setParam('viggle_trim_start', undefined)
     setParam('viggle_trim_end', undefined)
+    setSelectedFrameTime(0)
     setGuideVideoFps(null)
+  }
+
+  const extractSourceFrame = async (time: number) => {
+    const response = await fetch('/api/v1/extract-frames', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ video_path: editVideoPath, start_time: time, workspace }),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Could not extract the source frame.' }))
+      throw new Error(error.detail || 'Could not extract the source frame.')
+    }
+    const result = await response.json() as { start_path?: string; start_url?: string }
+    if (!result.start_path) throw new Error('The source frame could not be saved.')
+    return { path: result.start_path, url: result.start_url || sourceUrl(result.start_path) }
+  }
+
+  const addSourceFrame = async (time: number) => {
+    if (!editVideoPath || frames.length >= MAX_FRAMES) return
+    const existing = frames.find(frame => Math.abs(frame.time - time) < 1 / 24)
+    if (existing) {
+      setSelectedFrameTime(existing.time)
+      return
+    }
+    setUploadingFrame(true)
+    setFrameEditError('')
+    try {
+      const extracted = await extractSourceFrame(time)
+      writeFrames([...frames.map(frame => frame.path), extracted.path], [...frames.map(frame => frame.time), time])
+      setFramePreviewUrls(previous => ({ ...previous, [extracted.path]: extracted.url }))
+    } catch (error) {
+      setFrameEditError(error instanceof Error ? error.message : 'Could not extract the source frame.')
+    } finally {
+      setUploadingFrame(false)
+    }
+  }
+
+  const suggestSourceFrames = async () => {
+    if (!editVideoPath || frames.length >= MAX_FRAMES) return
+    const lastFrame = Math.max(trimStart, trimEnd - 1 / 24)
+    const candidates = [trimStart, (trimStart + trimEnd) / 2, lastFrame]
+      .map(time => Math.round(time * 1000) / 1000)
+      .filter((time, index, all) => all.findIndex(candidate => Math.abs(candidate - time) < 1 / 24) === index)
+      .filter(time => !frames.some(frame => Math.abs(frame.time - time) < 1 / 24))
+      .slice(0, MAX_FRAMES - frames.length)
+    if (!candidates.length) return
+    setUploadingFrame(true)
+    setFrameEditError('')
+    try {
+      const extracted = await Promise.all(candidates.map(async time => ({ ...await extractSourceFrame(time), time })))
+      writeFrames([...frames.map(frame => frame.path), ...extracted.map(frame => frame.path)],
+        [...frames.map(frame => frame.time), ...extracted.map(frame => frame.time)])
+      setFramePreviewUrls(previous => ({ ...previous,
+        ...Object.fromEntries(extracted.map(frame => [frame.path, frame.url])) }))
+    } catch (error) {
+      setFrameEditError(error instanceof Error ? error.message : 'Could not prepare the suggested source frames.')
+    } finally {
+      setUploadingFrame(false)
+    }
+  }
+
+  const editKeyframe = async (time: number) => {
+    setFrameEditError('')
+    try {
+      await sendFrameToImageMode('remake', time)
+    } catch (error) {
+      setFrameEditError(error instanceof Error ? error.message : 'Could not open the keyframe in Maestro Image Mode.')
+    }
   }
 
   return (
@@ -184,8 +261,10 @@ export function ViggleRemakeControls() {
                 duration={duration}
                 startTime={trimStart}
                 endTime={trimEnd}
+                playheadTime={selectedFrameTime}
                 onStartChange={start => handleTrimChange(start, trimEnd)}
                 onEndChange={end => handleTrimChange(trimStart, end)}
+                onPlayheadChange={setSelectedFrameTime}
                 onMetadata={metadataDuration => {
                   if (!Number.isFinite(metadataDuration) || metadataDuration <= 0) return
                   useStore.setState({ editVideoDuration: metadataDuration })
@@ -203,12 +282,13 @@ export function ViggleRemakeControls() {
                     : Math.min(maxEnd, Math.max(start + minSpan, fallback.end))
                   setParam('viggle_trim_start', start)
                   setParam('viggle_trim_end', end)
+                  setSelectedFrameTime(current => Math.max(start, Math.min(end - 1 / 24, current)))
                   useStore.setState({ editStartTime: start, editEndTime: end })
                   const paths = Array.isArray(current.image_refs) ? current.image_refs : []
                   const times = Array.isArray(current.viggle_remake_frame_times)
                     ? current.viggle_remake_frame_times.map(Number) : []
                   writeFrames(paths, paths.map((_, index) => Number.isFinite(times[index])
-                    ? Math.max(start, Math.min(end, times[index]))
+                    ? Math.max(start, Math.min(end - 1 / 24, times[index]))
                     : nextFrameTime(times, start, end)))
                 }}
               />
@@ -228,6 +308,15 @@ export function ViggleRemakeControls() {
                   className="mt-1 w-full rounded-md border border-border bg-bg-primary px-2 py-1.5 text-[10px] text-text-primary" />
               </label>
             </div>
+            {!aligned && <label className="block text-[9px] text-text-muted">
+              Keyframe to add (seconds)
+              <input type="number" min={trimStart} max={Math.max(trimStart, trimEnd - 1 / 24)} step="0.001"
+                value={selectedFrameTime} onChange={event => {
+                  const time = event.currentTarget.valueAsNumber
+                  if (Number.isFinite(time)) setSelectedFrameTime(Math.max(trimStart, Math.min(trimEnd - 1 / 24, time)))
+                }}
+                className="mt-1 w-full rounded-md border border-border bg-bg-primary px-2 py-1.5 text-[10px] text-text-primary" />
+            </label>}
           </div>
         ) : (
           <div className="space-y-2">
@@ -249,29 +338,54 @@ export function ViggleRemakeControls() {
 
       <div className="space-y-2 rounded-lg border border-border p-2.5">
         <div className="flex items-center justify-between gap-2">
-          <label className="text-[11px] uppercase tracking-wider text-text-muted">Reference frames</label>
-          <span className="text-[9px] text-text-muted">{frames.length}/{MAX_FRAMES}</span>
+          <label className="text-[11px] uppercase tracking-wider text-text-muted">
+            {aligned ? 'Replacement character' : 'Reference frames'}
+          </label>
+          {!aligned && <span className="text-[9px] text-text-muted">{frames.length}/{frameLimit}</span>}
         </div>
-        <p className="text-[10px] leading-snug text-text-muted">Add 1–4 edited frames and set each frame’s time in the source clip.</p>
-        <GalleryInput kind="image" label="Remake frame" onFile={handleFrameUpload}
-          getImages={() => frames.map(frame => ({ url: frame.url, name: `Frame at ${formatTime(frame.time)}` }))}
-          disabledReason={uploadingFrame ? 'Uploading a reference frame…' : frames.length >= MAX_FRAMES ? 'Four reference frames is the limit.' : undefined} />
+        <p className="text-[10px] leading-snug text-text-muted">
+          {aligned
+            ? 'Choose one image of the replacement character. The source video supplies the timing, scene and performance.'
+            : 'Choose up to four source moments, edit each frame in Maestro Image Mode, then review the replacements before generating.'}
+        </p>
+        {!aligned && <div className="grid grid-cols-2 gap-2">
+          <button type="button" disabled={!editVideoPath || uploadingFrame || frames.length >= MAX_FRAMES}
+            onClick={() => void addSourceFrame(selectedFrameTime)}
+            className="flex min-h-9 items-center justify-center gap-1.5 rounded-lg border border-border text-[10px] text-text-secondary hover:border-accent-blue/60 hover:text-text-primary disabled:opacity-50">
+            <ImagePlus size={13} /> Add selected source frame
+          </button>
+          <button type="button" disabled={!editVideoPath || uploadingFrame || frames.length >= MAX_FRAMES}
+            onClick={() => void suggestSourceFrames()}
+            className="flex min-h-9 items-center justify-center gap-1.5 rounded-lg border border-border text-[10px] text-text-secondary hover:border-accent-blue/60 hover:text-text-primary disabled:opacity-50">
+            {uploadingFrame ? <Loader2 size={13} className="animate-spin" /> : <Film size={13} />}
+            Suggest keyframes
+          </button>
+        </div>}
+        <GalleryInput kind="image" label={aligned ? 'Replacement character image' : 'Remake frame'} onFile={handleFrameUpload}
+          getImages={() => frames.map(frame => ({ url: frame.url, name: aligned ? frame.name : `Frame at ${formatTime(frame.time)}` }))}
+          disabledReason={uploadingFrame ? 'Uploading image…' : frames.length >= frameLimit
+            ? aligned ? 'Remove the selected image to choose another.' : 'Four reference frames is the limit.'
+            : undefined} />
         {frames.length > 0 && (
           <div className="space-y-2">
             {frames.map((frame, index) => (
               <div key={`${frame.path}-${index}`} className="flex items-center gap-2 rounded-lg border border-border bg-bg-tertiary p-1.5">
-                <img src={frame.url} alt={`Remake reference frame ${index + 1}`} className="h-12 w-16 rounded object-cover" />
+                <img src={frame.url} alt={aligned ? 'Replacement character' : `Remake reference frame ${index + 1}`} className="h-12 w-16 rounded object-cover" />
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-[10px] text-text-secondary">Frame {index + 1} · {frame.name}</div>
-                  <label className="mt-1 flex items-center gap-1 text-[9px] text-text-muted">
+                  <div className="truncate text-[10px] text-text-secondary">{aligned ? frame.name : `Frame ${index + 1} · ${frame.name}`}</div>
+                  {!aligned && <label className="mt-1 flex items-center gap-1 text-[9px] text-text-muted">
                     Time (seconds)
                     <input type="number" min={trimStart} max={trimEnd} step="0.001" value={frame.time}
                       onChange={event => handleFrameTime(index, event.currentTarget.valueAsNumber)}
                       disabled={!editVideoPath}
                       className="w-20 rounded border border-border bg-bg-primary px-1.5 py-1 text-[10px] text-text-primary disabled:opacity-50" />
-                  </label>
+                  </label>}
+                  {!aligned && <button type="button" disabled={!editVideoPath} onClick={() => void editKeyframe(frame.time)}
+                    className="mt-1 flex min-h-7 items-center gap-1 text-[9px] text-accent-blue hover:text-text-primary disabled:opacity-50">
+                    <WandSparkles size={11} /> Edit this source moment in Maestro
+                  </button>}
                 </div>
-                <button type="button" aria-label={`Remove frame ${index + 1}`} onClick={() => removeFrame(index)}
+                <button type="button" aria-label={aligned ? 'Remove replacement character image' : `Remove frame ${index + 1}`} onClick={() => removeFrame(index)}
                   className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text-primary">
                   <X size={13} />
                 </button>
@@ -279,14 +393,15 @@ export function ViggleRemakeControls() {
             ))}
           </div>
         )}
-        {frames.length < MAX_FRAMES && (
+        {frames.length < frameLimit && (
           <button type="button" disabled={uploadingFrame} onClick={() => frameFileRef.current?.click()}
             className="flex min-h-9 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-border text-[10px] text-text-secondary hover:border-accent-blue/60 hover:text-text-primary disabled:opacity-50">
-            <ImagePlus size={13} /> {uploadingFrame ? 'Uploading frame…' : 'Add uploaded frame'}
+            <ImagePlus size={13} /> {uploadingFrame ? 'Uploading image…' : aligned ? 'Upload character image' : 'Add uploaded frame'}
           </button>
         )}
+        {frameEditError && <p role="alert" className="text-[10px] text-red-400">{frameEditError}</p>}
         <input ref={frameFileRef} type="file" accept="image/*" className="hidden"
-          aria-label="Upload Remake reference frame"
+          aria-label={aligned ? 'Upload replacement character image' : 'Upload Remake reference frame'}
           onChange={event => {
             const file = event.currentTarget.files?.[0]
             if (file) void handleFrameUpload(file)

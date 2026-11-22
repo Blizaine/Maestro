@@ -1,3 +1,4 @@
+import { DirectorSingingControls } from './DirectorSingingControls'
 import { isModelEnabledInScope } from '../../lib/modelVisibility'
 import { DirectorMusicClipLength } from './DirectorMusicClipLength'
 import { DirectorGpuClipLimit } from './DirectorGpuClipLimit'
@@ -1031,6 +1032,7 @@ export function DirectorChat() {
               isShortFilm={isShortFilm}
               isMusicVideo={skill === 'music_video'}
             />
+            {skill === 'music_video' && !pastStep('style') && <DirectorSingingControls />}
             {/* Allow adding/changing reference photo after analysis */}
             {!pastStep('style') && (
               <div ref={referenceSetupRef} data-testid="director-reference-setup" className="mt-2 pt-2 border-t border-border/50">
