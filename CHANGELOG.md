@@ -3,6 +3,54 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [4.2.0] — 2026-11-22
+
+Public Dev testing release.
+
+### Director and creative workflows
+
+- Preserve named H3 References dialogue speakers through prompt enhancement.
+  Validate dialogue and reference attribution in every window before rendering.
+  Allow complementary images to describe one subject while retaining separate
+  identities for distinct saved characters.
+- Checkpoint accepted music-video plans and repair failed batches while keeping
+  story events in order. Scope each shot's visual and voice references to its
+  cast and recover completed clips during assembly.
+- Audition a new singing voice in Director with **Sung by**. SeedVC can convert
+  lead vocals or duet parts while retaining the accompaniment and song timing.
+- Preview Recipes with short, muted video samples and apply them with their
+  required model, media and prompt guidance. MCP clients can read recipe
+  guidance too.
+- Extract and edit up to four Remake keyframes in Studio Image and return them to
+  their original slots. Experimental BFS Aligned Swap uses one identity image
+  with the original clip's framing and soundtrack.
+
+### Models and acceleration
+
+- Add pDMD 2- and 4-step presets for MiniMax H3 Image text-to-image and reference
+  editing, alongside the native 6-step reset preset.
+- Add experimental H3 HyperFlow Flash 14B for Frames and References with 4, 6 and
+  8 Euler steps and optional two-pass generation.
+- Add LongCat Avatar 1.6 Distilled with 25 fps output, an 8-step scheduler and
+  streamed audio conditioning.
+- Add experimental ZONOS3 Mini speech with support for 43 languages, 27 built-in
+  voices, reference voice cloning and delivery controls.
+
+### Reliability and performance
+
+- Use the driving media for Studio References and Avatar automatic duration,
+  respecting its window geometry. Track denoising speed per pass.
+- Add Face Refiner blending, face selection, audio guidance and before/after
+  comparison.
+- Select H3 attention head splitting from available VRAM in Auto mode and reduce
+  peak VAE conversion memory. Independently configure manual splitting.
+- Assemble supported native sliding-window MP4s incrementally, preserving audio
+  and frame timing. Window assembly is scoped to the active job.
+- Pin optional WGPKernels 1.5.0, correct Wan 2.2 guidance defaults and respect
+  compile opt-outs. Fix FlashVSR streamed cache shapes and padding, omit
+  unsupported fields from compatible Gemini requests and improve LTX 2.5
+  second-pass failure reporting and cleanup.
+
 ## [4.1.1] — 2026-11-10
 
 - Reserve GPU memory for reference-heavy MiniMax H3 Image renders. Auto-Tune
