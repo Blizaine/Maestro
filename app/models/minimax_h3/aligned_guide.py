@@ -5,6 +5,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from .packing import MINIMAX_H3_FRAMES_PER_CHUNK, align_num_frames
+
 
 def prepare_control_video_tensor(video, height: int, width: int) -> torch.Tensor | None:
     """Normalize control video pixels to CPU CTHW in ``[-1, 1]``."""
@@ -41,7 +43,7 @@ def aligned_guide_visual_condition(
     height: int,
     width: int,
 ) -> dict:
-    """Slice exact source frames after carried history; never pad or shift."""
+    """Slice exact source frames and fill only H3's internal alignment tail."""
 
     source = prepare_control_video_tensor(input_frames, height, width)
     if source is None:
@@ -51,12 +53,35 @@ def aligned_guide_visual_condition(
     if start < 0 or count < 1:
         raise ValueError("BFS Aligned Swap received invalid source-window geometry.")
     stop = start + count
-    if int(source.shape[1]) < stop:
+    available = max(0, int(source.shape[1]) - start)
+    if available < 1:
         raise ValueError(
-            "BFS Aligned Swap source window is shorter than the requested target; "
-            "the aligned guide cannot pad or shift source frames."
+            "BFS Aligned Swap source window has no frames at the requested start."
         )
-    aligned = source[:, start:stop].contiguous()
+    source_window = source[:, start:min(stop, int(source.shape[1]))]
+    missing = count - int(source_window.shape[1])
+    if missing > 0:
+        # WGP aligns the internal H3 denoise grid upward to 17*n+5 while it
+        # keeps the published source duration exact. Pad only that grid tail;
+        # all real source frames stay at their original indices.
+        if (
+            missing > MINIMAX_H3_FRAMES_PER_CHUNK - 1
+            or align_num_frames(available) != count
+        ):
+            raise ValueError(
+                "BFS Aligned Swap source window is materially shorter than the "
+                "requested H3 target grid."
+            )
+        source_window = torch.cat(
+            [
+                source_window,
+                source_window[:, -1:].expand(
+                    -1, missing, -1, -1
+                ),
+            ],
+            dim=1,
+        )
+    aligned = source_window.contiguous()
     if int(aligned.shape[1]) != count:
         raise ValueError("BFS Aligned Swap could not map every target frame to its source frame.")
     return {"anchor": "first", "source": aligned, "keep_all_latents": True}

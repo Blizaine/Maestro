@@ -28,9 +28,38 @@ def test_aligned_guide_slices_matching_window_frames_after_history():
     assert condition["anchor"] == "first"
     assert condition["keep_all_latents"] is True
     assert torch.equal(condition["source"], source[:, 5:27])
-    with pytest.raises(ValueError, match="shorter than the requested target"):
+
+
+def test_aligned_guide_pads_only_one_internal_frame_after_nonzero_history():
+    source = torch.linspace(-1, 1, 26, dtype=torch.float32).view(1, 26, 1, 1)
+    source = source.expand(3, -1, 4, 4).contiguous()
+    condition = _aligned_guide_visual_condition(
+        source, history_count=5, target_frame_num=22, height=4, width=4,
+    )
+    assert torch.equal(condition["source"][:, :21], source[:, 5:])
+    assert torch.equal(condition["source"][:, 21:], source[:, -1:].expand(-1, 1, -1, -1))
+
+
+def test_aligned_guide_pads_108_source_frames_to_internal_124_frame_grid():
+    source = torch.linspace(-1, 1, 108, dtype=torch.float32).view(1, 108, 1, 1)
+    source = source.expand(3, -1, 4, 4).contiguous()
+    condition = _aligned_guide_visual_condition(
+        source, history_count=0, target_frame_num=124, height=4, width=4,
+    )
+    assert condition["source"].shape == (3, 124, 4, 4)
+    assert torch.equal(condition["source"][:, :108], source)
+    assert torch.equal(condition["source"][:, 108:], source[:, -1:].expand(-1, 16, -1, -1))
+
+
+def test_aligned_guide_rejects_missing_start_and_materially_short_source():
+    source = torch.zeros((3, 30, 4, 4), dtype=torch.float32)
+    with pytest.raises(ValueError, match="no frames at the requested start"):
         _aligned_guide_visual_condition(
-            source[:, :26], 5, 22, height=4, width=4,
+            source[:, :5], history_count=5, target_frame_num=22, height=4, width=4,
+        )
+    with pytest.raises(ValueError, match="materially shorter"):
+        _aligned_guide_visual_condition(
+            source[:, :9], history_count=5, target_frame_num=22, height=4, width=4,
         )
 
 

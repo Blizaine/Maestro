@@ -1319,6 +1319,10 @@ def _load_transformer(
         from .hyperflow_flash import replace_low_rank_linears
 
         replace_low_rank_linears(transformer, checkpoint["low_rank"], dtype)
+    # MMGP's ConvRot loader installs quantized wrapper Parameters from the
+    # checkpoint. Freeze the meta model before loading so those INT8-backed
+    # Parameters are not created with requires_grad=True.
+    transformer.requires_grad_(False)
     offload.load_model_data(
         transformer,
         [*filenames, veda_filename] if veda_filename is not None else filename,

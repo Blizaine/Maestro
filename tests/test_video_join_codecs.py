@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import symtable
 import sys
 import tempfile
 import unittest
@@ -399,6 +400,13 @@ class SoundtrackConversionTests(unittest.TestCase):
 
 @unittest.skipUnless(FFMPEG and FFPROBE, "requires FFmpeg")
 class WindowVideoWriterTests(unittest.TestCase):
+    def test_generation_uses_module_shutil_for_ffmpeg_detection(self):
+        path = APP / "wgp.py"
+        symbols = symtable.symtable(path.read_text(encoding="utf-8"), str(path), "exec")
+        generate = next(table for table in symbols.get_children() if table.get_name() == "generate_video")
+        self.assertTrue(symbols.lookup("shutil").is_imported())
+        self.assertTrue(generate.lookup("shutil").is_global())
+
     def test_cumulative_output_uses_every_window_without_reencoding_prior_frames(self):
         from shared.utils.window_video_writer import WindowVideoWriter
         from types import SimpleNamespace

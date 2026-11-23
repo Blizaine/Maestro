@@ -789,6 +789,13 @@ def _marker_matches_w4a8_metadata(marker_config, metadata_config, base):
 
 def _collect_specs(state_dict, metadata=None):
     metadata_layers = _quantization_metadata_layers(metadata)
+    # WanGP's legacy exports omit the per-layer markers and declare the
+    # ConvRot group rule once in the SafeTensor header.
+    wangp_layout = (
+        isinstance(metadata, Mapping)
+        and metadata.get("quantization_format") == "int8_convrot"
+        and metadata.get("convrot_format") == "comfy_quant_v1"
+    )
     metadata_configs = {}
     metadata_w4a8_configs = {}
     state_bases = {}
@@ -882,6 +889,19 @@ def _collect_specs(state_dict, metadata=None):
         elif header_config is not None:
             _validate_header_int8_tensors(base, tensor, scale, header_config)
             config = header_config
+        elif wangp_layout and canonical_base not in metadata_layers:
+            if tensor.ndim != 2 or not all(tensor.shape):
+                raise ValueError(f"WanGP INT8 ConvRot weight for '{base}' must have two nonempty dimensions")
+            rows, columns = tensor.shape
+            group_size = next((size for size in (256, 64, 16) if columns % size == 0), None)
+            if group_size is None:
+                raise ValueError(f"WanGP INT8 ConvRot weight for '{base}' has an unsupported input width")
+            if (
+                getattr(scale, "dtype", None) != torch.float32
+                or tuple(scale.shape) not in ((rows,), (rows, 1))
+            ):
+                raise ValueError(f"WanGP INT8 ConvRot scale for '{base}' must have one float32 value per row")
+            config = {"format": "int8_tensorwise", "convrot": True, "convrot_groupsize": group_size}
         else:
             continue
         specs.append(

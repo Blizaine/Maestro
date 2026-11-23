@@ -158,7 +158,10 @@ class LongCatModel:
         )
         text_encoder_folder = self.model_def.get("text_encoder_folder")
         if text_encoder_folder:
-            tokenizer_path = fl.locate_folder(text_encoder_folder)
+            tokenizer_path = fl.locate_folder(
+                text_encoder_folder,
+                required_files=("tokenizer_config.json", "spiece.model"),
+            )
         else:
             tokenizer_path = os.path.dirname(text_encoder_path)
         self.text_encoder = T5EncoderModel(
@@ -194,9 +197,12 @@ class LongCatModel:
         model_path = model_filename[0] if isinstance(model_filename, (list, tuple)) else model_filename
         if model_path is None:
             raise ValueError("Missing LongCat transformer weights path.")
+        # MMGP creates the checkpoint parameters using the module's gradient flags.
+        # INT8 weights cannot be loaded into parameters that require gradients.
+        transformer.requires_grad_(False)
         offload.load_model_data(transformer, model_path, writable_tensors=False)
         transformer._model_dtype = dtype
-        transformer.eval().requires_grad_(False)
+        transformer.eval()
         self.transformer = transformer
         if save_quantized:
             from wgp import save_quantized_model

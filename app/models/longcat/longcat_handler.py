@@ -300,6 +300,17 @@ class family_handler:
             save_quantized=save_quantized,
         )
 
+        if (model_def or {}).get("avatar_version") == "1.6":
+            from .lora_preprocessing import (
+                make_longcat_avatar_v1_6_lora_preprocessor,
+            )
+
+            longcat_model.transformer.preprocess_loras = (
+                make_longcat_avatar_v1_6_lora_preprocessor(
+                    longcat_model.transformer
+                )
+            )
+
         pipe = {
             "transformer": longcat_model.transformer,
             "vae": longcat_model.vae,

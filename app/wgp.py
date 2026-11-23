@@ -3177,14 +3177,14 @@ def get_model_fps(model_type):
     fps= model_def.get("fps", 16)
     return fps
 
-def get_computed_fps(force_fps, base_model_type , video_guide, video_source ):
+def get_computed_fps(force_fps, model_type, video_guide, video_source):
     if force_fps == "auto":
         if video_source != None:
             fps,  _, _, _ = get_video_info(video_source)
         elif video_guide != None:
             fps,  _, _, _ = get_video_info(video_guide)
         else:
-            fps = get_model_fps(base_model_type)
+            fps = get_model_fps(model_type)
     elif force_fps == "control" and video_guide != None:
         fps,  _, _, _ = get_video_info(video_guide)
     elif force_fps == "source" and video_source != None:
@@ -3192,7 +3192,7 @@ def get_computed_fps(force_fps, base_model_type , video_guide, video_source ):
     elif len(force_fps) > 0 and is_integer(force_fps) :
         fps = int(force_fps)
     else:
-        fps = get_model_fps(base_model_type)
+        fps = get_model_fps(model_type)
     return fps
 
 def get_model_name(model_type, description_container = [""]):
@@ -9182,7 +9182,7 @@ def generate_video(
         else:
             mp4_files = glob.glob(os.path.join(save_path, "*.mp4"))
             video_source = max(mp4_files, key=os.path.getmtime) if mp4_files else None                            
-    fps = 1 if is_image else get_computed_fps(force_fps, base_model_type , video_guide, video_source )
+    fps = 1 if is_image else get_computed_fps(force_fps, model_type, video_guide, video_source)
     control_audio_tracks = source_audio_tracks = source_audio_metadata = []
     if any_letters(audio_prompt_type, "R") and video_guide is not None and MMAudio_setting == 0 and not any_letters(audio_prompt_type, "ABXK"):
         control_audio_tracks, _  = extract_audio_tracks(video_guide, temp_format="wav")
@@ -11471,7 +11471,6 @@ def generate_video(
                                 if retake_audio_path and os.path.isfile(retake_audio_path):
                                     try: os.remove(retake_audio_path)
                                     except OSError: pass
-                                import shutil
                                 shutil.rmtree(si.get("temp_dir", ""), ignore_errors=True)
                                 _retake_stitch_info = None
                             except Exception as stitch_err:
@@ -14172,8 +14171,8 @@ def compute_video_length_label(fps, current_video_length, video_length_locked = 
         ret += ", locked"
     return ret
 def refresh_video_length_label(state, current_video_length, force_fps, video_guide, video_source):
-    base_model_type = get_base_model_type(get_state_model_type(state))
-    computed_fps = get_computed_fps(force_fps, base_model_type , video_guide, video_source )
+    model_type = get_state_model_type(state)
+    computed_fps = get_computed_fps(force_fps, model_type, video_guide, video_source)
     return gr.update(label= compute_video_length_label(computed_fps, current_video_length))
 
 def get_default_value(choices, current_value, default_value = None):
@@ -14935,7 +14934,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                     
                     current_video_length = video_length_locked if video_length_locked is not None else ui_get("video_length", 81 if get_model_family(base_model_type)=="wan" else 97)
 
-                    computed_fps = get_computed_fps(ui_get("force_fps"), base_model_type , ui_defaults.get("video_guide", None), ui_defaults.get("video_source", None))
+                    computed_fps = get_computed_fps(ui_get("force_fps"), model_type, ui_defaults.get("video_guide", None), ui_defaults.get("video_source", None))
                     model_frames_maximum = model_def.get("frames_maximum", None)
                     max_frames = (
                         int(model_frames_maximum)

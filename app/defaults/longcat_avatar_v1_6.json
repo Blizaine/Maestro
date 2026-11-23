@@ -3,7 +3,7 @@
         "name": "LongCat Avatar 1.6 Distilled 13.6B",
         "architecture": "longcat_avatar",
         "avatar_version": "1.6",
-        "description": "Animate one or two characters from a voice recording and an optional image. Eight-step generation and anchored sliding windows support longer performances; inspect transitions and identity drift when extending a clip.",
+        "description": "Animate a character from a voice recording and an optional image. Eight-step generation and anchored sliding windows support longer performances.",
         "URLs": [
             "https://huggingface.co/DeepBeepMeep/LongCat/resolve/e99c5444ad0e7f6d6027a293469e0f93be772415/longcat_avatar_v1_6_bf16.safetensors",
             "https://huggingface.co/DeepBeepMeep/LongCat/resolve/e99c5444ad0e7f6d6027a293469e0f93be772415/longcat_avatar_v1_6_int8_convrot.safetensors"

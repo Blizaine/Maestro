@@ -148,6 +148,79 @@ class NativeContractPatchTests(unittest.TestCase):
         self.assertEqual(properties["dialogue_beats"]["maxItems"], 0)
         self.assertEqual(properties["video_prompt"]["enum"], [""])
 
+    def test_one_silent_row_receives_all_source_events_without_contract_repair(self):
+        story = (
+            "A silent short film. A courier waits beside the door. "
+            "The courier looks toward the clock. The courier turns toward the window. "
+            "The courier watches the rain. The courier remains still. No speech or music."
+        )
+        contract = build_source_contract(story)
+        event_ids = [event["event_id"] for event in contract["events"]]
+        event_texts = [event["text"] for event in contract["events"]]
+        self.assertEqual(event_ids, ["E1", "E2", "E3", "E4", "E5"])
+
+        row = {
+            "title": "Courier waits",
+            "duration_sec": 10,
+            "scene_goal": "The courier waits by the door as rain falls outside.",
+            "narrative_role": "setup",
+            "scene_type": "action",
+            "continuity_strategy": "independent",
+            "continuity_group": "entryway",
+            "story_scene_number": 1,
+            "causal_handoff": "The courier is waiting beside the door.",
+            "persistent_story_state": "The courier waits as rain falls outside.",
+            "source_event_ids": ["E1"],
+            "physical_state": {"opening": [], "transitions": [], "closing": []},
+            "subjects_on_screen": [],
+            "spatial_setup": "The courier stands beside the entryway door.",
+            "environment": "A quiet entryway during steady rain.",
+            "visual_style": "Cinematic live action.",
+            "lighting": "Soft overcast daylight.",
+            "mood": "Quiet and patient.",
+            "action_beats": [event_texts[0]],
+            "dialogue_beats": [],
+            "camera_plan": {
+                "framing": "medium shot",
+                "movement": "static",
+                "movement_intensity": "none",
+            },
+            "audio_plan": {
+                "mode": "ambient_only",
+                "ambience": "steady rain and quiet room tone",
+                "effects": [],
+            },
+            "ending_beat": "The courier remains still by the door.",
+            "closing_blocking": "The courier stands beside the entryway door.",
+            "video_prompt": "",
+            "multishot": False,
+            "window_prompts": [],
+        }
+        planner = ShortFilmPlanner(llm_generate=lambda **kw: "")
+        planner._uses_generated_shot_images = False
+        planner._video_model = "minimax_h3"
+        with patch.object(
+            planner, "_call_llm_json", return_value=[copy.deepcopy(row)],
+        ) as call:
+            shots, _ = planner._plan_story_h3_native(
+                story_description=story,
+                screenplay="A courier waits by the door, watches the rain, and stays silent.",
+                reference_image_path=None,
+                char_profiles=[],
+                has_reference=False,
+                target_duration=10,
+                fps=24,
+                frames_steps=17,
+                frames_minimum=124,
+                frames_maximum=345,
+                require_source_contract=_requires_h3_source_contract(contract),
+            )
+
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(len(shots), 1)
+        self.assertEqual(shots[0].metadata["source_event_ids"], event_ids)
+        self.assertEqual(shots[0].action_beats, event_texts)
+
     def test_silent_repair_keeps_segmentation_camera_and_authored_duration(self):
         rows = []
         for index, verb in enumerate(("opens", "closes"), 1):

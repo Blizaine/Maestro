@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'app'))
 from services.adaptive_enhancement import adaptive_dialogue_expected, adaptive_writing_guide, draft_spoken_exchange
 from services.dialogue_writing import dialogue_forbidden, spoken_word_count
+from services.director.source_contract import director_audio_policy
 from services.h3_story_ledger import _canonicalize_story_ledger, _deterministic_ledger, extract_source_events, extract_h3_source_intent
 from services import llm_service
 from services.llm_sampling import caller_sampling_enabled
@@ -1275,6 +1276,37 @@ class AdaptiveWritingTests(unittest.TestCase):
                     prompt,
                 )
         generator.assert_not_called()
+
+    def test_collective_subject_silence_is_global_but_respects_existing_scope_guards(self):
+        source = (
+            'Alex and Sam sit at the same wooden desk. Alex slides a closed blue folder across to Sam. '
+            'Sam picks up the folder with both hands and places it flat on the right. '
+            'The camera cuts from a wide two-shot to the hands on the folder. '
+            'Both remain seated and silent.'
+        )
+        self.assertFalse(director_audio_policy(source)['generated_speech_allowed'])
+        self.assertTrue(dialogue_forbidden(source))
+
+        for prompt in (
+            'Everyone remains silent.',
+            'All characters stay seated and silent.',
+            'Both remain seated and silent.',
+            'Both characters remain standing and completely silent.',
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertTrue(dialogue_forbidden(prompt))
+
+        local_or_individual_silence = (
+            'For the first shot, both remain seated and silent. Then Mara asks Dev a question.',
+            'During the camera hold, everyone stays seated and silent. Then Mara speaks.',
+            'Mara remains seated and silent. Then Dev asks a question.',
+            'Mara says, "Both remain seated and silent." Dev answers her.',
+            'Both are not silent. Mara and Dev discuss the folder.',
+            'Both remain next to the silent witness as they speak.',
+        )
+        for prompt in local_or_individual_silence:
+            with self.subTest(prompt=prompt):
+                self.assertFalse(dialogue_forbidden(prompt))
 
     def test_shared_no_list_does_not_erase_positive_or_quoted_dialogue(self):
         prompts = (

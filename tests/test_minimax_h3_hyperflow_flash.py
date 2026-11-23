@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import json
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 import types
 import unittest
+from contextlib import nullcontext
+from unittest import mock
 
 import torch
 
@@ -20,34 +24,53 @@ if str(APP) not in sys.path:
 
 def _load_flash_runtime():
     """Keep CPU-only helper tests usable outside the pinned MMGP install."""
-    try:
-        return importlib.import_module("models.minimax_h3.hyperflow_flash")
-    except ModuleNotFoundError as error:
-        if error.name != "optimum":
-            raise
+    def import_with_test_stubs():
         offload = types.ModuleType("mmgp.offload")
         offload.register_row_projection = lambda _projection: None
         sys.modules["mmgp.offload"] = offload
         import mmgp
 
         mmgp.offload = offload
-        sys.modules.pop("models.minimax_h3.hyperflow_flash", None)
+
+        diffusers = types.ModuleType("diffusers")
+        diffusers.__path__ = []
+        diffusers_utils = types.ModuleType("diffusers.utils")
+        diffusers_utils.__path__ = []
+        torch_utils = types.ModuleType("diffusers.utils.torch_utils")
+        torch_utils.randn_tensor = lambda shape, **kwargs: torch.randn(shape, **kwargs)
+        diffusers_names = (
+            "diffusers",
+            "diffusers.utils",
+            "diffusers.utils.torch_utils",
+        )
+        saved_modules = {name: sys.modules.get(name) for name in diffusers_names}
+        try:
+            sys.modules["diffusers"] = diffusers
+            sys.modules["diffusers.utils"] = diffusers_utils
+            sys.modules["diffusers.utils.torch_utils"] = torch_utils
+            sys.modules.pop("models.minimax_h3.hyperflow_flash", None)
+            return importlib.import_module("models.minimax_h3.hyperflow_flash")
+        finally:
+            for name, previous in saved_modules.items():
+                if previous is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = previous
+
+    if importlib.util.find_spec("optimum") is None:
+        return import_with_test_stubs()
+    try:
         return importlib.import_module("models.minimax_h3.hyperflow_flash")
+    except ModuleNotFoundError as error:
+        if error.name != "optimum":
+            raise
+        return import_with_test_stubs()
 
 
 class TestHyperFlowFlashRuntime(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.flash = _load_flash_runtime()
-        from models.minimax_h3.packing import (
-            MINIMAX_H3_TEXT_TAG,
-            build_packed_sequence,
-            build_row_timesteps,
-        )
-
-        cls.MINIMAX_H3_TEXT_TAG = MINIMAX_H3_TEXT_TAG
-        cls.build_packed_sequence = staticmethod(build_packed_sequence)
-        cls.build_row_timesteps = staticmethod(build_row_timesteps)
 
     def test_native_and_refinement_grids_match_upstream_flash_intervals(self):
         expected_raw = {
@@ -121,11 +144,203 @@ class TestHyperFlowFlashRuntime(unittest.TestCase):
         )
         self.assertEqual(tuple(linear.weight.shape), (3, 5))
 
+    def test_mmgp_loads_and_runs_dense_and_factorized_convrot_paths_for_both_workflows(self):
+        if importlib.util.find_spec("optimum") is None:
+            self.skipTest("Pinned MMGP/Quanto runtime is unavailable")
+        try:
+            from mmgp import offload, quant_router
+            from models.minimax_h3 import minimax_h3_main
+            from safetensors import safe_open
+            from safetensors.torch import save_file
+            from shared.qtypes import int8_convrot
+        except ImportError as error:
+            self.skipTest(f"Pinned MMGP/Quanto runtime is unavailable: {error}")
+
+        handler_name = "shared.qtypes.int8_convrot"
+        registered = set(quant_router._HANDLER_MODULES)
+        quant_router.register_handler(handler_name)
+        load_model_data = offload.load_model_data
+        scratch = TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+
+        def make_int8_state(base, rows, *, vector_scale=False):
+            weight = (
+                torch.arange(rows * 64, dtype=torch.int32)
+                .reshape(rows, 64)
+                .remainder(23)
+                .sub(11)
+                .to(torch.int8)
+            )
+            scale = torch.linspace(0.001, 0.005, rows, dtype=torch.float32).reshape(
+                rows, 1
+            )
+            return {
+                base + ".weight": weight,
+                base + ".weight_scale": scale.flatten() if vector_scale else scale,
+            }, weight, scale
+
+        class TinyTransformer(torch.nn.Module):
+            def __init__(self, target, block_index, dtype):
+                super().__init__()
+                self.blocks = torch.nn.ModuleList(
+                    [torch.nn.Module() for _ in range(block_index + 1)]
+                )
+                self.blocks[block_index].attn = torch.nn.Module()
+                setattr(
+                    self.blocks[block_index].attn,
+                    target.rsplit(".", 1)[-1],
+                    torch.nn.Linear(64, 4, bias=False, dtype=dtype, device="meta"),
+                )
+                self.blocks[block_index].attn.dense_proj = torch.nn.Linear(
+                    64, 5, bias=True, dtype=dtype, device="meta"
+                )
+
+            def set_qkv_layout(self, layout):
+                self.test_qkv_layout = layout
+
+        try:
+            # FL2VA and Ref2VA checkpoints use different named low-rank
+            # projections. Exercise each through the production H3 loader.
+            for target in ("blocks.1.attn.q_proj", "blocks.4.attn.v_proj"):
+                with self.subTest(target=target):
+                    block_index = int(target.split(".")[1])
+                    dense_base = f"blocks.{block_index}.attn.dense_proj"
+                    raw_state = {}
+                    dense_state, dense_weight, dense_scale = make_int8_state(dense_base, 5, vector_scale=True)
+                    low_rank_state, down_weight, down_scale = make_int8_state(
+                        target + ".down", 3
+                    )
+                    raw_state.update(dense_state)
+                    raw_state.update(low_rank_state)
+                    bias = torch.linspace(-0.2, 0.2, 5, dtype=torch.bfloat16)
+                    up_weight = (
+                        torch.arange(12, dtype=torch.float32)
+                        .reshape(4, 3)
+                        .div(13)
+                        .to(torch.bfloat16)
+                    )
+                    raw_state[dense_base + ".bias"] = bias
+                    raw_state[target + ".up.weight"] = up_weight
+
+                    checkpoint = {
+                        "hyperflow_flash": True,
+                        "compressed_modulation": False,
+                        "adaln_curve_grid": None,
+                        "time_embed_dim": 16,
+                        "endpoint_gate": 0.25,
+                        "dropped_blocks": (),
+                        "low_rank": {target: 3},
+                        "quantization_format": "int8_convrot",
+                    }
+
+                    def construct_tiny(**kwargs):
+                        return TinyTransformer(target, block_index, kwargs["dtype"])
+
+                    def load_tiny_state(model, filename, **kwargs):
+                        self.assertTrue(
+                            all(not parameter.requires_grad for parameter in model.parameters()),
+                            "H3 transformer must be frozen before MMGP installs INT8 Parameters",
+                        )
+                        load_model_data(model, filename, verboseLevel=0, **kwargs)
+
+                    def read_tiny_file(filename, **_):
+                        with safe_open(filename, framework="pt") as handle:
+                            state = {key: handle.get_tensor(key).clone() for key in handle.keys()}
+                            return state, handle.metadata()
+
+                    with (
+                        mock.patch.object(
+                            minimax_h3_main,
+                            "MiniMaxH3Transformer",
+                            side_effect=construct_tiny,
+                        ),
+                        mock.patch.object(
+                            minimax_h3_main,
+                            "probe_h3_checkpoint",
+                            return_value=checkpoint,
+                        ),
+                        mock.patch.object(
+                            minimax_h3_main,
+                            "init_empty_weights",
+                            return_value=nullcontext(),
+                        ),
+                        mock.patch.object(
+                            minimax_h3_main.offload,
+                            "load_model_data",
+                            side_effect=load_tiny_state,
+                        ),
+                        mock.patch.object(offload, "_safetensors_load_file", side_effect=read_tiny_file),
+                    ):
+                        filename = str(Path(scratch.name) / f"tiny-hyperflow-{block_index}.safetensors")
+                        save_file(raw_state, filename, metadata={
+                            "quantization_format": "int8_convrot",
+                            "convrot_format": "comfy_quant_v1",
+                        })
+                        model = minimax_h3_main._load_transformer(
+                            filename,
+                            torch.bfloat16,
+                            qkv_layout="contiguous",
+                            hyperflow_flash=True,
+                        )
+
+                    dense = model.blocks[block_index].attn.dense_proj
+                    factored = model.get_submodule(target)
+                    down = factored.down
+                    for module in (dense, down):
+                        self.assertIsInstance(
+                            module.weight, int8_convrot.Int8ConvRotWeightTensor
+                        )
+                        self.assertEqual(module._convrot_group_size, 64)
+                        self.assertFalse(module.weight.requires_grad)
+
+                    inputs = torch.linspace(
+                        -1.0, 1.0, 128, dtype=torch.bfloat16
+                    ).reshape(2, 64)
+                    rotated = int8_convrot._rotate_activation(inputs, 64)
+
+                    def expected_convrot(weight, scale, layer_bias=None):
+                        accum = torch.nn.functional.linear(
+                            rotated.float(), weight.float()
+                        )
+                        row_scales = (
+                            scale.reshape(-1)
+                            .to(torch.bfloat16)
+                            .float()
+                            .reshape(1, -1)
+                        )
+                        expected = (accum * row_scales).to(torch.bfloat16)
+                        return expected if layer_bias is None else expected + layer_bias
+
+                    torch.testing.assert_close(
+                        dense(inputs),
+                        expected_convrot(dense_weight, dense_scale, bias),
+                        rtol=0.01,
+                        atol=0.005,
+                    )
+                    expected_down = expected_convrot(down_weight, down_scale)
+                    torch.testing.assert_close(
+                        down(inputs), expected_down, rtol=0.01, atol=0.005
+                    )
+                    torch.testing.assert_close(
+                        factored(inputs),
+                        torch.nn.functional.linear(expected_down, up_weight),
+                        rtol=0.01,
+                        atol=0.005,
+                    )
+        finally:
+            if handler_name not in registered:
+                quant_router.unregister_handler(handler_name)
+
     def test_two_time_conditioning_keeps_reference_rows_at_their_own_time(self):
         from models.minimax_h3.hyperflow_flash import two_time_rows
+        from models.minimax_h3.packing import (
+            MINIMAX_H3_TEXT_TAG,
+            build_packed_sequence,
+            build_row_timesteps,
+        )
 
-        layout = self.build_packed_sequence(
-            torch.tensor([self.MINIMAX_H3_TEXT_TAG]),
+        layout = build_packed_sequence(
+            torch.tensor([MINIMAX_H3_TEXT_TAG]),
             1,
             2,
             2,
@@ -134,7 +349,7 @@ class TestHyperFlowFlashRuntime(unittest.TestCase):
             keyframe_anchors=("first",),
             audio_condition_anchors=(("first", 1),),
         )
-        timestep, indices = self.build_row_timesteps(
+        timestep, indices = build_row_timesteps(
             layout, 0.2, 0.3, 0.8, 1.0
         )
         unique_t, unique_r, pair_indices = two_time_rows(

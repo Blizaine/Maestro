@@ -10407,6 +10407,18 @@ SCREENPLAY:
                 raw["window_prompts"] = []
                 raw["multishot"] = False
                 normalized.append(raw)
+            if (
+                require_source_contract
+                and source_contract["audio_policy"].get("generated_speech_allowed") is False
+                and len(items or []) == 1
+                and len(normalized) == 1
+                and not _h3_native_structure_issues(
+                    items, schema_required, minimum_items=1, maximum_items=1,
+                )
+            ):
+                normalized[0]["source_event_ids"] = [
+                    event["event_id"] for event in source_contract.get("events") or []
+                ]
             return normalized
 
         def _apply_native_schedule(

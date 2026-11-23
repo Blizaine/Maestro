@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import ast
+from contextlib import nullcontext
 import importlib.util
 import json
 import os
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 import types
 import unittest
 from unittest import mock
@@ -16,6 +18,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 _HANDLER_PATH = _ROOT / "app" / "models" / "longcat" / "longcat_handler.py"
 _MAIN_PATH = _ROOT / "app" / "models" / "longcat" / "longcat_main.py"
 _LAUNCH_PATH = _ROOT / "app" / "launch.py"
+_WGP_PATH = _ROOT / "app" / "wgp.py"
 _DEFAULTS_PATH = _ROOT / "app" / "defaults"
 
 
@@ -58,6 +61,32 @@ class LongCatCapabilityTests(unittest.TestCase):
         self.assertFalse(model_def.get("any_audio_prompt", False))
         self.assertNotIn("audio_prompt_type_sources", model_def)
 
+    def test_renderer_uses_the_selected_avatar_variant_frame_rate(self):
+        tree = ast.parse(_WGP_PATH.read_text(encoding="utf-8"))
+        generation = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                          and node.name == "generate_video")
+        set_fps = next(node for node in generation.body if isinstance(node, ast.Assign)
+                       and any(isinstance(call, ast.Call) and
+                               isinstance(call.func, ast.Name) and call.func.id == "get_computed_fps"
+                               for call in ast.walk(node)))
+        names = {"get_model_fps", "get_computed_fps"}
+        helpers = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+        handler = _load_handler().family_handler
+        definitions = {
+            "longcat_avatar": handler.query_model_def("longcat_avatar", {}),
+            "longcat_avatar_v1_6": handler.query_model_def("longcat_avatar", {"avatar_version": "1.6"}),
+        }
+        code = compile(ast.Module(body=[*helpers, set_fps], type_ignores=[]), str(_WGP_PATH), "exec")
+        for selected, expected in (("longcat_avatar", 16), ("longcat_avatar_v1_6", 25)):
+            with self.subTest(model=selected):
+                namespace = {
+                    "base_model_type": "longcat_avatar", "model_type": selected,
+                    "force_fps": "auto", "video_guide": None, "video_source": None,
+                    "is_image": False, "get_model_def": definitions.__getitem__,
+                }
+                exec(code, namespace)
+                self.assertEqual(namespace["fps"], expected)
+
     def test_each_model_exposes_the_existing_short_window_recipe_to_studio(self):
         for architecture in ("longcat_video", "longcat_avatar"):
             with self.subTest(architecture=architecture):
@@ -68,6 +97,64 @@ class LongCatCapabilityTests(unittest.TestCase):
                 self.assertEqual(windows["window_step"], 4)
                 self.assertEqual(windows["overlap_default"], 13)
                 self.assertEqual(windows["discard_last_frames"], 0)
+
+    def test_avatar_loads_the_linked_tokenizer_and_freezes_int8_parameters_first(self):
+        tree = ast.parse(_MAIN_PATH.read_text(encoding="utf-8"))
+        model = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                     and node.name == "LongCatModel")
+        constructor = next(node for node in model.body if isinstance(node, ast.FunctionDef)
+                           and node.name == "__init__")
+        locator_path = _ROOT / "app" / "shared" / "utils" / "files_locator.py"
+        spec = importlib.util.spec_from_file_location("longcat_test_files_locator", locator_path)
+        locator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(locator)
+
+        with TemporaryDirectory() as directory:
+            primary = Path(directory) / "primary" / "umt5-xxl"
+            linked = Path(directory) / "linked" / "umt5-xxl"
+            primary.mkdir(parents=True)
+            linked.mkdir(parents=True)
+            weight = primary / "int8.safetensors"
+            weight.touch()
+            for filename in ("tokenizer_config.json", "spiece.model"):
+                (linked / filename).touch()
+            locator.set_checkpoints_paths([str(primary.parent), str(linked.parent)])
+
+            class CheckpointLoaded(Exception):
+                pass
+
+            transformer = mock.Mock()
+            frozen = False
+
+            def freeze(flag):
+                nonlocal frozen
+                frozen = not flag
+
+            def load_weights(module, path, *, writable_tensors):
+                self.assertIs(module, transformer)
+                self.assertEqual(path, str(weight))
+                self.assertFalse(writable_tensors)
+                self.assertTrue(frozen)
+                raise CheckpointLoaded
+
+            transformer.requires_grad_.side_effect = freeze
+            text_encoder = mock.Mock()
+            namespace = {
+                "torch": types.SimpleNamespace(device=str, bfloat16=object(), float32=object()),
+                "fl": locator, "T5EncoderModel": text_encoder, "TextEncoderCache": object,
+                "_load_json_config": lambda _: {}, "init_empty_weights": nullcontext,
+                "LongCatVideoAvatarTransformer3DModel": lambda **_: transformer,
+                "LongCatVideoTransformer3DModel": object,
+                "offload": types.SimpleNamespace(load_model_data=load_weights),
+            }
+            exec(compile(ast.Module(body=[constructor], type_ignores=[]), str(_MAIN_PATH), "exec"), namespace)
+            with self.assertRaises(CheckpointLoaded):
+                namespace["__init__"](
+                    types.SimpleNamespace(), directory, model_filename=str(weight),
+                    base_model_type="longcat_avatar", model_def={"text_encoder_folder": "umt5-xxl"},
+                    text_encoder_filename=str(weight),
+                )
+            self.assertEqual(text_encoder.call_args.kwargs["tokenizer_path"], str(linked))
 
     def test_oversized_or_inherited_windows_are_bounded_without_cutting_the_song(self):
         normalize = _load_handler().normalize_longcat_window_params
