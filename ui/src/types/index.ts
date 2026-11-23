@@ -329,7 +329,7 @@ export interface LTXWindowPlan {
 
 export type MiniMaxH3ReferenceType = 'image' | 'video' | 'audio'
 export type MiniMaxH3AudioIntent = 'voice' | 'drive' | 'style' | 'sound'
-export type MiniMaxH3VideoAudioRole = 'ignore' | 'legacy' | MiniMaxH3AudioIntent
+export type MiniMaxH3VideoAudioRole = 'ignore' | 'legacy' | 'output_only' | MiniMaxH3AudioIntent
 
 export interface MiniMaxH3Reference {
   id: string

@@ -184,6 +184,15 @@ class H3VDNTests(unittest.TestCase):
             self.assertEqual(turbo["params"]["num_inference_steps"], 8)
             self.assertIn("/630975da14fd3c84169d6cd5092da3ce1287d137/", turbo["activated_loras"][0])
             self.assertEqual(recipes["VDN Standard 50 Steps"]["activated_loras"], [])
+        for model in ("minimax_h3", "minimax_h3_full"):
+            recipes = {p["name"]: p for p in presets if p["model_type"] == model}
+            for steps in (2, 4):
+                pi = recipes[f"pi-H3 FL2VA {steps} Steps"]
+                self.assertTrue(pi["builtin"])
+                self.assertEqual(pi["params"]["num_inference_steps"], steps)
+                self.assertEqual(pi["params"]["sample_solver"], "euler")
+                self.assertFalse(pi["params"]["minimax_h3_turbo_mode"])
+                self.assertTrue(pi["activated_loras"][0].endswith(f"pi_{steps}step_lora_bf16.safetensors"))
 
     def test_adapter_url_can_download_without_a_prior_classic_ui_cache(self):
         import ast, os

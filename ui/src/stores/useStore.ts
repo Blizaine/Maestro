@@ -14740,13 +14740,18 @@ export const useStore = create<AppState>((set, get) => ({
       && Number.isFinite(p.switch_threshold)
       ? p.switch_threshold
       : restoredModelOptions?.default_switch_threshold ?? undefined
+    // The typed manifest owns a restored References drive choice. Its saved
+    // WGP guide is derived from that choice and would linger after a role edit.
+    const manifestHasDrive = newParams.minimax_h3_references?.some(reference =>
+      (reference.type === 'video' && reference.video_audio_role === 'drive')
+      || (reference.type === 'audio' && reference.audio_intent === 'drive'))
     newParams.video_prompt_type = (p.video_prompt_type as string) || ''
-    newParams.audio_prompt_type = (p.audio_prompt_type as string) || ''
+    newParams.audio_prompt_type = manifestHasDrive ? '' : (p.audio_prompt_type as string) || ''
     newParams.image_prompt_type = (p.image_prompt_type as string) || ''
     newParams.input_video_strength = (p.input_video_strength as number) ?? undefined
     newParams.flow_shift = migratedLegacyRecast ? 1 : (p.flow_shift as number) ?? undefined
     newParams.self_refiner_setting = (p.self_refiner_setting as number) ?? undefined
-    newParams.audio_guide = (p.audio_guide as string) || ''
+    newParams.audio_guide = manifestHasDrive ? '' : (p.audio_guide as string) || ''
     newParams.audio_frame_offset = Number.isFinite(Number(p.audio_frame_offset))
       ? Number(p.audio_frame_offset) : undefined
     newParams.audio_scale = (p.audio_scale as number) ?? undefined

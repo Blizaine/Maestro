@@ -1,8 +1,8 @@
 """Canonical source-audio roles for MiniMax H3 video references.
 
-The original UI manifest remains the saved source of truth.  This module
-creates a request-local view that turns an explicitly selected video audio
-role into the existing standalone audio-reference representation.
+The original UI manifest remains the saved source of truth. This module
+creates request-local standalone audio references for roles that condition
+H3, while output-only soundtracks stay outside the conditioning manifest.
 """
 
 from __future__ import annotations
@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-H3VideoAudioRole = Literal["ignore", "legacy", "drive", "voice", "style", "sound"]
+H3VideoAudioRole = Literal[
+    "ignore", "legacy", "drive", "voice", "style", "sound", "output_only",
+]
 
 VIDEO_AUDIO_ROLE_TO_INTENT: dict[str, str] = {
     "drive": "drive",
@@ -26,7 +28,7 @@ VIDEO_AUDIO_ROLE_TO_INTENT: dict[str, str] = {
     "sound": "sound",
 }
 
-VIDEO_AUDIO_ROLES = {"ignore", "legacy", *VIDEO_AUDIO_ROLE_TO_INTENT}
+VIDEO_AUDIO_ROLES = {"ignore", "legacy", "output_only", *VIDEO_AUDIO_ROLE_TO_INTENT}
 _AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"}
 _VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
 _DERIVED_AUDIO_MARKER = "_h3_video_audio_source_id"
@@ -88,6 +90,10 @@ def video_audio_contributes_reference_ordinal(reference: dict[str, Any]) -> bool
     # row.  Raw uncanonicalized manifests still need their effective role
     # reflected in read-only prompt/signature numbering.
     if role == "drive":
+        return False
+    if role == "output_only":
+        # This soundtrack is restored only after generation. It has no H3
+        # audio-reference slot and must never shift authored Audio labels.
         return False
     # Once canonicalized, this visual row is only the video reference; the
     # derived audio row owns the single Audio ordinal. Keep counting raw typed
@@ -277,11 +283,12 @@ def canonicalize_video_audio_roles(
 ) -> list[dict[str, Any]]:
     """Return an idempotent request-local manifest with typed video audio rows.
 
-    Legacy paired soundtracks remain attached to their video.  Explicit
-    source-audio roles become existing standalone audio rows, so ``drive`` is
-    routed through the exact target-audio path and ``voice``/``style``/``sound``
-    use their established reference behavior.  Existing derived rows are
-    rebuilt from their video source, making repeated calls stable.
+    Legacy paired soundtracks remain attached to their video. Explicit
+    conditioning roles become standalone audio rows: ``drive`` is routed
+    through the exact target-audio path and ``voice``/``style``/``sound`` use
+    their established reference behavior. ``output_only`` stays on its video
+    row with audio disabled. Existing derived rows are rebuilt from their
+    video source, making repeated calls stable.
     """
 
     if references is None:
@@ -336,6 +343,18 @@ def canonicalize_video_audio_roles(
             result.append(item)
             continue
 
+        if role == "output_only":
+            # Keep the visual row in the H3 manifest, with embedded audio
+            # disabled. The output mixer resolves its source separately from
+            # this request-local visual manifest.
+            item["include_audio"] = False
+            item.pop("audio_duration_seconds", None)
+            item.pop(_VIDEO_AUDIO_MARKER, None)
+            item.pop("_h3_video_audio_role_routed", None)
+            item.pop("_h3_video_audio_routed_role", None)
+            result.append(item)
+            continue
+
         source_key = hashlib.sha256(
             "\0".join((str(video_ordinal), str(item.get("id") or ""), str(item.get("path") or ""))).encode("utf-8")
         ).hexdigest()[:16]
@@ -381,6 +400,70 @@ def canonicalize_video_audio_roles(
 
     return result
 
+
+def resolve_output_only_audio_path(
+    references,
+    *,
+    cache_dir: str | os.PathLike[str] | None = None,
+) -> str | None:
+    """Resolve the single request-only output soundtrack from H3 video refs.
+
+    ``references`` may be one manifest or a list of per-clip manifests. Repeated
+    copies of the same selected source across per-clip manifests are one output
+    soundtrack; two output-only rows in one manifest or different sources
+    across clips are ambiguous and rejected.
+
+    The return value is always a seekable WAV for WGP's timeline slicer. An
+    attached audio file takes precedence over the video's first audio stream.
+    Nothing is attached to a Ref2VA audio row or copied into saved settings.
+    """
+
+    if references is None:
+        return None
+    if not isinstance(references, list):
+        raise ValueError("MiniMax H3 references must be a list.")
+
+    if any(isinstance(item, list) for item in references):
+        manifests = references
+        if any(not isinstance(manifest, list) for manifest in manifests):
+            raise ValueError("Per-clip MiniMax H3 references must be lists.")
+    else:
+        manifests = [references]
+
+    resolved: dict[str, str] = {}
+    for manifest_index, manifest in enumerate(manifests, start=1):
+        candidates = []
+        for reference_index, item in enumerate(manifest, start=1):
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("type") or item.get("kind") or "").strip().lower()
+            if kind == "video" and normalize_video_audio_role(item) == "output_only":
+                candidates.append((reference_index, item))
+        if len(candidates) > 1:
+            raise ValueError(
+                f"Reference manifest {manifest_index} selects more than one "
+                "Keep source audio (output only) soundtrack. Choose one source per generation."
+            )
+        for reference_index, item in candidates:
+            source_path, _duration = _source_audio_path(
+                item,
+                index=reference_index,
+                role="output_only",
+                cache_dir=cache_dir,
+            )
+            if Path(source_path).suffix.lower() != ".wav":
+                source_path = _extract_full_audio(source_path, cache_dir)
+            resolved[os.path.normcase(os.path.realpath(source_path))] = source_path
+
+    if not resolved:
+        return None
+    if len(resolved) > 1:
+        raise ValueError(
+            "Per-clip references select different Keep source audio (output only) "
+            "soundtracks. Use one soundtrack for the full generation."
+        )
+    return next(iter(resolved.values()))
+
 def measure_video_audio_metadata(
     references: list[dict[str, Any]] | None,
     *,
@@ -411,6 +494,11 @@ def measure_video_audio_metadata(
         row.pop(_VIDEO_AUDIO_MARKER, None)
         row.pop("_h3_video_audio_role_routed", None)
         row.pop("_h3_video_audio_routed_role", None)
+        if (
+            str(row.get("type") or row.get("kind") or "").strip().lower() == "video"
+            and normalize_video_audio_role(row) == "output_only"
+        ):
+            row.pop("audio_duration_seconds", None)
         original_rows.append(row)
 
     expanded = canonicalize_video_audio_roles(

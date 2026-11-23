@@ -28,6 +28,7 @@ from services.h3_reference_audio import (
     canonicalize_video_audio_roles,
     measure_video_audio_metadata,
     normalize_video_audio_role,
+    resolve_output_only_audio_path,
     video_audio_contributes_reference_ordinal,
     video_drive_prompt_context,
 )
@@ -119,6 +120,85 @@ class H3VideoAudioRoleTests(unittest.TestCase):
         normalized = validate_reference_manifest([enabled, disabled], require_files=False)
         self.assertEqual(normalized[0]["include_audio"], True)
         self.assertEqual(normalized[1]["include_audio"], False)
+
+    def test_output_only_video_stays_visual_and_does_not_allocate_audio(self):
+        source = self._video_ref(
+            video_audio_role="OUTPUT_ONLY",
+            audio_duration_seconds=12.0,
+        )
+        original = dict(source)
+
+        canonical = canonicalize_video_audio_roles([source])
+        runtime, drive_path, ordinal = split_exact_drive_audio_reference([source])
+        validated = validate_reference_manifest([source], require_files=False)
+
+        self.assertEqual(source, original)
+        self.assertEqual(len(canonical), 1)
+        self.assertEqual(canonical[0]["video_audio_role"], "output_only")
+        self.assertFalse(canonical[0]["include_audio"])
+        self.assertNotIn("audio_duration_seconds", canonical[0])
+        self.assertFalse(video_audio_contributes_reference_ordinal(canonical[0]))
+        self.assertEqual([item["type"] for item in runtime], ["video"])
+        self.assertIsNone(drive_path)
+        self.assertIsNone(ordinal)
+        self.assertFalse(validated[0]["include_audio"])
+
+        measured = measure_video_audio_metadata([source])
+        self.assertNotIn("audio_duration_seconds", measured[0])
+
+    def test_output_only_audio_resolver_prefers_attached_audio_and_caches_video_audio(self):
+        attached = self._video_ref(
+            video_audio_role="output_only",
+            audio_path=str(self.attached),
+        )
+        with patch(
+            "services.h3_reference_audio._probe_audio",
+            return_value=(True, 7.25),
+        ):
+            self.assertEqual(
+                resolve_output_only_audio_path([attached]),
+                str(self.attached),
+            )
+
+        embedded = self._video_ref(video_audio_role="output_only")
+        with (
+            patch(
+                "services.h3_reference_audio._probe_audio",
+                side_effect=[(True, None), (True, 9.5)],
+            ),
+            patch(
+                "services.h3_reference_audio._extract_full_audio",
+                return_value=str(self.cached),
+            ) as extract,
+        ):
+            self.assertEqual(
+                resolve_output_only_audio_path([embedded]),
+                str(self.cached),
+            )
+        extract.assert_called_once_with(str(self.video), None)
+
+    def test_output_only_audio_resolver_reuses_same_source_across_clips_and_rejects_conflicts(self):
+        same_source = self._video_ref(
+            video_audio_role="output_only",
+            audio_path=str(self.attached),
+        )
+        second_source = self._video_ref(
+            id="video-2",
+            video_audio_role="output_only",
+            audio_path=str(self.cached),
+        )
+        with patch(
+            "services.h3_reference_audio._probe_audio",
+            return_value=(True, 7.25),
+        ):
+            self.assertEqual(
+                resolve_output_only_audio_path([[same_source], [dict(same_source)]]),
+                str(self.attached),
+            )
+            with self.assertRaisesRegex(ValueError, "different Keep source audio"):
+                resolve_output_only_audio_path([[same_source], [second_source]])
+        with self.assertRaisesRegex(ValueError, "more than one Keep source audio"):
+            resolve_output_only_audio_path([[same_source, dict(same_source)]])
 
     def test_explicit_audio_roles_make_one_standalone_row_and_keep_input_unchanged(self):
         source = self._video_ref(
@@ -315,6 +395,69 @@ class H3VideoAudioRoleTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "one Music / performance timeline"):
                 split_exact_drive_audio_reference([drive, standalone])
+
+    def test_output_only_rejects_a_separate_exact_drive(self):
+        output_only = self._video_ref(
+            id="output-only",
+            video_audio_role="output_only",
+            audio_path=str(self.attached),
+        )
+        standalone = {
+            "type": "audio",
+            "path": str(self.attached),
+            "audio_intent": "drive",
+        }
+        with self.assertRaisesRegex(ValueError, "cannot be combined with a separate"):
+            split_exact_drive_audio_reference([output_only, standalone])
+
+    def test_output_only_path_is_request_local_until_the_final_wgp_mux(self):
+        launch_path = APP / "launch.py"
+        launch_tree = ast.parse(
+            launch_path.read_text(encoding="utf-8"),
+            filename=str(launch_path),
+        )
+        sidecar = next(
+            node for node in launch_tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_generation_sidecar_params"
+        )
+        sidecar_call = next(
+            node for node in ast.walk(sidecar)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "json_safe_generation_params"
+        )
+        omitted = ast.literal_eval(next(
+            keyword.value for keyword in sidecar_call.keywords
+            if keyword.arg == "omit_keys"
+        ))
+        self.assertIn("_h3_output_audio_path", omitted)
+
+        prepare = next(
+            node for node in launch_tree.body
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "_prepare_generation_submission"
+        )
+        prepare_source = ast.get_source_segment(
+            launch_path.read_text(encoding="utf-8"), prepare,
+        )
+        self.assertIn('body.pop("_h3_output_audio_path", None)', prepare_source)
+        self.assertIn("resolve_output_only_audio_path", prepare_source)
+        self.assertIn('prepared_params.pop("_h3_output_audio_path", None)', prepare_source)
+
+        wgp_path = APP / "wgp.py"
+        wgp_source = wgp_path.read_text(encoding="utf-8")
+        wgp_tree = ast.parse(wgp_source, filename=str(wgp_path))
+        generate = next(
+            node for node in wgp_tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "generate_video"
+        )
+        argument_names = {argument.arg for argument in generate.args.args}
+        self.assertIn("_h3_output_audio_path", argument_names)
+        generate_source = ast.get_source_segment(wgp_source, generate)
+        self.assertIn('inputs.pop("_h3_output_audio_path", None)', generate_source)
+        self.assertIn("slice_audio_file_from_frame", generate_source)
+        self.assertIn("new_audio_tracks = [_h3_output_audio_path]", generate_source)
 
     def test_video_drive_context_is_recognized_as_an_exact_performance_clock(self):
         relationships = "\n".join(video_drive_prompt_context(

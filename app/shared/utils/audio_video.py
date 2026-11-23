@@ -1,5 +1,6 @@
 import subprocess
 import tempfile, os
+import math
 import ffmpeg
 import torchvision.transforms.functional as TF
 import torch.nn.functional as F
@@ -350,6 +351,28 @@ def get_audio_file_channels(audio_path):
     if audio_stream is None or not audio_stream.get("channels"):
         raise ValueError(f"Unable to read audio channel count from {audio_path}")
     return int(audio_stream["channels"])
+
+
+def slice_audio_file_from_frame(audio_path, start_frame, fps, output_path):
+    """Write the source audio tail beginning at one exact video frame.
+
+    H3 output-only reference audio uses this after request preflight has
+    decoded its source to WAV. Reading and writing at the source sample rate
+    keeps the audio clock aligned without resampling the reference.
+    """
+    import soundfile as sf
+
+    fps = float(fps)
+    if not math.isfinite(fps) or fps <= 0:
+        raise ValueError("Audio timeline frame rate must be positive.")
+    start_frame = max(0, int(start_frame or 0))
+    with sf.SoundFile(audio_path) as audio_file:
+        sample_rate = audio_file.samplerate
+        start_sample = int(round(start_frame * sample_rate / fps))
+        audio_file.seek(min(start_sample, len(audio_file)))
+        data = audio_file.read(dtype="float32")
+    sf.write(output_path, data, sample_rate)
+    return output_path
 
 
 def combine_and_concatenate_video_with_audio_tracks(

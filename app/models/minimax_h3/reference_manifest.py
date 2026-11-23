@@ -252,6 +252,27 @@ def split_exact_drive_audio_reference(references) -> tuple[list[dict], str | Non
     items = canonicalize_video_audio_roles(
         [dict(item) for item in (references or []) if isinstance(item, dict)]
     )
+    has_output_only = any(
+        str(item.get("type") or item.get("kind") or "").strip().lower() == "video"
+        and str(item.get("video_audio_role") or "").strip().lower() == "output_only"
+        for item in items
+    )
+    has_drive = any(
+        (
+            str(item.get("type") or item.get("kind") or "").strip().lower() == "audio"
+            and str(item.get("audio_intent") or "voice").strip().lower() == "drive"
+        )
+        or (
+            str(item.get("type") or item.get("kind") or "").strip().lower() == "video"
+            and str(item.get("video_audio_role") or "").strip().lower() == "drive"
+        )
+        for item in items
+    )
+    if has_output_only and has_drive:
+        raise ValueError(
+            "Keep source audio (output only) cannot be combined with a separate "
+            "Music / performance timeline. Choose one output soundtrack."
+        )
     runtime_references: list[dict] = []
     drive_path: str | None = None
     drive_ordinal: int | None = None

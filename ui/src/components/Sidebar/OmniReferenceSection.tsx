@@ -30,7 +30,8 @@ const VIDEO_INTENT_HELP = {
 const VIDEO_AUDIO_ROLE_HELP: Record<MiniMaxH3VideoAudioRole, string> = {
   ignore: 'Use the video for visual guidance and ignore its soundtrack.',
   legacy: 'Generative audio guidance. H3 may change the source sounds or add new audio; the original waveform is not preserved.',
-  drive: 'Preserve this soundtrack exactly as the target timeline. It can set the output duration; later windows are silent after its end.',
+  output_only: 'Copies the source soundtrack onto the finished video after H3 generates the picture.',
+  drive: 'Preserves this soundtrack and uses it to guide the performance, including mouth movement. It can also set the output duration.',
   voice: 'Reuse vocal identity and delivery for new dialogue without copying the source words or timing.',
   style: 'Borrow sound, music, rhythm, or texture across the source timeline; later windows are silent after it ends.',
   sound: 'Reuse this clip as sound-effect timbre guidance in each window; generation places the effect from the prompt.',
@@ -38,6 +39,15 @@ const VIDEO_AUDIO_ROLE_HELP: Record<MiniMaxH3VideoAudioRole, string> = {
 
 function effectiveVideoAudioRole(reference: MiniMaxH3Reference): MiniMaxH3VideoAudioRole {
   return reference.video_audio_role ?? (reference.include_audio === false ? 'ignore' : 'legacy')
+}
+
+function hasOutputOnlySoundtrackConflict(references: MiniMaxH3Reference[]): boolean {
+  const outputOnly = references.filter(reference => reference.type === 'video'
+    && effectiveVideoAudioRole(reference) === 'output_only')
+  return outputOnly.length > 1 || (outputOnly.length === 1 && references.some(reference => (
+    (reference.type === 'audio' && reference.audio_intent === 'drive')
+    || (reference.type === 'video' && effectiveVideoAudioRole(reference) === 'drive')
+  )))
 }
 
 function referenceCounts(references: MiniMaxH3Reference[]) {
@@ -309,12 +319,18 @@ export function OmniReferenceSection({
     setError('')
     try {
       const uploaded = reference.type === 'audio' ? await api.uploadAudio(file) : await api.uploadImage(file)
+      const hasAudio = reference.type === 'video'
+        ? Boolean('has_audio' in uploaded && uploaded.has_audio)
+        : reference.type === 'audio'
       update(currentReferences().map(item => item.id === reference.id ? {
         ...item, path: uploaded.path, filename: file.name, url: uploaded.url,
         duration_seconds: uploaded.duration_seconds ?? null,
         source_duration_seconds: undefined,
         effective_duration_seconds: undefined,
-        has_audio: reference.type === 'video' ? Boolean('has_audio' in uploaded && uploaded.has_audio) : reference.type === 'audio',
+        has_audio: hasAudio,
+        video_audio_role: item.video_audio_role === 'output_only' && !hasAudio && !item.audio_path
+          ? 'ignore'
+          : item.video_audio_role,
       } : item))
     } catch (error) { setError(error instanceof Error ? error.message : 'Could not replace reference.') }
     finally { setUploading(false) }
@@ -452,6 +468,12 @@ export function OmniReferenceSection({
 
   const setAudioIntent = (index: number, intent: MiniMaxH3AudioIntent) => {
     const reference = references[index]
+    const next = references.map((item, position) => position === index ? {...item, audio_intent: intent} : item)
+    if (hasOutputOnlySoundtrackConflict(next)) {
+      setError('Choose one output soundtrack. An output-only track and a performance timeline cannot be selected together.')
+      return
+    }
+    setError('')
     patchReference(index, { audio_intent: intent })
     if (intent === 'drive') applyDriveDuration(Number(reference?.duration_seconds))
   }
@@ -459,6 +481,10 @@ export function OmniReferenceSection({
   const setVideoAudioRole = (index: number, role: MiniMaxH3VideoAudioRole) => {
     const reference = references[index]
     const next = references.map((item, position) => position === index ? {...item, video_audio_role: role} : item)
+    if (hasOutputOnlySoundtrackConflict(next)) {
+      setError('Choose one output soundtrack. Clear the other output-only track or performance timeline first.')
+      return
+    }
     const counts = referenceCounts(next)
     if (counts.total > limits.total || counts.audio > limits.audio) {
       setError('This soundtrack role needs an audio reference slot. Remove another reference or choose Ignore source audio.')
@@ -495,7 +521,7 @@ export function OmniReferenceSection({
         audio_path: uploaded.path,
         audio_filename: file.name,
         audio_duration_seconds: uploaded.duration_seconds ?? null,
-        include_audio: true,
+        include_audio: !reference.video_audio_role || reference.video_audio_role === 'legacy',
       } : reference))
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : 'Soundtrack upload failed.')
@@ -654,6 +680,7 @@ export function OmniReferenceSection({
             title={VIDEO_AUDIO_ROLE_HELP[effectiveVideoAudioRole(reference)]} className={fieldClass}>
             <option value="ignore">Ignore source audio</option>
             <option value="legacy">Audio reference (generative)</option>
+            {scope === 'studio' && <option value="output_only">Keep source audio (output only)</option>}
             <option value="drive">Preserve soundtrack / performance timeline</option>
             <option value="voice">Voice reference</option>
             <option value="style">Music / sound style</option>
@@ -692,7 +719,15 @@ export function OmniReferenceSection({
               onChange={event => { void attachAudio(reference.id, event.target.files?.[0]); event.currentTarget.value = '' }} />
           </label>
           {reference.audio_path && <button type="button" disabled={disabled} title="Remove attached soundtrack"
-            onClick={() => patchReference(index, { audio_path: undefined, audio_filename: undefined, audio_duration_seconds: undefined, include_audio: reference.has_audio === true })}
+            onClick={() => patchReference(index, {
+              audio_path: undefined,
+              audio_filename: undefined,
+              audio_duration_seconds: undefined,
+              video_audio_role: reference.video_audio_role === 'output_only' && !reference.has_audio
+                ? 'ignore'
+                : reference.video_audio_role,
+              include_audio: reference.has_audio === true && effectiveVideoAudioRole(reference) === 'legacy',
+            })}
             className="flex min-h-8 min-w-0 items-center gap-1 text-text-muted hover:text-indicator-error">
             <X size={12} className="shrink-0" /><span className="truncate">{reference.audio_filename || 'Attached audio'}</span>
           </button>}

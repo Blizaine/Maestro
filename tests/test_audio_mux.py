@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 from shared.utils.audio_video import (  # noqa: E402
     combine_and_concatenate_video_with_audio_tracks,
     resample_audio_array,
+    slice_audio_file_from_frame,
 )
 
 
@@ -121,6 +122,26 @@ class AudioMuxTests(unittest.TestCase):
                 output, streams = self.mux(sources, [self.mono], prefix_seconds)
                 self.assertEqual(streams[0]["channels"], 1)
                 self.assert_tones(self.samples(output, channels=1), 1.2, (660,))
+
+    def test_output_only_reference_audio_keeps_cut_timing_in_final_mux(self):
+        source = str(self.root / "source_with_cut.wav")
+        sliced = str(self.root / "source_after_cut.wav")
+        t = np.arange(self.rate * 3, dtype=np.float32) / self.rate
+        waveform = np.concatenate((
+            0.3 * np.sin(2 * np.pi * 440 * t[:self.rate]),
+            0.3 * np.sin(2 * np.pi * 880 * t[:self.rate]),
+            0.3 * np.sin(2 * np.pi * 1320 * t[:self.rate]),
+        ))
+        sf.write(source, waveform, self.rate)
+
+        slice_audio_file_from_frame(source, 24, 24, sliced)
+        output, streams = self.mux([], [sliced])
+
+        self.assertEqual(streams[0]["channels"], 1)
+        self.assertAlmostEqual(float(streams[0]["duration"]), 2, delta=0.1)
+        audio = self.samples(output, channels=1)
+        self.assert_tones(audio, 0.2, (880,))
+        self.assert_tones(audio, 1.2, (1320,))
 
     def test_silent_prefix_and_missing_new_audio_use_matching_channels(self):
         output, streams = self.mux([], [self.stereo], 1)

@@ -61,6 +61,21 @@ class StudioAudioContextTests(unittest.TestCase):
                 {"type": "audio", "audio_intent": "drive"},
             ]})
 
+    def test_output_only_reference_never_becomes_transcript_context(self):
+        with patch(
+            "models.minimax_h3.reference_manifest.split_exact_drive_audio_reference",
+        ) as resolve:
+            self.assertIsNone(source_audio_driver({
+                "references": [{
+                    "type": "video",
+                    "path": "source.mp4",
+                    "video_audio_role": "output_only",
+                }],
+                "audio_guide": "stale-frame-audio.wav",
+                "audio_prompt_type": "A",
+            }))
+            resolve.assert_not_called()
+
     def test_window_contexts_follow_overlap_and_never_copy_the_whole_track(self):
         windows = conditioning_transcript_windows([
             {"start_seconds": 0, "end_seconds": 10},

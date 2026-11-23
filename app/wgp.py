@@ -93,7 +93,7 @@ from shared.utils.loras_mutipliers import preparse_loras_multipliers, parse_lora
 from shared.utils.utils import convert_tensor_to_image, save_image, get_video_info, get_file_creation_date, convert_image_to_video, calculate_new_dimensions, convert_image_to_tensor, calculate_dimensions_and_resize_image, rescale_and_crop, get_video_frame, resize_and_remove_background, rgb_bw_to_rgba_mask, to_rgb_tensor
 from shared.utils.utils import calculate_new_dimensions, get_outpainting_frame_location, get_outpainting_full_area_dimensions
 from shared.utils.utils import has_video_file_extension, has_image_file_extension, has_audio_file_extension
-from shared.utils.audio_video import extract_audio_tracks, combine_video_with_audio_tracks, combine_and_concatenate_video_with_audio_tracks, cleanup_temp_audio_files, normalize_audio_pair_volumes_to_temp_files, save_video, save_image
+from shared.utils.audio_video import extract_audio_tracks, combine_video_with_audio_tracks, combine_and_concatenate_video_with_audio_tracks, cleanup_temp_audio_files, normalize_audio_pair_volumes_to_temp_files, save_video, save_image, slice_audio_file_from_frame
 from shared.utils.audio_video import save_image_metadata, read_image_metadata, extract_audio_track_to_wav, write_wav_file, save_audio_file, get_audio_codec_extension, append_sliding_window_audio, create_silent_wav_file
 from services.video_encoding import get_video_encoding
 from shared.utils.audio_metadata import save_audio_metadata, read_audio_metadata, extract_creation_datetime_from_metadata, resolve_audio_creation_datetime
@@ -8376,6 +8376,9 @@ def generate_video(
     source_audio_transcript_in_prompt=False,
     source_audio_transcript_for_enhancement=False,
     source_audio_transcript_data=None,
+    # Request-only H3 Reference soundtrack, restored after generation without
+    # entering the model's conditioning or saved settings.
+    _h3_output_audio_path=None,
     # Optional pre-separated vocal stem used only for model conditioning.
     # ``audio_guide`` remains the pristine soundtrack that is muxed into the
     # published video. Director uses this to give LTX-2.5 a clearer lip-sync
@@ -8448,6 +8451,18 @@ def generate_video(
     model_def = h3_duration_model_def(model_def, {
         "minimax_h3_extended_duration": minimax_h3_extended_duration,
     })
+    if _h3_output_audio_path:
+        if not model_def.get("omni_reference"):
+            raise ValueError(
+                "Keep source audio (output only) is supported for MiniMax H3 Studio References."
+            )
+        if not os.path.isfile(_h3_output_audio_path):
+            raise ValueError("The selected output-only soundtrack is no longer available.")
+        if str(audio_prompt_type or "").strip() == "AD" and (audio_guide or input_waveform is not None):
+            raise ValueError(
+                "Keep source audio (output only) cannot be combined with a separate "
+                "Frames Music / performance soundtrack. Choose one output soundtrack."
+            )
     recipe = apply_model_acceleration_profile(model_type, {
         "sample_solver": sample_solver,
         "num_inference_steps": num_inference_steps,
@@ -9429,6 +9444,26 @@ def generate_video(
                 if clean_audio_files: # need to rebuild the sum of audios with original audio
                     _, output_new_audio_data = get_full_audio_embeddings(audio_guide1 = original_audio_guide, audio_guide2= original_audio_guide2, combination_type= combination_type , num_frames= max_source_video_frames, sr= audio_sampling_rate, fps =fps, padded_frames_for_embeddings = (reuse_frames if reset_control_aligment else 0), min_audio_duration = min_audio_duration, return_sum_only= True) 
                 output_new_audio_filepath=  None # need to build original speaker track if it changed size (due to padding at the end) or if it has been combined
+
+    # The H3 output-only source uses the same clip-origin slicing as an exact
+    # audio guide, but never becomes an audio conditioning input. API preflight
+    # canonicalizes this path to WAV, so SoundFile seeks at the source sample
+    # rate and leaves the soundtrack's timeline intact.
+    if audio_frame_offset > 0 and _h3_output_audio_path is not None:
+        trimmed_audio_path = get_available_filename(
+            save_path,
+            _h3_output_audio_path,
+            "_h3_output_clip_offset",
+            ".wav",
+        )
+        slice_audio_file_from_frame(
+            _h3_output_audio_path,
+            audio_frame_offset,
+            fps,
+            trimmed_audio_path,
+        )
+        _h3_output_audio_path = trimmed_audio_path
+        temp_filenames_list.append(trimmed_audio_path)
 
     if hunyuan_custom_edit and video_guide != None:
         import cv2
@@ -11005,7 +11040,12 @@ def generate_video(
                         output_video_frames = frames_already_processed
                     output_frame_count = frames_already_processed_count
                     sample = None
-                    any_mmaudio = MMAudio_setting != 0 and mmaudio_enabled and output_frame_count >= fps
+                    any_mmaudio = (
+                        _h3_output_audio_path is None
+                        and MMAudio_setting != 0
+                        and mmaudio_enabled
+                        and output_frame_count >= fps
+                    )
                 time_flag = datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d-%Hh%Mm%Ss")
                 save_prompt = original_prompts[0]
                 if audio_only:
@@ -11023,6 +11063,10 @@ def generate_video(
                     extension = container
                     output_dir = save_path
                 inputs = get_function_arguments(generate_video, locals())
+                # This source is request-only and is consumed exclusively by
+                # the final mux below; keep it out of saved metadata and H3
+                # runtime inputs.
+                inputs.pop("_h3_output_audio_path", None)
                 # Only the window-local context belongs in output prompts.
                 # The full source transcript stays in its private ASR cache.
                 inputs.pop("source_audio_transcript_data", None)
@@ -11086,7 +11130,7 @@ def generate_video(
                         new_image_path.append(save_image(img, save_file = img_path, quality = image_output_codec or server_config.get("image_output_codec", None)))
 
                     video_path= new_image_path
-                elif len(control_audio_tracks) > 0 or len(source_audio_tracks) > 0 or output_new_audio_filepath is not None or any_mmaudio or output_new_audio_data is not None or audio_source is not None:
+                elif len(control_audio_tracks) > 0 or len(source_audio_tracks) > 0 or output_new_audio_filepath is not None or any_mmaudio or output_new_audio_data is not None or audio_source is not None or _h3_output_audio_path is not None:
                     video_path = os.path.join(save_path, file_name)
                     save_path_tmp = video_path.rsplit('.', 1)[0] + f"_tmp.{container}"
                     if window_video_writer is not None:
@@ -11114,17 +11158,39 @@ def generate_video(
                         else:
                             new_audio_tracks = control_audio_tracks
                         if generated_audio is not None: output_new_audio_filepath = None
-                        mux_audio_sampling_rate = resolve_mux_audio_sampling_rate(output_audio_sampling_rate, source_audio_metadata, new_audio_tracks)
+                        mux_source_audio_tracks = source_audio_tracks
+                        mux_source_audio_duration = source_audio_duration
+                        mux_source_audio_metadata = source_audio_metadata
+                        mux_new_audio_from_start = new_audio_added_from_audio_start
+                        mux_default_audio_rate = output_audio_sampling_rate
+                        if _h3_output_audio_path is not None:
+                            # Output-only audio is authoritative. Discard any
+                            # generated/control/source-video tracks and mux the
+                            # selected soundtrack from this clip's exact source
+                            # clock origin through the saved video duration.
+                            mux_source_audio_tracks = []
+                            mux_source_audio_duration = 0
+                            mux_source_audio_metadata = []
+                            new_audio_tracks = [_h3_output_audio_path]
+                            mux_new_audio_from_start = True
+                            mux_default_audio_rate = get_audio_file_sample_rate(
+                                _h3_output_audio_path
+                            )
+                        mux_audio_sampling_rate = resolve_mux_audio_sampling_rate(
+                            mux_default_audio_rate,
+                            mux_source_audio_metadata,
+                            new_audio_tracks,
+                        )
 
                         combine_and_concatenate_video_with_audio_tracks(
                             video_path,
                             save_path_tmp,
-                            source_audio_tracks,
+                            mux_source_audio_tracks,
                             new_audio_tracks,
-                            source_audio_duration,
+                            mux_source_audio_duration,
                             mux_audio_sampling_rate,
-                            new_audio_from_start=new_audio_added_from_audio_start,
-                            source_audio_metadata=source_audio_metadata,
+                            new_audio_from_start=mux_new_audio_from_start,
+                            source_audio_metadata=mux_source_audio_metadata,
                             audio_codec_key=server_config.get("audio_output_codec", "aac_128"),
                             verbose=verbose_level >= 2,
                         )

@@ -7280,22 +7280,42 @@ def _save_presets(presets: list[dict]):
 
 
 def _bundled_generation_presets():
-    """Expose shipped VDN profiles alongside the user's saved Studio presets."""
+    """Expose shipped H3 profiles alongside the user's saved Studio presets."""
+    profiles_dir = os.path.join(os.path.dirname(__file__), "profiles")
     presets = []
+
+    def add_preset(model_type, key, name, recipe):
+        loras = recipe["activated_loras"]
+        presets.append({
+            "id": f"builtin-{model_type}-{key}",
+            "name": name,
+            "mode": "video",
+            "model_type": model_type,
+            "prompt": "",
+            "builtin": True,
+            "activated_loras": loras,
+            "loras_multipliers": recipe["loras_multipliers"],
+            "lora_weights": {lora: [1.0] for lora in loras},
+            "created_at": 0,
+            "params": {**recipe, "minimax_h3_turbo_mode": False, "minimax_h3_turbo_preset": ""},
+        })
+
     for model_type in ("minimax_h3_vdn", "minimax_h3_vdn_full"):
-        path = os.path.join(os.path.dirname(__file__), "profiles", model_type, "VDN Turbo 8 Steps.json")
+        path = os.path.join(profiles_dir, model_type, "VDN Turbo 8 Steps.json")
         with open(path, encoding="utf-8") as reader:
             turbo = json.load(reader)
-        for key, name, recipe in (
-            ("standard", "VDN Standard 50 Steps", {**turbo, "activated_loras": [], "loras_multipliers": "", "num_inference_steps": 50}),
-            ("turbo8", "VDN Turbo 8 Steps", turbo),
-        ):
-            loras = recipe["activated_loras"]
-            presets.append({"id": f"builtin-{model_type}-{key}", "name": name,
-                "mode": "video", "model_type": model_type, "prompt": "", "builtin": True,
-                "activated_loras": loras, "loras_multipliers": recipe["loras_multipliers"],
-                "lora_weights": {lora: [1.0] for lora in loras}, "created_at": 0,
-                "params": {**recipe, "minimax_h3_turbo_mode": False, "minimax_h3_turbo_preset": ""}})
+        standard = {**turbo, "activated_loras": [], "loras_multipliers": "", "num_inference_steps": 50}
+        add_preset(model_type, "standard", "VDN Standard 50 Steps", standard)
+        add_preset(model_type, "turbo8", "VDN Turbo 8 Steps", turbo)
+
+    for steps in (2, 4):
+        name = f"pi-H3 FL2VA {steps} Steps"
+        path = os.path.join(profiles_dir, "minimax_h3_fl2va", f"{name}.json")
+        with open(path, encoding="utf-8") as reader:
+            recipe = json.load(reader)
+        for model_type in ("minimax_h3", "minimax_h3_full"):
+            add_preset(model_type, f"pi-h3-{steps}", name, recipe)
+
     return presets
 
 
@@ -12149,7 +12169,7 @@ def _generation_sidecar_params(
         params,
         path_params=path_params,
         attachment_keys=attachment_keys,
-        omit_keys={"_reviewed_h3_runtime_geometry"},
+        omit_keys={"_reviewed_h3_runtime_geometry", "_h3_output_audio_path"},
     )
 
 
@@ -12258,6 +12278,9 @@ async def _prepare_generation_submission(
     """Normalize/plan a request, then submit it or return prepared params."""
 
     body = dict(body)
+    # This path is created only from a validated H3 reference below. Never
+    # trust a caller-supplied internal output-audio path.
+    body.pop("_h3_output_audio_path", None)
     # Only the generation worker may supply recognized source text to the
     # runtime. Clients select opt-in flags and a driver, never internal ASR data.
     body.pop("source_audio_transcript_data", None)
@@ -12444,16 +12467,78 @@ async def _prepare_generation_submission(
                     body.get("minimax_h3_references"),
                     require_files=True,
                 )
-            from services.h3_reference_audio import measure_video_audio_metadata
+            from services.h3_reference_audio import (
+                measure_video_audio_metadata,
+                resolve_output_only_audio_path,
+            )
             if per_clip_references is not None:
                 body["per_clip_minimax_h3_references"] = [
                     await asyncio.to_thread(measure_video_audio_metadata, manifest)
                     for manifest in body["per_clip_minimax_h3_references"]
                 ]
+                output_audio_manifests = body["per_clip_minimax_h3_references"]
             else:
                 body["minimax_h3_references"] = await asyncio.to_thread(
                     measure_video_audio_metadata, body["minimax_h3_references"]
                 )
+                output_audio_manifests = body["minimax_h3_references"]
+            output_only_audio_path = await asyncio.to_thread(
+                resolve_output_only_audio_path,
+                output_audio_manifests,
+            )
+            if output_only_audio_path:
+                # The selected reference soundtrack is an output-only source.
+                # Keep its extracted WAV private to this request; the original
+                # source-shaped references remain the saved/retry contract.
+                audio_flags = str(body.get("audio_prompt_type") or "").strip()
+                if audio_flags == "AD" and bool(
+                    body.get("audio_guide") or body.get("input_waveform")
+                ):
+                    selected_source_paths = {
+                        os.path.normcase(os.path.realpath(output_only_audio_path)),
+                    }
+                    source_manifests = (
+                        output_audio_manifests
+                        if output_audio_manifests and isinstance(output_audio_manifests[0], list)
+                        else [output_audio_manifests]
+                    )
+                    for manifest in source_manifests:
+                        for reference in manifest:
+                            if not isinstance(reference, dict):
+                                continue
+                            if (
+                                str(reference.get("type") or reference.get("kind") or "").strip().lower()
+                                != "video"
+                                or str(reference.get("video_audio_role") or "").strip().lower()
+                                != "output_only"
+                            ):
+                                continue
+                            for source_key in ("path", "audio_path"):
+                                source_path = str(reference.get(source_key) or "").strip()
+                                if source_path:
+                                    selected_source_paths.add(
+                                        os.path.normcase(os.path.realpath(source_path))
+                                    )
+                    guide_path = str(body.get("audio_guide") or "").strip()
+                    same_selected_source = bool(
+                        guide_path
+                        and os.path.normcase(os.path.realpath(guide_path)) in selected_source_paths
+                    )
+                    if not same_selected_source:
+                        raise ValueError(
+                            "Keep source audio (output only) cannot be combined with "
+                            "a separate Frames Music / performance soundtrack. Choose one output soundtrack."
+                        )
+                    # Older saved Drive settings can leave this exact same
+                    # reference in the canonical Frames guide. Drop only that
+                    # stale copy so it does not enter H3 conditioning; a
+                    # different explicit soundtrack above remains an error.
+                    body.pop("audio_guide", None)
+                    body.pop("input_waveform", None)
+                    body["audio_prompt_type"] = ""
+                body["_h3_output_audio_path"] = output_only_audio_path
+            else:
+                body.pop("_h3_output_audio_path", None)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
     if (
@@ -13794,8 +13879,10 @@ async def _prepare_generation_submission(
     job_out_dir = _workspace_dir(workspace)
 
     if prepare_only:
+        prepared_params = dict(body)
+        prepared_params.pop("_h3_output_audio_path", None)
         return {
-            "params": body,
+            "params": prepared_params,
             "workspace": workspace,
             "out_dir": job_out_dir,
             "h3_window_plan": h3_window_plan_response,
@@ -28317,8 +28404,15 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 per_clip_continuations = raw_params.pop(
                     "per_clip_continue_from_previous", None,
                 )
-                multi_clip_concat_audio = raw_params.pop(
+                configured_multi_clip_audio = raw_params.pop(
                     "multi_clip_concat_audio", None,
+                )
+                # Rejoin per-clip H3 outputs against the complete output-only
+                # reference soundtrack. Individual clip renders already slice
+                # this same WAV by audio_frame_offset for their own muxes.
+                multi_clip_concat_audio = (
+                    raw_params.get("_h3_output_audio_path")
+                    or configured_multi_clip_audio
                 )
                 multi_clip_audio_start_sec = raw_params.pop("multi_clip_audio_start_sec", 0.0)
                 omni_sequence_continuity = bool(
